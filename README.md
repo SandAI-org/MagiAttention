@@ -117,7 +117,7 @@ You can refer to the magi_attention/api/magi_attn_interface.py for more informat
 flex_flash_attention(kernel):
 ```python
 bsz=3
-seqlen=128       
+seqlen=128
 x = torch.randn(    # input x with shape ((bzs, seqlen), h)
             bsz * seqlen,
             h,   # hidden_size
