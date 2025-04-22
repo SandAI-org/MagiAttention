@@ -107,14 +107,14 @@ For implementation details, more experimental results and future works, please v
 
 ### Basic Usage
 
-We provide an example(pseudo-code) of how to use flex_flash_attention(kernel) and magi_attention(context parallel only) to accelerate distribute attention calculation.
+We provide an example(pseudo-code) of how to use flex_flash_attention(kernel) and magi_attention(context parallel only) to accelerate local/distribute attention calculation.
 
 You can refer to the magi_attention/api/magi_attn_interface.py for more information.
 
 <details>
 <summary>Basic Usage</summary>
 
-flex_flash_attention:
+flex_flash_attention(kernel):
 ```python
 bsz=3
 seqlen=128       
@@ -160,7 +160,7 @@ out, _ = flex_flash_attn_func(
 
 # generate g with same shape as out
 g = torch.randn(bsz * seqlen_q, nheads, nd, device=device, dtype=dtype)
-# backward
+# do backward
 out.backward(g)
 
 ```
