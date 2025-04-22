@@ -40,7 +40,7 @@ FULL_ATTN = False
 
 if __name__ == "__main__":
     # -------------------       setup env   ------------------- #
-    # 设置随机种子以确保实验可重现性
+    # set random seed to eliminate randomness in training
     seed = 42
     random.seed(seed)
     torch.manual_seed(seed)

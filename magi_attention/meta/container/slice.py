@@ -30,7 +30,8 @@ class AttnSlice:
 
     _area: int | None = None
 
-    # HACK: 后面会将计算面积的逻辑封装在AttnSlice中并且area只读, 这里保留直接设置area的功能
+    # HACK: The logic for calculating the area will be encapsulated in AttnSlice later, and the area will be read-only.
+    # This feature of directly setting the area is retained here for now.
 
     @property
     def area(self) -> int:

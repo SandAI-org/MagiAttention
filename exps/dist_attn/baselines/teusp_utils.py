@@ -95,7 +95,7 @@ def _get_varlen_unpad_data(
     )
 
 
-# 负载均衡的2d repad
+# load balance 2d repad
 def _get_zigzag2d_varlen_unpad_data(
     attention_mask_thd: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -129,7 +129,7 @@ def _get_zigzag2d_varlen_unpad_data(
     )
 
 
-# pad 到 padding_factor 的整数倍
+# pad to padding_factor‘s integer multiple
 def _get_te_pad_needed(
     seqlens_in_batch: torch.Tensor, padding_factor: int
 ) -> torch.Tensor:
@@ -139,7 +139,7 @@ def _get_te_pad_needed(
     return pad_needed
 
 
-# token 对于 cu_seqlens_padded 的 thd index
+# token‘s thd index to cu_seqlens_padded
 def _get_indices_in_thd_padded(
     indices: torch.Tensor, cu_seqlens_padded: torch.Tensor, unpad_max_sequence: int
 ) -> torch.Tensor:
@@ -149,7 +149,7 @@ def _get_indices_in_thd_padded(
     return indices_in_thd_padded
 
 
-# token 对于 cu_seqlens_padded 的 thd index
+# token's thd index to cu_seqlens_padded
 def _get_indices_in_thd_padded2(
     seqlens_in_batch: torch.Tensor, cu_seqlens_padded: torch.Tensor
 ) -> torch.Tensor:
@@ -173,8 +173,8 @@ def _get_chunk_indices_on_cp_rank(
 ):
     device = cu_seqlens_padded.device
     chunks_p2p = []
-    # 迭代每一段
-    for i in range(len(cu_seqlens_padded) - 1):  # 最后一段没有后继段
+    # interate
+    for i in range(len(cu_seqlens_padded) - 1):
         start_idx = cu_seqlens_padded[i]
         end_idx = cu_seqlens_padded[i + 1]
         seqlen = end_idx - start_idx

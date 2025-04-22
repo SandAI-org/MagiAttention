@@ -183,7 +183,7 @@ def generate_seqlens(distribution, total_seqlen):
     while current_total < total_seqlen:
         remaining = total_seqlen - current_total
 
-        # 筛选符合条件的区间：a <= remaining 且 a < b
+        # filter intervals satisfy：a <= remaining and a < b
         available_intervals = []
         available_weights = []
         for interval, weight in zip(intervals, weights):
@@ -197,13 +197,13 @@ def generate_seqlens(distribution, total_seqlen):
                 f"No valid interval available for remaining length {remaining}"
             )
 
-        # 根据权重选择区间
+        # choose intervals according to weights
         selected_interval = random.choices(
             available_intervals, weights=available_weights, k=1
         )[0]
 
         a, b = selected_interval
-        # 生成该区间内且不超过remaining的长度
+        # generate seqlen less than remaining and in the interval
         max_val = min(b - 1, remaining)
         seqlen = random.randint(a, max_val)
 

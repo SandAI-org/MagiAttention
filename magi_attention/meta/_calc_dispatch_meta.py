@@ -394,7 +394,8 @@ def _calc_self_attn_areas(
             )
 
             # analyze this slice
-            # HACK: 后面会将计算面积的逻辑封装在AttnSlice中并且area只读, 这里保留直接设置area的功能
+            # HACK: The logic for calculating the area will be encapsulated in AttnSlice later, and the area will be read-only.
+            # This feature of directly setting the area is retained here for now.
             if exceed_size <= 0:  # this bottom half of seqi should be all in this chunk
                 # set start and end for q_range of this slice
                 q_range_start, q_range_end = seqi_mid, seqi_end
