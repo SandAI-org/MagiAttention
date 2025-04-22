@@ -115,39 +115,39 @@ def torch_attn_ref(q, k, v, mask, layout="thd", high_precision=True):
 
 
 def generate_qk_ranges(seqlen_q, seqlen_k, bsz, device="cuda"):
-    """生成q和k的ranges
+    """generate q k ranges
 
     Args:
-        seqlen: 序列长度
+        seqlen: 
         bsz: batch size
-        device: 设备,默认为'cuda'
+        device: 'cuda' by default
 
     Returns:
-        q_range: q的ranges张量,形状为(bsz, 2)
-        k_range: k的ranges张量,形状为(bsz, 2)
+        q_range: q_range tensor with shape (bsz, 2)
+        k_range: k_range tensor with shape(bsz, 2)
     """
 
     random.seed(42)
 
     if bsz == 1:
-        # bsz为1时直接使用完整序列
+        # use total seq
         q_ranges = [[0, seqlen_q]]
         max_seqlen_q = seqlen_q
 
-        # 随机生成k_range
+        # generate k_range randomly
         start = random.randint(0, seqlen_k - 1)
         end = random.randint(start + 1, seqlen_k)
         k_ranges = [[start, end]]
         max_seqlen_k = end - start
 
     else:
-        # 随机获取bsz-1个整数作为q的分割点
+        # Randomly obtain bsz-1 integers as split points for q
         points = sorted(random.sample(range(seqlen_q), bsz - 1))
 
         max_seqlen_q = 0
         max_seqlen_k = 0
 
-        # 构建q_range
+        # construct q_range
         q_ranges = [[0, points[0]]]
         for i in range(bsz - 2):
             q_ranges.append([points[i], points[i + 1]])
@@ -155,7 +155,7 @@ def generate_qk_ranges(seqlen_q, seqlen_k, bsz, device="cuda"):
         for q_range in q_ranges:
             max_seqlen_q = max(max_seqlen_q, q_range[1] - q_range[0])
 
-        # 随机生成k_ranges
+        # generate k_ranges randomly
         k_ranges = []
         for i in range(bsz):
             start = random.randint(0, seqlen_k - 1)
