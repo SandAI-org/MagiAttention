@@ -179,7 +179,7 @@ def apply_fsdp(model, device_mesh):
 
 
 def parallize_model(model, device_mesh):
-    # pass dp_cp mesh to fsdp2
+    # pass dp_cp mesh to fsdp, fsdp will handle the gradient sync of both dp and cp.
     apply_fsdp(model, device_mesh["dp_cp"])
 
 
