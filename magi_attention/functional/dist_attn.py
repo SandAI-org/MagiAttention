@@ -556,7 +556,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
             lse_list=lse_list,
         )
 
-        if out is None:
+        if out is None:  # attn computation are all skipped
             out = torch.zeros_like(local_q)
 
         ctx.save_for_backward(local_q, local_kv, out, lse)
