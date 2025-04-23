@@ -556,6 +556,9 @@ class DistFlashAttnFunc(torch.autograd.Function):
             lse_list=lse_list,
         )
 
+        if out is None:
+            out = torch.zeros_like(local_q)
+
         ctx.save_for_backward(local_q, local_kv, out, lse)
         ctx.dist_attn_runtime = dist_attn_runtime
 

@@ -168,7 +168,7 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
         [
             # full attn with seqlen 1k and batchsize 2
             {
-                NAME: "full_attn_1k",
+                NAME: "full_attn_1k_bs2",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
                 INTERFACE: "magi_attn",
                 "batch_size": 2,
@@ -190,7 +190,7 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
             },
             # full attn with seqlen 2k and batchsize 3
             {
-                NAME: "full_attn_1k",
+                NAME: "full_attn_2k_bs3",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
                 INTERFACE: "magi_attn",
                 "batch_size": 3,
@@ -473,7 +473,6 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})]"
         )
-
         # -----    contruct config from test cases   ---- #
         from copy import deepcopy
 
@@ -497,7 +496,7 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
             high_bandwith_domain_size=high_bandwith_domain_size,
             deterministic=False,
         )
-
+        print(f"{attn_config_[NAME]=}")
         # -----    run pipeline test   ---- #
 
         # ----- init input data and module---- #
@@ -511,11 +510,10 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
         pad_size, _ = compute_pad_size(total_seqlen_q, cp_size, head_dim)
 
         if interface == "magi_attn":
-            batch_size = attn_config["batch_size"]
-
+            batch_size = attn_config_["batch_size"]
             x_with_batch = torch.randn(
                 batch_size,
-                attn_config["total_seqlen_q"] // batch_size,
+                attn_config_["total_seqlen_q"] // batch_size,
                 head_dim,
                 device=device,
                 dtype=dtype,
@@ -524,7 +522,7 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
 
             x = squash_batch_dim(x_with_batch)
             cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
-                batch_size, attn_config["total_seqlen_q"] // batch_size
+                batch_size, attn_config_["total_seqlen_q"] // batch_size
             )
 
             x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
@@ -592,7 +590,6 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
         dist.all_reduce(grad_total_out.data, group=self.nccl_group)
         total_out.backward(grad_total_out)
 
-        print(f"{attn_config_[NAME]=}")
         # -----   assert close to torch ref   ---- #
         self.assert_close_to_torch_ref(
             x=x,
@@ -631,9 +628,6 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
         dq_rtol = EPSILON
         # -----   build attn mask   ---- #
 
-        print(f"{is_causal_mapping=}")
-        print(f"{q_ranges=}")
-        print(f"{k_ranges=}")
         mask = get_attn_mask_from_ranges(
             q_ranges=q_ranges.to_naive_ranges(),
             k_ranges=k_ranges.to_naive_ranges(),
