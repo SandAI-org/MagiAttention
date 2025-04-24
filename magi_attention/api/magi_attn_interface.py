@@ -631,23 +631,8 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
     Returns:
         position_ids (torch.Tensor): postion_ids of local tensor to global tensor.
     """
-    mgr = DistAttnRuntimeDict.get(key)
+    mgr: DistAttnRuntimeMgr = DistAttnRuntimeDict.get(key)
     if mgr is None:
         raise ValueError("DistRunTimeKey not exists!")
 
-    cp_group = key.cp_group
-
-    rank = dist.get_rank(cp_group)
-    q_dispatch_meta = mgr.q_dispatch_meta
-    chunk_size = mgr.chunk_size
-
-    local_partition = q_dispatch_meta.partitions[rank]  # list
-    position_ids = torch.tensor(
-        [
-            i
-            for n in local_partition
-            for i in range(n * chunk_size, (n + 1) * chunk_size)
-        ]
-    )
-
-    return position_ids
+    return mgr.get_position_ids()

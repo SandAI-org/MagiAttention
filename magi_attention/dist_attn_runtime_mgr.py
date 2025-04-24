@@ -19,7 +19,7 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.common import AttnRanges
-from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.enum import AttnMaskType, AttnRole
 from magi_attention.config import DistAttnConfig
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
 from magi_attention.functional.dist_attn import DistFlashAttnRuntime, dist_attn_func
@@ -213,6 +213,39 @@ class DistAttnRuntimeMgr:
             shard_seqlen_q=self.attn_solver.bucket.q_ranges.total_seqlen,
         )
         return attn_arg
+
+    def get_position_ids(self, attn_role: AttnRole = AttnRole.QUERY) -> torch.Tensor:
+        """
+        Get the position ids of local tensor to global tensor after dispatching.
+
+        Args:
+            key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+        Returns:
+            position_ids (torch.Tensor): postion_ids of local tensor to global tensor.
+        """
+
+        cp_group = self.cp_group
+
+        rank = dist.get_rank(cp_group)
+        if attn_role == AttnRole.QUERY:
+            dispatch_meta = self.q_dispatch_meta
+        elif attn_role == AttnRole.KEY or attn_role == AttnRole.VALUE:
+            dispatch_meta = self.k_dispatch_meta
+        else:
+            raise ValueError(f"Invalid attn role: {attn_role}")
+
+        chunk_size = self.chunk_size
+
+        local_partition = dispatch_meta.partitions[rank]  # list
+        position_ids = torch.tensor(
+            [
+                i
+                for n in local_partition
+                for i in range(n * chunk_size, (n + 1) * chunk_size)
+            ]
+        )
+
+        return position_ids
 
 
 def init_dist_attn_runtime_mgr(
