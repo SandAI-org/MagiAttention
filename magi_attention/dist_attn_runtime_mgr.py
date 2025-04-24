@@ -228,41 +228,16 @@ class DistAttnRuntimeMgr:
             position_ids (torch.Tensor): postion_ids of local tensor to global tensor w.r.t. the attn_role.
         """
 
-        cp_group = self.cp_group
-
-        rank = dist.get_rank(cp_group)
         if attn_role == AttnRole.QUERY:
-            if self._q_position_ids is not None:
-                # return cached position ids
-                return self._q_position_ids
-            dispatch_meta = self.q_dispatch_meta
+            if self._q_position_ids is None:
+                self._q_position_ids = self.q_dispatch_meta.position_ids
+            return self._q_position_ids
         elif attn_role == AttnRole.KEY or attn_role == AttnRole.VALUE:
-            if self._k_position_ids is not None:
-                # return cached position ids
-                return self._k_position_ids
-            dispatch_meta = self.k_dispatch_meta
+            if self._k_position_ids is None:
+                self._k_position_ids = self.k_dispatch_meta.position_ids
+            return self._k_position_ids
         else:
             raise ValueError(f"Invalid attn role: {attn_role}")
-
-        chunk_size = self.chunk_size
-
-        local_partition = dispatch_meta.partitions[rank]  # list
-        position_ids = torch.tensor(
-            [
-                i
-                for n in local_partition
-                for i in range(n * chunk_size, (n + 1) * chunk_size)
-            ]
-        )
-
-        if attn_role == AttnRole.QUERY:
-            self._q_position_ids = position_ids
-        elif attn_role == AttnRole.KEY or attn_role == AttnRole.VALUE:
-            self._k_position_ids = position_ids
-        else:
-            raise ValueError(f"Invalid attn role: {attn_role}")
-
-        return position_ids
 
 
 def init_dist_attn_runtime_mgr(

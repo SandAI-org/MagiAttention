@@ -236,6 +236,7 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
     total_seqlen = total_seqlen_q
     num_chunks = num_chunks_q
     shard_seqlen = shard_seqlen_q
+    max_valid_ids = max(q_range.end for q_range in q_ranges)
 
     # q_ranges can be transferred to cu_seqlens_q for sure
     assert q_ranges.is_cu_seqlens(
@@ -304,6 +305,7 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
         batch_size=batch_size,
         total_seqlen=total_seqlen,
         shard_seqlen=shard_seqlen,
+        max_valid_ids=max_valid_ids,
         cp_rank=cp_rank,
         cp_size=cp_size,
         chunk_size=chunk_size,

@@ -14,6 +14,8 @@
 
 from dataclasses import dataclass
 
+import torch
+
 from magi_attention.common.enum import AttnMaskType, AttnRole, AttnType
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.meta.container.bucket import AttnBucket
@@ -25,6 +27,8 @@ class DispatchMeta:
 
     Args:
         TODO: finish docstring
+
+        max_valid_ids(int): the maximum valid token ids in the seqlen dim.
 
     NOTE: global_bucket
     """
@@ -38,6 +42,7 @@ class DispatchMeta:
     batch_size: int
     total_seqlen: int
     shard_seqlen: int
+    max_valid_ids: int
 
     chunk_size: int
     num_chunks: int
@@ -94,6 +99,23 @@ class DispatchMeta:
             attn_ranges.extend(host_ranges_ith_rank)
 
         return attn_ranges
+
+    @property
+    def position_ids(self) -> torch.Tensor:
+        chunk_size = self.chunk_size
+        local_partition = self.partitions[self.cp_rank]
+
+        position_ids = torch.tensor(
+            [
+                i
+                for n in local_partition
+                for i in range(n * chunk_size, (n + 1) * chunk_size)
+            ]
+        )
+
+        position_ids = position_ids.clamp(max=self.max_valid_ids - 1)
+
+        return position_ids
 
     def __post_init__(self) -> None:
         assert len(self.seqlens) == len(self.seqlens_permed) == self.batch_size
