@@ -222,9 +222,10 @@ class DistAttnRuntimeMgr:
         Get the position ids of local tensor to global tensor after dispatching.
 
         Args:
-            key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+            attn_role (AttnRole): the role of the tensor to get position ids
+
         Returns:
-            position_ids (torch.Tensor): postion_ids of local tensor to global tensor.
+            position_ids (torch.Tensor): postion_ids of local tensor to global tensor w.r.t. the attn_role.
         """
 
         cp_group = self.cp_group
