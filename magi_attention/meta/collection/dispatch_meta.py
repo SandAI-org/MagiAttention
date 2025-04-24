@@ -110,7 +110,8 @@ class DispatchMeta:
                 i
                 for n in local_partition
                 for i in range(n * chunk_size, (n + 1) * chunk_size)
-            ]
+            ],
+            device=torch.cuda.current_device(),
         )
 
         position_ids = position_ids.clamp(max=self.max_valid_ids - 1)
