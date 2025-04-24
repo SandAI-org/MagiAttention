@@ -128,6 +128,17 @@ def calc_dispatch_meta_from_qk_ranges(
         f"bot got {dispatch_config.alg=}."
     )
 
+    max_valid_ids_q = max(
+        q_range.end
+        for q_range, k_range in zip(q_ranges, k_ranges)
+        if q_range.seqlen > 0 and k_range.seqlen > 0
+    )
+    max_valid_ids_k = max(
+        k_range.end
+        for q_range, k_range in zip(q_ranges, k_ranges)
+        if q_range.seqlen > 0 and k_range.seqlen > 0
+    )
+
     # --------------      calculate dispatch meta   -------------- #
 
     # TODO: for now, we seperate different settings in different functions
@@ -143,6 +154,8 @@ def calc_dispatch_meta_from_qk_ranges(
                 total_seqlen_k=total_seqlen_k,
                 shard_seqlen_q=shard_seqlen_q,
                 shard_seqlen_k=shard_seqlen_k,
+                max_valid_ids_q=max_valid_ids_q,
+                max_valid_ids_k=max_valid_ids_k,
                 num_chunks_q=num_chunks_q,
                 num_chunks_k=num_chunks_k,
                 chunk_size=chunk_size,
@@ -186,6 +199,8 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
     total_seqlen_k: int,
     shard_seqlen_q: int,
     shard_seqlen_k: int,
+    max_valid_ids_q: int,
+    max_valid_ids_k: int,
     num_chunks_q: int,
     num_chunks_k: int,
     chunk_size: int,
@@ -236,7 +251,7 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
     total_seqlen = total_seqlen_q
     num_chunks = num_chunks_q
     shard_seqlen = shard_seqlen_q
-    max_valid_ids = max(q_range.end for q_range in q_ranges)
+    max_valid_ids = max_valid_ids_q
 
     # q_ranges can be transferred to cu_seqlens_q for sure
     assert q_ranges.is_cu_seqlens(
