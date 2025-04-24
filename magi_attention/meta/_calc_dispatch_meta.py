@@ -128,6 +128,7 @@ def calc_dispatch_meta_from_qk_ranges(
         f"bot got {dispatch_config.alg=}."
     )
 
+    # calculate max valid ids for query and key to avoid padding tokens position ids overflow
     max_valid_ids_q = max(
         q_range.end
         for q_range, k_range in zip(q_ranges, k_ranges)
