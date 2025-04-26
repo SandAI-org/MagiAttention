@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import itertools
-from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -33,23 +32,32 @@ from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
 from magi_attention.utils import is_list_value_all, wrap_to_list
 
 
-@dataclass(frozen=True)
+# @dataclass(frozen=True)
 class DistAttnRuntimeKey:
-    cp_group: dist.ProcessGroup
-    pad_size: int
-    head_dim: int
-    q_ranges: AttnRanges
-    k_ranges: AttnRanges
-    attn_mask_type: AttnMaskType | list[AttnMaskType]
-    total_seqlen_q: int
-    total_seqlen_k: int
-    dist_attn_config: DistAttnConfig
+    def __init__(
+        self,
+        cp_group: dist.ProcessGroup,
+        pad_size: int,
+        head_dim: int,
+        q_ranges: AttnRanges,
+        k_ranges: AttnRanges,
+        attn_mask_type: list[AttnMaskType],
+        total_seqlen_q: int,
+        total_seqlen_k: int,
+        dist_attn_config: DistAttnConfig,
+    ):
+        self.cp_group = cp_group
+        self.pad_size = pad_size
+        self.head_dim = head_dim
+        self.q_ranges = q_ranges
+        self.k_ranges = k_ranges
+        self.attn_mask_type = attn_mask_type
+        self.total_seqlen_q = total_seqlen_q
+        self.total_seqlen_k = total_seqlen_k
+        self.dist_attn_config = dist_attn_config
 
     def __hash__(self):
-        if isinstance(self.attn_mask_type, list):
-            mask_tuple = tuple(self.attn_mask_type)
-        else:
-            mask_tuple = (self.attn_mask_type,)
+        mask_tuple = tuple(self.attn_mask_type)
 
         return hash(
             (
