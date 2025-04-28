@@ -47,45 +47,53 @@ def _flex_flash_attn_forward(
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
 
-    out, out_accum, softmax_lse = flexible_flash_attention_cuda.fwd(
-        q,
-        k,
-        v,
-        None,  # k_new, v_new
-        None,
-        None,  # qv
-        None,  # out
-        q_ranges,
-        k_ranges,
-        None,  # cu_seqlens_q
-        None,  # cu_seqlens_k
-        None,  # cu_seqlens_k_new
-        None,  # seqused_q
-        None,  # seqused_k
-        max_seqlen_q,
-        max_seqlen_k,
-        attn_type_map,
-        None,  # page_table, kv_batch_idx, leftpad_k,
-        None,
-        None,
-        None,  # rotary_cos, rotary_sin, seqlens_rotary
-        None,
-        None,
-        None,  # q_descale, k_descale, v_descale
-        None,
-        None,
-        softmax_scale,
-        False,  # causal
-        -1,  # window_size[0]
-        -1,  # window_size[1]
-        softcap,
-        True,  # rotary_interleaved
-        None,  # scheduler_metadata
-        1,  # num_splits
-        None,  # pack_gqa
-        sm_margin,
-        disable_fwd_atomic_reduction,
-    )
+    if q_ranges.shape[0] == 0:
+        # FIXME: This logic should be written in the cuda kernel, this is a temporary workaround
+        ttk, nh, hd = q.shape
+        out = torch.zeros_like(q)
+        out_accum = torch.zeros_like(q, dtype=torch.float32)
+        softmax_lse = torch.empty(nh, ttk, dtype=torch.float32)
+        softmax_lse.fill_(-float("inf"))
+    else:
+        out, out_accum, softmax_lse = flexible_flash_attention_cuda.fwd(
+            q,
+            k,
+            v,
+            None,  # k_new, v_new
+            None,
+            None,  # qv
+            None,  # out
+            q_ranges,
+            k_ranges,
+            None,  # cu_seqlens_q
+            None,  # cu_seqlens_k
+            None,  # cu_seqlens_k_new
+            None,  # seqused_q
+            None,  # seqused_k
+            max_seqlen_q,
+            max_seqlen_k,
+            attn_type_map,
+            None,  # page_table, kv_batch_idx, leftpad_k,
+            None,
+            None,
+            None,  # rotary_cos, rotary_sin, seqlens_rotary
+            None,
+            None,
+            None,  # q_descale, k_descale, v_descale
+            None,
+            None,
+            softmax_scale,
+            False,  # causal
+            -1,  # window_size[0]
+            -1,  # window_size[1]
+            softcap,
+            True,  # rotary_interleaved
+            None,  # scheduler_metadata
+            1,  # num_splits
+            None,  # pack_gqa
+            sm_margin,
+            disable_fwd_atomic_reduction,
+        )
 
     if disable_fwd_atomic_reduction:
         out = out
@@ -121,42 +129,50 @@ def _flex_flash_attn_backward(
         maybe_contiguous(x) for x in (dout, q, k, v, out, q_ranges, k_ranges)
     ]
 
-    (
-        _,
-        _,
-        _,
-        softmax_d,
-        _,
-        dq_accum,
-        dk_accum,
-        dv_accum,
-    ) = flexible_flash_attention_cuda.bwd(
-        dout,
-        q,
-        k,
-        v,
-        out,
-        softmax_lse,
-        None,
-        None,
-        None,  # dq, dk, dv
-        q_ranges,
-        k_ranges,
-        None,  # cu_seqlens_q, cu_seqlens_k
-        None,
-        None,  # seqused_q, seqused_k
-        None,
-        max_seqlen_q,
-        max_seqlen_k,
-        attn_type_map,
-        softmax_scale,
-        False,  # causal
-        -1,  # window_size[0]
-        -1,  # window_size[1]
-        softcap,
-        deterministic,
-        sm_margin,
-    )
+    if q_ranges.shape[0] == 0:
+        # FIXME: This logic should be written in the cuda kernel, this is a temporary workaround
+        ttk, nh, hd = q.shape
+        dq_accum = torch.zeros_like(q, dtype=torch.float32)
+        dk_accum = torch.zeros_like(k, dtype=torch.float32)
+        dv_accum = torch.zeros_like(v, dtype=torch.float32)
+        softmax_d = torch.zeros(nh, ttk, dtype=torch.float32)
+    else:
+        (
+            _,
+            _,
+            _,
+            softmax_d,
+            _,
+            dq_accum,
+            dk_accum,
+            dv_accum,
+        ) = flexible_flash_attention_cuda.bwd(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            None,
+            None,
+            None,  # dq, dk, dv
+            q_ranges,
+            k_ranges,
+            None,  # cu_seqlens_q, cu_seqlens_k
+            None,
+            None,  # seqused_q, seqused_k
+            None,
+            max_seqlen_q,
+            max_seqlen_k,
+            attn_type_map,
+            softmax_scale,
+            False,  # causal
+            -1,  # window_size[0]
+            -1,  # window_size[1]
+            softcap,
+            deterministic,
+            sm_margin,
+        )
 
     return dq_accum.to(q.dtype), dk_accum.to(q.dtype), dv_accum.to(q.dtype), softmax_d
 

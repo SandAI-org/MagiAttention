@@ -557,7 +557,10 @@ class DistFlashAttnFunc(torch.autograd.Function):
         )
 
         if out is None:  # attn computation are all skipped
-            out = torch.empty_like(local_q)
+            # NOTE: We cannot use torch.empty_like here, because empty_like may contain nan values,
+            #       and once gradients between different tokens need to be reduced, the nan values
+            #       from pad tokens would interfere with the gradients of other tokens
+            out = torch.zeros_like(local_q)
 
         ctx.save_for_backward(local_q, local_kv, out, lse)
         ctx.dist_attn_runtime = dist_attn_runtime
