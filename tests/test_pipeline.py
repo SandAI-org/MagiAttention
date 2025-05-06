@@ -42,12 +42,7 @@ from magi_attention.testing.precision import (
     extract_mismatch_info,
     torch_attn_ref,
 )
-from magi_attention.utils import (
-    get_attn_mask_from_ranges,
-    is_list_value_all,
-    str2seed,
-    sync_rng,
-)
+from magi_attention.utils import get_attn_mask_from_ranges, str2seed, sync_rng
 
 # tell if using profile mode
 profile_mode = os.environ.get("MAGI_ATTENTION_UNITEST_PROFILE_MODE", "0") == "1"
@@ -491,10 +486,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 is_causal_mapping = [
                     random.choice([True, False]) for _ in is_causal_mapping
                 ]
-        if not magi_attention.is_causal_mask_enable():
-            # NOTE: skip any test case with causal mask when the feature is disabled
-            if not is_list_value_all(is_causal_mapping, False):
-                return
+
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         chunk_size: int = attn_config["chunk_size"]

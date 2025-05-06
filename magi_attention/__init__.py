@@ -78,16 +78,6 @@ def is_refactor_bwd_args_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_REFACTOR_BWD_ARGS", "0") == "1"
 
 
-def is_causal_mask_enable() -> bool:
-    """
-    Toggle this env variable to 1 to allow causal mask
-    NOTE: This flag is only used during experimental stage
-    needed to be removed when causal mask is fully supported,
-    both in functionality and performance
-    """
-    return os.environ.get("MAGI_ATTENTION_SUPPORT_CAUSAL_MASK", "0") == "1"
-
-
 def is_cuda_device_max_connections_one() -> bool:
     """
     Toggle this env variable to 1 to allow cuda device to have only one connection
