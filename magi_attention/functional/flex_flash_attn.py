@@ -355,7 +355,7 @@ def flex_flash_attn_func(
                 1 1 1 1 1
                 1 1 1 1 1
                 1 1 1 1 1
-        2: causal attention
+        2: causal attention (bottom-right aligned)
             If seqlen_q = 5 and seqlen_k = 2, the causal mask is:
                 0 0
                 0 0
@@ -371,7 +371,7 @@ def flex_flash_attn_func(
                 1 1 1 0 0
                 1 1 1 1 0
                 1 1 1 1 1
-        3: inverse causal attention
+        3: inverse causal attention (top-left aligned)
             if seqlen_q = 5 and seqlen_k = 2, the inverse causal mask is:
                 1 1
                 0 1
@@ -387,8 +387,8 @@ def flex_flash_attn_func(
                 0 0 1 1 1
                 0 0 0 1 1
                 0 0 0 0 1
-        4. bidirectional causal attention
-            bidirectional causal attention mask is a 'and mask' of casual and inverse causal attention.
+        4. bidirectional causal attention (top-left & bottom-right intersect-aligned)
+            bidirectional causal attention mask is an 'and mask' of casual and inverse causal attention.
             if seqlen_q = 5 and seqlen_k = 2, the bidirectional causal mask is:
                 0 0
                 0 0
