@@ -15,11 +15,16 @@
 import unittest
 from unittest import TestCase
 
+import numpy as np
+
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.meta._calc_dispatch_meta import _calc_self_attn_areas
 from magi_attention.meta.container import AttnBucket, AttnChunk, AttnSlice
+from magi_attention.testing import parameterize
+from magi_attention.testing.utils import add_range_to_array
+from magi_attention.utils._utils import argsort
 
 
 class TestCalcSelfAttnAreas(TestCase):
@@ -1008,6 +1013,264 @@ class TestCalcSelfAttnAreas(TestCase):
             f"The testcase of one line is not passed!\n"
             f"expect result={result_bucket}\n"
             f"but get {global_bucket}."
+        )
+
+    @parameterize(
+        "testcase",
+        [
+            (
+                AttnRanges.from_ranges(
+                    [
+                        (0, 8),
+                        (8, 24),
+                        (24, 38),
+                        (38, 57),
+                        (57, 83),
+                        (83, 92),
+                        (92, 96),
+                    ],
+                ),
+                AttnRanges.from_ranges(
+                    [
+                        (12, 20),
+                        (27, 43),
+                        (43, 48),
+                        (48, 67),
+                        (5, 74),
+                        (31, 86),
+                        (67, 96),
+                    ]
+                ),
+            ),
+            (
+                AttnRanges.from_ranges(
+                    [
+                        (0, 30),
+                        (30, 53),
+                        (53, 74),
+                        (74, 96),
+                    ],
+                ),
+                AttnRanges.from_ranges(
+                    [
+                        (0, 50),
+                        (61, 71),
+                        (34, 47),
+                        (57, 90),
+                    ]
+                ),
+            ),
+            (
+                AttnRanges.from_ranges(
+                    [
+                        (0, 10),
+                        (10, 16),
+                        (16, 30),
+                        (30, 43),
+                        (43, 61),
+                        (61, 64),
+                    ],
+                ),
+                AttnRanges.from_ranges(
+                    [
+                        (0, 11),
+                        (5, 18),
+                        (18, 32),
+                        (32, 45),
+                        (45, 64),
+                        (53, 64),
+                    ]
+                ),
+            ),
+            (
+                AttnRanges.from_ranges(
+                    [
+                        (0, 2),
+                        (2, 5),
+                        (5, 8),
+                        (8, 10),
+                        (10, 14),
+                        (14, 16),
+                        (16, 22),
+                        (22, 29),
+                        (29, 32),
+                    ],
+                ),
+                AttnRanges.from_ranges(
+                    [
+                        (0, 2),
+                        (2, 5),
+                        (5, 8),
+                        (8, 16),
+                        (8, 16),
+                        (8, 16),
+                        (4, 20),
+                        (17, 24),
+                        (19, 31),
+                    ]
+                ),
+            ),
+            (
+                AttnRanges.from_ranges(
+                    [
+                        [0, 8],
+                        [0, 8],
+                        [8, 16],
+                        [16, 24],
+                        [24, 32],
+                        [32, 40],
+                        [40, 48],
+                        [0, 14],
+                        [0, 16],
+                        [18, 20],
+                        [23, 42],
+                    ]
+                ),
+                AttnRanges.from_ranges(
+                    [
+                        [0, 8],
+                        [8, 16],
+                        [0, 8],
+                        [0, 8],
+                        [0, 8],
+                        [0, 8],
+                        [0, 8],
+                        [16, 20],
+                        [20, 24],
+                        [9, 10],
+                        [33, 45],
+                    ]
+                ),
+            ),
+            (
+                AttnRanges.from_ranges(
+                    [
+                        (0, 8),
+                        (24, 32),
+                    ]
+                ),
+                AttnRanges.from_ranges(
+                    [
+                        (0, 8),
+                        (24, 32),
+                    ]
+                ),
+            ),
+            (
+                AttnRanges.from_ranges(
+                    [
+                        (0, 10),
+                        (2, 5),
+                        (7, 30),
+                        (28, 40),
+                        (29, 41),
+                        (45, 48),
+                        (45, 48),
+                    ]
+                ),
+                AttnRanges.from_ranges(
+                    [
+                        (0, 8),
+                        (8, 16),
+                        (16, 24),
+                        (0, 8),
+                        (32, 34),
+                        (0, 8),
+                        (16, 18),
+                    ]
+                ),
+            ),
+            (
+                AttnRanges.from_ranges(
+                    [
+                        [0, 1024],
+                        [128, 256],
+                        [256, 512],
+                        [512, 1024],
+                    ]
+                ),
+                AttnRanges.from_ranges(
+                    [
+                        [0, 128],
+                        [128, 256],
+                        [256, 512],
+                        [512, 1024],
+                    ]
+                ),
+            ),
+        ],
+    )
+    @parameterize(
+        "masktype",
+        [
+            AttnMaskType.FULL,
+            AttnMaskType.CAUSAL,
+        ],
+    )
+    @parameterize("chunk_size", [4, 8, 16])
+    def test_calc_self_attn_areas(
+        self,
+        testcase: tuple[AttnRanges, AttnRanges],
+        masktype: AttnMaskType,
+        chunk_size: int,
+    ):
+        q_ranges, k_ranges = testcase
+        attn_mask_type = [masktype] * len(q_ranges)
+
+        assert q_ranges.end % chunk_size == 0
+        num_chunks = q_ranges.end // chunk_size
+
+        sorted_indices = argsort(q_ranges, key=lambda x: (x.start, x.end))
+        q_ranges._ranges = [q_ranges[i] for i in sorted_indices]
+        k_ranges._ranges = [k_ranges[i] for i in sorted_indices]
+        attn_mask_type = [attn_mask_type[i] for i in sorted_indices]
+
+        global_bucket = _calc_self_attn_areas(
+            q_ranges,
+            k_ranges,
+            attn_mask_type,
+            num_chunks,
+            chunk_size,
+        )
+
+        assert (
+            len(global_bucket.q_chunks) == num_chunks
+        ), f"The num of chunks must be {num_chunks}, but get {len(global_bucket.q_chunks)}"
+
+        answer = np.zeros((q_ranges.end, q_ranges.end), dtype=np.int32)
+        result = np.zeros((q_ranges.end, q_ranges.end), dtype=np.int32)
+
+        for q_range, k_range, masktype in zip(q_ranges, k_ranges, attn_mask_type):
+            add_range_to_array(
+                array=answer,
+                q_range=q_range,
+                k_range=k_range,
+                masktype=masktype,
+                check=True,
+            )
+
+        for chunk_index, chunk in enumerate(global_bucket.q_chunks):
+            chunk_begin = chunk_index * chunk_size
+            chunk_end = (chunk_index + 1) * chunk_size
+
+            for slice in chunk.attn_slices:
+                add_range_to_array(
+                    array=result,
+                    q_range=slice.q_range,  # type: ignore
+                    k_range=slice.k_range,  # type: ignore
+                    masktype=slice.mask_type,  # type: ignore
+                    check=True,
+                )
+                q_range_start, q_range_end = slice.q_range.start, slice.q_range.end  # type: ignore
+
+                assert (
+                    chunk_begin <= q_range_start < chunk_end
+                    and chunk_begin < q_range_end <= chunk_end
+                )
+
+        assert np.array_equal(answer, result), (
+            f"There's wrong with {global_bucket=}, "
+            f"when {q_ranges=}, {k_ranges=}, {attn_mask_type=} and {chunk_size=}"
         )
 
 

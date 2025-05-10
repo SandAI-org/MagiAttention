@@ -30,6 +30,7 @@ from magi_attention.utils import (
     perm_idxs2unperm_idxs,
     wrap_to_list,
 )
+from magi_attention.utils._utils import argsort, is_list_value_all
 
 __all__ = [
     "calc_dispatch_meta_from_qk_ranges",
@@ -247,6 +248,14 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
         f"as well as {num_chunks_q=} and {num_chunks_k=}"
     )
 
+    assert (
+        is_list_value_all(attn_mask_type, AttnMaskType.FULL)
+        or q_ranges.is_non_overlap()
+    ), (
+        "Only support q_range overlap when masktype is all full, "
+        "but get other masktype when q_range is overlap"
+    )
+
     # --------------    extract some trivial meta info   -------------- #
 
     total_seqlen = total_seqlen_q
@@ -254,19 +263,11 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
     shard_seqlen = shard_seqlen_q
     max_valid_ids = max_valid_ids_q
 
-    # q_ranges can be transferred to cu_seqlens_q for sure
-    assert q_ranges.is_cu_seqlens(
-        total_seqlen
-    ), "q_ranges should be cu_seqlens for now."
-    cu_seqlens = q_ranges.to_cu_seqlens(total_seqlen)
-    seqlens = cu_seqlens2seqlens(cu_seqlens)
-
-    # NOTE: for now, we don't permute seqlens
-    # but we keep this general functionality
-    seqlens_perm_idxs = list(range(len(seqlens)))
-    seqlens_unperm_idxs = perm_idxs2unperm_idxs(seqlens_perm_idxs)
-    seqlens_permed = [seqlens[i] for i in seqlens_perm_idxs]
-    cu_seqlens_permed = seqlens2cu_seqlens(seqlens_permed)
+    # sort (q_range, k_range, masktype) with (q_range.start, q_range.end)
+    sorted_indices = argsort(q_ranges, key=lambda x: (x.start, x.end))
+    q_ranges._ranges = [q_ranges[i] for i in sorted_indices]
+    k_ranges._ranges = [k_ranges[i] for i in sorted_indices]
+    attn_mask_type = [attn_mask_type[i] for i in sorted_indices]
 
     # -------    calculate attn areas to construct an undispatch bucket   ------- #
 
@@ -326,12 +327,6 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
         cp_size=cp_size,
         chunk_size=chunk_size,
         num_chunks=num_chunks,
-        seqlens=seqlens,
-        seqlens_permed=seqlens_permed,
-        seqlens_perm_idxs=seqlens_perm_idxs,
-        seqlens_unperm_idxs=seqlens_unperm_idxs,
-        cu_seqlens=cu_seqlens,
-        cu_seqlens_permed=cu_seqlens_permed,
         partitions=partitions,
         partitions_perm_idxs=partitions_perm_idxs,
         partitions_unperm_idxs=partitions_unperm_idxs,
@@ -378,31 +373,50 @@ def _calc_self_attn_areas(
     # -----------    init meta info and global bucket    ----------- #
 
     global_bucket = AttnBucket()
-    range_idx, seqi_mid = 0, 0
+    range_idx = 0
+    n = len(q_ranges)
 
     # -----------    compute attn areas for self-attn settings    ----------- #
 
     for chunk_id in range(num_chunks):  # for each chunk
         chunk: AttnChunk = AttnChunk(chunk_id=chunk_id)
-        cur_chunk_size = 0
+
+        # calculate begin and end of current chunk
+        chunk_begin = chunk_id * chunk_size
+        chunk_end = (chunk_id + 1) * chunk_size
+
+        # find the first range that intersect with current chunk
+        while (
+            range_idx < n
+            and q_ranges[range_idx].start < chunk_begin
+            and q_ranges[range_idx].end <= chunk_begin
+        ):
+            range_idx += 1
 
         slice_id = 0
-        while cur_chunk_size < chunk_size:  # for each slice
-            mask_type = attn_mask_type[range_idx]
+        cur_range_idx = range_idx
+        # Iterate from the current range until the start of the range exceeds the current chunk.
+        while cur_range_idx < n and q_ranges[cur_range_idx].start < chunk_end:
+            mask_type = attn_mask_type[cur_range_idx]
             is_causal = mask_type == AttnMaskType.CAUSAL
 
             slice: AttnSlice = AttnSlice(slice_id=slice_id, mask_type=mask_type)
 
-            seqi_end = q_ranges[range_idx].end
-            seqi_len_bottom = seqi_end - seqi_mid
-
-            attn_len = k_ranges[range_idx].seqlen
-            attn_start, attn_end = (
-                k_ranges[range_idx].start,
-                k_ranges[range_idx].end,
+            attn_len = k_ranges[cur_range_idx].seqlen
+            attn_q_start, attn_q_end = (
+                q_ranges[cur_range_idx].start,
+                q_ranges[cur_range_idx].end,
+            )
+            attn_k_start, attn_k_end = (
+                k_ranges[cur_range_idx].start,
+                k_ranges[cur_range_idx].end,
             )
 
-            exceed_size = seqi_len_bottom + cur_chunk_size - chunk_size
+            # If the current range has no intersection with the chunk,
+            # and the range's start is beyond the end of the chunk, skip it directly.
+            if attn_q_start < chunk_begin and attn_q_end <= chunk_begin:
+                cur_range_idx += 1
+                continue
 
             q_range_start, q_range_end, k_range_start, k_range_end = (
                 None,
@@ -411,76 +425,40 @@ def _calc_self_attn_areas(
                 None,
             )
 
-            # analyze this slice
-            # HACK: The logic for calculating the area will be encapsulated in AttnSlice later, and the area will be read-only.
-            # This feature of directly setting the area is retained here for now.
-            if exceed_size <= 0:  # this bottom half of seqi should be all in this chunk
-                # set start and end for q_range of this slice
-                q_range_start, q_range_end = seqi_mid, seqi_end
+            if is_causal:
+                q_range_start = max(attn_q_start, chunk_begin, attn_q_end - attn_len)
+                q_range_end = min(attn_q_end, chunk_end)
+                if q_range_start < q_range_end:
+                    # the area of a triangle or a trapezoid
+                    diff_slice_end_and_q_end = attn_q_end - q_range_end
+                    (k_range_start, k_range_end) = (
+                        attn_k_start,
+                        attn_k_end - diff_slice_end_and_q_end,
+                    )
 
-                # set start and end for k_range of this slice
-                k_range_start, k_range_end = attn_start, attn_end
-
-                # compuate areas
-                if is_causal:
-                    if attn_len > seqi_len_bottom:  # the area of a trapezoid
-                        slice.area = (
-                            (2 * attn_len - seqi_len_bottom + 1) * seqi_len_bottom // 2
-                        )
-                    else:  # the area of a triangle
-                        slice.area = (1 + attn_len) * attn_len // 2
-                else:  # the area of a rectangle
-                    slice.area = seqi_len_bottom * attn_len
-
-                # iterate to the next sample within the same chunk
-                range_idx += 1
-                seqi_mid = seqi_end
-                cur_chunk_size += seqi_len_bottom
-            else:  # only the prefix of this bottom half of seqi should be in this chunk
-                # truncate the seqlen to the edge of chunk line
-                seqi_end_truncate = seqi_end - exceed_size
-                seqi_len_bottom_truncate = seqi_end_truncate - seqi_mid
-                attn_len_truncate = attn_len - exceed_size
-
-                # set start and end for q_range of this slice
-                q_range_start, q_range_end = seqi_mid, seqi_end_truncate
-
-                # compuate areas
-                if is_causal:
-                    if attn_len > seqi_len_bottom:  # the area of a trapezoid
-                        slice.area = (
-                            (
-                                2 * (attn_len - seqi_len_bottom)
-                                + seqi_len_bottom_truncate
-                                + 1
-                            )
-                            * seqi_len_bottom_truncate
-                            // 2
-                        )
-                        # set start and end for k_range of this slice
-                        k_range_start, k_range_end = (
-                            attn_start,
-                            attn_start + attn_len_truncate,
-                        )
-                    elif attn_len > exceed_size:  # the area of a triangle
-                        slice.area = (1 + attn_len_truncate) * attn_len_truncate // 2
-                        # set start and end for k_range of this slice
-                        k_range_start, k_range_end = (
-                            attn_start,
-                            attn_start + attn_len_truncate,
-                        )
-                    else:  # no area to compute
-                        slice.area = 0
-                        # set start and end for k_range of this slice
-                        k_range_start, k_range_end = attn_start, attn_start
-                else:  # the area of a rectangle
-                    slice.area = seqi_len_bottom_truncate * attn_len
-                    # set start and end for k_range of this slice
-                    k_range_start, k_range_end = attn_start, attn_end
-
-                # iterate to next chunk within the same sample
-                seqi_mid = seqi_end_truncate
-                cur_chunk_size = chunk_size
+                    # calculate the base and height of the trapezoid
+                    base_of_causal = k_range_end - k_range_start
+                    height_of_causal = q_range_end - q_range_start
+                    slice.area = (
+                        (2 * base_of_causal - height_of_causal + 1)
+                        * height_of_causal
+                        // 2
+                    )
+                    # HACK To ensure the correctness of some test cases,
+                    # a special handling is temporarily implemented here, which can be removed later.
+                    q_range_start = max(attn_q_start, chunk_begin)
+                else:
+                    # empty slice
+                    (q_range_start, q_range_end) = (q_range_start, q_range_start)
+                    (k_range_start, k_range_end) = (attn_k_start, attn_k_start)
+                    slice.area = 0
+            else:
+                # the area of a rectangle
+                q_range_start = max(attn_q_start, chunk_begin)
+                q_range_end = min(attn_q_end, chunk_end)
+                (k_range_start, k_range_end) = (attn_k_start, attn_k_end)
+                slice.area = (q_range_end - q_range_start) * attn_len
+            cur_range_idx += 1
 
             # set q_range, k_range for this slice
             slice.q_range = AttnRange(start=q_range_start, end=q_range_end)

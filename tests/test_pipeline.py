@@ -43,6 +43,7 @@ from magi_attention.testing.precision import (
     torch_attn_ref,
 )
 from magi_attention.utils import get_attn_mask_from_ranges, str2seed, sync_rng
+from magi_attention.utils._utils import is_list_value_all
 
 # tell if using profile mode
 profile_mode = os.environ.get("MAGI_ATTENTION_UNITEST_PROFILE_MODE", "0") == "1"
@@ -287,6 +288,98 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 147456,
                 "chunk_size": 4096,
             },
+            # {
+            #     NAME: "varlen_block_causal_with_overlap_15k",
+            #     SKIP_WORLD_SIZE: [4, 7, 8],
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 8192],
+            #             [2048, 8192],
+            #             [4096, 8192],
+            #             [6144, 8192],
+            #             [8192, 15360],
+            #             [10240, 15360],
+            #             [12288, 15360],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 2048],
+            #             [2048, 4096],
+            #             [4096, 6144],
+            #             [6144, 8192],
+            #             [8192, 10240],
+            #             [10240, 12288],
+            #             [12288, 15360],
+            #         ]
+            #     ),
+            #     "is_causal_mapping": [False] * 7,
+            #     "total_seqlen_q": 15360,
+            #     "total_seqlen_k": 15360,
+            #     "chunk_size": 512,
+            # },
+            # {
+            #     NAME: "varlen_block_causal_1k",
+            #     SKIP_WORLD_SIZE: [3, 5, 6, 7],
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 1024],
+            #             [128, 1024],
+            #             [256, 1024],
+            #             [384, 1024],
+            #             [512, 1024],
+            #             [640, 1024],
+            #             [768, 1024],
+            #             [896, 1024],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 128],
+            #             [128, 256],
+            #             [256, 384],
+            #             [384, 512],
+            #             [512, 640],
+            #             [640, 768],
+            #             [768, 896],
+            #             [896, 1024],
+            #         ]
+            #     ),
+            #     "is_causal_mapping": [False] * 8,
+            #     "total_seqlen_q": 1024,
+            #     "total_seqlen_k": 1024,
+            #     "chunk_size": 128,
+            # },
+            # {
+            #     NAME: "varlen_block_causal_17k",
+            #     SKIP_WORLD_SIZE: [3, 5, 6, 7],
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 8192],
+            #             [2048, 8192],
+            #             [4096, 8192],
+            #             [6144, 8192],
+            #             [8192, 17808],
+            #             [10240, 17808],
+            #             [12288, 17808],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 2048],
+            #             [2048, 4096],
+            #             [4096, 6144],
+            #             [6144, 8192],
+            #             [8192, 10240],
+            #             [10240, 12288],
+            #             [12288, 17808],
+            #         ]
+            #     ),
+            #     "is_causal_mapping": [False] * 7,
+            #     "total_seqlen_q": 17808,
+            #     "total_seqlen_k": 17808,
+            #     "chunk_size": 1113,
+            # },
         ],
     )
     @parameterize(
@@ -411,8 +504,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     @parameterize(
         "dtype",
         [
-            # XXX HACK: for latest ffa interface
-            # torch.float16,
+            torch.float16,
             torch.bfloat16,
         ],
     )
@@ -486,6 +578,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 is_causal_mapping = [
                     random.choice([True, False]) for _ in is_causal_mapping
                 ]
+
+        # -----    skip for q_range overlap with causal mask  ---- #
+
+        if not q_ranges.is_non_overlap() and not is_list_value_all(
+            is_causal_mapping, False
+        ):
+            return
 
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]

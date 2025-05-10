@@ -52,13 +52,8 @@ def dispatch_func(
 
     # --------------      dispatch       -------------- #
 
-    x_split = torch.split(x_global, split_size_or_sections=meta.seqlens, dim=seq_dim)
-    x_perm = torch.concat(
-        [x_split[i] for i in meta.seqlens_perm_idxs],
-        dim=seq_dim,
-    )
     x_chunked = torch.chunk(
-        x_perm,
+        x_global,
         chunks=meta.num_chunks,
         dim=seq_dim,
     )
@@ -108,17 +103,8 @@ def undispatch_func(
         chunks=meta.num_chunks,
         dim=seq_dim,
     )
-    x_perm = torch.concat(
-        [x_chunked[i] for i in meta.partitions_unperm_idxs],
-        dim=seq_dim,
-    )
-    x_split = torch.split(
-        x_perm,
-        split_size_or_sections=meta.seqlens_permed,
-        dim=seq_dim,
-    )
     x_global = torch.concat(
-        [x_split[i] for i in meta.seqlens_unperm_idxs],
+        [x_chunked[i] for i in meta.partitions_unperm_idxs],
         dim=seq_dim,
     )
 

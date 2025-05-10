@@ -99,7 +99,9 @@ class AttnArg:
                 assert not k_range.is_empty()
 
             # check non-overlapped q ranges
-            assert self.q_ranges.is_non_overlap()
+            assert self.q_ranges.is_non_overlap() or is_list_value_all(
+                self.is_causal_mapping, False
+            )
 
     def _init_out_zero_fill_ranges(self) -> None:
         start, end = 0, self.shard_seqlen_q
