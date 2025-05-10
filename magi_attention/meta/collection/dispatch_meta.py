@@ -50,14 +50,6 @@ class DispatchMeta:
     cp_rank: int
     cp_size: int
 
-    seqlens: list[int]
-    seqlens_permed: list[int]  # used but not enabled property
-    seqlens_perm_idxs: list[int]  # used but not enabled property
-    seqlens_unperm_idxs: list[int]  # used but not enabled property
-
-    cu_seqlens: list[int]  # unused property
-    cu_seqlens_permed: list[int]  # unused property
-
     # dispatch solver results
     partitions: list[list[int]]
     partitions_perm_idxs: list[int]
@@ -119,16 +111,6 @@ class DispatchMeta:
         return position_ids
 
     def __post_init__(self) -> None:
-        assert len(self.seqlens) == len(self.seqlens_permed) == self.batch_size
-        assert (
-            len(self.seqlens_perm_idxs)
-            == len(self.seqlens_unperm_idxs)
-            == self.batch_size
-        )
-        assert (
-            len(self.cu_seqlens) == len(self.cu_seqlens_permed) == self.batch_size + 1
-        )
-
         assert len(self.partitions) == self.cp_size
         assert (
             len(self.partitions_perm_idxs)

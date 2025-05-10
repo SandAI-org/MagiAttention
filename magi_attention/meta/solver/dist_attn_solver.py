@@ -1693,16 +1693,11 @@ class DistAttnSolver:
                 is_self_merged=True,
             ).merge()
 
-            if magi_attention.is_sanity_check_enable():
-                # the local ranges are always contains only a single range after merged
-                # unless the it is empty
-                assert len(k_ranges) <= 1
-
-            if len(k_ranges) == 1:
+            for k_range in k_ranges:
                 attn_calc_remote_slice_local_list_this_stage.append(
                     AttnSlice(
                         q_range=q_range,
-                        k_range=k_ranges[0],
+                        k_range=k_range,
                         mask_type=mask_type,
                     )
                 )
