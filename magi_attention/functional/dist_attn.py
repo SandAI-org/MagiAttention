@@ -24,14 +24,11 @@ from magi_attention.comm.primitive import group_cast_collective, group_reduce_co
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.common.ranges import NaiveRanges
 from magi_attention.meta.collection import AttnCalcMeta, CommMeta
-from magi_attention.utils import nvtx, to_higher_fp_dtype
+from magi_attention.utils import max_fp_dtype, nvtx, to_higher_fp_dtype
 
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
 from .utils import safe_subtract
-
-# from flash_attn_interface import _flex_flash_attn_backward, _flex_flash_attn_forward
-
 
 logger = getLogger("magi_attention")
 
@@ -339,9 +336,19 @@ class DistFlashAttnRuntime:
                         sm_margin=0
                         if magi_attention.is_cuda_device_max_connections_one()
                         else 4,
-                        return_dtype=q.dtype,
-                        disable_fwd_atomic_reduction=True,
+                        # NOTE: increase the partial out precision temporarily,
+                        # to reduce the error caused by the out correction
+                        return_dtype=max_fp_dtype(q.dtype, torch.float32),
+                        disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
                     )
+
+                # DE-BUG: log fwd attn arg
+                # from magi_attention.utils import write_rank
+                # write_rank((
+                #     f"{attn_arg.q_ranges=}\n\n"
+                #     f"{attn_arg.k_ranges=}\n\n"
+                #     f"{attn_arg.to_ffa_args(is_bwd=False)=}\n\n"
+                # ), path="fwd_attn_arg.log")
 
                 # fill output with zero indexed by "hole" q ranges
                 # TODO: put this logic into kernel
@@ -561,6 +568,10 @@ class DistFlashAttnFunc(torch.autograd.Function):
             #       and once gradients between different tokens need to be reduced, the nan values
             #       from pad tokens would interfere with the gradients of other tokens
             out = torch.zeros_like(local_q)
+        else:
+            # NOTE: since we've increased the precision of partial out for correction
+            # here we need to downcast to q dtype to both return and save for backward
+            out = out.to(local_q.dtype)
 
         ctx.save_for_backward(local_q, local_kv, out, lse)
         ctx.dist_attn_runtime = dist_attn_runtime

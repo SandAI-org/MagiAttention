@@ -58,7 +58,9 @@ def deprecated(func: Callable) -> Callable:
 
 
 def rprint_rank(
-    msg: str, rank: int | None = None, width: int = 50
+    msg: str,
+    rank: int | None = None,
+    width: int = 50,
 ) -> None:  # pragma: no cover
     if rank is None or dist.get_rank() == rank:
         rank = dist.get_rank()
@@ -69,7 +71,10 @@ def rprint_rank(
 
 
 def write_rank(
-    msg: str, path: str, rank: int | None = None, width: int = 50
+    msg: str,
+    path: str,
+    rank: int | None = None,
+    width: int = 50,
 ) -> None:  # pragma: no cover
     if rank is None or dist.get_rank() == rank:
         rank = dist.get_rank()

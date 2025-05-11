@@ -429,9 +429,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
             },
-            # share question mask with total seqlen 1k
+            # share question mask with total seqlen 1k + overlapped q ranges
             {
-                NAME: "share_question_mask_1k",
+                NAME: "share_question_1k_with_q_overlap",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -454,9 +454,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
             },
-            # interleaved q_range mask with total seqlen 1k
+            # half-inv block diagonal with total seqlen 1k
+            # + interleaved overlapped q ranges
             {
-                NAME: "shark_overlap_mask_1k",
+                NAME: "half_inv_block_diagonal_1k_with_interleave_q_overlap",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -501,9 +502,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
             },
-            # block causal in overlap q_range with 1k mask
+            # varlen block causal with total seqlen 1k + overlapped q ranges
             {
-                NAME: "block_causal_in_overlap_mask_1k",
+                NAME: "varlen_block_causal_1k_with_q_overlap",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
                 "q_ranges": AttnRanges.from_ranges(
                     [
@@ -725,7 +726,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                     random.choice([True, False]) for _ in is_causal_mapping
                 ]
 
-        # -----    skip for q_range overlap with causal mask  ---- #
+        # -----    skip for overlapped q_range with causal mask  ---- #
 
         if not q_ranges.is_non_overlap() and not is_list_value_all(
             is_causal_mapping, False

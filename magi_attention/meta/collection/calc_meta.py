@@ -28,7 +28,7 @@ class AttnArg:
     q_ranges: AttnRanges
     k_ranges: AttnRanges
     is_causal_mapping: list[bool]
-    # attn_type_map: torch.Tensor
+
     # REVIEW(xiaowu): Is shard_seqlen_q an appropriate name?
     shard_seqlen_q: int
 
@@ -104,23 +104,20 @@ class AttnArg:
             )
 
     def _init_out_zero_fill_ranges(self) -> None:
-        start, end = 0, self.shard_seqlen_q
-        out_zero_fill_ranges: list[tuple[int, int]] = []
-        for q_range in self.q_ranges:
-            if start < q_range.start:
-                out_zero_fill_ranges.append((start, q_range.start))
-            start = q_range.end
-        if start < end:
-            out_zero_fill_ranges.append((start, end))
-
-        self.out_zero_fill_ranges = (
-            AttnRanges.from_ranges(out_zero_fill_ranges).merge().to_naive_ranges()
-        )
+        shard_q_ranges = AttnRanges.from_ranges([[0, self.shard_seqlen_q]])
+        self.out_zero_fill_ranges = AttnRanges.find_hole_ranges(
+            shard_q_ranges,
+            self.q_ranges,
+            is_self_merged=True,
+        ).to_naive_ranges()
 
     def _init_ffa_fwd_args_dict(self) -> None:
-        # init skip attn flag
+        # init `skip_attn_fwd` flag
         batch_size_fwd = len(self.q_ranges)
         self.skip_attn_fwd = batch_size_fwd == 0
+
+        # init `disable_fwd_atomic_reduction` flag
+        self.disable_fwd_atomic_reduction = self.q_ranges.is_non_overlap()
 
         # init tensors
         q_ranges_tensor_fwd = self.q_ranges.to_tensor(
@@ -129,11 +126,6 @@ class AttnArg:
         k_ranges_tensor_fwd = self.k_ranges.to_tensor(
             device=torch.cuda.current_device()
         )
-        """
-        is_causal_mapping_tensor_fwd = torch.tensor(
-            self.is_causal_mapping, dtype=torch.bool, device=torch.cuda.current_device()
-        )
-        """
         mask_type_tensor_fwd = torch.tensor(
             self.is_causal_mapping,
             dtype=torch.int32,
@@ -147,9 +139,6 @@ class AttnArg:
                 assert q_ranges_tensor_fwd.shape == torch.Size([batch_size_fwd, 2])
                 assert k_ranges_tensor_fwd.shape == torch.Size([batch_size_fwd, 2])
                 assert mask_type_tensor_fwd.shape == torch.Size([batch_size_fwd])
-                # assert attn_type_map_fwd.shape == torch.Size(
-                #    [batch_size_fwd]
-                # )
 
         # init max seqlen
         if self.skip_attn_fwd:  # no calc needed
@@ -162,8 +151,6 @@ class AttnArg:
         self.ffa_fwd_args_dict = dict(
             q_ranges=q_ranges_tensor_fwd,
             k_ranges=k_ranges_tensor_fwd,
-            # XXX HACK: for latest ffa interface
-            # is_causal_mapping=is_causal_mapping_tensor_fwd,
             attn_type_map=mask_type_tensor_fwd,
             max_seqlen_q=max_seqlen_q_fwd,
             max_seqlen_k=max_seqlen_k_fwd,
@@ -191,8 +178,6 @@ class AttnArg:
             k_ranges_tensor_bwd = self.k_ranges_bwd.to_tensor(
                 device=torch.cuda.current_device()
             )
-
-            # XXX HACK: for latest ffa interface
             mask_type_tensor_bwd = torch.tensor(
                 self.is_causal_mapping_bwd,
                 dtype=torch.int32,
@@ -218,8 +203,6 @@ class AttnArg:
             self.ffa_bwd_args_dict = dict(
                 q_ranges=q_ranges_tensor_bwd,
                 k_ranges=k_ranges_tensor_bwd,
-                # XXX HACK: for latest ffa interface
-                # is_causal_mapping=is_causal_mapping_tensor_bwd,
                 attn_type_map=mask_type_tensor_bwd,
                 max_seqlen_q=max_seqlen_q_bwd,
                 max_seqlen_k=max_seqlen_k_bwd,
@@ -227,10 +210,11 @@ class AttnArg:
         else:
             # just copy args from fwd
             self.skip_attn_bwd = self.skip_attn_fwd
-            self.ffa_bwd_args_dict = self.ffa_fwd_args_dict
             self.q_ranges_bwd = self.q_ranges
             self.k_ranges_bwd = self.k_ranges
             self.is_causal_mapping_bwd = self.is_causal_mapping
+
+            self.ffa_bwd_args_dict = self.ffa_fwd_args_dict
 
     def _refactor_bwd_ranges_and_types(
         self,
