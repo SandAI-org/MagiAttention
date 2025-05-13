@@ -825,35 +825,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             total_out_ref_low_precision, total_out_ref_high_precision
         )
 
-        # DE-BUG: log out with ref
-        # from magi_attention.utils import write_rank
-        # write_rank((
-        #     f"{test_case=}\n\n"
-        #     f"{total_out=}\n\n"
-        #     f"{total_out_ref_high_precision=}\n\n"
-        # ), path="test_pipe_out.log")
-
-        # try:
-        #     torch.testing.assert_close(
-        #         total_out,
-        #         total_out_ref_high_precision,
-        #         atol=o_atol,
-        #         rtol=o_rtol,
-        #     )
-        # except AssertionError as e:
-        #     write_rank((
-        #         f"Torch Error:\n\n{e}\n\n"
-        #     ), path="test_pipe_out_torch_assertclose.log")
-
-        if "q_overlap" not in test_case:
-            # XXX: with overlapped q ranges, the out Linf norm test cannot pass
-            # espeicially when dtype is bfloat16, and the total seqlen is quite long
-            # which seems like a bug about the atomic-reduction of out in the ffa fwd kernel
-            self.assertLessEqual(
-                out_norm,
-                norm_rtol_ratio * out_ref_norm,
-                msg=f"For {test_case=}: {out_norm=} should be no greater than {norm_rtol_ratio}x of {out_ref_norm=}",
-            )
+        self.assertLessEqual(
+            out_norm,
+            norm_rtol_ratio * out_ref_norm,
+            msg=f"For {test_case=}: {out_norm=} should be no greater than {norm_rtol_ratio}x of {out_ref_norm=}",
+        )
 
         # torch style with atol + rtol + mismatch threshold
         o_thres = self._extract_mismatch_threshold_ref(
@@ -881,15 +857,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             grad_total_q_ref_low_precision, grad_total_q_ref_high_precision
         )
 
-        if "q_overlap" not in test_case:
-            # XXX: with overlapped q ranges, the dq Linf norm test cannot pass due to out
-            # espeicially when dtype is bfloat16, and the total seqlen is quite long
-            # which seems like a bug about the atomic-reduction of out in the ffa fwd kernel
-            self.assertLessEqual(
-                dq_norm,
-                norm_rtol_ratio * dq_ref_norm,
-                msg=f"For {test_case=}: {dq_norm=} should be no greater than {norm_rtol_ratio}x of {dq_ref_norm=}",
-            )
+        self.assertLessEqual(
+            dq_norm,
+            norm_rtol_ratio * dq_ref_norm,
+            msg=f"For {test_case=}: {dq_norm=} should be no greater than {norm_rtol_ratio}x of {dq_ref_norm=}",
+        )
 
         # torch style with atol + rtol + mismatch threshold
         dq_thres = self._extract_mismatch_threshold_ref(
@@ -917,15 +889,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             grad_total_k_ref_low_precision, grad_total_k_ref_high_precision
         )
 
-        if "q_overlap" not in test_case:
-            # XXX: with overlapped q ranges, the dk Linf norm test cannot pass due to out
-            # espeicially when dtype is bfloat16, and the total seqlen is quite long
-            # which seems like a bug about the atomic-reduction of out in the ffa fwd kernel
-            self.assertLessEqual(
-                dk_norm,
-                norm_rtol_ratio * dk_ref_norm,
-                msg=f"For {test_case=}: {dk_norm=} should be no greater than {norm_rtol_ratio}x of {dk_ref_norm=}",
-            )
+        self.assertLessEqual(
+            dk_norm,
+            norm_rtol_ratio * dk_ref_norm,
+            msg=f"For {test_case=}: {dk_norm=} should be no greater than {norm_rtol_ratio}x of {dk_ref_norm=}",
+        )
 
         # torch style with atol + rtol + mismatch threshold
         dk_thres = self._extract_mismatch_threshold_ref(
