@@ -824,7 +824,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         out_ref_norm = calc_inf_norm(
             total_out_ref_low_precision, total_out_ref_high_precision
         )
-
         self.assertLessEqual(
             out_norm,
             norm_rtol_ratio * out_ref_norm,
@@ -839,7 +838,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             rtol=o_rtol,
             mismatch_thres_ratio=mismatch_thres_ratio,
         )
-
         magi_attention.testing.assert_close(
             total_out,
             total_out_ref_high_precision,
@@ -856,7 +854,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         dq_ref_norm = calc_inf_norm(
             grad_total_q_ref_low_precision, grad_total_q_ref_high_precision
         )
-
         self.assertLessEqual(
             dq_norm,
             norm_rtol_ratio * dq_ref_norm,
@@ -871,7 +868,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             rtol=dq_rtol,
             mismatch_thres_ratio=mismatch_thres_ratio,
         )
-
         magi_attention.testing.assert_close(
             grad_total_q,
             grad_total_q_ref_high_precision,
@@ -888,7 +884,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         dk_ref_norm = calc_inf_norm(
             grad_total_k_ref_low_precision, grad_total_k_ref_high_precision
         )
-
         self.assertLessEqual(
             dk_norm,
             norm_rtol_ratio * dk_ref_norm,
@@ -903,7 +898,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             rtol=dk_rtol,
             mismatch_thres_ratio=mismatch_thres_ratio,
         )
-
         magi_attention.testing.assert_close(
             grad_total_k,
             grad_total_k_ref_high_precision,
@@ -934,7 +928,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             rtol=dv_rtol,
             mismatch_thres_ratio=mismatch_thres_ratio,
         )
-
         magi_attention.testing.assert_close(
             grad_total_v,
             grad_total_v_ref_high_precision,

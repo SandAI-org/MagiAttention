@@ -342,14 +342,6 @@ class DistFlashAttnRuntime:
                         disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
                     )
 
-                # DE-BUG: log fwd attn arg
-                # from magi_attention.utils import write_rank
-                # write_rank((
-                #     f"{attn_arg.q_ranges=}\n\n"
-                #     f"{attn_arg.k_ranges=}\n\n"
-                #     f"{attn_arg.to_ffa_args(is_bwd=False)=}\n\n"
-                # ), path="fwd_attn_arg.log")
-
                 # fill output with zero indexed by "hole" q ranges
                 # TODO: put this logic into kernel
                 out_zero_fill_correction(out, attn_arg.out_zero_fill_ranges)
