@@ -267,6 +267,67 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 10240,
                 "chunk_size": 512,
             },
+            # varlen block causal with total seqlen 12k + overlapped q ranges
+            {
+                NAME: "varlen_block_causal_12k_with_q_overlap",
+                SKIP_WORLD_SIZE: [5, 7],
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 8192],
+                        [2048, 8192],
+                        [4096, 8192],
+                        [6144, 8192],
+                        [8192, 12288],
+                        [10240, 12288],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 2048],
+                        [2048, 4096],
+                        [4096, 6144],
+                        [6144, 8192],
+                        [8192, 10240],
+                        [10240, 12288],
+                    ]
+                ),
+                "is_causal_mapping": [False] * 6,
+                "total_seqlen_q": 12288,
+                "total_seqlen_k": 12288,
+                "chunk_size": 512,
+            },
+            # half-inv block diagonal with total seqlen 10k
+            # + interleaved overlapped q ranges
+            {
+                NAME: "varlen_block_causal_12k_with_q_overlap",
+                SKIP_WORLD_SIZE: [2, 4, 5, 6, 8],
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 3072],
+                        [1536, 4608],
+                        [3072, 6144],
+                        [4608, 7680],
+                        [6144, 9216],
+                        [7680, 10752],
+                        [9216, 10752],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 1536],
+                        [1536, 3072],
+                        [3072, 4608],
+                        [4608, 6144],
+                        [6144, 7680],
+                        [7680, 9216],
+                        [9216, 10752],
+                    ]
+                ),
+                "is_causal_mapping": [False] * 7,
+                "total_seqlen_q": 10752,
+                "total_seqlen_k": 10752,
+                "chunk_size": 512,
+            },
             # NOTE: profile only case
             # full attn with total seqlen 140k
             # {

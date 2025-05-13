@@ -574,6 +574,67 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
             },
+            # varlen block causal with total seqlen 840 + overlapped q ranges
+            {
+                NAME: "varlen_block_causal_840_with_q_overlap",
+                SKIP_WORLD_SIZE: [4, 8],
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 512],
+                        [128, 512],
+                        [256, 512],
+                        [384, 512],
+                        [512, 840],
+                        [640, 840],
+                        [768, 840],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 128],
+                        [128, 256],
+                        [256, 384],
+                        [384, 512],
+                        [512, 640],
+                        [640, 768],
+                        [768, 840],
+                    ]
+                ),
+                "is_causal_mapping": [False] * 7,
+                "total_seqlen_q": 840,
+                "total_seqlen_k": 840,
+                "chunk_size": 4,
+            },
+            # half-inv block diagonal with total seqlen 1050
+            # + interleaved overlapped q ranges
+            {
+                NAME: "half_inv_block_diagonal_1050_with_interleave_q_overlap",
+                SKIP_WORLD_SIZE: [4, 8],
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 420],
+                        [210, 630],
+                        [420, 840],
+                        [630, 1050],
+                        [0, 210],
+                        [840, 1050],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 210],
+                        [210, 420],
+                        [420, 630],
+                        [630, 840],
+                        [840, 1050],
+                        [840, 1050],
+                    ]
+                ),
+                "is_causal_mapping": [False] * 6,
+                "total_seqlen_q": 1050,
+                "total_seqlen_k": 1050,
+                "chunk_size": 5,
+            },
         ],
     )
     @parameterize(
