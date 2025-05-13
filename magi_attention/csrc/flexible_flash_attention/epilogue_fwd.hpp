@@ -240,6 +240,7 @@ struct CollectiveEpilogueFwd {
             int index_2 = block_idx2 * num_heads + bidh;
 
             // Try to acquire the second lock
+            #pragma unroll 1
             while (atomicCAS(&range_lock[index_2], 0, 1) != 0) {
                 // Temporarily release the first lock to avoid deadlock
                 // atomicExch(&range_lock[index_1], 0);
@@ -324,30 +325,6 @@ struct CollectiveEpilogueFwd {
         // cp.async if we need).
         flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
 
-        // Step 1: Write O from rmem -> smem
-        // if constexpr (Use_smem) {
-        //     auto smem_tiled_copy_O = make_tiled_copy_C(SmemCopyAtomO{}, tiled_mma);
-        //     auto smem_thr_copy_O = smem_tiled_copy_O.get_thread_slice(thread_idx);
-        //     Tensor taccOrO = smem_thr_copy_O.retile_S(tOrO_out);        // ((Atom,AtomNum), MMA_M, MMA_N)
-        //     Tensor taccOsO = smem_thr_copy_O.partition_D(sO);     // ((Atom,AtomNum),PIPE_M,PIPE_N)
-        //     // Tensor taccOsO = smem_thr_copy_O.partition_D(sO_pi);     // ((Atom,AtomNum),PIPE_M,PIPE_N)
-        //     cute::copy(smem_tiled_copy_O, taccOrO, taccOsO);
-        //     if constexpr (Use_TMA_O) {
-        //         cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
-        //         cutlass::arch::NamedBarrier::arrive(NumEpilogueThreads + cutlass::NumThreadsPerWarp,
-        //                                             cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-        //     } else {
-        //         flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-        //     }
-        // } else {
-        //     if constexpr (ArchTag::kMinComputeCapability >= 90) {
-        //         #pragma unroll
-        //         for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
-        //             shared_storage.pipelines.barrier_O.arrive(cta_id);
-        //         }
-        //     }
-        // }
-
         warpgroup_wait<0>();
         Tensor tOrCurrO = make_fragment_like(tOrO);
         for (int oi = 0; oi < size(tOrO); ++oi) {
@@ -397,6 +374,8 @@ struct CollectiveEpilogueFwd {
         }
         flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
 
+        // A workaround to ensure that all threads get the correct lse_final, low performance
+        __threadfence();
 
         auto lse_prev = make_fragment_like(lse);
         auto lse_final = make_fragment_like(lse);
@@ -406,6 +385,16 @@ struct CollectiveEpilogueFwd {
             if (row < seqlen_o) {
                 lse_prev(mi) = mLSE(row);
                 lse_final(mi) = correct_lse(lse_prev(mi), lse(mi));
+            }
+        }
+
+        // A workaround to ensure that all threads get the correct lse_final, low performance
+        flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+
+        #pragma unroll
+        for (int mi = 0; mi < size(lse_prev); ++mi) {
+            int const row = m_block * kBlockM + get<0>(taccOcO_row(mi));
+            if (row < seqlen_o) {
                 if (get<1>(taccOcO_row(_0{})) == 0) {
                     mLSE(row) = lse_final(mi);
                 }
