@@ -30,7 +30,7 @@ def range_fill_kernel(
     row_map_ptr,
     n_ranges,
     input_stride,
-    M: tl.constexpr,
+    M,
     N: tl.constexpr,
     N_BLOCK: tl.constexpr,
     ELEM_PER_BLOCK: tl.constexpr,

@@ -31,7 +31,7 @@ def range_gather_kernel(
     n_ranges,
     input_stride,
     output_stride,
-    M: tl.constexpr,
+    M,
     N: tl.constexpr,
     N_BLOCK: tl.constexpr,
     ELEM_PER_BLOCK: tl.constexpr,
