@@ -147,6 +147,7 @@ class DistAttnRuntimeMgr:
 
     def get_xattn_args(
         self,
+        ref_xattn_q_ranges: AttnRanges,
         ref_xattn_k_ranges: AttnRanges,
         attn_mask_type: AttnMaskType | list[AttnMaskType],
         return_host_only: bool = False,
@@ -172,15 +173,16 @@ class DistAttnRuntimeMgr:
             attn_mask_type, AttnMaskType.FULL
         ), "Only supports all full attn mask for now."
 
-        host_global_perm_sorted_q_ranges = self.attn_solver.bucket.q_ranges
-        total_global_unperm_xattn_k_ranges_this_rank = AttnRanges()
+        host_global_perm_merged_q_ranges = self.attn_solver.host_q_ranges_global
+        host_global_perm_sorted_q_ranges = ref_xattn_q_ranges.find_overlap_ranges(
+            host_global_perm_merged_q_ranges
+        )
+        host_global_unperm_xattn_k_ranges = AttnRanges()
         for q_range in host_global_perm_sorted_q_ranges:
             is_found = False
-            for i, ref_q_range in enumerate(self.ref_q_ranges):
+            for i, ref_q_range in enumerate(ref_xattn_q_ranges):
                 if q_range.is_subrange_of(ref_q_range):
-                    total_global_unperm_xattn_k_ranges_this_rank.append(
-                        ref_xattn_k_ranges[i]
-                    )
+                    host_global_unperm_xattn_k_ranges.append(ref_xattn_k_ranges[i])
                     is_found = True
             if not is_found:
                 raise ValueError(
@@ -192,36 +194,41 @@ class DistAttnRuntimeMgr:
                 q_ranges=host_global_perm_sorted_q_ranges.make_ranges_local(
                     host_global_perm_sorted_q_ranges
                 ),
-                k_ranges=total_global_unperm_xattn_k_ranges_this_rank,
+                k_ranges=host_global_unperm_xattn_k_ranges,
                 is_causal_mapping=[False] * len(host_global_perm_sorted_q_ranges),
-                shard_seqlen_q=self.attn_solver.bucket.q_ranges.total_seqlen,
+                shard_seqlen_q=host_global_perm_sorted_q_ranges.total_seqlen,
             )
             return attn_arg
 
         cp_size = dist.get_world_size(self.cp_group)
-        total_global_unperm_xattn_k_ranges_per_rank: list[AttnRanges] = [None] * cp_size  # type: ignore[list-item]
+        host_global_perm_sorted_q_ranges_per_rank: list[AttnRanges] = [None] * cp_size  # type: ignore[list-item]
+        host_global_unperm_xattn_k_ranges_per_rank: list[AttnRanges] = [None] * cp_size  # type: ignore[list-item]
 
         dist.all_gather_object(
-            total_global_unperm_xattn_k_ranges_per_rank,
-            total_global_unperm_xattn_k_ranges_this_rank,
+            host_global_perm_sorted_q_ranges_per_rank,
+            host_global_perm_sorted_q_ranges,
             group=self.cp_group,
         )
 
-        # TODO: remove this to dispatch meta
-        total_global_perm_unordered_q_ranges = AttnRanges()
-        bucket_per_rank = self.q_dispatch_meta.buckets_per_rank
-        for bucket in bucket_per_rank:
-            total_global_perm_unordered_q_ranges.extend(bucket.q_ranges)
+        total_global_perm_sorted_q_ranges = AttnRanges.from_ranges(
+            itertools.chain(*host_global_perm_sorted_q_ranges_per_rank)  # type: ignore[arg-type]
+        )
+
+        dist.all_gather_object(
+            host_global_unperm_xattn_k_ranges_per_rank,
+            host_global_unperm_xattn_k_ranges,
+            group=self.cp_group,
+        )
 
         total_global_unperm_xattn_k_ranges = AttnRanges.from_ranges(
-            itertools.chain(*total_global_unperm_xattn_k_ranges_per_rank)  # type: ignore[arg-type]
+            itertools.chain(*host_global_unperm_xattn_k_ranges_per_rank)  # type: ignore[arg-type]
         )
 
         attn_arg = AttnArg(
-            q_ranges=total_global_perm_unordered_q_ranges,
+            q_ranges=total_global_perm_sorted_q_ranges,
             k_ranges=total_global_unperm_xattn_k_ranges,
-            is_causal_mapping=[False] * len(total_global_perm_unordered_q_ranges),
-            shard_seqlen_q=self.attn_solver.bucket.q_ranges.total_seqlen,
+            is_causal_mapping=[False] * len(total_global_perm_sorted_q_ranges),
+            shard_seqlen_q=total_global_perm_sorted_q_ranges.total_seqlen,
         )
         return attn_arg
 

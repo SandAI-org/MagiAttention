@@ -82,6 +82,11 @@ class TestDistAttnRuntimeMgr(DistTestBase):
                         [0, 14336],
                     ]
                 ),
+                "xattn_q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 14336],
+                    ]
+                ),
                 "xattn_k_ranges": AttnRanges.from_ranges(
                     [
                         [0, 1222],
@@ -115,6 +120,16 @@ class TestDistAttnRuntimeMgr(DistTestBase):
                         [10240, 12288],
                     ]
                 ),
+                "xattn_q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 2048],
+                        [2048, 4096],
+                        [4096, 6144],
+                        [6144, 8192],
+                        [8192, 10240],
+                        [10240, 12288],
+                    ]
+                ),
                 "xattn_k_ranges": AttnRanges.from_ranges(
                     [
                         [0, 1222],
@@ -131,6 +146,58 @@ class TestDistAttnRuntimeMgr(DistTestBase):
                 "total_seqlen_xattn_k": 2566,
                 "chunk_size": 512,
             },
+            # varlen full attn with total seqlen 12k with overlapped q_ranges
+            {
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 2048],
+                        [2048, 4096],
+                        [2048, 4096],
+                        [4096, 6144],
+                        [4096, 6144],
+                        [6144, 8192],
+                        [8192, 10240],
+                        [10240, 12288],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 2048],
+                        [2048, 4096],
+                        [10240, 12288],
+                        [4096, 6144],
+                        [10240, 12288],
+                        [6144, 8192],
+                        [8192, 10240],
+                        [10240, 12288],
+                    ]
+                ),
+                "xattn_q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 2048],
+                        [2048, 4096],
+                        [4096, 6144],
+                        [6144, 8192],
+                        [8192, 10240],
+                        [10240, 12288],
+                    ]
+                ),
+                "xattn_k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 1222],
+                        [0, 1222],
+                        [1222, 1558],
+                        [1558, 1894],
+                        [1894, 2230],
+                        [2230, 2566],
+                    ]
+                ),
+                "is_causal_mapping": [False] * 8,
+                "total_seqlen_q": 12288,
+                "total_seqlen_k": 12288,
+                "total_seqlen_xattn_k": 2566,
+                "chunk_size": 512,
+            },
         ],
     )
     def test_update_xattn_k_ranges(
@@ -139,6 +206,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
     ):
         q_ranges: AttnRanges = test_config["q_ranges"]
         k_ranges: AttnRanges = test_config["k_ranges"]
+        xattn_q_ranges: AttnRanges = test_config["xattn_q_ranges"]
         xattn_k_ranges: AttnRanges = test_config["xattn_k_ranges"]
         total_seqlen_q: int = test_config["total_seqlen_q"]
         total_seqlen_k: int = test_config["total_seqlen_k"]
@@ -160,6 +228,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
         )
 
         host_xattn_attn_arg: AttnArg = dist_attn_runtime_mgr.get_xattn_args(
+            xattn_q_ranges,
             xattn_k_ranges,
             attn_mask_type=[AttnMaskType.FULL] * len(xattn_k_ranges),
             return_host_only=True,
@@ -196,12 +265,14 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             q=total_q,
             k=xattn_k,
             v=xattn_v,
-            q_ranges=q_ranges.to_tensor(device=torch.cuda.current_device()),
+            q_ranges=xattn_q_ranges.to_tensor(device=torch.cuda.current_device()),
             k_ranges=xattn_k_ranges.to_tensor(device=torch.cuda.current_device()),
             attn_type_map=torch.zeros(
-                len(q_ranges), dtype=torch.int32, device=torch.cuda.current_device()
+                len(xattn_q_ranges),
+                dtype=torch.int32,
+                device=torch.cuda.current_device(),
             ),
-            max_seqlen_q=q_ranges.max_seqlen,
+            max_seqlen_q=xattn_q_ranges.max_seqlen,
             max_seqlen_k=xattn_k_ranges.max_seqlen,
         )
 
@@ -220,8 +291,9 @@ class TestDistAttnRuntimeMgr(DistTestBase):
         )
 
         total_xattn_attn_arg: AttnArg = dist_attn_runtime_mgr.get_xattn_args(
+            xattn_q_ranges,
             xattn_k_ranges,
-            attn_mask_type=[AttnMaskType.FULL] * len(xattn_k_ranges),
+            attn_mask_type=[AttnMaskType.FULL] * len(xattn_q_ranges),
             return_host_only=False,
         )
 

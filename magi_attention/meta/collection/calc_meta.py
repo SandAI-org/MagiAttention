@@ -46,7 +46,9 @@ class AttnArg:
 
     def __post_init__(self):
         # shape check
-        assert len(self.q_ranges) == len(self.k_ranges) == len(self.is_causal_mapping)
+        assert (
+            len(self.q_ranges) == len(self.k_ranges) == len(self.is_causal_mapping)
+        ), f"{len(self.q_ranges)=}, {len(self.k_ranges)=}, {len(self.is_causal_mapping)=}"
         # assert len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
 
         # init out zero-fill ranges for fwd out correction

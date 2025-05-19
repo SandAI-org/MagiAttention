@@ -494,7 +494,7 @@ class AttnRanges:
         Example::
             self = [[0, 10), [15, 20), [25, 30)]
             other_attn_ranges = [[5, 10), [18, 30)]
-            return [[5, 10), [18, 30)]
+            return [[5, 10), [18, 20), [25, 30)]
         """
 
         ranges1 = self if is_self_merged else self.merge()
