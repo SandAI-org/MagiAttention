@@ -166,7 +166,7 @@ def _calc_group_cast_a2a_input_args(
             device=input.device,
         )
 
-    # -----     group_cast_a2a_input tensor sargs     ----- #
+    # -----     group_cast_a2a_input tensor args     ----- #
 
     a2a_input = range_gather(
         input=input,
@@ -269,7 +269,7 @@ def _calc_group_cast_a2a_output_args(
             device=output.device,
         )
 
-    # -----     group_cast_a2a_output tensor sargs     ----- #
+    # -----     group_cast_a2a_output tensor args     ----- #
 
     a2a_output = output
 
