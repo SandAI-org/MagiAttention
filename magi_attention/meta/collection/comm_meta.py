@@ -14,11 +14,16 @@
 
 from dataclasses import dataclass
 
+import torch
+import torch.distributed as dist
+
+import magi_attention
 from magi_attention.comm.primitive.utils import (
     _calc_group_cast_a2a_input_meta_args,
     _calc_group_cast_a2a_output_meta_args,
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
+    _prepare_meta_for_group_cast_collective_hier,
 )
 
 
@@ -31,6 +36,9 @@ class GroupCollectiveArg:
     dst_indices_list: list[list[int]]
     src_index_list: list[int]
     world_size: int
+
+    intra_group: dist.ProcessGroup | None = None
+    inter_group: dist.ProcessGroup | None = None
 
     # NOTE: 以下变量是__post_init__自动生成的，并作为group collective to a2a的meta args
     # group_cast_args_dict_kv_packed: dict
@@ -49,6 +57,8 @@ class GroupCollectiveArg:
             f"{len(self.src_index_list)=}."
         )
 
+        device = torch.cuda.current_device()
+
         # -------   group cast args dict for packed kv  ------- #
 
         self.group_cast_args_dict_kv_packed = {
@@ -61,29 +71,40 @@ class GroupCollectiveArg:
             }.items()
         }
 
-        (
-            self.group_cast_args_dict_kv_packed["a2a_input_split_size"],
-            self.group_cast_args_dict_kv_packed["perm_before_a2a_kwargs"],
-        ) = _calc_group_cast_a2a_input_meta_args(
-            input_split_size_list=self.group_cast_args_dict_kv_packed[
-                "input_split_size_list"
-            ],
-            dst_indices_list=self.group_cast_args_dict_kv_packed["dst_indices_list"],
-            world_size=self.world_size,
-            device="cuda",
-        )
+        if magi_attention.is_hierarchical_comm_enable():
+            self.group_cast_args_dict_kv_packed["intra_group"] = self.intra_group
+            self.group_cast_args_dict_kv_packed["inter_group"] = self.inter_group
+            (
+                self.group_cast_args_dict_kv_packed["hier_comm_meta_kwargs"]
+            ) = _prepare_meta_for_group_cast_collective_hier(
+                **self.group_cast_args_dict_kv_packed,
+            )
+        else:
+            (
+                self.group_cast_args_dict_kv_packed["a2a_input_split_size"],
+                self.group_cast_args_dict_kv_packed["perm_before_a2a_kwargs"],
+            ) = _calc_group_cast_a2a_input_meta_args(
+                input_split_size_list=self.group_cast_args_dict_kv_packed[
+                    "input_split_size_list"
+                ],
+                dst_indices_list=self.group_cast_args_dict_kv_packed[
+                    "dst_indices_list"
+                ],
+                world_size=self.world_size,
+                device=device,
+            )
 
-        (
-            self.group_cast_args_dict_kv_packed["a2a_output_split_size"],
-            self.group_cast_args_dict_kv_packed["unperm_after_a2a_kwargs"],
-        ) = _calc_group_cast_a2a_output_meta_args(
-            output_split_size_list=self.group_cast_args_dict_kv_packed[
-                "output_split_size_list"
-            ],
-            src_index_list=self.group_cast_args_dict_kv_packed["src_index_list"],
-            world_size=self.world_size,
-            device="cuda",
-        )
+            (
+                self.group_cast_args_dict_kv_packed["a2a_output_split_size"],
+                self.group_cast_args_dict_kv_packed["unperm_after_a2a_kwargs"],
+            ) = _calc_group_cast_a2a_output_meta_args(
+                output_split_size_list=self.group_cast_args_dict_kv_packed[
+                    "output_split_size_list"
+                ],
+                src_index_list=self.group_cast_args_dict_kv_packed["src_index_list"],
+                world_size=self.world_size,
+                device=device,
+            )
 
         # -------   group reduce args dict for packed kv  ------- #
 
@@ -106,7 +127,7 @@ class GroupCollectiveArg:
             ],
             dst_index_list=self.group_reduce_args_dict_kv_packed["dst_index_list"],
             world_size=self.world_size,
-            device="cuda",
+            device=device,
         )
 
         (
@@ -118,7 +139,7 @@ class GroupCollectiveArg:
             ],
             src_indices_list=self.group_reduce_args_dict_kv_packed["src_indices_list"],
             world_size=self.world_size,
-            device="cuda",
+            device=device,
         )
 
     def to_group_cast_args(self) -> dict:

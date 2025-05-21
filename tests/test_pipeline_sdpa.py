@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
@@ -101,6 +102,29 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # NOTE: test using sdpa backend with fp64 dtype support
         os.environ["MAGI_ATTENTION_SDPA_BACKEND"] = "1"
+
+        # -----    set up for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable() and self.world_size in [
+            4,
+            6,
+            8,
+        ]:
+            world_size_inter_node, world_size_intra_node = {
+                4: (2, 2),
+                6: (3, 2),
+                8: (2, 4),
+            }[self.world_size]
+            device_mesh = init_device_mesh(
+                device_type="cuda",
+                mesh_shape=(world_size_inter_node, world_size_intra_node),
+                mesh_dim_names=("inter", "intra"),
+            )
+            self.intra_group = device_mesh.get_group("intra")
+            self.inter_group = device_mesh.get_group("inter")
+        else:
+            self.intra_group = None
+            self.inter_group = None
 
     @property
     def process_group(self):
@@ -761,6 +785,16 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # thus we always enable sanity check mode
         assert magi_attention.is_sanity_check_enable()
 
+        # -----    skip for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable():
+            if self.world_size not in [4, 6, 8]:
+                # skip for invalid world size
+                # when hierarchical comm is enabled
+                return
+            if high_bandwith_domain_size > 1:
+                return
+
         # -----    construct test case name   ---- #
 
         assert (
@@ -829,9 +863,12 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             is_q_permutable=True,
             is_k_permutable=True,
             dist_attn_config=dist_attn_config,
+            cp_intra_group=self.intra_group,
+            cp_inter_group=self.inter_group,
         )
-        # HACK: double cp group for kv/dkv
-        dist_attn_runtime_mgr.dist_attn_runtime.cp_group_dkv = self.nccl_groups[1]
+        if not magi_attention.is_hierarchical_comm_enable():
+            # HACK: double cp group for kv/dkv
+            dist_attn_runtime_mgr.dist_attn_runtime.cp_group_dkv = self.nccl_groups[1]
 
         # -----   init global qkv   ---- #
 

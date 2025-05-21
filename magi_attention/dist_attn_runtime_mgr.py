@@ -269,6 +269,8 @@ def init_dist_attn_runtime_mgr(
     is_q_permutable: bool,
     is_k_permutable: bool,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
+    cp_intra_group: dist.ProcessGroup | None = None,
+    cp_inter_group: dist.ProcessGroup | None = None,
 ) -> DistAttnRuntimeMgr:
     """
 
@@ -365,6 +367,8 @@ def init_dist_attn_runtime_mgr(
         cp_group=cp_group,
         high_bandwith_domain_size=dist_attn_config.high_bandwith_domain_size,
         overlap_config=dist_attn_config.overlap_config,
+        cp_intra_group=cp_intra_group,
+        cp_inter_group=cp_inter_group,
     )
 
     dist_attn_runtime = DistFlashAttnRuntime(

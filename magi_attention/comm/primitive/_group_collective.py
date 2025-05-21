@@ -17,10 +17,15 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
+import magi_attention
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.utils import nvtx
 
-from .utils import _calc_group_cast_a2a_args, _calc_group_reduce_a2a_args
+from .utils import (
+    _calc_group_cast_a2a_args,
+    _calc_group_reduce_a2a_args,
+    _group_cast_collective_hier,
+)
 
 __all__ = [
     "group_cast_collective",
@@ -85,6 +90,19 @@ def group_cast_collective(
     assert len(input_split_size_list) == len(dst_indices_list)
     assert len(output_split_size_list) == len(src_index_list)
 
+    if magi_attention.is_hierarchical_comm_enable():
+        return _group_cast_collective_hier(
+            input_tensor=input,
+            output_tensor=output,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_indices_list=dst_indices_list,
+            src_index_list=src_index_list,
+            group=group,
+            async_op=async_op,
+            **kwargs,
+        )
+
     world_size = dist.get_world_size(group)
 
     # ---------    calc group cast a2a args     --------- #
@@ -117,7 +135,7 @@ def group_cast_collective(
             output_split_sizes=a2a_output_split_size,
             input_split_sizes=a2a_input_split_size,
             group=group,
-            async_op=True,
+            async_op=async_op,
         )
 
     return WorkWithPostProcessFn(
@@ -208,7 +226,7 @@ def group_reduce_collective(
         output_split_sizes=a2a_output_split_size,
         input_split_sizes=a2a_input_split_size,
         group=group,
-        async_op=True,
+        async_op=async_op,
     )
 
     return WorkWithPostProcessFn(

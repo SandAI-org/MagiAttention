@@ -16,12 +16,13 @@ from collections import defaultdict
 from functools import partial
 from itertools import accumulate, chain, pairwise
 from logging import getLogger
-from typing import Callable, TypeAlias
+from typing import Callable, Optional, TypeAlias
 
 import torch
 import torch.distributed as dist
 
 import magi_attention
+from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.common.range import NaiveRange
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.common.ranges import NaiveRanges
@@ -196,7 +197,7 @@ def _calc_group_cast_a2a_output_meta_args(
 
     if reorder_list is not None:
         if magi_attention.is_sanity_check_enable():
-            assert reorder_list == list(range(world_size)), (
+            assert sorted(reorder_list) == list(range(world_size)), (
                 "The reorder list must be a permutation of [0, 1, ..., world_size-1] if not None, "
                 f"but got {reorder_list=} when {world_size=}"
             )
@@ -658,3 +659,651 @@ def _get_dims_as_trans_with_dim0(
 
 
 # ------------------        utils for scatter-v       ------------------ #
+
+
+# ------------------        utils for hier-comm       ------------------ #
+
+
+def _prepare_meta_for_group_cast_collective_hier(
+    input_split_size_list: list[int],
+    output_split_size_list: list[int],
+    dst_indices_list: list[list[int]],
+    src_index_list: list[int],
+    intra_group: dist.ProcessGroup,
+    inter_group: dist.ProcessGroup,
+    **kwargs,
+):
+    # check if pre-calculated
+    if kwargs.get("hier_comm_meta_kwargs", None) is not None:
+        return kwargs["hier_comm_meta_kwargs"]
+
+    # --------------      prepare env info       -------------- #
+
+    world_size_intra_node = dist.get_world_size(intra_group)
+    world_size_inter_node = dist.get_world_size(inter_group)
+
+    rank = dist.get_rank()
+    device = torch.cuda.current_device()
+    world_size = world_size_intra_node * world_size_inter_node
+
+    to_local_rank_intra_node = lambda r: r % world_size_intra_node  # noqa: E731
+    local_rank_intra_node = to_local_rank_intra_node(rank)
+
+    to_local_rank_inter_node = lambda r: r // world_size_intra_node  # noqa: E731
+    local_rank_inter_node = to_local_rank_inter_node(rank)
+
+    first_rank_this_intra_node = local_rank_inter_node * world_size_intra_node
+    last_rank_this_intra_node = first_rank_this_intra_node + world_size_intra_node - 1
+    is_rank_within_this_intra_node = (  # noqa: E731
+        lambda r: first_rank_this_intra_node <= r <= last_rank_this_intra_node
+    )
+
+    to_rank_with_same_local_rank_intra_node = (  # noqa: E731
+        lambda r: to_local_rank_inter_node(r) * world_size_intra_node
+        + local_rank_intra_node
+    )
+
+    # --------------      build group-cast meta for 1st step       -------------- #
+
+    def build_group_cast_meta_args_pre_intra(
+        input_split_size_list: list[int],
+        dst_indices_list: list[list[int]],
+        output_split_size_list: list[int],
+        src_index_list: list[int],
+        return_local_rank: bool = False,
+    ):
+        # input split size list does not need to change
+        input_split_size_list_pre_intra = input_split_size_list
+
+        # filter dst indices list within this intra node
+        dst_indices_list_pre_intra = [
+            list(
+                map(
+                    to_local_rank_intra_node if return_local_rank else lambda r: r,
+                    filter(
+                        is_rank_within_this_intra_node,
+                        dst_indices,
+                    ),
+                )
+            )
+            for dst_indices in dst_indices_list
+        ]
+
+        # filter src index list along with output split size list
+        # within this intra node
+        src_index_list_pre_intra = []
+        output_split_size_list_pre_intra = []
+        for src_index, output_split_size in zip(src_index_list, output_split_size_list):
+            if is_rank_within_this_intra_node(src_index):
+                src_index_list_pre_intra.append(
+                    to_local_rank_intra_node(src_index)
+                    if return_local_rank
+                    else src_index
+                )
+                output_split_size_list_pre_intra.append(output_split_size)
+
+        return (
+            input_split_size_list_pre_intra,
+            dst_indices_list_pre_intra,
+            output_split_size_list_pre_intra,
+            src_index_list_pre_intra,
+        )
+
+    (
+        input_split_size_list_pre_intra,
+        dst_indices_list_pre_intra,
+        output_split_size_list_pre_intra,
+        src_index_list_pre_intra,
+    ) = build_group_cast_meta_args_pre_intra(
+        input_split_size_list,
+        dst_indices_list,
+        output_split_size_list,
+        src_index_list,
+        return_local_rank=True,
+    )
+
+    # --------------      get a2a meta for 1st step       -------------- #
+
+    (
+        a2a_input_split_size_pre_intra,
+        perm_range_gather_kwargs_pre_intra,
+    ) = _calc_group_cast_a2a_input_meta_args(
+        input_split_size_list=input_split_size_list_pre_intra,
+        dst_indices_list=dst_indices_list_pre_intra,
+        world_size=world_size_intra_node,
+        device=device,
+    )
+    (
+        a2a_output_split_size_pre_intra,
+        unperm_after_a2a_kwargs_pre_intra,
+    ) = _calc_group_cast_a2a_output_meta_args(
+        output_split_size_list=output_split_size_list_pre_intra,
+        src_index_list=src_index_list_pre_intra,
+        world_size=world_size_intra_node,
+        device=device,
+        calc_unperm_after_a2a_kwargs=False,
+    )
+
+    # --------------      build group-cast meta for 2nd step       -------------- #
+
+    def build_group_cast_meta_args_inter_plus_half_post_intra(
+        input_split_size_list: list[int],
+        dst_indices_list: list[list[int]],
+        return_local_rank: bool = False,
+    ):
+        # input split size list does not need to change
+        input_split_size_list_inter = input_split_size_list
+
+        # build dst indices list within this inter node
+        dst_indices_list_inter = [
+            list(
+                set(
+                    map(
+                        to_local_rank_inter_node if return_local_rank else lambda r: r,
+                        map(
+                            to_rank_with_same_local_rank_intra_node,
+                            filter(
+                                lambda r: not is_rank_within_this_intra_node(r),
+                                dst_indices,
+                            ),
+                        ),
+                    )
+                )
+            )
+            for dst_indices in dst_indices_list
+        ]
+
+        # all gather send info per rank within this inter node
+        send_info_this_rank_inter = (
+            input_split_size_list_inter,
+            dst_indices_list_inter,
+            dst_indices_list,
+        )
+        send_info_per_rank_inter: list[
+            tuple[list[int], list[list[int]], list[list[int]]]
+        ] = [
+            None  # type: ignore
+        ] * world_size_inter_node
+        dist.all_gather_object(
+            send_info_per_rank_inter,
+            send_info_this_rank_inter,
+            group=inter_group,
+        )
+
+        # build naive src index list and output split size list
+        # within this inter node
+        # as well as preparing group cast input meta args for the third step
+        src_index_list_inter = []
+        output_split_size_list_inter = []
+        dst_indices_list_post_intra = []
+        is_this_rank_in_dst_indices_inter = (  # noqa: E731
+            lambda dst_indices: (local_rank_inter_node in dst_indices)
+            if return_local_rank
+            else (rank in dst_indices)
+        )
+        for i, (
+            input_split_size_list_inter_ith_rank,
+            dst_indices_list_inter_ith_rank,
+            dst_indices_list_ith_rank,
+        ) in enumerate(send_info_per_rank_inter):
+            if i == local_rank_inter_node:
+                continue
+
+            src_index_inter = (
+                i
+                if return_local_rank
+                else (i * world_size_intra_node + local_rank_intra_node)
+            )
+            for input_split_size_inter, dst_indices_inter, dst_indices in zip(
+                input_split_size_list_inter_ith_rank,
+                dst_indices_list_inter_ith_rank,
+                dst_indices_list_ith_rank,
+            ):
+                if is_this_rank_in_dst_indices_inter(dst_indices_inter):
+                    # append src index with corr. input split size for the second step
+                    src_index_list_inter.append(src_index_inter)
+                    output_split_size_list_inter.append(input_split_size_inter)
+
+                    # append filtered dst indices for the third step
+                    dst_indices_list_post_intra.append(
+                        list(
+                            map(
+                                to_local_rank_intra_node
+                                if return_local_rank
+                                else lambda r: r,
+                                filter(
+                                    is_rank_within_this_intra_node,
+                                    dst_indices,
+                                ),
+                            )
+                        )
+                    )
+
+        input_split_size_list_post_intra = output_split_size_list_inter
+
+        return (
+            input_split_size_list_inter,
+            dst_indices_list_inter,
+            output_split_size_list_inter,
+            src_index_list_inter,
+            input_split_size_list_post_intra,
+            dst_indices_list_post_intra,
+        )
+
+    (
+        input_split_size_list_inter,
+        dst_indices_list_inter,
+        output_split_size_list_inter,
+        src_index_list_inter,
+        input_split_size_list_post_intra,
+        dst_indices_list_post_intra,
+    ) = build_group_cast_meta_args_inter_plus_half_post_intra(
+        input_split_size_list,
+        dst_indices_list,
+        return_local_rank=True,
+    )
+
+    # --------------      get a2a meta for 2nd step       -------------- #
+
+    (
+        a2a_input_split_size_inter,
+        perm_range_gather_kwargs_inter,
+    ) = _calc_group_cast_a2a_input_meta_args(
+        input_split_size_list=input_split_size_list_inter,
+        dst_indices_list=dst_indices_list_inter,
+        world_size=world_size_inter_node,
+        device=device,
+    )
+    (
+        a2a_output_split_size_inter,
+        unperm_after_a2a_kwargs_inter,
+    ) = _calc_group_cast_a2a_output_meta_args(
+        output_split_size_list=output_split_size_list_inter,
+        src_index_list=src_index_list_inter,
+        world_size=world_size_inter_node,
+        device=device,
+        calc_unperm_after_a2a_kwargs=False,
+    )
+
+    # --------------      build group-cast meta for 3rd step       -------------- #
+
+    def build_group_cast_meta_args_rest_half_post_intra(
+        input_split_size_list_post_intra: list[list[int]],
+        dst_indices_list_post_intra: list[list[int]],
+        return_local_rank: bool = False,
+    ):
+        # all gather send info per rank within this intra node
+        send_info_this_rank_post_intra = (
+            input_split_size_list_post_intra,
+            dst_indices_list_post_intra,
+        )
+        send_info_per_rank_post_intra: list[tuple[list[int], list[list[int]]]] = [
+            None  # type: ignore
+        ] * world_size_intra_node
+        dist.all_gather_object(
+            send_info_per_rank_post_intra,
+            send_info_this_rank_post_intra,
+            group=intra_group,
+        )
+
+        # build naive src index list and output split size list
+        # within this intra node
+        src_index_list_post_intra = []
+        output_split_size_list_post_intra = []
+        is_this_rank_in_dst_indices_post_intra = (  # noqa: E731
+            lambda dst_indices: (local_rank_intra_node in dst_indices)
+            if return_local_rank
+            else (rank in dst_indices)
+        )
+        for i, (
+            input_split_size_list_post_intra_ith_rank,
+            dst_indices_list_post_intra_ith_rank,
+        ) in enumerate(send_info_per_rank_post_intra):
+            src_index_post_intra = (
+                i if return_local_rank else (i + first_rank_this_intra_node)
+            )
+            for input_split_size_post_intra, dst_indices_post_intra in zip(
+                input_split_size_list_post_intra_ith_rank,
+                dst_indices_list_post_intra_ith_rank,
+            ):
+                if is_this_rank_in_dst_indices_post_intra(dst_indices_post_intra):
+                    # append src index with corr. input split size for the second step
+                    src_index_list_post_intra.append(src_index_post_intra)
+                    output_split_size_list_post_intra.append(
+                        input_split_size_post_intra
+                    )
+
+        return (
+            output_split_size_list_post_intra,
+            src_index_list_post_intra,
+        )
+
+    (
+        output_split_size_list_post_intra,
+        src_index_list_post_intra,
+    ) = build_group_cast_meta_args_rest_half_post_intra(
+        input_split_size_list_post_intra,
+        dst_indices_list_post_intra,
+        return_local_rank=True,
+    )
+
+    # --------------      get a2a meta for 3rd step       -------------- #
+
+    (
+        a2a_input_split_size_post_intra,
+        perm_range_gather_kwargs_post_intra,
+    ) = _calc_group_cast_a2a_input_meta_args(
+        input_split_size_list=input_split_size_list_post_intra,
+        dst_indices_list=dst_indices_list_post_intra,
+        world_size=world_size_intra_node,
+        device=device,
+    )
+    (
+        a2a_output_split_size_post_intra,
+        unperm_after_a2a_kwargs_post_intra,
+    ) = _calc_group_cast_a2a_output_meta_args(
+        output_split_size_list=output_split_size_list_post_intra,
+        src_index_list=src_index_list_post_intra,
+        world_size=world_size_intra_node,
+        device=device,
+        calc_unperm_after_a2a_kwargs=False,
+    )
+
+    # --------------      get post-process fn for 4th step       -------------- #
+
+    def get_unperm_after_a2a_kwargs_hier(
+        output_split_size_list: list[int],
+        src_index_list: list[int],
+        world_size: int,
+        device: torch.device,
+    ):
+        rank_list_intra = list(
+            range(first_rank_this_intra_node, last_rank_this_intra_node + 1)
+        )
+        rank_list_per_inter_wo_this_intra_node = [
+            [
+                r
+                for inter_offset in range(world_size_inter_node)
+                if not is_rank_within_this_intra_node(
+                    r := inter_offset * world_size_intra_node + intra_offset
+                )
+            ]
+            for intra_offset in range(world_size_intra_node)
+        ]
+        reorder_list = rank_list_intra + list(
+            chain(*rank_list_per_inter_wo_this_intra_node)
+        )
+
+        _, unperm_after_a2a_kwargs_hier = _calc_group_cast_a2a_output_meta_args(
+            output_split_size_list=output_split_size_list,
+            src_index_list=src_index_list,
+            world_size=world_size,
+            device=device,
+            reorder_list=reorder_list,
+            calc_unperm_after_a2a_kwargs=True,
+        )
+
+        return unperm_after_a2a_kwargs_hier
+
+    unperm_after_a2a_kwargs_hier = get_unperm_after_a2a_kwargs_hier(
+        output_split_size_list=output_split_size_list,
+        src_index_list=src_index_list,
+        world_size=world_size,
+        device=device,
+    )
+
+    post_process_fn = partial(
+        _unpermute_tensor,
+        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs_hier,
+    )
+
+    return (
+        # for pre intra
+        input_split_size_list_pre_intra,
+        output_split_size_list_pre_intra,
+        dst_indices_list_pre_intra,
+        src_index_list_pre_intra,
+        a2a_input_split_size_pre_intra,
+        a2a_output_split_size_pre_intra,
+        perm_range_gather_kwargs_pre_intra,
+        unperm_after_a2a_kwargs_pre_intra,
+        # for inter
+        input_split_size_list_inter,
+        output_split_size_list_inter,
+        dst_indices_list_inter,
+        src_index_list_inter,
+        a2a_input_split_size_inter,
+        a2a_output_split_size_inter,
+        perm_range_gather_kwargs_inter,
+        unperm_after_a2a_kwargs_inter,
+        # for post intra
+        input_split_size_list_post_intra,
+        output_split_size_list_post_intra,
+        dst_indices_list_post_intra,
+        src_index_list_post_intra,
+        a2a_input_split_size_post_intra,
+        a2a_output_split_size_post_intra,
+        perm_range_gather_kwargs_post_intra,
+        unperm_after_a2a_kwargs_post_intra,
+        # for post process
+        post_process_fn,
+    )
+
+
+@torch.no_grad()
+@nvtx.instrument_nvtx
+def _group_cast_collective_hier(
+    input_tensor: torch.Tensor,
+    output_tensor: torch.Tensor,
+    input_split_size_list: list[int],
+    output_split_size_list: list[int],
+    dst_indices_list: list[list[int]],
+    src_index_list: list[int],
+    group: Optional[dist.ProcessGroup] = None,
+    async_op: bool = False,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    intra_group = kwargs.pop("intra_group", None)
+    inter_group = kwargs.pop("inter_group", None)
+    assert intra_group is not None and inter_group is not None
+
+    world_size_intra_node = dist.get_world_size(intra_group)
+    world_size_inter_node = dist.get_world_size(inter_group)
+
+    # --------------------------------------------------------------------
+    # hier comm meta
+    # --------------------------------------------------------------------
+
+    (
+        # for pre intra
+        input_split_size_list_pre_intra,
+        output_split_size_list_pre_intra,
+        dst_indices_list_pre_intra,
+        src_index_list_pre_intra,
+        a2a_input_split_size_pre_intra,
+        a2a_output_split_size_pre_intra,
+        perm_range_gather_kwargs_pre_intra,
+        unperm_after_a2a_kwargs_pre_intra,
+        # for inter
+        input_split_size_list_inter,
+        output_split_size_list_inter,
+        dst_indices_list_inter,
+        src_index_list_inter,
+        a2a_input_split_size_inter,
+        a2a_output_split_size_inter,
+        perm_range_gather_kwargs_inter,
+        unperm_after_a2a_kwargs_inter,
+        # for post intra
+        input_split_size_list_post_intra,
+        output_split_size_list_post_intra,
+        dst_indices_list_post_intra,
+        src_index_list_post_intra,
+        a2a_input_split_size_post_intra,
+        a2a_output_split_size_post_intra,
+        perm_range_gather_kwargs_post_intra,
+        unperm_after_a2a_kwargs_post_intra,
+        # for post process
+        post_process_fn,
+    ) = _prepare_meta_for_group_cast_collective_hier(
+        input_split_size_list=input_split_size_list,
+        output_split_size_list=output_split_size_list,
+        dst_indices_list=dst_indices_list,
+        src_index_list=src_index_list,
+        intra_group=intra_group,
+        inter_group=inter_group,
+        **kwargs,
+    )
+
+    # --------------------------------------------------------------------
+    # hier comm tensor for 1st and 2nd steps
+    # --------------------------------------------------------------------
+
+    # --------------      pre-init buffer for all steps       -------------- #
+    output_tensor_pre_intra, output_tensor_post_intra = torch.split(
+        output_tensor,
+        [sum(output_split_size_list_pre_intra), sum(output_split_size_list_post_intra)],
+        dim=0,
+    )
+    output_tensor_inter = torch.empty(
+        size=[sum(output_split_size_list_inter)] + list(output_tensor.shape[1:]),
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+
+    # --------------      get a2a buffer for 1st step       -------------- #
+
+    input_tensor_pre_intra = input_tensor
+    (
+        a2a_input_pre_intra,
+        a2a_input_split_size_pre_intra,
+    ) = _calc_group_cast_a2a_input_args(
+        input=input_tensor_pre_intra,
+        input_split_size_list=input_split_size_list_pre_intra,
+        dst_indices_list=dst_indices_list_pre_intra,
+        world_size=world_size_intra_node,
+        a2a_input_split_size=a2a_input_split_size_pre_intra,
+        perm_before_a2a_kwargs=perm_range_gather_kwargs_pre_intra,
+    )
+
+    (
+        a2a_output_pre_intra,
+        a2a_output_split_size_pre_intra,
+        unperm_after_a2a_kwargs_pre_intra,
+    ) = _calc_group_cast_a2a_output_args(
+        output=output_tensor_pre_intra,
+        output_split_size_list=output_split_size_list_pre_intra,
+        src_index_list=src_index_list_pre_intra,
+        world_size=world_size_intra_node,
+        a2a_output_split_size=a2a_output_split_size_pre_intra,
+        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs_pre_intra,
+    )
+
+    # --------------      get a2a buffer for 2nd step       -------------- #
+
+    input_tensor_inter = input_tensor
+    (
+        a2a_input_inter,
+        a2a_input_split_size_inter,
+    ) = _calc_group_cast_a2a_input_args(
+        input=input_tensor_inter,
+        input_split_size_list=input_split_size_list_inter,
+        dst_indices_list=dst_indices_list_inter,
+        world_size=world_size_inter_node,
+        a2a_input_split_size=a2a_input_split_size_inter,
+        perm_before_a2a_kwargs=perm_range_gather_kwargs_inter,
+    )
+    (
+        a2a_output_inter,
+        a2a_output_split_size_inter,
+        unperm_after_a2a_kwargs_inter,
+    ) = _calc_group_cast_a2a_output_args(
+        output=output_tensor_inter,
+        output_split_size_list=output_split_size_list_inter,
+        src_index_list=src_index_list_inter,
+        world_size=world_size_inter_node,
+        a2a_output_split_size=a2a_output_split_size_inter,
+        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs_inter,
+    )
+
+    # --------------------------------------------------------------------
+    # hier comm operation for 1st and 2nd steps (async)
+    # --------------------------------------------------------------------
+
+    # --------------      apply a2a for 1st step       -------------- #
+
+    work_pre_intra = dist.all_to_all_single(
+        output=a2a_output_pre_intra,
+        input=a2a_input_pre_intra,
+        output_split_sizes=a2a_output_split_size_pre_intra,
+        input_split_sizes=a2a_input_split_size_pre_intra,
+        group=intra_group,
+        async_op=async_op,
+    )
+
+    # --------------      apply a2a for 2nd step       -------------- #
+
+    work_inter = dist.all_to_all_single(
+        output=a2a_output_inter,
+        input=a2a_input_inter,
+        output_split_sizes=a2a_output_split_size_inter,
+        input_split_sizes=a2a_input_split_size_inter,
+        group=inter_group,
+        async_op=async_op,
+    )
+
+    # --------------------------------------------------------------------
+    # hier comm tensor for 3rd step
+    # --------------------------------------------------------------------
+
+    # --------------      get a2a buffer for 3rd step       -------------- #
+
+    work_inter.wait()
+    input_tensor_post_intra = a2a_output_inter
+    (
+        a2a_input_post_intra,
+        a2a_input_split_size_post_intra,
+    ) = _calc_group_cast_a2a_input_args(
+        input=input_tensor_post_intra,
+        input_split_size_list=input_split_size_list_post_intra,
+        dst_indices_list=dst_indices_list_post_intra,
+        world_size=world_size_intra_node,
+        a2a_input_split_size=a2a_input_split_size_post_intra,
+        perm_before_a2a_kwargs=perm_range_gather_kwargs_post_intra,
+    )
+    (
+        a2a_output_post_intra,
+        a2a_output_split_size_post_intra,
+        unperm_after_a2a_kwargs_post_intra,
+    ) = _calc_group_cast_a2a_output_args(
+        output=output_tensor_post_intra,
+        output_split_size_list=output_split_size_list_post_intra,
+        src_index_list=src_index_list_post_intra,
+        world_size=world_size_intra_node,
+        a2a_output_split_size=a2a_output_split_size_post_intra,
+        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs_post_intra,
+    )
+
+    # --------------------------------------------------------------------
+    # hier comm operation for 3rd step
+    # --------------------------------------------------------------------
+
+    # --------------      apply a2a for 3rd step       -------------- #
+
+    work_post_intra = dist.all_to_all_single(
+        output=a2a_output_post_intra,
+        input=a2a_input_post_intra,
+        output_split_sizes=a2a_output_split_size_post_intra,
+        input_split_sizes=a2a_input_split_size_post_intra,
+        group=intra_group,
+        async_op=async_op,
+    )
+
+    # ---------    prepare work with post-process fn    --------- #
+
+    work_with_post_process_fn = WorkWithPostProcessFn(
+        work=[work_pre_intra, work_post_intra],
+        post_process_fn=post_process_fn,
+        sync=not async_op,
+    )
+
+    return work_with_post_process_fn

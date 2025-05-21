@@ -44,6 +44,8 @@ def magi_attn_varlen_key(
     cp_group: dist.ProcessGroup,
     causal: bool = False,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
+    cp_intra_group: dist.ProcessGroup | None = None,
+    cp_inter_group: dist.ProcessGroup | None = None,
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
     """
     flash_attn_varlen like interface. Generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q,
@@ -142,6 +144,8 @@ def magi_attn_varlen_key(
         True,
         True,
         dist_attn_config,
+        cp_intra_group,
+        cp_inter_group,
     )
 
 
@@ -154,6 +158,8 @@ def magi_attn_varlen_dispatch(
     cp_group: dist.ProcessGroup,
     causal: bool = False,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),  # deterministic is hidden in dist_attn_config
+    cp_intra_group: dist.ProcessGroup | None = None,
+    cp_inter_group: dist.ProcessGroup | None = None,
 ):
     """
     flash_attn_varlen like interface.
@@ -223,6 +229,8 @@ def magi_attn_varlen_dispatch(
         cp_group,
         causal,
         dist_attn_config,
+        cp_intra_group,
+        cp_inter_group,
     )
     dx = dispatch(padded_x, key)
     return (dx, key)
@@ -242,6 +250,8 @@ def magi_attn_flex_key(
     is_q_permutable: bool,
     is_k_permutable: bool,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
+    cp_intra_group: dist.ProcessGroup | None = None,
+    cp_inter_group: dist.ProcessGroup | None = None,
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
     """
     Pad the input tensor, Caculate DistAttnRuntimeKey and generate the corresponding DistAttnRuntimeMgr.
@@ -420,6 +430,8 @@ def magi_attn_flex_key(
             cp_group=cp_group,
             high_bandwith_domain_size=dist_attn_config.high_bandwith_domain_size,
             overlap_config=dist_attn_config.overlap_config,
+            cp_intra_group=cp_intra_group,
+            cp_inter_group=cp_inter_group,
         )
 
         dist_attn_runtime = DistFlashAttnRuntime(
@@ -465,6 +477,8 @@ def magi_attn_flex_dispatch(
     is_q_permutable: bool,
     is_k_permutable: bool,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
+    cp_intra_group: dist.ProcessGroup | None = None,
+    cp_inter_group: dist.ProcessGroup | None = None,
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
     """
     Generate dist_attn_key and dispatch the padded input tensor.
@@ -556,6 +570,8 @@ def magi_attn_flex_dispatch(
         is_q_permutable,
         is_k_permutable,
         dist_attn_config,
+        cp_intra_group=cp_intra_group,
+        cp_inter_group=cp_inter_group,
     )
 
     dx = dispatch(padded_x, key)

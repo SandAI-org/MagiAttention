@@ -17,6 +17,8 @@ from typing import Any, Callable
 
 from torch.distributed import Work
 
+from magi_attention.utils import wrap_to_list
+
 
 @dataclass
 class WorkWithPostProcessFn:
@@ -28,7 +30,7 @@ class WorkWithPostProcessFn:
         the user are not supposed to use this object anymore
     """
 
-    work: Work | None = None
+    work: Work | list[Work] | None = None
     post_process_fn: Callable = field(
         default_factory=lambda: lambda *args, **kwargs: None
     )
@@ -40,9 +42,13 @@ class WorkWithPostProcessFn:
         # to avoid repeatedly calling post process fn
         self._work_done = False
 
+        if self.work is not None:
+            self.work = wrap_to_list(self.work)
+
         # if sync mode, the given work needs to wait immediately
         if self.sync and self.work is not None:
-            self.work.wait()
+            for work in self.work:
+                work.wait()
             self.work = None
 
     def wait_post_process(self, *args, **kwargs) -> Any:
@@ -50,7 +56,8 @@ class WorkWithPostProcessFn:
             raise RuntimeError("Work has already been done.")
 
         if self.work is not None:
-            self.work.wait()
+            for work in self.work:
+                work.wait()
             self.work = None
 
         ret = self.post_process_fn(*args, **kwargs)

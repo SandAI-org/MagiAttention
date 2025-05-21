@@ -18,9 +18,11 @@ from itertools import accumulate, chain
 import torch
 import torch.distributed
 import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
+import magi_attention
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.comm.primitive.utils import (
     _calc_group_cast_a2a_input_args,
@@ -369,6 +371,32 @@ def _calc_group_reduce_a2a_output_phase2_meta_args_ref(
 
 
 class TestMultiCastCollective(DistTestBase):
+    def init_pg(self):
+        super().init_pg()
+
+        # -----    set up for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable() and self.world_size in [
+            4,
+            6,
+            8,
+        ]:
+            world_size_inter_node, world_size_intra_node = {
+                4: (2, 2),
+                6: (3, 2),
+                8: (2, 4),
+            }[self.world_size]
+            device_mesh = init_device_mesh(
+                device_type="cuda",
+                mesh_shape=(world_size_inter_node, world_size_intra_node),
+                mesh_dim_names=("inter", "intra"),
+            )
+            self.intra_group = device_mesh.get_group("intra")
+            self.inter_group = device_mesh.get_group("inter")
+        else:
+            self.intra_group = None
+            self.inter_group = None
+
     @property
     def process_group(self):
         return dist.distributed_c10d._get_default_group()
@@ -528,6 +556,8 @@ class TestMultiCastCollective(DistTestBase):
             src_index_list=src_index_list,
             group=self.process_group,
             async_op=True,
+            intra_group=self.intra_group,
+            inter_group=self.inter_group,
         )
         output_tensor = work.wait_post_process(output_tensor)
 

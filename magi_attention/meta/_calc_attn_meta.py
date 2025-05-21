@@ -29,6 +29,8 @@ def calc_attn_meta_from_dispatch_meta(
     cp_group: dist.ProcessGroup,
     high_bandwith_domain_size: int,
     overlap_config: OverlapConfig,
+    cp_intra_group: dist.ProcessGroup | None = None,
+    cp_inter_group: dist.ProcessGroup | None = None,
 ) -> tuple[CommMeta, AttnCalcMeta, DistAttnSolver]:
     """Calculate the communication and calculation meta from the dispatch meta
 
@@ -51,6 +53,8 @@ def calc_attn_meta_from_dispatch_meta(
         cp_group=cp_group,
         high_bandwith_domain_size=high_bandwith_domain_size,
         overlap_config=overlap_config,
+        cp_intra_group=cp_intra_group,
+        cp_inter_group=cp_inter_group,
     )
 
     comm_meta = attn_solver.calc_comm_meta()
