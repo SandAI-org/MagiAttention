@@ -1231,25 +1231,41 @@ def _group_cast_collective_hier(
 
     # --------------      apply a2a for 1st step       -------------- #
 
-    work_pre_intra = dist.all_to_all_single(
-        output=a2a_output_pre_intra,
-        input=a2a_input_pre_intra,
-        output_split_sizes=a2a_output_split_size_pre_intra,
-        input_split_sizes=a2a_input_split_size_pre_intra,
-        group=intra_group,
-        async_op=async_op,
-    )
+    with nvtx.add_nvtx_event(
+        (
+            f"{a2a_output_pre_intra.shape=} | "
+            f"{a2a_input_pre_intra.shape=} | "
+            f"{a2a_output_split_size_pre_intra=} | "
+            f"{a2a_input_split_size_pre_intra=}"
+        )
+    ):
+        work_pre_intra = dist.all_to_all_single(
+            output=a2a_output_pre_intra,
+            input=a2a_input_pre_intra,
+            output_split_sizes=a2a_output_split_size_pre_intra,
+            input_split_sizes=a2a_input_split_size_pre_intra,
+            group=intra_group,
+            async_op=async_op,
+        )
 
     # --------------      apply a2a for 2nd step       -------------- #
 
-    work_inter = dist.all_to_all_single(
-        output=a2a_output_inter,
-        input=a2a_input_inter,
-        output_split_sizes=a2a_output_split_size_inter,
-        input_split_sizes=a2a_input_split_size_inter,
-        group=inter_group,
-        async_op=async_op,
-    )
+    with nvtx.add_nvtx_event(
+        (
+            f"{a2a_output_inter.shape=} | "
+            f"{a2a_input_inter.shape=} | "
+            f"{a2a_output_split_size_inter=} | "
+            f"{a2a_input_split_size_inter=}"
+        )
+    ):
+        work_inter = dist.all_to_all_single(
+            output=a2a_output_inter,
+            input=a2a_input_inter,
+            output_split_sizes=a2a_output_split_size_inter,
+            input_split_sizes=a2a_input_split_size_inter,
+            group=inter_group,
+            async_op=async_op,
+        )
 
     # --------------------------------------------------------------------
     # hier comm tensor for 3rd step
@@ -1257,7 +1273,8 @@ def _group_cast_collective_hier(
 
     # --------------      get a2a buffer for 3rd step       -------------- #
 
-    work_inter.wait()
+    if work_inter is not None:
+        work_inter.wait()
     input_tensor_post_intra = a2a_output_inter
     (
         a2a_input_post_intra,
@@ -1289,14 +1306,22 @@ def _group_cast_collective_hier(
 
     # --------------      apply a2a for 3rd step       -------------- #
 
-    work_post_intra = dist.all_to_all_single(
-        output=a2a_output_post_intra,
-        input=a2a_input_post_intra,
-        output_split_sizes=a2a_output_split_size_post_intra,
-        input_split_sizes=a2a_input_split_size_post_intra,
-        group=intra_group,
-        async_op=async_op,
-    )
+    with nvtx.add_nvtx_event(
+        (
+            f"{a2a_output_post_intra.shape=} | "
+            f"{a2a_input_post_intra.shape=} | "
+            f"{a2a_output_split_size_post_intra=} | "
+            f"{a2a_input_split_size_post_intra=}"
+        )
+    ):
+        work_post_intra = dist.all_to_all_single(
+            output=a2a_output_post_intra,
+            input=a2a_input_post_intra,
+            output_split_sizes=a2a_output_split_size_post_intra,
+            input_split_sizes=a2a_input_split_size_post_intra,
+            group=intra_group,
+            async_op=async_op,
+        )
 
     # ---------    prepare work with post-process fn    --------- #
 

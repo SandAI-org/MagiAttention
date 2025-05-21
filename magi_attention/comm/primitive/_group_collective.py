@@ -127,7 +127,12 @@ def group_cast_collective(
     # ---------    lauch a2a comm kernel     --------- #
 
     with nvtx.add_nvtx_event(
-        f"{a2a_output_split_size=} | {a2a_input_split_size=} | {a2a_output.shape=} | {a2a_input.shape=}"
+        (
+            f"{a2a_output.shape=} | "
+            f"{a2a_input.shape=} | "
+            f"{a2a_output_split_size=} | "
+            f"{a2a_input_split_size=}"
+        )
     ):
         work = dist.all_to_all_single(
             output=a2a_output,
@@ -220,14 +225,22 @@ def group_reduce_collective(
 
     # ---------    lauch a2a comm kernel     --------- #
 
-    work = dist.all_to_all_single(
-        output=a2a_output,
-        input=a2a_input,
-        output_split_sizes=a2a_output_split_size,
-        input_split_sizes=a2a_input_split_size,
-        group=group,
-        async_op=async_op,
-    )
+    with nvtx.add_nvtx_event(
+        (
+            f"{a2a_output.shape=} | "
+            f"{a2a_input.shape=} | "
+            f"{a2a_output_split_size=} | "
+            f"{a2a_input_split_size=}"
+        )
+    ):
+        work = dist.all_to_all_single(
+            output=a2a_output,
+            input=a2a_input,
+            output_split_sizes=a2a_output_split_size,
+            input_split_sizes=a2a_input_split_size,
+            group=group,
+            async_op=async_op,
+        )
 
     return WorkWithPostProcessFn(
         work=work,
