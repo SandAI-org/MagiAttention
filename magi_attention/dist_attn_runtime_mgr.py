@@ -174,8 +174,10 @@ class DistAttnRuntimeMgr:
         ), "Only supports all full attn mask for now."
 
         host_global_perm_merged_q_ranges = self.attn_solver.host_q_ranges_global
+        # HACK: ref_xattn_q_ranges cannot be merged, so we hack it by setting is_self_merged=True,
+        #       this way find_overlap_ranges won't merge ref_xattn_q_ranges
         host_global_perm_sorted_q_ranges = ref_xattn_q_ranges.find_overlap_ranges(
-            host_global_perm_merged_q_ranges
+            host_global_perm_merged_q_ranges, is_self_merged=True
         )
         host_global_unperm_xattn_k_ranges = AttnRanges()
         for q_range in host_global_perm_sorted_q_ranges:
@@ -186,7 +188,7 @@ class DistAttnRuntimeMgr:
                     is_found = True
             if not is_found:
                 raise ValueError(
-                    f"q_range: {q_range} is not in ref_q_ranges: {self.ref_q_ranges}"
+                    f"q_range: {q_range} is not in ref_q_ranges: {ref_xattn_q_ranges}"
                 )
 
         if return_host_only:

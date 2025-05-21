@@ -26,7 +26,7 @@ from magi_attention.meta import (
     calc_attn_meta_from_dispatch_meta,
     calc_dispatch_meta_from_qk_ranges,
 )
-from magi_attention.utils import is_list_value_any, wrap_to_list
+from magi_attention.utils import is_list_value_all, is_list_value_any, wrap_to_list
 
 from .functools import FixedLenDict, compute_pad_size, pad_at_dim, unpad_at_dim
 
@@ -329,10 +329,14 @@ def magi_attn_flex_key(
         raise ValueError(f"head_dim ({head_dim}) must be divisible by 8")
     if head_dim > 192:
         raise ValueError(f"head_dim ({head_dim}) must be ≤ 192")
-    if not q_ranges.is_non_overlap():
-        raise ValueError(
-            f"q_ranges ({q_ranges}) should not have overlap for now. This feature is coming in a near future release."
-        )
+
+    assert (
+        is_list_value_all(attn_mask_type, AttnMaskType.FULL)  # type: ignore[arg-type]
+        or q_ranges.is_non_overlap()
+    ), (
+        "Only support q_range overlap when masktype is all full, "
+        "other masktype is not supported for now."
+    )
 
     attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
 
