@@ -21,6 +21,7 @@ from typing import Callable, TypeAlias
 import torch
 import torch.distributed as dist
 
+import magi_attention
 from magi_attention.common.range import NaiveRange
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.common.ranges import NaiveRanges
@@ -182,6 +183,8 @@ def _calc_group_cast_a2a_output_meta_args(
     src_index_list: list[int],
     world_size: int,
     device: torch.device,
+    reorder_list: list[int] | None = None,
+    calc_unperm_after_a2a_kwargs: bool = True,
 ) -> tuple[list[int], dict]:
     a2a_output_split_size_per_rank: list[list[int]] = [[] for _ in range(world_size)]
     a2a_output_permute_index_list_per_rank: list[list[int]] = [
@@ -191,6 +194,19 @@ def _calc_group_cast_a2a_output_meta_args(
         a2a_output_split_size_per_rank[src_index].append(output_split_size_list[i])
         a2a_output_permute_index_list_per_rank[src_index].append(i)
 
+    if reorder_list is not None:
+        if magi_attention.is_sanity_check_enable():
+            assert reorder_list == list(range(world_size)), (
+                "The reorder list must be a permutation of [0, 1, ..., world_size-1] if not None, "
+                f"but got {reorder_list=} when {world_size=}"
+            )
+        a2a_output_split_size_per_rank = [
+            a2a_output_split_size_per_rank[i] for i in reorder_list
+        ]
+        a2a_output_permute_index_list_per_rank = [
+            a2a_output_permute_index_list_per_rank[i] for i in reorder_list
+        ]
+
     a2a_output_split_size = [sum(x) for x in a2a_output_split_size_per_rank]
     a2a_output_tensor_size_list = list(chain(*a2a_output_split_size_per_rank))
     a2a_output_permute_index_list = list(chain(*a2a_output_permute_index_list_per_rank))
@@ -199,46 +215,49 @@ def _calc_group_cast_a2a_output_meta_args(
         key=lambda x: a2a_output_permute_index_list[x],
     )
 
-    # ---------    calc unperm before a2a kwargs     --------- #
-    # calculate the output size from a2a_output_split_size_list
-    total_size = sum(a2a_output_tensor_size_list)
+    # ---------    calc unperm after a2a kwargs     --------- #
+    if calc_unperm_after_a2a_kwargs:
+        # calculate the output size from a2a_output_split_size_list
+        total_size = sum(a2a_output_tensor_size_list)
 
-    # calculate each range's start and end
-    ranges = torch.tensor(
-        [0] + a2a_output_tensor_size_list,
-        dtype=torch.int32,
-    )
-    ranges = torch.cumsum(ranges, dim=0)
-    ranges = torch.cat(
-        [ranges[0:-1, None], ranges[1:, None]],
-        dim=1,
-    )
-
-    # re-order ranges by a2a_output_unpermute_index_list
-    # this means the ranges are in the order of the output tensor
-    # convert to list for easy indexing
-    ranges = ranges.tolist()
-    ranges = [ranges[i] for i in a2a_output_unpermute_index_list]
-
-    # calculate cu_range_sizes
-    cu_range_sizes = torch.cumsum(
-        torch.tensor(
-            [0] + [end - start for start, end in ranges],
+        # calculate each range's start and end
+        ranges = torch.tensor(
+            [0] + a2a_output_tensor_size_list,
             dtype=torch.int32,
-        ),
-        dim=0,
-    )
+        )
+        ranges = torch.cumsum(ranges, dim=0)
+        ranges = torch.cat(
+            [ranges[0:-1, None], ranges[1:, None]],
+            dim=1,
+        )
 
-    # convert to tensor again
-    ranges = torch.tensor(
-        ranges,
-    )
+        # re-order ranges by a2a_output_unpermute_index_list
+        # this means the ranges are in the order of the output tensor
+        # convert to list for easy indexing
+        ranges = ranges.tolist()
+        ranges = [ranges[i] for i in a2a_output_unpermute_index_list]
 
-    unperm_range_gather_kwargs = {
-        "ranges": ranges.to(device),
-        "cu_range_sizes": cu_range_sizes.to(device),
-        "total_size": total_size,
-    }
+        # calculate cu_range_sizes
+        cu_range_sizes = torch.cumsum(
+            torch.tensor(
+                [0] + [end - start for start, end in ranges],
+                dtype=torch.int32,
+            ),
+            dim=0,
+        )
+
+        # convert to tensor again
+        ranges = torch.tensor(
+            ranges,
+        )
+
+        unperm_range_gather_kwargs = {
+            "ranges": ranges.to(device),
+            "cu_range_sizes": cu_range_sizes.to(device),
+            "total_size": total_size,
+        }
+    else:
+        unperm_range_gather_kwargs = {}
 
     return (
         a2a_output_split_size,
