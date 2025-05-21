@@ -353,24 +353,24 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "chunk_size": 512,
             },
             # NOTE: profile only case
-            # full attn with total seqlen 140k
+            # full attn with total seqlen 144k
             # {
             #     PROFILE_ONLY: True,
-            #     NAME: "full_attn_140k",
+            #     NAME: "full_attn_144k",
             #     SKIP_WORLD_SIZE: [1, 2, 3, 5, 6, 7, 8],
             #     "q_ranges": AttnRanges.from_ranges(
             #         [
-            #             [0, 143360],
+            #             [0, 147456],
             #         ]
             #     ),
             #     "k_ranges": AttnRanges.from_ranges(
             #         [
-            #             [0, 143360],
+            #             [0, 147456],
             #         ]
             #     ),
             #     "is_causal_mapping": [False],
-            #     "total_seqlen_q": 143360,
-            #     "total_seqlen_k": 143360,
+            #     "total_seqlen_q": 147456,
+            #     "total_seqlen_k": 147456,
             #     "chunk_size": 2048,
             # },
             # NOTE: profile only case

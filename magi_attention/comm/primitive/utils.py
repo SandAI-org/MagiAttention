@@ -1107,6 +1107,9 @@ def _group_cast_collective_hier(
     inter_group = kwargs.pop("inter_group", None)
     assert intra_group is not None and inter_group is not None
 
+    side_stream = kwargs.pop("side_stream", None)
+    assert side_stream is not None
+
     world_size_intra_node = dist.get_world_size(intra_group)
     world_size_inter_node = dist.get_world_size(inter_group)
 
@@ -1159,6 +1162,7 @@ def _group_cast_collective_hier(
     # --------------------------------------------------------------------
 
     # --------------      pre-init buffer for all steps       -------------- #
+
     output_tensor_pre_intra, output_tensor_post_intra = torch.split(
         output_tensor,
         [sum(output_split_size_list_pre_intra), sum(output_split_size_list_post_intra)],
@@ -1184,7 +1188,6 @@ def _group_cast_collective_hier(
         a2a_input_split_size=a2a_input_split_size_pre_intra,
         perm_before_a2a_kwargs=perm_range_gather_kwargs_pre_intra,
     )
-
     (
         a2a_output_pre_intra,
         a2a_output_split_size_pre_intra,
@@ -1273,6 +1276,7 @@ def _group_cast_collective_hier(
 
     # --------------      get a2a buffer for 3rd step       -------------- #
 
+    # with torch.cuda.stream(side_stream):
     if work_inter is not None:
         work_inter.wait()
     input_tensor_post_intra = a2a_output_inter

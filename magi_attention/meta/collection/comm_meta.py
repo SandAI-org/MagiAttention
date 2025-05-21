@@ -74,6 +74,7 @@ class GroupCollectiveArg:
         if magi_attention.is_hierarchical_comm_enable():
             self.group_cast_args_dict_kv_packed["intra_group"] = self.intra_group
             self.group_cast_args_dict_kv_packed["inter_group"] = self.inter_group
+            self.group_cast_args_dict_kv_packed["side_stream"] = torch.cuda.Stream()
             (
                 self.group_cast_args_dict_kv_packed["hier_comm_meta_kwargs"]
             ) = _prepare_meta_for_group_cast_collective_hier(
