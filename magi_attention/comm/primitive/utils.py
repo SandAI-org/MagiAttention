@@ -65,22 +65,16 @@ def _calc_range_gather_kwargs_from_ranges_with_rank(
     total_size = sum(range_sizes)
 
     # calculate row_map from row idx to range idx
+    range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int32, device=device)
     row_map = torch.repeat_interleave(
-        torch.arange(0, len(ranges)),
-        torch.tensor(range_sizes, dtype=torch.int32),
+        torch.arange(0, len(ranges), device=device),
+        range_sizes[1:],
         dim=0,
         output_size=total_size,
-    ).to(device)
+    )
 
     # calculate cu_range_sizes
-    cu_range_sizes = torch.cumsum(
-        torch.tensor(
-            [0] + range_sizes,
-            dtype=torch.int32,
-            device=device,
-        ),
-        dim=0,
-    )
+    cu_range_sizes = torch.cumsum(range_sizes, dim=0)
 
     range_gather_kwargs = {
         "ranges": torch.tensor(ranges, device=device),
@@ -92,11 +86,56 @@ def _calc_range_gather_kwargs_from_ranges_with_rank(
     return range_gather_kwargs
 
 
+def _calc_unperm_range_gather_kwargs_from_split_size_list(
+    split_size_list: list[int],
+    unpermute_index_list: list[int],
+    device: torch.device,
+) -> dict:
+    # calculate the output size
+    total_size = sum(split_size_list)
+
+    # calculate each range's start and end
+    ranges = _seqlens2curanges(split_size_list)
+
+    # re-order ranges to be in the order of the output tensor
+    ranges = [ranges[i] for i in unpermute_index_list]
+
+    # calculate range sizes
+    range_sizes = [end - start for start, end in ranges]
+    range_sizes = torch.tensor(
+        [0] + range_sizes,
+        dtype=torch.int32,
+        device=device,
+    )
+
+    # calculate cu_range_sizes
+    cu_range_sizes = torch.cumsum(range_sizes, dim=0)
+
+    # calculate row_map from row idx to range idx
+    row_map = torch.repeat_interleave(
+        torch.arange(0, len(ranges), device=device),
+        range_sizes[1:],
+        dim=0,
+        output_size=total_size,
+    )
+
+    ranges = torch.tensor(ranges, device=device)
+
+    unperm_range_gather_kwargs = {
+        "ranges": ranges,
+        "cu_range_sizes": cu_range_sizes,
+        "row_map": row_map,
+        "total_size": total_size,
+    }
+
+    return unperm_range_gather_kwargs
+
+
 def _calc_range_reduce_kwargs_from_ranges(
     cu_ranges: NaiveRanges,
     reduce_ranges_list: list[NaiveRanges],
     device: torch.device,
-):
+) -> dict:
     input_ranges = []
     output_ranges = []
     range_sizes = []
@@ -110,15 +149,14 @@ def _calc_range_reduce_kwargs_from_ranges(
 
     input_ranges = torch.tensor(input_ranges, dtype=torch.int32, device=device)
     output_ranges = torch.tensor(output_ranges, dtype=torch.int32, device=device)
-    cu_range_sizes = torch.cumsum(
-        torch.tensor([0] + range_sizes, dtype=torch.int32, device=device), dim=0
-    )
+    range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int32, device=device)
+    cu_range_sizes = torch.cumsum(range_sizes, dim=0)
     row_map = torch.repeat_interleave(
-        torch.arange(0, input_ranges.shape[0]),
-        torch.tensor(range_sizes, dtype=torch.int32),
+        torch.arange(0, input_ranges.shape[0], device=device),
+        range_sizes[1:],
         dim=0,
         output_size=total_size,
-    ).to(device)
+    )
 
     range_reduce_kwargs = {
         "input_ranges": input_ranges,
@@ -262,44 +300,13 @@ def _calc_group_cast_a2a_output_meta_args(
 
     # ---------    calc unperm after a2a kwargs     --------- #
     if calc_unperm_after_a2a_kwargs:
-        # calculate the output size
-        total_size = sum(a2a_output_tensor_size_list)
-
-        # calculate each range's start and end
-        ranges = _seqlens2curanges(a2a_output_tensor_size_list)
-
-        # re-order ranges to be in the order of the output tensor
-        ranges = [ranges[i] for i in a2a_output_unpermute_index_list]
-
-        # calculate range sizes
-        range_sizes = [end - start for start, end in ranges]
-
-        # calculate cu_range_sizes
-        cu_range_sizes = torch.cumsum(
-            torch.tensor(
-                [0] + range_sizes,
-                dtype=torch.int32,
+        unperm_range_gather_kwargs = (
+            _calc_unperm_range_gather_kwargs_from_split_size_list(
+                split_size_list=a2a_output_tensor_size_list,
+                unpermute_index_list=a2a_output_unpermute_index_list,
                 device=device,
-            ),
-            dim=0,
+            )
         )
-
-        # calculate row_map from row idx to range idx
-        row_map = torch.repeat_interleave(
-            torch.arange(0, len(ranges)),
-            torch.tensor(range_sizes, dtype=torch.int32),
-            dim=0,
-            output_size=total_size,
-        ).to(device)
-
-        ranges = torch.tensor(ranges, device=device)
-
-        unperm_range_gather_kwargs = {
-            "ranges": ranges,
-            "cu_range_sizes": cu_range_sizes,
-            "row_map": row_map,
-            "total_size": total_size,
-        }
     else:
         unperm_range_gather_kwargs = {}
 
