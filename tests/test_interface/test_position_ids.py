@@ -264,8 +264,6 @@ class TestPositionIdsWithWorldSize1(DistTestBase):
         device = torch.cuda.current_device()
         dist_attn_config = DistAttnConfig()
 
-        print(f"{attn_config_[NAME]=}")
-
         #   -----   init input   -----   #
         global_x = torch.randn(
             total_seqlen_q, head_dim, device=device, requires_grad=True
