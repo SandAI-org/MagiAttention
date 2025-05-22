@@ -911,14 +911,6 @@ class DistAttnSolver:
         self.shard_seqlen_k = dispatch_meta_k.shard_seqlen
         self.high_bandwith_domain_size = high_bandwith_domain_size
 
-        # HACK: this is a temporary side stream
-        # to apply intermediate range-gather for hierarchical comm
-        self.cp_side_stream = (
-            torch.cuda.Stream()
-            if magi_attention.is_hierarchical_comm_enable()
-            else None
-        )
-
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
 
@@ -2209,7 +2201,6 @@ class DistAttnSolver:
             world_size=self.cp_size,
             intra_group=self.cp_intra_group,
             inter_group=self.cp_inter_group,
-            side_stream=self.cp_side_stream,
         )
 
         return group_collective_arg
