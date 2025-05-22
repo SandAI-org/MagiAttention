@@ -18,6 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
+from magi_attention.utils import nvtx
+
 __all__ = ["range_reduce"]
 
 
@@ -94,6 +96,7 @@ def range_reduce_kernel_deterministic(
     pass
 
 
+@nvtx.instrument_nvtx
 def range_reduce(
     input: torch.Tensor,
     output: torch.Tensor,

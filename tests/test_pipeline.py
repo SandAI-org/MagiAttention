@@ -354,58 +354,58 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             },
             # NOTE: profile only case
             # full attn with total seqlen 144k
-            # {
-            #     PROFILE_ONLY: True,
-            #     NAME: "full_attn_144k",
-            #     SKIP_WORLD_SIZE: [1, 2, 3, 5, 6, 7, 8],
-            #     "q_ranges": AttnRanges.from_ranges(
-            #         [
-            #             [0, 147456],
-            #         ]
-            #     ),
-            #     "k_ranges": AttnRanges.from_ranges(
-            #         [
-            #             [0, 147456],
-            #         ]
-            #     ),
-            #     "is_causal_mapping": [False],
-            #     "total_seqlen_q": 147456,
-            #     "total_seqlen_k": 147456,
-            #     "chunk_size": 2048,
-            # },
-            # NOTE: profile only case
-            # varlen block causal with total seqlen 144k
             {
                 PROFILE_ONLY: True,
-                NAME: "varlen_block_causal_144k",
+                NAME: "full_attn_144k",
                 SKIP_WORLD_SIZE: [1, 2, 3, 5, 6, 7, 8],
                 "q_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 20480],
-                        [20480, 40960],
-                        [40960, 61440],
-                        [61440, 81920],
-                        [81920, 102400],
-                        [102400, 122880],
-                        [122880, 147456],
+                        [0, 147456],
                     ]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 20480],
-                        [0, 40960],
-                        [0, 61440],
-                        [0, 81920],
-                        [81920, 102400],
-                        [81920, 122880],
-                        [122880, 147456],
+                        [0, 147456],
                     ]
                 ),
-                "is_causal_mapping": [False] * 7,
+                "is_causal_mapping": [False],
                 "total_seqlen_q": 147456,
                 "total_seqlen_k": 147456,
-                "chunk_size": 4096,
+                "chunk_size": 2048,
             },
+            # NOTE: profile only case
+            # varlen block causal with total seqlen 144k
+            # {
+            #     PROFILE_ONLY: True,
+            #     NAME: "varlen_block_causal_144k",
+            #     SKIP_WORLD_SIZE: [1, 2, 3, 5, 6, 7, 8],
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 20480],
+            #             [20480, 40960],
+            #             [40960, 61440],
+            #             [61440, 81920],
+            #             [81920, 102400],
+            #             [102400, 122880],
+            #             [122880, 147456],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 20480],
+            #             [0, 40960],
+            #             [0, 61440],
+            #             [0, 81920],
+            #             [81920, 102400],
+            #             [81920, 122880],
+            #             [122880, 147456],
+            #         ]
+            #     ),
+            #     "is_causal_mapping": [False] * 7,
+            #     "total_seqlen_q": 147456,
+            #     "total_seqlen_k": 147456,
+            #     "chunk_size": 4096,
+            # },
         ],
     )
     @parameterize(
@@ -554,8 +554,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     ):
         # -----    switch mode   ---- #
 
-        if profile_mode:
-            prof_iters, prof_start_iter, prof_end_iter = 10, 4, 6
+        if profile_mode:  # [start_iter, end_iter)
+            prof_iters, prof_start_iter, prof_end_iter = 10, 5, 8
         else:
             prof_iters, prof_start_iter, prof_end_iter = 1, -1, -1
             assert magi_attention.is_sanity_check_enable()

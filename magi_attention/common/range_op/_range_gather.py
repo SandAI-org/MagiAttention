@@ -18,6 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
+from magi_attention.utils import nvtx
+
 __all__ = ["range_gather"]
 
 
@@ -70,6 +72,7 @@ def range_gather_kernel(
         tl.store(curr_out_ptr + cols, inp, mask=cols < elem_in_last_block)
 
 
+@nvtx.instrument_nvtx
 def range_gather(
     input: torch.Tensor,
     ranges: torch.Tensor,

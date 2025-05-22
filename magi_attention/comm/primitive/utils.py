@@ -64,27 +64,71 @@ def _calc_range_gather_kwargs_from_ranges_with_rank(
     # calculate the output size
     total_size = sum(range_sizes)
 
+    # calculate row_map from row idx to range idx
+    row_map = torch.repeat_interleave(
+        torch.arange(0, len(ranges)),
+        torch.tensor(range_sizes, dtype=torch.int32),
+        dim=0,
+        output_size=total_size,
+    ).to(device)
+
     # calculate cu_range_sizes
     cu_range_sizes = torch.cumsum(
         torch.tensor(
             [0] + range_sizes,
             dtype=torch.int32,
+            device=device,
         ),
         dim=0,
     )
 
-    # convert to tensor
-    ranges = torch.tensor(
-        ranges,
-    )
-
-    perm_range_gather_kwargs = {
-        "ranges": ranges.to(device),
-        "cu_range_sizes": cu_range_sizes.to(device),
+    range_gather_kwargs = {
+        "ranges": torch.tensor(ranges, device=device),
+        "cu_range_sizes": cu_range_sizes,
+        "row_map": row_map,
         "total_size": total_size,
     }
 
-    return perm_range_gather_kwargs
+    return range_gather_kwargs
+
+
+def _calc_range_reduce_kwargs_from_ranges(
+    cu_ranges: NaiveRanges,
+    reduce_ranges_list: list[NaiveRanges],
+    device: torch.device,
+):
+    input_ranges = []
+    output_ranges = []
+    range_sizes = []
+    total_size = 0
+    for (out_start, out_end), reduce_ranges in zip(cu_ranges, reduce_ranges_list):
+        for reduce_start, reduce_end in reduce_ranges:
+            input_ranges.append([reduce_start, reduce_end])
+            output_ranges.append([out_start, out_end])
+            range_sizes.append(reduce_end - reduce_start)
+            total_size += reduce_end - reduce_start
+
+    input_ranges = torch.tensor(input_ranges, dtype=torch.int32, device=device)
+    output_ranges = torch.tensor(output_ranges, dtype=torch.int32, device=device)
+    cu_range_sizes = torch.cumsum(
+        torch.tensor([0] + range_sizes, dtype=torch.int32, device=device), dim=0
+    )
+    row_map = torch.repeat_interleave(
+        torch.arange(0, input_ranges.shape[0]),
+        torch.tensor(range_sizes, dtype=torch.int32),
+        dim=0,
+        output_size=total_size,
+    ).to(device)
+
+    range_reduce_kwargs = {
+        "input_ranges": input_ranges,
+        "output_ranges": output_ranges,
+        "cu_range_sizes": cu_range_sizes,
+        "row_map": row_map,
+        "total_size": total_size,
+    }
+
+    return range_reduce_kwargs
 
 
 # ------------------        utils for group cast collective       ------------------ #
@@ -218,43 +262,42 @@ def _calc_group_cast_a2a_output_meta_args(
 
     # ---------    calc unperm after a2a kwargs     --------- #
     if calc_unperm_after_a2a_kwargs:
-        # calculate the output size from a2a_output_split_size_list
+        # calculate the output size
         total_size = sum(a2a_output_tensor_size_list)
 
         # calculate each range's start and end
-        ranges = torch.tensor(
-            [0] + a2a_output_tensor_size_list,
-            dtype=torch.int32,
-        )
-        ranges = torch.cumsum(ranges, dim=0)
-        ranges = torch.cat(
-            [ranges[0:-1, None], ranges[1:, None]],
-            dim=1,
-        )
+        ranges = _seqlens2curanges(a2a_output_tensor_size_list)
 
-        # re-order ranges by a2a_output_unpermute_index_list
-        # this means the ranges are in the order of the output tensor
-        # convert to list for easy indexing
-        ranges = ranges.tolist()
+        # re-order ranges to be in the order of the output tensor
         ranges = [ranges[i] for i in a2a_output_unpermute_index_list]
+
+        # calculate range sizes
+        range_sizes = [end - start for start, end in ranges]
 
         # calculate cu_range_sizes
         cu_range_sizes = torch.cumsum(
             torch.tensor(
-                [0] + [end - start for start, end in ranges],
+                [0] + range_sizes,
                 dtype=torch.int32,
+                device=device,
             ),
             dim=0,
         )
 
-        # convert to tensor again
-        ranges = torch.tensor(
-            ranges,
-        )
+        # calculate row_map from row idx to range idx
+        row_map = torch.repeat_interleave(
+            torch.arange(0, len(ranges)),
+            torch.tensor(range_sizes, dtype=torch.int32),
+            dim=0,
+            output_size=total_size,
+        ).to(device)
+
+        ranges = torch.tensor(ranges, device=device)
 
         unperm_range_gather_kwargs = {
-            "ranges": ranges.to(device),
-            "cu_range_sizes": cu_range_sizes.to(device),
+            "ranges": ranges,
+            "cu_range_sizes": cu_range_sizes,
+            "row_map": row_map,
             "total_size": total_size,
         }
     else:
@@ -489,30 +532,11 @@ def _calc_group_reduce_a2a_output_meta_args(
         )
 
     # calc range_reduce kwargs
-    input_ranges = []
-    output_ranges = []
-    cu_range_sizes = [0]
-    total_size = 0
-    for (out_start, out_end), reduce_ranges in zip(
-        output_size_ranges, a2a_output_reduce_ranges_list
-    ):
-        for reduce_start, reduce_end in reduce_ranges:
-            input_ranges.append([reduce_start, reduce_end])
-            output_ranges.append([out_start, out_end])
-            cu_range_sizes.append(reduce_end - reduce_start)
-            total_size += reduce_end - reduce_start
-
-    input_ranges = torch.tensor(input_ranges, dtype=torch.int32)
-    output_ranges = torch.tensor(output_ranges, dtype=torch.int32)
-    cu_range_sizes = torch.tensor(cu_range_sizes, dtype=torch.int32)
-    cu_range_sizes = torch.cumsum(cu_range_sizes, dim=0)
-
-    range_reduce_kwargs = {
-        "input_ranges": input_ranges.to(device),
-        "output_ranges": output_ranges.to(device),
-        "cu_range_sizes": cu_range_sizes.to(device),
-        "total_size": total_size,
-    }
+    range_reduce_kwargs = _calc_range_reduce_kwargs_from_ranges(
+        cu_ranges=output_size_ranges,
+        reduce_ranges_list=a2a_output_reduce_ranges_list,
+        device=device,
+    )
 
     return (
         a2a_output_split_size,
@@ -671,13 +695,8 @@ def _prepare_meta_for_group_cast_collective_hier(
     src_index_list: list[int],
     intra_group: dist.ProcessGroup,
     inter_group: dist.ProcessGroup,
-    **kwargs,
 ):
-    # check if pre-calculated
-    if kwargs.get("hier_comm_meta_kwargs", None) is not None:
-        return kwargs["hier_comm_meta_kwargs"]
-
-    # --------------      prepare env info       -------------- #
+    # --------      prepare env info       -------- #
 
     world_size_intra_node = dist.get_world_size(intra_group)
     world_size_inter_node = dist.get_world_size(inter_group)
@@ -703,7 +722,7 @@ def _prepare_meta_for_group_cast_collective_hier(
         + local_rank_intra_node
     )
 
-    # --------------      build group-cast meta for 1st step       -------------- #
+    # --------      build group-cast meta for 1st step       -------- #
 
     def build_group_cast_meta_args_pre_intra(
         input_split_size_list: list[int],
@@ -761,8 +780,9 @@ def _prepare_meta_for_group_cast_collective_hier(
         src_index_list,
         return_local_rank=True,
     )
+    output_seqlen_pre_intra = sum(output_split_size_list_pre_intra)
 
-    # --------------      get a2a meta for 1st step       -------------- #
+    # --------      get a2a meta for 1st step       -------- #
 
     (
         a2a_input_split_size_pre_intra,
@@ -775,7 +795,7 @@ def _prepare_meta_for_group_cast_collective_hier(
     )
     (
         a2a_output_split_size_pre_intra,
-        unperm_after_a2a_kwargs_pre_intra,
+        _,
     ) = _calc_group_cast_a2a_output_meta_args(
         output_split_size_list=output_split_size_list_pre_intra,
         src_index_list=src_index_list_pre_intra,
@@ -784,7 +804,7 @@ def _prepare_meta_for_group_cast_collective_hier(
         calc_unperm_after_a2a_kwargs=False,
     )
 
-    # --------------      build group-cast meta for 2nd step       -------------- #
+    # --------      build group-cast meta for 2nd step       -------- #
 
     def build_group_cast_meta_args_inter_plus_half_post_intra(
         input_split_size_list: list[int],
@@ -902,8 +922,9 @@ def _prepare_meta_for_group_cast_collective_hier(
         dst_indices_list,
         return_local_rank=True,
     )
+    output_seqlen_inter = sum(output_split_size_list_inter)
 
-    # --------------      get a2a meta for 2nd step       -------------- #
+    # --------      get a2a meta for 2nd step       -------- #
 
     (
         a2a_input_split_size_inter,
@@ -916,7 +937,7 @@ def _prepare_meta_for_group_cast_collective_hier(
     )
     (
         a2a_output_split_size_inter,
-        unperm_after_a2a_kwargs_inter,
+        _,
     ) = _calc_group_cast_a2a_output_meta_args(
         output_split_size_list=output_split_size_list_inter,
         src_index_list=src_index_list_inter,
@@ -925,7 +946,7 @@ def _prepare_meta_for_group_cast_collective_hier(
         calc_unperm_after_a2a_kwargs=False,
     )
 
-    # --------------      build group-cast meta for 3rd step       -------------- #
+    # --------      build group-cast meta for 3rd step       -------- #
 
     def build_group_cast_meta_args_rest_half_post_intra(
         input_split_size_list_post_intra: list[list[int]],
@@ -986,8 +1007,9 @@ def _prepare_meta_for_group_cast_collective_hier(
         dst_indices_list_post_intra,
         return_local_rank=True,
     )
+    output_seqlen_post_intra = sum(output_split_size_list_post_intra)
 
-    # --------------      get a2a meta for 3rd step       -------------- #
+    # --------      get a2a meta for 3rd step       -------- #
 
     (
         a2a_input_split_size_post_intra,
@@ -1000,7 +1022,7 @@ def _prepare_meta_for_group_cast_collective_hier(
     )
     (
         a2a_output_split_size_post_intra,
-        unperm_after_a2a_kwargs_post_intra,
+        _,
     ) = _calc_group_cast_a2a_output_meta_args(
         output_split_size_list=output_split_size_list_post_intra,
         src_index_list=src_index_list_post_intra,
@@ -1009,7 +1031,7 @@ def _prepare_meta_for_group_cast_collective_hier(
         calc_unperm_after_a2a_kwargs=False,
     )
 
-    # --------------      get post-process fn for 4th step       -------------- #
+    # --------      get post-process fn for 4th step       -------- #
 
     def get_unperm_after_a2a_kwargs_hier(
         output_split_size_list: list[int],
@@ -1059,32 +1081,20 @@ def _prepare_meta_for_group_cast_collective_hier(
 
     return (
         # for pre intra
-        input_split_size_list_pre_intra,
-        output_split_size_list_pre_intra,
-        dst_indices_list_pre_intra,
-        src_index_list_pre_intra,
+        output_seqlen_pre_intra,
         a2a_input_split_size_pre_intra,
         a2a_output_split_size_pre_intra,
         perm_range_gather_kwargs_pre_intra,
-        unperm_after_a2a_kwargs_pre_intra,
         # for inter
-        input_split_size_list_inter,
-        output_split_size_list_inter,
-        dst_indices_list_inter,
-        src_index_list_inter,
+        output_seqlen_inter,
         a2a_input_split_size_inter,
         a2a_output_split_size_inter,
         perm_range_gather_kwargs_inter,
-        unperm_after_a2a_kwargs_inter,
         # for post intra
-        input_split_size_list_post_intra,
-        output_split_size_list_post_intra,
-        dst_indices_list_post_intra,
-        src_index_list_post_intra,
+        output_seqlen_post_intra,
         a2a_input_split_size_post_intra,
         a2a_output_split_size_post_intra,
         perm_range_gather_kwargs_post_intra,
-        unperm_after_a2a_kwargs_post_intra,
         # for post process
         post_process_fn,
     )
@@ -1107,132 +1117,55 @@ def _group_cast_collective_hier(
     inter_group = kwargs.pop("inter_group", None)
     assert intra_group is not None and inter_group is not None
 
-    side_stream = kwargs.pop("side_stream", None)
-    assert side_stream is not None
-
-    world_size_intra_node = dist.get_world_size(intra_group)
-    world_size_inter_node = dist.get_world_size(inter_group)
-
-    # --------------------------------------------------------------------
-    # hier comm meta
-    # --------------------------------------------------------------------
-
+    # --------      get hier-comm meta args       -------- #
     (
         # for pre intra
-        input_split_size_list_pre_intra,
-        output_split_size_list_pre_intra,
-        dst_indices_list_pre_intra,
-        src_index_list_pre_intra,
+        output_seqlen_pre_intra,
         a2a_input_split_size_pre_intra,
         a2a_output_split_size_pre_intra,
         perm_range_gather_kwargs_pre_intra,
-        unperm_after_a2a_kwargs_pre_intra,
         # for inter
-        input_split_size_list_inter,
-        output_split_size_list_inter,
-        dst_indices_list_inter,
-        src_index_list_inter,
+        output_seqlen_inter,
         a2a_input_split_size_inter,
         a2a_output_split_size_inter,
         perm_range_gather_kwargs_inter,
-        unperm_after_a2a_kwargs_inter,
         # for post intra
-        input_split_size_list_post_intra,
-        output_split_size_list_post_intra,
-        dst_indices_list_post_intra,
-        src_index_list_post_intra,
+        output_seqlen_post_intra,
         a2a_input_split_size_post_intra,
         a2a_output_split_size_post_intra,
         perm_range_gather_kwargs_post_intra,
-        unperm_after_a2a_kwargs_post_intra,
         # for post process
         post_process_fn,
-    ) = _prepare_meta_for_group_cast_collective_hier(
-        input_split_size_list=input_split_size_list,
-        output_split_size_list=output_split_size_list,
-        dst_indices_list=dst_indices_list,
-        src_index_list=src_index_list,
-        intra_group=intra_group,
-        inter_group=inter_group,
-        **kwargs,
-    )
+    ) = kwargs["hier_comm_meta_kwargs"]
 
-    # --------------------------------------------------------------------
-    # hier comm tensor for 1st and 2nd steps
-    # --------------------------------------------------------------------
+    # --------      pre-init output buffer for all steps       -------- #
 
-    # --------------      pre-init buffer for all steps       -------------- #
-
-    output_tensor_pre_intra, output_tensor_post_intra = torch.split(
+    a2a_output_pre_intra, a2a_output_post_intra = torch.split(
         output_tensor,
-        [sum(output_split_size_list_pre_intra), sum(output_split_size_list_post_intra)],
+        [output_seqlen_pre_intra, output_seqlen_post_intra],
         dim=0,
     )
-    output_tensor_inter = torch.empty(
-        size=[sum(output_split_size_list_inter)] + list(output_tensor.shape[1:]),
+    a2a_output_inter = torch.empty(
+        size=[output_seqlen_inter, *output_tensor.shape[1:]],
         dtype=input_tensor.dtype,
         device=input_tensor.device,
     )
 
-    # --------------      get a2a buffer for 1st step       -------------- #
+    # --------      get a2a input buffer for 1st step       -------- #
 
-    input_tensor_pre_intra = input_tensor
-    (
-        a2a_input_pre_intra,
-        a2a_input_split_size_pre_intra,
-    ) = _calc_group_cast_a2a_input_args(
-        input=input_tensor_pre_intra,
-        input_split_size_list=input_split_size_list_pre_intra,
-        dst_indices_list=dst_indices_list_pre_intra,
-        world_size=world_size_intra_node,
-        a2a_input_split_size=a2a_input_split_size_pre_intra,
-        perm_before_a2a_kwargs=perm_range_gather_kwargs_pre_intra,
-    )
-    (
-        a2a_output_pre_intra,
-        a2a_output_split_size_pre_intra,
-        unperm_after_a2a_kwargs_pre_intra,
-    ) = _calc_group_cast_a2a_output_args(
-        output=output_tensor_pre_intra,
-        output_split_size_list=output_split_size_list_pre_intra,
-        src_index_list=src_index_list_pre_intra,
-        world_size=world_size_intra_node,
-        a2a_output_split_size=a2a_output_split_size_pre_intra,
-        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs_pre_intra,
+    a2a_input_pre_intra = range_gather(
+        input=input_tensor,
+        **perm_range_gather_kwargs_pre_intra,
     )
 
-    # --------------      get a2a buffer for 2nd step       -------------- #
+    # --------      get a2a input buffer for 2nd step       -------- #
 
-    input_tensor_inter = input_tensor
-    (
-        a2a_input_inter,
-        a2a_input_split_size_inter,
-    ) = _calc_group_cast_a2a_input_args(
-        input=input_tensor_inter,
-        input_split_size_list=input_split_size_list_inter,
-        dst_indices_list=dst_indices_list_inter,
-        world_size=world_size_inter_node,
-        a2a_input_split_size=a2a_input_split_size_inter,
-        perm_before_a2a_kwargs=perm_range_gather_kwargs_inter,
-    )
-    (
-        a2a_output_inter,
-        a2a_output_split_size_inter,
-        unperm_after_a2a_kwargs_inter,
-    ) = _calc_group_cast_a2a_output_args(
-        output=output_tensor_inter,
-        output_split_size_list=output_split_size_list_inter,
-        src_index_list=src_index_list_inter,
-        world_size=world_size_inter_node,
-        a2a_output_split_size=a2a_output_split_size_inter,
-        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs_inter,
+    a2a_input_inter = range_gather(
+        input=input_tensor,
+        **perm_range_gather_kwargs_inter,
     )
 
-    # --------------------------------------------------------------------
-    # hier comm operation for 1st and 2nd steps (async)
-    # --------------------------------------------------------------------
-
-    # --------------      apply a2a for 1st step       -------------- #
+    # --------      apply a2a for 1st step       -------- #
 
     with nvtx.add_nvtx_event(
         (
@@ -1251,7 +1184,7 @@ def _group_cast_collective_hier(
             async_op=async_op,
         )
 
-    # --------------      apply a2a for 2nd step       -------------- #
+    # --------      apply a2a for 2nd step       -------- #
 
     with nvtx.add_nvtx_event(
         (
@@ -1270,45 +1203,17 @@ def _group_cast_collective_hier(
             async_op=async_op,
         )
 
-    # --------------------------------------------------------------------
-    # hier comm tensor for 3rd step
-    # --------------------------------------------------------------------
+    # --------      get a2a input buffer for 3rd step       -------- #
 
-    # --------------      get a2a buffer for 3rd step       -------------- #
-
-    # with torch.cuda.stream(side_stream):
     if work_inter is not None:
         work_inter.wait()
-    input_tensor_post_intra = a2a_output_inter
-    (
-        a2a_input_post_intra,
-        a2a_input_split_size_post_intra,
-    ) = _calc_group_cast_a2a_input_args(
-        input=input_tensor_post_intra,
-        input_split_size_list=input_split_size_list_post_intra,
-        dst_indices_list=dst_indices_list_post_intra,
-        world_size=world_size_intra_node,
-        a2a_input_split_size=a2a_input_split_size_post_intra,
-        perm_before_a2a_kwargs=perm_range_gather_kwargs_post_intra,
-    )
-    (
-        a2a_output_post_intra,
-        a2a_output_split_size_post_intra,
-        unperm_after_a2a_kwargs_post_intra,
-    ) = _calc_group_cast_a2a_output_args(
-        output=output_tensor_post_intra,
-        output_split_size_list=output_split_size_list_post_intra,
-        src_index_list=src_index_list_post_intra,
-        world_size=world_size_intra_node,
-        a2a_output_split_size=a2a_output_split_size_post_intra,
-        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs_post_intra,
+
+    a2a_input_post_intra = range_gather(
+        input=a2a_output_inter,
+        **perm_range_gather_kwargs_post_intra,
     )
 
-    # --------------------------------------------------------------------
-    # hier comm operation for 3rd step
-    # --------------------------------------------------------------------
-
-    # --------------      apply a2a for 3rd step       -------------- #
+    # --------      apply a2a for 3rd step       -------- #
 
     with nvtx.add_nvtx_event(
         (
