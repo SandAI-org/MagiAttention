@@ -23,11 +23,8 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DispatchConfig, MinHeapDispatchAlg
 from magi_attention.functional import dispatch_func, undispatch_func
 from magi_attention.meta import calc_dispatch_meta_from_qk_ranges
-from magi_attention.meta._calc_dispatch_meta import (
-    cu_seqlens2seqlens,
-    seqlens2cu_seqlens,
-)
 from magi_attention.testing.dist_common import DistTestBase, with_comms
+from magi_attention.utils import cu_seqlens2seqlens, seqlens2cu_seqlens
 
 WORLD_SIZE = 4
 SEED = 42

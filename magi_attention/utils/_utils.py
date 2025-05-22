@@ -118,6 +118,20 @@ def clearup_dist_env() -> None:
 NestedIntList: TypeAlias = Union[list[int], tuple[int, ...], Sequence["NestedIntList"]]
 
 
+def seqlens2cu_seqlens(seqlens: list[int]) -> list[int]:
+    cu_seqlens = [0]
+    for seqlen in seqlens:
+        cu_seqlens.append(cu_seqlens[-1] + seqlen)
+    return cu_seqlens
+
+
+def cu_seqlens2seqlens(cu_seqlens: list[int]) -> list[int]:
+    seqlens = []
+    for i in range(1, len(cu_seqlens)):
+        seqlens.append(cu_seqlens[i] - cu_seqlens[i - 1])
+    return seqlens
+
+
 @nvtx.instrument_nvtx
 def flatten_nested_list(nested_list: NestedIntList) -> list[int]:
     # Initialize a stack with the reversed nested list to process elements from left to right

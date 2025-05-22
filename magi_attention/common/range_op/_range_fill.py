@@ -18,6 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
+from magi_attention.utils import nvtx
+
 __all__ = ["range_fill_"]
 
 
@@ -63,6 +65,7 @@ def range_fill_kernel(
         tl.store(curr_inp_ptr + cols, val, mask=cols < elem_in_last_block)
 
 
+@nvtx.instrument_nvtx
 def range_fill_(
     input: torch.Tensor,
     ranges: torch.Tensor,
@@ -85,7 +88,7 @@ def range_fill_(
         row_map: Optional mapping from row indices to range indices
 
     Returns:
-        The modified input tensor
+        The in-place filled input tensor
     """
 
     # Check that input has no gradient

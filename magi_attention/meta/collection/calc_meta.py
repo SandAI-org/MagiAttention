@@ -107,12 +107,38 @@ class AttnArg:
             )
 
     def _init_out_zero_fill_ranges(self) -> None:
+        device = torch.cuda.current_device()
         shard_q_ranges = AttnRanges.from_ranges([[0, self.shard_seqlen_q]])
         self.out_zero_fill_ranges = AttnRanges.find_hole_ranges(
             shard_q_ranges,
             self.q_ranges,
             is_self_merged=True,
         ).to_naive_ranges()
+
+        # calculate range sizes
+        range_sizes = [end - start for start, end in self.out_zero_fill_ranges]
+
+        # calculate the output size
+        total_size = sum(range_sizes)
+
+        # calculate row_map from row idx to range idx
+        range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int32, device=device)
+        row_map = torch.repeat_interleave(
+            torch.arange(0, len(self.out_zero_fill_ranges), device=device),
+            range_sizes[1:],
+            dim=0,
+            output_size=total_size,
+        )
+
+        # calculate cu_range_sizes
+        cu_range_sizes = torch.cumsum(range_sizes, dim=0)
+
+        self.out_zero_range_fill_kwargs = {
+            "ranges": torch.tensor(self.out_zero_fill_ranges, device=device),
+            "cu_range_sizes": cu_range_sizes,
+            "row_map": row_map,
+            "total_size": total_size,
+        }
 
     def _init_ffa_fwd_args_dict(self) -> None:
         # init `skip_attn_fwd` flag

@@ -34,8 +34,6 @@ from magi_attention.utils._utils import argsort, is_list_value_all
 
 __all__ = [
     "calc_dispatch_meta_from_qk_ranges",
-    "seqlens2cu_seqlens",
-    "cu_seqlens2seqlens",
 ]
 
 
@@ -472,17 +470,3 @@ def _calc_self_attn_areas(
         global_bucket.q_chunks.append(chunk)
 
     return global_bucket
-
-
-def seqlens2cu_seqlens(seqlens: list[int]) -> list[int]:
-    cu_seqlens = [0]
-    for seqlen in seqlens:
-        cu_seqlens.append(cu_seqlens[-1] + seqlen)
-    return cu_seqlens
-
-
-def cu_seqlens2seqlens(cu_seqlens: list[int]) -> list[int]:
-    seqlens = []
-    for i in range(1, len(cu_seqlens)):
-        seqlens.append(cu_seqlens[i] - cu_seqlens[i - 1])
-    return seqlens
