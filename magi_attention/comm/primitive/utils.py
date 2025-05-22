@@ -702,7 +702,11 @@ def _prepare_meta_for_group_cast_collective_hier(
     src_index_list: list[int],
     intra_group: dist.ProcessGroup,
     inter_group: dist.ProcessGroup,
+    **kwargs,
 ):
+    if "hier_comm_meta_kwargs" in kwargs:
+        return kwargs["hier_comm_meta_kwargs"]
+
     # --------      prepare env info       -------- #
 
     world_size_intra_node = dist.get_world_size(intra_group)
@@ -1120,11 +1124,19 @@ def _group_cast_collective_hier(
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
+    assert (
+        async_op
+    ), "async_op must be True for hierarchical group-cast collective by now"
+
     intra_group = kwargs.pop("intra_group", None)
     inter_group = kwargs.pop("inter_group", None)
     assert intra_group is not None and inter_group is not None
 
+    side_stream: torch.cuda.Stream = kwargs.pop("side_stream", None)
+    assert side_stream is not None
+
     # --------      get hier-comm meta args       -------- #
+
     (
         # for pre intra
         output_seqlen_pre_intra,
@@ -1143,7 +1155,15 @@ def _group_cast_collective_hier(
         perm_range_gather_kwargs_post_intra,
         # for post process
         post_process_fn,
-    ) = kwargs["hier_comm_meta_kwargs"]
+    ) = _prepare_meta_for_group_cast_collective_hier(
+        input_split_size_list=input_split_size_list,
+        output_split_size_list=output_split_size_list,
+        dst_indices_list=dst_indices_list,
+        src_index_list=src_index_list,
+        intra_group=intra_group,
+        inter_group=inter_group,
+        **kwargs,
+    )
 
     # --------      pre-init output buffer for all steps       -------- #
 
@@ -1158,18 +1178,11 @@ def _group_cast_collective_hier(
         device=input_tensor.device,
     )
 
-    # --------      get a2a input buffer for 1st step       -------- #
+    # --------      prepare a2a input buffer for 1st step       -------- #
 
     a2a_input_pre_intra = range_gather(
         input=input_tensor,
         **perm_range_gather_kwargs_pre_intra,
-    )
-
-    # --------      get a2a input buffer for 2nd step       -------- #
-
-    a2a_input_inter = range_gather(
-        input=input_tensor,
-        **perm_range_gather_kwargs_inter,
     )
 
     # --------      apply a2a for 1st step       -------- #
@@ -1191,6 +1204,13 @@ def _group_cast_collective_hier(
             async_op=async_op,
         )
 
+    # --------      prepare a2a input buffer for 2nd step       -------- #
+
+    a2a_input_inter = range_gather(
+        input=input_tensor,
+        **perm_range_gather_kwargs_inter,
+    )
+
     # --------      apply a2a for 2nd step       -------- #
 
     with nvtx.add_nvtx_event(
@@ -1210,39 +1230,43 @@ def _group_cast_collective_hier(
             async_op=async_op,
         )
 
-    # --------      get a2a input buffer for 3rd step       -------- #
+    side_stream.wait_stream(torch.cuda.default_stream())
+    with torch.cuda.stream(side_stream):
+        # --------      prepare a2a input buffer for 3rd step       -------- #
 
-    if work_inter is not None:
         work_inter.wait()
-
-    a2a_input_post_intra = range_gather(
-        input=a2a_output_inter,
-        **perm_range_gather_kwargs_post_intra,
-    )
-
-    # --------      apply a2a for 3rd step       -------- #
-
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output_post_intra.shape=} | "
-            f"{a2a_input_post_intra.shape=} | "
-            f"{a2a_output_split_size_post_intra=} | "
-            f"{a2a_input_split_size_post_intra=}"
+        a2a_input_post_intra = range_gather(
+            input=a2a_output_inter,
+            **perm_range_gather_kwargs_post_intra,
         )
-    ):
-        work_post_intra = dist.all_to_all_single(
-            output=a2a_output_post_intra,
-            input=a2a_input_post_intra,
-            output_split_sizes=a2a_output_split_size_post_intra,
-            input_split_sizes=a2a_input_split_size_post_intra,
-            group=intra_group,
-            async_op=async_op,
-        )
+
+        # --------      apply a2a for 3rd step       -------- #
+
+        with nvtx.add_nvtx_event(
+            (
+                f"{a2a_output_post_intra.shape=} | "
+                f"{a2a_input_post_intra.shape=} | "
+                f"{a2a_output_split_size_post_intra=} | "
+                f"{a2a_input_split_size_post_intra=}"
+            )
+        ):
+            work_post_intra = dist.all_to_all_single(
+                output=a2a_output_post_intra,
+                input=a2a_input_post_intra,
+                output_split_sizes=a2a_output_split_size_post_intra,
+                input_split_sizes=a2a_input_split_size_post_intra,
+                group=intra_group,
+                async_op=async_op,
+            )
+        work_post_intra.wait()
+
+    a2a_output_inter.record_stream(side_stream)
+    a2a_output_post_intra.record_stream(side_stream)
 
     # ---------    prepare work with post-process fn    --------- #
 
     work_with_post_process_fn = WorkWithPostProcessFn(
-        work=[work_pre_intra, work_post_intra],
+        work=[work_pre_intra, side_stream],
         post_process_fn=post_process_fn,
         sync=not async_op,
     )
