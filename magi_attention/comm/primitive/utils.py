@@ -1031,6 +1031,7 @@ def _prepare_meta_for_group_cast_collective_hier(
         world_size=world_size_intra_node,
         device=device,
     )
+    a2a_input_seqlen_post_intra = sum(a2a_input_split_size_post_intra)
     (
         a2a_output_split_size_post_intra,
         _,
@@ -1103,6 +1104,7 @@ def _prepare_meta_for_group_cast_collective_hier(
         perm_range_gather_kwargs_inter,
         # for post intra
         output_seqlen_post_intra,
+        a2a_input_seqlen_post_intra,
         a2a_input_split_size_post_intra,
         a2a_output_split_size_post_intra,
         perm_range_gather_kwargs_post_intra,
@@ -1150,6 +1152,7 @@ def _group_cast_collective_hier(
         perm_range_gather_kwargs_inter,
         # for post intra
         output_seqlen_post_intra,
+        a2a_input_seqlen_post_intra,
         a2a_input_split_size_post_intra,
         a2a_output_split_size_post_intra,
         perm_range_gather_kwargs_post_intra,
@@ -1167,13 +1170,19 @@ def _group_cast_collective_hier(
 
     # --------      pre-init output buffer for all steps       -------- #
 
+    output_other_shape = output_tensor.shape[1:]
     a2a_output_pre_intra, a2a_output_post_intra = torch.split(
         output_tensor,
         [output_seqlen_pre_intra, output_seqlen_post_intra],
         dim=0,
     )
     a2a_output_inter = torch.empty(
-        size=[output_seqlen_inter, *output_tensor.shape[1:]],
+        size=[output_seqlen_inter, *output_other_shape],
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+    a2a_input_post_intra = torch.empty(
+        size=[a2a_input_seqlen_post_intra, *output_other_shape],
         dtype=input_tensor.dtype,
         device=input_tensor.device,
     )
@@ -1237,6 +1246,7 @@ def _group_cast_collective_hier(
         work_inter.wait()
         a2a_input_post_intra = range_gather(
             input=a2a_output_inter,
+            output=a2a_input_post_intra,
             **perm_range_gather_kwargs_post_intra,
         )
 
@@ -1261,6 +1271,7 @@ def _group_cast_collective_hier(
         work_post_intra.wait()
 
     a2a_output_inter.record_stream(side_stream)
+    a2a_input_post_intra.record_stream(side_stream)
     a2a_output_post_intra.record_stream(side_stream)
 
     # ---------    prepare work with post-process fn    --------- #
