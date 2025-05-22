@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch.distributed as dist
+from torch.distributed.device_mesh import DeviceMesh
 
 from magi_attention.meta.collection.calc_meta import AttnCalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta
@@ -29,8 +30,7 @@ def calc_attn_meta_from_dispatch_meta(
     cp_group: dist.ProcessGroup,
     high_bandwith_domain_size: int,
     overlap_config: OverlapConfig,
-    cp_intra_group: dist.ProcessGroup | None = None,
-    cp_inter_group: dist.ProcessGroup | None = None,
+    cp_mesh: DeviceMesh | None = None,
 ) -> tuple[CommMeta, AttnCalcMeta, DistAttnSolver]:
     """Calculate the communication and calculation meta from the dispatch meta
 
@@ -41,6 +41,8 @@ def calc_attn_meta_from_dispatch_meta(
         cp_group (dist.ProcessGroup): The NCCL process group
         high_bandwith_domain_size (int): The high bandwith domain size
         overlap_config (OverlapConfig): The overlap config, including the overlap mode, overlap degree, overlap chunk size, etc
+
+        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
 
     Returns:
         tuple[CommMeta, AttnCalcMeta]: The communication and calculation meta
@@ -53,8 +55,7 @@ def calc_attn_meta_from_dispatch_meta(
         cp_group=cp_group,
         high_bandwith_domain_size=high_bandwith_domain_size,
         overlap_config=overlap_config,
-        cp_intra_group=cp_intra_group,
-        cp_inter_group=cp_inter_group,
+        cp_mesh=cp_mesh,
     )
 
     comm_meta = attn_solver.calc_comm_meta()

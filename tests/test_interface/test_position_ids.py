@@ -13,13 +13,16 @@
 # limitations under the License.
 
 import os
+from copy import deepcopy
 from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
+import magi_attention
 from magi_attention.api.functools import compute_pad_size, pad_at_dim
 from magi_attention.api.magi_attn_interface import (
     get_position_ids,
@@ -53,6 +56,26 @@ class TestPositionIdsWithWorldSize1(DistTestBase):
 
         # NOTE: test using sdpa backend with fp64 dtype support
         os.environ["MAGI_ATTENTION_SDPA_BACKEND"] = "1"
+
+        # -----    set up for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable() and self.world_size in (
+            4,
+            6,
+            8,
+        ):
+            world_size_inter_node, world_size_intra_node = {
+                4: (2, 2),
+                6: (3, 2),
+                8: (2, 4),
+            }[self.world_size]
+            self.device_mesh = init_device_mesh(
+                device_type="cuda",
+                mesh_shape=(world_size_inter_node, world_size_intra_node),
+                mesh_dim_names=("inter", "intra"),
+            )
+        else:
+            self.device_mesh = None
 
     @property
     def process_group(self):
@@ -222,7 +245,13 @@ class TestPositionIdsWithWorldSize1(DistTestBase):
         attn_config: dict[str, Any],
         head_dim: int,
     ):
-        from copy import deepcopy
+        # -----    skip for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable():
+            if self.world_size not in (4, 6, 8):
+                # skip for invalid world size
+                # when hierarchical comm is enabled
+                return
 
         attn_config_ = deepcopy(attn_config)
 
@@ -258,7 +287,10 @@ class TestPositionIdsWithWorldSize1(DistTestBase):
             total_seqlen_k=total_seqlen_k,
             head_dim=head_dim,
             pad_size=pad_size,
-            cp_group=self.nccl_group,
+            cp_group=None
+            if magi_attention.is_hierarchical_comm_enable()
+            else self.nccl_group,
+            cp_mesh=self.device_mesh,
             is_same_source=True,
             is_q_permutable=True,
             is_k_permutable=True,

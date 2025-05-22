@@ -16,6 +16,7 @@ import itertools
 
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import DeviceMesh
 
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType, AttnRole
@@ -269,8 +270,7 @@ def init_dist_attn_runtime_mgr(
     is_q_permutable: bool,
     is_k_permutable: bool,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
-    cp_intra_group: dist.ProcessGroup | None = None,
-    cp_inter_group: dist.ProcessGroup | None = None,
+    cp_mesh: DeviceMesh | None = None,
 ) -> DistAttnRuntimeMgr:
     """
 
@@ -301,6 +301,8 @@ def init_dist_attn_runtime_mgr(
                     b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
 
         dist_attn_config (DistAttnConfig): dist attn config
+
+        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
 
     Returns:
         DistAttnRuntimeMgr: dist attn runtime mgr
@@ -367,8 +369,7 @@ def init_dist_attn_runtime_mgr(
         cp_group=cp_group,
         high_bandwith_domain_size=dist_attn_config.high_bandwith_domain_size,
         overlap_config=dist_attn_config.overlap_config,
-        cp_intra_group=cp_intra_group,
-        cp_inter_group=cp_inter_group,
+        cp_mesh=cp_mesh,
     )
 
     dist_attn_runtime = DistFlashAttnRuntime(

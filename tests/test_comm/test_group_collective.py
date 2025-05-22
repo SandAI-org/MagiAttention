@@ -376,11 +376,11 @@ class TestMultiCastCollective(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable() and self.world_size in [
+        if magi_attention.is_hierarchical_comm_enable() and self.world_size in (
             4,
             6,
             8,
-        ]:
+        ):
             world_size_inter_node, world_size_intra_node = {
                 4: (2, 2),
                 6: (3, 2),
@@ -393,9 +393,11 @@ class TestMultiCastCollective(DistTestBase):
             )
             self.intra_group = device_mesh.get_group("intra")
             self.inter_group = device_mesh.get_group("inter")
+            self.side_stream = torch.cuda.Stream()
         else:
             self.intra_group = None
             self.inter_group = None
+            self.side_stream = None
 
     @property
     def process_group(self):
@@ -436,6 +438,9 @@ class TestMultiCastCollective(DistTestBase):
             src_index_list=src_index_list,
             group=self.process_group,
             async_op=True,
+            intra_group=self.intra_group,
+            inter_group=self.inter_group,
+            side_stream=self.side_stream,
         )
         output_tensor = work.wait_post_process(output_tensor)
 
@@ -496,6 +501,8 @@ class TestMultiCastCollective(DistTestBase):
 
         self.assertTrue(torch.equal(output_tensor, expected_tensor_per_rank[self.rank]))
 
+    # TODO: parameterize the test cases
+    # and add more cases within more world sizes
     @skip_if_lt_x_gpu(4)
     @with_comms
     def test_group_cast_collective(self):
@@ -558,6 +565,7 @@ class TestMultiCastCollective(DistTestBase):
             async_op=True,
             intra_group=self.intra_group,
             inter_group=self.inter_group,
+            side_stream=self.side_stream,
         )
         output_tensor = work.wait_post_process(output_tensor)
 

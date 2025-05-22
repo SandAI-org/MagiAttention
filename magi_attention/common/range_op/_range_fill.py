@@ -71,7 +71,7 @@ def range_fill_(
     val: float,
     dim: int = 0,
     row_map: Optional[torch.Tensor] = None,
-):
+) -> torch.Tensor:
     """
     Fill specified ranges in the input tensor with a given value.
 

@@ -13,12 +13,14 @@
 # limitations under the License.
 
 import os
+from copy import deepcopy
 from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from einops import rearrange
+from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
@@ -45,6 +47,7 @@ from magi_attention.config import (
     OverlapConfig,
     UniformOverlapAlg,
 )
+from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import EPSILON, torch_attn_ref
@@ -124,7 +127,8 @@ class MultiHeadAttention(nn.Module):
         return q, k, v
 
 
-class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
+# TODO: merge this test script with `test_pipeline_sdpa.py`
+class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
@@ -140,6 +144,26 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # NOTE: test using sdpa backend with fp64 dtype support
         os.environ["MAGI_ATTENTION_SDPA_BACKEND"] = "1"
+
+        # -----    set up for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable() and self.world_size in (
+            4,
+            6,
+            8,
+        ):
+            world_size_inter_node, world_size_intra_node = {
+                4: (2, 2),
+                6: (3, 2),
+                8: (2, 4),
+            }[self.world_size]
+            self.device_mesh = init_device_mesh(
+                device_type="cuda",
+                mesh_shape=(world_size_inter_node, world_size_intra_node),
+                mesh_dim_names=("inter", "intra"),
+            )
+        else:
+            self.device_mesh = None
 
     @property
     def process_group(self):
@@ -435,7 +459,7 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
         "high_bandwith_domain_size",
         [1, 2, 4, 8],
     )
-    def test_pipeline_sdpa(
+    def test_interface_sdpa(
         self,
         attn_config: dict[str, Any],
         overlap_config: dict[str, Any],
@@ -462,6 +486,16 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
         # thus we always enable sanity check mode
         assert magi_attention.is_sanity_check_enable()
 
+        # -----    skip for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable():
+            if self.world_size not in (4, 6, 8):
+                # skip for invalid world size
+                # when hierarchical comm is enabled
+                return
+            if high_bandwith_domain_size > 1:
+                return
+
         # -----    construct test case name   ---- #
 
         assert (
@@ -474,7 +508,6 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})]"
         )
         # -----    contruct config from test cases   ---- #
-        from copy import deepcopy
 
         attn_config_ = deepcopy(attn_config)
 
@@ -495,7 +528,7 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
             high_bandwith_domain_size=high_bandwith_domain_size,
             deterministic=False,
         )
-        print(f"{attn_config_[NAME]=}")
+
         # -----    run pipeline test   ---- #
 
         # ----- init input data and module---- #
@@ -516,21 +549,26 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
                 head_dim,
                 device=device,
                 dtype=dtype,
-                requires_grad=True,
+                requires_grad=False,
             )
 
-            x = squash_batch_dim(x_with_batch)
+            x.data.copy_(squash_batch_dim(x_with_batch))
+
             cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
                 batch_size, attn_config_["total_seqlen_q"] // batch_size
             )
 
+            assert self.device_mesh is not None
             x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
                 x,
                 cu_seqlens_q,
                 cu_seqlens_k,
                 head_dim=head_dim,
                 pad_size=pad_size,
-                cp_group=self.nccl_group,
+                cp_group=None
+                if magi_attention.is_hierarchical_comm_enable()
+                else self.nccl_group,
+                cp_mesh=self.device_mesh,
                 causal=is_causal_mapping[0]
                 if isinstance(is_causal_mapping, list)
                 else is_causal_mapping,
@@ -546,7 +584,10 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
                 cu_seqlens_k,
                 head_dim=head_dim,
                 pad_size=pad_size,
-                cp_group=self.nccl_group,
+                cp_group=None
+                if magi_attention.is_hierarchical_comm_enable()
+                else self.nccl_group,
+                cp_mesh=self.device_mesh,
                 causal=is_causal_mapping[0]
                 if isinstance(is_causal_mapping, list)
                 else is_causal_mapping,
@@ -574,7 +615,10 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
                 total_seqlen_k=total_seqlen_k,
                 head_dim=head_dim,
                 pad_size=pad_size,
-                cp_group=self.nccl_group,
+                cp_group=None
+                if magi_attention.is_hierarchical_comm_enable()
+                else self.nccl_group,
+                cp_mesh=self.device_mesh,
                 is_same_source=True,
                 is_q_permutable=True,
                 is_k_permutable=True,
@@ -582,9 +626,11 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
             )
 
         # -----    init dist attn runtime key   ---- #
-        dist_attn_runtime_mgr = DistAttnRuntimeDict[dist_attn_runtime_key]
+        dist_attn_runtime_mgr: DistAttnRuntimeMgr = DistAttnRuntimeDict[
+            dist_attn_runtime_key
+        ]
 
-        # HACK: double cp group for kv/dkv
+        # HACK: seperate cp group for dkv group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_dkv = self.nccl_groups[1]
 
         # -----   get local qkv   ---- #
@@ -687,88 +733,74 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
         )
 
 
-class TestInterfacePipelineSDPAWithWorldSize2(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize2(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 2
 
     @skip_if_lt_x_gpu(2)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize3(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize3(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 3
 
     @skip_if_lt_x_gpu(3)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize4(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize4(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 4
 
     @skip_if_lt_x_gpu(4)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize5(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize5(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 5
 
     @skip_if_lt_x_gpu(5)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize6(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize6(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 6
 
     @skip_if_lt_x_gpu(6)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize7(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize7(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 7
 
     @skip_if_lt_x_gpu(7)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize8(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize8(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 8
 
     @skip_if_lt_x_gpu(8)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
 if __name__ == "__main__":

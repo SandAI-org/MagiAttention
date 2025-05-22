@@ -110,26 +110,23 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable() and self.world_size in [
+        if magi_attention.is_hierarchical_comm_enable() and self.world_size in (
             4,
             6,
             8,
-        ]:
+        ):
             world_size_inter_node, world_size_intra_node = {
                 4: (2, 2),
                 6: (3, 2),
                 8: (2, 4),
             }[self.world_size]
-            device_mesh = init_device_mesh(
+            self.device_mesh = init_device_mesh(
                 device_type="cuda",
                 mesh_shape=(world_size_inter_node, world_size_intra_node),
                 mesh_dim_names=("inter", "intra"),
             )
-            self.intra_group = device_mesh.get_group("intra")
-            self.inter_group = device_mesh.get_group("inter")
         else:
-            self.intra_group = None
-            self.inter_group = None
+            self.device_mesh = None
 
     @property
     def process_group(self):
@@ -582,7 +579,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         # -----    skip for hier comm   ---- #
 
         if magi_attention.is_hierarchical_comm_enable():
-            if self.world_size not in [4, 6, 8]:
+            if self.world_size not in (4, 6, 8):
                 # skip for invalid world size
                 # when hierarchical comm is enabled
                 return
@@ -676,14 +673,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 is_q_permutable=True,
                 is_k_permutable=True,
                 dist_attn_config=dist_attn_config,
-                cp_intra_group=self.intra_group,
-                cp_inter_group=self.inter_group,
+                cp_mesh=self.device_mesh,
             )
-            if not magi_attention.is_hierarchical_comm_enable():
-                # HACK: double cp group for kv/dkv
-                dist_attn_runtime_mgr.dist_attn_runtime.cp_group_dkv = self.nccl_groups[
-                    1
-                ]
+            # HACK: seperate cp group for dkv group-reduce
+            dist_attn_runtime_mgr.dist_attn_runtime.cp_group_dkv = self.nccl_groups[1]
 
             # -----   init global qkv   ---- #
 

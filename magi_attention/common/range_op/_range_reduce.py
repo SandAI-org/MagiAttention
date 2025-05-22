@@ -93,6 +93,7 @@ def range_reduce_kernel_deterministic(
     N_BLOCK: tl.constexpr,
     ELEM_PER_BLOCK: tl.constexpr,
 ):
+    # TODO: finish deterministic range reduction kernel
     pass
 
 
@@ -108,7 +109,7 @@ def range_reduce(
     row_map: Optional[torch.Tensor] = None,
     deterministic: bool = False,
     range_split_sizes: Optional[torch.Tensor] = None,
-):
+) -> torch.Tensor:
     """
     Reduce values from input tensor to output tensor based on specified ranges.
 
