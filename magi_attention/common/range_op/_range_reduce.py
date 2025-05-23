@@ -18,6 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
+from magi_attention.utils import nvtx
+
 __all__ = ["range_reduce"]
 
 
@@ -91,9 +93,11 @@ def range_reduce_kernel_deterministic(
     N_BLOCK: tl.constexpr,
     ELEM_PER_BLOCK: tl.constexpr,
 ):
+    # TODO: finish deterministic range reduction kernel
     pass
 
 
+@nvtx.instrument_nvtx
 def range_reduce(
     input: torch.Tensor,
     output: torch.Tensor,
@@ -105,7 +109,7 @@ def range_reduce(
     row_map: Optional[torch.Tensor] = None,
     deterministic: bool = False,
     range_split_sizes: Optional[torch.Tensor] = None,
-):
+) -> torch.Tensor:
     """
     Reduce values from input tensor to output tensor based on specified ranges.
 

@@ -21,6 +21,7 @@ from typing import Iterator
 
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
@@ -897,12 +898,14 @@ class DistAttnSolver:
         cp_group: dist.ProcessGroup,
         high_bandwith_domain_size: int,
         overlap_config: OverlapConfig,
+        cp_mesh: DeviceMesh | None = None,
     ):
         assert dist.get_backend(cp_group) == dist.Backend.NCCL
 
         self.cp_rank = dist.get_rank(cp_group)
         self.cp_size = dist.get_world_size(cp_group)
         self.cp_group = cp_group
+        self.cp_mesh = cp_mesh
         self.shard_seqlen_q = dispatch_meta_q.shard_seqlen
         self.shard_seqlen_k = dispatch_meta_k.shard_seqlen
         self.high_bandwith_domain_size = high_bandwith_domain_size
@@ -2195,6 +2198,7 @@ class DistAttnSolver:
             dst_indices_list=dst_indices_list,
             src_index_list=src_index_list,
             world_size=self.cp_size,
+            device_mesh=self.cp_mesh,
         )
 
         return group_collective_arg

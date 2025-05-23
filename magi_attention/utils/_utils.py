@@ -14,6 +14,7 @@
 
 import functools
 import hashlib
+import os
 import random
 import warnings
 from contextlib import contextmanager
@@ -86,7 +87,49 @@ def write_rank(
             f.write(write_content)
 
 
+def setup_dist_env(
+    base_seed: int | None = None, seed_bias: Callable = lambda rank: 0
+) -> tuple[int, int, dist.ProcessGroup, str, int | None]:
+    """set up distributed environment with NCCL backend,
+    NOTE: the test script using this func to set up should be executed through torchrun
+    """
+    rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    torch.cuda.set_device(rank)
+
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+    )
+
+    manual_seed = None
+    if base_seed is not None:
+        manual_seed = base_seed + seed_bias(rank)
+        torch.manual_seed(manual_seed)
+
+    return rank, world_size, dist.group.WORLD, f"cuda:{rank}", manual_seed  # noqa: E231
+
+
+def clearup_dist_env() -> None:
+    dist.destroy_process_group()
+
+
 NestedIntList: TypeAlias = Union[list[int], tuple[int, ...], Sequence["NestedIntList"]]
+
+
+def seqlens2cu_seqlens(seqlens: list[int]) -> list[int]:
+    cu_seqlens = [0]
+    for seqlen in seqlens:
+        cu_seqlens.append(cu_seqlens[-1] + seqlen)
+    return cu_seqlens
+
+
+def cu_seqlens2seqlens(cu_seqlens: list[int]) -> list[int]:
+    seqlens = []
+    for i in range(1, len(cu_seqlens)):
+        seqlens.append(cu_seqlens[i] - cu_seqlens[i - 1])
+    return seqlens
 
 
 @nvtx.instrument_nvtx
