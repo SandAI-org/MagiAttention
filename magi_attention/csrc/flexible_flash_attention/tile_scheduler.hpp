@@ -468,7 +468,7 @@ public:
                     int next_cu_seqlen = __shfl_down_sync(0xffffffff, cur_cu_seqlen, 1);
                     seqlen = next_cu_seqlen - cur_cu_seqlen;
                 } else if (params.q_ranges) {
-                    seqlen = params.q_ranges[2 * batch_idx + 1] - params.q_ranges[2 * batch_idx];
+                    seqlen = batch_idx <= params.num_batch ? params.q_ranges[2 * batch_idx + 1] - params.q_ranges[2 * batch_idx] : 0;
                 } else {
                     seqlen = params.seqlen;
                 }
