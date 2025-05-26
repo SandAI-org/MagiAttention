@@ -89,6 +89,8 @@ shells:
 - resume_from_checkpoint.sh: You can run this shell to train llama-1b model from megatron checkpoint.
 - run_llama_from_checkpoint.sh: You can run this shell to train llama-1b model from checkpoint converted from hugging face format.
 
+For more detail, you can refer to the code in this pr: https://github.com/SandAI-org/Megatron-LM-MagiAttention/pull/1.
+
 ### Experiments
 You can run ./magiattention_example/train_llama_1b_from_scratch.sh to train llama-1b from scratch with magiattention.
 training_settings:
