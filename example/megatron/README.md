@@ -2,8 +2,8 @@
 We fork a repo of megatron and provide an example for you to train llama-3-1b with magiattention with different cp size. You can refer to https://github.com/SandAI-org/Megatron-LM-MagiAttention/pull/1 for more details about how to prepare data, checkpoint, integrate magiattention and do experiments.
 
 
-### Experiments
-We compare the loss convergence curve of te context_parallel(ring_attention) and megatron by training llama-1b model from scratch.
+### Convergence Experiments
+We compare the loss convergence curve of te context_parallel(ring_attention) and magiattention by training llama-1b model from scratch.
 
 Training_settings:
 - dataset:  openwebtext(https://huggingface.co/datasets/Skylion007/openwebtext).
