@@ -57,10 +57,10 @@ For implementation details, more experimental results and future works, please v
 
 ## Roadmap ⛏️
 
+- [ ] Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*)
 - [ ] Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*)
-- [ ] Optimize `Flex-Flash-Attention` kernels to better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*)
-- [ ] Refactor `Distributed Attention Solver` to support all mask types with all kinds of overlap, as well as reduce CPU overhead for meta info calculation
-- [ ] Improve `Dispatch Solver` to reduce nessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*)
+- [ ] Refactor `Distributed Attention Solver` as well as `Flex-Flash-Attention` kernel arguments to support all mask types with all kinds of overlap, and reduce CPU overhead for meta info calculation
+- [ ] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*)
 - [ ] Build a comprehensive `CP Benchmark` to better compare the performance of different context parallel strategies under various mask patterns and other training configurations
 
 
