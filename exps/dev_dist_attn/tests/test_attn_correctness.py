@@ -287,7 +287,7 @@ class MyAttnTest(MultiProcessTestCase):
 
         device = torch.cuda.current_device()
         batch_size = 3
-        total_seqlen = 4096
+        total_seqlen = 4096*8
         h = 16
         d = 128
         dtype = torch.float16
@@ -295,7 +295,7 @@ class MyAttnTest(MultiProcessTestCase):
         qkv_format = "thd"
         deterministic = True
         dropout = 0.0
-        attn_mask_type = AttnMaskType.CAUSAL
+        attn_mask_type = AttnMaskType.FULL
         causal = attn_mask_type == AttnMaskType.CAUSAL
         attn_backend = AttnBackend.TE
 
@@ -427,5 +427,5 @@ class MyAttnTest(MultiProcessTestCase):
 
 
 if __name__ == "__main__":
-    test = MyAttnTest(AttnImpl.USP)
+    test = MyAttnTest(AttnImpl.ULYSSESS)
     test.test_attn()
