@@ -1,24 +1,31 @@
-## integrate megatron with magiattention
-We fork a repo of megatron and provide an example for you to train llama-3-1b with magiattention with different cp size. You can refer to https://github.com/SandAI-org/Megatron-LM-MagiAttention/pull/1 for more details about how to prepare data, checkpoint, integrate magiattention and do experiments.
+# Integrating Megatron with MagiAttention
+
+This repository provides an example of training the LLaMA-3B model using MagiAttention. For more details on data preparation, checkpoint setup, integration, and experimentation, please refer to the [MagiAttention experiments](https://github.com/SandAI-org/Megatron-LM-MagiAttention/pull/1).
+
+## Convergence Experiments
+
+We compared the loss convergence curves of TE Ring Attention and MagiAttention by training the LLaMA-1B model from scratch.
+
+### Training Settings
+
+| **Configuration**                 | **Value**                                                                                |
+| ----------------------------- | -------------------------------------------------------------------------------------------- |
+| **Dataset**                   | [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext)                        |
+| **Model Size**                | LLaMA-1B                                                                                     |
+| **Number of Layers**          | 16                                                                                           |
+| **Hidden Size**               | 2048                                                                                         |
+| **Number of Attention Heads** | 32                                                                                           |
+| **Group Query Attention**     | Enabled                                                                                      |
+| **Number of Query Groups**    | 8                                                                                            |
+| **Sequence Length**           | 8192                                                                                         |
+| **Context Parallel Size**     | CP1/2/4/8 (MagiAttention vs. TE Ring Attention) with a global batch size of 16               |
+| **Training Iterations**       | 100,000                                                                                      |
 
 
-### Convergence Experiments
-We compare the loss convergence curve of te context_parallel(ring_attention) and magiattention by training llama-1b model from scratch.
+### Results
 
-Training_settings:
-- dataset:  openwebtext(https://huggingface.co/datasets/Skylion007/openwebtext).
-- model-size: llama-1b
-    - num-layers: 16
-    - hidden-size: 2048
-    - num-attention-heads: 32
-    - group-query-attention
-    - num-query-groups: 8
-- seqlen: 8192
-- context_parallel_size: cp1/2/4/8(magiattention vs te ring attention) with global batch size 16.
-- train_iters: 100000
+MagiAttention aligns well with TE Ring Attention.
 
-Results:
-**MagiAttention aligns well with te ring attention.**
- ![alt text](./results.png)
+![Results](./results.png)
 
-Feel free to open any issue in [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention) repo if you have any question!
+Feel free to open an issue in the [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention) repository if you have any questions.
