@@ -1168,50 +1168,14 @@ def _group_cast_collective_hier(
         **kwargs,
     )
 
-    # --------      pre-init output buffer for all steps       -------- #
+    # --------      prepare a2a output buffer for 2nd step       -------- #
 
     output_other_shape = output_tensor.shape[1:]
-    a2a_output_pre_intra, a2a_output_post_intra = torch.split(
-        output_tensor,
-        [output_seqlen_pre_intra, output_seqlen_post_intra],
-        dim=0,
-    )
     a2a_output_inter = torch.empty(
         size=[output_seqlen_inter, *output_other_shape],
         dtype=input_tensor.dtype,
         device=input_tensor.device,
     )
-    a2a_input_post_intra = torch.empty(
-        size=[a2a_input_seqlen_post_intra, *output_other_shape],
-        dtype=input_tensor.dtype,
-        device=input_tensor.device,
-    )
-
-    # --------      prepare a2a input buffer for 1st step       -------- #
-
-    a2a_input_pre_intra = range_gather(
-        input=input_tensor,
-        **perm_range_gather_kwargs_pre_intra,
-    )
-
-    # --------      apply a2a for 1st step       -------- #
-
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output_pre_intra.shape=} | "
-            f"{a2a_input_pre_intra.shape=} | "
-            f"{a2a_output_split_size_pre_intra=} | "
-            f"{a2a_input_split_size_pre_intra=}"
-        )
-    ):
-        work_pre_intra = dist.all_to_all_single(
-            output=a2a_output_pre_intra,
-            input=a2a_input_pre_intra,
-            output_split_sizes=a2a_output_split_size_pre_intra,
-            input_split_sizes=a2a_input_split_size_pre_intra,
-            group=intra_group,
-            async_op=async_op,
-        )
 
     # --------      prepare a2a input buffer for 2nd step       -------- #
 
@@ -1239,12 +1203,54 @@ def _group_cast_collective_hier(
             async_op=async_op,
         )
 
+    # --------      prepare a2a output buffer for 1st/3rd step     -------- #
+
+    a2a_output_pre_intra, a2a_output_post_intra = torch.split(
+        output_tensor,
+        [output_seqlen_pre_intra, output_seqlen_post_intra],
+        dim=0,
+    )
+
+    # --------      prepare a2a input buffer for 1st step     -------- #
+
+    a2a_input_pre_intra = range_gather(
+        input=input_tensor,
+        **perm_range_gather_kwargs_pre_intra,
+    )
+
+    # --------      apply a2a for 1st step       -------- #
+
+    with nvtx.add_nvtx_event(
+        (
+            f"{a2a_output_pre_intra.shape=} | "
+            f"{a2a_input_pre_intra.shape=} | "
+            f"{a2a_output_split_size_pre_intra=} | "
+            f"{a2a_input_split_size_pre_intra=}"
+        )
+    ):
+        work_pre_intra = dist.all_to_all_single(
+            output=a2a_output_pre_intra,
+            input=a2a_input_pre_intra,
+            output_split_sizes=a2a_output_split_size_pre_intra,
+            input_split_sizes=a2a_input_split_size_pre_intra,
+            group=intra_group,
+            async_op=async_op,
+        )
+
+    # --------      prepare a2a input buffer for 3rd step     -------- #
+
+    a2a_input_post_intra = torch.empty(
+        size=[a2a_input_seqlen_post_intra, *output_other_shape],
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+
     side_stream.wait_stream(torch.cuda.default_stream())
     with torch.cuda.stream(side_stream):
         # --------      prepare a2a input buffer for 3rd step       -------- #
 
         work_inter.wait()
-        a2a_input_post_intra = range_gather(
+        a2a_input_post_intra_ = range_gather(
             input=a2a_output_inter,
             output=a2a_input_post_intra,
             **perm_range_gather_kwargs_post_intra,
@@ -1262,7 +1268,7 @@ def _group_cast_collective_hier(
         ):
             work_post_intra = dist.all_to_all_single(
                 output=a2a_output_post_intra,
-                input=a2a_input_post_intra,
+                input=a2a_input_post_intra_,
                 output_split_sizes=a2a_output_split_size_post_intra,
                 input_split_sizes=a2a_input_split_size_post_intra,
                 group=intra_group,
