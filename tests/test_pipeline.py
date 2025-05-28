@@ -849,6 +849,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             total_v.grad,
         )
 
+        # -----   init error message list   ---- #
+
+        err_msg_list: list[str] = []
+
         # -----   assert close for fwd out   ---- #
 
         # fa style with Linf norm
@@ -856,11 +860,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         out_ref_norm = calc_inf_norm(
             total_out_ref_low_precision, total_out_ref_high_precision
         )
-        self.assertLessEqual(
-            out_norm,
-            norm_rtol_ratio * out_ref_norm,
-            msg=f"For {test_case=}: {out_norm=} should be no greater than {norm_rtol_ratio}x of {out_ref_norm=}",
-        )
+        try:
+            self.assertLessEqual(
+                out_norm,
+                norm_rtol_ratio * out_ref_norm,
+                msg=f"For {test_case=}: {out_norm=} should be no greater than {norm_rtol_ratio}x of {out_ref_norm=}",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
         o_thres = self._extract_mismatch_threshold_ref(
@@ -870,14 +877,17 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             rtol=o_rtol,
             mismatch_thres_ratio=mismatch_thres_ratio,
         )
-        magi_attention.testing.assert_close(
-            total_out,
-            total_out_ref_high_precision,
-            atol=o_atol,
-            rtol=o_rtol,
-            mismatch_threshold=o_thres,
-            test_case=f"{test_case} => o",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                total_out,
+                total_out_ref_high_precision,
+                atol=o_atol,
+                rtol=o_rtol,
+                mismatch_threshold=o_thres,
+                test_case=f"{test_case} => o",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # -----   assert close for bwd dq   ---- #
 
@@ -900,14 +910,17 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             rtol=dq_rtol,
             mismatch_thres_ratio=mismatch_thres_ratio,
         )
-        magi_attention.testing.assert_close(
-            grad_total_q,
-            grad_total_q_ref_high_precision,
-            atol=dq_atol,
-            rtol=dq_rtol,
-            mismatch_threshold=dq_thres,
-            test_case=f"{test_case} => dq",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                grad_total_q,
+                grad_total_q_ref_high_precision,
+                atol=dq_atol,
+                rtol=dq_rtol,
+                mismatch_threshold=dq_thres,
+                test_case=f"{test_case} => dq",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # -----   assert close for bwd dk   ---- #
 
@@ -930,14 +943,17 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             rtol=dk_rtol,
             mismatch_thres_ratio=mismatch_thres_ratio,
         )
-        magi_attention.testing.assert_close(
-            grad_total_k,
-            grad_total_k_ref_high_precision,
-            atol=dk_atol,
-            rtol=dk_rtol,
-            mismatch_threshold=dk_thres,
-            test_case=f"{test_case} => dk",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                grad_total_k,
+                grad_total_k_ref_high_precision,
+                atol=dk_atol,
+                rtol=dk_rtol,
+                mismatch_threshold=dk_thres,
+                test_case=f"{test_case} => dk",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # -----   assert close for bwd dv   ---- #
 
@@ -960,14 +976,22 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             rtol=dv_rtol,
             mismatch_thres_ratio=mismatch_thres_ratio,
         )
-        magi_attention.testing.assert_close(
-            grad_total_v,
-            grad_total_v_ref_high_precision,
-            atol=dv_atol,
-            rtol=dv_rtol,
-            mismatch_threshold=dv_thres,
-            test_case=f"{test_case} => dv",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                grad_total_v,
+                grad_total_v_ref_high_precision,
+                atol=dv_atol,
+                rtol=dv_rtol,
+                mismatch_threshold=dv_thres,
+                test_case=f"{test_case} => dv",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
+
+        # -----   raise error if any error occurs   ---- #
+
+        if err_msg_list:
+            raise AssertionError("\n\n".join(err_msg_list))
 
     def _extract_mismatch_threshold_ref(
         self,

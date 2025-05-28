@@ -1004,45 +1004,66 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             total_v.grad,
         )
 
+        # -----   init error message list   ---- #
+
+        err_msg_list: list[str] = []
+
         # -----   assert close for fwd out   ---- #
 
-        magi_attention.testing.assert_close(
-            total_out,
-            total_out_ref_high_precision,
-            atol=o_atol,
-            rtol=o_rtol,
-            test_case=f"{test_case} => o",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                total_out,
+                total_out_ref_high_precision,
+                atol=o_atol,
+                rtol=o_rtol,
+                test_case=f"{test_case} => o",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # -----   assert close for bwd dq   ---- #
 
-        magi_attention.testing.assert_close(
-            grad_total_q,
-            grad_total_q_ref_high_precision,
-            atol=dq_atol,
-            rtol=dq_rtol,
-            test_case=f"{test_case} => dq",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                grad_total_q,
+                grad_total_q_ref_high_precision,
+                atol=dq_atol,
+                rtol=dq_rtol,
+                test_case=f"{test_case} => dq",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # -----   assert close for bwd dk   ---- #
 
-        magi_attention.testing.assert_close(
-            grad_total_k,
-            grad_total_k_ref_high_precision,
-            atol=dk_atol,
-            rtol=dk_rtol,
-            test_case=f"{test_case} => dk",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                grad_total_k,
+                grad_total_k_ref_high_precision,
+                atol=dk_atol,
+                rtol=dk_rtol,
+                test_case=f"{test_case} => dk",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # -----   assert close for bwd dv   ---- #
 
-        magi_attention.testing.assert_close(
-            grad_total_v,
-            grad_total_v_ref_high_precision,
-            atol=dv_atol,
-            rtol=dv_rtol,
-            test_case=f"{test_case} => dv",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                grad_total_v,
+                grad_total_v_ref_high_precision,
+                atol=dv_atol,
+                rtol=dv_rtol,
+                test_case=f"{test_case} => dv",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
+
+        # -----   raise error if any error occurs   ---- #
+
+        if err_msg_list:
+            raise AssertionError("\n\n".join(err_msg_list))
 
 
 class TestPipelineSDPAWithWorldSize2(TestPipelineSDPABaseWithWorldSize1):
