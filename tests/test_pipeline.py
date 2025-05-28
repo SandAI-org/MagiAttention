@@ -896,11 +896,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         dq_ref_norm = calc_inf_norm(
             grad_total_q_ref_low_precision, grad_total_q_ref_high_precision
         )
-        self.assertLessEqual(
-            dq_norm,
-            norm_rtol_ratio * dq_ref_norm,
-            msg=f"For {test_case=}: {dq_norm=} should be no greater than {norm_rtol_ratio}x of {dq_ref_norm=}",
-        )
+        try:
+            self.assertLessEqual(
+                dq_norm,
+                norm_rtol_ratio * dq_ref_norm,
+                msg=f"For {test_case=}: {dq_norm=} should be no greater than {norm_rtol_ratio}x of {dq_ref_norm=}",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
         dq_thres = self._extract_mismatch_threshold_ref(
@@ -929,11 +932,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         dk_ref_norm = calc_inf_norm(
             grad_total_k_ref_low_precision, grad_total_k_ref_high_precision
         )
-        self.assertLessEqual(
-            dk_norm,
-            norm_rtol_ratio * dk_ref_norm,
-            msg=f"For {test_case=}: {dk_norm=} should be no greater than {norm_rtol_ratio}x of {dk_ref_norm=}",
-        )
+        try:
+            self.assertLessEqual(
+                dk_norm,
+                norm_rtol_ratio * dk_ref_norm,
+                msg=f"For {test_case=}: {dk_norm=} should be no greater than {norm_rtol_ratio}x of {dk_ref_norm=}",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
         dk_thres = self._extract_mismatch_threshold_ref(
@@ -962,11 +968,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         dv_ref_norm = calc_inf_norm(
             grad_total_v_ref_low_precision, grad_total_v_ref_high_precision
         )
-        self.assertLessEqual(
-            dv_norm,
-            norm_rtol_ratio * dv_ref_norm,
-            msg=f"For {test_case=}: {dv_norm=} should be no greater than {norm_rtol_ratio}x of {dv_ref_norm=}",
-        )
+        try:
+            self.assertLessEqual(
+                dv_norm,
+                norm_rtol_ratio * dv_ref_norm,
+                msg=f"For {test_case=}: {dv_norm=} should be no greater than {norm_rtol_ratio}x of {dv_ref_norm=}",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
         dv_thres = self._extract_mismatch_threshold_ref(
