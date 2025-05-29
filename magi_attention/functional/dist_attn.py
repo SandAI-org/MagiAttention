@@ -22,6 +22,7 @@ import torch.nn.functional as F
 import magi_attention
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.comm.work import WorkWithPostProcessFn
+from magi_attention.common.range_op import range_fill_
 from magi_attention.common.ranges import NaiveRanges
 from magi_attention.meta.collection import AttnCalcMeta, CommMeta
 from magi_attention.utils import max_fp_dtype, nvtx, to_higher_fp_dtype
@@ -155,9 +156,18 @@ def result_correction(
 def out_zero_fill_correction(
     out: torch.Tensor,
     out_zero_fill_ranges: NaiveRanges,
+    use_range_fill: bool = True,
+    **kwargs,
 ) -> torch.Tensor:
-    for fill_start, fill_end in out_zero_fill_ranges:
-        out[fill_start:fill_end].fill_(0)
+    if use_range_fill:
+        out = range_fill_(
+            input=out,
+            val=0.0,
+            **kwargs,
+        )
+    else:  # FIXME: when range fill is stable, we can remove this old branch
+        for fill_start, fill_end in out_zero_fill_ranges:
+            out[fill_start:fill_end].fill_(0)
 
     return out
 
@@ -344,7 +354,15 @@ class DistFlashAttnRuntime:
 
                 # fill output with zero indexed by "hole" q ranges
                 # TODO: put this logic into kernel
-                out_zero_fill_correction(out, attn_arg.out_zero_fill_ranges)
+                out_zero_fill_correction(
+                    out=out,
+                    out_zero_fill_ranges=attn_arg.out_zero_fill_ranges,
+                    # FIXME: this is still an experimental feature,
+                    # we should remove this flag in the future
+                    # when range fill is stable
+                    use_range_fill=True,
+                    **attn_arg.out_zero_range_fill_kwargs,
+                )
 
         return out, lse, skip_attn
 

@@ -18,6 +18,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
@@ -85,6 +86,7 @@ INTER_NODE_COMM_COST_FACTOR = (
 )
 
 
+# TODO: merge this test script with `test_magi_attn_interface.py`
 class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
@@ -101,6 +103,26 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # NOTE: test using sdpa backend with fp64 dtype support
         os.environ["MAGI_ATTENTION_SDPA_BACKEND"] = "1"
+
+        # -----    set up for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable() and self.world_size in (
+            4,
+            6,
+            8,
+        ):
+            world_size_inter_node, world_size_intra_node = {
+                4: (2, 2),
+                6: (3, 2),
+                8: (2, 4),
+            }[self.world_size]
+            self.device_mesh = init_device_mesh(
+                device_type="cuda",
+                mesh_shape=(world_size_inter_node, world_size_intra_node),
+                mesh_dim_names=("inter", "intra"),
+            )
+        else:
+            self.device_mesh = None
 
     @property
     def process_group(self):
@@ -761,6 +783,16 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # thus we always enable sanity check mode
         assert magi_attention.is_sanity_check_enable()
 
+        # -----    skip for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable():
+            if self.world_size not in (4, 6, 8):
+                # skip for invalid world size
+                # when hierarchical comm is enabled
+                return
+            if high_bandwith_domain_size > 1:
+                return
+
         # -----    construct test case name   ---- #
 
         assert (
@@ -829,8 +861,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             is_q_permutable=True,
             is_k_permutable=True,
             dist_attn_config=dist_attn_config,
+            cp_mesh=self.device_mesh,
         )
-        # HACK: double cp group for kv/dkv
+        # HACK: seperate cp group for dkv group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_dkv = self.nccl_groups[1]
 
         # -----   init global qkv   ---- #
@@ -971,45 +1004,66 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             total_v.grad,
         )
 
+        # -----   init error message list   ---- #
+
+        err_msg_list: list[str] = []
+
         # -----   assert close for fwd out   ---- #
 
-        magi_attention.testing.assert_close(
-            total_out,
-            total_out_ref_high_precision,
-            atol=o_atol,
-            rtol=o_rtol,
-            test_case=f"{test_case} => o",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                total_out,
+                total_out_ref_high_precision,
+                atol=o_atol,
+                rtol=o_rtol,
+                test_case=f"{test_case} => o",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # -----   assert close for bwd dq   ---- #
 
-        magi_attention.testing.assert_close(
-            grad_total_q,
-            grad_total_q_ref_high_precision,
-            atol=dq_atol,
-            rtol=dq_rtol,
-            test_case=f"{test_case} => dq",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                grad_total_q,
+                grad_total_q_ref_high_precision,
+                atol=dq_atol,
+                rtol=dq_rtol,
+                test_case=f"{test_case} => dq",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # -----   assert close for bwd dk   ---- #
 
-        magi_attention.testing.assert_close(
-            grad_total_k,
-            grad_total_k_ref_high_precision,
-            atol=dk_atol,
-            rtol=dk_rtol,
-            test_case=f"{test_case} => dk",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                grad_total_k,
+                grad_total_k_ref_high_precision,
+                atol=dk_atol,
+                rtol=dk_rtol,
+                test_case=f"{test_case} => dk",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         # -----   assert close for bwd dv   ---- #
 
-        magi_attention.testing.assert_close(
-            grad_total_v,
-            grad_total_v_ref_high_precision,
-            atol=dv_atol,
-            rtol=dv_rtol,
-            test_case=f"{test_case} => dv",
-        )
+        try:
+            magi_attention.testing.assert_close(
+                grad_total_v,
+                grad_total_v_ref_high_precision,
+                atol=dv_atol,
+                rtol=dv_rtol,
+                test_case=f"{test_case} => dv",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
+
+        # -----   raise error if any error occurs   ---- #
+
+        if err_msg_list:
+            raise AssertionError("\n\n".join(err_msg_list))
 
 
 class TestPipelineSDPAWithWorldSize2(TestPipelineSDPABaseWithWorldSize1):
