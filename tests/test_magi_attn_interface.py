@@ -558,7 +558,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 batch_size, attn_config_["total_seqlen_q"] // batch_size
             )
 
-            assert self.device_mesh is not None
             x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
                 x,
                 cu_seqlens_q,
