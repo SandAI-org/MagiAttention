@@ -428,10 +428,10 @@ public:
         }
 
         CUTLASS_DEVICE
-        cute::tuple<int32_t, int32_t, int32_t, int32_t>
+        cute::tuple<int32_t, int32_t, int32_t>
         get_block_coord(Params const& params) const {
             if constexpr (!Split) {
-                return {block, bidh, bidb, 0 /*split_idx*/};
+                return {block, bidh, bidb};
             } else {
                 // the top 8 bits of bidh store num_splits and the next 8 bits store split_idx
                 // reinterpret_cast to uint32_t to make sure we're not doing sign extension when we shift
@@ -445,7 +445,7 @@ public:
                 // if (threadIdx.x == 128) {
                 //     printf("blockIdx.x = %d, bidb = %d, bidh = %d, bidh_actual = %d, split_idx = %d\n", blockIdx.x, bidb, bidh, bidh_actual, split_idx);
                 // }
-                return {block, bidh_actual, bidb, split_idx};
+                return {block, bidh_actual, bidb};
             }
         }
     };

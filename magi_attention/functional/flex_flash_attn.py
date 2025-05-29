@@ -51,59 +51,24 @@ def _flex_flash_attn_forward(
         # FIXME: This logic should be written in the cuda kernel, this is a temporary workaround
         ttk, nh, hd = q.shape
         out = torch.zeros_like(q)
-        out_accum = torch.zeros_like(q, dtype=torch.float32)
         softmax_lse = torch.empty(nh, ttk, dtype=torch.float32)
         softmax_lse.fill_(-float("inf"))
     else:
-        out, out_accum, softmax_lse = flexible_flash_attention_cuda.fwd(
+        out, softmax_lse = flexible_flash_attention_cuda.fwd(
             q,
             k,
             v,
-            None,  # k_new, v_new
-            None,
-            None,  # qv
-            None,  # out
             q_ranges,
             k_ranges,
-            None,  # cu_seqlens_q
-            None,  # cu_seqlens_k
-            None,  # cu_seqlens_k_new
-            None,  # seqused_q
-            None,  # seqused_k
             max_seqlen_q,
             max_seqlen_k,
             attn_type_map,
-            None,  # page_table, kv_batch_idx, leftpad_k,
-            None,
-            None,
-            None,  # rotary_cos, rotary_sin, seqlens_rotary
-            None,
-            None,
-            None,  # q_descale, k_descale, v_descale
-            None,
-            None,
             softmax_scale,
-            False,  # causal
-            -1,  # window_size[0]
-            -1,  # window_size[1]
             softcap,
-            True,  # rotary_interleaved
-            None,  # scheduler_metadata
-            1,  # num_splits
-            None,  # pack_gqa
             sm_margin,
             disable_fwd_atomic_reduction,
+            None,
         )
-
-    if disable_fwd_atomic_reduction:
-        out = out
-    else:
-        out = out_accum
-
-    if return_dtype is None:
-        out = out.to(q.dtype)
-    else:
-        out = out.to(return_dtype)
 
     return out, softmax_lse
 

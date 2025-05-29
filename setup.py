@@ -477,7 +477,7 @@ if not SKIP_CUDA_BUILD:
     DISABLE_APPENDKV = True
     DISABLE_SPLIT = True
     DISABLE_FP16 = False
-    DISABLE_BACKWARD = False
+    DISABLE_BACKWARD = True
     DISABLE_SOFTCAP = False
     DISABLE_VARLEN = False
     DISABLE_CLUSTER = False
@@ -523,7 +523,7 @@ if not SKIP_CUDA_BUILD:
         + ([192] if not DISABLE_HDIM192 else [])
         + ([256] if not DISABLE_HDIM256 else [])
     )
-    HEAD_DIMENSIONS_FWD = ["all", "diff"]
+    HEAD_DIMENSIONS_FWD = ["all"]
     HEAD_DIMENSIONS_FWD_SM80 = HEAD_DIMENSIONS_BWD
     SPLIT = [""] + (["_split"] if not DISABLE_SPLIT else [])
     PAGEDKV = [""] + (["_paged"] if not DISABLE_PAGEDKV else [])
@@ -569,9 +569,10 @@ if not SKIP_CUDA_BUILD:
     )
     if not DISABLE_SPLIT:
         sources += [f"{ffa_dir_rel}/flash_fwd_combine.cu"]
-    sources += [f"{ffa_dir_rel}/flash_prepare_scheduler.cu"]
     nvcc_flags = [
         "-O3",
+        "-Xptxas",
+        "-v",
         "-std=c++17",
         "--ftemplate-backtrace-limit=0",  # To debug template code
         "--use_fast_math",

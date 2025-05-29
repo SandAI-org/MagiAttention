@@ -61,7 +61,7 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
     using SeqlenInfo_t = flash::SeqlenInfoQK<Varlen, kBlockM>;
-    using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, Is_causal, Is_local>;
+    using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN>;
 
     static_assert(ArchTag::kMinComputeCapability >= 90);
     static_assert(get<0>(ClusterShape{}) == 1 && get<2>(ClusterShape{}) == 1);
@@ -854,7 +854,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdQgdQaccum = r2s_thr_copy_dQaccum.partition_D(gdQaccum);
         // if (blockIdx.x == 0 && threadIdx.x == 128) { print(mdQaccum); printf("\n"); print(gdQaccum_); printf("\n"); print(gdQaccum); printf("\n"); print(tdQgdQaccum); printf("\n"); }
 
-        flash::Mask<kBlockM, kBlockN, false /*PackGQA*/, TiledMmaSdP, SdP_swapAB> mask(
+        flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask(
             thread_idx, seqlen_q, seqlen_k, params.window_size_left, window_size_right, 0 /*sink_token_length*/,
             params.qhead_per_khead_divmod
         );

@@ -111,7 +111,7 @@ CUTLASS_DEVICE auto convert_layout_acc_rowcol(Layout0 acc_layout) {
         if constexpr (!Transposed) {
             return make_layout(make_layout(get<0, 1>(l), get<1>(l)), make_layout(get<0, 0>(l), get<0, 2>(l), get<2>(l)));
         } else {
-             return make_layout(make_layout(get<0, 0>(l), get<0, 2>(l), get<2>(l)), make_layout(get<0, 1>(l), get<1>(l)));
+            return make_layout(make_layout(get<0, 0>(l), get<0, 2>(l), get<2>(l)), make_layout(get<0, 1>(l), get<1>(l)));
         }
 
     } else {  // SM80

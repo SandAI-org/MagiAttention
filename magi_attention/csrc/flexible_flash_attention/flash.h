@@ -29,7 +29,7 @@ struct Qkv_params {
     index_t v_dim_stride;
 
     // The number of heads.
-    int h, h_k;
+    int h_qo, h_kv;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -63,7 +63,7 @@ struct Flash_fwd_params : public Qkv_params {
 
     // The dimensions.
     // b = q_ranges.shape[0]; seqlen_q: max_seqlen_q, seqlen_k: max_seqlen_k
-    int b, seqlen_q, seqlen_k, seqlen_knew, d, seqlen_q_rounded, seqlen_k_rounded, d_rounded, rotary_dim;
+    int b, max_seqlen_q, max_seqlen_k, max_seqlen_knew, d, max_seqlen_q_rounded, max_seqlen_k_rounded, d_rounded, rotary_dim;
     int total_q, total_k, total_knew;
     int b_k;  // When having KV cache and with cache_batch_idx, K & V might have larger batch size than Q
     int dv, dv_rounded;  // For the case where V headdim is different from Q/K headdim
@@ -151,6 +151,7 @@ struct Flash_fwd_params : public Qkv_params {
     bool is_e4m3;
     bool is_causal;
     bool is_local;
+    bool is_fp32_out;
 
     bool is_rotary_interleaved;
     bool disable_fwd_atomic_reduction;
@@ -217,10 +218,7 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int Arch, typename T, int kHeadDim, int kHeadDimV, bool Split, bool PagedKVNonTMA, bool Has_softcap, bool PackGQA>
+template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap>
 void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
-void prepare_varlen_num_blocks(Flash_fwd_params &params, cudaStream_t stream, bool packgqa, int blockM, int blockN, bool enable_pdl);
-template <int Arch, typename T, int kHeadDim, bool Has_softcap>
-void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
-template <typename T, typename Tpartial, int kBlockK>
-void run_mha_fwd_combine_(Flash_fwd_params &params, cudaStream_t stream, bool enable_pdl);
+// template <int Arch, typename T, int kHeadDim, bool Has_softcap>
+// void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
