@@ -125,63 +125,38 @@ You can refer to the magi_attention/api/magi_attn_interface.py for more informat
 
 flex_flash_attention(kernel):
 ```python
-bsz=4
-seqlen=128
-x = torch.randn(    # input x with shape ((bzs, seqlen), h)
-            bsz * seqlen,
-            h,   # hidden_size
-            device=device,
-            dtype=dtype,
-            requires_grad = True
-        )
-q_ranges=AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [128, 256],
-                        [256, 384],
-                        [384, 512],
-                    ]
-                ),
-k_ranges=AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [0, 256],
-                        [0, 384],
-                        [0, 512],
-                    ]
-                ),
-max_seqlen_q=512
-max_seqlen_k=512
-attn_type_map=torch.tensor([0， 1， 2, 3], device=device)  # we support different mask type for different qk ranges.
-'''
-attn type map:
-0: full attention
-1: causal attention
-2: inverse causal attention
-3: bidirectional causal attention
-for more information about attn mask type, please refer to our blog:
-https://sandai-org.github.io/MagiAttention/
-'''
+from magi_attention.api import flex_flash_attn_func
 
-q, k, v = q_proj(x), k_proj(x), v_proj(x)  # q with shape(s, nheads, nd), k with shape(s, nheads_kv, nd), v with shape(s, nheads_kv, nd)
+# --- Define Attention Structure ---
+# Shape: [num_ranges, 2]
+q_ranges_tensor = torch.tensor([[0, 100], [100, 250]], device=device, dtype=torch.int32)
+k_ranges_tensor = torch.tensor([[0, 100], [0, 250]], device=device, dtype=torch.int32)
 
-# do flex_flash_attn_func forward.
-out, _ = flex_flash_attn_func(
-        q,
-        k,
-        v,
-        q_ranges,
-        k_ranges,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        attn_type_map=attn_type_map,
-        disable_fwd_atomic_reduction=True,
-    )
+max_seqlen_q = 150 # Max length of any q_range (250-100 = 150)
+max_seqlen_k = 250 # Max length of any k_range (250-0 = 250)
 
-# generate g with same shape as out
-g = torch.randn(bsz * seqlen_q, nheads, nd, device=device, dtype=dtype)
-# do backward
-out.backward(g)
+# attn_type_map values:
+# 0: full attention
+# 1: causal attention (bottom-right aligned)
+# 2: inverse causal attention (top-left aligned)
+# 3: bidirectional causal attention (diagonal)
+# for more information about attn mask type, please refer to our blog:
+# https://sandai-org.github.io/MagiAttention/
+attn_type_map_tensor = torch.tensor([1, 0], device=device, dtype=torch.int32) # Causal for 1st, Full for 2nd
+
+# --- Forward Pass ---
+# disable_fwd_atomic_reduction=True can be used if q_ranges are guaranteed to be non-overlapping for performance.
+# If q_ranges might overlap (e.g. for specific sparse patterns not representable as disjoint blocks), set it to False.
+out_ffa, lse_ffa = flex_flash_attn_func(
+    q, k, v,
+    q_ranges=q_ranges_tensor,
+    k_ranges=k_ranges_tensor,
+    max_seqlen_q=max_seqlen_q,
+    max_seqlen_k=max_seqlen_k,
+    attn_type_map=attn_type_map_tensor,
+    softmax_scale=None, # Defaults to 1/sqrt(head_dim)
+    disable_fwd_atomic_reduction=True # Assuming q_ranges here are disjoint after any potential processing
+)
 
 ```
 
@@ -330,16 +305,17 @@ We provide an example of how to integrate magi_attention with fsdp2 in `example/
 
 In this example, we build a llama-1b model and apply fsdp2 with magi_attention as the parallelism strategy.
 
-- `example/torchnative/modeling_llama.py`: build llama model and integrate with magi_attention.
-- `example/torchnative/main.py`: main training loop.
+- `example/torch_native/modeling_llama.py`: build llama model and integrate with magi_attention.
+- `example/torch_native/main.py`: main training loop.
 
 </details>
 
 
 ### Examples to integrate with Megatron-LM
 
-Coming soon ...
+We create a new repository [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention/tree/magi_attention), forked from [Megatron-LM v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0), to provide an example of training the llama-1B model with Megatron-LM + MagiAttention. What's more, we train llama-1B model from scratch to show the correctness of convergence.
 
+For more information, you can refer to `example/megatron/README.md`.
 
 ## Documentation
 
