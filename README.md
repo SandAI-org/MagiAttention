@@ -128,6 +128,7 @@ flex_flash_attention(kernel):
 from magi_attention.api import flex_flash_attn_func
 
 # --- Define Attention Structure ---
+device='cuda'
 # Shape: [num_ranges, 2]
 q_ranges_tensor = torch.tensor([[0, 100], [100, 250]], device=device, dtype=torch.int32)
 k_ranges_tensor = torch.tensor([[0, 100], [0, 250]], device=device, dtype=torch.int32)
