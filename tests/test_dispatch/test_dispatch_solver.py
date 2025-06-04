@@ -18,6 +18,7 @@ from unittest import TestCase
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.meta.solver.dispatch_solver import (
     BSDispatchAlg,
+    DispatchData,
     DispatchJob,
     DispatchSolver,
     DPDispatchAlg,
@@ -52,11 +53,15 @@ class TestDispatchSolver(TestCase):
             workloads=job_workloads,
         )
 
+        dispatch_data: DispatchData = DispatchData(
+            jobs=jobs,
+            num_buckets=num_buckets,
+        )
+
         # --------------      solve       -------------- #
 
         solution = lb_solver.solve(
-            jobs=jobs,
-            num_buckets=num_buckets,
+            dispatch_data=dispatch_data,
         )
 
         # --------------      check       -------------- #
@@ -94,19 +99,21 @@ class TestDispatchSolver(TestCase):
             workloads=job_workloads,
         )
 
+        dispatch_data: DispatchData = DispatchData(
+            jobs=jobs,
+            num_buckets=num_buckets,
+        )
+
         # --------------      solve       -------------- #
 
         lb_solution = lb_solver.solve(
-            jobs=jobs,
-            num_buckets=num_buckets,
+            dispatch_data=dispatch_data,
         )
         dp_solution = dp_solver.solve(
-            jobs=jobs,
-            num_buckets=num_buckets,
+            dispatch_data=dispatch_data,
         )
         bs_solution = bs_solver.solve(
-            jobs=jobs,
-            num_buckets=num_buckets,
+            dispatch_data=dispatch_data,
         )
 
         # --------------      check       -------------- #
@@ -142,15 +149,18 @@ class TestDispatchSolver(TestCase):
             workloads=job_workloads,
         )
 
-        # --------------      solve       -------------- #
-
-        bs_solution = bs_solver.solve(
+        dispatch_data: DispatchData = DispatchData(
             jobs=jobs,
             num_buckets=num_buckets,
         )
+
+        # --------------      solve       -------------- #
+
+        bs_solution = bs_solver.solve(
+            dispatch_data=dispatch_data,
+        )
         minhp_solution = minhp_solver.solve(
-            jobs=jobs,
-            num_buckets=num_buckets,
+            dispatch_data=dispatch_data,
         )
 
         # --------------      check       -------------- #
@@ -195,15 +205,18 @@ class TestDispatchSolver(TestCase):
             affinities=job_affinities,
         )
 
-        # --------------      solve       -------------- #
-
-        minhp_solution = minhp_solver.solve(
+        dispatch_data: DispatchData = DispatchData(
             jobs=jobs,
             num_buckets=num_buckets,
         )
+
+        # --------------      solve       -------------- #
+
+        minhp_solution = minhp_solver.solve(
+            dispatch_data=dispatch_data,
+        )
         topphp_solution = topphp_solver.solve(
-            jobs=jobs,
-            num_buckets=num_buckets,
+            dispatch_data=dispatch_data,
         )
 
         # --------------      check       -------------- #
@@ -260,15 +273,18 @@ class TestDispatchSolver(TestCase):
             affinities=job_affinities,
         )
 
-        # --------------      solve       -------------- #
-
-        minhp_solution = minhp_solver.solve(
+        dispatch_data: DispatchData = DispatchData(
             jobs=jobs,
             num_buckets=num_buckets,
         )
+
+        # --------------      solve       -------------- #
+
+        minhp_solution = minhp_solver.solve(
+            dispatch_data=dispatch_data,
+        )
         topphp_solution = topphp_solver.solve(
-            jobs=jobs,
-            num_buckets=num_buckets,
+            dispatch_data=dispatch_data,
         )
 
         # --------------      check       -------------- #

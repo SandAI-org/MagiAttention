@@ -18,6 +18,7 @@ from magi_attention.meta.collection import DispatchMeta
 from magi_attention.meta.container import AttnBucket, AttnChunk, AttnSlice
 from magi_attention.meta.solver.dispatch_solver import (
     DispatchConfig,
+    DispatchData,
     DispatchJob,
     DispatchSolution,
     DispatchSolver,
@@ -290,9 +291,12 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
         workloads=attn_areas,  # type: ignore[arg-type]
         affinities=affinities,  # type: ignore[arg-type]
     )
-    dispatch_solution: DispatchSolution = dispatch_solver.solve(
+    dispatch_data: DispatchData = DispatchData(
         jobs=dispatch_jobs,
         num_buckets=cp_size,
+    )
+    dispatch_solution: DispatchSolution = dispatch_solver.solve(
+        dispatch_data=dispatch_data,
     )
     partitions = dispatch_solution.bucket_partitions
 
@@ -465,6 +469,7 @@ def _calc_self_attn_areas(
             if slice.k_range.seqlen > 0 and slice.area > 0:
                 # append this q slice to the current chunk except invalid slice
                 chunk.q_slices.append(slice)
+                chunk.sample_ids.append(cur_range_idx - 1)
                 slice_id += 1
 
         global_bucket.q_chunks.append(chunk)
