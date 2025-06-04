@@ -42,7 +42,7 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 NSYS_CMD="
 nsys profile \
     --force-overwrite true \
-    -o exp_ring_p2p_te_${TIMESTAMP}.nsys-rep \
+    -o exp_ring_p2p_fa3_${TIMESTAMP}.nsys-rep \
     --capture-range=cudaProfilerApi \
     $TORCHRUN_CMD
 "
