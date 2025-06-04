@@ -315,7 +315,7 @@ In this example, we build a llama-1b model and apply fsdp2 with magi_attention a
 
 ### Examples to integrate with Megatron-LM
 
-We create a new repository [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention/tree/magi_attention), forked from [Megatron-LM v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0), to provide an example of training the llama-1B model with Megatron-LM + MagiAttention. What's more, we train llama-1B model from scratch to show the correctness of convergence.
+We create a new repository [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention/tree/magi_attention), forked from [Megatron-LM v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0), to provide an example of training the llama-1B model with Megatron-LM + MagiAttention. What's more, we conducted an experiment training llama-3-1B model from scratch to show the correctness of convergence.
 
 For more information, you can refer to `example/megatron/README.md`.
 
