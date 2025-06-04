@@ -14,6 +14,7 @@
 
 import heapq
 import math
+import random
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -234,6 +235,128 @@ class ToppHeapDispatchAlg(DispatchAlg):
 
 
 @dataclass(frozen=True)
+class RandomSelectDispatchAlg(DispatchAlg):
+    """The config/meta info dataclass for the topp-heap dispatch algorithm"""
+
+    @property
+    def type(self) -> DispatchAlgType:
+        return DispatchAlgType.RANDOM_SELECT
+
+    @property
+    def is_optimal(self) -> bool:
+        """Whether the dispatch algorithm is optimal"""
+        return False
+
+    @property
+    def is_partitions_returned(self) -> bool:
+        """Whether the dispatch partitions are returned"""
+        return True
+
+    @property
+    def is_equal_num_workloads(self) -> bool:
+        """Whether the number of workloads of each bucket are equal"""
+        return True
+
+    @property
+    def is_affinity_considered(self) -> bool:
+        """Whether the affinity is considered"""
+        return False
+
+
+@dataclass(frozen=True)
+class SequentialDispatchAlg(DispatchAlg):
+    """The config/meta info dataclass for the topp-heap dispatch algorithm"""
+
+    @property
+    def type(self) -> DispatchAlgType:
+        return DispatchAlgType.SEQUENTIAL_SELECT
+
+    @property
+    def is_optimal(self) -> bool:
+        """Whether the dispatch algorithm is optimal"""
+        return False
+
+    @property
+    def is_partitions_returned(self) -> bool:
+        """Whether the dispatch partitions are returned"""
+        return True
+
+    @property
+    def is_equal_num_workloads(self) -> bool:
+        """Whether the number of workloads of each bucket are equal"""
+        return True
+
+    @property
+    def is_affinity_considered(self) -> bool:
+        """Whether the affinity is considered"""
+        return False
+
+
+@dataclass(frozen=True)
+class BatchToppHeapDispatchAlg(DispatchAlg):
+    """The config/meta info dataclass for the batch topp-heap dispatch algorithm"""
+
+    top_p: float = 0.0
+    num_of_select_chunk: int = 1
+
+    @property
+    def type(self) -> DispatchAlgType:
+        return DispatchAlgType.BATCH_TOPP_HEAP
+
+    @property
+    def is_optimal(self) -> bool:
+        """Whether the dispatch algorithm is optimal"""
+        return False
+
+    @property
+    def is_partitions_returned(self) -> bool:
+        """Whether the dispatch partitions are returned"""
+        return True
+
+    @property
+    def is_equal_num_workloads(self) -> bool:
+        """Whether the number of workloads of each bucket are equal"""
+        return True
+
+    @property
+    def is_affinity_considered(self) -> bool:
+        """Whether the affinity is considered"""
+        return True
+
+
+@dataclass(frozen=True)
+class SortedSequentialSelect(DispatchAlg):
+    """The config/meta info dataclass for the batch topp-heap dispatch algorithm"""
+
+    top_p: float = 0.0
+    num_of_select_chunk: int = 1
+
+    @property
+    def type(self) -> DispatchAlgType:
+        return DispatchAlgType.SORTED_SEQUENTIAL_SELECT
+
+    @property
+    def is_optimal(self) -> bool:
+        """Whether the dispatch algorithm is optimal"""
+        return False
+
+    @property
+    def is_partitions_returned(self) -> bool:
+        """Whether the dispatch partitions are returned"""
+        return True
+
+    @property
+    def is_equal_num_workloads(self) -> bool:
+        """Whether the number of workloads of each bucket are equal"""
+        return True
+
+    @property
+    def is_affinity_considered(self) -> bool:
+        """Whether the affinity is considered"""
+        return False
+
+
+@dataclass(frozen=True)
 class DispatchConfig:
     """The config dataclass for load-balanced dispatching"""
 
@@ -295,6 +418,13 @@ class SampleIDAffinity(BaseDispatchAffinity):
 
     def __init__(self):
         self.sample_id_cnt_dict = defaultdict(int)
+
+    @staticmethod
+    def from_list(ids: list[int]) -> "SampleIDAffinity":
+        affinity = SampleIDAffinity()
+        for id in ids:
+            affinity.add_sample_id(id)
+        return affinity
 
     def add_sample_id(self, sample_id: int) -> None:
         assert sample_id >= 0
@@ -416,6 +546,22 @@ class DispatchJob:
 
 
 @dataclass
+class DispatchData:
+    """The dispatch data dataclass, made of several data as follows:
+    1. jobs (list[DispatchJob]): the list of jobs to be dispatched in balance
+    2. num_buckets (int): the number of buckets, denoted as 'k' in any specific algorithm
+
+    Optional:
+    1. sample_areas (list[int]): the areas of each sample
+    """
+
+    jobs: list[DispatchJob]
+    num_buckets: int
+
+    sample_areas: list[int] | None = None
+
+
+@dataclass
 class DispatchSolution:
     """The dispatch solution dataclass, made of several info as follows:
     1. minimax_workload: the minimum maximum workload of all buckets.
@@ -450,6 +596,10 @@ class DispatchSolver(nn.Module):
             DispatchAlgType.MIN_HEAP: self._solve_with_minhp,
             DispatchAlgType.TOPP_HEAP: self._solve_with_topphp,
             DispatchAlgType.BACKTRACKING_PRUNING: self._solve_with_btp,
+            DispatchAlgType.RANDOM_SELECT: self._solve_with_random,
+            DispatchAlgType.SEQUENTIAL_SELECT: self._solve_with_sequential,
+            DispatchAlgType.BATCH_TOPP_HEAP: self._solve_with_batch_topphp,
+            DispatchAlgType.SORTED_SEQUENTIAL_SELECT: self._solve_with_sorted_ss,
         }[self.alg.type]
 
         # tmp values
@@ -462,8 +612,7 @@ class DispatchSolver(nn.Module):
 
     def solve(
         self,
-        jobs: list[DispatchJob],
-        num_buckets: int,
+        dispatch_data: DispatchData,
     ) -> DispatchSolution:
         """Dispatch jobs with workloads and optional affinities to 'num_buckets' buckets
         to make the workload of each bucket as balanced as possible
@@ -479,11 +628,10 @@ class DispatchSolver(nn.Module):
                 among them any two elements are mutually exclusive
         """
 
-        assert num_buckets > 0, "num_buckets should be greater than 0"
+        assert dispatch_data.num_buckets > 0, "num_buckets should be greater than 0"
 
         self.solve_func(
-            jobs=jobs,
-            num_buckets=num_buckets,
+            dispatch_data=dispatch_data,
             **asdict(self.alg),
         )
 
@@ -496,18 +644,20 @@ class DispatchSolver(nn.Module):
 
     def _solve_with_lb(
         self,
-        jobs: list[DispatchJob],
-        num_buckets: int,
+        dispatch_data: DispatchData,
         **kwargs,
     ) -> None:
         """Lower bound for the job partition to minimize the maximum workload
         NOTE: this algorithm is just to get the lower bound of the answer, which might be invalid
 
         Args:
-            jobs (list[DispatchJob]): the list of dispatch job
-            num_buckets (int): the number of buckets, by which the number of jobs should be divisible
+            dispatch_data (DispatchData): data config with dispatch params
             kwargs (dict | None): additional arguments
         """
+        # get dispatch jobs from data config
+        jobs: list[DispatchJob] = dispatch_data.jobs
+        num_buckets: int = dispatch_data.num_buckets
+
         # get the workload of each job
         workloads = [job.workload for job in jobs]
 
@@ -515,16 +665,14 @@ class DispatchSolver(nn.Module):
 
     def _solve_with_bs(
         self,
-        jobs: list[DispatchJob],
-        num_buckets: int,
+        dispatch_data: DispatchData,
         **kwargs,
     ) -> None:
         """Binary search for the job partition to minimize the maximum workload
         NOTE: this algorithm has no constraint on the number of jobs dispatched in each bucket
 
         Args:
-            jobs (list[DispatchJob]): the list of dispatch job
-            num_buckets (int): the number of buckets
+            dispatch_data (DispatchData): data config with dispatch params
             kwargs (dict | None): additional arguments
 
         Time complexity:
@@ -542,6 +690,10 @@ class DispatchSolver(nn.Module):
                 - n is the length of the jobs array
                 - and the space is mainly used by the recursive stack
         """
+
+        # get dispatch jobs from data config
+        jobs: list[DispatchJob] = dispatch_data.jobs
+        num_buckets: int = dispatch_data.num_buckets
 
         # get the workload of each job
         workloads = [job.workload for job in jobs]
@@ -573,8 +725,7 @@ class DispatchSolver(nn.Module):
 
     def _solve_with_dp(
         self,
-        jobs: list[DispatchJob],
-        num_buckets: int,
+        dispatch_data: DispatchData,
         **kwargs,
     ) -> None:
         """Dynamic programming for the job partition to minimize the maximum workload
@@ -582,8 +733,7 @@ class DispatchSolver(nn.Module):
         and it only returns the scalar answer of the maximum workload, w/o neither the partition or the workloads
 
         Args:
-            jobs (list[DispatchJob]): the list of dispatch job
-            num_buckets (int): the number of buckets
+            dispatch_data (DispatchData): data config with dispatch params
             kwargs (dict | None): additional arguments
 
         Time complexity:
@@ -605,6 +755,10 @@ class DispatchSolver(nn.Module):
                 - firstly of all, we need a sum array, which costs O(2**n)
                 - and a dp array, which costs O(2**n) if we do the state compression
         """
+
+        # get dispatch jobs from data config
+        jobs: list[DispatchJob] = dispatch_data.jobs
+        num_buckets: int = dispatch_data.num_buckets
 
         # get the workload of each job
         workloads = [job.workload for job in jobs]
@@ -643,8 +797,7 @@ class DispatchSolver(nn.Module):
 
     def _solve_with_btp(
         self,
-        jobs: list[DispatchJob],
-        num_buckets: int,
+        dispatch_data: DispatchData,
         **kwargs,
     ) -> None:
         """Backtrack pruning algorithm for the job partition to minimize the maximum workload,
@@ -652,10 +805,13 @@ class DispatchSolver(nn.Module):
         NOTE: the solution of this algorithm is optimal when the number of jobs dispatched in each bucket is same
 
         Args:
-            jobs (list[DispatchJob]): the list of dispatch job
-            num_buckets (int): the number of buckets
+            dispatch_data (DispatchData): data config with dispatch params
             kwargs (dict | None): additional arguments
         """
+
+        # get dispatch jobs from data config
+        jobs: list[DispatchJob] = dispatch_data.jobs
+        num_buckets: int = dispatch_data.num_buckets
 
         # get the workload of each job
         workloads = [job.workload for job in jobs]
@@ -736,8 +892,7 @@ class DispatchSolver(nn.Module):
 
     def _solve_with_minhp(
         self,
-        jobs: list[DispatchJob],
-        num_buckets: int,
+        dispatch_data: DispatchData,
         **kwargs,
     ) -> None:
         """Greedy algorithm using a min-heap for the job partition to minimize the maximum workload,
@@ -748,8 +903,7 @@ class DispatchSolver(nn.Module):
         the optimal solution is [8, 6, 2, 2] and [7, 5, 4, 2] all with total number 18
 
         Args:
-            jobs (list[DispatchJob]): the list of dispatch job
-            num_buckets (int): the number of buckets, by which the number of jobs should be divisible
+            dispatch_data (DispatchData): data config with dispatch params
             kwargs (dict | None): additional arguments
 
         Time complexity:
@@ -768,6 +922,9 @@ class DispatchSolver(nn.Module):
                 - the job array needs O(n) space
                 - the min-heap and other auxiliary data needs O(k) space
         """
+        # get dispatch jobs from data config
+        jobs: list[DispatchJob] = dispatch_data.jobs
+        num_buckets: int = dispatch_data.num_buckets
 
         # get the workload of each job
         workloads = [job.workload for job in jobs]
@@ -834,8 +991,7 @@ class DispatchSolver(nn.Module):
 
     def _solve_with_topphp(
         self,
-        jobs: list[DispatchJob],
-        num_buckets: int,
+        dispatch_data: DispatchData,
         **kwargs,
     ) -> None:
         """Greedy algorithm using a top-p min-heap for the job partition to minimize the maximum workload,
@@ -845,8 +1001,7 @@ class DispatchSolver(nn.Module):
         NOTE: this algorithm is not guaranteed to find the optimal solution
 
         Args:
-            jobs (list[DispatchJob]): the list of dispatch job
-            num_buckets (int): the number of buckets, by which the number of jobs should be divisible
+            dispatch_data (DispatchData): data config with dispatch params
             kwargs (dict | None): additional arguments, including:
                 1. top_p (float, optional): the top-p value, ranging from [0., 1.]
                 NOTE: this arg denotes the ratio of the utmost number of jobs fetched from the top of the min-heap each time
@@ -871,6 +1026,10 @@ class DispatchSolver(nn.Module):
                 - the min-heap and other auxiliary data needs O(k) space
                 - the affinity array needs O(m) space
         """
+
+        # get dispatch jobs from data config
+        jobs: list[DispatchJob] = dispatch_data.jobs
+        num_buckets: int = dispatch_data.num_buckets
 
         top_p: float = kwargs.get("top_p", 0.0)
         assert 0.0 <= top_p <= 1.0
@@ -985,6 +1144,321 @@ class DispatchSolver(nn.Module):
         self.bucket_partitions = [
             [sorted_indices[i] for i in p] for p in self.bucket_partitions
         ]
+
+    def _solve_with_random(
+        self,
+        dispatch_data: DispatchData,
+        **kwargs,
+    ) -> None:
+        # get dispatch jobs from data config
+        jobs: list[DispatchJob] = dispatch_data.jobs
+        num_buckets: int = dispatch_data.num_buckets
+
+        workloads = [job.workload for job in jobs]
+
+        # check the job number constraint
+        n = len(workloads)
+        assert (
+            n % num_buckets == 0
+        ), f"The number of jobs ({n}) should be divisible by k ({num_buckets}) for this algorithm."
+        bucket_num_limit = n // num_buckets
+
+        chunk_idx = list(range(len(jobs)))
+        random.shuffle(chunk_idx)
+
+        self.bucket_partitions = [
+            chunk_idx[i * bucket_num_limit : (i + 1) * bucket_num_limit]
+            for i in range(num_buckets)
+        ]
+
+        workload_per_bucket = [
+            [workloads[idx] for idx in partition]
+            for partition in self.bucket_partitions
+        ]
+        self.minimax_workload = max([sum(workload) for workload in workload_per_bucket])
+
+    def _solve_with_sequential(
+        self,
+        dispatch_data: DispatchData,
+        **kwargs,
+    ) -> None:
+        # get dispatch jobs from data config
+        jobs: list[DispatchJob] = dispatch_data.jobs
+        num_buckets: int = dispatch_data.num_buckets
+
+        workloads = [job.workload for job in jobs]
+
+        # check the job number constraint
+        n = len(workloads)
+        assert (
+            n % num_buckets == 0
+        ), f"The number of jobs ({n}) should be divisible by k ({num_buckets}) for this algorithm."
+        bucket_num_limit = n // num_buckets
+
+        chunk_idx = list(range(len(jobs)))
+
+        self.bucket_partitions = [
+            chunk_idx[i * bucket_num_limit : (i + 1) * bucket_num_limit]
+            for i in range(num_buckets)
+        ]
+
+        workload_per_bucket = [
+            [workloads[idx] for idx in partition]
+            for partition in self.bucket_partitions
+        ]
+        self.minimax_workload = max([sum(workload) for workload in workload_per_bucket])
+
+    def _solve_with_batch_topphp(
+        self,
+        dispatch_data: DispatchData,
+        **kwargs,
+    ) -> None:
+        # get dispatch jobs from data config
+        jobs: list[DispatchJob] = dispatch_data.jobs
+        num_buckets: int = dispatch_data.num_buckets
+
+        top_p: float = kwargs.get("top_p", 0.0)
+        num_of_select_chunk: int = kwargs.get("num_of_select_chunk", 1)
+        assert 0.0 <= top_p <= 1.0
+        assert num_of_select_chunk >= 1
+
+        # calcuate m
+        m = max(1, math.ceil(num_buckets * top_p))
+
+        # get the workload of each job
+        workloads = [job.workload for job in jobs]
+
+        # check the job number constraint
+        n = len(workloads)
+        assert (
+            n % num_buckets == 0
+        ), f"The number of jobs ({n}) should be divisible by k ({num_buckets}) for this algorithm."
+        bucket_num_limit = n // num_buckets
+
+        # get the affinity of each job
+        affinities = [job.affinity for job in jobs if job.affinity is not None]
+        assert (
+            affinities
+        ), "For top-p min-heap algorithm, we need the affinity for each job to be explicitly set."
+        affinity_class = type(
+            affinities[0]
+        )  # all the affinity should be of the same type, checked in self.solve() already
+
+        # sort workloads and affinities in descending order
+        sorted_indices = argsort(workloads, key=lambda x: -x)
+        workloads = [workloads[i] for i in sorted_indices]
+        affinities = [affinities[i] for i in sorted_indices]
+
+        # init the job partition and its workloads
+        bucket_nums = [0] * num_buckets
+        self.bucket_workloads = [0] * num_buckets
+        self.bucket_partitions = [[] for _ in range(num_buckets)]
+
+        # init the min-heap with size of k
+        # where each heap element is a tuple: (cur_workload, bucket_index, bucket_affinity)
+        heap = []
+        for bucket_idx in range(num_buckets):
+            heap.append((0.0, bucket_idx, affinity_class()))
+        heapq.heapify(heap)
+
+        bucket_iteration_times = (
+            len(workloads) + num_of_select_chunk - 1
+        ) // num_of_select_chunk
+
+        # define a helper function to assign a job to a bucket
+        # with their idxs and the new workload to update the heap
+        def _assign_job_to_bucket(
+            job_idx: int,
+            bucket_idx: int,
+            new_workload: float,
+            new_affinity: BaseDispatchAffinity,
+        ) -> None:
+            # assign the job to this bucket
+            self.bucket_partitions[bucket_idx].append(job_idx)
+            self.bucket_workloads[bucket_idx] = new_workload
+            bucket_nums[bucket_idx] += 1
+
+        for iteration in range(bucket_iteration_times):
+            # print(f"In interation {iteration}")
+            job_idx_start, job_idx_end = (
+                iteration * num_of_select_chunk,
+                min((iteration + 1) * num_of_select_chunk, len(workloads)),
+            )
+
+            top_p_bucket_idxs: list[int] = []
+            top_p_bucket_affinities: list[BaseDispatchAffinity] = []
+            top_p_bucket_cur_workloads: list[float] = []
+            num_of_chunks_can_store: int = 0
+            while (
+                heap
+            ):  # find the top-p buckets with the minimum workload that is not full to assign this job
+                cur_workload, bucket_idx, bucket_affinity = heapq.heappop(heap)
+                if bucket_nums[bucket_idx] < bucket_num_limit:
+                    top_p_bucket_idxs.append(bucket_idx)
+                    top_p_bucket_affinities.append(bucket_affinity)
+                    top_p_bucket_cur_workloads.append(cur_workload)
+                    num_of_chunks_can_store += (
+                        bucket_num_limit - bucket_nums[bucket_idx]
+                    )
+
+                if (
+                    len(top_p_bucket_idxs) == m
+                    and num_of_chunks_can_store >= num_of_select_chunk
+                ):
+                    break
+
+            # if no bucket is found for this job (which shouldn't happen), raise an error
+            if len(top_p_bucket_idxs) == 0:
+                raise RuntimeError(f"No bucket is found for the job when {bucket_idx=}")
+
+            for job_idx in range(job_idx_start, job_idx_end):
+                (job_workload, job_affinity) = (workloads[job_idx], affinities[job_idx])
+
+                # print(f"{job_idx=} {job_affinity=} {top_p_bucket_affinities=}")
+                closest_topp_idx = job_affinity.get_closest_affinity_idx(
+                    top_p_bucket_affinities
+                )
+
+                # update this closest bucket
+                closest_bucket_affinity = top_p_bucket_affinities[closest_topp_idx]
+                closest_bucket_affinity.update(job_affinity)
+                top_p_bucket_cur_workloads[closest_topp_idx] += job_workload
+
+                # assign the job to this closest bucket
+                _assign_job_to_bucket(
+                    job_idx=job_idx,
+                    bucket_idx=top_p_bucket_idxs[closest_topp_idx],
+                    new_workload=top_p_bucket_cur_workloads[closest_topp_idx],
+                    new_affinity=closest_bucket_affinity,
+                )
+
+                if bucket_nums[top_p_bucket_idxs[closest_topp_idx]] >= bucket_num_limit:
+                    heapq.heappush(
+                        heap,
+                        (
+                            top_p_bucket_cur_workloads[closest_topp_idx],
+                            top_p_bucket_idxs[closest_topp_idx],
+                            closest_bucket_affinity,
+                        ),
+                    )
+                    top_p_bucket_idxs.pop(closest_topp_idx)
+                    top_p_bucket_affinities.pop(closest_topp_idx)
+                    top_p_bucket_cur_workloads.pop(closest_topp_idx)
+
+            # push the other top-p buckets back into heap w/o updating
+            for topp_idx, (cur_workload, bucket_idx, bucket_affinity) in enumerate(
+                zip(
+                    top_p_bucket_cur_workloads,
+                    top_p_bucket_idxs,
+                    top_p_bucket_affinities,
+                )
+            ):
+                heapq.heappush(heap, (cur_workload, bucket_idx, bucket_affinity))
+
+        self.minimax_workload = max(self.bucket_workloads)
+        self.bucket_partitions = [
+            [sorted_indices[i] for i in p] for p in self.bucket_partitions
+        ]
+
+    def _solve_with_sorted_ss(
+        self,
+        dispatch_data: DispatchData,
+        **kwargs,
+    ) -> None:
+        # get dispatch jobs from data config
+        jobs: list[DispatchJob] = dispatch_data.jobs
+        num_buckets: int = dispatch_data.num_buckets
+
+        sample_areas: list[int] = dispatch_data.sample_areas  # type: ignore
+        assert (
+            sample_areas is not None and len(sample_areas) > 0
+        ), f"sorted sequential select solver need areas of each sample, but get {sample_areas=}"
+
+        sample_ids_sorted = argsort(sample_areas, key=lambda x: -x)
+
+        # get the workload of each job
+        workloads = [job.workload for job in jobs]
+
+        # check the job number constraint
+        n = len(workloads)
+        assert (
+            n % num_buckets == 0
+        ), f"The number of jobs ({n}) should be divisible by k ({num_buckets}) for this algorithm."
+        bucket_num_limit = n // num_buckets
+
+        # get the affinity of each job and assert check
+        affinities: list[SampleIDAffinity] = [
+            job.affinity for job in jobs if isinstance(job.affinity, SampleIDAffinity)
+        ]
+        assert (
+            affinities
+        ), "For sorted sequential select algorithm, we need the affinity for each job to be explicitly set."
+        affinity_class = type(
+            affinities[0]
+        )  # all the affinity should be of the same type, checked in self.solve() already
+        assert affinity_class == SampleIDAffinity
+        assert len(affinities) == len(
+            workloads
+        ), "class of affinity for sorted sequential select must be all SampleIDAffinity."
+
+        sample_to_slice_map: defaultdict[int, list[int]] = defaultdict(list)
+
+        # calculate samples are chunked to which chunk
+        for chunk_idx, affinity in enumerate(affinities):
+            for sample_idx, _ in affinity.sample_id_cnt_dict.items():
+                sample_to_slice_map[sample_idx].append(chunk_idx)
+
+        # initialize heap to store bucket params
+        heap = []
+        for bucket_idx in range(num_buckets):
+            heap.append((0.0, bucket_idx, affinity_class()))
+        heapq.heapify(heap)
+
+        def _assign_job_to_bucket(
+            job_idx: int,
+            bucket_idx: int,
+            new_workload: float,
+        ) -> None:
+            # assign the job to this bucket
+            self.bucket_partitions[bucket_idx].append(job_idx)
+            self.bucket_workloads[bucket_idx] = new_workload
+            bucket_nums[bucket_idx] += 1
+
+        # init the job partition and its workloads
+        bucket_nums = [0] * num_buckets
+        self.bucket_workloads = [0] * num_buckets
+        self.bucket_partitions = [[] for _ in range(num_buckets)]
+        chunk_has_select = [False] * len(workloads)
+
+        for sample_id in sample_ids_sorted:
+            # get chunk_ids will be handled
+            chunk_ids_list = sorted(sample_to_slice_map[sample_id])[::-1]
+            cur_workload, bucket_idx, affinity = heapq.heappop(heap)
+            for chunk_id in chunk_ids_list:
+                # skip chunk has assigned
+                if chunk_has_select[chunk_id]:
+                    continue
+                new_workload = cur_workload + workloads[chunk_id]
+                _assign_job_to_bucket(
+                    job_idx=chunk_id,
+                    bucket_idx=bucket_idx,
+                    new_workload=new_workload,
+                )
+                chunk_has_select[chunk_id] = True
+                if bucket_nums[bucket_idx] == bucket_num_limit and len(heap) > 0:
+                    cur_workload, bucket_idx, affinity = heapq.heappop(heap)
+
+            if bucket_nums[bucket_idx] < bucket_num_limit:
+                heapq.heappush(heap, (cur_workload, bucket_idx, affinity))
+
+            if len(heap) == 0:
+                break
+
+        assert len(heap) == 0
+        for num in bucket_nums:
+            assert num == bucket_num_limit
+
+        self.minimax_workload = max(self.bucket_workloads)
 
     def _bs_backtrack(self, workloads: list[float], idx: int, limit: float) -> bool:
         """Inner function of '_solve_with_bs',
