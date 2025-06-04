@@ -28,6 +28,8 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from magi_attention.comm.functional import all_gather_fwd_scatter_bwd
 
+from .utils_cp import divide_lst
+
 
 @dataclass
 class ParallelMode:
@@ -45,8 +47,9 @@ class ShardMeta:
     cu_seqlens_padded: torch.Tensor
     host_cu_seqlens: List[int]
     host_cu_seqlens_padded: List[int]
-    restore_shape: torch.Size
-    max_seqlen: int
+    # restore_shape: torch.Size
+    origin_shape: torch.Size
+    # max_seqlen: int
     max_seqlen_padded: int
 
 
@@ -118,7 +121,9 @@ def get_loongtrain_pg(device_mesh, window_num, rank):
     cp_pg = {ParallelMode.ULYSESS: a2a_pg, ParallelMode.RING: p2p_pg}
 
     cp_size = dist.get_world_size(p2p_pg)
-    context_ranks = dist.get_global_rank(p2p_pg)
+    context_ranks = []
+    for i in range(cp_size):
+        context_ranks.append(dist.get_global_rank(p2p_pg, i))
     assert cp_size % window_num == 0, "cp_size must be divisible by window_num"
     window_size = cp_size // window_num
 
@@ -160,16 +165,17 @@ def get_loongtrain_pg(device_mesh, window_num, rank):
 # bshd, sbhd
 def zigzag_dispatch(
     x_global: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    cu_seqlens_padded: torch.Tensor,
+    # cu_seqlens: torch.Tensor,
+    # cu_seqlens_padded: torch.Tensor,
     host_cu_seqlens: List[int],  # python list
     host_cu_seqlens_padded: List[int],  # python list
     qkv_format,
     cp_group_p2p=None,  # ring pg
     cp_group_a2a=None,  # ulysess pg
 ):
+    assert qkv_format == "thd"
     restore_shape = x_global.shape
-    batch_size = cu_seqlens.shape[0] - 1
+    batch_size = len(host_cu_seqlens) - 1
 
     cp_size_p2p = dist.get_world_size(cp_group_p2p) if cp_group_p2p is not None else -1
     cp_size_a2a = dist.get_world_size(cp_group_a2a) if cp_group_a2a is not None else -1
@@ -178,38 +184,20 @@ def zigzag_dispatch(
 
     # ring load balance dispatch
     if cp_rank_p2p != -1:
-        cu_seqlens_padded_shard = cu_seqlens_padded // cp_size_p2p
-        if qkv_format == "thd":  # thd
-            x_shard = _zigzag_dispatch_varlen(
-                x_global,
-                cu_seqlens[:batch_size],
-                cu_seqlens_padded_shard[:batch_size],
-                host_cu_seqlens,
-                host_cu_seqlens_padded,
-                cp_size_p2p,
-                cp_rank_p2p,
-            )
-        else:  # bshd, sbhd
-            x_shard = _zigzag_dispatch_non_varlen(
-                x_global,
-                host_cu_seqlens_padded[-1] - host_cu_seqlens_padded[-2],
-                qkv_format,
-                cp_size_p2p,
-                cp_rank_p2p,
-            )
+        cu_seqlens_padded_shard = divide_lst(host_cu_seqlens_padded, cp_size_p2p)
+        x_shard = _zigzag_dispatch_varlen(
+            x_global,
+            host_cu_seqlens[:batch_size],
+            cu_seqlens_padded_shard[:batch_size],
+            host_cu_seqlens,
+            host_cu_seqlens_padded,
+            cp_size_p2p,
+            cp_rank_p2p,
+        )
     else:  # ulysess pad
-        if qkv_format == "thd":
-            x_shard = _pad_narrow_seq_dim(
-                x_global, qkv_format, host_cu_seqlens_padded[-1]
-            )
-        else:
-            x_shard = _pad_narrow_seq_dim(
-                x_global,
-                qkv_format,
-                host_cu_seqlens_padded[-1] - host_cu_seqlens_padded[-2],
-            )
+        x_shard = _pad_narrow_seq_dim(x_global, qkv_format, host_cu_seqlens_padded[-1])
     # ulysess dispatch
-    seq_dim = 0 if qkv_format != "bshd" else 1
+    seq_dim = 0
     if cp_rank_a2a != -1:
         x_local = torch.chunk(x_shard, cp_size_a2a, dim=seq_dim)[
             cp_rank_a2a
@@ -222,12 +210,12 @@ def zigzag_dispatch(
 
 def zigzag_undispatch(
     x_local: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    cu_seqlens_padded: torch.Tensor,
+    # cu_seqlens: torch.Tensor,
+    # cu_seqlens_padded: torch.Tensor,
     host_cu_seqlens: List[int],  # python list
     host_cu_seqlens_padded: List[int],  # python list
     qkv_format,
-    restore_shape,
+    # restore_shape,
     cp_group_p2p=None,  # ring pg
     cp_group_a2a=None,  # ulysess pg
 ):
@@ -235,7 +223,7 @@ def zigzag_undispatch(
     cp_rank_p2p = dist.get_rank(cp_group_p2p) if cp_group_p2p is not None else -1
     cp_rank_a2a = dist.get_rank(cp_group_a2a) if cp_group_a2a is not None else -1
 
-    seq_dim = 0 if qkv_format != "bshd" else 1
+    seq_dim = 0
     if cp_rank_a2a != -1:
         # ulysess all gather
         x_shard = all_gather_fwd_scatter_bwd(
@@ -245,25 +233,16 @@ def zigzag_undispatch(
         x_shard = x_local
 
     if cp_rank_p2p != -1:
-        if qkv_format == "thd":
-            # cu_seqlens_padded_shard = cu_seqlens_padded // cp_size_p2p
-            x_global = _zigzag_undispatch_varlen(
-                x_shard,
-                host_cu_seqlens,
-                host_cu_seqlens_padded,
-                cp_size_p2p,
-                cp_group_p2p,
-            )
-        else:
-            x_global = _zigzag_undispatch_non_varlen(
-                x_shard, qkv_format, cp_size_p2p, cp_group_p2p
-            )
-            x_global = _pad_narrow_seq_dim(x_global, qkv_format, restore_shape[seq_dim])
+        # cu_seqlens_padded_shard = cu_seqlens_padded // cp_size_p2p
+        x_global = _zigzag_undispatch_varlen(
+            x_shard,
+            host_cu_seqlens,
+            host_cu_seqlens_padded,
+            cp_size_p2p,
+            cp_group_p2p,
+        )
     else:
-        if qkv_format == "thd":
-            x_global = _pad_narrow_seq_dim(x_shard, qkv_format, host_cu_seqlens[-1])
-        else:
-            x_global = _pad_narrow_seq_dim(x_shard, qkv_format, restore_shape[seq_dim])
+        x_global = _pad_narrow_seq_dim(x_shard, qkv_format, host_cu_seqlens[-1])
     return x_global
 
 
@@ -285,8 +264,8 @@ def _pad_narrow_seq_dim(
 
 def _zigzag_dispatch_varlen(
     input: torch.Tensor,
-    zigzag_indices_base: torch.Tensor,  # indices offset of each seq in original data
-    shard_indices_base: torch.Tensor,  # indices offset of each seq in shard tensor
+    zigzag_indices_base: List[int],  # indices offset of each seq in original data
+    shard_indices_base: List[int],  # indices offset of each seq in shard tensor
     host_cu_seqlens: List[int],  # python list
     host_cu_seqlens_padded: List[int],  # python list
     cp_size_p2p,
@@ -294,14 +273,20 @@ def _zigzag_dispatch_varlen(
 ):
     device = input.device
     other_shape = input.shape[1:]
-    zigzag_indices, shard_indices = generate_zigzag_dispatch_indices(
+    zigzag_indices_np, shard_indices_np = generate_zigzag_dispatch_indices(
         host_cu_seqlens,
         host_cu_seqlens_padded,
         zigzag_indices_base,
         shard_indices_base,
         cp_size_p2p,
         cp_rank_p2p,
-        device,
+        # device,
+    )
+    zigzag_indices = torch.from_numpy(zigzag_indices_np).to(
+        device=device, dtype=torch.int64
+    )
+    shard_indices = torch.from_numpy(shard_indices_np).to(
+        device=device, dtype=torch.int64
     )
     # load balance ring shard
     x_shard = torch.zeros(
@@ -320,27 +305,6 @@ def _zigzag_dispatch_varlen(
     return x_shard  # t,h,d
 
 
-def _zigzag_dispatch_non_varlen(
-    input: torch.Tensor, target_len, qkv_format, cp_size_p2p, cp_rank_p2p
-):
-    seq_dim = qkv_format.index("s")
-    other_shape = input.shape[2:]
-    first_idx, second_idx = cp_rank_p2p, 2 * cp_size_p2p - cp_rank_p2p - 1
-    pad_input = _pad_narrow_seq_dim(input, qkv_format, target_len)
-    if qkv_format == "bshd":  # b,s,h,d -> b,2cp,s',h,d
-        batch_size = pad_input.shape[0]
-        pad_input = pad_input.view(batch_size, 2 * cp_size_p2p, -1, *other_shape)
-        chunk0 = pad_input[:, first_idx, ...].contiguous()
-        chunk1 = pad_input[:, second_idx, ...].contiguous()
-    elif qkv_format == "sbhd":  # s,b,h,d -> 2cp,s',b,h,d
-        batch_size = pad_input.shape[1]
-        pad_input = pad_input.view(2 * cp_size_p2p, -1, batch_size, *other_shape)
-        chunk0 = pad_input[first_idx, ...].contiguous()
-        chunk1 = pad_input[second_idx, ...].contiguous()
-    x_shard = torch.cat([chunk0, chunk1], dim=seq_dim)
-    return x_shard  # b,s',h,d or s',b,h,d
-
-
 def _zigzag_undispatch_varlen(
     input: torch.Tensor,
     host_cu_seqlens: List[int],  # python list
@@ -353,8 +317,11 @@ def _zigzag_undispatch_varlen(
     # ring all-gather
     input_shard = all_gather_fwd_scatter_bwd(input, cp_group_p2p, dim=0)
 
-    undispatch_indices = generate_zigzag_undispatch_indices(
-        host_cu_seqlens_padded, cp_size_p2p, device, host_cu_seqlens
+    undispatch_indices_np = generate_zigzag_undispatch_indices(
+        host_cu_seqlens_padded, cp_size_p2p, host_cu_seqlens
+    )
+    undispatch_indices = torch.from_numpy(undispatch_indices_np).to(
+        device=device, dtype=torch.int64
     )
     output = torch.gather(
         input_shard,
@@ -362,31 +329,6 @@ def _zigzag_undispatch_varlen(
         index=undispatch_indices[:, None, None].expand(-1, *other_shape),
     )
 
-    return output
-
-
-def _zigzag_undispatch_non_varlen(
-    input: torch.Tensor, qkv_format, cp_size_p2p, cp_group_p2p
-):
-    device = input.device
-    seq_dim = qkv_format.index("s")
-    batch_size = input.shape[0] if qkv_format == "bshd" else input.shape[1]
-    other_shape = input.shape[2:]
-    # ring all-gather
-    input_chaos = all_gather_fwd_scatter_bwd(input, cp_group_p2p, dim=seq_dim)
-    # construct reorder ids contiguous
-    chunk_reorder_ids = generate_reorder_chunk_ids_contiguous(cp_size_p2p, device)
-    # b,cp,s,h,d or cp,s,b,h,d
-    if qkv_format == "bshd":
-        input_chaos = input_chaos.view(batch_size, 2 * cp_size_p2p, -1, *other_shape)
-    else:
-        input_chaos = input_chaos.view(2 * cp_size_p2p, -1, batch_size, *other_shape)
-
-    output = torch.index_select(input_chaos, seq_dim, chunk_reorder_ids)
-    if qkv_format == "bshd":
-        output = output.view(batch_size, -1, *other_shape)
-    else:
-        output = output.view(-1, batch_size, *other_shape)
     return output
 
 
@@ -434,7 +376,7 @@ def get_cu_seqlens_padded(
         cu_seqlens_padded = F.pad(
             torch.cumsum(seqlens_padded, dim=0, dtype=torch.int32), (1, 0)
         )
-    else:  # thd
+    elif qkv_format == "thd":  # thd
         cu_seqlens_padded = F.pad(
             torch.cumsum(seqlens_padded, dim=0, dtype=torch.int32), (1, 0)
         )
@@ -488,56 +430,65 @@ def _get_seqlens_padded(
     return seqlens_padded
 
 
+def get_max_seqlen(host_cu_seqlens: List[int]):
+    max_seqlen = max(b - a for a, b in zip(host_cu_seqlens, host_cu_seqlens[1:]))
+    return max_seqlen
+
+
 # ring load balance dispatch indices
 def generate_zigzag_dispatch_indices(
     host_cu_seqlens: List[int],
     host_cu_seqlens_padded: List[int],
-    zigzag_indices_base: torch.Tensor,  # indices offset of each seq in original data
-    shard_indices_base: torch.Tensor,  # indices offset of each seq in shard tensor
+    zigzag_indices_base: List[int],  # indices offset of each seq in original data
+    shard_indices_base: List[int],  # indices offset of each seq in shard tensor
     cp_size: int,
     rank: int,
-    device,
+    # device,
 ):
     batch_size = len(host_cu_seqlens_padded) - 1
     host_cu_seqlens_np = np.array(host_cu_seqlens, dtype=np.int32)
-    host_cu_seqlens_padded = np.array(host_cu_seqlens_padded, dtype=np.int32)
-    host_cu_padded_np = host_cu_seqlens_padded[1:] - host_cu_seqlens_padded[:-1]
+    host_cu_seqlens_padded_np = np.array(host_cu_seqlens_padded, dtype=np.int32)
     host_seqlens_np = host_cu_seqlens_np[1:] - host_cu_seqlens_np[:-1]
-    chunk_lens = host_cu_padded_np // (2 * cp_size)
-
+    host_padded_np = host_cu_seqlens_padded_np[1:] - host_cu_seqlens_padded_np[:-1]
+    chunk_lens = host_padded_np // (2 * cp_size)
+    # cpu implement
     front_start = np.minimum(rank * chunk_lens, host_seqlens_np)
     front_end = np.minimum(front_start + chunk_lens, host_seqlens_np)
     back_start = np.minimum((2 * cp_size - 1 - rank) * chunk_lens, host_seqlens_np)
     back_end = np.minimum(back_start + chunk_lens, host_seqlens_np)
 
-    zigzag_indices_varlen = []
-    shard_indices_varlen = []
+    zigzag_indices_list = []
+    shard_indices_list = []
     for i in range(batch_size):
         zigzag_base = zigzag_indices_base[i]
-        shard_base = shard_indices_base[i]
-        first_indices = torch.arange(
-            start=front_start[i], end=front_end[i], device=device
-        )
-        second_indices = torch.arange(
-            start=back_start[i], end=back_end[i], device=device
-        )
-        valid_len = front_end[i] - front_start[i] + back_end[i] - back_start[i]
-        valid_indices = torch.arange(start=0, end=valid_len, device=device)
-        zigzag_indices_varlen.append(
-            torch.cat([first_indices + zigzag_base, second_indices + zigzag_base])
-        )
-        shard_indices_varlen.append(valid_indices + shard_base)
+        first_indices = np.arange(front_start[i], front_end[i], dtype=np.int64)
+        second_indices = np.arange(back_start[i], back_end[i], dtype=np.int64)
+        zigzag_full = np.concatenate([first_indices, second_indices]) + zigzag_base
+        zigzag_indices_list.append(zigzag_full)
 
-    zigzag_indices = torch.cat(zigzag_indices_varlen, dim=0).to(torch.int64)
-    shard_indices = torch.cat(shard_indices_varlen, dim=0).to(torch.int64)
-    return zigzag_indices, shard_indices
+        if shard_indices_base is not None:
+            shard_base = shard_indices_base[i]
+            valid_len = len(first_indices) + len(second_indices)
+            valid_indices = np.arange(0, valid_len, dtype=np.int64)
+            shard_full = valid_indices + shard_base
+            shard_indices_list.append(shard_full)
+
+    zigzag_indices_np = np.concatenate(zigzag_indices_list)
+    shard_indices_np = None
+    if shard_indices_base is not None:
+        shard_indices_np = np.concatenate(shard_indices_list)
+
+    # zigzag_indices = torch.from_numpy(zigzag_indices_np).to(device=device)
+    # shard_indices = torch.from_numpy(shard_indices_np).to(device=device)
+
+    return zigzag_indices_np, shard_indices_np
 
 
 # ring load balance zigzag to contiguous indices
 def generate_zigzag_undispatch_indices(
     host_cu_seqlens_padded: List[int],
     cp_size: int,
-    device,
+    # device,
     host_cu_seqlens=None,
 ):
     batch_size = len(host_cu_seqlens_padded) - 1
@@ -548,42 +499,34 @@ def generate_zigzag_undispatch_indices(
 
     indices_lst = []
     for i in range(batch_size):
-        indices_batch_lst = []
         if i == 0:
             seq_off = 0
         else:
             seq_off += chunk_lens[i - 1] * 2
+        batch_indices = np.empty((2 * cp_size, chunk_lens[i]), dtype=np.int64)
         for rk in range(cp_size):
             offset = rk * cp_chunk_len + seq_off
-            indices_head = torch.arange(
-                start=offset, end=offset + chunk_lens[i], device=device
+            head = np.arange(offset, offset + chunk_lens[i], dtype=np.int64)
+            tail = np.arange(
+                offset + chunk_lens[i], offset + 2 * chunk_lens[i], dtype=np.int64
             )
-            indices_tail = torch.arange(
-                start=offset + chunk_lens[i],
-                end=offset + 2 * chunk_lens[i],
-                device=device,
-            )
-            indices_batch_lst.append(indices_head)
-            indices_batch_lst.append(indices_tail)
-        indices_batch = torch.cat(indices_batch_lst, dim=0)
-        reorder_chunk_ids = generate_reorder_chunk_ids_contiguous(cp_size, device)
-        indices_contigious = torch.index_select(
-            indices_batch.view(2 * cp_size, -1), dim=0, index=reorder_chunk_ids
-        )
-        indices_contigious = indices_contigious.view(-1)
+            batch_indices[2 * rk] = head
+            batch_indices[2 * rk + 1] = tail
+
+        reorder_chunk_ids = generate_reorder_chunk_ids_contiguous_np(cp_size)
+        reordered_indices = batch_indices[reorder_chunk_ids].reshape(-1)
         if host_cu_seqlens is not None:
             valid_len = host_cu_seqlens[i + 1] - host_cu_seqlens[i]
-            indices_contigious = indices_contigious[:valid_len]
+            reordered_indices = reordered_indices[:valid_len]
 
-        indices_lst.append(indices_contigious)
+        indices_lst.append(reordered_indices)
 
-    total_indices = torch.cat(indices_lst, dim=0).to(torch.int64)
-    return total_indices
+    total_indices_np = np.concatenate(indices_lst, axis=0)
+    return total_indices_np
+    # return torch.from_numpy(total_indices).to(device=device, dtype=torch.int64)
 
 
 # contiguous load balance dispatch indices
-
-
 # e.g. cp = 4 : [0,7,1,6,2,5,3,4]
 def generate_reorder_chunk_ids_zigzag(
     cp_size,
@@ -604,3 +547,9 @@ def generate_reorder_chunk_ids_contiguous(
     second_ids = torch.arange(start=2 * cp_size - 1, end=0, step=-2, device=device)
     chunk_reorder_ids = torch.cat([first_ids, second_ids], dim=0)
     return chunk_reorder_ids
+
+
+def generate_reorder_chunk_ids_contiguous_np(cp_size: int) -> np.ndarray:
+    first_ids = np.arange(0, 2 * cp_size, 2, dtype=np.int64)
+    second_ids = np.arange(2 * cp_size - 1, 0, -2, dtype=np.int64)
+    return np.concatenate([first_ids, second_ids], axis=0)

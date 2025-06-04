@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, List
+from typing import Dict
 
 import torch
 
@@ -25,20 +25,29 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 
 from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.ranges import AttnRanges
 
-from .attn import prepare_for_saving  # type: ignore[attr-defined]
-from .attn import restore_from_saved  # type: ignore[attr-defined]
-from .attn import AttnBackend, _fa3_attn_backward, _fa3_attn_forward
 from .interface import AttnBaselineInterface
 from .shard import (
     ParallelMode,
     ShardMeta,
     get_cu_seqlens_padded,
+    get_max_seqlen,
     get_pad_factor,
     zigzag_dispatch,
     zigzag_undispatch,
 )
-from .utils_cp import _SeqAllToAll
+from .utils_cp import prepare_for_saving  # type: ignore[attr-defined]
+from .utils_cp import restore_from_saved  # type: ignore[attr-defined]
+from .utils_cp import (
+    AttnBackend,
+    _fa3_varlen_backward,
+    _fa3_varlen_forward,
+    _pre_process,
+    _SeqAllToAll,
+    generate_runtime_meta_per_step,
+    unflatten_data_from_varlen,
+)
 
 
 class FA3UlysessAttnFunc(torch.autograd.Function):
@@ -48,44 +57,23 @@ class FA3UlysessAttnFunc(torch.autograd.Function):
         q,
         k,
         v,
-        cu_seqlens_q,
-        cu_seqlens_kv,
-        max_seqlen_q,  # python int
-        max_seqlen_kv,  # python int
-        cu_seqlens_q_padded,
-        cu_seqlens_kv_padded,
+        runtime_meta,
         causal,
         dropout_p,
         softmax_scale,
-        qkv_format,
         deterministic,
-        pad_between_seqs,
-        host_meta=[None, None, None, None],
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
-        qkv_dtype = q.dtype
         assert (
             q.shape[-1] % 8 == 0
         ), "Hidden size per attention head should be multiple of 8!"
 
-        fa_forward_kwargs = {"softmax_scale": softmax_scale}
-        out, softmax_lse = _fa3_attn_forward(
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            # max_seqlen_q,
-            # max_seqlen_kv,
-            # cu_seqlens_q_padded,
-            # cu_seqlens_kv_padded,
-            causal,
-            qkv_format,
-            pad_between_seqs,
-            fa_forward_kwargs,
-            host_meta,
+        fa_forward_kwargs = {"window_size": (-1, -1)}
+        rumtime_meta_per_step = runtime_meta[0]
+        out, softmax_lse = _fa3_varlen_forward(
+            q, k, v, softmax_scale, causal, rumtime_meta_per_step, fa_forward_kwargs
         )
 
         out_ret = out
@@ -96,24 +84,16 @@ class FA3UlysessAttnFunc(torch.autograd.Function):
             v_save,
             out_save,
             softmax_lse,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            cu_seqlens_q_padded,
-            cu_seqlens_kv_padded,
         )
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
 
-        ctx.qkv_dtype = qkv_dtype
         ctx.causal = causal
+        # TODO: rm
         ctx.dropout_p = dropout_p
-        ctx.max_seqlen_q = max_seqlen_q
-        ctx.max_seqlen_kv = max_seqlen_kv
         ctx.softmax_scale = softmax_scale
-        ctx.qkv_format = qkv_format
         ctx.deterministic = deterministic
-        ctx.pad_between_seqs = pad_between_seqs
-        ctx.host_meta = host_meta
+        ctx.rumtime_meta_per_step = rumtime_meta_per_step
 
         return out_ret, softmax_lse
 
@@ -125,49 +105,30 @@ class FA3UlysessAttnFunc(torch.autograd.Function):
             v,
             out,
             softmax_lse,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            cu_seqlens_q_padded,
-            cu_seqlens_kv_padded,
         ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
 
+        rumtime_meta_per_step = ctx.rumtime_meta_per_step
         dout = dout.view(*out.shape)
 
-        fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
-        fa_backward_kwargs["deterministic"] = ctx.deterministic
-
-        dq, dk, dv = _fa3_attn_backward(
+        window_size = (-1, 0) if ctx.causal else (-1, -1)
+        dq, dk, dv = _fa3_varlen_backward(
             q,
             k,
             v,
             out,
             dout,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            # ctx.max_seqlen_q,
-            # ctx.max_seqlen_kv,
-            # cu_seqlens_q_padded,
-            # cu_seqlens_kv_padded,
             softmax_lse,
+            ctx.softmax_scale,
             ctx.causal,
-            ctx.qkv_format,
-            ctx.pad_between_seqs,
-            fa_backward_kwargs,
-            ctx.host_meta,
+            window_size,
+            ctx.deterministic,
+            rumtime_meta_per_step,
         )
 
         return (
             dq,
             dk,
             dv,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
             None,
             None,
             None,
@@ -288,7 +249,6 @@ class TEUlysessAttnFunc(torch.autograd.Function):
         fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
         dout = dout.view(*out.shape)
-
         fused_attn_meta_args = (
             ctx.qkv_dtype,
             fused_attn_dqkv_dtype,
@@ -344,7 +304,7 @@ class Ulysess(AttnBaselineInterface):
     def __init__(
         self,
         cp_process_group: Dict,
-        qkv_format: str,
+        qkv_format: str,  # "thd" or "bshd" or "sbhd"
         backend: AttnBackend,
     ):
         self.pg_a2a = cp_process_group[ParallelMode.ULYSESS]
@@ -355,53 +315,64 @@ class Ulysess(AttnBaselineInterface):
         self.backend = backend
         self.qkv_format = qkv_format
         self.shard_meta = {}  # type: ignore
+        self.runtime_meta_per_step = []  # type: ignore
+
+    # to call after q,k,v dispatch
+    def pre_compute_attn_runtime_meta(self, device):
+        if self.backend == AttnBackend.FA3:
+            shard_q_meta = self.shard_meta["q"]
+            shard_kv_meta = self.shard_meta["k"]
+            rumtime_meta = generate_runtime_meta_per_step(
+                shard_q_meta.cu_seqlens,
+                shard_kv_meta.cu_seqlens,
+                shard_q_meta.cu_seqlens_padded,
+                shard_kv_meta.cu_seqlens_padded,
+                shard_q_meta.host_cu_seqlens,
+                shard_kv_meta.host_cu_seqlens,
+                shard_q_meta.host_cu_seqlens_padded[-1],
+                shard_kv_meta.host_cu_seqlens_padded[-1],
+                device,
+            )
+            self.runtime_meta_per_step.append(rumtime_meta)
+        pass
 
     def dispatch(
         self,
         x_global: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        host_cu_seqlens: List[int],
+        ranges: AttnRanges,
+        valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
         name: str,  # key name for shard_meta
         **kwargs,
     ):
+        # pre-process data
+        x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
+            x_global, ranges, valid_total_seqlen, self.qkv_format, x_global.device
+        )
         # compute cu_seqlens_padded and host_cu_seqlens_padded
         cu_seqlens_padded, host_cu_seqlens_padded = get_cu_seqlens_padded(
             cu_seqlens,
             host_cu_seqlens,
-            self.qkv_format,
+            "thd",
             pad_factor_p2p=self.pad_factor_p2p,
             pad_factor_a2a=self.pad_factor_a2a,
         )
 
-        x_local, restore_shape = zigzag_dispatch(
-            x_global,
-            cu_seqlens,
-            cu_seqlens_padded,
+        x_local, _ = zigzag_dispatch(
+            x_global_varlen,
             host_cu_seqlens,
             host_cu_seqlens_padded,
-            self.qkv_format,
+            "thd",
             cp_group_p2p=None,
             cp_group_a2a=self.pg_a2a,
         )
-        max_seqlen = max(
-            [
-                (host_cu_seqlens[i + 1] - host_cu_seqlens[i])
-                for i in range(len(host_cu_seqlens) - 1)
-            ]
-        )
-        max_seqlen_padded = max(
-            [
-                (host_cu_seqlens_padded[i + 1] - host_cu_seqlens_padded[i])
-                for i in range(len(host_cu_seqlens_padded) - 1)
-            ]
-        )
+
+        max_seqlen_padded = get_max_seqlen(host_cu_seqlens_padded)
         self.shard_meta[name] = ShardMeta(
             cu_seqlens=cu_seqlens,
             cu_seqlens_padded=cu_seqlens_padded,
             host_cu_seqlens=host_cu_seqlens,
             host_cu_seqlens_padded=host_cu_seqlens_padded,
-            restore_shape=restore_shape,
-            max_seqlen=max_seqlen,
+            origin_shape=origin_shape,
             max_seqlen_padded=max_seqlen_padded,
         )
         return x_local
@@ -413,16 +384,16 @@ class Ulysess(AttnBaselineInterface):
         **kwargs,
     ) -> torch.Tensor:
         smeta = self.shard_meta[name]
-        x_global = zigzag_undispatch(
+        x_global_varlen = zigzag_undispatch(
             x_local,
-            smeta.cu_seqlens,
-            smeta.cu_seqlens_padded,
             smeta.host_cu_seqlens,
             smeta.host_cu_seqlens_padded,
-            self.qkv_format,
-            smeta.restore_shape,
+            "thd",
             cp_group_p2p=None,
             cp_group_a2a=self.pg_a2a,
+        )
+        x_global = unflatten_data_from_varlen(
+            x_global_varlen, smeta.cu_seqlens, smeta.origin_shape, self.qkv_format
         )
 
         return x_global
@@ -438,20 +409,13 @@ class Ulysess(AttnBaselineInterface):
         deterministic: bool,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.qkv_format != "sbhd":
-            batch_dim, seq_dim = 0, 1
-        else:
-            batch_dim, seq_dim = 1, 0
-
-        if self.qkv_format == "thd":  # thd -> 1,thd
-            q, k, v = [x.unsqueeze(0) for x in [q, k, v]]
+        batch_dim, seq_dim = 0, 1
+        # [t,h,d] -> [1,t,h,d]
+        q, k, v = [x.unsqueeze(0) for x in [q, k, v]]
         q_layer, k_layer, v_layer = [
             _SeqAllToAll.apply(self.pg_a2a, x, 2, seq_dim, batch_dim) for x in [q, k, v]
         ]
-        if self.qkv_format == "thd":
-            q_layer, k_layer, v_layer = [
-                x.squeeze(0) for x in [q_layer, k_layer, v_layer]
-            ]
+        q_layer, k_layer, v_layer = [x.squeeze(0) for x in [q_layer, k_layer, v_layer]]
 
         shard_q_meta = self.shard_meta["q"]
         shard_kv_meta = self.shard_meta["k"]
@@ -473,7 +437,7 @@ class Ulysess(AttnBaselineInterface):
                 shard_kv_meta.cu_seqlens_padded,
                 dropout_p,
                 softmax_scale,
-                self.qkv_format,
+                "thd",
                 attn_mask,
                 deterministic,
             )
@@ -482,38 +446,21 @@ class Ulysess(AttnBaselineInterface):
                 is_causal = True
             elif attn_mask_type == AttnMaskType.FULL:
                 is_causal = False
-            pad_between_seqs = not (
-                shard_q_meta.host_cu_seqlens[-1]
-                == shard_q_meta.host_cu_seqlens_padded[-1]
-            )
+
             out, lse = FA3UlysessAttnFunc.apply(
                 q_layer,
                 k_layer,
                 v_layer,
-                shard_q_meta.cu_seqlens,
-                shard_kv_meta.cu_seqlens,
-                shard_q_meta.max_seqlen,
-                shard_kv_meta.max_seqlen,
-                shard_q_meta.cu_seqlens_padded,
-                shard_kv_meta.cu_seqlens_padded,
+                self.runtime_meta_per_step,
                 is_causal,
                 dropout_p,
                 softmax_scale,
-                self.qkv_format,
                 deterministic,
-                pad_between_seqs,
-                [
-                    shard_q_meta.host_cu_seqlens,
-                    shard_q_meta.host_cu_seqlens_padded,
-                    shard_kv_meta.host_cu_seqlens,
-                    shard_kv_meta.host_cu_seqlens_padded,
-                ],
             )
 
-        if self.qkv_format == "thd":  # thd -> 1,thd
-            out = out.unsqueeze(0)
+        # thd -> 1,thd
+        out = out.unsqueeze(0)
         out_layer = _SeqAllToAll.apply(self.pg_a2a, out, seq_dim, 2, batch_dim)
-        if self.qkv_format == "thd":
-            out_layer = out_layer.squeeze(0)
+        out_layer = out_layer.squeeze(0)
 
         return out_layer, lse

@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# import os
+import os
+
 # import sys
-# sys.path.append(
-#     os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-# )
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from enum import Enum
 
 import torch
 import torch.distributed as dist
-from baselines.attn import AttnBackend
+from baselines.loongtrain import LoongTrain
 from baselines.ring_attn import RingAttnAllGather, RingAttnP2P
 from baselines.shard import (
     ParallelMode,
+    get_loongtrain_pg,
     get_ring_pg,
     get_ulysess_pg,
     get_usp_pg,
@@ -33,11 +33,21 @@ from baselines.shard import (
 )
 from baselines.ulysess import Ulysess
 from baselines.usp import USP
-from test_utils import generate_test_data
+from baselines.utils_cp import AttnBackend
+from test_utils import (
+    generate_attn_cu_seqlens,
+    generate_attn_ranges,
+    generate_test_data,
+)
 from torch.testing._internal.common_distributed import MultiProcessTestCase
 
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.utils import nvtx
+
+# import sys
+
+
+# import sys
 
 
 class AttnImpl(Enum):
@@ -45,6 +55,7 @@ class AttnImpl(Enum):
     RING_P2P = 2
     RING_ALLGATHER = 3
     USP = 4
+    LOONGTRAIN = 5
 
 
 class MyAttnProfile(MultiProcessTestCase):
@@ -87,22 +98,38 @@ class MyAttnProfile(MultiProcessTestCase):
             world_size = 4
             device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
             cp_group = get_usp_pg(device_shard)
+        elif self.TO_TEST == AttnImpl.LOONGTRAIN:
+            cp_pg_meta = {
+                ParallelMode.ULYSESS: 1,
+                ParallelMode.RING: 4,
+            }
+            # cp_pg_meta = {
+            #     ParallelMode.RING: 4,
+            #     ParallelMode.ULYSESS: 1,
+            # }
+            world_size = 4
+            # NOTE: param for loongtrain double ring-attention
+            window_num = 2
+            rank = int(os.environ.get("RANK", 0))
+            assert world_size % window_num == 0
+            device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
+            cp_group = get_loongtrain_pg(device_shard, window_num, rank)
 
         # -----    set test param   ---- #
 
         device = torch.cuda.current_device()
-        batch_size = 3
-        total_seqlen = 4096 * 2
+        batch_size = 50
+        total_seqlen = 4096 * 8
         h = 16
         d = 128
         dtype = torch.float16
         # NUM_SAMPLES = batch_size
         qkv_format = "thd"
-        deterministic = True
+        deterministic = False
         dropout = 0.0
         attn_mask_type = AttnMaskType.FULL
         # causal = attn_mask_type == AttnMaskType.CAUSAL
-        attn_backend = AttnBackend.TE
+        attn_backend = AttnBackend.FA3
 
         # -----    init attn module   ---- #
 
@@ -110,24 +137,38 @@ class MyAttnProfile(MultiProcessTestCase):
             attn = RingAttnAllGather(
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )
+            cal_runtime_args = [attn_mask_type, device]
         elif self.TO_TEST == AttnImpl.RING_P2P:
             attn = RingAttnP2P(
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )
+            cal_runtime_args = [attn_mask_type, device]
         elif self.TO_TEST == AttnImpl.ULYSSESS:
             attn = Ulysess(
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )
+            cal_runtime_args = [device]
         elif self.TO_TEST == AttnImpl.USP:
             attn = USP(
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )
+            cal_runtime_args = [attn_mask_type, device]
+        elif self.TO_TEST == AttnImpl.LOONGTRAIN:
+            attn = LoongTrain(
+                cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
+            )
+            cal_runtime_args = [attn_mask_type, device]
 
         # -----    init test data   ---- #
 
-        q, k, v, dout, cu_seqlens, cu_seqlens_padded = generate_test_data(
+        q, k, v, dout, random_cu_seqlens_list, max_seqlen = generate_test_data(
             batch_size, total_seqlen, h, d, dtype, qkv_format, device
         )
+        ranges = generate_attn_ranges(random_cu_seqlens_list, total_seqlen)
+        cu_seqlens, cu_seqlens_padded = generate_attn_cu_seqlens(
+            random_cu_seqlens_list, max_seqlen, batch_size, qkv_format, device
+        )
+        # print(f"{random_cu_seqlens_list=},{cu_seqlens=},{cu_seqlens_padded=}")
 
         dist.broadcast(q.data, src=0)
         dist.broadcast(k.data, src=0)
@@ -144,8 +185,14 @@ class MyAttnProfile(MultiProcessTestCase):
         # print(f"{k.shape=},{k.requires_grad=}")
         # print(f"{v.shape=},{v.requires_grad=}")
 
-        host_cu_seqlens = cu_seqlens.tolist()
-        # print(f"{cu_seqlens=}")
+        # -----    dispatch   ---- #
+
+        q_local = attn.dispatch(q, ranges, total_seqlen, "q")
+        k_local = attn.dispatch(k, ranges, total_seqlen, "k")
+        v_local = attn.dispatch(v, ranges, total_seqlen, "v")
+        dout_local = attn.dispatch(dout, ranges, total_seqlen, "dout")
+
+        attn.pre_compute_attn_runtime_meta(*cal_runtime_args)
 
         prof_iters, prof_start_iter, prof_end_iter = 10, 4, 7
         for iter in range(prof_iters):
@@ -160,12 +207,6 @@ class MyAttnProfile(MultiProcessTestCase):
             dist.barrier()
             torch.cuda.synchronize()
 
-            # -----    dispatch   ---- #
-
-            q_local = attn.dispatch(q, cu_seqlens, host_cu_seqlens, "q")
-            k_local = attn.dispatch(k, cu_seqlens, host_cu_seqlens, "k")
-            v_local = attn.dispatch(v, cu_seqlens, host_cu_seqlens, "v")
-
             # -----    forward   ---- #
 
             out, lse = attn.apply_attn(
@@ -178,11 +219,13 @@ class MyAttnProfile(MultiProcessTestCase):
                 deterministic,
             )
 
-            out_global = attn.undispatch(out, "q")
+            # out_global = attn.undispatch(out, "q")
 
             # -----    backward   ---- #
 
-            out_global.backward(dout)
+            out.backward(dout_local, retain_graph=True)
+
+            # -----    collect global grad   ---- #
 
         # dq_global = collect_global_grad(attn, q.grad, cu_seqlens, host_cu_seqlens, "dq")
         # dk_global = collect_global_grad(attn, k.grad, cu_seqlens, host_cu_seqlens, "dk")
@@ -212,5 +255,5 @@ class MyAttnProfile(MultiProcessTestCase):
 
 
 if __name__ == "__main__":
-    test = MyAttnProfile(AttnImpl.RING_ALLGATHER)
+    test = MyAttnProfile(AttnImpl.LOONGTRAIN)
     test.profile_attn()

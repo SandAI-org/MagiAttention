@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import List
+
 import torch
 
 # fa3
 from flash_attn_interface import flash_attn_func, flash_attn_varlen_func
 
+from magi_attention.common.ranges import AttnRanges
 from magi_attention.testing.precision import torch_attn_ref
 
 
@@ -290,34 +293,47 @@ def gen_init_data(shape, device, dtype, test_bwd):
 def generate_test_data(
     batch_size, total_seqlen, heads_num, hidden_dim, dtype, qkv_format, device
 ):
+    # chunk_seq = total_seqlen if qkv_format == "thd" else total_seqlen // batch_size
+    random_cu_seqlens_list, max_seqlen = generate_random_samples(
+        total_seqlen, batch_size
+    )
     if qkv_format == "thd":
         shape = [total_seqlen, heads_num, hidden_dim]
     elif qkv_format == "bshd":
-        shape = [batch_size, total_seqlen // batch_size, heads_num, hidden_dim]
+        shape = [batch_size, max_seqlen, heads_num, hidden_dim]
     elif qkv_format == "sbhd":
-        shape = [total_seqlen // batch_size, batch_size, heads_num, hidden_dim]
+        shape = [max_seqlen, batch_size, heads_num, hidden_dim]
     q, k, v, dout = gen_init_data(shape, device, dtype, False)
 
-    chunk_seq = total_seqlen if qkv_format == "thd" else total_seqlen // batch_size
-    cu_seqlens = generate_random_cu_seqlens(chunk_seq, batch_size, device)
-    # cu_seqlens = torch.tensor([   0, 2788, 3627, 4096], device=device, dtype=torch.int32)
-    # cu_seqlens = torch.tensor([   0, 2730, 3627, 4096], device=device, dtype=torch.int32)
+    # random_cu_seqlens_list = [0,2048,4096]
     if qkv_format != "thd":
+        q = fill_data_with_pad(q, random_cu_seqlens_list, qkv_format)
+        k = fill_data_with_pad(k, random_cu_seqlens_list, qkv_format)
+        v = fill_data_with_pad(v, random_cu_seqlens_list, qkv_format)
+        dout = fill_data_with_pad(dout, random_cu_seqlens_list, qkv_format)
+
+    return q, k, v, dout, random_cu_seqlens_list, max_seqlen
+
+
+def generate_attn_ranges(random_cu_seqlens_list, valid_total_seqlen):
+    ranges = AttnRanges.from_cu_seqlens(random_cu_seqlens_list, valid_total_seqlen)
+    return ranges
+
+
+def generate_attn_cu_seqlens(
+    random_cu_seqlens_list, max_seqlen, batch_size, qkv_format, device
+):
+    cu_seqlens = torch.tensor(random_cu_seqlens_list, device=device, dtype=torch.int32)
+    if qkv_format == "thd":
+        cu_seqlens_padded = cu_seqlens
+    else:
         cu_seqlens_padded = torch.arange(
             start=0,
-            end=total_seqlen + 1,
-            step=total_seqlen // batch_size,
+            end=max_seqlen * batch_size + 1,
+            step=max_seqlen,
             device=device,
         )
-    else:
-        cu_seqlens_padded = cu_seqlens
-    if qkv_format != "thd":
-        q = fill_data_with_pad(q, cu_seqlens, qkv_format)
-        k = fill_data_with_pad(k, cu_seqlens, qkv_format)
-        v = fill_data_with_pad(v, cu_seqlens, qkv_format)
-        dout = fill_data_with_pad(dout, cu_seqlens, qkv_format)
-
-    return q, k, v, dout, cu_seqlens, cu_seqlens_padded
+    return cu_seqlens, cu_seqlens_padded
 
 
 def generate_non_pad_cu_seqlens(batch_size, per_seq_len, device):
@@ -325,6 +341,19 @@ def generate_non_pad_cu_seqlens(batch_size, per_seq_len, device):
         start=0, end=batch_size * per_seq_len + 1, step=per_seq_len, device=device
     )
     return cu_seqlens.to(torch.int32)
+
+
+# generate random cu_seqlens list
+def generate_random_samples(total_seqlen, NUM_SAMPLES):
+    random_indices = (torch.randperm(total_seqlen - 1)[: NUM_SAMPLES - 1] + 1).tolist()
+    random_indices = sorted(random_indices)
+    random_indices = [0] + random_indices + [total_seqlen]
+
+    max_seqlen = 0
+    for i in range(len(random_indices) - 1):
+        max_seqlen = max(max_seqlen, random_indices[i + 1] - random_indices[i])
+
+    return random_indices, max_seqlen
 
 
 # generate random cu_seqlens
@@ -336,17 +365,25 @@ def generate_random_cu_seqlens(total_seqlen, NUM_SAMPLES, device):
     return cu_seqlens
 
 
+def generate_random_ranges(total_seqlen, NUM_SAMPLES, device):
+    random_indices = (torch.randperm(total_seqlen - 1)[: NUM_SAMPLES - 1] + 1).tolist()
+    random_indices = sorted(random_indices)
+    random_indices = [0] + random_indices + [total_seqlen]
+    ranges = AttnRanges.from_cu_seqlens(random_indices, total_seqlen)
+    return ranges
+
+
 # fill pad token 0 for bshd, sbhd format
 def fill_data_with_pad(
     data: torch.Tensor,
-    cu_seqlens: torch.Tensor,
+    hsot_cu_seqlens: List[int],
     qkv_format,
 ):
     batch_dim = qkv_format.index("b")
     batch_size = data.shape[batch_dim]
     new_data = data.clone()
     for i in range(batch_size):
-        seqlen = (cu_seqlens[i + 1] - cu_seqlens[i]).item()
+        seqlen = hsot_cu_seqlens[i + 1] - hsot_cu_seqlens[i]
         if qkv_format == "bshd":
             new_data[i, seqlen:, :, :] = 0
         elif qkv_format == "sbhd":
@@ -354,7 +391,7 @@ def fill_data_with_pad(
     return new_data
 
 
-def collect_global_grad(attn, grad, cu_seqlens, host_cu_seqlens, name):
-    grad_part = attn.dispatch(grad, cu_seqlens, host_cu_seqlens, name)
+def collect_global_grad(attn, grad, ranges, valid_total_seqlen, name):
+    grad_part = attn.dispatch(grad, ranges, valid_total_seqlen, name)
     grad_global = attn.undispatch(grad_part, name)
     return grad_global
