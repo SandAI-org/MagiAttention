@@ -330,6 +330,8 @@ def magi_attn_flex_key(
     if head_dim > 192:
         raise ValueError(f"head_dim ({head_dim}) must be ≤ 192")
 
+    attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
+
     assert (
         is_list_value_all(attn_mask_type, AttnMaskType.FULL)  # type: ignore[arg-type]
         or q_ranges.is_non_overlap()
@@ -337,8 +339,6 @@ def magi_attn_flex_key(
         "Only support q_range overlap when masktype is all full, "
         "other masktype is not supported for now."
     )
-
-    attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
 
     if is_list_value_any(attn_mask_type, AttnMaskType.BICAUSAL):
         raise ValueError(
