@@ -164,7 +164,7 @@ out_ffa, lse_ffa = flex_flash_attn_func(
 
 flash_attn_varlen like interface(magi_attn_varlen_dispatch):
 ```python
-from magi_attention.api import magi_attn_flex_dispatch, undispatch, calc_attn, squash_batch_dim, full_attention_to_varlen_attention, compute_pad_size   # func tools and interface
+from magi_attention.api import magi_attn_varlen_dispatch, undispatch, calc_attn, squash_batch_dim, full_attention_to_varlen_attention, compute_pad_size   # func tools and interface
 
 # ---  prepare data and args for magi_attention --- #
 
@@ -231,6 +231,7 @@ total_out = undispatch(local_out, magi_attn_runtime_key)   # total out with shap
 
 magi_attn_flex_dispatch(more flexible):
 ```python
+from magi_attention.api import magi_attn_flex_dispatch, undispatch, calc_attn, squash_batch_dim, full_attention_to_varlen_attention, compute_pad_size   # func tools and interface
 
 x = torch.randn(
           seqlen,
