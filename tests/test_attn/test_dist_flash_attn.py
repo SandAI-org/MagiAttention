@@ -13,14 +13,15 @@
 # limitations under the License.
 
 import torch
-import torch.distributed
 import torch.distributed as dist
 from einops import rearrange
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.nn.functional import all_gather
 from torch.nn.functional import scaled_dot_product_attention
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
+import magi_attention
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.functional.dist_attn import DistFlashAttnRuntime, dist_attn_func
 from magi_attention.meta.collection.calc_meta import AttnArg, AttnCalcMeta
@@ -39,6 +40,19 @@ class TestDistFlashAttn(DistTestBase):
             dist.new_group(list(range(self.world_size)), backend="nccl")
             for _ in range(2)
         ]
+
+        # -----    set up for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable():
+            assert self.world_size == 4
+            world_size_inter_node, world_size_intra_node = 2, 2
+            self.device_mesh = init_device_mesh(
+                device_type="cuda",
+                mesh_shape=(world_size_inter_node, world_size_intra_node),
+                mesh_dim_names=("inter", "intra"),
+            )
+        else:
+            self.device_mesh = None
 
     @property
     def process_group(self):
@@ -100,6 +114,7 @@ class TestDistFlashAttn(DistTestBase):
                         rank for rank in range(self.world_size) if rank != self.rank
                     ],
                     world_size=self.world_size,
+                    device_mesh=self.device_mesh,
                 )
             ],
         )

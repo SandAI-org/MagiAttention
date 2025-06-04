@@ -17,16 +17,14 @@ import torch.distributed as dist
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
+import magi_attention
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DispatchConfig, MinHeapDispatchAlg
 from magi_attention.functional import dispatch_func, undispatch_func
 from magi_attention.meta import calc_dispatch_meta_from_qk_ranges
-from magi_attention.meta._calc_dispatch_meta import (
-    cu_seqlens2seqlens,
-    seqlens2cu_seqlens,
-)
 from magi_attention.testing.dist_common import DistTestBase, with_comms
+from magi_attention.utils import cu_seqlens2seqlens, seqlens2cu_seqlens
 
 WORLD_SIZE = 4
 SEED = 42
@@ -112,7 +110,9 @@ class TestDispatcher(DistTestBase):
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
             # pass a placeholder since required
-            high_bandwith_domain_size=self.world_size // 2,
+            high_bandwith_domain_size=1
+            if magi_attention.is_hierarchical_comm_enable()
+            else self.world_size // 2,
         )
 
         self.assertEqual(len(buckets_per_rank), cp_size)

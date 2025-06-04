@@ -18,6 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
+from magi_attention.utils import nvtx
+
 __all__ = ["range_gather"]
 
 
@@ -70,6 +72,7 @@ def range_gather_kernel(
         tl.store(curr_out_ptr + cols, inp, mask=cols < elem_in_last_block)
 
 
+@nvtx.instrument_nvtx
 def range_gather(
     input: torch.Tensor,
     ranges: torch.Tensor,
@@ -77,7 +80,8 @@ def range_gather(
     total_size: int,
     dim: int = 0,
     row_map: Optional[torch.Tensor] = None,
-):
+    output: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """
     Gather values from input tensor based on specified ranges into a new output tensor.
 
@@ -88,13 +92,16 @@ def range_gather(
         total_size: Total number of rows in the output tensor
         dim: Dimension along which to perform the gather operation
         row_map: Optional mapping from row indices to range indices
+        output: Optional output tensor buffer to store the result
 
     Returns:
-        A new tensor containing the gathered values
+        A new tensor containing the gathered values, put into output if provided.
     """
-    output_shape = list(input.shape)
-    output_shape[dim] = total_size
-    output = torch.empty(output_shape, device=input.device, dtype=input.dtype)
+
+    if output is None:
+        output_shape = list(input.shape)
+        output_shape[dim] = total_size
+        output = torch.empty(output_shape, device=input.device, dtype=input.dtype)
 
     # Get the number of ranges
     n_ranges = ranges.shape[0]

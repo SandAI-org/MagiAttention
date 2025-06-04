@@ -16,6 +16,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
@@ -44,6 +45,19 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             dist.new_group(list(range(self.world_size)), backend="gloo")
             for _ in range(1)
         ]
+
+        # -----    set up for hier comm   ---- #
+
+        if magi_attention.is_hierarchical_comm_enable():
+            assert self.world_size == 4
+            world_size_inter_node, world_size_intra_node = 2, 2
+            self.device_mesh = init_device_mesh(
+                device_type="cuda",
+                mesh_shape=(world_size_inter_node, world_size_intra_node),
+                mesh_dim_names=("inter", "intra"),
+            )
+        else:
+            self.device_mesh = None
 
     @property
     def process_group(self):
@@ -401,6 +415,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             total_seqlen_k=total_seqlen_k,
             chunk_size=chunk_size,
             cp_group=self.nccl_group,
+            cp_mesh=self.device_mesh,
             is_same_source=True,
             is_q_permutable=True,
             is_k_permutable=True,

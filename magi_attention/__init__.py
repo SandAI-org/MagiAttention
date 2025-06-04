@@ -83,3 +83,14 @@ def is_cuda_device_max_connections_one() -> bool:
     Toggle this env variable to 1 to allow cuda device to have only one connection
     """
     return os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8") == "1"
+
+
+def is_hierarchical_comm_enable() -> bool:
+    """
+    Toggling this env variable to 1 to enable hierarchical group-collective comm
+    within 2-dim cp group (inter_node group + intra_node group)
+
+    NOTE: this is for now a temporary solution to reduce the redundant inter-node comm
+    and should be removed or updated in the future
+    """
+    return os.environ.get("MAGI_ATTENTION_HIERARCHICAL_COMM", "0") == "1"
