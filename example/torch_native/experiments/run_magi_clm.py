@@ -44,7 +44,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from itertools import chain
-from typing import Any, Optional, Union, override
+from typing import Any, Optional, Union
 
 import datasets
 import evaluate
@@ -84,6 +84,7 @@ from transformers.utils import (
     send_example_telemetry,
 )
 from transformers.utils.versions import require_version
+from typing_extensions import override
 
 if is_apex_available():
     from apex import amp
