@@ -26,11 +26,11 @@ SEQLEN=8192
 PRECISION="bf16=true"
 #FSDP_CONFIG="llama3_fsdp_native.json"
 #JOB_NAME="LLAMA3_FSDP_NATIVE_GPU${NPROC_PER_NODE}_BS${BS}_SEQLEN${SEQLEN}_BF16_FA"
-cp_size=1
-NPROC_PER_NODE=8
+cp_size=$1
+NPROC_PER_NODE=$cp_size
 export cp_size=$cp_size
 
-export WANDB_PROJECT="test"
+export WANDB_PROJECT="test_new"
 
 torchrun --nproc_per_node $NPROC_PER_NODE \
     --nnodes $WORLD_SIZE \
@@ -39,8 +39,7 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --master_addr $MASTER_ADDR \
     run_magi_clm.py \
     --num_train_epochs 2 \
-    --dataset_name wikitext \
-    --dataset_config_name wikitext-2-raw-v1 \
+    --dataset_name openwebtext \
     --use_fast_tokenizer false \
     --per_device_train_batch_size $BS \
     --per_device_eval_batch_size $BS \
@@ -56,10 +55,11 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --save_strategy no \
     --logging_strategy steps \
     --gradient_checkpointing no \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps 2 \
     --logging_steps 1 \
     --$PRECISION \
     --report_to wandb \
-    --run_name magi-cp$cp_size \
+    --run_name magi-cp$cp_size-dp1-ga2 \
+    --max_steps 1 \
     #--fsdp "auto_wrap" \
     #--fsdp_config $FSDP_CONFIG 2>&1 | tee ./$JOB_NAME.log

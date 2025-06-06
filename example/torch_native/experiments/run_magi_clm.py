@@ -36,19 +36,24 @@ https://huggingface.co/models?filter=text-generation
 """
 # You can also adapt this script on your own causal language modeling task. Pointers for this are left as comments.
 
+import functools
+import inspect
 import logging
 import math
 import os
 import sys
 from dataclasses import dataclass, field
 from itertools import chain
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, override
 
 import datasets
 import evaluate
 import torch
 import transformers
+from accelerate import Accelerator
+from accelerate.utils import DataLoaderConfiguration
 from datasets import load_dataset
+from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from transformers import (
     CONFIG_MAPPING,
@@ -57,15 +62,31 @@ from transformers import (
     AutoTokenizer,
     HfArgumentParser,
     Trainer,
-    TrainingArguments,
     default_data_collator,
     is_torch_xla_available,
     set_seed,
 )
 from transformers.testing_utils import CaptureLogger
+from transformers.trainer_pt_utils import smp_forward_backward
 from transformers.trainer_utils import get_last_checkpoint
-from transformers.utils import check_min_version, send_example_telemetry
+from transformers.training_args import OptimizerNames, TrainingArguments
+from transformers.utils import (
+    check_min_version,
+    is_accelerate_available,
+    is_apex_available,
+    is_sagemaker_mp_enabled,
+    is_torch_hpu_available,
+    is_torch_mlu_available,
+    is_torch_mps_available,
+    is_torch_musa_available,
+    is_torch_npu_available,
+    is_torch_xpu_available,
+    send_example_telemetry,
+)
 from transformers.utils.versions import require_version
+
+if is_apex_available():
+    from apex import amp
 
 from magi_attention.api import dispatch, get_position_ids, magi_attn_varlen_dispatch
 from magi_attention.api.functools import (
@@ -90,6 +111,8 @@ require_version(
     "datasets>=2.14.0",
     "To fix: pip install -r examples/pytorch/language-modeling/requirements.txt",
 )
+if is_accelerate_available():
+    from accelerate.utils import DistributedType
 
 logger = logging.getLogger(__name__)
 
@@ -373,7 +396,6 @@ def prepare_magi_attention(inputs, cu_seqlens_q, cu_seqlens_k, pad_size, head_di
         inputs,
         cu_seqlens_q,
         cu_seqlens_k,
-        # head_dim=config.head_dim,
         head_dim=head_dim,
         pad_size=pad_size,
         cp_group=cp_group,
@@ -385,8 +407,199 @@ def prepare_magi_attention(inputs, cu_seqlens_q, cu_seqlens_k, pad_size, head_di
     return x_padded, dist_attn_runtime_key
 
 
+class MagiAccelerator(Accelerator):
+    @override
+    def _prepare_device_mesh(self):
+        """
+        Prepare the device mesh for distributed training. The dataloader will determine how to load data based on the
+        device mesh.
+        """
+        cp_size = int(os.environ.get("cp_size", 1))
+
+        if self.state.torch_tp_plugin:
+            return self.state.torch_tp_plugin.torch_device_mesh
+        elif self.distributed_type == DistributedType.DEEPSPEED and hasattr(
+            self.state, "ds_device_mesh"
+        ):
+            return self.state.ds_device_mesh
+        elif cp_size > 1:
+            device_mesh = torch.arange(0, torch.distributed.get_world_size()).reshape(
+                torch.distributed.get_world_size() // cp_size,  # dp_size
+                cp_size,
+            )
+
+            device_mesh = DeviceMesh(
+                device_type="cuda",
+                mesh=device_mesh,
+                mesh_dim_names=(
+                    "dp",
+                    "tp",
+                ),  # hack tp with cp here, set dp-tp 2-dim parallel
+            )
+
+            return device_mesh
+
+        return None
+
+
 class MagiTrainer(Trainer):
-    # @override
+    @override
+    def create_accelerator_and_postprocess(self):
+        # We explicitly don't rely on the `Accelerator` to do gradient accumulation
+        grad_acc_kwargs = {}
+        if (
+            is_accelerate_available("0.28.0")
+            and self.args.accelerator_config.gradient_accumulation_kwargs is not None
+        ):
+            grad_acc_kwargs = self.args.accelerator_config.gradient_accumulation_kwargs
+
+        # check if num_steps is attempted to be passed in gradient_accumulation_kwargs
+        if "num_steps" in grad_acc_kwargs:
+            if self.args.gradient_accumulation_steps > 1:
+                # raise because we do not know which setting is intended.
+                raise ValueError(
+                    "The `AcceleratorConfig`'s `num_steps` is set but `gradient_accumulation_steps` "
+                    "is greater than 1 in the passed `TrainingArguments`"
+                    "If using the passed `AcceleratorConfig` is desired, do not set the `TrainingArguments`"
+                    " `gradient_accumulation_steps`."
+                )
+            else:
+                self.args.gradient_accumulation_steps = grad_acc_kwargs["num_steps"]
+
+        accelerator_config = self.args.accelerator_config.to_dict()
+
+        if is_accelerate_available("0.28.0"):
+            # Extract dataloader config params from accelerator config
+            dataloader_params = [
+                "split_batches",
+                "dispatch_batches",
+                "even_batches",
+                "use_seedable_sampler",
+            ]
+            dataloader_config = DataLoaderConfiguration(
+                **{param: accelerator_config.pop(param) for param in dataloader_params}
+            )
+            if is_accelerate_available("1.1.0"):
+                dataloader_config.data_seed = self.args.data_seed
+
+        non_blocking = accelerator_config.pop("non_blocking")
+        if not is_accelerate_available("0.30.0"):
+            if non_blocking:
+                raise ImportError(
+                    "`non_blocking` is only supported in accelerate v0.30.0 and above. "
+                    "Please upgrade accelerate to use this feature."
+                )
+        else:
+            if non_blocking and not self.args.dataloader_pin_memory:
+                logger.warning(
+                    "`non_blocking` is enabled but `dataloader_pin_memory` is not. For the best performance, "
+                    "it's recommended to enable both."
+                )
+            dataloader_config.non_blocking = non_blocking
+        # this would have been updated above, no need for it anymore
+        accelerator_config.pop("gradient_accumulation_kwargs")
+
+        args = {
+            "deepspeed_plugin": self.args.deepspeed_plugin,
+        }
+        if is_accelerate_available("0.28.0"):
+            args["dataloader_config"] = dataloader_config
+        else:
+            args.update(accelerator_config)
+        # tp is initialized at Accelerator init phase so
+        # args should be prepared here
+        # ignore tp here.
+        """
+        if self.args.tp_size > 1:
+            self.is_tp_enabled = True
+            if version.parse(accelerate_version) > version.parse("1.3.0"):
+                args["torch_tp_plugin"] = TorchTensorParallelPlugin(
+                    tp_size=self.args.tp_size
+                )
+            else:
+                raise ValueError("Requires accelerate>1.3.0 to use Tensor Parallelism.")
+        """
+        # create accelerator object
+        self.accelerator = MagiAccelerator(**args)
+        # some Trainer classes need to use `gather` instead of `gather_for_metrics`, thus we store a flag
+        self.gather_function = self.accelerator.gather_for_metrics
+
+        if (
+            "use_gather_object"
+            in inspect.signature(self.gather_function).parameters.keys()
+        ):
+            self.gather_function = functools.partial(
+                self.gather_function, use_gather_object=self.args.eval_use_gather_object
+            )
+
+        # deepspeed and accelerate flags covering both trainer args and accelerate launcher
+        self.is_deepspeed_enabled = (
+            getattr(self.accelerator.state, "deepspeed_plugin", None) is not None
+        )
+        self.is_fsdp_enabled = (
+            getattr(self.accelerator.state, "fsdp_plugin", None) is not None
+        )
+        self.is_tp_enabled = (
+            getattr(self.accelerator.state, "torch_tp_plugin", None) is not None
+        )
+        # post accelerator creation setup
+        if self.is_fsdp_enabled:
+            fsdp_plugin = self.accelerator.state.fsdp_plugin
+            for param in ["limit_all_gathers", "activation_checkpointing"]:
+                setattr(
+                    fsdp_plugin,
+                    param,
+                    self.args.fsdp_config.get(param, getattr(fsdp_plugin, param)),
+                )
+            if (
+                fsdp_plugin.activation_checkpointing
+                and self.args.gradient_checkpointing
+            ):
+                raise ValueError(
+                    "The activation_checkpointing in FSDP config and the gradient_checkpointing in training arg "
+                    "can't be set to True simultaneously. Please use FSDP's activation_checkpointing logic "
+                    "when using FSDP."
+                )
+
+        if (
+            self.is_deepspeed_enabled
+            and getattr(self.args, "hf_deepspeed_config", None) is None
+        ):
+            self.propagate_args_to_deepspeed()
+
+        # `save_only_model` can't be used with DeepSpeed/FSDP along with `load_best_model_at_end`
+        if (
+            self.args.save_only_model
+            and (self.is_deepspeed_enabled or self.is_fsdp_enabled)
+            and self.args.load_best_model_at_end
+        ):
+            wrapper = "DeepSpeed" if self.is_deepspeed_enabled else "FSDP"
+            raise ValueError(
+                f"{wrapper} can't be used with `save_only_model` along with `load_best_model_at_end`."
+            )
+
+        # `auto_find_batch_size` isn't supported yet with DeepSpeed Zero-3
+
+        if (
+            self.is_deepspeed_enabled
+            and self.accelerator.state.deepspeed_plugin.zero_stage == 3
+            and self.args.auto_find_batch_size
+        ):
+            raise ValueError(
+                "`auto_find_batch_size` isn't supported yet with DeepSpeed Zero-3."
+                "Please consider using Zero-2, Zero-1, or FSDP"
+            )
+        if (
+            self.args.save_only_model
+            and self.is_fsdp_enabled
+            and "SHARDED_STATE_DICT"
+            in str(self.accelerator.state.fsdp_plugin.state_dict_type)
+        ):
+            raise ValueError(
+                "save_only_model option is not compatible with FSDP state dict type 'SHARDED_STATE_DICT'"
+            )
+
+    # TODO: should override here, but mypy fail.
     def _prepare_inputs(
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
@@ -437,6 +650,96 @@ class MagiTrainer(Trainer):
         inputs["input_ids"] = local_input
 
         return inputs
+
+    # TODO: should override here, but mypy fail.
+    def training_step(
+        self,
+        model: nn.Module,
+        inputs: dict[str, Union[torch.Tensor, Any]],
+        num_items_in_batch=None,
+    ) -> torch.Tensor:
+        """
+        Perform a training step on a batch of inputs.
+
+        Subclass and override to inject custom behavior.
+
+        Args:
+            model (`nn.Module`):
+                The model to train.
+            inputs (`Dict[str, Union[torch.Tensor, Any]]`):
+                The inputs and targets of the model.
+
+                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
+                argument `labels`. Check your model's documentation for all accepted arguments.
+
+        Return:
+            `torch.Tensor`: The tensor with training loss on this batch.
+        """
+        model.train()
+        if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
+            self.optimizer.train()
+        inputs = self._prepare_inputs(inputs)
+        if is_sagemaker_mp_enabled():
+            loss_mb = smp_forward_backward(
+                model, inputs, self.args.gradient_accumulation_steps
+            )
+            return loss_mb.reduce_mean().detach().to(self.args.device)
+
+        with self.compute_loss_context_manager():
+            loss = self.compute_loss(
+                model, inputs, num_items_in_batch=num_items_in_batch
+            )
+
+        del inputs
+        if (
+            self.args.torch_empty_cache_steps is not None
+            and self.state.global_step % self.args.torch_empty_cache_steps == 0
+        ):
+            if is_torch_xpu_available():
+                torch.xpu.empty_cache()
+            elif is_torch_mlu_available():
+                torch.mlu.empty_cache()
+            elif is_torch_musa_available():
+                torch.musa.empty_cache()
+            elif is_torch_npu_available():
+                torch.npu.empty_cache()
+            elif is_torch_mps_available(min_version="2.0"):
+                torch.mps.empty_cache()
+            elif is_torch_hpu_available():
+                logger.warning(
+                    "`torch_empty_cache_steps` is set but HPU device/backend does not support empty_cache()."
+                )
+            else:
+                torch.cuda.empty_cache()
+
+        kwargs = {}
+
+        # For LOMO optimizers you need to explicitly use the learnign rate
+        if self.args.optim in [OptimizerNames.LOMO, OptimizerNames.ADALOMO]:
+            kwargs["learning_rate"] = self._get_learning_rate()
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+
+        if self.use_apex:
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            # Finally we need to normalize the loss for reporting
+            if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
+                loss = loss / self.args.gradient_accumulation_steps
+
+            # Turning off loss scaling w.r.t. gradient accumulation when DeepSpeed is enabled
+            # https://github.com/huggingface/transformers/pull/35808
+            if self.accelerator.distributed_type == DistributedType.DEEPSPEED:
+                kwargs["scale_wrt_gas"] = False
+            import os
+
+            cp_size = int(os.environ.get("cp_size", 1))
+            backward_loss = loss * cp_size
+            self.accelerator.backward(backward_loss, **kwargs)
+
+            return loss.detach()
 
 
 def main():
