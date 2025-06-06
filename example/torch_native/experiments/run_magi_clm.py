@@ -67,7 +67,6 @@ from transformers import (
     set_seed,
 )
 from transformers.testing_utils import CaptureLogger
-from transformers.trainer_pt_utils import smp_forward_backward
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.training_args import OptimizerNames, TrainingArguments
 from transformers.utils import (
@@ -83,27 +82,23 @@ from transformers.utils import (
     is_torch_xpu_available,
     send_example_telemetry,
 )
+
+if is_sagemaker_mp_enabled():
+    from transformers.trainer_pt_utils import smp_forward_backward
+
 from transformers.utils.versions import require_version
 from typing_extensions import override
 
 if is_apex_available():
     from apex import amp
 
-from magi_attention.api import dispatch, get_position_ids, magi_attn_varlen_dispatch
+from magi_attention.api import get_position_ids, magi_attn_varlen_dispatch
 from magi_attention.api.functools import (
     compute_pad_size,
     full_attention_to_varlen_attention,
-    pad_at_dim,
     squash_batch_dim,
 )
-from magi_attention.common.enum import AttnOverlapMode
-from magi_attention.config import (
-    DispatchConfig,
-    DistAttnConfig,
-    MinHeapDispatchAlg,
-    OverlapConfig,
-    UniformOverlapAlg,
-)
+from magi_attention.config import DistAttnConfig
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.51.0")
@@ -335,79 +330,6 @@ class DataTrainingArguments:
                 ], "`validation_file` should be a csv, a json or a txt file."
 
 
-def prepare_magi_data(inputs, head_dim):
-    seqlen = inputs.size(1)
-    batch_size = inputs.size(0)
-
-    local_input = squash_batch_dim(inputs)
-    cp_size = int(os.environ.get("cp_size", 1))
-
-    pad_size, _ = compute_pad_size(local_input.size(0), cp_size, head_dim)
-
-    cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(batch_size, seqlen)
-
-    local_input = local_input.unsqueeze(0)
-
-    return local_input, cu_seqlens_q, cu_seqlens_k, pad_size
-
-
-def build_mesh(cp_size):
-    # we only consider dp and cp here.
-    device_mesh = torch.arange(0, torch.distributed.get_world_size()).reshape(
-        torch.distributed.get_world_size() // cp_size,  # dp_size
-        cp_size,
-    )
-
-    device_mesh = DeviceMesh(
-        device_type="cuda",
-        mesh=device_mesh,
-        mesh_dim_names=("dp", "cp"),  # set dp-cp 2-dim parallel
-    )
-
-    return device_mesh
-
-
-def prepare_magi_attention(inputs, cu_seqlens_q, cu_seqlens_k, pad_size, head_dim):
-    cp_size = int(os.environ.get("cp_size", 1))
-    # ---   magi_attn_flex_dispatch   --- #
-    # an example of distattnconfig
-    # dist_attn_config = DistAttnConfig()
-    dist_attn_config = DistAttnConfig(
-        dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
-        overlap_config=OverlapConfig(
-            enable=True,
-            mode=AttnOverlapMode.STATIC,
-            degree=4,
-            min_chunk_size=13,
-            max_num_chunks=52,
-            alg=UniformOverlapAlg(
-                random_costs=True,
-                random_seed=42,
-            ),
-        ),
-        high_bandwith_domain_size=8,
-        deterministic=False,
-    )
-    device_mesh = build_mesh(cp_size)
-    cp_group = device_mesh.get_group("cp")
-
-    inputs = squash_batch_dim(inputs)
-
-    x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
-        inputs,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        head_dim=head_dim,
-        pad_size=pad_size,
-        cp_group=cp_group,
-        causal=True,
-        dist_attn_config=dist_attn_config,
-    )
-    x_padded = x_padded.unsqueeze(0)
-
-    return x_padded, dist_attn_runtime_key
-
-
 class MagiAccelerator(Accelerator):
     @override
     def _prepare_device_mesh(self):
@@ -600,6 +522,64 @@ class MagiTrainer(Trainer):
                 "save_only_model option is not compatible with FSDP state dict type 'SHARDED_STATE_DICT'"
             )
 
+    def _prepare_magi_data(self, inputs, head_dim):
+        seqlen = inputs.size(1)
+        batch_size = inputs.size(0)
+        local_input = squash_batch_dim(inputs)
+        cp_size = int(os.environ.get("cp_size", 1))
+        pad_size, _ = compute_pad_size(local_input.size(0), cp_size, head_dim)
+        cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
+            batch_size, seqlen
+        )
+        local_input = local_input.unsqueeze(0)
+
+        return local_input, cu_seqlens_q, cu_seqlens_k, pad_size
+
+    def _build_cp_group(self):
+        # cp_group do not change during training step.
+        if hasattr(self, "cp_group"):
+            return self.cp_group
+
+        cp_size = int(os.environ.get("cp_size", 1))
+        device_mesh = torch.arange(0, torch.distributed.get_world_size()).reshape(
+            torch.distributed.get_world_size() // cp_size,  # dp_size
+            cp_size,
+        )
+
+        device_mesh = DeviceMesh(
+            device_type="cuda",
+            mesh=device_mesh,
+            mesh_dim_names=("dp", "cp"),  # set dp-cp 2-dim parallel
+        )
+
+        cp_group = device_mesh.get_group("cp")
+        self.cp_group = cp_group
+
+        return cp_group
+
+    def _prepare_magi_attention(
+        self, inputs, cu_seqlens_q, cu_seqlens_k, pad_size, head_dim
+    ):
+        # ---   magi_attn_flex_dispatch   --- #
+        dist_attn_config = DistAttnConfig()
+        cp_group = self._build_cp_group()
+
+        inputs = squash_batch_dim(inputs)
+
+        x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
+            inputs,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            head_dim=head_dim,
+            pad_size=pad_size,
+            cp_group=cp_group,
+            causal=True,
+            dist_attn_config=dist_attn_config,
+        )
+        x_padded = x_padded.unsqueeze(0)
+
+        return x_padded, dist_attn_runtime_key
+
     # TODO: should override here, but mypy fail.
     def _prepare_inputs(
         self, inputs: dict[str, Union[torch.Tensor, Any]]
@@ -617,37 +597,21 @@ class MagiTrainer(Trainer):
         if self.args.past_index >= 0 and self._past is not None:
             inputs["mems"] = self._past
 
-        local_input, cu_seqlens_q, cu_seqlens_k, pad_size = prepare_magi_data(
+        local_input, cu_seqlens_q, cu_seqlens_k, pad_size = self._prepare_magi_data(
             inputs["input_ids"], self.model.config.head_dim
         )
-        """
-        local_input, magi_attn_key = prepare_magi_attention(
-                    local_input,
-                    cu_seqlens_q,
-                    cu_seqlens_k,
-                    pad_size,
-            )
-        """
-        if not hasattr(self, "magi_attn_key"):
-            local_input, magi_attn_key = prepare_magi_attention(
-                local_input,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                pad_size,
-                self.model.config.head_dim,
-            )
-            self.magi_attn_key = magi_attn_key
-        else:
-            local_input = squash_batch_dim(local_input)
-            local_input = pad_at_dim(local_input, 0, pad_size)
-            local_input = dispatch(local_input, self.magi_attn_key)
-            local_input = local_input.unsqueeze(0)
 
-        if not hasattr(self, "position_ids"):
-            position_ids = get_position_ids(magi_attn_key)
-            self.position_ids = position_ids.unsqueeze(0)
+        local_input, magi_attn_key = self._prepare_magi_attention(
+            local_input,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            pad_size,
+            self.model.config.head_dim,
+        )
 
-        inputs["position_ids"] = self.position_ids
+        position_ids = get_position_ids(magi_attn_key).unsqueeze(0)
+
+        inputs["position_ids"] = position_ids
         inputs["input_ids"] = local_input
 
         return inputs

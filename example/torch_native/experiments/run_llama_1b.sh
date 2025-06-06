@@ -19,7 +19,7 @@ echo "Running a native torch job ..."
 [ -z "$RANK" ] && RANK=0
 [ -z "$WORLD_SIZE" ] && WORLD_SIZE=1
 [ -z "$MASTER_ADDR" ] && MASTER_ADDR=127.0.0.1
-[ -z "$MASTER_PORT" ] && MASTER_PORT=9010
+[ -z "$MASTER_PORT" ] && MASTER_PORT=9011
 
 BS=1
 SEQLEN=8192
@@ -60,6 +60,5 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --$PRECISION \
     --report_to wandb \
     --run_name magi-cp$cp_size-dp1-ga2 \
-    --max_steps 1 \
     #--fsdp "auto_wrap" \
     #--fsdp_config $FSDP_CONFIG 2>&1 | tee ./$JOB_NAME.log
