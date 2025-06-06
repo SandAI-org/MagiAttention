@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, TypedDict, Unpack
+from typing import Optional, TypedDict
 
 import torch
 from einops import rearrange
@@ -27,6 +27,7 @@ from transformers.modeling_outputs import (
 
 # from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from typing_extensions import Unpack
 
 from magi_attention.api import calc_attn, squash_batch_dim, undispatch
 from magi_attention.api.magi_attn_interface import DistAttnRuntimeDict
