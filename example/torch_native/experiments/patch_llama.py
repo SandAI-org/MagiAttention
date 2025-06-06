@@ -18,21 +18,15 @@ import torch
 from einops import rearrange
 from torch import nn
 from transformers import LlamaForCausalLM
-
-# from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
-
-# from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from typing_extensions import Unpack
 
 from magi_attention.api import calc_attn, squash_batch_dim, undispatch
 from magi_attention.api.magi_attn_interface import DistAttnRuntimeDict
-
-# from transformers.utils import LossKwargs
 
 
 def get_magi_attention_key():
@@ -41,7 +35,7 @@ def get_magi_attention_key():
     return DistAttnRuntimeDict.get_most_recent_key()
 
 
-# define magi_attn function and register
+# define magi_attn function
 def Magi_Attention_forward(
     module: nn.Module,
     query: torch.Tensor,  # (b, num_heads, seq_len, hidden_dim)
