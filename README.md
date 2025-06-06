@@ -141,7 +141,7 @@ q = torch.rand(n_heads, total_seq_len, head_d, device=device, dtype=dtype)
 k = torch.rand(n_heads_kv, total_seq_len, head_d, device=device, dtype=dtype)
 v = torch.rand(n_heads_kv, total_seq_len, head_d, device=device, dtype=dtype)
 
-# --- Define Attention mask Structure ---
+# --- Define Attention Structure ---
 # Shape: [num_ranges, 2]
 q_ranges_tensor = torch.tensor([[0, 100], [100, 250]], device=device, dtype=torch.int32)
 k_ranges_tensor = torch.tensor([[0, 100], [0, 250]], device=device, dtype=torch.int32)
@@ -249,7 +249,7 @@ def magi_attn_example():
                 embed_d,
                 device=device,
                 dtype=dtype,
-                requires_grad = True
+                requires_grad=True
             )
 
     # squash the batch dim, magi_attention do not support input data with batch dim.
@@ -285,8 +285,8 @@ def magi_attn_example():
     # q, k, v projection
     local_q, local_k, local_v = QKVProjection.forward(local_x)
     # local attention calculation
-    local_out, _ = calc_attn(local_q, local_k, local_v, magi_attn_runtime_key) # local out with shape (bs * seqlen / cp_size, h)
-    # total attention output
+    local_out, _ = calc_attn(local_q, local_k, local_v, magi_attn_runtime_key)
+    # Gather local attention results and unpad to global result
     total_out = undispatch(local_out, magi_attn_runtime_key)
 
 magi_attn_example()
@@ -366,6 +366,7 @@ def magi_attn_example():
           requires_grad = True
       )
 
+    # --- Define Attention Structure ---
     # block mask
     q_ranges = AttnRanges.from_ranges(
                         [
@@ -391,8 +392,8 @@ def magi_attn_example():
                     )
 
     # pad input seqlen for better performance
-    total_seqlen_q = 960
-    total_seqlen_k = 960
+    total_seqlen_q = 1024
+    total_seqlen_k = 1024
     attn_mask_type = [AttnMaskType.FULL] * 7
     cp_group = device_mesh.get_group('cp')
     cp_size = cp_group.size()
@@ -418,8 +419,8 @@ def magi_attn_example():
     # q, k, v projection
     local_q, local_k, local_v = QKVProjection.forward(local_x)
     # local attention calculation
-    local_out, _ = calc_attn(local_q, local_k, local_v, magi_attn_runtime_key) # local out with shape (bs * seqlen / cp_size, h)
-    # total attention output
+    local_out, _ = calc_attn(local_q, local_k, local_v, magi_attn_runtime_key)
+    # Gather local attention results and unpad to global result
     total_out = undispatch(local_out, magi_attn_runtime_key)
 
 magi_attn_example()
