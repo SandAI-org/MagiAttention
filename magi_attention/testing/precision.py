@@ -109,9 +109,14 @@ def torch_attn_ref(
                 k.to(torch.float64),
                 v.to(torch.float64),
                 attn_mask=mask,
+                enable_gqa=True,
             )
         else:
-            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+            out = F.scaled_dot_product_attention(
+                q, k, v, 
+                attn_mask=mask,
+                enable_gqa=True,
+            )
 
     if layout == "thd":
         out = rearrange(out, "1 h t d -> t h d")
