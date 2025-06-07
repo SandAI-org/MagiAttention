@@ -132,16 +132,22 @@ class TestFlexFlashAttn(TestCase):
 
         # construct data
         q = torch.randn(
-            (seqlen, num_heads_q, head_dim), dtype=dtype, device=self.device,
-            requires_grad = True,
+            (seqlen, num_heads_q, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
         )
         k = torch.randn(
-            (seqlen, num_heads_kv, head_dim), dtype=dtype, device=self.device,
-            requires_grad = True,
+            (seqlen, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
         )
         v = torch.randn(
-            (seqlen, num_heads_kv, head_dim), dtype=dtype, device=self.device,
-            requires_grad = True,
+            (seqlen, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
         )
         do = torch.randn_like(q)
 

@@ -113,7 +113,9 @@ def torch_attn_ref(
             )
         else:
             out = F.scaled_dot_product_attention(
-                q, k, v, 
+                q,
+                k,
+                v,
                 attn_mask=mask,
                 enable_gqa=True,
             )
