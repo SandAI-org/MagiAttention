@@ -55,7 +55,7 @@ class MaskGenerator:
         self.total_seqlen = total_seqlen
         self.to_attn_ranges = to_attn_ranges
 
-        if self.total_seqlen > 64 * 1024:  # 64k
+        if self.total_seqlen > 128 * 1024:  # 64k
             self.seqlen_distribution = varlen_long_seqlen_distribution()
         else:
             self.seqlen_distribution = varlen_short_seqlen_distribution()

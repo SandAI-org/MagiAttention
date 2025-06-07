@@ -14,12 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-export WORLD_SIZE=${WORLD_SIZE:-8}
-export GPUS_PER_NODE=${WORLD_SIZE}
-export NNODES=1
+export WORLD_SIZE=${WORLD_SIZE:-64}
+export GPUS_PER_NODE=8
+export NNODES=${NNODES:-8}
 export NODE_RANK=${RANK:-0}
-export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
-export MASTER_PORT=${MASTER_PORT:-16988}
+# export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+# export MASTER_PORT=${MASTER_PORT:-16988}
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
@@ -38,7 +38,7 @@ echo $DISTRIBUTED_ARGS
 CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
 TORCHRUN_CMD="nsys profile \
     --force-overwrite true \
-    -o usp_4_2.nsys-rep \
+    -o usp_8_8.nsys-rep \
     --capture-range=cudaProfilerApi \
     $CMD"
 $TORCHRUN_CMD

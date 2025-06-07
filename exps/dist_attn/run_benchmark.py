@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from datetime import timedelta
 from enum import Enum
 
 import torch
@@ -34,8 +35,20 @@ from exps.dist_attn.baselines.usp import USP
 from exps.dist_attn.baselines.utils_cp import AttnBackend
 from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.mask import MaskGenerator
-from magi_attention.common.enum import AttnMaskType
+from magi_attention.api import (
+    calc_attn,
+    compute_pad_size,
+    magi_attn_flex_dispatch,
+    undispatch,
+)
+from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.ranges import AttnRanges
+from magi_attention.config import DistAttnConfig
+from magi_attention.meta.solver.dispatch_solver import (
+    DispatchConfig,
+    MinHeapDispatchAlg,
+)
+from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOverlapAlg
 
 
 class AttnImpl(Enum):
@@ -44,28 +57,37 @@ class AttnImpl(Enum):
     RING_ALLGATHER = 3
     USP = 4
     LOONGTRAIN = 5
+    MAGI_ATTENTION = 6
 
 
+# attention params
 SEED = 42
-TOTAL_SEQLEN = 64 * 1024
+TOTAL_SEQLEN = 512 * 1024
 Q_HEADS = 48
-KV_HEADS = 8
+KV_HEADS = 16
 HIDDEN_SIZE = 128
 DTYPE = torch.bfloat16
-DROPOUT = 0.0
-SOFTMAX_SCALE = None
-DETERMINISTIC = False
-WORLD_SIZE = 8
-CP_PG_META = {
-    ParallelMode.RING: 8,
-    # ParallelMode.ULYSESS: 4,
-    # ParallelMode.RING: 2,
-}
-ATTN_IMPL = AttnImpl.RING_P2P
+WORLD_SIZE = 64
+ATTN_IMPL = AttnImpl.USP
 ATTN_BACKEND = AttnBackend.FA3
+
+# mask params
 MASK_NUMS = 1
 MASK_TYPE = FlashMaskType.FULL_DOCUMENT
 ITERATION = 10
+
+# Optional baseline params (except magi)
+DROPOUT = 0.0
+SOFTMAX_SCALE = None
+DETERMINISTIC = False
+CP_PG_META = {
+    ParallelMode.RING: 8,
+    ParallelMode.ULYSESS: 8,
+    # ParallelMode.RING: 2,
+}
+
+# Optional Magi params
+DISPATCH_ALG = MinHeapDispatchAlg()
 
 
 def init_dist_environment(
@@ -122,6 +144,18 @@ def init_dist_environment(
         # assert world_size % window_num == 0
         device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
         cp_group = get_loongtrain_pg(device_shard, window_num, rank)
+    elif attn_impl == AttnImpl.MAGI_ATTENTION:
+        # init dist env
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=world_size,
+            rank=rank,
+            timeout=timedelta(minutes=30),
+        )
+        local_rank = rank % 8
+        torch.cuda.set_device(local_rank)
+        cp_group = dist.new_group(list(range(world_size)), backend="nccl")
 
     return cp_group
 
@@ -227,6 +261,158 @@ def run_dist_attn(
     _ = attn.undispatch(out, "q")
 
 
+def run_magi_attn(
+    total_seqlen: int,
+    q_heads: int,
+    kv_heads: int,
+    hidden_size: int,
+    dtype,
+    q_ranges: AttnRanges,
+    k_ranges: AttnRanges,
+    world_size: int,
+    attn_mask_type: list[AttnMaskType],
+    attn_impl: AttnImpl,
+    cp_group,
+    iteration: int,
+):
+    assert attn_impl == AttnImpl.MAGI_ATTENTION
+
+    rank = int(os.environ.get("RANK", 0))
+    device = torch.cuda.current_device()
+
+    # -----    init test data   ---- #
+
+    q = torch.randn(total_seqlen, q_heads, hidden_size, dtype=dtype, device=device)
+    k = torch.randn(total_seqlen, kv_heads, hidden_size, dtype=dtype, device=device)
+    v = torch.randn(total_seqlen, kv_heads, hidden_size, dtype=dtype, device=device)
+    dout = torch.randn(total_seqlen, q_heads, hidden_size, dtype=dtype, device=device)
+
+    q.requires_grad_(True)
+    k.requires_grad_(True)
+    v.requires_grad_(True)
+
+    # -----   init dispatch mata ----- #
+
+    pad_size, _ = compute_pad_size(total_seqlen, world_size, hidden_size)
+
+    dist_attn_config = DistAttnConfig(
+        dispatch_config=DispatchConfig(alg=DISPATCH_ALG),
+        overlap_config=OverlapConfig(
+            enable=True,
+            mode=AttnOverlapMode.STATIC,
+            degree=2,
+            min_chunk_size=512,
+            max_num_chunks=64,
+            alg=UniformOverlapAlg(
+                random_costs=True,
+                random_seed=42,
+            ),
+        ),
+        high_bandwith_domain_size=1,
+    )
+
+    # -----    dispatch   ---- #
+
+    (
+        local_q,
+        magi_attn_runtime_key,
+    ) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
+        q,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        total_seqlen_q=total_seqlen,
+        total_seqlen_k=total_seqlen,
+        head_dim=hidden_size,
+        pad_size=pad_size,
+        cp_group=cp_group,
+        is_same_source=True,
+        is_q_permutable=True,
+        is_k_permutable=True,
+        dist_attn_config=dist_attn_config,
+    )
+
+    (
+        local_k,
+        _,
+    ) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
+        k,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        total_seqlen_q=total_seqlen,
+        total_seqlen_k=total_seqlen,
+        head_dim=hidden_size,
+        pad_size=pad_size,
+        cp_group=cp_group,
+        is_same_source=True,
+        is_q_permutable=True,
+        is_k_permutable=True,
+        dist_attn_config=dist_attn_config,
+    )
+
+    (
+        local_v,
+        _,
+    ) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
+        v,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        total_seqlen_q=total_seqlen,
+        total_seqlen_k=total_seqlen,
+        head_dim=hidden_size,
+        pad_size=pad_size,
+        cp_group=cp_group,
+        is_same_source=True,
+        is_q_permutable=True,
+        is_k_permutable=True,
+        dist_attn_config=dist_attn_config,
+    )
+
+    (
+        local_dout,
+        _,
+    ) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
+        dout,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        total_seqlen_q=total_seqlen,
+        total_seqlen_k=total_seqlen,
+        head_dim=hidden_size,
+        pad_size=pad_size,
+        cp_group=cp_group,
+        is_same_source=True,
+        is_q_permutable=True,
+        is_k_permutable=True,
+        dist_attn_config=dist_attn_config,
+    )
+
+    # local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
+
+    # -----    forward   ---- #
+
+    for i in range(iteration):
+        if rank == 0 and i == 6:
+            torch.cuda.profiler.start()
+            torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
+        if rank == 0 and i == 9:
+            torch.cuda.profiler.stop()
+
+        # -----    barrier at the beginning of each iteration   ---- #
+
+        dist.barrier()
+        torch.cuda.synchronize()
+
+        local_out, _ = calc_attn(local_q, local_k, local_v, magi_attn_runtime_key)
+        local_out.backward(local_dout, retain_graph=True)
+
+    # ----- undispatch ----- #
+
+    _ = undispatch(local_out, magi_attn_runtime_key)
+
+
 def run_benchmark(
     mask_nums: int,
     mask_type: FlashMaskType,
@@ -245,26 +431,42 @@ def run_benchmark(
         cp_pg_meta=CP_PG_META,
     )
     for q_ranges, k_ranges, attn_mask_type in mask_generator:
-        run_dist_attn(
-            seed=SEED,
-            total_seqlen=TOTAL_SEQLEN,
-            q_heads=Q_HEADS,
-            kv_heads=KV_HEADS,
-            hidden_size=HIDDEN_SIZE,
-            dtype=DTYPE,
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            dropout=DROPOUT,
-            softmax_scale=SOFTMAX_SCALE,  # type: ignore
-            deterministic=DETERMINISTIC,
-            world_size=WORLD_SIZE,
-            attn_mask_type=attn_mask_type[0],
-            cp_pg_meta=CP_PG_META,
-            attn_impl=ATTN_IMPL,
-            attn_backend=ATTN_BACKEND,
-            cp_group=cp_group,
-            iteration=ITERATION,
-        )
+        if ATTN_IMPL != AttnImpl.MAGI_ATTENTION:
+            run_dist_attn(
+                seed=SEED,
+                total_seqlen=TOTAL_SEQLEN,
+                q_heads=Q_HEADS,
+                kv_heads=KV_HEADS,
+                hidden_size=HIDDEN_SIZE,
+                dtype=DTYPE,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                dropout=DROPOUT,
+                softmax_scale=SOFTMAX_SCALE,  # type: ignore
+                deterministic=DETERMINISTIC,
+                world_size=WORLD_SIZE,
+                attn_mask_type=attn_mask_type[0],
+                cp_pg_meta=CP_PG_META,
+                attn_impl=ATTN_IMPL,
+                attn_backend=ATTN_BACKEND,
+                cp_group=cp_group,
+                iteration=ITERATION,
+            )
+        else:
+            run_magi_attn(
+                total_seqlen=TOTAL_SEQLEN,
+                q_heads=Q_HEADS,
+                kv_heads=KV_HEADS,
+                hidden_size=HIDDEN_SIZE,
+                dtype=DTYPE,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                world_size=WORLD_SIZE,
+                attn_mask_type=attn_mask_type,
+                attn_impl=ATTN_IMPL,
+                cp_group=cp_group,
+                iteration=ITERATION,
+            )
 
 
 if __name__ == "__main__":
