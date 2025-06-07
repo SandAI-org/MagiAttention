@@ -264,11 +264,11 @@ def magi_attn_example():
         dist_attn_config=DistAttnConfig(),
     )
 
+    # q, k, v projection
     local_q = q_proj(local_x).view(-1, n_heads, head_d)
     local_k = k_proj(local_x).view(-1, n_heads_kv, head_d)
     local_v = v_proj(local_x).view(-1, n_heads_kv, head_d)
 
-    # q, k, v projection
     # local attention calculation
     local_out, _ = calc_attn(local_q, local_k, local_v, magi_attn_runtime_key)
     # Gather local attention results and unpad to global result
@@ -388,6 +388,7 @@ def magi_attn_example():
     local_q = q_proj(local_x).view(-1, n_heads, head_d)
     local_k = k_proj(local_x).view(-1, n_heads_kv, head_d)
     local_v = v_proj(local_x).view(-1, n_heads_kv, head_d)
+
     # local attention calculation
     local_out, _ = calc_attn(local_q, local_k, local_v, magi_attn_runtime_key)
     # Gather local attention results and unpad to global result
