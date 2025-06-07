@@ -150,9 +150,18 @@ public:
         static constexpr int kBlockM = get<0>(TileShape_MK{});
 
         int const thread_idx = threadIdx.x;
-        int const m_block = blockIdx.x;
-        int const bidh = blockIdx.y;
-        int const bidb = blockIdx.z;
+
+        /**
+         * NOTE: Here, we shift the batch size to the x-dimension because the z-dimension must be less than 65536.
+         *  Thus once the batch size is too large (>= 65536), the z-dimension may overflow, causing an implicit kernel-launch error.
+         *  What's worse, this error may not be explicitly raised, resulting in the kernel being skipped.
+         */
+        // int const m_block = blockIdx.x;
+        // int const bidh = blockIdx.y;
+        // int const bidb = blockIdx.z;
+        int const m_block = blockIdx.y;
+        int const bidh = blockIdx.z;
+        int const bidb = blockIdx.x;
 
         flash::SeqlenInfoBwd<Varlen, kBlockM> seqlen_info(bidb, size<0>(params.shape_O), params.cu_seqlens, params.ranges, params.seqused);
         bool const is_varlen = Varlen && (params.cu_seqlens || params.ranges);
