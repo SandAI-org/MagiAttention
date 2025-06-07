@@ -676,7 +676,7 @@ def single_all_to_all(
     output = torch.empty_like(input_t)
     # work =
     dist.all_to_all_single(output, input_t, group=group, async_op=async_op)
-    dist.barrier(group=group)
+    # dist.barrier(group=group)
 
     res = post_all2all_fun(output)
     return res

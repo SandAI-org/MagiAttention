@@ -1174,7 +1174,7 @@ class FA3RingAttnFunc(torch.autograd.Function):
         cp_group,
         cp_stream,
         deterministic,
-        batch_p2p_comm=True,
+        batch_p2p_comm=False,
     ) -> torch.Tensor:
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -1894,7 +1894,6 @@ class RingAttnP2P(AttnBaselineInterface):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cp_size = dist.get_world_size(group=self.pg_p2p)
-        batch_p2p_comm = kwargs.get("batch_p2p_comm", True)
         with torch.cuda.device(q.device):
             cp_stream = torch.cuda.Stream()
 
@@ -1925,7 +1924,6 @@ class RingAttnP2P(AttnBaselineInterface):
                 attn_mask,
                 cp_stream,
                 deterministic,
-                batch_p2p_comm,
             )
 
         elif self.backend == AttnBackend.FA3:
@@ -1948,7 +1946,6 @@ class RingAttnP2P(AttnBaselineInterface):
                 self.pg_p2p,
                 cp_stream,
                 deterministic,
-                batch_p2p_comm,
             )
 
         return out_layer, lse

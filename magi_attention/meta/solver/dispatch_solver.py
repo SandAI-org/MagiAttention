@@ -325,11 +325,8 @@ class BatchToppHeapDispatchAlg(DispatchAlg):
 
 
 @dataclass(frozen=True)
-class SortedSequentialSelect(DispatchAlg):
+class SortedSequentialSelectAlg(DispatchAlg):
     """The config/meta info dataclass for the batch topp-heap dispatch algorithm"""
-
-    top_p: float = 0.0
-    num_of_select_chunk: int = 1
 
     @property
     def type(self) -> DispatchAlgType:

@@ -17,12 +17,15 @@ from magi_attention.common.enum import AttnMaskType, AttnRole, AttnType
 from magi_attention.meta.collection import DispatchMeta
 from magi_attention.meta.container import AttnBucket, AttnChunk, AttnSlice
 from magi_attention.meta.solver.dispatch_solver import (
+    BatchToppHeapDispatchAlg,
     DispatchConfig,
     DispatchData,
     DispatchJob,
     DispatchSolution,
     DispatchSolver,
     IOUAffinity,
+    SampleIDAffinity,
+    SortedSequentialSelectAlg,
     ToppHeapDispatchAlg,
 )
 from magi_attention.utils import (
@@ -285,10 +288,22 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
 
     dispatch_solver = DispatchSolver(alg=dispatch_config.alg)
     affinities = None
-    if isinstance(dispatch_config.alg, ToppHeapDispatchAlg):
+    sample_areas = None
+    if isinstance(dispatch_config.alg, (ToppHeapDispatchAlg, BatchToppHeapDispatchAlg)):
         affinities = [
             IOUAffinity.from_ranges(chunk.k_ranges) for chunk in global_bucket.q_chunks
         ]
+    elif isinstance(dispatch_config.alg, SortedSequentialSelectAlg):
+        affinities = [
+            SampleIDAffinity.from_list(chunk.sample_ids)  # type: ignore
+            for chunk in global_bucket.q_chunks
+        ]
+
+        sample_slices = [
+            AttnSlice(q_range=q_range, k_range=k_range, mask_type=mask_type)
+            for q_range, k_range, mask_type in zip(q_ranges, k_ranges, attn_mask_type)
+        ]
+        sample_areas = [sample_slice.area for sample_slice in sample_slices]
     dispatch_jobs = DispatchJob.from_job_list(
         workloads=attn_areas,  # type: ignore[arg-type]
         affinities=affinities,  # type: ignore[arg-type]
@@ -296,6 +311,7 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
     dispatch_data: DispatchData = DispatchData(
         jobs=dispatch_jobs,
         num_buckets=cp_size,
+        sample_areas=sample_areas,  # type: ignore[arg-type]
     )
     dispatch_solution: DispatchSolution = dispatch_solver.solve(
         dispatch_data=dispatch_data,
