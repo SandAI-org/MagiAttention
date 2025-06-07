@@ -68,7 +68,13 @@ public:
 
     static dim3
     get_grid_shape(Params const& params, int num_sm) {
-        return {uint32_t(params.num_blocks), uint32_t((!Split ? 1 : params.num_splits) * params.num_head), uint32_t(params.num_batch)};
+        /**
+         * NOTE: Here, we shift the batch size to the x-dimension because the z-dimension must be less than 65536.
+         *  Thus once the batch size is too large (>= 65536), the z-dimension may overflow, causing an implicit kernel-launch error.
+         *  What's worse, this error may not be explicitly raised, resulting in the kernel being skipped.
+         */
+        // return {uint32_t(params.num_blocks), uint32_t((!Split ? 1 : params.num_splits) * params.num_head), uint32_t(params.num_batch)};
+        return {uint32_t(params.num_batch), uint32_t(params.num_blocks), uint32_t((!Split ? 1 : params.num_splits) * params.num_head)};
     }
 
     struct WorkTileInfo {
@@ -98,7 +104,13 @@ public:
     CUTLASS_DEVICE
     WorkTileInfo
     get_initial_work(Params const& params) const {
-        WorkTileInfo work_info {int(blockIdx.x), int(blockIdx.y), int(blockIdx.z), 0};
+        /**
+         * NOTE: Here, we shift the batch size to the x-dimension because the z-dimension must be less than 65536.
+         *  Thus once the batch size is too large (>= 65536), the z-dimension may overflow, causing an implicit kernel-launch error.
+         *  What's worse, this error may not be explicitly raised, resulting in the kernel being skipped.
+         */
+        // WorkTileInfo work_info {int(blockIdx.x), int(blockIdx.y), int(blockIdx.z), 0};
+        WorkTileInfo work_info {int(blockIdx.y), int(blockIdx.z), int(blockIdx.x), 0};
         if constexpr (Split) {
             int split_idx;
             work_info.bidh = params.nsplits_divmod.divmod(split_idx, work_info.bidh);

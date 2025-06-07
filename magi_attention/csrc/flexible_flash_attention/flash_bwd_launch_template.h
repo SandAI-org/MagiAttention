@@ -79,7 +79,15 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     };
     typename PreprocessKernel::Params preprocess_params = PreprocessKernel::to_underlying_arguments(preprocess_args);
     int num_m_block = cute::ceil_div(params.seqlen_q, kBlockM);
-    dim3 grid_m(num_m_block, params.h, params.b);
+
+    /**
+     * NOTE: Here, we shift the batch size to the x-dimension because the z-dimension must be less than 65536.
+     *  Thus once the batch size is too large (>= 65536), the z-dimension may overflow, causing an implicit kernel-launch error.
+     *  What's worse, this error may not be explicitly raised, resulting in the kernel being skipped.
+     */
+    // dim3 grid_m(num_m_block, params.h, params.b);
+    dim3 grid_m(params.b, num_m_block, params.h);
+
     cutlass::kernel_launch<PreprocessKernel>(grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, false /*launch_with_pdl*/);
     CHECK_CUDA_KERNEL_LAUNCH();
 
