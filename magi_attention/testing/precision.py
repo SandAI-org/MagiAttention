@@ -43,6 +43,24 @@ def extract_mismatch_info(error_msg: str) -> tuple[int, int, float]:
         raise ValueError(f"Could not find mismatch elements in {error_msg=}")
 
 
+def extract_mismatch_threshold(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    atol: float,
+    rtol: float,
+    mismatch_thres_ratio: float = 1.0,
+) -> float:
+    mismatch_threshold = 0.0
+    try:
+        torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
+    except AssertionError as e:
+        error_msg = str(e)
+        _, _, mismatch_threshold = extract_mismatch_info(error_msg)
+
+    # scale it by `mismatch_thres_ratio`, and clamp it in [0, 1]
+    return min(max(mismatch_threshold * mismatch_thres_ratio, 0.0), 1.0)
+
+
 def assert_close(
     a: torch.Tensor,
     b: torch.Tensor,
