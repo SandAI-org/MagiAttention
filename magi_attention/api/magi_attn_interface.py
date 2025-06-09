@@ -238,9 +238,9 @@ def magi_attn_flex_key(
     head_dim: int,
     pad_size: int,
     cp_group: dist.ProcessGroup,
-    is_same_source: bool,
-    is_q_permutable: bool,
-    is_k_permutable: bool,
+    is_same_source: bool = True,
+    is_q_permutable: bool = True,
+    is_k_permutable: bool = True,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
     """
@@ -461,9 +461,9 @@ def magi_attn_flex_dispatch(
     head_dim: int,
     pad_size: int,
     cp_group: dist.ProcessGroup,
-    is_same_source: bool,
-    is_q_permutable: bool,
-    is_k_permutable: bool,
+    is_same_source: bool = True,
+    is_q_permutable: bool = True,
+    is_k_permutable: bool = True,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
     """
@@ -567,13 +567,14 @@ def dispatch(
     key: DistAttnRuntimeKey,
 ) -> torch.Tensor:
     """
-    Dispatch the input total tensor to local tensor on each rank.
+    Dispatch the input tensor to local tensor on each rank along dim0 (seqlen dim).
     args:
         x (torch.Tensor): input total tensor.
-        key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+        key (DistAttnRuntimeKey): the object that holds some inner meta data
+        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
 
     returns:
-        dx (torch.Tensor): local tensor.
+        local_x (torch.Tensor): the dispatched local tensor.
 
     Raises:
         ValueError: If the provided `key` does not exist in `DistAttnRuntimeDict`.
@@ -586,17 +587,18 @@ def dispatch(
 
 
 def undispatch(
-    dx: torch.tensor,
+    x: torch.Tensor,
     key: DistAttnRuntimeKey,
 ) -> torch.Tensor:
     """
-    UnDispatch local tensor to total tensor and unpad the total tensor at dim0(seqlen).
+    Undispatch local tensor to total tensor and unpad the total tensor at dim0 (seqlen dim).
     args:
-        dx (torch.Tensor): local tensor,
-        key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+        x (torch.Tensor): local tensor
+        key (DistAttnRuntimeKey): the object that holds some inner meta data
+        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
 
     returns:
-        unpad_total_x (torch.Tensor): The undispatched and unpadded tensor.
+        unpad_total_x (torch.Tensor): the undispatched and unpadded tensor.
 
     Raises:
         ValueError: If the provided `key` does not exist in `DistAttnRuntimeDict`.
@@ -605,7 +607,7 @@ def undispatch(
     if mgr is None:
         raise ValueError("DistRunTimeKey not exists!")
 
-    total_x = mgr.undispatch_qo(dx)
+    total_x = mgr.undispatch_qo(x)
     pad_size = key.pad_size
     unpad_total_x = unpad_at_dim(total_x, 0, pad_size)
 
@@ -613,7 +615,10 @@ def undispatch(
 
 
 def calc_attn(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, key: DistAttnRuntimeKey
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    key: DistAttnRuntimeKey,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Do attention computation.
@@ -622,7 +627,8 @@ def calc_attn(
         q (torch.Tensor): Query tensor of shape `(num_tokens_q, num_heads, head_dim)`.
         k (torch.Tensor): Key tensor of shape `(num_tokens_k, num_heads, head_dim)`.
         v (torch.Tensor): Value tensor of shape `(num_tokens_v, num_heads, head_dim)`.
-        key (DistAttnRuntimeKey):  DistAttnRuntimeKey.
+        key (DistAttnRuntimeKey): the object that holds some inner meta data
+        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
 
     Returns:
         out (torch.Tensor): Attention output tensor of shape.
@@ -643,7 +649,8 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
     Get the position ids of local tensor to global tensor after dispatching.
 
     Args:
-        key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+        key (DistAttnRuntimeKey): the object that holds some inner meta data
+        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
     Returns:
         position_ids (torch.Tensor): postion_ids of local tensor to global tensor.
     """
