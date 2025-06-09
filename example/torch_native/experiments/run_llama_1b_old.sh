@@ -31,7 +31,7 @@ ga=$2
 NPROC_PER_NODE=8
 export cp_size=$cp_size
 
-export WANDB_PROJECT="align_with_origin"
+export WANDB_PROJECT="last_align"
 
 torchrun --nproc_per_node $NPROC_PER_NODE \
     --nnodes $WORLD_SIZE \
@@ -60,9 +60,9 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --gradient_accumulation_steps $ga \
     --logging_steps 1 \
     --$PRECISION \
-    --max_steos 1000 \
     --report_to wandb \
-    --run_name old-cp$cp_size-gbs1-linear \
+    --run_name old-cp$cp_size-ga$ga-linear \
+    --max_steps 200
     #--dataset_name wikitext \
     #--dataset_config_name wikitext-2-raw-v1 \
     #--fsdp "auto_wrap" \
