@@ -190,9 +190,9 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
   from magi_attention.common.enum import AttnMaskType
   from magi_attention.utils import setup_dist_env, clearup_dist_env
 
-  # --- Set up Distributed Environment --- #
+  # --- Set up distributed environment --- #
 
-  rank, world_size, world_group, device, seed = setup_dist_env()
+  rank, local_rank, world_size, world_group, device, seed = setup_dist_env()
 
   # --- Define attention config --- #
 
