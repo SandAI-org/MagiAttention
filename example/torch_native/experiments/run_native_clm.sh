@@ -14,8 +14,6 @@
 
 set -ex
 
-echo "Running a native torch job ..."
-
 [ -z "$RANK" ] && RANK=0
 [ -z "$WORLD_SIZE" ] && WORLD_SIZE=1
 [ -z "$MASTER_ADDR" ] && MASTER_ADDR=127.0.0.1
@@ -24,8 +22,7 @@ echo "Running a native torch job ..."
 BS=1
 SEQLEN=8192
 PRECISION="bf16=true"
-#FSDP_CONFIG="llama3_fsdp_native.json"
-#JOB_NAME="LLAMA3_FSDP_NATIVE_GPU${NPROC_PER_NODE}_BS${BS}_SEQLEN${SEQLEN}_BF16_FA"
+lr_scheduler_kwargs="lr_scheduler_kwargs.json"
 cp_size=$1
 ga=$2
 NPROC_PER_NODE=8
@@ -38,7 +35,7 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --node_rank $RANK \
     --master_port $MASTER_PORT \
     --master_addr $MASTER_ADDR \
-    run_magi_clm.py \
+    run_origin_clm.py \
     --num_train_epochs 2 \
     --dataset_name openwebtext \
     --use_fast_tokenizer false \
@@ -53,7 +50,10 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --cache_dir ./cache \
     --block_size $SEQLEN \
     --optim adamw_torch \
-    --lr_scheduler_type linear \
+    --learning_rate 6e-5 \
+    --lr_scheduler_type cosine_with_min_lr \
+    --warm_up_ratio 0.01 \
+    --lr_scheduler_kwargs $lr_scheduler_kwargs \
     --save_strategy no \
     --logging_strategy steps \
     --gradient_checkpointing no \
@@ -61,9 +61,4 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --logging_steps 1 \
     --$PRECISION \
     --report_to wandb \
-    --run_name magi-cp$cp_size-ga$ga-linear \
-    --max_steps 200 \
-    #--dataset_name wikitext \
-    #--dataset_config_name wikitext-2-raw-v1 \
-    #--fsdp "auto_wrap" \
-    #--fsdp_config $FSDP_CONFIG 2>&1 | tee ./$JOB_NAME.log
+    --run_name native-cp$cp_size-ga$ga \
