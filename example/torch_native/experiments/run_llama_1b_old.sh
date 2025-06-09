@@ -38,7 +38,7 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --node_rank $RANK \
     --master_port $MASTER_PORT \
     --master_addr $MASTER_ADDR \
-    run_magi_clm.py \
+    run_origin_clm.py \
     --num_train_epochs 2 \
     --dataset_name openwebtext \
     --use_fast_tokenizer false \
@@ -60,8 +60,9 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --gradient_accumulation_steps $ga \
     --logging_steps 1 \
     --$PRECISION \
+    --max_steos 1000 \
     --report_to wandb \
-    --run_name magi-cp$cp_size-gbs16-ga2-linear \
+    --run_name old-cp$cp_size-gbs1-linear \
     #--dataset_name wikitext \
     #--dataset_config_name wikitext-2-raw-v1 \
     #--fsdp "auto_wrap" \

@@ -25,7 +25,8 @@ from transformers.modeling_outputs import (
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from typing_extensions import Unpack
 
-from magi_attention.api import calc_attn, squash_batch_dim, undispatch
+from magi_attention.api import calc_attn, undispatch
+from magi_attention.api.functools import squash_batch_dim
 from magi_attention.api.magi_attn_interface import DistAttnRuntimeDict
 
 
