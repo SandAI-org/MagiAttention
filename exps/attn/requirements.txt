@@ -1,0 +1,3 @@
+transformer_engine===2.1.0
+mpi4py==4.0.3
+seaborn==0.13.2
