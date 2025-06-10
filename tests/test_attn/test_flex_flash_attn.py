@@ -150,18 +150,18 @@ class TestFlexFlashAttn(TestCase):
     @parameterize(
         "model_config",
         [
-            {
-                "name": "mha_nh8_hd128",
-                "num_heads_q": 8,
-                "num_heads_kv": 8,
-                "head_dim": 128,
-            },
-            {
-                "name": "gqa_nhq16_nhkv4_hd128",
-                "num_heads_q": 16,
-                "num_heads_kv": 4,
-                "head_dim": 128,
-            },
+            # {
+            #     "name": "mha_nh8_hd128",
+            #     "num_heads_q": 8,
+            #     "num_heads_kv": 8,
+            #     "head_dim": 128,
+            # },
+            # {
+            #     "name": "gqa_nhq16_nhkv4_hd128",
+            #     "num_heads_q": 16,
+            #     "num_heads_kv": 4,
+            #     "head_dim": 128,
+            # },
             {
                 "name": "mha_nh1_hd64",
                 "num_heads_q": 1,

@@ -192,7 +192,8 @@ public:
         // Initialize the barriers
         if (warp_idx == 0 && lane_predicate) {
             shared_storage.pipelines.barrier_Q.init(Use_TMA_Q ? 1 : NumProducerThreads /*numThreads*/);
-            shared_storage.pipelines.barrier_O.init(size(ClusterShape{}));
+            // TODO: Fix if TMA store O is used
+            shared_storage.pipelines.barrier_O.init(size(ClusterShape{}) * NumMmaThreads);
         }
 
         // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();

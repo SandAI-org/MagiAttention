@@ -302,7 +302,7 @@ class DistFlashAttnRuntime:
         skip_attn = attn_arg.can_skip(is_bwd=False)
 
         # DE-BUG
-        logger.debug(
+        print(
             f"RANK: {dist.get_rank()}, {q.shape=}, {kv.shape=}, "
             f"{q.device=}, {kv.device=}, "
             f"{attn_arg=}"
@@ -340,6 +340,8 @@ class DistFlashAttnRuntime:
                         k=k,
                         v=v,
                         **attn_arg.to_ffa_args(is_bwd=False),
+                        merge_q_ranges=None,
+                        qk_map=None,
                         softmax_scale=q.shape[-1] ** -0.5,
                         deterministic=deterministic,
                         softcap=0.0,
@@ -416,6 +418,8 @@ class DistFlashAttnRuntime:
                     out=o,
                     softmax_lse=lse,
                     **attn_arg.to_ffa_args(is_bwd=True),
+                    merge_k_ranges=None,
+                    bwd_kq_map=None,
                     softmax_scale=q.shape[-1] ** -0.5,
                     deterministic=deterministic,
                     softcap=0.0,

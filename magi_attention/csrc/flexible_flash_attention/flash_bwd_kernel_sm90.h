@@ -321,7 +321,7 @@ public:
                     }
                 }
                 else {
-                    mainloop.mma(
+                    tile_valid = mainloop.mma(
                         params.mainloop, pipeline_q, pipeline_do, smem_pipe_read, smem_pipe_read_do,
                         tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage, true, true);
                 }

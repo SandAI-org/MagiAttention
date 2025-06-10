@@ -67,7 +67,7 @@ constexpr std::tuple<int, int> tile_size_bwd_sm90(
     assert(element_size == 2);
 
     if (headdim <= 64) {
-        return {64, 128};
+        return {128, 128};
     }
     else if (headdim <= 128) {
         // if (softcap) {

@@ -362,19 +362,19 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                     #ifndef FLASHATTENTION_DISABLE_FP16
                     if (params.is_fp32_out) {
                         #ifndef FLASHATTENTION_DISABLE_HDIM64
-                        if (params.d <= 64) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, float, 64, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
+                        if (params.d <= 64) { return run_mha_fwd_<Arch, cutlass::half_t, float, 64, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
                         #endif
                         #ifndef FLASHATTENTION_DISABLE_HDIM96
-                        if (params.d <= 96) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, float, 96, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
+                        if (params.d <= 96) { return run_mha_fwd_<Arch, cutlass::half_t, float, 96, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
                         #endif
                         #ifndef FLASHATTENTION_DISABLE_HDIM128
-                        if (params.d <= 128) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, float, 128, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
+                        if (params.d <= 128) { return run_mha_fwd_<Arch, cutlass::half_t, float, 128, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
                         #endif
                         #ifndef FLASHATTENTION_DISABLE_HDIM192
-                        if (params.d <= 192) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, float, 192, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
+                        if (params.d <= 192) { return run_mha_fwd_<Arch, cutlass::half_t, float, 192, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
                         #endif
                         #ifndef FLASHATTENTION_DISABLE_HDIM256
-                        if (params.d <= 256) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, float, 256, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
+                        if (params.d <= 256) { return run_mha_fwd_<Arch, cutlass::half_t, float, 256, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
                         #endif
                     }
                     else{

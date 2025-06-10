@@ -375,40 +375,77 @@ struct CollectiveEpilogueFwd {
             correct_output(tOrPrevO_rowcol, tOrO_rowcol, lse_prev, lse, lse_final);
         }
 
-        // Copy correct O to smem
-        Tensor tOrFinalO = make_tensor_like<Element>(tOrO);
-        flash::convert_type_out(tOrO, tOrFinalO);
-        Tensor tOrO_copy_view = thr_copy_O.retile_S(tOrFinalO);
-        Tensor tOsO = thr_copy_O.partition_D(sO_pi);
-        cute::copy(tiled_copy_O, tOrO_copy_view, tOsO);
-        flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-
-        {
-            // TODO: move the following code out of braces
-            cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
-            flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+        // Initialize gmem_tiled_copy_O
+        GmemTiledCopyO gmem_tiled_copy_O;
+        auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
         
-            Tensor mO = params.tma_store_O.get_tma_tensor(params.shape_O)(_, _, bidh);
-            Tensor gO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
-            auto block_tma_O = params.tma_store_O.get_slice(_0{});
-            Tensor tOgO = block_tma_O.partition_D(gO);  // (TMA, TMA_M, TMA_K)
-            Tensor tOsO = block_tma_O.partition_S(sO); // (TMA, TMA_M, TMA_K)
+        // Initialize tOcO and tOpO to predict OOB access
+        Tensor tOcO = gmem_thr_copy_O.partition_D(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})));
+        Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOcO)));
+        #pragma unroll
+        for (int k = 0; k < size(tOpO); ++k) { tOpO(k) = get<1>(tOcO(_0{}, _0{}, k)) < get<1>(params.shape_O); }
 
-            int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
-            if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-                // cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp,
-                //                                     cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-                if (cute::elect_one_sync()) {
-                    cute::copy(params.tma_store_O, tOsO, tOgO);
-                    tma_store_arrive();
-                    tma_store_wait<0>();
-                    #pragma unroll
-                    for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
-                        shared_storage.pipelines.barrier_O.arrive(cta_id);
-                    }
-                }
+        // Initialize tOgO to store O to gmem
+        Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
+
+        // Convert tOrO to Element type and copy to smem
+        {
+            Tensor tOrFinalO = make_tensor_like<Element>(tOrO);
+            flash::convert_type_out(tOrO, tOrFinalO);
+            Tensor tOrO_copy_view = thr_copy_O.retile_S(tOrFinalO);
+            Tensor tOsO = thr_copy_O.partition_D(sO_pi);
+            cute::copy(tiled_copy_O, tOrO_copy_view, tOsO);
+            flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+        }
+
+        // Copy tOsO to tOrFinalO
+        Tensor tOsO = gmem_thr_copy_O.partition_S(sO); 
+        Tensor tOrFinalO = make_fragment_like(tOsO);
+        cute::copy(gmem_tiled_copy_O, tOsO, tOrFinalO);
+
+        // Signal producer threads that smem_v is released
+        if constexpr (ArchTag::kMinComputeCapability >= 90) {
+            #pragma unroll
+            for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
+                shared_storage.pipelines.barrier_O.arrive(cta_id);
             }
         }
+
+        // Clear_OOB_K must be false since we don't want to write zeros to gmem
+        flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+            gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM
+        );
+    
+        // TODO: Fix TMA store
+        // BUG: The following TMA code does not handle out-of-bounds access, needs to be fixed
+        // {
+        //     // TODO: move the following code out of braces
+        //     cutlass::arch::fence_view_async_shared(); // ensure smem writes are visible to TMA
+        //     flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+        
+        //     Tensor mO = params.tma_store_O.get_tma_tensor(params.shape_O)(_, _, bidh);
+        //     Tensor gO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
+        //     auto block_tma_O = params.tma_store_O.get_slice(_0{});
+        //     Tensor tOgO = block_tma_O.partition_D(gO);  // (TMA, TMA_M, TMA_K)
+        //     Tensor tOsO = block_tma_O.partition_S(sO); // (TMA, TMA_M, TMA_K)
+
+        //     int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
+        //     if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+        //         // cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp,
+        //         //                                     cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+        //         if (cute::elect_one_sync()) {
+        //             cute::copy(params.tma_store_O, tOsO, tOgO);
+        //             tma_store_arrive();
+        //             tma_store_wait<0>();
+        //             #pragma unroll
+        //             for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
+        //                 shared_storage.pipelines.barrier_O.arrive(cta_id);
+        //             }
+        //         }
+        //     }
+        // }
+
+
 
         if constexpr (!DisableFwdAtomicReduction) {
             flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
