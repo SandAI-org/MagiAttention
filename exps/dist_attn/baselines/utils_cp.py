@@ -20,11 +20,11 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine as te  # noqa
+import transformer_engine_torch as tex
 
 # fa3
 from flash_attn_interface import _flash_attn_backward, _flash_attn_forward
 
-import transformer_engine_torch as tex
 from magi_attention.common.ranges import AttnRanges
 
 # from flashattn_hopper.flash_attn_interface import (
