@@ -16,9 +16,7 @@ import os
 from datetime import datetime
 
 import torch
-from einops import rearrange
-
-from exps.attn.baselines import (
+from baselines.attn_impl import (
     cudnn_fused_attn_func,
     fa2_func,
     fa2_varlen_func,
@@ -29,13 +27,17 @@ from exps.attn.baselines import (
     sdpa_func,
     torch_attn_func,
 )
-from exps.attn.baselines.utils import (
+from baselines.utils import (
+    calculate_attn_flops,
     curanges2document_id,
+    generate_ranges_from_seqlens,
     generate_seqlens,
     make_causal_block_mask,
     make_causal_mask_score_mod,
     make_sliding_window_causal_block_mask,
     make_sliding_window_causal_mask_score_mod,
+    make_varlen_block_causal_block_mask,
+    make_varlen_block_causal_mask_score_mod,
     make_varlen_causal_block_mask,
     make_varlen_causal_mask_score_mod,
     make_varlen_full_block_mask,
@@ -43,26 +45,28 @@ from exps.attn.baselines.utils import (
     seqlens2cu_seqlens,
     seqlens2curanges,
 )
+from einops import rearrange
+
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.utils import get_attn_mask_from_ranges
-from tools.calculator import calculate_attn_flops
 
 # impls = ["sdpa", "fa2", "fa3", "ffa", "torch"]
 # impls = ["sdpa", "fa2", "fa3", "ffa"]  # ignore torch native to avoid OOM
 # impls = ["fa2", "fa3", "ffa"]  # compare to fa family
 # impls = ["cudnn", "fa3", "ffa"]  # compare to performance top-3 sota
-impls = ["ffa", "fa3", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
-# impls = ["ffa", "fa3", "sdpa"]
+# impls = ["ffa", "fa3", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
+impls = ["ffa", "fa3", "sdpa"]
 
 
-# mask_types = ["full"]
+mask_types = ["full"]
 # mask_types = ["causal"]
 # mask_types = ["varlen_full"]
-mask_types = ["varlen_causal"]
+# mask_types = ["varlen_causal"]
 # mask_types = ["sliding_window_causal"]
-# mask_types = ["block_causal"]
+# mask_types = ["varlen_block_causal"]
 
 
 varlen_seqlen_distribution = {
@@ -93,6 +97,7 @@ nhk = 8
 dtype = torch.bfloat16
 
 window_size = 1024
+block_size = 2048
 num_varlen_samples = 16
 
 bias = None
@@ -118,7 +123,7 @@ attn_flops_configs = [
             ("red", "-"),
         ],
         ylabel={  # Label name for the y-axis.
-            "flops": "Computation Power (TFLOPs/s)",
+            "flops": "Throughout (TFLOPs/s)",
             "mem": "Peak Memory (GB)",
         },
         plot_name=f"attn-{wd} with {mask_type} mask",  # Name for the plot. Used also as a file name for saving the plot.
@@ -148,40 +153,118 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
     sdpa_mask = None
 
     # calculate attn flops
-    if "varlen" in mask_type:
-        seqlens = generate_seqlens(varlen_seqlen_distribution, seqlen)
-        cu_seqlens = seqlens2cu_seqlens(seqlens)
-        cu_ranges = seqlens2curanges(seqlens)
-        document_id = curanges2document_id(cu_ranges)
+    if mask_type == "sliding_window_causal":
+        q_ranges_ = AttnRanges.from_ranges([[0, window_size]])
+        k_ranges_ = AttnRanges.from_ranges([[0, window_size]])
+        is_causal_mapping_ = [True]
 
-        q_ranges_ = AttnRanges.from_ranges(cu_ranges)
-        k_ranges_ = AttnRanges.from_ranges(cu_ranges)
-        max_seqlen_q = q_ranges_.max_seqlen
-        max_seqlen_k = k_ranges_.max_seqlen
-        max_seqlen_kv = max_seqlen_k
-        is_causal_mapping_ = [causal] * len(cu_ranges)
+        for start in range(window_size, seqlen):
+            q_ranges_.append(AttnRange(start, start + 1))
+            k_ranges_.append(AttnRange(start - window_size + 1, start + 1))
+            is_causal_mapping_.append(False)
+
+        window_size_tuple = (window_size, 0)
+        max_seqlen_q = sq
+        max_seqlen_k = sk
+        max_seqlen_q = sq
+        max_seqlen_kv = sk
+        cu_seqlens_q = torch.tensor([0, sq], dtype=torch.int32, device=device)
+        cu_seqlens_k = torch.tensor([0, sq], dtype=torch.int32, device=device)
+        cu_seqlens_kv = torch.tensor([0, sk], dtype=torch.int32, device=device)
 
         attn_flops_dict = calculate_attn_flops(
             q_ranges=q_ranges_,
             k_ranges=k_ranges_,
-            attn_mask_type=[AttnMaskType.CAUSAL if causal else AttnMaskType.FULL]
-            * len(cu_ranges),
+            attn_mask_type=[
+                AttnMaskType.CAUSAL if c else AttnMaskType.FULL
+                for c in is_causal_mapping_
+            ],
             total_seqlen_q=sq,
             num_heads_q=nhq,
             head_dim=hd,
         )
 
-        q_ranges = torch.tensor(cu_ranges, dtype=torch.int32, device=device)
-        k_ranges = torch.tensor(cu_ranges, dtype=torch.int32, device=device)
-
-        cu_seqlens_q = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-        cu_seqlens_k = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-        cu_seqlens_kv = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-        attn_type_map = (
-            torch.ones(len(cu_ranges), dtype=torch.int32, device=device)
-            if causal
-            else torch.zeros(len(cu_ranges), dtype=torch.int32, device=device)
+        q_ranges = torch.tensor(
+            [[0, window_size], [window_size, seqlen]], dtype=torch.int32, device=device
         )
+        k_ranges = torch.tensor(
+            [[0, window_size], [0, seqlen]], dtype=torch.int32, device=device
+        )
+        attn_type_map = torch.tensor([1, 3], dtype=torch.int32, device=device)
+    elif "varlen" in mask_type:
+        if "block_causal" in mask_type:
+            assert not causal
+
+            seqlens = generate_seqlens(varlen_seqlen_distribution, seqlen)
+            q_ranges_, k_ranges_ = generate_ranges_from_seqlens(seqlens, block_size)
+            is_causal_mapping_ = [False] * len(q_ranges_)
+
+            max_seqlen_q = q_ranges_.max_seqlen
+            max_seqlen_k = k_ranges_.max_seqlen
+            max_seqlen_kv = max_seqlen_k
+
+            cu_seqlens = seqlens2cu_seqlens(seqlens)
+            cu_ranges = seqlens2curanges(seqlens)
+            document_id = curanges2document_id(cu_ranges)
+
+            attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges_,
+                k_ranges=k_ranges_,
+                attn_mask_type=[AttnMaskType.FULL] * len(q_ranges_),
+                total_seqlen_q=sq,
+                num_heads_q=nhq,
+                head_dim=hd,
+            )
+
+            q_ranges = torch.tensor(
+                q_ranges_.to_naive_ranges(), dtype=torch.int32, device=device
+            )
+            k_ranges = torch.tensor(
+                k_ranges_.to_naive_ranges(), dtype=torch.int32, device=device
+            )
+            attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device=device)
+
+            cu_seqlens_q = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            cu_seqlens_k = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            cu_seqlens_kv = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
+            window_size_tuple = (-1, -1)
+        else:
+            seqlens = generate_seqlens(varlen_seqlen_distribution, seqlen)
+            cu_seqlens = seqlens2cu_seqlens(seqlens)
+            cu_ranges = seqlens2curanges(seqlens)
+            document_id = curanges2document_id(cu_ranges)
+
+            q_ranges_ = AttnRanges.from_ranges(cu_ranges)
+            k_ranges_ = AttnRanges.from_ranges(cu_ranges)
+            max_seqlen_q = q_ranges_.max_seqlen
+            max_seqlen_k = k_ranges_.max_seqlen
+            max_seqlen_kv = max_seqlen_k
+            is_causal_mapping_ = [causal] * len(cu_ranges)
+
+            attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges_,
+                k_ranges=k_ranges_,
+                attn_mask_type=[AttnMaskType.CAUSAL if causal else AttnMaskType.FULL]
+                * len(cu_ranges),
+                total_seqlen_q=sq,
+                num_heads_q=nhq,
+                head_dim=hd,
+            )
+
+            q_ranges = torch.tensor(cu_ranges, dtype=torch.int32, device=device)
+            k_ranges = torch.tensor(cu_ranges, dtype=torch.int32, device=device)
+
+            cu_seqlens_q = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            cu_seqlens_k = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            cu_seqlens_kv = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            attn_type_map = (
+                torch.ones(len(cu_ranges), dtype=torch.int32, device=device)
+                if causal
+                else torch.zeros(len(cu_ranges), dtype=torch.int32, device=device)
+            )
+
+            window_size_tuple = (-1, -1)
     else:
         attn_flops_dict = calculate_attn_flops(
             q_ranges=AttnRanges.from_ranges([[0, sq]]),
@@ -199,10 +282,14 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
         max_seqlen_q = sq
         max_seqlen_kv = sk
         cu_seqlens_q = torch.tensor([0, sq], dtype=torch.int32, device=device)
+        cu_seqlens_k = torch.tensor([0, sq], dtype=torch.int32, device=device)
         cu_seqlens_kv = torch.tensor([0, sk], dtype=torch.int32, device=device)
         attn_type_map = torch.tensor(
             [1 if causal else 0], dtype=torch.int32, device=device
         )
+
+        window_size_tuple = (-1, -1)
+
     attn_flops = attn_flops_dict[wd]
 
     # --------- prepare data --------- #
@@ -250,17 +337,31 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                         score_mod = make_varlen_causal_mask_score_mod(document_id)
                         block_mask = None
                 else:
-                    try:
-                        block_mask = make_varlen_full_block_mask(sq, sk, document_id)
-                        score_mod = None
-                    except RuntimeError:
-                        score_mod = make_varlen_full_mask_score_mod(document_id)
-                        block_mask = None
+                    if "block_causal" in mask_type:
+                        try:
+                            block_mask = make_varlen_block_causal_block_mask(
+                                sq, sk, block_size, document_id
+                            )
+                            score_mod = None
+                        except RuntimeError:
+                            score_mod = make_varlen_block_causal_mask_score_mod(
+                                block_size, document_id
+                            )
+                            block_mask = None
+                    else:
+                        try:
+                            block_mask = make_varlen_full_block_mask(
+                                sq, sk, document_id
+                            )
+                            score_mod = None
+                        except RuntimeError:
+                            score_mod = make_varlen_full_mask_score_mod(document_id)
+                            block_mask = None
             else:
                 raise NotImplementedError(
                     f"mask type {mask_type} not supported for flex attn"
                 )
-        elif "varlen" in mask_type:
+        elif "varlen" in mask_type or mask_type == "sliding_window_causal":
             try:
                 # sdpa_mask = make_varlen_causal_sdpa_mask(sq, sk, cu_ranges)
                 sdpa_mask = get_attn_mask_from_ranges(
@@ -279,6 +380,10 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
         k = k.view(b * sk, nhk, hd)
         v = v.view(b * sk, nhk, hd)
 
+        if attn_impl == "cudnn":
+            if "varlen_block_causal" in mask_type:
+                is_attn_impl_support_this_mask = False
+
     # fa style shape:
     #   non-varlen: (b,s,h,d)
     #   varlen: (t,h,d)
@@ -287,6 +392,9 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
             q = q.view(b * sq, nhq, hd)
             k = k.view(b * sk, nhk, hd)
             v = v.view(b * sk, nhk, hd)
+
+        if "block_causal" in mask_type:
+            is_attn_impl_support_this_mask = False
 
     # --------- prepare grads --------- #
 
@@ -383,6 +491,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                     dropout_p=dropout_p,
                     softmax_scale=softmax_scale,
                     causal=causal,
+                    window_size=window_size_tuple,
                     return_attn_probs=return_attn_probs,
                 )
 
@@ -415,6 +524,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                     max_seqlen_k,
                     softmax_scale=softmax_scale,
                     causal=causal,
+                    window_size=window_size_tuple,
                 )
 
         else:
@@ -426,6 +536,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                     v,
                     softmax_scale=softmax_scale,
                     causal=causal,
+                    window_size=window_size_tuple,
                 )
 
         if wd == "bwd":
@@ -457,6 +568,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                 softmax_scale=softmax_scale,
                 is_causal=causal,
                 dropout_p=dropout_p,
+                window_size=window_size_tuple,
                 is_training=wd == "bwd",
             )
 

@@ -19,7 +19,6 @@ import torch.distributed as dist
 
 # te
 import transformer_engine as te  # noqa
-import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     FusedAttnBackend,
@@ -28,6 +27,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 
+import transformer_engine_torch as tex
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
 
