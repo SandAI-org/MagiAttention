@@ -21,17 +21,10 @@ namespace flash {
 
 using namespace cute;
 
-template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_>
+template <class CollectiveMainloop_, class CollectiveEpilogue_, class TileScheduler_, bool RangeMerge_>
 class FlashAttnBwdSm90 {
 
 public:
-
-    // Type Aliases
-    static constexpr bool Is_causal = CollectiveMainloop_::Is_causal;
-    static constexpr bool Is_local = CollectiveMainloop_::Is_local;
-    static_assert(CollectiveMainloop_::Varlen == CollectiveEpilogue_::Varlen);
-    static constexpr bool Varlen = CollectiveMainloop_::Varlen;
-
     // Mainloop derived types
     using CollectiveMainloop = CollectiveMainloop_;
     using TileShape_MNK = typename CollectiveMainloop::TileShape_MNK;
@@ -42,6 +35,8 @@ public:
     using MainloopArguments = typename CollectiveMainloop::Arguments;
     using MainloopParams = typename CollectiveMainloop::Params;
     static constexpr bool dKV_swapAB = CollectiveMainloop::dKV_swapAB;
+
+    static constexpr bool RangeMerge = RangeMerge_;
 
     // Epilogue derived types
     using CollectiveEpilogue = CollectiveEpilogue_;
@@ -218,24 +213,64 @@ public:
                 for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler);
                      work_tile_info.is_valid(params.scheduler);
                      work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
+
                     auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-                    auto [n_block, bidh, bidb, _ /*split_idx*/] = block_coord_;
-                    cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
-                    auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() {
-                        scheduler.prefetch_next_work(params.scheduler, work_tile_info);
+                    auto [n_block, bidh, bidb_idx, _ /*split_idx*/] = block_coord_;
+
+                     auto scheduler_prefetch = [&scheduler, &params, &work_tile_info](bool const is_last_tile) {
+                        if (is_last_tile) {
+                            scheduler.prefetch_next_work(params.scheduler, work_tile_info);
+                        }
                     };
-                    mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write,
-                                  smem_pipe_write_do, shared_storage, scheduler_prefetch, block_coord);
+
+                    if constexpr (RangeMerge) {
+                        int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
+                        int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+
+                        for (int idx = 0; idx < loop_count; ++idx) {
+                            int bidb = bidb_start + idx;
+                            cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
+
+                            bool const is_first_tile = idx == 0;
+                            bool const is_last_tile = idx == loop_count - 1;
+
+                            mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write,
+                                        smem_pipe_write_do, shared_storage, scheduler_prefetch, block_coord, is_first_tile, is_last_tile);
+                        }
+                    }
+                    else {
+                        auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+                        mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write,
+                                    smem_pipe_write_do, shared_storage, scheduler_prefetch, block_coord, true, true);
+                    }
                 }
                 mainloop.load_tail(pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do);
             } else if (warp_idx_in_warpgroup == 1) {
                 for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
                      work_tile_info.is_valid(params.scheduler);
                      work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+
                     auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-                    auto [n_block, bidh, bidb, _ /*split_idx*/] = block_coord_;
-                    cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
-                    mainloop.store_dq(params.mainloop, shared_storage, block_coord);
+                    auto [n_block, bidh, bidb_idx, _ /*split_idx*/] = block_coord_;
+
+                    if constexpr (RangeMerge) {
+                        int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
+                        int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+
+                        for (int idx = 0; idx < loop_count; ++idx) {
+                            int bidb = bidb_start + idx;
+                            cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
+
+                            bool const is_first_tile = idx == 0;
+                            bool const is_last_tile = idx == loop_count - 1;
+
+                            mainloop.store_dq(params.mainloop, shared_storage, block_coord, is_first_tile, is_last_tile);
+                        }
+                    }
+                    else {
+                        auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+                        mainloop.store_dq(params.mainloop, shared_storage, block_coord, true, true);
+                    }
                 }
             }
         } else {  // Consumer
@@ -254,19 +289,47 @@ public:
             for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
                  work_tile_info.is_valid(params.scheduler);
                  work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-                auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-                auto [n_block, bidh, bidb, _ /*split_idx*/] = block_coord_;
-                cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
 
-                // dK and dV output accumulator.
+                auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+                auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+
                 Tensor tdKrdK = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB? 2 : 1>(TileShape_MNK{}));
                 Tensor tdVrdV = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB? 2 : 1>(TileShape_MNK{}));
-                bool tile_valid = mainloop.mma(
-                    params.mainloop, pipeline_q, pipeline_do, smem_pipe_read, smem_pipe_read_do,
-                    tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage);
+                clear(tdKrdK);
+                clear(tdVrdV);
+                bool tile_valid = false;
+
+                if constexpr (RangeMerge) {
+                    int bidb_idx = get<2>(block_coord);
+                    int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
+                    int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+
+                    
+
+                    for (int idx = 0; idx < loop_count; ++idx) {
+                        int bidb = bidb_start + idx;
+                        block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
+
+                        bool const is_first_tile = idx == 0;
+                        bool const is_last_tile = idx == loop_count - 1;
+                        
+                        // dK and dV output accumulator.
+                        bool tile_valid_tmp = mainloop.mma(
+                            params.mainloop, pipeline_q, pipeline_do, smem_pipe_read, smem_pipe_read_do,
+                            tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage, is_first_tile, is_last_tile);
+                        tile_valid = tile_valid || tile_valid_tmp;
+                    }
+                }
+                else {
+                    mainloop.mma(
+                        params.mainloop, pipeline_q, pipeline_do, smem_pipe_read, smem_pipe_read_do,
+                        tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage, true, true);
+                }
+
+
                 if (tile_valid) {
                     epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV,
-                                   threadIdx.x - NumCopyThreads, block_coord);
+                                threadIdx.x - NumCopyThreads, block_coord);
                 } else {
                     epilogue.store_zero(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
                 }
