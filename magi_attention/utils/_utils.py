@@ -40,7 +40,7 @@ from rich import print as rprint
 from . import nvtx
 
 if TYPE_CHECKING:
-    from magi_attention.common.ranges import NaiveRanges
+    from magi_attention.common.ranges import AttnRanges, NaiveRanges
 
 
 def deprecated(func: Callable) -> Callable:
@@ -299,6 +299,22 @@ def vis_matrix(
         plt.savefig(save_path)
 
 
+def vis_attn_mask(
+    attn_mask: torch.Tensor,
+    save_path: str | None = None,
+) -> None:  # pragma: no cover
+    vis_matrix(
+        attn_mask.cpu().numpy(),
+        title="attn_mask",
+        xlabel="k",
+        ylabel="q",
+        val_ticks=[0, 1],
+        format_ticks=lambda x, pos: "unmasked" if x == 0 else "unmasked",
+        save_path=save_path,
+    )
+
+
+@deprecated
 def make_causal_mask(
     seqlen_q: int,
     seqlen_k: int,
@@ -321,6 +337,7 @@ def make_causal_mask(
     return causal_mask
 
 
+@deprecated
 def get_attn_mask_from_ranges(
     q_ranges: "NaiveRanges",
     k_ranges: "NaiveRanges",
@@ -358,6 +375,67 @@ def get_attn_mask_from_ranges(
                 q_range[0] : q_range[1],
                 k_range[0] : k_range[1],
             ] = True
+
+    return mask
+
+
+def make_ffa_causal_mask(
+    seqlen_q: int,
+    seqlen_k: int,
+    attn_type_idx: int = 0,
+    device: str | int = "cuda",
+) -> torch.Tensor:
+    max_seqlen = max(seqlen_q, seqlen_k)
+    latend_square_full_mask = torch.ones(
+        (max_seqlen, max_seqlen),
+        dtype=torch.bool,
+        device=device,
+    )
+
+    match attn_type_idx:
+        case 0:  # full
+            mask = latend_square_full_mask[:seqlen_q, :seqlen_k]
+        case 1:  # causal with bottom-right aligned
+            mask = torch.tril(latend_square_full_mask)[-seqlen_q:, -seqlen_k:]
+        case 2:  # inv-causal with top-left aligned
+            mask = torch.triu(latend_square_full_mask)[:seqlen_q, :seqlen_k]
+        case 3:  # bi-causal with bottom-right and top-left (bi-directional) aligned
+            mask = (
+                torch.tril(latend_square_full_mask)[-seqlen_q:, -seqlen_k:]
+                & torch.triu(latend_square_full_mask)[:seqlen_q, :seqlen_k]
+            )
+        case _:
+            raise ValueError(f"Invalid {attn_type_idx=}")
+
+    return mask
+
+
+def get_attn_mask_from_ffa_args(
+    q_ranges: "AttnRanges",
+    k_ranges: "AttnRanges",
+    attn_type_map: list[int],
+    total_seqlen_q: int,
+    total_seqlen_k: int,
+    device: str | int = "cuda",
+) -> torch.Tensor:
+    mask = torch.zeros(
+        (total_seqlen_q, total_seqlen_k),
+        dtype=torch.bool,
+        device=device,
+    )
+
+    for q_range, k_range, attn_type_idx in zip(q_ranges, k_ranges, attn_type_map):
+        slice_mask = make_ffa_causal_mask(
+            seqlen_q=q_range.seqlen,
+            seqlen_k=k_range.seqlen,
+            attn_type_idx=attn_type_idx,
+            device=device,
+        )
+
+        mask[
+            q_range.start : q_range.end,
+            k_range.start : k_range.end,
+        ] = slice_mask
 
     return mask
 

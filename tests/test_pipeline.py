@@ -40,7 +40,7 @@ from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import (
     EPSILON,
     calc_inf_norm,
-    extract_mismatch_info,
+    extract_mismatch_threshold,
     torch_attn_ref,
 )
 from magi_attention.utils import get_attn_mask_from_ranges, str2seed, sync_rng
@@ -870,7 +870,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
-        o_thres = self._extract_mismatch_threshold_ref(
+        o_thres = extract_mismatch_threshold(
             actual=total_out_ref_low_precision,
             expected=total_out_ref_high_precision,
             atol=o_atol,
@@ -906,7 +906,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
-        dq_thres = self._extract_mismatch_threshold_ref(
+        dq_thres = extract_mismatch_threshold(
             actual=grad_total_q_ref_low_precision,
             expected=grad_total_q_ref_high_precision,
             atol=dq_atol,
@@ -942,7 +942,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
-        dk_thres = self._extract_mismatch_threshold_ref(
+        dk_thres = extract_mismatch_threshold(
             actual=grad_total_k_ref_low_precision,
             expected=grad_total_k_ref_high_precision,
             atol=dk_atol,
@@ -978,7 +978,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
-        dv_thres = self._extract_mismatch_threshold_ref(
+        dv_thres = extract_mismatch_threshold(
             actual=grad_total_v_ref_low_precision,
             expected=grad_total_v_ref_high_precision,
             atol=dv_atol,
@@ -1001,23 +1001,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         if err_msg_list:
             raise AssertionError("\n\n".join(err_msg_list))
-
-    def _extract_mismatch_threshold_ref(
-        self,
-        actual: torch.Tensor,
-        expected: torch.Tensor,
-        atol: float,
-        rtol: float,
-        mismatch_thres_ratio: float = 1.0,
-    ) -> float:
-        mismatch_threshold_ref = 0.0
-        try:
-            torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
-        except AssertionError as e:
-            error_msg = str(e)
-            _, _, mismatch_threshold_ref = extract_mismatch_info(error_msg)
-
-        return min(max(mismatch_threshold_ref * mismatch_thres_ratio, 0.0), 1.0)
 
 
 class TestPipelineWithWorldSize2(TestPipelineBaseWithWorldSize1):

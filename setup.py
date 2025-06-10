@@ -21,7 +21,6 @@ import subprocess
 import sys
 import sysconfig
 import tarfile
-import urllib.error
 import urllib.request
 import warnings
 from pathlib import Path
@@ -63,6 +62,8 @@ SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "FALSE") == "TRUE"
 
 
+# TODO: remove flags to compile with sm80
+# which we do not support for now
 def _write_ninja_file(
     path,
     cflags,
@@ -612,7 +613,6 @@ if not SKIP_CUDA_BUILD:
 
 setup(
     name="magi_attention",
-    version="1.0.0",
     packages=find_packages(
         exclude=(
             "build",
