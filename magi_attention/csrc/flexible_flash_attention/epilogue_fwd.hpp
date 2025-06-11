@@ -315,7 +315,7 @@ struct CollectiveEpilogueFwd {
                     lse(mi) = -INFINITY;
                 }
 
-                if (row < get<0>(params.shape_O)) {
+                if (row + offset_o < get<0>(params.shape_O)) {
                     lse_prev(mi) = mLSE(row);
 
                     if (lse_prev(mi) != -INFINITY) {
