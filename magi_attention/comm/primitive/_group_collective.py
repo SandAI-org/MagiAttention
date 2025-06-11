@@ -91,6 +91,7 @@ def group_cast_collective(
     assert len(output_split_size_list) == len(src_index_list)
 
     if magi_attention.is_hierarchical_comm_enable():
+        # NOTE: a hacky and temporary way to support hierarchical group-cast
         return _group_cast_collective_hier(
             input_tensor=input,
             output_tensor=output,
