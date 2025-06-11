@@ -76,6 +76,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
     @skip_if_lt_x_gpu(4)
     @with_comms
     @parameterize(
+        # TODO: add test cases for world size > 4
         "test_case",
         [
             {
@@ -310,6 +311,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
     @skip_if_lt_x_gpu(4)
     @with_comms
     @parameterize(
+        # TODO: add test cases for world size > 4
         "test_case",
         [
             {
@@ -482,6 +484,10 @@ class TestGroupCollectiveWithWorldSize6(TestGroupCollectiveWithWorldSize4):
     def test_group_cast_collective(self, *args, **kwargs):
         super().test_group_cast_collective(*args, **kwargs)
 
+    @skip_if_lt_x_gpu(6)
+    def test_group_reduce_collective(self, *args, **kwargs):
+        super().test_group_reduce_collective(*args, **kwargs)
+
 
 class TestGroupCollectiveWithWorldSize8(TestGroupCollectiveWithWorldSize4):
     @property
@@ -491,6 +497,10 @@ class TestGroupCollectiveWithWorldSize8(TestGroupCollectiveWithWorldSize4):
     @skip_if_lt_x_gpu(8)
     def test_group_cast_collective(self, *args, **kwargs):
         super().test_group_cast_collective(*args, **kwargs)
+
+    @skip_if_lt_x_gpu(8)
+    def test_group_reduce_collective(self, *args, **kwargs):
+        super().test_group_reduce_collective(*args, **kwargs)
 
 
 if __name__ == "__main__":
