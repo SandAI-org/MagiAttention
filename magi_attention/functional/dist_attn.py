@@ -354,18 +354,6 @@ class DistFlashAttnRuntime:
                         disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
                     )
 
-                # fill output with zero indexed by "hole" q ranges
-                # TODO: put this logic into kernel
-                out_zero_fill_correction(
-                    out=out,
-                    out_zero_fill_ranges=attn_arg.out_zero_fill_ranges,
-                    # FIXME: this is still an experimental feature,
-                    # we should remove this flag in the future
-                    # when range fill is stable
-                    use_range_fill=True,
-                    **attn_arg.out_zero_range_fill_kwargs,
-                )
-
         return out, lse, skip_attn
 
     @nvtx.instrument_nvtx

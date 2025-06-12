@@ -166,7 +166,7 @@ struct CollectiveEpilogueFwd {
     /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
     CUTLASS_DEVICE
     static void prefetch_tma_descriptors(Params const& params) {
-        cute::prefetch_tma_descriptor(params.tma_store_O.get_tma_descriptor());
+        // cute::prefetch_tma_descriptor(params.tma_store_O.get_tma_descriptor());
     }
 
     CUTLASS_DEVICE
@@ -404,10 +404,22 @@ struct CollectiveEpilogueFwd {
         cute::copy(gmem_tiled_copy_O, tOsO, tOrFinalO);
 
         // Signal producer threads that smem_v is released
-        if constexpr (ArchTag::kMinComputeCapability >= 90) {
-            #pragma unroll
-            for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
-                shared_storage.pipelines.barrier_O.arrive(cta_id);
+        // if constexpr (ArchTag::kMinComputeCapability >= 90) {
+        //     #pragma unroll
+        //     for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
+        //         shared_storage.pipelines.barrier_O.arrive(cta_id);
+        //     }
+        // }
+
+        int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
+        if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+            // cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp,
+            //                                     cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+            if (cute::elect_one_sync()) {
+                #pragma unroll
+                for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
+                    shared_storage.pipelines.barrier_O.arrive(cta_id);
+                }
             }
         }
 
