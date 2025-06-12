@@ -196,7 +196,7 @@ public:
         if (warp_idx == 0 && lane_predicate) {
             shared_storage.pipelines.barrier_Q.init(Use_TMA_Q ? 1 : NumProducerThreads /*numThreads*/);
             // TODO: Fix if TMA store O is used
-            shared_storage.pipelines.barrier_O.init(size(ClusterShape{}));
+            shared_storage.pipelines.barrier_O.init(size(ClusterShape{}) * NumMmaThreads);
             shared_storage.pipelines.barrier_producer.init(size(ClusterShape{}) * NumProducerThreads);
             shared_storage.pipelines.barrier_consumer.init(size(ClusterShape{}) * NumMmaThreads);
         }

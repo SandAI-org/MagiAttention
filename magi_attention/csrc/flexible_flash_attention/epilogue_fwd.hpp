@@ -263,7 +263,7 @@ struct CollectiveEpilogueFwd {
         Tensor sO = make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_o.data()), SmemLayoutO{});
 
         // Define sO as position independent swizzle tensor
-        Tensor sO_pi = cute::as_position_independent_swizzle_tensor(sO);
+        // Tensor sO_pi = cute::as_position_independent_swizzle_tensor(sO);
 
         // Define Tensor for mLSE
         Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE + offset_o * get<0>(params.stride_LSE)),
@@ -393,7 +393,8 @@ struct CollectiveEpilogueFwd {
             Tensor tOrFinalO = make_tensor_like<Element>(tOrO);
             flash::convert_type_out(tOrO, tOrFinalO);
             Tensor tOrO_copy_view = thr_copy_O.retile_S(tOrFinalO);
-            Tensor tOsO = thr_copy_O.partition_D(sO_pi);
+            Tensor tOsO = thr_copy_O.partition_D(sO);
+            // Tensor tOsO = thr_copy_O.partition_D(sO_pi);
             cute::copy(tiled_copy_O, tOrO_copy_view, tOsO);
             flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
         }
@@ -404,24 +405,27 @@ struct CollectiveEpilogueFwd {
         cute::copy(gmem_tiled_copy_O, tOsO, tOrFinalO);
 
         // Signal producer threads that smem_v is released
-        // if constexpr (ArchTag::kMinComputeCapability >= 90) {
-        //     #pragma unroll
-        //     for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
-        //         shared_storage.pipelines.barrier_O.arrive(cta_id);
-        //     }
-        // }
-
-        int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
-        if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
-            // cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp,
-            //                                     cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-            if (cute::elect_one_sync()) {
-                #pragma unroll
-                for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
-                    shared_storage.pipelines.barrier_O.arrive(cta_id);
-                }
+        if constexpr (ArchTag::kMinComputeCapability >= 90) {
+            cutlass::arch::fence_view_async_shared();
+            #pragma unroll
+            for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
+                shared_storage.pipelines.barrier_O.arrive(cta_id);
             }
         }
+        
+        // cutlass::arch::fence_view_async_shared();
+        // flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+        // int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
+        // if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+        //     // cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp,
+        //     //                                     cutlass::arch::ReservedNamedBarriers::EpilogueBarrier)
+        //     if (cute::elect_one_sync()) {
+        //         #pragma unroll
+        //         for (uint32_t cta_id = 0; cta_id < size(ClusterShape{}); ++cta_id) {
+        //             shared_storage.pipelines.barrier_O.arrive(cta_id);
+        //         }
+        //     }
+        // }
 
         // Clear_OOB_K must be false since we don't want to write zeros to gmem
         flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
