@@ -444,7 +444,7 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     template <typename SchedulerPrefetch, typename SharedStorage>
-    CUTLASS_DEVICE void
+    CUTLASS_DEVICE bool
     load(Params const& params,
          MainloopPipeline pipeline_q,
          MainloopPipeline_dO pipeline_do,
@@ -452,7 +452,8 @@ struct CollectiveMainloopBwdSm90 {
          PipelineState_dO& smem_pipe_write_do,
          SharedStorage &shared_storage,
          SchedulerPrefetch const& scheduler_prefetch,
-         cute::tuple<int32_t, int32_t, int32_t> block_coord
+         cute::tuple<int32_t, int32_t, int32_t> block_coord,
+         bool const& has_valid_tile
          ) {
 
         auto [n_block, bidh, bidb] = block_coord;
@@ -469,8 +470,7 @@ struct CollectiveMainloopBwdSm90 {
             params.window_size_left, window_size_right, 0 /*sink_token_length*/, attn_type);
         // It's possible to have m_block_max <= m_block_min. Loading Q, K can cause illegal memory access.
         if (m_block_max <= m_block_min) {
-            scheduler_prefetch();
-            return;
+            return false;
         }
 
         Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
@@ -547,9 +547,11 @@ struct CollectiveMainloopBwdSm90 {
 
         if (lane_predicate) {
             // Copy K tile and V tile from GMEM to SMEM.
-            shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
-            copy(params.tma_load_K.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0 /*mcast_mask*/), tKgK, tKsK);
-            copy(params.tma_load_V.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0 /*mcast_mask*/), tVgV, tVsV);
+            if (!has_valid_tile) {
+                shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
+                copy(params.tma_load_K.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0 /*mcast_mask*/), tKgK, tKsK);
+                copy(params.tma_load_V.with(reinterpret_cast<cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_KV), 0 /*mcast_mask*/), tVgV, tVsV);
+            }
 
             #pragma unroll (kHeadDim < 256 ? 2 : 1)
             for (; m_block < m_block_max - 1; ++m_block) {
@@ -570,7 +572,6 @@ struct CollectiveMainloopBwdSm90 {
                      gLSE(_, m_block + 1), sLSE(_, smem_pipe_write.index()));
             }
         }
-        scheduler_prefetch();
         if (lane_predicate) {
             PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write, smem_pipe_write_do);
             pipeline_do.producer_acquire(smem_pipe_write_do_cur);
@@ -582,6 +583,7 @@ struct CollectiveMainloopBwdSm90 {
             ++smem_pipe_write;
         }
         if constexpr (Q_dO_same_stages) { smem_pipe_write_do = smem_pipe_write; }
+        return true;
     }
 
     /// Perform a Producer Epilogue to prevent early exit of blocks in a Cluster
@@ -618,12 +620,13 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     template <typename SharedStorage>
-    CUTLASS_DEVICE void
+    CUTLASS_DEVICE bool
     store_dq(Params const& params,
              SharedStorage &shared_storage,
-             cute::tuple<int32_t, int32_t, int32_t> block_coord
+             cute::tuple<int32_t, int32_t, int32_t> block_coord,
+             bool const& has_valid_tile
              ) {
-        if constexpr (!dQacc_use_TMA) { return; }
+        if constexpr (!dQacc_use_TMA) { return false; }
 
         auto [n_block, bidh, bidb] = block_coord;
         SeqlenInfo_t seqlen_info{
@@ -638,7 +641,7 @@ struct CollectiveMainloopBwdSm90 {
             seqlen_info, n_block, bidb, params.window_size_left,
             window_size_right, 0 /*sink_token_length*/, attn_type);
         // It's possible to have m_block_max <= m_block_min. Exit early
-        if (m_block_max <= m_block_min) { return; }
+        if (m_block_max <= m_block_min) { return false; }
 
         Tensor sdQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{});
         bool const is_varlen = Varlen && (params.cu_seqlens_q || params.q_ranges);
@@ -688,6 +691,7 @@ struct CollectiveMainloopBwdSm90 {
                 Barrier::arrive_inc(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, m_block * num_batch * num_head);
             }
         }
+        return true;
     }
 
     CUTLASS_DEVICE void
@@ -715,7 +719,8 @@ struct CollectiveMainloopBwdSm90 {
         int thread_idx,
         int &work_idx,
         cute::tuple<int32_t, int32_t, int32_t> block_coord,
-        SharedStorage& shared_storage
+        SharedStorage& shared_storage,
+        bool const& has_valid_tile
         ) {
         static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
@@ -865,8 +870,10 @@ struct CollectiveMainloopBwdSm90 {
         clear(tdVrdV);
         // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
 
-        cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_KV.try_wait(work_idx % 2));
-        if (barrier_token == cutlass::BarrierStatus::WaitAgain) { shared_storage.pipelines.barrier_KV.wait(work_idx % 2); }
+        if (!has_valid_tile) {
+            cutlass::ConsumerToken barrier_token = static_cast<cutlass::BarrierStatus>(shared_storage.pipelines.barrier_KV.try_wait(work_idx % 2));
+            if (barrier_token == cutlass::BarrierStatus::WaitAgain) { shared_storage.pipelines.barrier_KV.wait(work_idx % 2); }
+        }
 
         if constexpr (Mma_dP_is_RS) {
             using SmemCopyAtomV = Copy_Atom<cute::SM75_U32x4_LDSM_N, Element>;
@@ -1125,11 +1132,8 @@ struct CollectiveMainloopBwdSm90 {
         }
 
         // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
-        #pragma unroll
-        for (int i = 0; i < size(tdKrdK); ++i) { tdKrdK(i) *= params.softmax_scale; }
 
         if constexpr (Q_dO_same_stages) { smem_pipe_read_do = smem_pipe_read; }
-        ++work_idx;
         return true;
     }
 

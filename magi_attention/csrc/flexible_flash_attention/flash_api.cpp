@@ -682,7 +682,9 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         int num_splits,
         std::optional<bool> pack_gqa_,
         int const sm_margin,
-        bool const disable_fwd_atomic_reduction
+        bool const disable_fwd_atomic_reduction,
+        std::optional<const at::Tensor> &merge_q_ranges_,
+        std::optional<const at::Tensor> &qk_map_
         ) {
 
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -914,6 +916,20 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     }
     softmax_lse.fill_(std::numeric_limits<float>::infinity() * -1);
 
+    at::Tensor merge_q_ranges, qk_map;
+    bool has_merge_q_ranges = false;
+    bool has_qk_map = false;
+    int merge_batch_size = batch_size;
+    if (merge_q_ranges_.has_value()) {
+        has_merge_q_ranges = true;
+        merge_q_ranges = merge_q_ranges_.value();
+        merge_batch_size = merge_q_ranges.size(0);
+    }
+    if (qk_map_.has_value()) {
+        has_qk_map = true;
+        qk_map = qk_map_.value();
+    }
+
     Flash_fwd_params params;
     set_params_fprop(params,
                      batch_size,
@@ -941,6 +957,9 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     params.b_k = batch_size_k;
     params.dv = head_size_v;
     params.dv_rounded = head_size_v_rounded;
+    params.merge_batch_size = merge_batch_size;
+    params.merge_q_ranges = has_merge_q_ranges ? merge_q_ranges.data_ptr<int>() : nullptr;
+    params.qk_map = has_qk_map ? qk_map.data_ptr<int>() : nullptr;
     if (leftpad_k_.has_value()) {  // This needs to be set before get_pagedkv_tma
         params.leftpad_k = static_cast<int *>(leftpad_k_.value().data_ptr());
     }
@@ -1303,7 +1322,9 @@ std::vector<at::Tensor> mha_bwd(
     int window_size_right,
     float const softcap,
     bool const deterministic,
-    int const sm_margin) {
+    int const sm_margin,
+    std::optional<const at::Tensor> &merge_q_ranges_,
+    std::optional<const at::Tensor> &qk_map_) {
 
     #ifdef FLASHATTENTION_DISABLE_BACKWARD
         TORCH_CHECK(false, "This flash attention build does not support backward.");
@@ -1567,6 +1588,21 @@ std::vector<at::Tensor> mha_bwd(
         dv_accum = torch::zeros_like(dv, opts.dtype(at::kFloat));
     }
 
+
+    at::Tensor merge_q_ranges, qk_map;
+    bool has_merge_q_ranges = false;
+    bool has_qk_map = false;
+    int merge_batch_size = batch_size;
+    if (merge_q_ranges_.has_value()) {
+        has_merge_q_ranges = true;
+        merge_q_ranges = merge_q_ranges_.value();
+        merge_batch_size = merge_q_ranges.size(0);
+    }
+    if (qk_map_.has_value()) {
+        has_qk_map = true;
+        qk_map = qk_map_.value();
+    }
+
     Flash_bwd_params params;
     set_params_dgrad(params,
                      batch_size,
@@ -1599,6 +1635,9 @@ std::vector<at::Tensor> mha_bwd(
     params.total_k = total_k;
     params.softmax_lse_log2_ptr = softmax_lse_log2.data_ptr();
     params.dv = head_size;  // We don't support hdim_v being different from hdim_qk for now
+    params.merge_batch_size = merge_batch_size;
+    params.merge_q_ranges = has_merge_q_ranges ? merge_q_ranges.data_ptr<int>() : nullptr;
+    params.qk_map = has_qk_map ? qk_map.data_ptr<int>() : nullptr;
 
     // auto tile_count_semaphore = (params.is_causal || params.is_local) ? torch::zeros({1}, opts.dtype(torch::kInt32)) : torch::empty({1}, opts.dtype(torch::kInt32));
     // params.tile_count_semaphore = tile_count_semaphore.data_ptr<int>();

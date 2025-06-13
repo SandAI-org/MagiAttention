@@ -590,7 +590,7 @@ struct CollectiveMainloopFwdSm90 {
     }
 
     template <typename SchedulerPrefetch, typename SharedStorage>
-    CUTLASS_DEVICE void
+    CUTLASS_DEVICE bool
     load(Params const& params,
          MainloopPipelineK pipeline_k,
          MainloopPipelineV pipeline_v,
@@ -600,7 +600,8 @@ struct CollectiveMainloopFwdSm90 {
          SchedulerPrefetch const& scheduler_prefetch,
          SeqlenInfo_t const& seqlen_info,
          cute::tuple<int32_t, int32_t, int32_t, int32_t> block_coord,
-         int &work_idx
+         int &work_idx,
+         bool const has_valid_tile
          ) {
 
         // some of these are captured in lambda so can't use structured binding
@@ -615,8 +616,7 @@ struct CollectiveMainloopFwdSm90 {
             params.window_size_left, window_size_right, params.qhead_per_khead_divmod, attn_type);
         // It's possible to have n_block_max <= n_block_min. Loading K can cause illegal memory access.
         if (n_block_max <= n_block_min) {
-            scheduler_prefetch();
-            return;
+            return false;
         }
 
         Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
@@ -663,6 +663,9 @@ struct CollectiveMainloopFwdSm90 {
         // if (cute::thread0()) { printf("Varlen = %d, params.leftpad_k = %p, leftpad_k = %d\n", Varlen, params.leftpad_k, leftpad_k); }
         Tensor gK_TMA = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}, _0{}), mK_TMA), select<1, 2>(TileShape_MNK{}), make_coord(_, _0{}, _));  // (N, K, _, _)
         Tensor gVt_TMA = local_tile(domain_offset(make_coord(_0{}, seqlen_info.offset_k, _0{}), mVt_TMA), select<1, 2>(TileShape_MNK_PV{}), make_coord(_0{}, _, _));  // (K, N, _, _)
+
+        static_assert(rank(gK_TMA) == 4);
+        static_assert(rank(gVt_TMA) == 4);
 
         auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
         Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));  // (TMA)
@@ -811,19 +814,21 @@ struct CollectiveMainloopFwdSm90 {
         }
 
         if constexpr (Use_TMA_Q) {
-            // Wait for the MMA warpgroups to signal that smem_q is ready
-            if (SingleProducerWarp || warp_idx_in_warpgroup == 0) {
-                cutlass::arch::NamedBarrier::sync(NumMmaThreadsQK + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
-            }
+            if (!has_valid_tile) {
+                // Wait for the MMA warpgroups to signal that smem_q is ready
+                if (SingleProducerWarp || warp_idx_in_warpgroup == 0) {
+                    cutlass::arch::NamedBarrier::sync(NumMmaThreadsQK + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+                }
 
-            if ((SingleProducerWarp || warp_idx_in_warpgroup == 0) && cute::elect_one_sync()) {
-                shared_storage.pipelines.barrier_Q.arrive_and_expect_tx(TmaTransactionBytesQ);
-                copy(params.tma_load_Q.with(reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Q), 0 /*mcast_mask*/, !Split ? TMA::CacheHintSm90::EVICT_FIRST : TMA::CacheHintSm90::EVICT_LAST),
-                    tQgQ, tQsQ);
-                if constexpr (HasQv) {
-                    shared_storage.pipelines.barrier_Qv.arrive_and_expect_tx(TmaTransactionBytesQv);
-                    copy(params.tma_load_Qv.with(reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Qv), 0 /*mcast_mask*/, !Split ? TMA::CacheHintSm90::EVICT_FIRST : TMA::CacheHintSm90::EVICT_LAST),
-                        tQvgQv, tQvsQv);
+                if ((SingleProducerWarp || warp_idx_in_warpgroup == 0) && cute::elect_one_sync()) {
+                    shared_storage.pipelines.barrier_Q.arrive_and_expect_tx(TmaTransactionBytesQ);
+                    copy(params.tma_load_Q.with(reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Q), 0 /*mcast_mask*/, !Split ? TMA::CacheHintSm90::EVICT_FIRST : TMA::CacheHintSm90::EVICT_LAST),
+                        tQgQ, tQsQ);
+                    if constexpr (HasQv) {
+                        shared_storage.pipelines.barrier_Qv.arrive_and_expect_tx(TmaTransactionBytesQv);
+                        copy(params.tma_load_Qv.with(reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Qv), 0 /*mcast_mask*/, !Split ? TMA::CacheHintSm90::EVICT_FIRST : TMA::CacheHintSm90::EVICT_LAST),
+                            tQvgQv, tQvsQv);
+                    }
                 }
             }
         } else {  // Load Q with cp.async
@@ -850,7 +855,9 @@ struct CollectiveMainloopFwdSm90 {
         // Need ClusterBarrier, not just NamedBarrier. Otherwise we might have CTA 0 finishing the
         // TMA store on O first, call TMA multicast load on V, before CTA 1 can finishing TMA store on O.
         // if (thread_idx == 0) { printf("Producer: main load, before barrier_O, work_idx = %d\n", work_idx);}
-        shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
+        if (!has_valid_tile) {
+            shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
+        }
         // if (thread_idx == 0) { printf("Producer: main load, after barrier_O\n");}
 
         if constexpr (!Transpose_V && !IntraWGOverlap) {
@@ -881,14 +888,14 @@ struct CollectiveMainloopFwdSm90 {
             n_block_prev = n_block;
             if constexpr (Transpose_V) { copy_Vt_to_V(smem_pipe_write_v); }
         }
-        scheduler_prefetch();
         if constexpr (!Transpose_V && IntraWGOverlap) {
             if (should_load_KV) { load_V(n_block_prev, smem_pipe_write, cute::true_type{} /*Seqlenk_mask*/); }
         }
         if constexpr (Transpose_V) { copy_Vt_to_V(smem_pipe_write); }
         ++smem_pipe_write;
         // At the end, all threads have the correct smem_pipe_write.
-        ++work_idx;
+
+        return true;
     }
 
     template <typename SharedStorage>
@@ -951,7 +958,7 @@ struct CollectiveMainloopFwdSm90 {
         }
     }
 
-    template <typename SharedStorage, typename FrgTensorO, typename Softmax>
+    template <typename SharedStorage, typename FrgTensorO, typename Softmax, typename ScoreScale>
     CUTLASS_DEVICE bool
     mma(Params const& params,
         MainloopPipelineK pipeline_k,
@@ -959,11 +966,13 @@ struct CollectiveMainloopFwdSm90 {
         PipelineState& smem_pipe_read,
         FrgTensorO& tOrO,
         Softmax& softmax,
+        ScoreScale& scores_scale,
         int const thread_idx,
         int &work_idx,
         SeqlenInfo_t const& seqlen_info,
         cute::tuple<int32_t, int32_t, int32_t, int32_t> block_coord,
-        SharedStorage& shared_storage
+        SharedStorage& shared_storage,
+        bool const has_valid_tile
         ) {
         static_assert(is_rmem<FrgTensorO>::value, "O tensor must be rmem resident.");
         static constexpr int kBlockM = get<0>(TileShape_MNK{});
@@ -1096,7 +1105,9 @@ struct CollectiveMainloopFwdSm90 {
 
         auto &barrier_Q = shared_storage.pipelines.barrier_Q;
         if constexpr (!AppendKV) {
-            barrier_Q.wait(work_idx % 2);
+            if (!has_valid_tile) {
+                barrier_Q.wait(work_idx % 2);
+            }
         } else {
             if (get<1>(params.shape_rotary) > 0) {  // Apply rotary to Q
                 using Rotary_t = Rotary<kBlockM, kHeadDim, NumMmaThreadsQK, Element, !(Is_causal || Is_local) /*FixedPosition*/>;
@@ -1161,7 +1172,11 @@ struct CollectiveMainloopFwdSm90 {
             //     print_tensor(tSrS);
             //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
             // }
-            Tensor scores_scale = softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+            if (!has_valid_tile) {
+                cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true>(tSrS), scores_scale);
+            } else {
+                cute::copy(softmax.template max_get_scale</*Is_first=*/false, /*Check_inf=*/true>(tSrS), scores_scale);
+            }
             // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
             //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
             //     print_tensor(scores_scale);
@@ -1169,7 +1184,14 @@ struct CollectiveMainloopFwdSm90 {
             // }
             // Don't need to store scales to send to WG1 (in the case of LargeHeadDimV) since it's 1.f
 
-            softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+            if (!has_valid_tile) {
+                softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+            } else {
+                if (!RescaleOBeforeGemm) {
+                    softmax.rescale_o(tOrO, scores_scale);
+                }
+                softmax.template online_softmax</*Is_first=*/false, /*Check_inf=*/true>(tSrS);
+            }
             // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
             //     printf("============================================ tSrS after online_softmax m_block: %d ==============================\n", m_block);
             //     print_tensor(tSrS);
@@ -1185,7 +1207,7 @@ struct CollectiveMainloopFwdSm90 {
             --n_block;
 
             // Need to initialize tOrO in the case of RescaleOBeforeGemm where we will scale tOrO even in the 1st iter
-            clear(tOrO);
+            // clear(tOrO);
             // tiled_mma_pv.accumulate_ = GMMA::ScaleOut::Zero;
 
             // Each step does gemm0 for iter n_block, gemm1 for iter n_block + 1, and softmax for iter n_block.
@@ -1282,12 +1304,12 @@ struct CollectiveMainloopFwdSm90 {
             }
 
             // Tell producers that smem_q is ready
-            cutlass::arch::NamedBarrier::arrive(NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+            // cutlass::arch::NamedBarrier::arrive(NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
             if constexpr (RescaleOBeforeGemm) { softmax.rescale_o(tOrO, scores_scale); }
             if constexpr (!HasQv) { consumer_wait(pipeline_v, smem_pipe_read); }
             flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, cute::conditional_return<MmaPV_is_RS>(tOrP, tOsP), tOrV(_, _, _, smem_pipe_read.index()), tOrO);
             float const v_descale = !Is_FP8 || params.ptr_v_descale == nullptr ? 1.0f : params.ptr_v_descale[bidb * get<0>(params.stride_v_descale) + bidh_kv * get<1>(params.stride_v_descale)];
-            cute::copy(softmax.finalize(v_descale), scores_scale);
+            // cute::copy(softmax.finalize(v_descale), scores_scale);
             // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
             //     printf("============================================ tOrO m_block: %d ==============================\n", m_block);
             //     print_tensor(tOrO);
@@ -1302,7 +1324,7 @@ struct CollectiveMainloopFwdSm90 {
             }
             warpgroup_wait<0>();
             pipeline_v.consumer_release(smem_pipe_read);  // release V, otherwise producers will hang
-            softmax.rescale_o(tOrO, scores_scale);
+            // softmax.rescale_o(tOrO, scores_scale);
             if constexpr (Is_FP8 && !V_colmajor) { flash::permute_output_fp8(tOrO); }
             ++smem_pipe_read;
 
@@ -1408,7 +1430,6 @@ struct CollectiveMainloopFwdSm90 {
             if constexpr (Is_FP8 && !V_colmajor) { flash::permute_output_fp8(tOrO); }
             ++smem_pipe_read;
         }
-        ++work_idx;
         return true;
     }
 

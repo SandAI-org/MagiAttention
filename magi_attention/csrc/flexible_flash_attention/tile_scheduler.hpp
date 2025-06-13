@@ -27,6 +27,8 @@ struct TileSchedulerArguments {
     int* const seqused = nullptr;
     // int* const num_m_blocks_ptr = nullptr;
     int* const num_splits_dynamic_ptr = nullptr;
+    int* const merge_q_ranges = nullptr;
+    int* const qk_map = nullptr;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -51,6 +53,8 @@ public:
         int* const q_ranges;
         int* const seqused;
         int const* const num_splits_dynamic_ptr = nullptr;
+        int const* const merge_q_ranges = nullptr;
+        int const* const qk_map = nullptr;
     };
 
     static Params
@@ -406,6 +410,8 @@ public:
         int* const seqused;
         // int* const num_m_blocks_ptr;
         int const* const num_splits_dynamic_ptr;
+        int const* const merge_q_ranges;
+        int const* const qk_map;
     };
 
     static Params
@@ -415,13 +421,14 @@ public:
         assert(args.tile_count_semaphore != nullptr);
         assert(args.num_head < (1 << 16));  // We use the top 16 bits to store num_splits & split_idx
         assert(!Split || args.num_splits < (1 << 8)); // We use the top 8 bits to store num_splits
+        int * q_ranges = args.merge_q_ranges ? args.merge_q_ranges : args.q_ranges;
         return {args.num_head, args.num_batch,
                 args.qhead_per_khead, args.seqlen,
                 cutlass::FastDivmod(args.num_head),
                 cutlass::FastDivmod(!Split ? 1 : args.num_splits),
-                args.tile_count_semaphore, args.cu_seqlens, args.q_ranges, args.seqused,
+                args.tile_count_semaphore, args.cu_seqlens, q_ranges, args.seqused,
                 // args.num_m_blocks_ptr, args.num_splits_dynamic_ptr};
-                args.num_splits_dynamic_ptr};
+                args.num_splits_dynamic_ptr, args.merge_q_ranges, args.qk_map};
     }
 
     static dim3
@@ -480,7 +487,7 @@ public:
                     int next_cu_seqlen = __shfl_down_sync(0xffffffff, cur_cu_seqlen, 1);
                     seqlen = next_cu_seqlen - cur_cu_seqlen;
                 } else if (params.q_ranges) {
-                    seqlen = batch_idx <= params.num_batch ? params.q_ranges[2 * batch_idx + 1] - params.q_ranges[2 * batch_idx] : 0;
+                    seqlen = batch_idx < params.num_batch ? params.q_ranges[2 * batch_idx + 1] - params.q_ranges[2 * batch_idx] : 0;
                 } else {
                     seqlen = params.seqlen;
                 }

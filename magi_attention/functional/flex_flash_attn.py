@@ -16,6 +16,8 @@ from typing import Optional
 
 import torch
 
+from magi_attention.utils import nvtx
+
 # isort: off
 # We need to import the CUDA kernels after importing torch
 import flexible_flash_attention_cuda
@@ -27,6 +29,21 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+def merge_ranges(
+    outer_ranges: torch.Tensor, inner_ranges: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
+    sorted_outer_ranges = outer_ranges[sorted_idx]
+    sorted_inner_ranges = inner_ranges[sorted_idx]
+    merge_outer_ranges, inverse_idx, counts = torch.unique_consecutive(
+        sorted_outer_ranges, dim=0, return_inverse=True, return_counts=True
+    )
+    range_map = torch.cumsum(counts, dim=0, dtype=torch.int32)
+
+    return merge_outer_ranges, sorted_outer_ranges, sorted_inner_ranges, range_map
+
+
+@nvtx.instrument_nvtx
 def _flex_flash_attn_forward(
     q,
     k,
@@ -36,6 +53,8 @@ def _flex_flash_attn_forward(
     max_seqlen_q,
     max_seqlen_k,
     attn_type_map,
+    merge_q_ranges,
+    qk_map,
     softmax_scale,
     softcap,
     deterministic,
@@ -93,6 +112,8 @@ def _flex_flash_attn_forward(
             None,  # pack_gqa
             sm_margin,
             disable_fwd_atomic_reduction,
+            merge_q_ranges,
+            qk_map,
         )
 
     if disable_fwd_atomic_reduction:
@@ -108,6 +129,7 @@ def _flex_flash_attn_forward(
     return out, softmax_lse
 
 
+@nvtx.instrument_nvtx
 def _flex_flash_attn_backward(
     dout,
     q,
@@ -120,6 +142,8 @@ def _flex_flash_attn_backward(
     max_seqlen_q,
     max_seqlen_k,
     attn_type_map,
+    merge_k_ranges,
+    bwd_kq_map,
     softmax_scale,
     softcap,
     deterministic,
@@ -172,6 +196,8 @@ def _flex_flash_attn_backward(
             softcap,
             deterministic,
             sm_margin,
+            merge_k_ranges,
+            bwd_kq_map,
         )
 
     return dq_accum.to(q.dtype), dk_accum.to(q.dtype), dv_accum.to(q.dtype), softmax_d
@@ -195,6 +221,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         sm_margin=0,
         return_dtype=None,
         disable_fwd_atomic_reduction=False,
+        auto_range_merge=False,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -206,15 +233,34 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             max_seqlen_k, int
         ), "max_seqlen_k must be an int, otherwise would lead to performance degradation"
 
+        if auto_range_merge:
+            merge_q_ranges, fwd_q_ranges, fwd_k_ranges, fwd_qk_map = merge_ranges(
+                q_ranges, k_ranges
+            )
+            merge_k_ranges, bwd_k_ranges, bwd_q_ranges, bwd_kq_map = merge_ranges(
+                k_ranges, q_ranges
+            )
+        else:
+            fwd_q_ranges = q_ranges
+            fwd_k_ranges = k_ranges
+            bwd_q_ranges = q_ranges
+            bwd_k_ranges = k_ranges
+            merge_q_ranges = None
+            merge_k_ranges = None
+            fwd_qk_map = None
+            bwd_kq_map = None
+
         out, softmax_lse = _flex_flash_attn_forward(
             q,
             k,
             v,
-            q_ranges,
-            k_ranges,
+            fwd_q_ranges,
+            fwd_k_ranges,
             max_seqlen_q,
             max_seqlen_k,
             attn_type_map,
+            merge_q_ranges,
+            fwd_qk_map,
             softmax_scale,
             softcap,
             deterministic,
@@ -223,30 +269,63 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             disable_fwd_atomic_reduction,
         )
 
-        ctx.save_for_backward(
-            q, k, v, out, softmax_lse, q_ranges, k_ranges, attn_type_map
-        )
+        if auto_range_merge:
+            ctx.save_for_backward(
+                q,
+                k,
+                v,
+                out,
+                softmax_lse,
+                bwd_q_ranges,
+                bwd_k_ranges,
+                attn_type_map,
+                merge_k_ranges,
+                bwd_kq_map,
+            )
+        else:
+            ctx.save_for_backward(
+                q, k, v, out, softmax_lse, bwd_q_ranges, bwd_k_ranges, attn_type_map
+            )
+
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
+        ctx.auto_range_merge = auto_range_merge
 
         return out, softmax_lse
 
     @staticmethod
     def backward(ctx, dout, *args):
-        (
-            q,
-            k,
-            v,
-            out,
-            softmax_lse,
-            q_ranges,
-            k_ranges,
-            attn_type_map,
-        ) = ctx.saved_tensors
+        if ctx.auto_range_merge:
+            (
+                q,
+                k,
+                v,
+                out,
+                softmax_lse,
+                bwd_q_ranges,
+                bwd_k_ranges,
+                attn_type_map,
+                merge_k_ranges,
+                bwd_kq_map,
+            ) = ctx.saved_tensors
+        else:
+            (
+                q,
+                k,
+                v,
+                out,
+                softmax_lse,
+                bwd_q_ranges,
+                bwd_k_ranges,
+                attn_type_map,
+            ) = ctx.saved_tensors
+            merge_k_ranges = None
+            bwd_kq_map = None
+
         dq, dk, dv, _ = _flex_flash_attn_backward(
             dout,
             q,
@@ -254,20 +333,24 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             v,
             out,
             softmax_lse,
-            q_ranges,
-            k_ranges,
+            bwd_q_ranges,
+            bwd_k_ranges,
             ctx.max_seqlen_q,
             ctx.max_seqlen_k,
             attn_type_map,
+            merge_k_ranges,
+            bwd_kq_map,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
         )
+
         return (
             dq,
             dk,
             dv,
+            None,
             None,
             None,
             None,
@@ -297,6 +380,7 @@ def flex_flash_attn_func(
     sm_margin=0,
     return_dtype=None,
     disable_fwd_atomic_reduction=False,
+    auto_range_merge=False,
 ):
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
@@ -406,6 +490,7 @@ def flex_flash_attn_func(
                 0 0 0 0 1
     """
     assert not deterministic, "deterministic is not supported yet."
+
     return FlexFlashAttnFunc.apply(
         q,
         k,
@@ -421,4 +506,5 @@ def flex_flash_attn_func(
         sm_margin,
         return_dtype,
         disable_fwd_atomic_reduction,
+        auto_range_merge,
     )
