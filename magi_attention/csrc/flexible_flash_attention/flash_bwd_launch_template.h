@@ -160,7 +160,7 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         params.h / params.h_k,
         params.seqlen_k,
         params.seqlen_q, params.d, params.dv, sizeof(Element),
-        params.tile_count_semaphore, params.cu_seqlens_k, params.k_ranges, params.seqused_k,
+        params.tile_count_semaphore, params.cu_seqlens_k, params.k_ranges, params.seqused_k, nullptr,
         params.merge_q_ranges, params.qk_map
     };
 

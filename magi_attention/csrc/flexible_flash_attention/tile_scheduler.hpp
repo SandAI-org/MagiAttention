@@ -61,13 +61,14 @@ public:
     to_underlying_arguments(TileSchedulerArguments const& args) {
         assert(!Split || !Varlen || args.num_splits_dynamic_ptr != nullptr);
         assert(!Split || !Varlen || args.num_splits < (1 << 16)); // We use the top 16 bits to store num_splits
+        int * q_ranges = args.merge_q_ranges ? args.merge_q_ranges : args.q_ranges;
         return {args.num_blocks, args.num_head, args.num_batch, !Split ? 1 : args.num_splits,
                 args.qhead_per_khead, args.seqlen,
                 cutlass::FastDivmod(!Split ? 1 : args.num_splits),
                 !Varlen ? nullptr : args.cu_seqlens,
-                !Varlen ? nullptr : args.q_ranges,
+                !Varlen ? nullptr : q_ranges,
                 !Varlen ? nullptr : args.seqused,
-                args.num_splits_dynamic_ptr};
+                args.num_splits_dynamic_ptr, args.merge_q_ranges, args.qk_map};
     }
 
     static dim3
