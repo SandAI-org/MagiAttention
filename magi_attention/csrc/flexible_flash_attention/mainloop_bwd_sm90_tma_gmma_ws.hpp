@@ -866,8 +866,8 @@ struct CollectiveMainloopBwdSm90 {
 
         int m_block = m_block_min;
 
-        clear(tdKrdK);
-        clear(tdVrdV);
+        // clear(tdKrdK);
+        // clear(tdVrdV);
         // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
 
         if (!has_valid_tile) {
