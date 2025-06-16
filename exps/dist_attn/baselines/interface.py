@@ -54,7 +54,6 @@ class AttnBaselineInterface(ABC):
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
         name: str,  # key name for shard_meta
-        **kwargs,
     ):
         """
         Dispatch the global tensor `x_global` along its sequence dimension according to `cu_seqlens` and meta information,
@@ -65,7 +64,6 @@ class AttnBaselineInterface(ABC):
             cu_seqlens (torch.Tensor): Cumulative sequence lengths (CUDA tensor) describing per-sample offsets.
             host_cu_seqlens (List[int]): Host-side copy of `cu_seqlens` used for metadata construction and validation.
             name (str): Unique key used to identify and store shard metadata.
-            **kwargs: Additional backend-specific or dispatch-related keyword arguments.
 
         Returns:
             torch.Tensor: The dispatched local tensor with shape [local_seqlen, ...], specific to the current cp rank.
@@ -80,7 +78,6 @@ class AttnBaselineInterface(ABC):
         self,
         x_local: torch.Tensor,
         name: str,  # key name for shard_meta
-        **kwargs,
     ) -> torch.Tensor:
         """
         Reconstruct the global tensor `x_global` from local shard `x_local` using saved meta information under `name`.
@@ -88,7 +85,6 @@ class AttnBaselineInterface(ABC):
         Args:
             x_local (torch.Tensor): The local tensor with shape [local_seqlen, ...] to be gathered from cp ranks.
             name (str): The key used to retrieve the corresponding shard metadata for reconstruction.
-            **kwargs: Additional backend-specific or reconstruction-related keyword arguments.
 
         Returns:
             torch.Tensor: The reconstructed global tensor with shape [total_seqlen, ...].
@@ -104,7 +100,6 @@ class AttnBaselineInterface(ABC):
         dropout_p: float,
         softmax_scale: float,
         deterministic: bool,
-        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply the attention mechanism on inputs `q`, `k`, and `v`, with optional masking, dropout, and scaling.
@@ -117,7 +112,6 @@ class AttnBaselineInterface(ABC):
             dropout_p (float): Dropout probability applied to attention weights (0.0 to 1.0).
             softmax_scale (float): Scale applied before softmax; typically 1 / sqrt(head_dim).
             deterministic (bool): If True, disables dropout and enforces deterministic computation.
-            **kwargs: Additional backend-specific arguments, such as precomputed bias, padding masks, or fused kernels.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]:

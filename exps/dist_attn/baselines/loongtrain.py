@@ -28,12 +28,9 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 
-from magi_attention.common.enum import AttnMaskType
-from magi_attention.common.ranges import AttnRanges
-
-from .interface import AttnBaselineInterface
-from .ring_attn import prepare_input_bwd, prepare_input_fwd
-from .shard import (
+from exps.dist_attn.baselines.interface import AttnBaselineInterface
+from exps.dist_attn.baselines.ring_attn import prepare_input_bwd, prepare_input_fwd
+from exps.dist_attn.baselines.shard import (
     ParallelMode,
     ShardMeta,
     get_cu_seqlens_padded,
@@ -42,12 +39,13 @@ from .shard import (
     zigzag_dispatch,
     zigzag_undispatch,
 )
-from .utils_cp import (
+from exps.dist_attn.baselines.utils_cp import (
     AttnBackend,
     _fa3_varlen_backward,
     _fa3_varlen_forward,
     _pre_process,
-    _SeqAllToAll,
+    _varlen_all2all_after_attn,
+    _varlen_all2all_before_attn,
     attn_p2p_communicate,
     bwd_dkv_update,
     bwd_dq_update,
@@ -59,6 +57,8 @@ from .utils_cp import (
     restore_from_saved,
     unflatten_data_from_varlen,
 )
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.ranges import AttnRanges
 
 
 class FA3DoubleRingAttnFunc(torch.autograd.Function):
@@ -77,7 +77,7 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
         cp_groups,
         cp_stream,
         deterministic,
-        batch_p2p_comm=True,
+        batch_p2p_comm=False,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -120,6 +120,8 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
 
         local_kv = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
         intra_p2p_comm_buffers = [None for _ in range(intra_cp_size)]
+        for i in range(intra_cp_size):
+            intra_p2p_comm_buffers[i] = torch.empty_like(local_kv)
         inter_kv_inputs[0] = local_kv
         inter_kv_inputs[1] = torch.empty_like(local_kv)
         intra_send_recv_reqs = [[], []]  # type: ignore
@@ -149,7 +151,8 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
             window_offset = ((inter_cp_rank - window_idx) % window_num) * intra_cp_size
 
             # inner ring loop
-            intra_p2p_comm_buffers[0] = local_kv
+            intra_p2p_comm_buffers[0].copy_(local_kv)
+            intra_send_recv_reqs = [[], []]
             for i in range(intra_cp_size + 1):
                 if i < intra_cp_size:
                     with torch.cuda.stream(flash_attn_streams[i % 2]):
@@ -158,9 +161,9 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
                             req.wait()
 
                         if i < (intra_cp_size - 1):
-                            intra_p2p_comm_buffers[i + 1] = torch.empty_like(
-                                intra_p2p_comm_buffers[i]
-                            )
+                            # intra_p2p_comm_buffers[i + 1] = torch.empty_like(
+                            #     intra_p2p_comm_buffers[i]
+                            # )
                             intra_send_recv_reqs[i % 2] = attn_p2p_communicate(
                                 intra_cp_rank,
                                 intra_p2p_comm_buffers[i],
@@ -249,9 +252,8 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
                             fwd_results_correction_done
                         )
 
-            intra_p2p_comm_buffers[:] = [None] * len(intra_p2p_comm_buffers)
-            intra_send_recv_reqs = [[], []]
             torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
+            # intra_p2p_comm_buffers[:] = [None] * len(intra_p2p_comm_buffers)
 
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
@@ -344,7 +346,6 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
             )
 
         dq = torch.empty_like(q)
-        # dq = torch.empty_like(q)
         kv = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
         p2p_comm_buffers = [
             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
@@ -509,15 +510,19 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
                 )
                 # assert torch.equal(dkv,dkv_send_tensor)
                 # intra dkv
-                intra_dkv_send_recv_reqs = attn_p2p_communicate(
-                    intra_cp_rank,
-                    dkv_send_tensor,
-                    intra_send_dst,
-                    dkv_recv_tensor,
-                    intra_recv_src,
-                    intra_dkv_p2p_pg,
-                    batch_p2p_comm,
-                )
+                if intra_cp_size > 1:
+                    intra_dkv_send_recv_reqs = attn_p2p_communicate(
+                        intra_cp_rank,
+                        dkv_send_tensor,
+                        intra_send_dst,
+                        dkv_recv_tensor,
+                        intra_recv_src,
+                        intra_dkv_p2p_pg,
+                        batch_p2p_comm,
+                    )
+                else:
+                    intra_dkv_send_recv_reqs = []
+                    dkv_recv_tensor.copy_(dkv_send_tensor)
 
             for req in intra_dkv_send_recv_reqs:
                 req.wait()
@@ -525,20 +530,27 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
             inter_dkv_inputs[window_idx % 2].copy_(
                 p2p_comm_buffers[intra_cp_size % 2][1]
             )
-            inter_dkv_send_recv_reqs = attn_p2p_communicate(
-                inter_cp_rank,
-                inter_dkv_inputs[window_idx % 2],
-                inter_send_dst,
-                inter_dkv_inputs[(window_idx + 1) % 2],
-                inter_recv_src,
-                inter_dkv_p2p_pg,
-                batch_p2p_comm,
-            )
+            if inter_cp_size > 1:
+                inter_dkv_send_recv_reqs = attn_p2p_communicate(
+                    inter_cp_rank,
+                    inter_dkv_inputs[window_idx % 2],
+                    inter_send_dst,
+                    inter_dkv_inputs[(window_idx + 1) % 2],
+                    inter_recv_src,
+                    inter_dkv_p2p_pg,
+                    batch_p2p_comm,
+                )
+            else:
+                inter_dkv_inputs[(window_idx + 1) % 2].copy_(
+                    inter_dkv_inputs[window_idx % 2]
+                )
+                inter_dkv_send_recv_reqs = []
 
         for req in inter_dkv_send_recv_reqs:
             req.wait()
 
         dkv = inter_dkv_inputs[window_num % 2]
+        # dkv = inter_dkv_inputs[0]
         dk, dv = dkv[0], dkv[1]
 
         return (
@@ -578,7 +590,7 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
         attn_mask_type,
         cp_stream,
         deterministic,
-        batch_p2p_comm=True,
+        batch_p2p_comm=False,
     ):
         assert qkv_format == "thd"
 
@@ -634,6 +646,8 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
 
         local_kv = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
         intra_p2p_comm_buffers = [None for _ in range(intra_cp_size)]
+        for i in range(intra_cp_size):
+            intra_p2p_comm_buffers[i] = torch.empty_like(local_kv)
         inter_kv_inputs[0] = local_kv
         inter_kv_inputs[1] = torch.empty_like(local_kv)
         intra_send_recv_reqs = [[], []]  # type: ignore
@@ -671,7 +685,8 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
             window_offset = ((inter_cp_rank - window_idx) % window_num) * intra_cp_size
 
             # inner ring loop
-            intra_p2p_comm_buffers[0] = local_kv
+            intra_p2p_comm_buffers[0].copy_(local_kv)
+            intra_send_recv_reqs = [[], []]
             for i in range(intra_cp_size + 1):
                 if i < intra_cp_size:
                     with torch.cuda.stream(flash_attn_streams[i % 2]):
@@ -680,9 +695,9 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
                             req.wait()
 
                         if i < (intra_cp_size - 1):
-                            intra_p2p_comm_buffers[i + 1] = torch.empty_like(
-                                intra_p2p_comm_buffers[i]
-                            )
+                            # intra_p2p_comm_buffers[i + 1] = torch.empty_like(
+                            #     intra_p2p_comm_buffers[i]
+                            # )
                             intra_send_recv_reqs[i % 2] = attn_p2p_communicate(
                                 intra_cp_rank,
                                 intra_p2p_comm_buffers[i],
@@ -820,8 +835,7 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
                             fwd_results_correction_done
                         )
 
-            intra_p2p_comm_buffers[:] = [None] * len(intra_p2p_comm_buffers)
-            intra_send_recv_reqs = [[], []]
+            # intra_p2p_comm_buffers[:] = [None] * len(intra_p2p_comm_buffers)
             torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
@@ -1141,15 +1155,19 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
                 )
                 # assert torch.equal(dkv,dkv_send_tensor)
                 # intra dkv
-                intra_dkv_send_recv_reqs = attn_p2p_communicate(
-                    intra_cp_rank,
-                    dkv_send_tensor,
-                    intra_send_dst,
-                    dkv_recv_tensor,
-                    intra_recv_src,
-                    intra_dkv_p2p_pg,
-                    batch_p2p_comm,
-                )
+                if intra_cp_size > 1:
+                    intra_dkv_send_recv_reqs = attn_p2p_communicate(
+                        intra_cp_rank,
+                        dkv_send_tensor,
+                        intra_send_dst,
+                        dkv_recv_tensor,
+                        intra_recv_src,
+                        intra_dkv_p2p_pg,
+                        batch_p2p_comm,
+                    )
+                else:
+                    intra_dkv_send_recv_reqs = []
+                    dkv_recv_tensor.copy_(dkv_send_tensor)
 
             for req in intra_dkv_send_recv_reqs:
                 req.wait()
@@ -1157,15 +1175,21 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
             inter_dkv_inputs[window_idx % 2].copy_(
                 p2p_comm_buffers[intra_cp_size % 2][1]
             )
-            inter_dkv_send_recv_reqs = attn_p2p_communicate(
-                inter_cp_rank,
-                inter_dkv_inputs[window_idx % 2],
-                inter_send_dst,
-                inter_dkv_inputs[(window_idx + 1) % 2],
-                inter_recv_src,
-                inter_dkv_p2p_pg,
-                batch_p2p_comm,
-            )
+            if inter_cp_size > 1:
+                inter_dkv_send_recv_reqs = attn_p2p_communicate(
+                    inter_cp_rank,
+                    inter_dkv_inputs[window_idx % 2],
+                    inter_send_dst,
+                    inter_dkv_inputs[(window_idx + 1) % 2],
+                    inter_recv_src,
+                    inter_dkv_p2p_pg,
+                    batch_p2p_comm,
+                )
+            else:
+                inter_dkv_inputs[(window_idx + 1) % 2].copy_(
+                    inter_dkv_inputs[window_idx % 2]
+                )
+                inter_dkv_send_recv_reqs = []
 
         for req in inter_dkv_send_recv_reqs:
             req.wait()
@@ -1294,7 +1318,6 @@ class LoongTrain(AttnBaselineInterface):
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
         name: str,  # key name for shard_meta
-        **kwargs,
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -1333,7 +1356,6 @@ class LoongTrain(AttnBaselineInterface):
         self,
         x_local: torch.Tensor,
         name: str,  # key name for shard_meta
-        **kwargs,
     ) -> torch.Tensor:
         smeta = self.shard_meta[name]
         x_global_varlen = zigzag_undispatch(
@@ -1359,20 +1381,14 @@ class LoongTrain(AttnBaselineInterface):
         dropout_p: float,
         softmax_scale: float,
         deterministic: bool,
-        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cp_size_p2p = dist.get_world_size(group=self.pg_p2p)
-        # ulysess all2all
-        batch_dim, seq_dim = 0, 1
+        # all2all comm
+        q_layer = _varlen_all2all_before_attn(q, self.pg_a2a)
+        k_layer = _varlen_all2all_before_attn(k, self.pg_a2a)
+        v_layer = _varlen_all2all_before_attn(v, self.pg_a2a)
 
-        # thd -> 1,thd
-        q, k, v = [x.unsqueeze(0) for x in [q, k, v]]
-        q_layer, k_layer, v_layer = [
-            _SeqAllToAll.apply(self.pg_a2a, x, 2, seq_dim, batch_dim) for x in [q, k, v]
-        ]
-        q_layer, k_layer, v_layer = [x.squeeze(0) for x in [q_layer, k_layer, v_layer]]
-
-        batch_p2p_comm = kwargs.get("batch_p2p_comm", True)
+        batch_p2p_comm = False
         with torch.cuda.device(q.device):
             cp_stream = torch.cuda.Stream()
 
@@ -1428,9 +1444,7 @@ class LoongTrain(AttnBaselineInterface):
                 batch_p2p_comm,
             )
 
-        # ulysess all2all
-        out = out.unsqueeze(0)
-        out_layer = _SeqAllToAll.apply(self.pg_a2a, out, seq_dim, 2, batch_dim)
-        out_layer = out_layer.squeeze(0)
+        # all2all comm
+        out_layer = _varlen_all2all_after_attn(out, self.pg_a2a)
 
         return out_layer, lse

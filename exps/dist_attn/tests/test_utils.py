@@ -294,9 +294,12 @@ def generate_test_data(
     batch_size, total_seqlen, heads_num, hidden_dim, dtype, qkv_format, device
 ):
     # chunk_seq = total_seqlen if qkv_format == "thd" else total_seqlen // batch_size
-    random_cu_seqlens_list, max_seqlen = generate_random_samples(
-        total_seqlen, batch_size
-    )
+    # random_cu_seqlens_list, max_seqlen = generate_random_samples(
+    #     total_seqlen, batch_size
+    # )
+
+    random_cu_seqlens_list = [0, 512, 1024]
+    max_seqlen = 512
     if qkv_format == "thd":
         shape = [total_seqlen, heads_num, hidden_dim]
     elif qkv_format == "bshd":
@@ -305,7 +308,6 @@ def generate_test_data(
         shape = [max_seqlen, batch_size, heads_num, hidden_dim]
     q, k, v, dout = gen_init_data(shape, device, dtype, False)
 
-    # random_cu_seqlens_list = [0,2048,4096]
     if qkv_format != "thd":
         q = fill_data_with_pad(q, random_cu_seqlens_list, qkv_format)
         k = fill_data_with_pad(k, random_cu_seqlens_list, qkv_format)

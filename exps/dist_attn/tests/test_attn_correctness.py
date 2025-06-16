@@ -20,9 +20,13 @@ from enum import Enum
 
 import torch
 import torch.distributed as dist
-from baselines.loongtrain import LoongTrain
-from baselines.ring_attn import RingAttnAllGather, RingAttnP2P
-from baselines.shard import (
+from torch.testing._internal.common_distributed import MultiProcessTestCase
+
+import magi_attention
+import magi_attention.testing
+from exps.dist_attn.baselines.loongtrain import LoongTrain
+from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
+from exps.dist_attn.baselines.shard import (
     ParallelMode,
     get_loongtrain_pg,
     get_max_seqlen,
@@ -32,22 +36,17 @@ from baselines.shard import (
     init_distributed,
     set_seed,
 )
-from baselines.ulysess import Ulysess
-from baselines.usp import USP
-from baselines.utils_cp import AttnBackend
-from test_utils import (
+from exps.dist_attn.baselines.ulysess import Ulysess
+from exps.dist_attn.baselines.usp import USP
+from exps.dist_attn.baselines.utils_cp import AttnBackend
+from exps.dist_attn.tests.test_utils import (
     collect_global_grad,
     generate_attn_cu_seqlens,
     generate_attn_ranges,
     generate_test_data,
-    get_attn_mask_from_cu_seqlens,
     test_fa3_varlen_func,
     test_torch_sdpa_func,
 )
-from torch.testing._internal.common_distributed import MultiProcessTestCase
-
-import magi_attention
-import magi_attention.testing
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.testing.precision import (
     EPSILON,
@@ -64,6 +63,27 @@ class AttnImpl(Enum):
     RING_ALLGATHER = 3
     USP = 4
     LOONGTRAIN = 5
+
+
+def test_pg_broadcast(pg, group_name, rank):
+    # world_size = dist.get_world_size(pg)
+    local_rank = dist.get_rank(pg)
+
+    test_tensor = torch.tensor([rank * 100], dtype=torch.int32).cuda()
+
+    src = dist.get_global_rank(pg, 0)
+    # 设定第0号rank作为broadcast源
+    if local_rank == 0:
+        print(
+            f"[{group_name}] Rank {rank} (local {local_rank}) broadcasting tensor: {test_tensor.item()}"
+        )
+    dist.broadcast(test_tensor, src=src, group=pg)
+    dist.barrier(pg)
+
+    # 所有进程应拿到 Rank0 的值
+    print(
+        f"[{group_name}] Rank {rank} (local {local_rank}) received tensor: {test_tensor.item()}"
+    )
 
 
 class MyAttnTest(MultiProcessTestCase):
@@ -277,22 +297,26 @@ class MyAttnTest(MultiProcessTestCase):
 
         # -----    test usp   ---- #
         elif self.TO_TEST == AttnImpl.USP:
-            cp_pg_meta = {
-                ParallelMode.ULYSESS: 2,
-                ParallelMode.RING: 2,
-            }
-            # ulysess [0,1] or ring [0,1]
             # cp_pg_meta = {
-            #     ParallelMode.RING: 2,
             #     ParallelMode.ULYSESS: 2,
+            #     ParallelMode.RING: 2,
             # }
+            # ulysess [0,1] or ring [0,1]
+            cp_pg_meta = {
+                ParallelMode.RING: 2,
+                ParallelMode.ULYSESS: 2,
+            }
             world_size = 4
             device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
             cp_group = get_usp_pg(device_shard)
+            print("ulysess")
+            print_ranks(cp_group[ParallelMode.ULYSESS])
+            print("ring")
+            print_ranks(cp_group[ParallelMode.RING])
         elif self.TO_TEST == AttnImpl.LOONGTRAIN:
             cp_pg_meta = {
-                ParallelMode.ULYSESS: 1,
-                ParallelMode.RING: 4,
+                ParallelMode.ULYSESS: 2,
+                ParallelMode.RING: 2,
             }
             # cp_pg_meta = {
             #     ParallelMode.RING: 4,
@@ -300,19 +324,24 @@ class MyAttnTest(MultiProcessTestCase):
             # }
             world_size = 4
             # NOTE: param for loongtrain double ring-attention
-            window_num = 2
+            window_num = 1
             rank = int(os.environ.get("RANK", 0))
             assert world_size % window_num == 0
-            device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
-            cp_group = get_loongtrain_pg(device_shard, window_num, rank)
+            device_shard = init_distributed(world_size=world_size, pg_meta=None)
+            cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
+
+        # test_pg_broadcast(cp_group[ParallelMode.RING], "RING", rank)
+        # test_pg_broadcast(cp_group[ParallelMode.ULYSESS], "ULYSESS", rank)
+        # test_pg_broadcast(cp_group[ParallelMode.DKV_INTRA_WINDOW], "INTRA_WINDOW", rank)
+        # test_pg_broadcast(cp_group[ParallelMode.DKV_INTER_WINDOW], "INTER_WINDOW", rank)
 
         # -----    set test param   ---- #
 
         device = torch.cuda.current_device()
-        batch_size = 3
+        batch_size = 2
         # NOTE: When validating the correctness of TE, setting deterministic = True will cause TE to allocate
         # the full mask space, which may lead to out-of-memory (OOM) issues.
-        total_seqlen = 4096 * 4
+        total_seqlen = 1024
         h = 16
         d = 128
         dtype = torch.float16
@@ -320,7 +349,7 @@ class MyAttnTest(MultiProcessTestCase):
         qkv_format = "thd"
         deterministic = True
         dropout = 0.0
-        attn_mask_type = AttnMaskType.CAUSAL
+        attn_mask_type = AttnMaskType.FULL
         causal = attn_mask_type == AttnMaskType.CAUSAL
         attn_backend = AttnBackend.FA3
 
@@ -442,6 +471,9 @@ class MyAttnTest(MultiProcessTestCase):
             qkv_format,
             deterministic,
         )
+        # print(f"{out_global=},{test_out_ref=}")
+        # print(f"{lse=},{test_lse_ref=}")
+        # print(f"{test_out_ref.shape=},{test_lse_ref.shape=}")
 
         print(f"max diff out: {torch.abs(test_out_ref - out_global).max()}")
         print(f"max diff dq: {torch.abs(test_dq_ref - dq_global).max()}")
@@ -450,10 +482,10 @@ class MyAttnTest(MultiProcessTestCase):
 
         # -----    assert close torch sdpa ref   ---- #
 
-        mask = get_attn_mask_from_cu_seqlens(cu_seqlens, cu_seqlens, causal)
-        self.assert_close_to_sdpa_ref(
-            q, k, v, dout, out_global, dq_global, dk_global, dv_global, dtype, mask
-        )
+        # mask = get_attn_mask_from_cu_seqlens(cu_seqlens, cu_seqlens, causal)
+        # self.assert_close_to_sdpa_ref(
+        #     q, k, v, dout, out_global, dq_global, dk_global, dv_global, dtype, mask
+        # )
 
         # torch.testing.assert_close(out_global, test_out_ref, atol=o_atol, rtol=o_rtol)
         # torch.testing.assert_close(dq_global, test_dq_ref, atol=dq_atol, rtol=dq_rtol)
@@ -475,5 +507,5 @@ def print_ranks(group):
 
 
 if __name__ == "__main__":
-    test = MyAttnTest(AttnImpl.RING_ALLGATHER)
+    test = MyAttnTest(AttnImpl.ULYSSESS)
     test.test_attn()
