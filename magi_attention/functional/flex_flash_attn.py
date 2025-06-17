@@ -93,6 +93,7 @@ def _flex_flash_attn_forward(
             None,  # pack_gqa
             sm_margin,
             disable_fwd_atomic_reduction,
+            deterministic,
         )
 
     if disable_fwd_atomic_reduction:
@@ -405,7 +406,7 @@ def flex_flash_attn_func(
                 0 0 0 1 0
                 0 0 0 0 1
     """
-    assert not deterministic, "deterministic is not supported yet."
+
     return FlexFlashAttnFunc.apply(
         q,
         k,
