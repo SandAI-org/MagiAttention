@@ -598,7 +598,6 @@ class MagiTrainer(Trainer):
 
         outputs = model(**inputs)
         logits = outputs.logits
-        # print(f"{logits=}")
 
         magi_attn_key = get_magi_attention_key()
         if magi_attn_key is not None:
@@ -606,8 +605,7 @@ class MagiTrainer(Trainer):
 
             logits = undispatch(logits, magi_attn_key)
             logits = logits.unsqueeze(0)
-        # import pdb
-        # pdb.set_trace()
+
         loss = self.model.loss_function(
             logits=logits,
             labels=labels,
@@ -713,15 +711,12 @@ class MagiTrainer(Trainer):
         # Finally we need to normalize the loss for reporting
         if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
             loss = loss / self.args.gradient_accumulation_steps
-        # import pdb
-        # pdb.set_trace()
         import os
 
         cp_size = int(os.environ.get("cp_size", 1))
         backward_loss = loss * cp_size
         self.accelerator.backward(backward_loss, **kwargs)
-        # import pdb
-        # pdb.set_trace()
+
         return loss.detach()
 
 
