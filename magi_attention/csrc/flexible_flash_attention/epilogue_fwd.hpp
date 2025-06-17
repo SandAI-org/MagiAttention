@@ -19,7 +19,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MNK_PV_, class ClusterShape_, class Element_, class ArchTag_, int NumEpilogueThreads_, bool DisableFwdAtomicReduction_>
+template <class TileShape_MNK_PV_, class ClusterShape_, class Element_, class ArchTag_, int NumEpilogueThreads_, bool DisableFwdAtomicReduction_, bool Deterministic_=false>
 struct CollectiveEpilogueFwd {
     // KblockM, Kheaddim, KblockN
     using TileShape_MNK_PV = TileShape_MNK_PV_;
@@ -29,6 +29,7 @@ struct CollectiveEpilogueFwd {
     using ArchTag = ArchTag_;
     static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
     static constexpr bool DisableFwdAtomicReduction = DisableFwdAtomicReduction_;
+    static constexpr bool Deterministic = Deterministic_;
 
     static_assert(ArchTag::kMinComputeCapability >= 90 || CUTE_STATIC_V(size(ClusterShape{})) == 1);
     // static_assert(sizeof(Element) <= 2);
@@ -97,6 +98,12 @@ struct CollectiveEpilogueFwd {
         AutoVectorizingCopyWithAssumedAlignment<128>
     >;
 
+    using BlockCoordType = std::conditional_t<
+        Deterministic,
+        cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>,
+        cute::tuple<int32_t, int32_t, int32_t>
+    >;
+
     // static constexpr size_t SmemAlignmentO = cutlass::detail::alignment_for_swizzle(SmemLayoutO{});
     // static_assert(SmemAlignmentO >= 128, "Require at least 128B alignment");
     // struct TensorStorage : cute::aligned_struct<SmemAlignmentO> {
@@ -126,6 +133,7 @@ struct CollectiveEpilogueFwd {
         int * range_locks = nullptr;
         int const* q_ranges = nullptr;
         int const* k_ranges = nullptr;
+        int * determin_range_locks = nullptr;
     };
 
     // Device side kernel params
@@ -142,6 +150,7 @@ struct CollectiveEpilogueFwd {
         int * range_locks = nullptr;
         int const* q_ranges = nullptr;
         int const* k_ranges = nullptr;
+        int * determin_range_locks = nullptr;
     };
 
     static Params
@@ -160,7 +169,9 @@ struct CollectiveEpilogueFwd {
         return {args.ptr_O, args.shape_O, args.stride_O,
                 args.ptr_LSE, shape_LSE, args.stride_LSE,
                 cutlass::FastDivmod(qhead_per_khead),
-                tma_store_O, args.nheads, args.range_locks, args.q_ranges, args.k_ranges};
+                tma_store_O, args.nheads, args.range_locks, args.q_ranges, args.k_ranges,
+                args.determin_range_locks
+            };
     }
 
     /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -233,6 +244,50 @@ struct CollectiveEpilogueFwd {
         atomicExch(&range_lock[index_1], 0);
     }
 
+    CUTLASS_DEVICE
+    void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int conflict_bidb1, int conflict_bidb2) {
+        if (conflict_bidb1 == 0 && conflict_bidb2 == 0)
+            return ;
+        // Calculate lock index
+        int block_idx1 = offset / q_block_size;
+        int index_1 = block_idx1 * num_heads + bidh;
+        int block_idx2 = (offset + q_block_size - 1) / q_block_size;
+
+        // Acquire the first lock
+        #pragma unroll 1
+        while (atomicCAS(&range_lock[index_1], conflict_bidb1, conflict_bidb1) != conflict_bidb1) {
+        }
+
+        // If we need a second lock
+        if (block_idx1 != block_idx2) {
+            int index_2 = block_idx2 * num_heads + bidh;
+
+            // Try to acquire the second lock
+            #pragma unroll 1
+            while (atomicCAS(&range_lock[index_2], conflict_bidb2, conflict_bidb2) != conflict_bidb2) {
+            }
+        }
+    }
+    
+    CUTLASS_DEVICE
+    void deterministic_arrive(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int bidb) {
+        // Calculate lock indices
+        int block_idx1 = offset / q_block_size;
+        int index_1 = block_idx1 * num_heads + bidh;
+
+        // Check if we need to release a second lock
+        int block_idx2 = (offset + q_block_size - 1) / q_block_size;
+
+        // Release the second lock
+        if (block_idx1 != block_idx2) {
+            int index_2 = block_idx2 * num_heads + bidh;
+            atomicExch(&range_lock[index_2], bidb + 1);
+        }
+
+        // Release the first lock
+        atomicExch(&range_lock[index_1], bidb + 1);
+    }
+
     template <typename SharedStorage, typename FrgTensorO, typename FrgTensorLSE, typename TiledMma>
     CUTLASS_DEVICE void
     store(Params const& params,
@@ -241,11 +296,18 @@ struct CollectiveEpilogueFwd {
           SharedStorage& shared_storage,
           TiledMma tiled_mma,
           int thread_idx,
-          cute::tuple<int32_t, int32_t, int32_t> const& block_coord
+          BlockCoordType const& block_coord
     ) {
         
         // Get block coordinates for current job(tile)
-        auto [m_block, bidh, bidb] = block_coord;
+        int m_block = get<0>(block_coord);
+        int bidh = get<1>(block_coord);
+        int bidb = get<2>(block_coord);
+        int conflict_bidb1 = 0, conflict_bidb2 = 0;
+        if constexpr (Deterministic) {
+            conflict_bidb1 = get<3>(block_coord);
+            conflict_bidb2 = get<4>(block_coord);
+        }
 
         // Get seqlen info for batch that current tile belongs to
         flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
@@ -301,6 +363,9 @@ struct CollectiveEpilogueFwd {
         if constexpr (!DisableFwdAtomicReduction) {
             // Acquire range lock to prevent multiple threads from writing to gmem simultaneously
             if (thread_idx == 0) {
+                if constexpr (Deterministic) {
+                    deterministic_sync(params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, conflict_bidb1, conflict_bidb2);
+                }
                 acquire_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
             }
             flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
@@ -466,6 +531,9 @@ struct CollectiveEpilogueFwd {
         if constexpr (!DisableFwdAtomicReduction) {
             flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
             if (thread_idx == 0) {
+                if constexpr (Deterministic) {
+                    deterministic_arrive(params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, bidb);
+                }
                 release_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
             }
         }
