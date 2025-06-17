@@ -62,7 +62,6 @@ For implementation details, more experimental results and future works, please v
 - [ ] Refactor `Distributed Attention Solver` as well as `Flex-Flash-Attention` kernel arguments to support all mask types with all kinds of overlap, and reduce CPU overhead for meta info calculation
 - [ ] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*)
 - [ ] Build a comprehensive `CP Benchmark` to better compare the performance of different context parallel strategies under various mask patterns and other training configurations
-- [ ] More comprehensive API reference and documentation.
 
 ## Installation ⚙️
 
