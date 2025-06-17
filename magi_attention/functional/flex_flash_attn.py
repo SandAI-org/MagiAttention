@@ -89,6 +89,7 @@ def _flex_flash_attn_forward(
             sm_margin,
             disable_fwd_atomic_reduction,
             return_dtype,
+            deterministic,
         )
 
     return out, softmax_lse
@@ -479,7 +480,6 @@ def flex_flash_attn_func(
                 0 0 0 1 0
                 0 0 0 0 1
     """
-    assert not deterministic, "deterministic is not supported yet."
 
     return FlexFlashAttnFunc.apply(
         q,
