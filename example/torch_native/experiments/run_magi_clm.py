@@ -89,7 +89,7 @@ from typing_extensions import override
 if is_apex_available():
     pass
 
-from patch_llama import get_magi_attention_key
+from Magi_attention import get_magi_attention_key
 
 from magi_attention.api import get_position_ids, magi_attn_varlen_dispatch
 from magi_attention.api.functools import (

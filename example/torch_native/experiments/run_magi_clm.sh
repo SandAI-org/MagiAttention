@@ -17,18 +17,18 @@ set -ex
 [ -z "$RANK" ] && RANK=0
 [ -z "$WORLD_SIZE" ] && WORLD_SIZE=1
 [ -z "$MASTER_ADDR" ] && MASTER_ADDR=127.0.0.1
-[ -z "$MASTER_PORT" ] && MASTER_PORT=9017
+[ -z "$MASTER_PORT" ] && MASTER_PORT=29533
 
 BS=1
 SEQLEN=8192
 PRECISION="bf16=true"
-cp_size=$1
-ga=$2
+CP_SIZE=$1
+GA=$2
 NPROC_PER_NODE=8
-export cp_size=$cp_size
-lr_scheduler_kwargs='lr_scheduler_kwargs.json'
+export cp_size=$CP_SIZE
 
-export WANDB_PROJECT="last_align"
+export WANDB_PROJECT="your_wandb_project"
+MODEL_PATH="your_model_path"
 
 torchrun --nproc_per_node $NPROC_PER_NODE \
     --nnodes $WORLD_SIZE \
@@ -42,23 +42,23 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --per_device_train_batch_size $BS \
     --per_device_eval_batch_size $BS \
     --do_train \
-    --output_dir /tmp/test-clm \
+    --output_dir your_checkpoint_path \
     --overwrite_output_dir \
-    --config_name /home/niubility2/sunhanwen/Megatron-LM/checkpoints/Llama-3.2-1b/ \
-    --tokenizer_name /home/niubility2/sunhanwen/Megatron-LM/checkpoints/Llama-3.2-1b/ \
+    --config_name $MODEL_PATH \
+    --tokenizer_name $MODEL_PATH \
+    --model_name_or_path $MODEL_PATH \
     --trust_remote_code true \
     --cache_dir ./cache \
     --block_size $SEQLEN \
     --optim adamw_torch \
-    --learning_rate 6e-5 \
-    --lr_scheduler_type cosine_with_min_lr \
-    --warmup_ratio 0.01 \
-    --lr_scheduler_kwargs '{"min_lr": 6e-6}'  \
+    --learning_rate 5e-5 \
+    --lr_scheduler_type cosine \
     --save_strategy no \
     --logging_strategy steps \
     --gradient_checkpointing no \
-    --gradient_accumulation_steps $ga \
+    --gradient_accumulation_steps $GA \
     --logging_steps 1 \
     --$PRECISION \
     --report_to wandb \
-    --run_name magi-cp$cp_size-ga$ga \
+    --max_steps 2000 \
+    --run_name magi-cp$CP_SIZE-ga$GA \
