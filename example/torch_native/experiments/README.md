@@ -1,5 +1,5 @@
 # Using MagiAttention with HuggingFace Transformers
-We provide you an example to train llama-3-1b model with magiattention utilizing the HuggingFace Transformers ecosystem. We also do experiments to compare the loss of training with/without magiattention to show the correctness of MagiAttention.
+We provide you an example to train llama-3-1b model with magiattention(dp + cp) utilizing the HuggingFace Transformers ecosystem. We also do experiments to compare the loss of training with/without magiattention to show the correctness of MagiAttention.
 
 ## Install Transformers and Accelerate
 ```shell
@@ -12,30 +12,79 @@ pip install evaluate
 ```
 
 ## Prepare model and datasets
-We load from [Llama-3-1b](https://huggingface.co/meta-llama/Llama-3.2-1B) model meta provided and continue pretraining it with [openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext) datasets.
+We load from [Llama-3-1b](https://huggingface.co/meta-llama/Llama-3.2-1B) model and continue pretraining it with [openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext) datasets.
 
-You can download the same model from modelscope [here](https://www.modelscope.cn/models/LLM-Research/Llama-3.2-1B/).
-
-
-## Prepare trainer
-Transformers provide an example of training language model [here](https://github.com/huggingface/transformers/tree/v4.51.3/examples/pytorch/language-modeling), you can utilize [run_clm.py](https://github.com/huggingface/transformers/blob/v4.51.3/examples/pytorch/language-modeling/run_clm.py) to train casual language model like gpt-2 and llama. You can specify a distributed training strategy, such as DDP or FSDP, and accelerate will automatically handle the underlying logic related to your datasets and the distributed setup.
-
-However, MagiAttention is a context parallel strategy that isn't natively supported by the transformers or accelerate libraries. Therefore, integrating it requires overriding the `transformers.Trainer` and `accelerate.Accelerator` classes.
+You can download the same model from [modelscope](https://www.modelscope.cn/models/LLM-Research/Llama-3.2-1B/).
 
 
-### Override transformers
+## Prepare Trainer
+Transformers provide an example of training language model [here](https://github.com/huggingface/transformers/tree/v4.51.3/examples/pytorch/language-modeling), you can utilize [run_clm.py](https://github.com/huggingface/transformers/blob/v4.51.3/examples/pytorch/language-modeling/run_clm.py) to train casual language model like gpt and llama. You can specify a distributed training strategy, such as DDP or FSDP, and accelerate will automatically handle the underlying logic related to your datasets and the distributed setup. We provide `run_origin_clm.py` and `run_origin_clm.sh` in this dir which is the official implentation of training casual launguage model.
 
-Specifically, we need to override `_prepare_inputs` to prepare data and position ids for MagiAttention:
+However, MagiAttention is a context parallel strategy that isn't natively supported by the transformers and accelerate libraries. Therefore, integrating it requires customizing the `transformers.Trainer` and `accelerate.Accelerator` classes. We provide `run_magi_clm.py` and `run_magi_clm.sh` in this dir to train llama-3-1b model with MagiAttention.
+
+### Customize accelerate Accelerator
+The following code are all avilable at `Magi_trainer.py`.
+
+We need to prepare a custom Accelerator called MagiAccelerator inheriting from the `accelerate.Accelerator` class:
+```python
+class MagiAccelerator(Accelerator):
+    ...
+```
+
+Override `_prepare_device_mesh` to prepare correct data for dp + cp sceneria.
+
+**NOTE:** We are implementing Context Parallelism (CP) by treating it as Tensor Parallelism (TP) at the data loading stage. This allows us to leverage accelerate's built-in data loader for DP+TP scenarios, which provides the exact data distribution we need: ranks within the same TP group receive identical data, while different TP groups receive sharded data.
+```diff
+def _prepare_device_mesh(self):
+    """
+    Prepare the device mesh for distributed training. The dataloader will determine how to load data based on thedevice mesh.
+    """
++   cp_size = int(os.environ.get("cp_size", 1))
+
+    if self.state.torch_tp_plugin:
+        return self.state.torch_tp_plugin.torch_device_mesh
+    elif self.distributed_type == DistributedType.DEEPSPEED and hasattr(
+        self.state, "ds_device_mesh"
+    ):
+        return self.state.ds_device_mesh
++    elif cp_size > 1:
++        device_mesh = torch.arange(0, torch.distributed.get_world_size()).reshape(
++            torch.distributed.get_world_size() // cp_size,  # dp_size
++            cp_size,
++        )
++
++        device_mesh = DeviceMesh(
++            device_type="cuda",
++            mesh=device_mesh,
++            mesh_dim_names=(
++                "dp",
++                "tp",
++            ),  # hack tp as cp here, set dp-tp 2-dim parallel
++        )
++
++        return device_mesh
+
+    return None
+```
+
+### Customize Transformers Trainer
+The following code are all avilable at `Magi_trainer.py`.
+
+We need to prepare a custom Trainer called `MagiTrainer` inheriting from the `transformers.Trainer` class:
+```python
+class MagiTrainer(Trainer):
+    ...
+```
+
+Override `_prepare_inputs` to prepare data and position_ids for MagiAttention:
 ```diff
 @override
 def _prepare_inputs():
     ...
-    if self.args.past_index >= 0 and self._past is not None:
-            inputs["mems"] = self._past
 +   local_input, cu_seqlens_q, cu_seqlens_k, pad_size = self._prepare_magi_data(
 +               inputs["input_ids"], self.model.config.head_dim
 +           )
-
++
 +   local_input, magi_attn_key = self._prepare_magi_attention(
 +       local_input,
 +       cu_seqlens_q,
@@ -43,17 +92,38 @@ def _prepare_inputs():
 +       pad_size,
 +       self.model.config.head_dim,
 +   )
-
 +   position_ids = get_position_ids(magi_attn_key).unsqueeze(0)
-
++
 +   inputs["position_ids"] = position_ids
 +   inputs["input_ids"] = local_input
 
     return inputs
+
+# dispatch data and prepare key
++def _prepare_magi_attention(
++    self, inputs, cu_seqlens_q, cu_seqlens_k, pad_size, head_dim
++):
++    # ---   magi_attn_flex_dispatch   --- #
++    dist_attn_config = DistAttnConfig()
++    cp_group = self._build_cp_group()
++    inputs = squash_batch_dim(inputs)
++
++    x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
++        inputs,
++        cu_seqlens_q,
++        cu_seqlens_k,
++        head_dim=head_dim,
++        pad_size=pad_size,
++        cp_group=cp_group,
++        causal=True,
++        dist_attn_config=dist_attn_config,
++    )
++    x_padded = x_padded.unsqueeze(0)
++
++    return x_padded, dist_attn_runtime_key
 ```
 
-
-We also need to override `compute_loss` because we need to undispatch logits and compute loss:
+Override `compute_loss` because we need to undispatch logits first:
 ```diff
 def compute_loss():
     ...
@@ -77,13 +147,12 @@ def compute_loss():
 
     return (loss, outputs) if return_outputs else loss
 ```
-Override `training_step`: We need to multiply the loss by cp_size before the backward pass because the gradients are divided by an extra factor of cp_size during the all_reduce averaging process.
+Override `training_step`: We must scale the loss by cp_size before the backward pass, as the dp/fsdp all_reduce averaging process divides the gradients by an additional factor of cp_size.
 ```diff
 def training_step():
     if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
         loss = loss / self.args.gradient_accumulation_steps
 +   import os
-
 +   cp_size = int(os.environ.get("cp_size", 1))
 +   backward_loss = loss * cp_size
 +   self.accelerator.backward(backward_loss, **kwargs)
@@ -91,7 +160,7 @@ def training_step():
 
     return loss.detach()
 ```
-Override `create_accelerator_and_postprocess` because we want to use the accelerator we overrided:
+Override `create_accelerator_and_postprocess` because we want to use our customize accelerator.
 ```diff
 def create_accelerator_and_postprocess():
 ...
@@ -100,49 +169,14 @@ def create_accelerator_and_postprocess():
 ...
 ```
 
-### Override accelerate
-Override `_prepare_device_mesh` to prepare correct data for cp + dp sceneria.
-```python
-def _prepare_device_mesh(self):
-        """
-        Prepare the device mesh for distributed training. The dataloader will determine how to load data based on the
-        device mesh.
-        """
-        cp_size = int(os.environ.get("cp_size", 1))
+### Register Magi_Attention implementation
+The following code are avaliable at Magi_attention.py.
 
-        if self.state.torch_tp_plugin:
-            return self.state.torch_tp_plugin.torch_device_mesh
-        elif self.distributed_type == DistributedType.DEEPSPEED and hasattr(
-            self.state, "ds_device_mesh"
-        ):
-            return self.state.ds_device_mesh
-        elif cp_size > 1:
-            device_mesh = torch.arange(0, torch.distributed.get_world_size()).reshape(
-                torch.distributed.get_world_size() // cp_size,  # dp_size
-                cp_size,
-            )
-
-            device_mesh = DeviceMesh(
-                device_type="cuda",
-                mesh=device_mesh,
-                mesh_dim_names=(
-                    "dp",
-                    "tp",
-                ),  # hack tp with cp here, set dp-tp 2-dim parallel
-            )
-
-            return device_mesh
-
-        return None
-```
-
-
-### register Magi_Attention implementation
-What's more, MagiAttention provides a new type of attention implenmentation(flexible flash attention), so we need to register it for use:
+What's more, MagiAttention provides a new type of attention implenmentation(flexible flash_attention), so we need to register it for use:
 ``` python
 def Magi_Attention_forward(
-     module: nn.Module,
-     query: torch.Tensor,  # (b, num_heads, seq_len, hidden_dim)
+    module: nn.Module,
+    query: torch.Tensor,  # (b, num_heads, seq_len, hidden_dim)
     key: torch.Tensor,
     value: torch.Tensor,
     attention_mask: Optional[torch.Tensor],
@@ -168,7 +202,7 @@ def Magi_Attention_forward(
 # register Magi_Attention as attn_backend globally.
 ALL_ATTENTION_FUNCTIONS.register("Magi_Attention", Magi_Attention_forward)
 ```
-And change model's attention inplementation:
+Use `Magi_Attention` as model's attention inplementation:
 ```diff
 ...
 elif model_args.model_name_or_path:
@@ -210,8 +244,6 @@ We don't need to make any modifications to modeling_llama.py
 
 
 ### Results
-You can refer to run_magi_clm.sh and run_origin_clm.sh for our experiment commands.
-
 
 MagiAttention aligns well with torch native training:
 ![Results](./results.png)
