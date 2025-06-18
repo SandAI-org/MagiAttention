@@ -44,7 +44,7 @@ def Magi_Attention_forward(
 
     dtype = query.dtype
     q, k, v = [
-        rearrange(e, "b nh s hd -> (b s) nh hd").to(
+        rearrange(e, "1 nh s hd -> (1 s) nh hd").to(
             torch.bfloat16
         )  # ffa only supports fp16/bf16 for now
         for e in (query, key, value)

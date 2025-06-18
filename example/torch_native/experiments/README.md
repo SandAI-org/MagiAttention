@@ -12,18 +12,18 @@ pip install evaluate
 ```
 
 ## Prepare model and datasets
-We load from [Llama-3-1b](https://huggingface.co/meta-llama/Llama-3.2-1B) model and continue pretraining it with [openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext) datasets.
+We load from [Llama-3-1b](https://huggingface.co/meta-llama/Llama-3.2-1B) model and continue training it with [openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext) datasets.
 
-You can download the same model from [modelscope](https://www.modelscope.cn/models/LLM-Research/Llama-3.2-1B/).
+You can also download the model from [modelscope](https://www.modelscope.cn/models/LLM-Research/Llama-3.2-1B/).
 
 
 ## Prepare Trainer
-Transformers provide an example of training language model [here](https://github.com/huggingface/transformers/tree/v4.51.3/examples/pytorch/language-modeling), you can utilize [run_clm.py](https://github.com/huggingface/transformers/blob/v4.51.3/examples/pytorch/language-modeling/run_clm.py) to train casual language model like gpt and llama. You can specify a distributed training strategy, such as DDP or FSDP, and accelerate will automatically handle the underlying logic related to your datasets and the distributed setup. We provide `run_origin_clm.py` and `run_origin_clm.sh` in this dir which is the official implentation of training casual launguage model.
+The HuggingFace Transformers library provides the [run_clm.py](https://github.com/huggingface/transformers/blob/v4.51.3/examples/pytorch/language-modeling/run_clm.py) script for training causal language models (CLMs) like gpt and llama. This script integrates seamlessly with accelerate, allowing you to specify a distributed training strategy (such as DDP or FSDP) while accelerate automatically handles the underlying data distribution and process setup. As a reference, we have included `run_origin_clm.py` and `run_origin_clm.sh` in this directory, which mirror the official implementation for training causal language models.
 
 However, MagiAttention is a context parallel strategy that isn't natively supported by the transformers and accelerate libraries. Therefore, integrating it requires customizing the `transformers.Trainer` and `accelerate.Accelerator` classes. We provide `run_magi_clm.py` and `run_magi_clm.sh` in this dir to train llama-3-1b model with MagiAttention.
 
 ### Customize accelerate Accelerator
-The following code are all avilable at `Magi_trainer.py`.
+The following code are all available at `Magi_trainer.py`.
 
 We need to prepare a custom Accelerator called MagiAccelerator inheriting from the `accelerate.Accelerator` class:
 ```python
@@ -31,7 +31,7 @@ class MagiAccelerator(Accelerator):
     ...
 ```
 
-Override `_prepare_device_mesh` to prepare correct data for dp + cp sceneria.
+Override `_prepare_device_mesh` to prepare correct data for dp + cp sceneria:
 
 **NOTE:** We are implementing Context Parallelism (CP) by treating it as Tensor Parallelism (TP) at the data loading stage. This allows us to leverage accelerate's built-in data loader for DP+TP scenarios, which provides the exact data distribution we need: ranks within the same TP group receive identical data, while different TP groups receive sharded data.
 ```diff
@@ -68,7 +68,7 @@ def _prepare_device_mesh(self):
 ```
 
 ### Customize Transformers Trainer
-The following code are all avilable at `Magi_trainer.py`.
+The following code are all available at `Magi_trainer.py`.
 
 We need to prepare a custom Trainer called `MagiTrainer` inheriting from the `transformers.Trainer` class:
 ```python
@@ -147,12 +147,13 @@ def compute_loss():
 
     return (loss, outputs) if return_outputs else loss
 ```
-Override `training_step`: We must scale the loss by cp_size before the backward pass, as the dp/fsdp all_reduce averaging process divides the gradients by an additional factor of cp_size.
+
+Override `training_step`:
+
+We must scale the loss by cp_size before the backward pass, as the dp/fsdp all_reduce averaging process divides the gradients by an additional factor of cp_size(accelerate does not recognize CP. As a result, it treats a combined CP+DP strategy as standard DP.).
 ```diff
 def training_step():
-    if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
-        loss = loss / self.args.gradient_accumulation_steps
-+   import os
+    ...
 +   cp_size = int(os.environ.get("cp_size", 1))
 +   backward_loss = loss * cp_size
 +   self.accelerator.backward(backward_loss, **kwargs)
@@ -169,8 +170,23 @@ def create_accelerator_and_postprocess():
 ...
 ```
 
+Last but not least, we need to create and use `MagiTrainer` in `run_magi_clm.py`:
+```diff
++ from Magi_trainer import MagiTrainer
++ trainer = MagiTrainer(
+            ...
+            )
+
+- trainer = Trainer(
+            ...
+            )
+...
+
+trainer.train()
+```
+
 ### Register Magi_Attention implementation
-The following code are avaliable at Magi_attention.py.
+The following code are all avaliable at Magi_attention.py.
 
 What's more, MagiAttention provides a new type of attention implenmentation(flexible flash_attention), so we need to register it for use:
 ``` python
@@ -188,7 +204,7 @@ def Magi_Attention_forward(
 
     dtype = query.dtype
     q, k, v = [
-        rearrange(e, "b nh s hd -> (b s) nh hd").to(
+        rearrange(e, "1 nh s hd -> (1 s) nh hd").to(
             torch.bfloat16
         )  # ffa only supports fp16/bf16 for now
         for e in (query, key, value)
@@ -202,7 +218,7 @@ def Magi_Attention_forward(
 # register Magi_Attention as attn_backend globally.
 ALL_ATTENTION_FUNCTIONS.register("Magi_Attention", Magi_Attention_forward)
 ```
-Use `Magi_Attention` as model's attention inplementation:
+Use `Magi_Attention` as model's attention inplementation in `run_magi_clm.py`:
 ```diff
 ...
 elif model_args.model_name_or_path:

@@ -29,26 +29,16 @@ from typing import Any, Union
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DataLoaderConfiguration
+from Magi_attention import get_magi_attention_key
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from transformers import MODEL_FOR_CAUSAL_LM_MAPPING, Trainer
 from transformers.training_args import OptimizerNames
-from transformers.utils import (
-    check_min_version,
-    is_accelerate_available,
-    is_apex_available,
-)
+from transformers.utils import check_min_version, is_accelerate_available
 from transformers.utils.versions import require_version
 from typing_extensions import override
 
-from magi_attention.api import undispatch
-
-if is_apex_available():
-    pass
-
-from Magi_attention import get_magi_attention_key
-
-from magi_attention.api import get_position_ids, magi_attn_varlen_dispatch
+from magi_attention.api import get_position_ids, magi_attn_varlen_dispatch, undispatch
 from magi_attention.api.functools import (
     compute_pad_size,
     full_attention_to_varlen_attention,
@@ -455,7 +445,6 @@ class MagiTrainer(Trainer):
         # Finally we need to normalize the loss for reporting
         if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
             loss = loss / self.args.gradient_accumulation_steps
-        import os
 
         cp_size = int(os.environ.get("cp_size", 1))
         backward_loss = loss * cp_size
