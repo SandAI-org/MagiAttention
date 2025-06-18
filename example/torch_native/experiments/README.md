@@ -1,5 +1,5 @@
 # Using MagiAttention with HuggingFace Transformers
-We provide you an example to train llama-3-1b model with magiattention(dp + cp) utilizing the HuggingFace Transformers ecosystem. We also do experiments to compare the loss of training with/without magiattention to show the correctness of MagiAttention.
+We provide an example for training a Llama-3 1B model with MagiAttention (using a DP+CP approach) in the Hugging Face transformers library. To verify its correctness, we include experiments that compare the training loss of the model with MagiAttention against a standard baseline
 
 ## Install Transformers and Accelerate
 ```shell
