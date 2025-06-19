@@ -16,6 +16,7 @@ from enum import Enum
 
 
 class FlashMaskType(Enum):
+    FULL = "full"
     CAUSAL = "causal"
     CAUSAL_DOCUMENT = "causal_document"
     FULL_DOCUMENT = "full_document"

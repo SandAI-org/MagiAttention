@@ -16,8 +16,12 @@ import os
 from datetime import timedelta
 from enum import Enum
 
+import magi_attention
+from magi_attention.api.magi_attn_interface import dispatch
+
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
 
 from exps.dist_attn.baselines.loongtrain import LoongTrain
 from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
@@ -34,7 +38,7 @@ from exps.dist_attn.baselines.ulysess import Ulysess
 from exps.dist_attn.baselines.usp import USP
 from exps.dist_attn.baselines.utils_cp import AttnBackend
 from exps.dist_attn.benchmark.enums import FlashMaskType
-from exps.dist_attn.benchmark.mask import MaskGenerator
+from exps.dist_attn.benchmark.mask import MaskGenerator, MaskIterator
 from magi_attention.api import (
     calc_attn,
     compute_pad_size,
@@ -47,6 +51,8 @@ from magi_attention.config import DistAttnConfig
 from magi_attention.meta.solver.dispatch_solver import (
     DispatchConfig,
     MinHeapDispatchAlg,
+    SequentialDispatchAlg,
+    SortedSequentialSelectAlg,
 )
 from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOverlapAlg
 
@@ -65,10 +71,11 @@ SEED = 42
 TOTAL_SEQLEN = 512 * 1024
 Q_HEADS = 48
 KV_HEADS = 16
+EMBED_DIM = 1024
 HIDDEN_SIZE = 128
 DTYPE = torch.bfloat16
 WORLD_SIZE = 64
-ATTN_IMPL = AttnImpl.USP
+ATTN_IMPL = AttnImpl.MAGI_ATTENTION
 ATTN_BACKEND = AttnBackend.FA3
 
 # mask params
@@ -145,7 +152,6 @@ def init_dist_environment(
         device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
         cp_group = get_loongtrain_pg(device_shard, window_num, rank)
     elif attn_impl == AttnImpl.MAGI_ATTENTION:
-        # init dist env
         dist.init_process_group(
             backend="nccl",
             init_method="env://",
@@ -155,14 +161,42 @@ def init_dist_environment(
         )
         local_rank = rank % 8
         torch.cuda.set_device(local_rank)
-        cp_group = dist.new_group(list(range(world_size)), backend="nccl")
+        if magi_attention.is_hierarchical_comm_enable():
+            cp_group = None
+        else:
+            cp_group = dist.new_group(list(range(world_size)), backend="nccl")
 
     return cp_group
 
+def init_hierarchical_mesh(
+    world_size: int
+):
+    if magi_attention.is_hierarchical_comm_enable() and world_size in (
+            8,
+            16,
+            32,
+            64,
+        ):
+            world_size_inter_node, world_size_intra_node = {
+                8: (1, 8),
+                16: (2, 8),
+                32: (4, 8),
+                64: (8, 8),
+            }[world_size]
+            device_mesh = init_device_mesh(
+                device_type="cuda",
+                mesh_shape=(world_size_inter_node, world_size_intra_node),
+                mesh_dim_names=("inter", "intra"),
+            )
+    else:
+        device_mesh = None
+    
+    return device_mesh
 
 def run_dist_attn(
     seed: int,
     total_seqlen: int,
+    embed_dim: int,
     q_heads: int,
     kv_heads: int,
     hidden_size: int,
@@ -211,21 +245,34 @@ def run_dist_attn(
 
     # -----    init test data   ---- #
 
-    q = torch.randn(total_seqlen, q_heads, hidden_size, dtype=dtype, device=device)
-    k = torch.randn(total_seqlen, kv_heads, hidden_size, dtype=dtype, device=device)
-    v = torch.randn(total_seqlen, kv_heads, hidden_size, dtype=dtype, device=device)
-    dout = torch.randn(total_seqlen, q_heads, hidden_size, dtype=dtype, device=device)
+    x = torch.randn(total_seqlen, embed_dim, dtype=dtype, device=device)
 
-    q.requires_grad_(True)
-    k.requires_grad_(True)
-    v.requires_grad_(True)
+    q_proj = torch.nn.Linear(embed_dim, q_heads * hidden_size, dtype=dtype, device=device)
+    k_proj = torch.nn.Linear(embed_dim, kv_heads * hidden_size, dtype=dtype, device=device)
+    v_proj = torch.nn.Linear(embed_dim, kv_heads * hidden_size, dtype=dtype, device=device)
+    dout_proj = torch.nn.Linear(embed_dim, q_heads * hidden_size, dtype=dtype, device=device)
+
+    x.requires_grad_(True)
 
     # -----    dispatch   ---- #
+    
+    # HACK dispatch only support (t, h, d)
+    # assert embed_dim % 2 == 0, "only support (t, h, d) in dispatch, so embed_dim must divided 2 in zero"
+    x = x.view(total_seqlen, 1, embed_dim)
 
-    q_local = attn.dispatch(q, q_ranges, total_seqlen, "q")
-    k_local = attn.dispatch(k, k_ranges, total_seqlen, "k")
-    v_local = attn.dispatch(v, k_ranges, total_seqlen, "v")
-    dout_local = attn.dispatch(dout, q_ranges, total_seqlen, "dout")
+    x_local = attn.dispatch(x, q_ranges, total_seqlen, "q")
+    _ = attn.dispatch(x, k_ranges, total_seqlen, "k")
+    _ = attn.dispatch(x, k_ranges, total_seqlen, "v")
+    _ = attn.dispatch(x, q_ranges, total_seqlen, "dout")
+    
+    x_local = x_local.view(-1, embed_dim)
+
+    # -----   projection ----- #
+
+    q_local = q_proj(x_local).view(-1, q_heads, hidden_size)
+    k_local = k_proj(x_local).view(-1, kv_heads, hidden_size)
+    v_local = v_proj(x_local).view(-1, kv_heads, hidden_size)
+    dout_local = dout_proj(x_local).view(-1, q_heads, hidden_size)
 
     # -----   pre_compute ---- #
 
@@ -263,6 +310,7 @@ def run_dist_attn(
 
 def run_magi_attn(
     total_seqlen: int,
+    embed_dim: int,
     q_heads: int,
     kv_heads: int,
     hidden_size: int,
@@ -282,14 +330,14 @@ def run_magi_attn(
 
     # -----    init test data   ---- #
 
-    q = torch.randn(total_seqlen, q_heads, hidden_size, dtype=dtype, device=device)
-    k = torch.randn(total_seqlen, kv_heads, hidden_size, dtype=dtype, device=device)
-    v = torch.randn(total_seqlen, kv_heads, hidden_size, dtype=dtype, device=device)
-    dout = torch.randn(total_seqlen, q_heads, hidden_size, dtype=dtype, device=device)
+    x = torch.randn(total_seqlen, embed_dim, dtype=dtype, device=device)
 
-    q.requires_grad_(True)
-    k.requires_grad_(True)
-    v.requires_grad_(True)
+    q_proj = torch.nn.Linear(embed_dim, q_heads * hidden_size, dtype=dtype, device=device)
+    k_proj = torch.nn.Linear(embed_dim, kv_heads * hidden_size, dtype=dtype, device=device)
+    v_proj = torch.nn.Linear(embed_dim, kv_heads * hidden_size, dtype=dtype, device=device)
+    dout_proj = torch.nn.Linear(embed_dim, q_heads * hidden_size, dtype=dtype, device=device)
+
+    x.requires_grad_(True)
 
     # -----   init dispatch mata ----- #
 
@@ -311,13 +359,15 @@ def run_magi_attn(
         high_bandwith_domain_size=1,
     )
 
+    cp_mesh = init_hierarchical_mesh(world_size)
+
     # -----    dispatch   ---- #
 
     (
-        local_q,
+        x_local,
         magi_attn_runtime_key,
     ) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
-        q,
+        x,
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
@@ -326,70 +376,19 @@ def run_magi_attn(
         head_dim=hidden_size,
         pad_size=pad_size,
         cp_group=cp_group,
+        cp_mesh=cp_mesh,
         is_same_source=True,
         is_q_permutable=True,
         is_k_permutable=True,
         dist_attn_config=dist_attn_config,
     )
 
-    (
-        local_k,
-        _,
-    ) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
-        k,
-        q_ranges=q_ranges,
-        k_ranges=k_ranges,
-        attn_mask_type=attn_mask_type,
-        total_seqlen_q=total_seqlen,
-        total_seqlen_k=total_seqlen,
-        head_dim=hidden_size,
-        pad_size=pad_size,
-        cp_group=cp_group,
-        is_same_source=True,
-        is_q_permutable=True,
-        is_k_permutable=True,
-        dist_attn_config=dist_attn_config,
-    )
+    # -----   projection  ----- #
 
-    (
-        local_v,
-        _,
-    ) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
-        v,
-        q_ranges=q_ranges,
-        k_ranges=k_ranges,
-        attn_mask_type=attn_mask_type,
-        total_seqlen_q=total_seqlen,
-        total_seqlen_k=total_seqlen,
-        head_dim=hidden_size,
-        pad_size=pad_size,
-        cp_group=cp_group,
-        is_same_source=True,
-        is_q_permutable=True,
-        is_k_permutable=True,
-        dist_attn_config=dist_attn_config,
-    )
-
-    (
-        local_dout,
-        _,
-    ) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
-        dout,
-        q_ranges=q_ranges,
-        k_ranges=k_ranges,
-        attn_mask_type=attn_mask_type,
-        total_seqlen_q=total_seqlen,
-        total_seqlen_k=total_seqlen,
-        head_dim=hidden_size,
-        pad_size=pad_size,
-        cp_group=cp_group,
-        is_same_source=True,
-        is_q_permutable=True,
-        is_k_permutable=True,
-        dist_attn_config=dist_attn_config,
-    )
-
-    # local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
+    q_local = q_proj(x_local).view(-1, q_heads, hidden_size)
+    k_local = k_proj(x_local).view(-1, kv_heads, hidden_size)
+    v_local = v_proj(x_local).view(-1, kv_heads, hidden_size)
+    dout_local = dout_proj(x_local).view(-1, q_heads, hidden_size)
 
     # -----    forward   ---- #
 
@@ -405,12 +404,12 @@ def run_magi_attn(
         dist.barrier()
         torch.cuda.synchronize()
 
-        local_out, _ = calc_attn(local_q, local_k, local_v, magi_attn_runtime_key)
-        local_out.backward(local_dout, retain_graph=True)
+        out_local, _ = calc_attn(q_local, k_local, v_local, magi_attn_runtime_key)
+        out_local.backward(dout_local, retain_graph=True)
 
     # ----- undispatch ----- #
 
-    _ = undispatch(local_out, magi_attn_runtime_key)
+    _ = undispatch(out_local, magi_attn_runtime_key)
 
 
 def run_benchmark(
@@ -419,22 +418,24 @@ def run_benchmark(
     seed: int = 42,
 ):
     set_seed(seed)
-    mask_generator = MaskGenerator(
+    mask_iterator = MaskIterator(
         generate_times=mask_nums,
         generate_mask=mask_type,
         total_seqlen=TOTAL_SEQLEN,
         to_attn_ranges=True,
+        seed=seed,
     )
     cp_group = init_dist_environment(
         attn_impl=ATTN_IMPL,
         world_size=WORLD_SIZE,
         cp_pg_meta=CP_PG_META,
     )
-    for q_ranges, k_ranges, attn_mask_type in mask_generator:
+    for q_ranges, k_ranges, attn_mask_type in mask_iterator:
         if ATTN_IMPL != AttnImpl.MAGI_ATTENTION:
             run_dist_attn(
                 seed=SEED,
                 total_seqlen=TOTAL_SEQLEN,
+                embed_dim=EMBED_DIM,
                 q_heads=Q_HEADS,
                 kv_heads=KV_HEADS,
                 hidden_size=HIDDEN_SIZE,
@@ -455,6 +456,7 @@ def run_benchmark(
         else:
             run_magi_attn(
                 total_seqlen=TOTAL_SEQLEN,
+                embed_dim=EMBED_DIM,
                 q_heads=Q_HEADS,
                 kv_heads=KV_HEADS,
                 hidden_size=HIDDEN_SIZE,

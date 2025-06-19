@@ -22,22 +22,16 @@ from exps.dist_attn.benchmark.utils import (
 )
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
-
+import random
 
 class MaskGenerator:
-    """This is a generator for multiple flash masks, it can be used with:
-    1. set several params in init and get an iterator,
-    2. use generate function with flash mask type and data distribution.
+    """This is a generator for multiple flash masks, it can be used with
+    generate function with flash mask type and data distribution.
     """
 
-    def __init__(
-        self,
-        generate_times: int = -1,
-        generate_mask: FlashMaskType = FlashMaskType.CAUSAL,
-        total_seqlen: int = 1024,
-        to_attn_ranges: bool = True,
-    ):
+    def __init__(self):
         self.generate_function = {
+            FlashMaskType.FULL: self.generate_full_mask,
             FlashMaskType.CAUSAL: self.generate_causal_mask,
             FlashMaskType.CAUSAL_DOCUMENT: self.generate_causal_document_mask,
             FlashMaskType.FULL_DOCUMENT: self.generate_full_document_mask,
@@ -48,24 +42,13 @@ class MaskGenerator:
             FlashMaskType.QK_SPARSE: self.generate_qk_sparse_mask,
         }
 
-        # set params in interator
-        self.generate_times = generate_times
-        self.current_times = 0
-        self.generate_mask = generate_mask
-        self.total_seqlen = total_seqlen
-        self.to_attn_ranges = to_attn_ranges
-
-        if self.total_seqlen > 128 * 1024:  # 64k
-            self.seqlen_distribution = varlen_long_seqlen_distribution()
-        else:
-            self.seqlen_distribution = varlen_short_seqlen_distribution()
-
     def generate(
         self,
         flash_mask_type: FlashMaskType,
         seqlen_distribute: dict[tuple[int, int], int],
         total_seqlen: int,
         to_attn_ranges: bool = True,
+        rng: random.Random | None = None,
     ) -> (
         tuple[list[list[int]], list[list[int]], list[bool]]
         | tuple[AttnRanges, AttnRanges, list[AttnMaskType]]
@@ -82,6 +65,7 @@ class MaskGenerator:
         q_ranges, k_ranges, attn_mask_type = self.generate_function[flash_mask_type](
             seqlen_distribute=seqlen_distribute,
             total_seqlen=total_seqlen,
+            rng=rng,
         )
 
         if to_attn_ranges:
@@ -99,11 +83,13 @@ class MaskGenerator:
         self,
         seqlen_distribute: dict[tuple[int, int], int],
         total_seqlen: int,
+        rng: random.Random | None = None,
     ) -> tuple[list[list[int]], list[list[int]], list[bool]]:
         """generate document causal mask (varlen causal mask)"""
         seqlens = generate_seqlens(
             distribution=seqlen_distribute,
             total_seqlen=total_seqlen,
+            rng=rng,
         )
         cu_seqlens = seqlens2cu_seqlens(seqlens)
 
@@ -119,6 +105,7 @@ class MaskGenerator:
         self,
         seqlen_distribute: dict[tuple[int, int], int],
         total_seqlen: int,
+        rng: random.Random | None = None,
     ) -> tuple[list[list[int]], list[list[int]], list[bool]]:
         """generate causal mask"""
         ranges = [[0, total_seqlen]]
@@ -130,11 +117,13 @@ class MaskGenerator:
         self,
         seqlen_distribute: dict[tuple[int, int], int],
         total_seqlen: int,
+        rng: random.Random | None = None,
     ) -> tuple[list[list[int]], list[list[int]], list[bool]]:
         """generate document full maks (varlen full mask)"""
         seqlens = generate_seqlens(
             distribution=seqlen_distribute,
             total_seqlen=total_seqlen,
+            rng=rng,
         )
         cu_seqlens = seqlens2cu_seqlens(seqlens)
 
@@ -145,16 +134,30 @@ class MaskGenerator:
         is_causal_mapping = [False] * len(seqlens)
 
         return (ranges, ranges, is_causal_mapping)
+    
+    def generate_full_mask(
+        self,
+        seqlen_distribute: dict[tuple[int, int], int],
+        total_seqlen: int,
+        rng: random.Random | None = None,
+    ) -> tuple[list[list[int]], list[list[int]], list[bool]]:
+        """generate causal mask"""
+        ranges = [[0, total_seqlen]]
+        is_causal_mapping = [False]
+
+        return (ranges, ranges, is_causal_mapping)
 
     def generate_share_question_mask(
         self,
         seqlen_distribute: dict[tuple[int, int], int],
         total_seqlen: int,
+        rng: random.Random | None = None,
     ) -> tuple[list[list[int]], list[list[int]], list[bool]]:
         """generate share question mask"""
         seqlens = generate_seqlens(
             distribution=seqlen_distribute,
             total_seqlen=total_seqlen,
+            rng=rng,
         )
         cu_seqlens = seqlens2cu_seqlens(seqlens)
 
@@ -180,11 +183,13 @@ class MaskGenerator:
         self,
         seqlen_distribute: dict[tuple[int, int], int],
         total_seqlen: int,
+        rng: random.Random | None = None,
     ) -> tuple[list[list[int]], list[list[int]], list[bool]]:
         """generate causal blockwise mask"""
         seqlens = generate_seqlens(
             distribution=seqlen_distribute,
             total_seqlen=total_seqlen,
+            rng=rng,
         )
         cu_seqlens = seqlens2cu_seqlens(seqlens)
 
@@ -203,11 +208,13 @@ class MaskGenerator:
         self,
         seqlen_distribute: dict[tuple[int, int], int],
         total_seqlen: int,
+        rng: random.Random | None = None,
     ) -> tuple[list[list[int]], list[list[int]], list[bool]]:
         """generate prefix lm causal mask"""
         seqlen = generate_seqlen_for_one_time(
             distribution=seqlen_distribute,
             total_seqlen=total_seqlen,
+            rng=rng,
         )
 
         if seqlen < total_seqlen:
@@ -225,11 +232,13 @@ class MaskGenerator:
         self,
         seqlen_distribute: dict[tuple[int, int], int],
         total_seqlen: int,
+        rng: random.Random | None = None,
     ) -> tuple[list[list[int]], list[list[int]], list[bool]]:
         """generate prefix lm document mask"""
         seqlens = generate_seqlens(
             distribution=seqlen_distribute,
             total_seqlen=total_seqlen,
+            rng=rng,
         )
         cu_seqlens = seqlens2cu_seqlens(seqlens)
 
@@ -240,6 +249,7 @@ class MaskGenerator:
             full_seqlen = generate_seqlen_for_one_time(
                 distribution=seqlen_distribute,
                 total_seqlen=seqlens[i],
+                rng=rng,
             )
             start, end = cu_seqlens[i], cu_seqlens[i + 1]
             if full_seqlen < seqlens[i]:
@@ -261,11 +271,13 @@ class MaskGenerator:
         self,
         seqlen_distribute: dict[tuple[int, int], int],
         total_seqlen: int,
+        rng: random.Random | None = None,
     ) -> tuple[list[list[int]], list[list[int]], list[bool]]:
         """generate qk sparse mask"""
         seqlen = generate_seqlen_for_one_time(
             distribution=seqlen_distribute,
             total_seqlen=total_seqlen // 2,
+            rng=rng,
         )
 
         if seqlen == total_seqlen // 2:
@@ -278,6 +290,7 @@ class MaskGenerator:
         full_seqlen = generate_seqlen_for_one_time(
             distribution=seqlen_distribute,
             total_seqlen=full_mask_seqlen,
+            rng=rng,
         )
 
         if full_seqlen == full_mask_seqlen:
@@ -309,6 +322,41 @@ class MaskGenerator:
 
         return (q_ranges, k_ranges, is_causal_mapping)
 
+class MaskIterator:
+    """This is a iterator for multiple flash masks, it can be used with
+    several params in init and get an iterator,
+    """
+
+    def __init__(
+        self,
+        generate_times: int,
+        generate_mask: FlashMaskType,
+        total_seqlen: int,
+        distribution: dict[tuple[int, int], float] | None = None,
+        to_attn_ranges: bool = True,
+        seed: int | None = None,
+    ):
+        # set params in interator
+        self.generate_times = generate_times
+        self.current_times = 0
+        self.generate_mask = generate_mask
+        self.total_seqlen = total_seqlen
+        self.to_attn_ranges = to_attn_ranges
+
+        if distribution is not None:
+            self.seqlen_distribution = distribution
+        elif self.total_seqlen > 128 * 1024:  # 128k
+            self.seqlen_distribution = varlen_long_seqlen_distribution()
+        else:
+            self.seqlen_distribution = varlen_short_seqlen_distribution()
+        
+        if seed is not None:
+            self.random_number_generator = random.Random(seed)
+        else:
+            self.random_number_generator = None
+        
+        self.mask_generator = MaskGenerator()
+    
     def __iter__(self):
         assert (
             self.generate_times > 0
@@ -318,11 +366,12 @@ class MaskGenerator:
     def __next__(self):
         if self.current_times >= self.generate_times:
             raise StopIteration
-        value = self.generate(
+        value = self.mask_generator.generate(
             flash_mask_type=self.generate_mask,
             seqlen_distribute=self.seqlen_distribution,
             total_seqlen=self.total_seqlen,
             to_attn_ranges=self.to_attn_ranges,
+            rng=self.random_number_generator,
         )
         self.current_times += 1
         return value

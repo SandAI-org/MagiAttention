@@ -21,6 +21,7 @@ def generate_seqlens(
     distribution: dict,
     total_seqlen: int,
     allow_zero: bool = False,
+    rng: random.Random | None = None,
 ) -> list[int]:
     """Each time a number is sampled from the distribution and accumulated into the current length.
     Sampling is repeated until the length exceeds the total sequence length.
@@ -29,10 +30,14 @@ def generate_seqlens(
         distribution (dict): a dictionary for describing data distribution, such as {(a, b): property}
         total_seqlen (int): total_seqlen for sampling
         allow_zero (bool): can zero be sampled
+        rng (random.Random | None): independent random number generator, use random module if None
 
     Returns:
         list[int]: The sampled length, with the total length equal to total_seqlen.
     """
+    # init random number generator
+    rng = rng if rng is not None else random
+    
     # normalize distribution
     total = sum(distribution.values())
     distribution = {k: v / total for k, v in distribution.items()}
@@ -48,11 +53,11 @@ def generate_seqlens(
         remaining = total_seqlen - current_total
 
         # choose intervals according to weights
-        selected_interval = random.choices(intervals, weights=weights, k=1)[0]
+        selected_interval = rng.choices(intervals, weights=weights, k=1)[0]
 
         a, b = selected_interval
         # generate seqlen less than remaining and in the interval
-        seqlen = random.randint(int(a), int(b))
+        seqlen = rng.randint(int(a), int(b))
         seqlen = min(seqlen, remaining)
 
         if not allow_zero:
@@ -68,12 +73,16 @@ def generate_seqlen_for_one_time(
     distribution: dict,
     total_seqlen: int,
     allow_zero: bool = False,
+    rng: random.Random | None = None,
 ) -> int:
     """Only sample for one time, rest is the same as above generate_seqlens function
 
     Returns:
         int: a seqlen for one time sample
     """
+    # init random number generator
+    rng = rng if rng is not None else random
+
     total = sum(distribution.values())
     distribution = {k: v / total for k, v in distribution.items()}
 
@@ -82,11 +91,11 @@ def generate_seqlen_for_one_time(
     weights = [item[1] for item in items]
 
     # choose intervals according to weights
-    selected_interval = random.choices(intervals, weights=weights, k=1)[0]
+    selected_interval = rng.choices(intervals, weights=weights, k=1)[0]
 
     a, b = selected_interval
     # generate seqlen less than remaining and in the interval
-    seqlen = random.randint(int(a), int(b))
+    seqlen = rng.randint(int(a), int(b))
     seqlen = min(seqlen, total_seqlen)
 
     if not allow_zero:

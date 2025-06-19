@@ -18,11 +18,19 @@ export WORLD_SIZE=${WORLD_SIZE:-64}
 export GPUS_PER_NODE=8
 export NNODES=${NNODES:-8}
 export NODE_RANK=${RANK:-0}
+export MAGI_ATTENTION_HIERARCHICAL_COMM=${MAGI_ATTENTION_HIERARCHICAL_COMM:-1}
 # export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 # export MASTER_PORT=${MASTER_PORT:-16988}
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
-export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
+
+if [ "${MAGI_ATTENTION_HIERARCHICAL_COMM}" == "1" ]; then
+    export CUDA_DEVICE_MAX_CONNECTIONS=8
+    echo "set CUDA_DEVICE_MAX_CONNECTIONS=8"
+else
+    export CUDA_DEVICE_MAX_CONNECTIONS=1
+    echo "set CUDA_DEVICE_MAX_CONNECTIONS=1"
+fi
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \
@@ -38,7 +46,7 @@ echo $DISTRIBUTED_ARGS
 CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
 TORCHRUN_CMD="nsys profile \
     --force-overwrite true \
-    -o usp_8_8.nsys-rep \
+    -o magi.nsys-rep \
     --capture-range=cudaProfilerApi \
     $CMD"
 $TORCHRUN_CMD
