@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import random
+
 from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.utils import (
     generate_seqlen_for_one_time,
@@ -22,7 +24,7 @@ from exps.dist_attn.benchmark.utils import (
 )
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
-import random
+
 
 class MaskGenerator:
     """This is a generator for multiple flash masks, it can be used with
@@ -134,7 +136,7 @@ class MaskGenerator:
         is_causal_mapping = [False] * len(seqlens)
 
         return (ranges, ranges, is_causal_mapping)
-    
+
     def generate_full_mask(
         self,
         seqlen_distribute: dict[tuple[int, int], int],
@@ -322,6 +324,7 @@ class MaskGenerator:
 
         return (q_ranges, k_ranges, is_causal_mapping)
 
+
 class MaskIterator:
     """This is a iterator for multiple flash masks, it can be used with
     several params in init and get an iterator,
@@ -349,14 +352,14 @@ class MaskIterator:
             self.seqlen_distribution = varlen_long_seqlen_distribution()
         else:
             self.seqlen_distribution = varlen_short_seqlen_distribution()
-        
+
         if seed is not None:
-            self.random_number_generator = random.Random(seed)
+            self.random_number_generator = random.Random(seed)  # type: ignore
         else:
-            self.random_number_generator = None
-        
+            self.random_number_generator = None  # type: ignore
+
         self.mask_generator = MaskGenerator()
-    
+
     def __iter__(self):
         assert (
             self.generate_times > 0

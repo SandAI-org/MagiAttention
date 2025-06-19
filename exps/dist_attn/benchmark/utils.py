@@ -37,7 +37,7 @@ def generate_seqlens(
     """
     # init random number generator
     rng = rng if rng is not None else random
-    
+
     # normalize distribution
     total = sum(distribution.values())
     distribution = {k: v / total for k, v in distribution.items()}

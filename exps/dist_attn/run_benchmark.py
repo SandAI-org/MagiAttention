@@ -16,13 +16,11 @@ import os
 from datetime import timedelta
 from enum import Enum
 
-import magi_attention
-from magi_attention.api.magi_attn_interface import dispatch
-
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
+import magi_attention
 from exps.dist_attn.baselines.loongtrain import LoongTrain
 from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
 from exps.dist_attn.baselines.shard import (
@@ -38,7 +36,7 @@ from exps.dist_attn.baselines.ulysess import Ulysess
 from exps.dist_attn.baselines.usp import USP
 from exps.dist_attn.baselines.utils_cp import AttnBackend
 from exps.dist_attn.benchmark.enums import FlashMaskType
-from exps.dist_attn.benchmark.mask import MaskGenerator, MaskIterator
+from exps.dist_attn.benchmark.mask import MaskIterator
 from magi_attention.api import (
     calc_attn,
     compute_pad_size,
@@ -51,8 +49,6 @@ from magi_attention.config import DistAttnConfig
 from magi_attention.meta.solver.dispatch_solver import (
     DispatchConfig,
     MinHeapDispatchAlg,
-    SequentialDispatchAlg,
-    SortedSequentialSelectAlg,
 )
 from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOverlapAlg
 
@@ -168,30 +164,30 @@ def init_dist_environment(
 
     return cp_group
 
-def init_hierarchical_mesh(
-    world_size: int
-):
+
+def init_hierarchical_mesh(world_size: int):
     if magi_attention.is_hierarchical_comm_enable() and world_size in (
-            8,
-            16,
-            32,
-            64,
-        ):
-            world_size_inter_node, world_size_intra_node = {
-                8: (1, 8),
-                16: (2, 8),
-                32: (4, 8),
-                64: (8, 8),
-            }[world_size]
-            device_mesh = init_device_mesh(
-                device_type="cuda",
-                mesh_shape=(world_size_inter_node, world_size_intra_node),
-                mesh_dim_names=("inter", "intra"),
-            )
+        8,
+        16,
+        32,
+        64,
+    ):
+        world_size_inter_node, world_size_intra_node = {
+            8: (1, 8),
+            16: (2, 8),
+            32: (4, 8),
+            64: (8, 8),
+        }[world_size]
+        device_mesh = init_device_mesh(
+            device_type="cuda",
+            mesh_shape=(world_size_inter_node, world_size_intra_node),
+            mesh_dim_names=("inter", "intra"),
+        )
     else:
         device_mesh = None
-    
+
     return device_mesh
+
 
 def run_dist_attn(
     seed: int,
@@ -247,15 +243,23 @@ def run_dist_attn(
 
     x = torch.randn(total_seqlen, embed_dim, dtype=dtype, device=device)
 
-    q_proj = torch.nn.Linear(embed_dim, q_heads * hidden_size, dtype=dtype, device=device)
-    k_proj = torch.nn.Linear(embed_dim, kv_heads * hidden_size, dtype=dtype, device=device)
-    v_proj = torch.nn.Linear(embed_dim, kv_heads * hidden_size, dtype=dtype, device=device)
-    dout_proj = torch.nn.Linear(embed_dim, q_heads * hidden_size, dtype=dtype, device=device)
+    q_proj = torch.nn.Linear(
+        embed_dim, q_heads * hidden_size, dtype=dtype, device=device
+    )
+    k_proj = torch.nn.Linear(
+        embed_dim, kv_heads * hidden_size, dtype=dtype, device=device
+    )
+    v_proj = torch.nn.Linear(
+        embed_dim, kv_heads * hidden_size, dtype=dtype, device=device
+    )
+    dout_proj = torch.nn.Linear(
+        embed_dim, q_heads * hidden_size, dtype=dtype, device=device
+    )
 
     x.requires_grad_(True)
 
     # -----    dispatch   ---- #
-    
+
     # HACK dispatch only support (t, h, d)
     # assert embed_dim % 2 == 0, "only support (t, h, d) in dispatch, so embed_dim must divided 2 in zero"
     x = x.view(total_seqlen, 1, embed_dim)
@@ -264,7 +268,7 @@ def run_dist_attn(
     _ = attn.dispatch(x, k_ranges, total_seqlen, "k")
     _ = attn.dispatch(x, k_ranges, total_seqlen, "v")
     _ = attn.dispatch(x, q_ranges, total_seqlen, "dout")
-    
+
     x_local = x_local.view(-1, embed_dim)
 
     # -----   projection ----- #
@@ -332,10 +336,18 @@ def run_magi_attn(
 
     x = torch.randn(total_seqlen, embed_dim, dtype=dtype, device=device)
 
-    q_proj = torch.nn.Linear(embed_dim, q_heads * hidden_size, dtype=dtype, device=device)
-    k_proj = torch.nn.Linear(embed_dim, kv_heads * hidden_size, dtype=dtype, device=device)
-    v_proj = torch.nn.Linear(embed_dim, kv_heads * hidden_size, dtype=dtype, device=device)
-    dout_proj = torch.nn.Linear(embed_dim, q_heads * hidden_size, dtype=dtype, device=device)
+    q_proj = torch.nn.Linear(
+        embed_dim, q_heads * hidden_size, dtype=dtype, device=device
+    )
+    k_proj = torch.nn.Linear(
+        embed_dim, kv_heads * hidden_size, dtype=dtype, device=device
+    )
+    v_proj = torch.nn.Linear(
+        embed_dim, kv_heads * hidden_size, dtype=dtype, device=device
+    )
+    dout_proj = torch.nn.Linear(
+        embed_dim, q_heads * hidden_size, dtype=dtype, device=device
+    )
 
     x.requires_grad_(True)
 
