@@ -20,13 +20,14 @@ from flash_attn import flash_attn_func as fa2_func
 from flash_attn import flash_attn_varlen_func as fa2_varlen_func
 from flash_attn_interface import flash_attn_func as fa3_func
 from flash_attn_interface import flash_attn_varlen_func as fa3_varlen_func
-from flex_flash_attn_interface import flex_flash_attn_func as ffa_func
 from packaging import version
 from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.functional import scaled_dot_product_attention as sdpa_func
 from transformer_engine.pytorch.attention import FusedAttnFunc
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
+
+from magi_attention.functional import flex_flash_attn_func as ffa_func
 
 if version.parse(torch.__version__) > version.parse("2.4"):
     # NOTE: in benchmarking, we should explicitly allow bf16/fp16 reduction for sdpa
@@ -36,7 +37,7 @@ if version.parse(torch.__version__) > version.parse("2.4"):
     torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(True)
 
 
-# solve the error:
+# NOTE: we need to disable donated buffer to resolve the flex-attn error:
 # RuntimeError: This backward function was compiled with non-empty donated buffers
 # which requires create_graph=False and retain_graph=False.
 # Please keep backward(create_graph=False, retain_graph=False) across all backward() function calls,
@@ -121,8 +122,7 @@ def cudnn_fused_attn_func(
     attn_mask_type = "padding_causal" if is_causal else "padding"
     qkv_layout = "thd_thd_thd"
     qkv_dtype = TE_DType[q.dtype]
-    core_attention_bias_type = "no_bias"
-    core_attention_bias = None
+
     fast_zero_fill = True
     softmax_scale = softmax_scale if softmax_scale is not None else q.shape[-1] ** -0.5
     fused_attention_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
@@ -131,6 +131,10 @@ def cudnn_fused_attn_func(
     fp8_meta: dict[str, Any] = {}
     quantizers = None
     window_size = window_size if window_size is not None else (-1, -1)
+
+    # for thd input, cudnn does not support bias
+    core_attention_bias_type = "no_bias"
+    core_attention_bias = None
 
     output = FusedAttnFunc.apply(
         is_training,

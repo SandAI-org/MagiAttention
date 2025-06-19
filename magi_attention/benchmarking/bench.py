@@ -351,8 +351,8 @@ class Mark(object):
                 "axes.titlesize": 14,
                 "axes.labelsize": 12,
                 "legend.fontsize": 10,
-                "xtick.labelsize": 10,
-                "ytick.labelsize": 10,
+                "xtick.labelsize": 15,
+                "ytick.labelsize": 15,
                 "grid.linewidth": 1.2,
             },
         )
@@ -364,7 +364,7 @@ class Mark(object):
             return
 
         for k in dfs:
-            plt.figure(figsize=(14, 8), dpi=300)
+            plt.figure(figsize=(14, 8), dpi=100)
             ax = plt.gca()
 
             all_data = []
@@ -404,7 +404,8 @@ class Mark(object):
                             va="bottom",
                             fontsize=15,
                             fontweight="bold",  # Add this line to make the text bold
-                            color=COLOR_PALETTE[i],
+                            # color=COLOR_PALETTE[i],
+                            color="red",
                             zorder=4,
                         )
                     elif value == -2:
@@ -416,7 +417,8 @@ class Mark(object):
                             va="bottom",
                             fontsize=15,
                             fontweight="bold",  # Add this line to make the text bold
-                            color=COLOR_PALETTE[i],
+                            # color=COLOR_PALETTE[i],
+                            color="red",
                             zorder=4,
                         )
 
@@ -465,20 +467,20 @@ class Mark(object):
             # set xlabel and ylabel
             ax.set_xlabel(
                 bench.xlabel or x_names[0],
-                fontsize=12,
+                fontsize=15,
                 labelpad=12,
                 fontweight="semibold",
             )
             ax.set_ylabel(
                 bench.ylabel[k] if isinstance(bench.ylabel, dict) else bench.ylabel,
-                fontsize=12,
+                fontsize=15,
                 labelpad=12,
                 fontweight="semibold",
             )
 
             ax.set_title(
                 f"The benchmark of {k}\n{bench.plot_name}",
-                fontsize=15,
+                fontsize=19,
                 pad=18,
                 fontweight="bold",
                 color="#2d3436",
@@ -487,10 +489,10 @@ class Mark(object):
             legend = ax.legend(
                 frameon=True,
                 shadow=True,
-                fontsize=10,
+                fontsize=15,
                 borderpad=1,
                 title=bench.line_arg,
-                title_fontsize="12",
+                title_fontsize="18",
                 loc="upper left",
                 bbox_to_anchor=(1, 1),
             )
@@ -502,14 +504,14 @@ class Mark(object):
             if save_path:
                 plt.savefig(
                     os.path.join(save_path, f"{k}_report.pdf"),
-                    dpi=300,
+                    dpi=100,
                     bbox_inches="tight",
                     transparent=False,
                     facecolor="white",
                 )
                 plt.savefig(
                     os.path.join(save_path, f"{k}_report.png"),
-                    dpi=300,
+                    dpi=100,
                     bbox_inches="tight",
                     transparent=False,
                     facecolor="white",
