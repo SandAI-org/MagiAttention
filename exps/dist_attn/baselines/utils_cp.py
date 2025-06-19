@@ -21,17 +21,18 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine as te  # noqa
 import transformer_engine_torch as tex
+from einops import rearrange
 
 # fa3
 from flash_attn_interface import _flash_attn_backward, _flash_attn_forward
-
-from magi_attention.common.ranges import AttnRanges
 
 # from flashattn_hopper.flash_attn_interface import (
 #     _flash_attn_backward,
 #     _flash_attn_forward,
 # )
+from torch.distributed._functional_collectives import all_to_all_single_autograd
 
+from magi_attention.common.ranges import AttnRanges
 
 jit_fuser = torch.jit.script
 
@@ -169,7 +170,8 @@ def fa_varlen_thd_pad(input: torch.Tensor, indices: torch.Tensor, shape):
 # softmax_lse
 # seq_dim = -1
 def fa_varlen_lse_pad(input: torch.Tensor, indices: torch.Tensor, shape):
-    pad_input = torch.zeros(*shape, device=input.device, dtype=input.dtype)
+    # pad_input = torch.zeros(*shape, device=input.device, dtype=input.dtype)
+    pad_input = torch.full(shape, float("-inf"), device=input.device, dtype=input.dtype)
     pad_input.scatter_(-1, indices[None, :].expand(input.shape[0], -1), input)
     return pad_input
 
@@ -478,6 +480,9 @@ def _fa3_varlen_backward(
     return dq, dk, dv
 
 
+# NOTE: for pad token, lse is set to -INF, however, this func meets issues when dealing with -INF in log1p
+
+
 @jit_fuser
 def flash_attn_fwd_softmax_lse_correction(
     softmax_lse: torch.Tensor,
@@ -488,6 +493,18 @@ def flash_attn_fwd_softmax_lse_correction(
     min_scale = torch.min(softmax_lse, softmax_lse_per_step)
     new_scale = max_scale + torch.log1p(torch.exp(min_scale - max_scale))
     softmax_lse.copy_(new_scale)
+
+
+# def flash_attn_fwd_softmax_lse_correction(
+#     softmax_lse: torch.Tensor,
+#     softmax_lse_per_step: torch.Tensor,
+# ):
+#     max_scale = torch.max(softmax_lse, softmax_lse_per_step)
+#     min_scale = torch.min(softmax_lse, softmax_lse_per_step)
+#     both_inf = torch.isneginf(max_scale) & torch.isneginf(min_scale)
+#     new_scale = max_scale + torch.log1p(torch.exp(min_scale - max_scale))
+#     new_scale = torch.where(both_inf, torch.full_like(new_scale, float('-inf')), new_scale)
+#     softmax_lse.copy_(new_scale)
 
 
 def bwd_dq_update(
@@ -520,198 +537,99 @@ def bwd_dkv_update(dkv, dkv_, cu_seqlens_kv_padded, first_op, second_op):
 
 
 # p2p comm
+# def attn_p2p_communicate(
+#     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
+# ):
+#     """Point-to-point communications of KV and dKV in Attention with context parallelism"""
+#     send_recv_ops = []
+
+#     send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
+#     recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
+#     send_recv_ops.append(send_op)
+#     send_recv_ops.append(recv_op)
+#     send_recv_reqs = send_recv_ops
+
+#     return send_recv_reqs
+
+
+# if batch_p2p_comm:
+#     if rank % 2 == 0:
+#         send_op = torch.distributed.P2POp(
+#             torch.distributed.isend, send_tensor, send_dst, cp_group
+#         )
+#         recv_op = torch.distributed.P2POp(
+#             torch.distributed.irecv, recv_tensor, recv_src, cp_group
+#         )
+#         send_recv_ops.append(send_op)
+#         send_recv_ops.append(recv_op)
+#     else:
+#         recv_op = torch.distributed.P2POp(
+#             torch.distributed.irecv, recv_tensor, recv_src, cp_group
+#         )
+#         send_op = torch.distributed.P2POp(
+#             torch.distributed.isend, send_tensor, send_dst, cp_group
+#         )
+#         send_recv_ops.append(recv_op)
+#         send_recv_ops.append(send_op)
+#     send_recv_reqs = torch.distributed.batch_isend_irecv(send_recv_ops)
+# else:
+#     if rank % 2 == 0:
+#         send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
+#         recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
+#         send_recv_ops.append(send_op)
+#         send_recv_ops.append(recv_op)
+#     else:
+#         recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
+#         send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
+#         send_recv_ops.append(recv_op)
+#         send_recv_ops.append(send_op)
+#     send_recv_reqs = send_recv_ops
+
+# return send_recv_reqs
+
+
 def attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
 ):
     """Point-to-point communications of KV and dKV in Attention with context parallelism"""
-    send_recv_ops = []
 
-    if batch_p2p_comm:
-        if rank % 2 == 0:
-            send_op = torch.distributed.P2POp(
-                torch.distributed.isend, send_tensor, send_dst, cp_group
-            )
-            recv_op = torch.distributed.P2POp(
-                torch.distributed.irecv, recv_tensor, recv_src, cp_group
-            )
-            send_recv_ops.append(send_op)
-            send_recv_ops.append(recv_op)
-        else:
-            recv_op = torch.distributed.P2POp(
-                torch.distributed.irecv, recv_tensor, recv_src, cp_group
-            )
-            send_op = torch.distributed.P2POp(
-                torch.distributed.isend, send_tensor, send_dst, cp_group
-            )
-            send_recv_ops.append(recv_op)
-            send_recv_ops.append(send_op)
-        send_recv_reqs = torch.distributed.batch_isend_irecv(send_recv_ops)
+    send_recv_ops = []
+    if rank % 2 == 0:
+        send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
+        recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
+        send_recv_ops.append(send_op)
+        send_recv_ops.append(recv_op)
     else:
-        if rank % 2 == 0:
-            send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
-            recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
-            send_recv_ops.append(send_op)
-            send_recv_ops.append(recv_op)
-        else:
-            recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
-            send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
-            send_recv_ops.append(recv_op)
-            send_recv_ops.append(send_op)
-        send_recv_reqs = send_recv_ops
+        recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
+        send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
+        send_recv_ops.append(recv_op)
+        send_recv_ops.append(send_op)
+    send_recv_reqs = send_recv_ops
 
     return send_recv_reqs
 
 
 # all2all comm
-# TODO: to Optimize
-class _SeqAllToAll(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx: Any, group, input, scatter_idx, gather_idx, batch_dim_idx):
-        ctx.group = group
-        ctx.scatter_idx = scatter_idx
-        ctx.gather_idx = gather_idx
-        ctx.batch_dim_idx = batch_dim_idx
-        res = single_all_to_all(
-            input, scatter_idx, gather_idx, batch_dim_idx, group, False
-        )
-        return res
-
-    @staticmethod
-    def backward(ctx, *dout):
-        res = single_all_to_all(
-            *dout, ctx.gather_idx, ctx.scatter_idx, ctx.batch_dim_idx, ctx.group, False
-        )
-        return (
-            None,
-            res,
-            None,
-            None,
-            None,
-        )
+def _varlen_all2all_before_attn(input_: torch.Tensor, cp_group):
+    cp_size = dist.get_world_size(cp_group)
+    x = rearrange(
+        input_,
+        "t h d -> h t d",
+    ).contiguous()
+    x = all_to_all_single_autograd(
+        x, output_split_sizes=None, input_split_sizes=None, group=cp_group
+    )
+    x = rearrange(x, "(cp_size h) t d -> (cp_size t) h d", cp_size=cp_size).contiguous()
+    return x
 
 
-def single_all_to_all(
-    input, scatter_idx, gather_idx, batch_dim_idx, group, async_op=False
-):
-    seq_world_size = dist.get_world_size(group)
-    if batch_dim_idx == 0:
-        # b, s, n, h
-        if scatter_idx < 2:
-            bs, global_seq_len, num_local_head, head_dim = input.shape
-            input_t = input.reshape(
-                [
-                    bs,
-                    seq_world_size,
-                    global_seq_len // seq_world_size,
-                    num_local_head,
-                    head_dim,
-                ]
-            ).contiguous()
-            input_t = input_t.permute(1, 0, 2, 3, 4).contiguous()
-        else:
-            bs, local_seq_len, num_total_head, head_dim = input.shape
-            assert (
-                num_total_head % seq_world_size == 0
-            ), f"Number of heads ({num_total_head}) must be divisible by the sequence parallel size ({seq_world_size})!"
-            input_t = input.reshape(
-                [
-                    bs,
-                    local_seq_len,
-                    seq_world_size,
-                    num_total_head // seq_world_size,
-                    head_dim,
-                ]
-            ).contiguous()
-            input_t = input_t.permute(2, 0, 1, 3, 4).contiguous()
-    else:
-        # s, b, n, h
-        if scatter_idx < 2:
-            global_seq_len, bs, num_local_head, head_dim = input.shape
-            input_t = input.reshape(
-                [
-                    seq_world_size,
-                    global_seq_len // seq_world_size,
-                    bs,
-                    num_local_head,
-                    head_dim,
-                ]
-            ).contiguous()
-        else:
-            local_seq_len, bs, num_total_head, head_dim = input.shape
-            assert (
-                num_total_head % seq_world_size == 0
-            ), f"Number of heads ({num_total_head}) must be divisible by the sequence parallel size ({seq_world_size})!"
-            input_t = input.reshape(
-                [
-                    local_seq_len,
-                    bs,
-                    seq_world_size,
-                    num_total_head // seq_world_size,
-                    head_dim,
-                ]
-            ).contiguous()
-            input_t = input_t.permute(2, 0, 1, 3, 4).contiguous()
-
-    if scatter_idx < 2:
-        post_all2all_fun = post_all2all(
-            scatter_idx,
-            batch_dim_idx,
-            seq_world_size,
-            bs,
-            global_seq_len,
-            num_local_head,
-            head_dim,
-        )
-    else:
-        post_all2all_fun = post_all2all(
-            scatter_idx,
-            batch_dim_idx,
-            seq_world_size,
-            bs,
-            local_seq_len,
-            num_total_head,
-            head_dim,
-        )
-
-    output = torch.empty_like(input_t)
-    # work =
-    dist.all_to_all_single(output, input_t, group=group, async_op=async_op)
-    # dist.barrier(group=group)
-
-    res = post_all2all_fun(output)
-    return res
-
-
-def post_all2all(
-    scatter_idx, batch_dim_idx, seq_world_size, bs, seq_len, num_head, head_dim
-):
-    def post_func(input):
-        if batch_dim_idx == 0:
-            # b, s, n, h
-            if scatter_idx < 2:
-                output = input.permute(1, 2, 0, 3, 4).contiguous()
-                output = output.reshape(
-                    bs, seq_len // seq_world_size, seq_world_size * num_head, head_dim
-                ).contiguous()
-            else:
-                output = input.permute(1, 0, 2, 3, 4).contiguous()
-                output = output.reshape(
-                    bs, seq_world_size * seq_len, num_head // seq_world_size, head_dim
-                ).contiguous()
-        else:
-            # s, b, n, h
-            if scatter_idx < 2:
-                output = input.permute(1, 2, 0, 3, 4).contiguous()
-                output = output.reshape(
-                    seq_len // seq_world_size, bs, seq_world_size * num_head, head_dim
-                ).contiguous()
-            else:
-                output = input.reshape(
-                    seq_len * seq_world_size, bs, num_head // seq_world_size, head_dim
-                ).contiguous()
-        return output
-
-    return post_func
+def _varlen_all2all_after_attn(input_: torch.Tensor, cp_group):
+    cp_size = dist.get_world_size(cp_group)
+    x = all_to_all_single_autograd(
+        input_, output_split_sizes=None, input_split_sizes=None, group=cp_group
+    )
+    x = rearrange(x, "(cp_size t) h d -> t (cp_size h) d", cp_size=cp_size).contiguous()
+    return x
 
 
 ############################################################

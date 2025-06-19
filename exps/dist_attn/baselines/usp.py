@@ -17,12 +17,9 @@ from typing import Dict
 import torch
 import torch.distributed as dist
 
-from magi_attention.common.enum import AttnMaskType
-from magi_attention.common.ranges import AttnRanges
-
-from .interface import AttnBaselineInterface
-from .ring_attn import FA3RingAttnFunc, TERingAttnFunc
-from .shard import (
+from exps.dist_attn.baselines.interface import AttnBaselineInterface
+from exps.dist_attn.baselines.ring_attn import FA3RingAttnFunc, TERingAttnFunc
+from exps.dist_attn.baselines.shard import (
     ParallelMode,
     ShardMeta,
     get_cu_seqlens_padded,
@@ -31,14 +28,17 @@ from .shard import (
     zigzag_dispatch,
     zigzag_undispatch,
 )
-from .utils_cp import (
+from exps.dist_attn.baselines.utils_cp import (
     AttnBackend,
     _pre_process,
-    _SeqAllToAll,
+    _varlen_all2all_after_attn,
+    _varlen_all2all_before_attn,
     generate_runtime_meta_per_step,
     get_cu_seqlens_on_cp_rank,
     unflatten_data_from_varlen,
 )
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.ranges import AttnRanges
 
 
 class USP(AttnBaselineInterface):
@@ -127,7 +127,6 @@ class USP(AttnBaselineInterface):
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
         name: str,  # key name for shard_meta
-        **kwargs,
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -166,7 +165,6 @@ class USP(AttnBaselineInterface):
         self,
         x_local: torch.Tensor,
         name: str,  # key name for shard_meta
-        **kwargs,
     ) -> torch.Tensor:
         smeta = self.shard_meta[name]
         x_global_varlen = zigzag_undispatch(
@@ -192,20 +190,14 @@ class USP(AttnBaselineInterface):
         dropout_p: float,
         softmax_scale: float,
         deterministic: bool,
-        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cp_size_p2p = dist.get_world_size(group=self.pg_p2p)
-        # ulysess all2all
-        batch_dim, seq_dim = 0, 1
+        # all2all comm
+        q_layer = _varlen_all2all_before_attn(q, self.pg_a2a)
+        k_layer = _varlen_all2all_before_attn(k, self.pg_a2a)
+        v_layer = _varlen_all2all_before_attn(v, self.pg_a2a)
 
-        # thd -> 1,thd
-        q, k, v = [x.unsqueeze(0) for x in [q, k, v]]
-        q_layer, k_layer, v_layer = [
-            _SeqAllToAll.apply(self.pg_a2a, x, 2, seq_dim, batch_dim) for x in [q, k, v]
-        ]
-        q_layer, k_layer, v_layer = [x.squeeze(0) for x in [q_layer, k_layer, v_layer]]
-
-        batch_p2p_comm = kwargs.get("batch_p2p_comm", True)
+        batch_p2p_comm = False
         with torch.cuda.device(q.device):
             cp_stream = torch.cuda.Stream()
 
@@ -259,10 +251,7 @@ class USP(AttnBaselineInterface):
                 batch_p2p_comm,
             )
 
-        # ulysess all2all
-        # thd -> 1,thd
-        out = out.unsqueeze(0)
-        out_layer = _SeqAllToAll.apply(self.pg_a2a, out, seq_dim, 2, batch_dim)
-        out_layer = out_layer.squeeze(0)
+        # all2all comm
+        out_layer = _varlen_all2all_after_attn(out, self.pg_a2a)
 
         return out_layer, lse

@@ -30,12 +30,8 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
 from transformer_engine.pytorch.distributed import reduce_scatter_along_first_dim
 from transformer_engine.pytorch.utils import get_cudnn_version
 
-from magi_attention.comm.functional import all_gather_fwd_scatter_bwd
-from magi_attention.common.enum import AttnMaskType
-from magi_attention.common.ranges import AttnRanges
-
-from .interface import AttnBaselineInterface
-from .shard import (
+from exps.dist_attn.baselines.interface import AttnBaselineInterface
+from exps.dist_attn.baselines.shard import (
     ParallelMode,
     ShardMeta,
     generate_zigzag_dispatch_indices,
@@ -46,9 +42,13 @@ from .shard import (
     zigzag_dispatch,
     zigzag_undispatch,
 )
-from .utils_cp import prepare_for_saving  # type: ignore[attr-defined]
-from .utils_cp import restore_from_saved  # type: ignore[attr-defined]
-from .utils_cp import (
+from exps.dist_attn.baselines.utils_cp import (
+    prepare_for_saving,  # type: ignore[attr-defined]
+)
+from exps.dist_attn.baselines.utils_cp import (
+    restore_from_saved,  # type: ignore[attr-defined]
+)
+from exps.dist_attn.baselines.utils_cp import (
     AttnBackend,
     _fa3_varlen_backward,
     _fa3_varlen_forward,
@@ -62,6 +62,9 @@ from .utils_cp import (
     get_p2p_send_recv_rank,
     unflatten_data_from_varlen,
 )
+from magi_attention.comm.functional import all_gather_fwd_scatter_bwd
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.ranges import AttnRanges
 
 jit_fuser = torch.jit.script
 
@@ -687,7 +690,7 @@ class TERingAttnFunc(torch.autograd.Function):
         attn_mask_type,
         cp_stream,
         deterministic,
-        batch_p2p_comm=True,
+        batch_p2p_comm=False,
     ) -> torch.Tensor:
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -727,6 +730,8 @@ class TERingAttnFunc(torch.autograd.Function):
 
         p2p_comm_buffers = [None for _ in range(cp_size)]
         p2p_comm_buffers[0] = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
+        for i in range(1, cp_size):
+            p2p_comm_buffers[i] = torch.empty_like(p2p_comm_buffers[i - 1])
         send_recv_reqs = [[], []]  # type: ignore
         out = None
 
@@ -747,7 +752,7 @@ class TERingAttnFunc(torch.autograd.Function):
                         req.wait()
 
                     if i < (cp_size - 1):
-                        p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
+                        # p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
                         send_recv_reqs[i % 2] = attn_p2p_communicate(
                             cp_rank,
                             p2p_comm_buffers[i],
@@ -1207,6 +1212,8 @@ class FA3RingAttnFunc(torch.autograd.Function):
 
         p2p_comm_buffers = [None for _ in range(cp_size)]
         p2p_comm_buffers[0] = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
+        for i in range(1, cp_size):
+            p2p_comm_buffers[i] = torch.empty_like(p2p_comm_buffers[i - 1])
         send_recv_reqs = [[], []]  # type: ignore
 
         out = None
@@ -1218,7 +1225,7 @@ class FA3RingAttnFunc(torch.autograd.Function):
                         req.wait()
 
                     if i < (cp_size - 1):
-                        p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
+                        # p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
                         send_recv_reqs[i % 2] = attn_p2p_communicate(
                             cp_rank,
                             p2p_comm_buffers[i],
@@ -1616,7 +1623,6 @@ class RingAttnAllGather(AttnBaselineInterface):
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
         name: str,  # key name for shard_meta
-        **kwargs,
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -1655,7 +1661,6 @@ class RingAttnAllGather(AttnBaselineInterface):
         self,
         x_local: torch.Tensor,
         name: str,  # key name for shard_meta
-        **kwargs,
     ) -> torch.Tensor:
         smeta = self.shard_meta[name]
         x_global_varlen = zigzag_undispatch(
@@ -1681,7 +1686,6 @@ class RingAttnAllGather(AttnBaselineInterface):
         dropout_p: float,
         softmax_scale: float,
         deterministic: bool,
-        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cp_size = dist.get_world_size(group=self.pg_p2p)
         with torch.cuda.device(q.device):
@@ -1826,7 +1830,6 @@ class RingAttnP2P(AttnBaselineInterface):
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
         name: str,  # key name for shard_meta
-        **kwargs,
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -1865,7 +1868,6 @@ class RingAttnP2P(AttnBaselineInterface):
         self,
         x_local: torch.Tensor,
         name: str,  # key name for shard_meta
-        **kwargs,
     ) -> torch.Tensor:
         smeta = self.shard_meta[name]
         x_global_varlen = zigzag_undispatch(
@@ -1891,7 +1893,6 @@ class RingAttnP2P(AttnBaselineInterface):
         dropout_p: float,
         softmax_scale: float,
         deterministic: bool,
-        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cp_size = dist.get_world_size(group=self.pg_p2p)
         with torch.cuda.device(q.device):
@@ -1906,7 +1907,6 @@ class RingAttnP2P(AttnBaselineInterface):
             elif attn_mask_type == AttnMaskType.FULL:
                 attn_mask = "padding"
 
-            # TODO: fix softmax lse bug
             out_layer, lse = TERingAttnFunc.apply(
                 q,
                 k,
@@ -1932,7 +1932,6 @@ class RingAttnP2P(AttnBaselineInterface):
             elif attn_mask_type == AttnMaskType.FULL:
                 is_causal = False
 
-            # TODO: fix softmax lse bug
             out_layer, lse = FA3RingAttnFunc.apply(
                 q,
                 k,

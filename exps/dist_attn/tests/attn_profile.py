@@ -20,9 +20,11 @@ from enum import Enum
 
 import torch
 import torch.distributed as dist
-from baselines.loongtrain import LoongTrain
-from baselines.ring_attn import RingAttnAllGather, RingAttnP2P
-from baselines.shard import (
+from torch.testing._internal.common_distributed import MultiProcessTestCase
+
+from exps.dist_attn.baselines.loongtrain import LoongTrain
+from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
+from exps.dist_attn.baselines.shard import (
     ParallelMode,
     get_loongtrain_pg,
     get_ring_pg,
@@ -31,16 +33,14 @@ from baselines.shard import (
     init_distributed,
     set_seed,
 )
-from baselines.ulysess import Ulysess
-from baselines.usp import USP
-from baselines.utils_cp import AttnBackend
-from test_utils import (
+from exps.dist_attn.baselines.ulysess import Ulysess
+from exps.dist_attn.baselines.usp import USP
+from exps.dist_attn.baselines.utils_cp import AttnBackend
+from exps.dist_attn.tests.test_utils import (
     generate_attn_cu_seqlens,
     generate_attn_ranges,
     generate_test_data,
 )
-from torch.testing._internal.common_distributed import MultiProcessTestCase
-
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.utils import nvtx
 

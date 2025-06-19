@@ -26,9 +26,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
 
+from exps.dist_attn.baselines.utils_cp import divide_lst
 from magi_attention.comm.functional import all_gather_fwd_scatter_bwd
-
-from .utils_cp import divide_lst
 
 
 @dataclass
@@ -61,36 +60,68 @@ def set_seed(seed):
 
 # init distribute environment
 # create DeviceMesh for all pg
+# def init_distributed(world_size, pg_meta={}):
+#     print(f"world_size: {world_size}, meta info: {pg_meta}")
+#     local_rank = int(os.environ.get("LOCAL_RANK", 0))
+#     torch.cuda.set_device(local_rank)
+#     pg_sizes = tuple(pg_meta.values())
+#     pg_names = tuple(pg_meta.keys())
+#     assert world_size == reduce(
+#         operator.mul, pg_sizes
+#     ), "world size does not match pg sizes"
+#     rank = int(os.environ.get("RANK", 0))
+#     local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+#     # init dist env
+#     dist.init_process_group(
+#         backend="nccl",
+#         init_method=None,
+#         world_size=world_size,
+#         rank=rank,
+#         timeout=timedelta(minutes=30),
+#         store=None,
+#     )
+
+#     # init device
+#     # device_count = torch.cuda.device_count()
+#     # device = dist.get_rank() % device_count
+#     # assert local_rank == device, "local rank does not match device"
+#     # torch.cuda.set_device(device)
+#     # device = torch.cuda.current_device()
+
+#     # init process group
+#     mesh = torch.arange(0, world_size).reshape(pg_sizes)
+#     deivce_mesh = DeviceMesh("cuda", mesh=mesh, mesh_dim_names=pg_names)
+
+#     return deivce_mesh
+
+
 def init_distributed(world_size, pg_meta={}):
     print(f"world_size: {world_size}, meta info: {pg_meta}")
-    pg_sizes = tuple(pg_meta.values())
-    pg_names = tuple(pg_meta.keys())
-    assert world_size == reduce(
-        operator.mul, pg_sizes
-    ), "world size does not match pg sizes"
-    rank = int(os.environ.get("RANK", 0))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
 
-    # init dist env
+    if pg_meta is not None:
+        pg_sizes = tuple(pg_meta.values())
+        pg_names = tuple(pg_meta.keys())
+        assert world_size == reduce(
+            operator.mul, pg_sizes
+        ), "world size does not match pg sizes"
+    rank = int(os.environ.get("RANK", 0))
+
     dist.init_process_group(
         backend="nccl",
-        init_method=None,
+        init_method="env://",
         world_size=world_size,
         rank=rank,
         timeout=timedelta(minutes=30),
-        store=None,
     )
 
-    # init device
-    device_count = torch.cuda.device_count()
-    device = dist.get_rank() % device_count
-    assert local_rank == device, "local rank does not match device"
-    torch.cuda.set_device(device)
-    device = torch.cuda.current_device()
-
-    # init process group
-    mesh = torch.arange(0, world_size).reshape(pg_sizes)
-    deivce_mesh = DeviceMesh("cuda", mesh=mesh, mesh_dim_names=pg_names)
+    if pg_meta is not None:
+        mesh = torch.arange(0, world_size).reshape(pg_sizes)
+        deivce_mesh = DeviceMesh("cuda", mesh=mesh, mesh_dim_names=pg_names)
+    else:
+        deivce_mesh = None
 
     return deivce_mesh
 
@@ -115,45 +146,138 @@ def get_usp_pg(device_mesh):
 
 
 # 非正交 group
-def get_loongtrain_pg(device_mesh, window_num, rank):
-    p2p_pg = device_mesh.get_group(mesh_dim=ParallelMode.RING)
-    a2a_pg = device_mesh.get_group(mesh_dim=ParallelMode.ULYSESS)
-    cp_pg = {ParallelMode.ULYSESS: a2a_pg, ParallelMode.RING: p2p_pg}
+# def get_loongtrain_pg(device_mesh, window_num, rank):
+#     p2p_pg = device_mesh.get_group(mesh_dim=ParallelMode.RING)
+#     a2a_pg = device_mesh.get_group(mesh_dim=ParallelMode.ULYSESS)
+#     cp_pg = {ParallelMode.ULYSESS: a2a_pg, ParallelMode.RING: p2p_pg}
 
-    cp_size = dist.get_world_size(p2p_pg)
-    context_ranks = []
-    for i in range(cp_size):
-        context_ranks.append(dist.get_global_rank(p2p_pg, i))
-    assert cp_size % window_num == 0, "cp_size must be divisible by window_num"
-    window_size = cp_size // window_num
+#     cp_size = dist.get_world_size(p2p_pg)
+#     context_ranks = []
+#     for i in range(cp_size):
+#         context_ranks.append(dist.get_global_rank(p2p_pg, i))
+#     assert cp_size % window_num == 0, "cp_size must be divisible by window_num"
+#     window_size = cp_size // window_num
 
-    # create the intra_window process group when using sliding window
-    for j in range(window_num):
-        intra_window_ranks = context_ranks[j * window_size : (j + 1) * window_size]
-        # intra_window
-        intra_window_group = dist.new_group(intra_window_ranks)
-        if rank in intra_window_ranks:
-            cp_pg[ParallelMode.INTRA_WINDOW] = intra_window_group
-        # dkv_intra_window
-        dkv_intra_window_group = dist.new_group(intra_window_ranks)
-        if rank in intra_window_ranks:
-            cp_pg[ParallelMode.DKV_INTRA_WINDOW] = dkv_intra_window_group
+#     print(f"{context_ranks=}")
 
-    # inter_window
-    for j in range(window_size):
-        inter_window_ranks = []
-        for t in range(window_num):
-            inter_window_ranks.append(context_ranks[t * window_size + j])
-        # inter_window
-        inter_window_group = dist.new_group(inter_window_ranks)
-        if rank in inter_window_ranks:
-            cp_pg[ParallelMode.INTER_WINDOW] = inter_window_group
-        # dkv_inter_window
-        dkv_inter_window_group = dist.new_group(inter_window_ranks)
-        if rank in inter_window_ranks:
-            cp_pg[ParallelMode.DKV_INTER_WINDOW] = dkv_inter_window_group
+#     # create the intra_window process group when using sliding window
+#     for j in range(window_num):
+#         intra_window_ranks = context_ranks[j * window_size : (j + 1) * window_size]
+#         # intra_window
+#         intra_window_group = dist.new_group(intra_window_ranks)
+#         if rank in intra_window_ranks:
+#             cp_pg[ParallelMode.INTRA_WINDOW] = intra_window_group
+#         # dkv_intra_window
+#         dkv_intra_window_group = dist.new_group(intra_window_ranks)
+#         if rank in intra_window_ranks:
+#             cp_pg[ParallelMode.DKV_INTRA_WINDOW] = dkv_intra_window_group
 
-    return cp_pg
+#     # inter_window
+#     for j in range(window_size):
+#         inter_window_ranks = []
+#         for t in range(window_num):
+#             inter_window_ranks.append(context_ranks[t * window_size + j])
+#         # inter_window
+#         inter_window_group = dist.new_group(inter_window_ranks)
+#         if rank in inter_window_ranks:
+#             print(f"{rank=},{inter_window_ranks=}")
+#             cp_pg[ParallelMode.INTER_WINDOW] = inter_window_group
+#         # dkv_inter_window
+#         dkv_inter_window_group = dist.new_group(inter_window_ranks)
+#         if rank in inter_window_ranks:
+#             cp_pg[ParallelMode.DKV_INTER_WINDOW] = dkv_inter_window_group
+
+#     return cp_pg
+
+
+def get_loongtrain_pg(cp_pg_meta, window_num, rank):
+    keys = list(cp_pg_meta.keys())
+    cp_size_a2a = cp_pg_meta[ParallelMode.ULYSESS]
+    cp_size_p2p = cp_pg_meta[ParallelMode.RING]
+    num_pgs_a2a = cp_size_p2p
+    num_pgs_p2p = cp_size_a2a
+    window_size = cp_size_p2p // window_num
+    cp_world_size = cp_size_a2a * cp_size_p2p
+    ulysess_first = not (keys[0] == ParallelMode.ULYSESS)
+    groups = {}
+
+    def get_sliding_window_pg(window_num, context_ranks):
+        # context_ranks = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        # window_size = 4
+        # window_num = 4
+        # intra_window = [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]]
+        # inter_window = [[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14], [3, 7, 11, 15]]
+
+        # create the intra_window process group when using sliding window
+        for j in range(window_num):
+            intra_window_ranks = context_ranks[j * window_size : (j + 1) * window_size]
+            # print(f"{rank=},{intra_window_ranks=}")
+
+            # intra_window
+            intra_window_group = dist.new_group(intra_window_ranks)
+            if rank in intra_window_ranks:
+                groups[ParallelMode.INTRA_WINDOW] = intra_window_group
+
+            # dkv_intra_window
+            dkv_intra_window_group = dist.new_group(intra_window_ranks)
+            if rank in intra_window_ranks:
+                groups[ParallelMode.DKV_INTRA_WINDOW] = dkv_intra_window_group
+
+        # create the inter_window process group when using sliding window
+        for j in range(window_size):
+            inter_window_ranks = []
+            for t in range(window_num):
+                inter_window_ranks.append(context_ranks[t * window_size + j])
+
+            # print(f"{rank=},{inter_window_ranks=}")
+
+            # inter_window
+            inter_window_group = dist.new_group(inter_window_ranks)
+            if rank in inter_window_ranks:
+                groups[ParallelMode.INTER_WINDOW] = inter_window_group
+
+            # dkv_inter_window
+            dkv_inter_window_group = dist.new_group(inter_window_ranks)
+            if rank in inter_window_ranks:
+                groups[ParallelMode.DKV_INTER_WINDOW] = dkv_inter_window_group
+
+    if ulysess_first:
+        # ULYSESS
+        for i in range(num_pgs_a2a):
+            ulysess_ranks = list(range(i * cp_size_a2a, (i + 1) * cp_size_a2a))
+            ulysess_pg = dist.new_group(ulysess_ranks)
+            if rank in ulysess_ranks:
+                groups[ParallelMode.ULYSESS] = ulysess_pg
+            # print(f"{rank=},{ulysess_ranks=}")
+
+        # RING
+        for i in range(num_pgs_p2p):
+            ring_ranks = list(range(i, cp_world_size, cp_size_a2a))
+            ring_pg = dist.new_group(ring_ranks)
+            if rank in ring_ranks:
+                groups[ParallelMode.RING] = ring_pg
+            get_sliding_window_pg(window_num, ring_ranks)
+            # print(f"{rank=},{ring_ranks=}")
+    else:
+        # RING
+        for i in range(num_pgs_p2p):
+            ring_ranks = list(range(i * cp_size_p2p, (i + 1) * cp_size_p2p))
+            ring_pg = dist.new_group(ring_ranks)
+            if rank in ring_ranks:
+                groups[ParallelMode.RING] = ring_pg
+            get_sliding_window_pg(window_num, ring_ranks)
+            # print(f"{rank=},{ring_ranks=}")
+
+        # ULYSESS
+        for i in range(num_pgs_a2a):
+            ulysess_ranks = list(range(i, cp_world_size, cp_size_p2p))
+            ulysess_pg = dist.new_group(ulysess_ranks)
+            if rank in ulysess_ranks:
+                groups[ParallelMode.ULYSESS] = ulysess_pg
+
+            # print(f"{rank=},{ulysess_ranks=}")
+
+    return groups
 
 
 ############################################################
