@@ -72,7 +72,7 @@ def test_pg_broadcast(pg, group_name, rank):
     test_tensor = torch.tensor([rank * 100], dtype=torch.int32).cuda()
 
     src = dist.get_global_rank(pg, 0)
-    # 设定第0号rank作为broadcast源
+    # set rank 0 as the broadcast source
     if local_rank == 0:
         print(
             f"[{group_name}] Rank {rank} (local {local_rank}) broadcasting tensor: {test_tensor.item()}"
@@ -80,7 +80,7 @@ def test_pg_broadcast(pg, group_name, rank):
     dist.broadcast(test_tensor, src=src, group=pg)
     dist.barrier(pg)
 
-    # 所有进程应拿到 Rank0 的值
+    # all processes should receive the value from Rank0
     print(
         f"[{group_name}] Rank {rank} (local {local_rank}) received tensor: {test_tensor.item()}"
     )
