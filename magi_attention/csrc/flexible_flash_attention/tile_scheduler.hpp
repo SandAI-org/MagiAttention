@@ -399,18 +399,25 @@ public:
                 int * conflict_state = params.determin_conflict_state;
                 // update conflict state
                 while (bidb_last < bidb_now) {
-                    int l = params.ranges[2 * bidb_last] / kBlock + lane;
-                    int r = (params.ranges[2 * bidb_last + 1] - 1) / kBlock;
+                    int q_l_index = params.ranges[2 * bidb_last], q_r_index = params.ranges[2 * bidb_last + 1];
+                    int l = q_l_index / kBlock + lane;
+                    int block_num = cute::ceil_div(q_r_index - q_l_index, kBlock);
+                    int r = (q_l_index + block_num * kBlock - 1) / kBlock;
                     while(l <= r) {
                         conflict_state[l * sm_stride + smid] = bidb_last + 1; // batch id + 1 (make it different to inital value 0)
                         l += cutlass::NumThreadsPerWarp;
                     }
                     bidb_last++;
                 }
-                int conflict_o_index1 = params.ranges[2 * bidb_now] / kBlock + block_now;
-                int conflict_o_index2 = (params.ranges[2 * bidb_now] + kBlock - 1) / kBlock + block_now;
+                int l = params.ranges[2 * bidb_now];
+                int r = params.ranges[2 * bidb_now + 1];
+                bool l_arrive_twice = (l % kBlock != 0) && (block_now == 0);
+                bool r_arrive_twice = (l % kBlock != 0) && (block_now == (r - l + kBlock - 1) / kBlock - 1);
+                int conflict_o_index1 = l / kBlock + block_now;
+                int conflict_o_index2 = (l + kBlock - 1) / kBlock + block_now;
                 __syncwarp();
-                return cute::make_tuple(conflict_state[conflict_o_index1 * sm_stride + smid], conflict_state[conflict_o_index2 * sm_stride + smid]);
+                return cute::make_tuple((conflict_state[conflict_o_index1 * sm_stride + smid] << 1) | l_arrive_twice,
+                                        (conflict_state[conflict_o_index2 * sm_stride + smid] << 1) | r_arrive_twice);
             };
 
             auto conflict_bidb = get_conflict_bidb(current_work.bidb, bidb, block);

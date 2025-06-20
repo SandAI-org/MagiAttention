@@ -245,9 +245,13 @@ struct CollectiveEpilogueFwd {
     }
 
     CUTLASS_DEVICE
-    void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int conflict_bidb1, int conflict_bidb2) {
+    void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int conflict_bidb1_raw, int conflict_bidb2_raw) {
+        // printf("sync: %d %d %d\n", conflict_bidb1_raw, conflict_bidb2_raw, blockIdx.x);
+        int conflict_bidb1 = conflict_bidb1_raw >> 1;
+        int conflict_bidb2 = conflict_bidb2_raw >> 1;
         if (conflict_bidb1 == 0 && conflict_bidb2 == 0)
             return ;
+
         // Calculate lock index
         int block_idx1 = offset / q_block_size;
         int index_1 = block_idx1 * num_heads + bidh;
@@ -255,7 +259,7 @@ struct CollectiveEpilogueFwd {
 
         // Acquire the first lock
         #pragma unroll 1
-        while (atomicCAS(&range_lock[index_1], conflict_bidb1, conflict_bidb1) != conflict_bidb1) {
+        while (atomicCAS(&range_lock[index_1 * 2], conflict_bidb1, conflict_bidb1) != conflict_bidb1) {
         }
 
         // If we need a second lock
@@ -264,13 +268,14 @@ struct CollectiveEpilogueFwd {
 
             // Try to acquire the second lock
             #pragma unroll 1
-            while (atomicCAS(&range_lock[index_2], conflict_bidb2, conflict_bidb2) != conflict_bidb2) {
+            while (atomicCAS(&range_lock[index_2 * 2], conflict_bidb2, conflict_bidb2) != conflict_bidb2) {
             }
         }
     }
     
     CUTLASS_DEVICE
-    void deterministic_arrive(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int bidb) {
+    void deterministic_arrive(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int bidb, bool l_arrive_twice, bool r_arrive_twice) {
+        // printf("arrive: %d %d %d\n", l_arrive_twice, r_arrive_twice, bidb);
         // Calculate lock indices
         int block_idx1 = offset / q_block_size;
         int index_1 = block_idx1 * num_heads + bidh;
@@ -279,13 +284,21 @@ struct CollectiveEpilogueFwd {
         int block_idx2 = (offset + q_block_size - 1) / q_block_size;
 
         // Release the second lock
-        if (block_idx1 != block_idx2) {
-            int index_2 = block_idx2 * num_heads + bidh;
-            atomicExch(&range_lock[index_2], bidb + 1);
+        int index_2 = block_idx2 * num_heads + bidh;
+        int add_cnt = r_arrive_twice ? 2 : 1;
+        int tmp = atomicAdd(&range_lock[index_2 * 2 + 1], add_cnt);
+        if (tmp + add_cnt == 2) {
+            atomicExch(&range_lock[index_2 * 2 + 1], 0);
+            atomicExch(&range_lock[index_2 * 2], bidb + 1);
         }
 
         // Release the first lock
-        atomicExch(&range_lock[index_1], bidb + 1);
+        add_cnt = l_arrive_twice ? 2 : 1;
+        tmp = atomicAdd(&range_lock[index_1 * 2 + 1], add_cnt);
+        if (tmp + add_cnt == 2) {
+            atomicExch(&range_lock[index_1 * 2 + 1], 0);
+            atomicExch(&range_lock[index_1 * 2], bidb + 1);
+        }
     }
 
     template <typename SharedStorage, typename FrgTensorO, typename FrgTensorLSE, typename TiledMma>
@@ -530,7 +543,7 @@ struct CollectiveEpilogueFwd {
             flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
             if (thread_idx == 0) {
                 if constexpr (Deterministic) {
-                    deterministic_arrive(params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, bidb);
+                    deterministic_arrive(params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, bidb, conflict_bidb1 & 1, conflict_bidb2 & 1);
                 }
                 release_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
             }
