@@ -1,6 +1,0 @@
-transformer_engine===2.1.0
-transformer-engine-torch==2.1.0
-transformer-engine-cu12==2.1.0
-deepspeed==0.16.4
-mpi4py==4.0.3
-seaborn==0.13.2

@@ -55,6 +55,10 @@ class DispatchAlgType(Enum):
     MIN_HEAP = "min_heap"
     TOPP_HEAP = "topp_heap"
     BACKTRACKING_PRUNING = "backtracing_pruning"
+    RANDOM_SELECT = "random_select"
+    SEQUENTIAL_SELECT = "sequential_select"
+    BATCH_TOPP_HEAP = "batch_topp_heap"
+    SORTED_SEQUENTIAL_SELECT = "sorted_sequential_select"
 
 
 class OverlapAlgType(Enum):

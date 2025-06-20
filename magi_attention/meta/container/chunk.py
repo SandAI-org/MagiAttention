@@ -25,6 +25,8 @@ class AttnChunk:
 
     q_slices: list[AttnSlice] = field(default_factory=list)
 
+    sample_ids: list[int] = field(default_factory=list)
+
     @property
     def q_ranges(self) -> AttnRanges:
         q_ranges = AttnRanges()

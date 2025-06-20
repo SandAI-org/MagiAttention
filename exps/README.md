@@ -1,31 +1,41 @@
-# Distributed Flex-Flash-Attention Experiments
-
-## Requirements
-
-* Megatron:
-    * github repo: [here](https://github.com/NVIDIA/Megatron-LM.git)
-    * tag: core_r0.9.0
-
-* TransformerEngine
-    * github repo: [here](https://github.com/NVIDIA/TransformerEngine.git)
-    * tag: v1.13
-
-* DeepSpeed
-    * github repo: [here](https://github.com/microsoft/DeepSpeed.git)
-    * tag: v0.16.2
+# Benchmark Experiments for MagiAttention
 
 
+## Kernel-Level Attention Performance and Flexibility
 
-## Experiments
+TODO ... (add more instructions to reproduce the experiments)
 
-### Attn Module
+basic running command:
 
-TODO ...
+```bash
+cd exps/attn
 
-### Pretraining
+bash run_benchmark.sh
+```
 
-TODO ...
 
-### Continual Pretraining
+## Module-Level Distributed Attention Performance and Scalability
 
-TODO ...
+TODO ... (add more instructions to reproduce the experiments)
+
+basic running command:
+
+```bash
+cd exps/dist_attn
+
+export PYTHONPATH="${PYTHONPATH}:/path/to/MagiAttention/"
+
+bash run_benchmark.sh
+```
+
+## Baseline Tests for Correctness
+
+basic running command:
+
+```bash
+cd exps/dist_attn/tests
+
+export PYTHONPATH="${PYTHONPATH}:/path/to/MagiAttention/"
+
+bash test_attn_correctness.sh
+```

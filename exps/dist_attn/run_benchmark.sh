@@ -14,20 +14,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
-export NNODES=$WORLD_SIZE
+export WORLD_SIZE=${WORLD_SIZE:-64}
+export GPUS_PER_NODE=8
+export NNODES=${NNODES:-8}
 export NODE_RANK=${RANK:-0}
-export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
-export MASTER_PORT=${MASTER_PORT:-16988}
-
-# hack to set world size
-export WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
+export MAGI_ATTENTION_HIERARCHICAL_COMM=${MAGI_ATTENTION_HIERARCHICAL_COMM:-1}
+# export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+# export MASTER_PORT=${MASTER_PORT:-16988}
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
-export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 
-# set the following three env variables when you need deterministic mode, otherwise, just comment them
-# export CUBLAS_WORKSPACE_CONFIG=:4096:8
+if [ "${MAGI_ATTENTION_HIERARCHICAL_COMM}" == "1" ]; then
+    export CUDA_DEVICE_MAX_CONNECTIONS=8
+    echo "set CUDA_DEVICE_MAX_CONNECTIONS=8"
+else
+    export CUDA_DEVICE_MAX_CONNECTIONS=1
+    echo "set CUDA_DEVICE_MAX_CONNECTIONS=1"
+fi
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \
@@ -37,17 +40,13 @@ DISTRIBUTED_ARGS="
     --master_port $MASTER_PORT
 "
 
-TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS main.py"
-$TORCHRUN_CMD
+echo $DISTRIBUTED_ARGS
 
-# generate a timestamp for the nsys output file
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-
-NSYS_CMD="
-nsys profile \
+# TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
+CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
+TORCHRUN_CMD="nsys profile \
     --force-overwrite true \
-    -o outs/magi_attention_exp_${TIMESTAMP}.nsys-rep \
+    -o magi.nsys-rep \
     --capture-range=cudaProfilerApi \
-    $TORCHRUN_CMD
-"
-$NSYS_CMD
+    $CMD"
+$TORCHRUN_CMD
