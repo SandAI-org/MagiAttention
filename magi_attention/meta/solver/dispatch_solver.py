@@ -328,6 +328,8 @@ class BatchToppHeapDispatchAlg(DispatchAlg):
 class SortedSequentialSelectAlg(DispatchAlg):
     """The config/meta info dataclass for the batch topp-heap dispatch algorithm"""
 
+    allocation_ratio: float = 1.0
+
     @property
     def type(self) -> DispatchAlgType:
         return DispatchAlgType.SORTED_SEQUENTIAL_SELECT
@@ -1366,6 +1368,10 @@ class DispatchSolver(nn.Module):
         jobs: list[DispatchJob] = dispatch_data.jobs
         num_buckets: int = dispatch_data.num_buckets
 
+        # get allocation ratio from dispatch alg
+        allocation_ratio = kwargs.get("allocation_ratio", 1.0)
+        assert 0.0 <= allocation_ratio <= 1.0
+
         sample_areas: list[int] = dispatch_data.sample_areas  # type: ignore
         assert (
             sample_areas is not None and len(sample_areas) > 0
@@ -1430,20 +1436,38 @@ class DispatchSolver(nn.Module):
         for sample_id in sample_ids_sorted:
             # get chunk_ids will be handled
             chunk_ids_list = sorted(sample_to_slice_map[sample_id])[::-1]
+            max_chunks_per_allocation = max(
+                1, math.ceil(allocation_ratio * len(chunk_ids_list))
+            )
             cur_workload, bucket_idx, affinity = heapq.heappop(heap)
+            chunks_assigned_per_allocation = 0
             for chunk_id in chunk_ids_list:
                 # skip chunk has assigned
                 if chunk_has_select[chunk_id]:
                     continue
-                new_workload = cur_workload + workloads[chunk_id]
+
+                # assign chunk and calculate bucket workload
+                cur_workload = cur_workload + workloads[chunk_id]
                 _assign_job_to_bucket(
                     job_idx=chunk_id,
                     bucket_idx=bucket_idx,
-                    new_workload=new_workload,
+                    new_workload=cur_workload,
                 )
+                chunks_assigned_per_allocation += 1
                 chunk_has_select[chunk_id] = True
+
+                # get new bucket if current bucket is full
                 if bucket_nums[bucket_idx] == bucket_num_limit and len(heap) > 0:
                     cur_workload, bucket_idx, affinity = heapq.heappop(heap)
+                    chunks_assigned_per_allocation = 0
+                # push current bucket and get new bucket if assigned chunks exceed max chunks per allocation
+                elif (
+                    allocation_ratio < 1.0
+                    and chunks_assigned_per_allocation == max_chunks_per_allocation
+                ):
+                    heapq.heappush(heap, (cur_workload, bucket_idx, affinity))
+                    cur_workload, bucket_idx, affinity = heapq.heappop(heap)
+                    chunks_assigned_per_allocation = 0
 
             if bucket_nums[bucket_idx] < bucket_num_limit:
                 heapq.heappush(heap, (cur_workload, bucket_idx, affinity))

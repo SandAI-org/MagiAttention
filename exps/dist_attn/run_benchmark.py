@@ -145,8 +145,8 @@ def init_dist_environment(
         # NOTE: param for loongtrain double ring-attention
         window_num = 2
         # assert world_size % window_num == 0
-        device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
-        cp_group = get_loongtrain_pg(device_shard, window_num, rank)
+        device_shard = init_distributed(world_size=world_size, pg_meta=None)
+        cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
     elif attn_impl == AttnImpl.MAGI_ATTENTION:
         dist.init_process_group(
             backend="nccl",
