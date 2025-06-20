@@ -111,7 +111,7 @@ CUTLASS_DEVICE auto convert_layout_acc_rowcol(Layout0 acc_layout) {
         if constexpr (!Transposed) {
             return make_layout(make_layout(get<0, 1>(l), get<1>(l)), make_layout(get<0, 0>(l), get<0, 2>(l), get<2>(l)));
         } else {
-             return make_layout(make_layout(get<0, 0>(l), get<0, 2>(l), get<2>(l)), make_layout(get<0, 1>(l), get<1>(l)));
+            return make_layout(make_layout(get<0, 0>(l), get<0, 2>(l), get<2>(l)), make_layout(get<0, 1>(l), get<1>(l)));
         }
 
     } else {  // SM80
@@ -447,6 +447,70 @@ CUTLASS_DEVICE void copy(TiledCopy<CopyAtom, TV, Tiler> const &tiled_copy, Tenso
     #pragma unroll
     for (int m = 0; m < size<1>(S); ++m) {
         bool predicate_mn = Is_even_MN || get<0>(identity_MN(_0{}, m, _0{})) < max_MN;
+        if constexpr (Is_even_MN || !Clear_OOB_MN) {
+            if (Is_even_MN || predicate_mn) {
+                #pragma unroll
+                for (int k = 0; k < size<2>(S); ++k) {
+                    if constexpr (Is_even_K || !Clear_OOB_K) {
+                        if (Is_even_K || predicate_K(k)) { cute::copy(copy_atom, S(_, m, k), D(_, m, k)); }
+                    } else {  // Clear_OOB_K == true && Is_even_K == false
+                        // If copy traits can be transformed with a predicate value, do it, otherwise branch here
+                        if constexpr (has_with_bool) {
+                            cute::copy(copy_atom.with(predicate_K(k)), S(_, m, k), D(_, m, k));
+                        } else {
+                            if (predicate_K(k)) {
+                                cute::copy(copy_atom, S(_, m, k), D(_, m, k));
+                            } else {
+                                cute::clear(D(_, m, k));
+                            }
+                        }
+                    }
+                }
+            }
+        } else {  // Clear_OOB_MN == true && Is_even_MN == false, also implies Clear_OOB_K == true
+            if constexpr (!has_with_bool) {
+                if (predicate_mn) {
+                    #pragma unroll
+                    for (int k = 0; k < size<2>(S); ++k) {
+                        if (Is_even_K || predicate_K(k)) {
+                            cute::copy(copy_atom, S(_, m, k), D(_, m, k));
+                        } else if (Clear_OOB_K) {
+                            cute::clear(D(_, m, k));
+                        }
+                    }
+                } else {
+                    cute::clear(D(_, m, _));
+                }
+            } else {  // combine the mn predicate with the k predicate
+                #pragma unroll
+                for (int k = 0; k < size<2>(S); ++k) {
+                    cute::copy(copy_atom.with(predicate_mn && (Is_even_K || predicate_K(k))), S(_, m, k), D(_, m, k));
+                }
+            }
+        }
+    }
+}
+
+
+template <bool Is_even_MN=true, bool Is_even_K=true, bool Clear_OOB_MN=false, bool Clear_OOB_K=true,
+          class CopyAtom, class TV, class Tiler, typename Engine0, typename Layout0, typename Engine1, typename Layout1,
+          typename Engine2, typename Layout2, typename Engine3, typename Layout3, typename Engine4, typename Layout4>
+CUTLASS_DEVICE void copy2(TiledCopy<CopyAtom, TV, Tiler> const &tiled_copy, Tensor<Engine0, Layout0> const &S,
+                         Tensor<Engine1, Layout1> &D, Tensor<Engine2, Layout2> const &identity_MN,
+                         Tensor<Engine3, Layout3> const &predicate_K, Tensor<Engine4, Layout4> const &predicate_M) {
+    // Decay TiledCopy to CopyAtom
+    auto copy_atom = static_cast<CopyAtom const&>(tiled_copy);
+    CUTE_STATIC_ASSERT_V(rank(S) == Int<3>{});
+    CUTE_STATIC_ASSERT_V(rank(D) == Int<3>{});
+    CUTE_STATIC_ASSERT_V(size<0>(S) == size<0>(D));                     // MMA
+    CUTE_STATIC_ASSERT_V(size<1>(S) == size<1>(D));                     // MMA_M
+    CUTE_STATIC_ASSERT_V(size<2>(S) == size<2>(D));                     // MMA_K
+    // There's no case where !Clear_OOB_K && Clear_OOB_MN
+    static_assert(!(Clear_OOB_MN && !Clear_OOB_K));
+    auto has_with_bool = cute::is_valid([](auto t)->void_t<decltype(declval<typename decltype(t)::Traits>().with(true))>{}, copy_atom);
+    #pragma unroll
+    for (int m = 0; m < size<1>(S); ++m) {
+        bool predicate_mn = Is_even_MN || predicate_M(m);
         if constexpr (Is_even_MN || !Clear_OOB_MN) {
             if (Is_even_MN || predicate_mn) {
                 #pragma unroll

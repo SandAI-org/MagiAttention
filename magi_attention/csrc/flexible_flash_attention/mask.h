@@ -21,38 +21,22 @@ enum class AttnType {
     BiCausal = 3,
 };
 
-template <int kBlockM, int kBlockN, bool PackGQA, typename TiledMma, bool SwapAB=false>
+template <int kBlockM, int kBlockN, typename TiledMma, bool SwapAB=false>
 struct Mask {
-
-    static_assert(!(PackGQA && SwapAB), "Cannot be both PackGQA and SwapAB");
-
     int const thread_idx;
     int const seqlen_q, seqlen_k;
-    int const window_size_left, window_size_right, sink_token_length;
-    cutlass::FastDivmod const qhead_per_khead_divmod;
 
     CUTLASS_DEVICE
-    Mask(const int thread_idx, const int seqlen_q, const int seqlen_k,
-         const int window_size_left, const int window_size_right, const int sink_token_length,
-         cutlass::FastDivmod const &qhead_per_khead_divmod)
+    Mask(const int thread_idx, const int seqlen_q, const int seqlen_k)
         : thread_idx(thread_idx)
         , seqlen_q(seqlen_q)
         , seqlen_k(seqlen_k)
-        , window_size_left(window_size_left)
-        , window_size_right(window_size_right)
-        , sink_token_length(sink_token_length)
-        , qhead_per_khead_divmod(qhead_per_khead_divmod)
-    {
-    };
+    {};
 
-    template <bool Seqlenk_mask=false, bool Causal_mask=false, bool Local_mask=false,
-        typename Engine, typename Layout>
+    template <bool Seqlenk_mask=false, typename Engine, typename Layout>
     CUTLASS_DEVICE
     void apply(Tensor<Engine, Layout> &tSrS, const int m_block, const int n_block, const flash::AttnType attn_type) const {
-        static_assert(!(Causal_mask && Local_mask), "Cannot be both causal and local");
         static_assert(Layout::rank == 3, "Only support 3D Tensor");
-        // if (!Seqlenk_mask && !is_causal && !Local_mask) { return; }
-
         auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
         auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
 
@@ -86,18 +70,11 @@ struct Mask {
                 // If PackGQA, we split the work of compute divmod among threads in the same row
                 static constexpr int kMmaThreadsPerRow = size<0, 0>(typename TiledMma::AtomLayoutC_TV{});
                 static_assert(cutlass::NumThreadsPerWarp % kMmaThreadsPerRow == 0);
-                static_assert(!PackGQA || CUTE_STATIC_V(size<0>(tSrS_rowcol)) <= kMmaThreadsPerRow);
-                int mma_m_idx;
                 // Might get OOB but it's ok since we'll check it later
-                if constexpr (PackGQA) {
-                    mma_m_idx = qhead_per_khead_divmod.divide(m_block * kBlockM + get<Row>(tScS_rowcol(thread_idx % kMmaThreadsPerRow, _0{})));
-                }
                 int const causal_row_offset = 1 + seqlen_k - n_block * kBlockN - seqlen_q - thread_col_offset;
                 #pragma unroll
                 for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
-                    int const row_idx = !PackGQA
-                        ? get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM
-                        :  __shfl_sync(0xffffffff, mma_m_idx, m % kMmaThreadsPerRow, kMmaThreadsPerRow);
+                    int const row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
                     int const col_limit_right = !Seqlenk_mask
                         ? row_idx + causal_row_offset
                         : __viaddmin_s32(row_idx, causal_row_offset, seqlenk_col_limit);
