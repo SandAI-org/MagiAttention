@@ -927,7 +927,7 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads_qo columns
     
     // Initialize determin_range_locks tensor, the shape is same as range_locks
-    at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads}, opts.dtype(torch::kInt32));
+    at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
     // Initialize determin_conflict_state, num_sm_max rows, ceil_div(total_q, kBlockM) + 1 columns
     int const num_sm_max = 132; // max sm number for H100
     at::Tensor determin_conflict_state = torch::empty({num_sm_max, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
