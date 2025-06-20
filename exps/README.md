@@ -23,5 +23,19 @@ basic running command:
 ```bash
 cd exps/dist_attn
 
+export PYTHONPATH="${PYTHONPATH}:/path/to/MagiAttention/"
+
 bash run_benchmark.sh
+```
+
+## Baseline Tests for Correctness
+
+basic running command:
+
+```bash
+cd exps/dist_attn/tests
+
+export PYTHONPATH="${PYTHONPATH}:/path/to/MagiAttention/"
+
+bash test_attn_correctness.sh
 ```
