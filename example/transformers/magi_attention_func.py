@@ -19,14 +19,7 @@ from einops import rearrange
 from torch import nn
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from magi_attention.api import calc_attn
-from magi_attention.api.magi_attn_interface import DistAttnRuntimeDict
-
-
-def get_magi_attention_key():
-    """get most recent magi_attention key"""
-
-    return DistAttnRuntimeDict.get_most_recent_key()
+from magi_attention.api import calc_attn, get_most_recent_key
 
 
 # define magi_attn function
@@ -40,7 +33,7 @@ def Magi_Attention_forward(
     dropout: float = 0.0,
     **kwargs,
 ):
-    magi_attn_key = get_magi_attention_key()
+    magi_attn_key = get_most_recent_key()
 
     dtype = query.dtype
     q, k, v = [

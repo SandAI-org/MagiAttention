@@ -29,7 +29,6 @@ from typing import Any, Union
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DataLoaderConfiguration
-from Magi_attention import get_magi_attention_key
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from transformers import MODEL_FOR_CAUSAL_LM_MAPPING, Trainer
@@ -38,7 +37,12 @@ from transformers.utils import check_min_version, is_accelerate_available
 from transformers.utils.versions import require_version
 from typing_extensions import override
 
-from magi_attention.api import get_position_ids, magi_attn_varlen_dispatch, undispatch
+from magi_attention.api import (
+    get_most_recent_key,
+    get_position_ids,
+    magi_attn_varlen_dispatch,
+    undispatch,
+)
 from magi_attention.api.functools import (
     compute_pad_size,
     full_attention_to_varlen_attention,
@@ -333,7 +337,7 @@ class MagiTrainer(Trainer):
         outputs = model(**inputs)
         logits = outputs.logits
 
-        magi_attn_key = get_magi_attention_key()
+        magi_attn_key = get_most_recent_key()
         if magi_attn_key is not None:
             logits = squash_batch_dim(logits)
 

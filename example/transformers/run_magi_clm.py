@@ -46,6 +46,7 @@ from typing import Optional
 
 import datasets
 import evaluate
+import magi_attention_func  # noqa: F401 register attn
 import torch
 import transformers
 from datasets import load_dataset
@@ -80,7 +81,7 @@ if is_apex_available():
     pass
 
 
-from Magi_trainer import MagiTrainer
+from magi_trainer import MagiTrainer
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.51.0")

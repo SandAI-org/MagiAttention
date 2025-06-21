@@ -24,7 +24,7 @@ SEQLEN=8192
 PRECISION="bf16=true"
 CP_SIZE=$1
 GA=$2
-NPROC_PER_NODE=8
+NPROC_PER_NODE=1
 export cp_size=$CP_SIZE
 
 export WANDB_PROJECT="your_wandb_project"
@@ -37,7 +37,8 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --master_addr $MASTER_ADDR \
     run_magi_clm.py \
     --num_train_epochs 2 \
-    --dataset_name openwebtext \
+    --dataset_name wikitext \
+    --dataset_config_name wikitext-2-raw-v1 \
     --use_fast_tokenizer false \
     --per_device_train_batch_size $BS \
     --per_device_eval_batch_size $BS \

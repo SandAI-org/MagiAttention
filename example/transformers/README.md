@@ -1,8 +1,5 @@
 # Using MagiAttention with HuggingFace Transformers
-
-We provide an example for training a Llama-3 1B model with MagiAttention (using a DP+CP approach) based on the Hugging Face [transformers](https://github.com/huggingface/transformers) library.
-
-To verify its correctness, we include experiments that compare the training loss of the model with MagiAttention against a standard baseline
+We provide an example for training a Llama-3 1B model with MagiAttention (using a DP+CP approach) in the Hugging Face transformers library. To verify its correctness, we include experiments that compare the training loss of the model with MagiAttention against a standard baseline
 
 ## Install Transformers and Accelerate
 ```shell
@@ -15,21 +12,18 @@ pip install evaluate
 ```
 
 ## Prepare model and datasets
-
 We load from [Llama-3-1b](https://huggingface.co/meta-llama/Llama-3.2-1B) model and continue training it with [openwebtext](https://huggingface.co/datasets/Skylion007/openwebtext) datasets.
 
 You can also download the model from [modelscope](https://www.modelscope.cn/models/LLM-Research/Llama-3.2-1B/).
 
 
 ## Prepare Trainer
-
 The HuggingFace Transformers library provides the [run_clm.py](https://github.com/huggingface/transformers/blob/v4.51.3/examples/pytorch/language-modeling/run_clm.py) script for training causal language models (CLMs) like gpt and llama. This script integrates seamlessly with accelerate, allowing you to specify a distributed training strategy (such as DDP or FSDP) while accelerate automatically handles the underlying data distribution and process setup. As a reference, we have included `run_origin_clm.py` and `run_origin_clm.sh` in this directory, which mirror the official implementation for training causal language models.
 
 However, MagiAttention is a context parallel strategy that isn't natively supported by the transformers and accelerate libraries. Therefore, integrating it requires customizing the `transformers.Trainer` and `accelerate.Accelerator` classes. We provide `run_magi_clm.py` and `run_magi_clm.sh` in this dir to train llama-3-1b model with MagiAttention.
 
 ### Customize accelerate Accelerator
-
-The following code are all available at `Magi_trainer.py`.
+The following code are all available at `magi_trainer.py`.
 
 We need to prepare a custom Accelerator called MagiAccelerator inheriting from the `accelerate.Accelerator` class:
 ```python
@@ -53,29 +47,28 @@ def _prepare_device_mesh(self):
         self.state, "ds_device_mesh"
     ):
         return self.state.ds_device_mesh
-+   elif cp_size > 1:
-+       device_mesh = torch.arange(0, torch.distributed.get_world_size()).reshape(
-+           torch.distributed.get_world_size() // cp_size,  # dp_size
-+           cp_size,
-+       )
++    elif cp_size > 1:
++        device_mesh = torch.arange(0, torch.distributed.get_world_size()).reshape(
++            torch.distributed.get_world_size() // cp_size,  # dp_size
++            cp_size,
++        )
 +
-+       device_mesh = DeviceMesh(
-+           device_type="cuda",
-+           mesh=device_mesh,
-+           mesh_dim_names=(
-+               "dp",
-+               "tp",
-+           ),  # hack tp as cp here, set dp-tp 2-dim parallel
-+       )
++        device_mesh = DeviceMesh(
++            device_type="cuda",
++            mesh=device_mesh,
++            mesh_dim_names=(
++                "dp",
++                "tp",
++            ),  # hack tp as cp here, set dp-tp 2-dim parallel
++        )
 +
-+       return device_mesh
++        return device_mesh
 
     return None
 ```
 
 ### Customize Transformers Trainer
-
-The following code are all available at `Magi_trainer.py`.
+The following code are all available at `magi_trainer.py`.
 
 We need to prepare a custom Trainer called `MagiTrainer` inheriting from the `transformers.Trainer` class:
 ```python
@@ -89,8 +82,8 @@ Override `_prepare_inputs` to prepare data and position_ids for MagiAttention:
 def _prepare_inputs():
     ...
 +   local_input, cu_seqlens_q, cu_seqlens_k, pad_size = self._prepare_magi_data(
-+       inputs["input_ids"], self.model.config.head_dim
-+   )
++               inputs["input_ids"], self.model.config.head_dim
++           )
 +
 +   local_input, magi_attn_key = self._prepare_magi_attention(
 +       local_input,
@@ -107,9 +100,9 @@ def _prepare_inputs():
     return inputs
 
 # dispatch data and prepare key
-+ def _prepare_magi_attention(
++def _prepare_magi_attention(
 +    self, inputs, cu_seqlens_q, cu_seqlens_k, pad_size, head_dim
-+ ):
++):
 +    # ---   magi_attn_flex_dispatch   --- #
 +    dist_attn_config = DistAttnConfig()
 +    cp_group = self._build_cp_group()
@@ -179,11 +172,14 @@ def create_accelerator_and_postprocess():
 
 Last but not least, we need to create and use `MagiTrainer` in `run_magi_clm.py`:
 ```diff
-+ from Magi_trainer import MagiTrainer
++ from magi_trainer import MagiTrainer
++ trainer = MagiTrainer(
+            ...
+            )
 
-+ trainer = MagiTrainer(...)
-- trainer = Trainer(...)
-
+- trainer = Trainer(
+            ...
+            )
 ...
 
 trainer.train()
@@ -196,7 +192,7 @@ What's more, MagiAttention provides a new type of attention implenmentation(flex
 ``` python
 def Magi_Attention_forward(
     module: nn.Module,
-    query: torch.Tensor,  # (b, num_heads, seq_len, head_dim)
+    query: torch.Tensor,  # (b, num_heads, seq_len, hidden_dim)
     key: torch.Tensor,
     value: torch.Tensor,
     attention_mask: Optional[torch.Tensor],
@@ -226,22 +222,19 @@ Use `Magi_Attention` as model's attention inplementation in `run_magi_clm.py`:
 ```diff
 ...
 elif model_args.model_name_or_path:
-    config = AutoConfig.from_pretrained(
-        model_args.model_name_or_path, **config_kwargs
-    )
+        config = AutoConfig.from_pretrained(
+            model_args.model_name_or_path, **config_kwargs
+        )
 ...
-
-+ config._attn_implementation = "Magi_Attention"
-
++config._attn_implementation = "Magi_Attention"
 ...
 ```
 
-> [!NOTE]
-> We don't need to make any modifications to modeling_llama.py
+We don't need to make any modifications to modeling_llama.py
+
 
 
 ## Experiments
-
 ### Training Environment
 | **Env**                 | **version**                                                                                |
 | ----------------------------- | -------------------------------------------------------------------------------------------- |
@@ -262,11 +255,11 @@ elif model_args.model_name_or_path:
 | **Group Query Attention**     | Enabled                                                                                      |
 | **Number of Query Groups**    | 8                                                                                            |
 | **Sequence Length**           | 8192                                                                                         |
-| **Parallel Size**     | CP1/2/4/8 (MagiAttention) vs no cp(torch native) with a global batch size of 8        |
+| **Parallel Size**     | CP1/4/8 (MagiAttention) vs no cp(torch native) with a global batch size of 8        |
 | **Training Iterations**       | 2000                                                                                      |
 
 
 ### Results
 
 MagiAttention aligns well with torch native training:
-![Results](./results.png)
+![Results](./result.png)
