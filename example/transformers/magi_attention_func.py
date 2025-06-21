@@ -23,7 +23,7 @@ from magi_attention.api import calc_attn, get_most_recent_key
 
 
 # define magi_attn function
-def Magi_Attention_forward(
+def magi_attention_forward(
     module: nn.Module,
     query: torch.Tensor,  # (b, num_heads, seq_len, hidden_dim)
     key: torch.Tensor,
@@ -50,4 +50,4 @@ def Magi_Attention_forward(
 
 
 # register Magi_Attention as attn_backend globally.
-ALL_ATTENTION_FUNCTIONS.register("Magi_Attention", Magi_Attention_forward)
+ALL_ATTENTION_FUNCTIONS.register("Magi_Attention", magi_attention_forward)

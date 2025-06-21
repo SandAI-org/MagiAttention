@@ -190,7 +190,7 @@ The following code are all avaliable at Magi_attention.py.
 
 What's more, MagiAttention provides a new type of attention implenmentation(flexible flash_attention), so we need to register it for use:
 ``` python
-def Magi_Attention_forward(
+def magi_attention_forward(
     module: nn.Module,
     query: torch.Tensor,  # (b, num_heads, seq_len, hidden_dim)
     key: torch.Tensor,
@@ -216,7 +216,7 @@ def Magi_Attention_forward(
     return o, None
 
 # register Magi_Attention as attn_backend globally.
-ALL_ATTENTION_FUNCTIONS.register("Magi_Attention", Magi_Attention_forward)
+ALL_ATTENTION_FUNCTIONS.register("Magi_Attention", magi_attention_forward)
 ```
 Use `Magi_Attention` as model's attention inplementation in `run_magi_clm.py`:
 ```diff
