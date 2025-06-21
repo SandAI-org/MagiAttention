@@ -47,6 +47,16 @@ class FixedLenDict(OrderedDict):
             return value
         return default
 
+    def get_most_recent_key(self):
+        """
+        Gets and returns the most recently added or accessed key.
+        If the dictionary is empty, returns None.
+        """
+        if not self:
+            return None
+
+        return next(reversed(self.keys()))
+
 
 def compute_pad_size(total_seqlen_q, cp_size, head_dim):
     """

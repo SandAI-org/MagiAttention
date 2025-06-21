@@ -659,3 +659,10 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
         raise ValueError("DistRunTimeKey not exists!")
 
     return mgr.get_position_ids()
+
+
+def get_most_recent_key():
+    """
+    Return the most recent insert key.
+    """
+    return DistAttnRuntimeDict.get_most_recent_key()
