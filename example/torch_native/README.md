@@ -2,7 +2,7 @@
 
 We provide an example in this direcotry to show you how to intergrate MagiAttention with FSDP to train llama-1b model.
 
-What's more, we provide an example in ./experiments to show you how to intergrate MagiAttention with Huggingface Transformers to train a llama-3-1b model.
+What's more, we provide an example in `./experiments` to show you how to intergrate MagiAttention with Hugging Face [transformers](https://github.com/huggingface/transformers) to train a llama-3-1b model.
 
 ## High-Precision Alignment
 
@@ -13,7 +13,7 @@ To validate the effectiveness of MagiAttention, we integrated it into the Huggin
 | **Env**                       | **version**                                                                          |
 | ----------------------------- | ------------------------------------------------------------------------------------ |
 |  docker             |  ngc25.02-py3                                                                                  |
-|  MagiAttention      |  Tags: v1.0.2                                                                                  | 
+|  MagiAttention      |  Tags: v1.0.2                                                                                  |
 |  transformers       |  Tags: 4.51.3                                                                                  |
 |  accelerate         |  Tags: 1.6.0                                                                                   |
 
