@@ -250,6 +250,17 @@ class TestFlexFlashAttn(TestCase):
                 ),
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             },
+            # {
+            #     "name": "deterministic_20",
+            #     "seqlen": 101,
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [[0, 100], [1, 101]] * 10
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [[i * 50, (i + 1) * 50] for i in range(20)]
+            #     ),
+            #     "attn_type_map": [1] * 20,
+            # },
         ],
     )
     @parameterize(
@@ -284,6 +295,7 @@ class TestFlexFlashAttn(TestCase):
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
     @parameterize("auto_range_merge", [False, True])
+    # @parameterize("fwd_deterministic", [True, False])
     def test_flex_attn(
         self,
         attn_mask_config: dict[str, Any],
@@ -291,6 +303,7 @@ class TestFlexFlashAttn(TestCase):
         dtype: torch.dtype,
         random_attn_type_map: bool,
         auto_range_merge: bool = False,
+        # fwd_deterministic: bool,
     ):
         # extract config
         seqlen = attn_mask_config["seqlen"]
@@ -364,8 +377,26 @@ class TestFlexFlashAttn(TestCase):
             max_seqlen_k,
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
+            # deterministic=fwd_deterministic,
         )
         o.backward(do)
+
+        # if fwd_deterministic:
+        #     o2, _ = flex_flash_attn_func(
+        #         q,
+        #         k,
+        #         v,
+        #         q_ranges_tensor,
+        #         k_ranges_tensor,
+        #         max_seqlen_q,
+        #         max_seqlen_k,
+        #         attn_type_map_tensor,
+        #         deterministic=fwd_deterministic,
+        #     )
+        #     try:
+        #         assert torch.equal(o, o2)
+        #     except Exception as e:
+        #         raise AssertionError("\n\n".join([str(e)]))
 
         # compare with reference
         self.assert_close_to_torch_ref(
