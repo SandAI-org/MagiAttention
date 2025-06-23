@@ -1051,7 +1051,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=1,
                         ),
                     ],
-                    sample_ids=[0, 1]
+                    sample_ids=[0, 1],
                 ),
             ]
         )
