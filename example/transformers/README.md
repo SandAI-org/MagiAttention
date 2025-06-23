@@ -29,7 +29,7 @@ However, MagiAttention is a context parallel strategy that isn't natively suppor
 
 ### Customize accelerate Accelerator
 
-The following code are all available at `Magi_trainer.py`.
+The following code are all available at `magi_trainer.py`.
 
 We need to prepare a custom Accelerator called MagiAccelerator inheriting from the `accelerate.Accelerator` class:
 ```python
@@ -75,7 +75,7 @@ def _prepare_device_mesh(self):
 
 ### Customize Transformers Trainer
 
-The following code are all available at `Magi_trainer.py`.
+The following code are all available at `magi_trainer.py`.
 
 We need to prepare a custom Trainer called `MagiTrainer` inheriting from the `transformers.Trainer` class:
 ```python
@@ -179,7 +179,7 @@ def create_accelerator_and_postprocess():
 
 Last but not least, we need to create and use `MagiTrainer` in `run_magi_clm.py`:
 ```diff
-+ from Magi_trainer import MagiTrainer
++ from magi_trainer import MagiTrainer
 
 + trainer = MagiTrainer(...)
 - trainer = Trainer(...)
@@ -204,7 +204,7 @@ def Magi_Attention_forward(
     dropout: float = 0.0,
     **kwargs,
 ):
-    magi_attn_key = get_magi_attention_key()
+    magi_attn_key = get_most_recent_key()
 
     dtype = query.dtype
     q, k, v = [
@@ -262,11 +262,11 @@ elif model_args.model_name_or_path:
 | **Group Query Attention**     | Enabled                                                                                      |
 | **Number of Query Groups**    | 8                                                                                            |
 | **Sequence Length**           | 8192                                                                                         |
-| **Parallel Size**     | CP1/2/4/8 (MagiAttention) vs no cp(torch native) with a global batch size of 8        |
-| **Training Iterations**       | 2000                                                                                      |
+| **Parallel Size**     | CP1/4/8 (MagiAttention) vs no cp(torch native) with a global batch size of 8        |
+| **Training Steps**       | 3000                                                                                      |
 
 
 ### Results
 
 MagiAttention aligns well with torch native training:
-![Results](./results.png)
+![Result](./result.png)
