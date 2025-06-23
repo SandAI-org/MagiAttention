@@ -256,7 +256,7 @@ We don't need to make any modifications to modeling_llama.py
 | **Number of Query Groups**    | 8                                                                                            |
 | **Sequence Length**           | 8192                                                                                         |
 | **Parallel Size**     | CP1/4/8 (MagiAttention) vs no cp(torch native) with a global batch size of 8        |
-| **Training Iterations**       | 2000                                                                                      |
+| **Training Steps**       | 3000                                                                                      |
 
 
 ### Results
