@@ -918,31 +918,6 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     // 2. use float32 to ensure numerical stability
     auto softmax_lse = torch::full({num_heads_qo, total_q}, std::numeric_limits<float>::infinity() * -1, opts.dtype(at::kFloat));
 
-    // Get element size
-    int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
-    // Get q block size, used to initialize range_locks
-    // FIXME: hack way to get the block size
-    int const kBlockM = arch >= 90 ? std::get<0>(tile_size_fwd_sm90(params.d, params.dv, false, false, element_size/*element_size*/, false, false, softcap > 0.0)) : 128;
-    at::Tensor range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads}, opts.dtype(torch::kInt32));
-    // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads_qo columns
-    
-    // Initialize determin_range_locks tensor, the shape is same as range_locks
-    at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
-    // Initialize determin_conflict_state, num_sm_max rows, ceil_div(total_q, kBlockM) + 1 columns
-    int const num_sm_max = 132; // max sm number for H100
-    at::Tensor determin_conflict_state = torch::empty({num_sm_max, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
-
-    // If atomic reduction is enabled, we need to zero out the out_accum tensor
-    if (!disable_fwd_atomic_reduction) {
-        range_locks.zero_();
-    }
-
-    // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
-    if (deterministic_enable) {
-        determin_range_locks.zero_();
-        determin_conflict_state.zero_();
-    }
-
     set_params_fprop(params,
                      batch_size,
                      seqlen_q, seqlen_k,
@@ -985,6 +960,26 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     TORCH_CHECK(q_type == at::ScalarType::BFloat16 || q_type == at::ScalarType::Half, "Only bfloat16 and float16 are supported");
     TORCH_CHECK(params.d == params.dv, "d and dv must be the same");
     TORCH_CHECK(params.d <= 192, "d must be <= 192");
+
+    // Get element size
+    int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
+    // Get q block size, used to initialize range_locks
+    // FIXME: hack way to get the block size
+    int const kBlockM = arch >= 90 ? std::get<0>(tile_size_fwd_sm90(params.d, params.dv, false, false, element_size/*element_size*/, false, false, softcap > 0.0)) : 128;
+    at::Tensor range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads}, opts.dtype(torch::kInt32));
+    // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads_qo columns
+    
+    // Initialize determin_range_locks tensor, the shape is same as range_locks
+    at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
+    // Initialize determin_conflict_state, num_sm_max rows, ceil_div(total_q, kBlockM) + 1 columns
+    int const num_sm_max = 132; // max sm number for H100
+    at::Tensor determin_conflict_state = torch::empty({num_sm_max, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+
+    // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
+    if (deterministic_enable) {
+        determin_range_locks.zero_();
+        determin_conflict_state.zero_();
+    }
 
     params.range_locks = range_locks.data_ptr<int>();
 
