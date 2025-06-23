@@ -37,5 +37,5 @@ cd exps/dist_attn/tests
 
 export PYTHONPATH="${PYTHONPATH}:/path/to/MagiAttention/"
 
-bash test_attn_correctness.sh
+pytest test_baseline_attn.py
 ```

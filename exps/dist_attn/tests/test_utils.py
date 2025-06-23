@@ -243,7 +243,7 @@ def get_attn_mask_from_cu_seqlens(
     return mask
 
 
-def test_torch_sdpa_func(q, k, v, grad_total_out, mask, high_precision=False):
+def ref_torch_sdpa_func(q, k, v, grad_total_out, mask, high_precision=False):
     total_q, total_k, total_v = [x.detach().clone() for x in [q, k, v]]
     total_q.requires_grad_(True)
     total_k.requires_grad_(True)
