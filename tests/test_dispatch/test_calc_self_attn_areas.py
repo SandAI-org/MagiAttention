@@ -82,6 +82,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=88,
                         ),
                     ],
+                    sample_ids=[0],
                 ),
                 AttnChunk(
                     chunk_id=1,
@@ -101,6 +102,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=63,
                         ),
                     ],
+                    sample_ids=[0, 1],
                 ),
                 AttnChunk(
                     chunk_id=2,
@@ -113,6 +115,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=36,
                         ),
                     ],
+                    sample_ids=[2],
                 ),
                 AttnChunk(
                     chunk_id=3,
@@ -132,6 +135,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=3,
                         ),
                     ],
+                    sample_ids=[2, 3],
                 ),
                 AttnChunk(
                     chunk_id=4,
@@ -144,6 +148,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=52,
                         ),
                     ],
+                    sample_ids=[3],
                 ),
                 AttnChunk(
                     chunk_id=5,
@@ -163,6 +168,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=95,
                         ),
                     ],
+                    sample_ids=[3, 4],
                 ),
                 AttnChunk(
                     chunk_id=6,
@@ -175,6 +181,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=152,
                         ),
                     ],
+                    sample_ids=[4],
                 ),
                 AttnChunk(
                     chunk_id=7,
@@ -194,6 +201,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=33,
                         ),
                     ],
+                    sample_ids=[4, 5],
                 ),
             ]
         )
@@ -281,6 +289,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=6,
                         ),
                     ],
+                    sample_ids=[0, 1, 2],
                 ),
                 AttnChunk(
                     chunk_id=1,
@@ -307,6 +316,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=15,
                         ),
                     ],
+                    sample_ids=[3, 4, 5],
                 ),
                 AttnChunk(
                     chunk_id=2,
@@ -326,6 +336,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=3,
                         ),
                     ],
+                    sample_ids=[6, 7],
                 ),
                 AttnChunk(
                     chunk_id=3,
@@ -345,6 +356,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=36,
                         ),
                     ],
+                    sample_ids=[7, 8],
                 ),
             ]
         )
@@ -408,6 +420,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=120,
                         ),
                     ],
+                    sample_ids=[0],
                 ),
                 AttnChunk(
                     chunk_id=1,
@@ -420,6 +433,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=144,
                         ),
                     ],
+                    sample_ids=[1],
                 ),
                 AttnChunk(
                     chunk_id=2,
@@ -439,6 +453,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=124,
                         ),
                     ],
+                    sample_ids=[1, 2],
                 ),
                 AttnChunk(
                     chunk_id=3,
@@ -451,6 +466,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=496,
                         ),
                     ],
+                    sample_ids=[2],
                 ),
                 AttnChunk(
                     chunk_id=4,
@@ -470,6 +486,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=102,
                         ),
                     ],
+                    sample_ids=[2, 3],
                 ),
                 AttnChunk(
                     chunk_id=5,
@@ -482,6 +499,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=408,
                         ),
                     ],
+                    sample_ids=[3],
                 ),
                 AttnChunk(
                     chunk_id=6,
@@ -501,6 +519,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=95,
                         ),
                     ],
+                    sample_ids=[3, 4],
                 ),
                 AttnChunk(
                     chunk_id=7,
@@ -513,6 +532,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=224,
                         ),
                     ],
+                    sample_ids=[5],
                 ),
                 AttnChunk(
                     chunk_id=8,
@@ -525,6 +545,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=152,
                         ),
                     ],
+                    sample_ids=[6],
                 ),
                 AttnChunk(
                     chunk_id=9,
@@ -537,6 +558,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=744,
                         ),
                     ],
+                    sample_ids=[7],
                 ),
                 AttnChunk(
                     chunk_id=10,
@@ -549,6 +571,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=744,
                         ),
                     ],
+                    sample_ids=[7],
                 ),
                 AttnChunk(
                     chunk_id=11,
@@ -568,6 +591,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=294,
                         ),
                     ],
+                    sample_ids=[7, 8],
                 ),
             ]
         )
@@ -627,6 +651,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=36,
                         ),
                     ],
+                    sample_ids=[0],
                 ),
                 AttnChunk(
                     chunk_id=1,
@@ -639,6 +664,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=36,
                         ),
                     ],
+                    sample_ids=[1],
                 ),
                 AttnChunk(
                     chunk_id=2,
@@ -651,6 +677,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=100,
                         ),
                     ],
+                    sample_ids=[1],
                 ),
                 AttnChunk(chunk_id=3, q_slices=[]),
                 AttnChunk(
@@ -671,6 +698,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=3,
                         ),
                     ],
+                    sample_ids=[2, 3],
                 ),
                 AttnChunk(
                     chunk_id=5,
@@ -683,6 +711,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=52,
                         ),
                     ],
+                    sample_ids=[3],
                 ),
                 AttnChunk(
                     chunk_id=6,
@@ -695,6 +724,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=116,
                         ),
                     ],
+                    sample_ids=[3],
                 ),
                 AttnChunk(
                     chunk_id=7,
@@ -714,6 +744,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=329,
                         ),
                     ],
+                    sample_ids=[3, 4],
                 ),
                 AttnChunk(
                     chunk_id=8,
@@ -726,6 +757,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=436,
                         ),
                     ],
+                    sample_ids=[4],
                 ),
                 AttnChunk(
                     chunk_id=9,
@@ -738,6 +770,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=500,
                         ),
                     ],
+                    sample_ids=[4],
                 ),
                 AttnChunk(
                     chunk_id=10,
@@ -757,6 +790,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=245,
                         ),
                     ],
+                    sample_ids=[4, 5],
                 ),
                 AttnChunk(
                     chunk_id=11,
@@ -776,6 +810,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=110,
                         ),
                     ],
+                    sample_ids=[5, 6],
                 ),
             ]
         )
@@ -829,6 +864,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=196,
                         ),
                     ],
+                    sample_ids=[0],
                 ),
                 AttnChunk(
                     chunk_id=1,
@@ -841,6 +877,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=260,
                         ),
                     ],
+                    sample_ids=[0],
                 ),
                 AttnChunk(
                     chunk_id=2,
@@ -853,6 +890,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=324,
                         ),
                     ],
+                    sample_ids=[0],
                 ),
                 AttnChunk(
                     chunk_id=3,
@@ -865,6 +903,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=285,
                         ),
                     ],
+                    sample_ids=[0],
                 ),
                 AttnChunk(chunk_id=4, q_slices=[]),
                 AttnChunk(
@@ -878,6 +917,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=15,
                         ),
                     ],
+                    sample_ids=[1],
                 ),
                 AttnChunk(
                     chunk_id=6,
@@ -890,6 +930,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=40,
                         ),
                     ],
+                    sample_ids=[1],
                 ),
                 AttnChunk(
                     chunk_id=7,
@@ -902,6 +943,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=6,
                         ),
                     ],
+                    sample_ids=[2],
                 ),
                 AttnChunk(
                     chunk_id=8,
@@ -914,6 +956,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=60,
                         ),
                     ],
+                    sample_ids=[2],
                 ),
                 AttnChunk(
                     chunk_id=9,
@@ -933,6 +976,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=87,
                         ),
                     ],
+                    sample_ids=[2, 3],
                 ),
                 AttnChunk(
                     chunk_id=10,
@@ -945,6 +989,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=172,
                         ),
                     ],
+                    sample_ids=[3],
                 ),
                 AttnChunk(
                     chunk_id=11,
@@ -957,6 +1002,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=236,
                         ),
                     ],
+                    sample_ids=[3],
                 ),
             ]
         )
@@ -1005,6 +1051,7 @@ class TestCalcSelfAttnAreas(TestCase):
                             _area=1,
                         ),
                     ],
+                    sample_ids=[0, 1]
                 ),
             ]
         )
