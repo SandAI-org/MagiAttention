@@ -60,5 +60,5 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --logging_steps 1 \
     --$PRECISION \
     --report_to wandb \
-    --max_steps 2000 \
+    --max_steps 3000 \
     --run_name origin-cp$CP_SIZE-ga$GA \

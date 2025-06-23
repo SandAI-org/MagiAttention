@@ -37,8 +37,7 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --master_addr $MASTER_ADDR \
     run_magi_clm.py \
     --num_train_epochs 2 \
-    --dataset_name wikitext \
-    --dataset_config_name wikitext-2-raw-v1 \
+    --dataset_name openwebtext \
     --use_fast_tokenizer false \
     --per_device_train_batch_size $BS \
     --per_device_eval_batch_size $BS \
@@ -61,5 +60,5 @@ torchrun --nproc_per_node $NPROC_PER_NODE \
     --logging_steps 1 \
     --$PRECISION \
     --report_to wandb \
-    --max_steps 2000 \
+    --max_steps 3000 \
     --run_name magi-cp$CP_SIZE-ga$GA \
