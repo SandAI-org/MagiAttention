@@ -246,7 +246,6 @@ struct CollectiveEpilogueFwd {
 
     CUTLASS_DEVICE
     void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int conflict_bidb1_raw, int conflict_bidb2_raw) {
-        // printf("sync: %d %d %d\n", conflict_bidb1_raw, conflict_bidb2_raw, blockIdx.x);
         int conflict_bidb1 = conflict_bidb1_raw >> 1;
         int conflict_bidb2 = conflict_bidb2_raw >> 1;
         if (conflict_bidb1 == 0 && conflict_bidb2 == 0)
@@ -275,7 +274,6 @@ struct CollectiveEpilogueFwd {
     
     CUTLASS_DEVICE
     void deterministic_arrive(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int bidb, bool l_arrive_twice, bool r_arrive_twice) {
-        // printf("arrive: %d %d %d\n", l_arrive_twice, r_arrive_twice, bidb);
         // Calculate lock indices
         int block_idx1 = offset / q_block_size;
         int index_1 = block_idx1 * num_heads + bidh;
