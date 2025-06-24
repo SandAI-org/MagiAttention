@@ -253,9 +253,7 @@ class TestFlexFlashAttn(TestCase):
             {
                 "name": "deterministic_1k",
                 "seqlen": 1000,
-                "q_ranges": AttnRanges.from_ranges(
-                    [[0, 100], [1, 101]] * 10
-                ),
+                "q_ranges": AttnRanges.from_ranges([[0, 100], [1, 101]] * 10),
                 "k_ranges": AttnRanges.from_ranges(
                     [[i * 50, (i + 1) * 50] for i in range(20)]
                 ),
