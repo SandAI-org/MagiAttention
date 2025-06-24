@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import unittest
 from enum import Enum
 from typing import Any
@@ -54,12 +55,24 @@ class AttnImpl(Enum):
     LOONGTRAIN = 5
 
 
+global_pg_groups = {}  # type: ignore
+global_loongtrain_pg_groups = {}  # type: ignore
+
+
 def get_device_mesh(pg_meta, world_size):
     pg_sizes = tuple(pg_meta.values())
     pg_names = tuple(pg_meta.keys())
     mesh = torch.arange(0, world_size).reshape(pg_sizes)
     deivce_mesh = DeviceMesh("cuda", mesh=mesh, mesh_dim_names=pg_names)
     return deivce_mesh
+
+
+def check_pg_exist(pg_meta, pg_groups):
+    key = json.dumps({str(k): v for k, v in pg_meta.items()})
+    if key in pg_groups:
+        return pg_groups[key], key
+    else:
+        return None, key
 
 
 class TestBaselineAttn(DistTestBase):
@@ -421,7 +434,8 @@ class TestBaselineAttn(DistTestBase):
         dtype: torch.dtype,
     ):
         # -----    init distributed environment   ---- #
-
+        global global_pg_groups
+        global global_loongtrain_pg_groups
         set_seed(self.seed)
 
         TO_TEST = impl_config["name"]
@@ -431,20 +445,29 @@ class TestBaselineAttn(DistTestBase):
         # -----    test ring attn   ---- #
         if TO_TEST == AttnImpl.RING_ALLGATHER or TO_TEST == AttnImpl.RING_P2P:
             # device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
-            device_shard = get_device_mesh(cp_pg_meta, world_size)
-            cp_group = get_ring_pg(device_shard)
+            cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
+            if cp_group is None:
+                device_shard = get_device_mesh(cp_pg_meta, world_size)
+                cp_group = get_ring_pg(device_shard)
+                global_pg_groups[key] = cp_group
 
         # -----    test ulysess   ---- #
         elif TO_TEST == AttnImpl.ULYSSESS:
             # device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
-            device_shard = get_device_mesh(cp_pg_meta, world_size)
-            cp_group = get_ulysess_pg(device_shard)
+            cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
+            if cp_group is None:
+                device_shard = get_device_mesh(cp_pg_meta, world_size)
+                cp_group = get_ulysess_pg(device_shard)
+                global_pg_groups[key] = cp_group
 
         # -----    test usp   ---- #
         elif TO_TEST == AttnImpl.USP:
             # device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
-            device_shard = get_device_mesh(cp_pg_meta, world_size)
-            cp_group = get_usp_pg(device_shard)
+            cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
+            if cp_group is None:
+                device_shard = get_device_mesh(cp_pg_meta, world_size)
+                cp_group = get_usp_pg(device_shard)
+                global_pg_groups[key] = cp_group
 
         # -----    test loongtrain   ---- #
         elif TO_TEST == AttnImpl.LOONGTRAIN:
@@ -455,7 +478,10 @@ class TestBaselineAttn(DistTestBase):
             # rank = int(os.environ.get("RANK", 0))
             assert world_size % window_num == 0
             # device_shard = init_distributed(world_size=world_size, pg_meta=None)
-            cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
+            cp_group, key = check_pg_exist(cp_pg_meta, global_loongtrain_pg_groups)
+            if cp_group is None:
+                cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
+                global_loongtrain_pg_groups[key] = cp_group
 
         # -----    init test data   ---- #
 
