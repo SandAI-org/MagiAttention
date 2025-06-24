@@ -132,6 +132,7 @@ void set_params_fprop(Flash_fwd_params &params,
     params.seqused_k = static_cast<int *>(seqused_k);
     params.attn_type_map = static_cast<int *>(attn_type_map);
 
+
     // Softmax sum
     params.softmax_lse_ptr = softmax_lse_d;
 
@@ -682,9 +683,11 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
         int num_splits,
         std::optional<bool> pack_gqa_,
         int const sm_margin,
-        bool const disable_fwd_atomic_reduction
-        ) {
-
+        // performance tuning arguments
+        bool const disable_fwd_atomic_reduction,
+        bool const deterministic_enable
+) {
+    // Check compute capability
     auto dprops = at::cuda::getCurrentDeviceProperties();
     bool is_sm8x = dprops->major >= 8;
     TORCH_CHECK(is_sm8x, "FlashAttention only supports Ampere GPUs or newer.");
@@ -906,15 +909,15 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
     // Cast to char to avoid compiler warning about narrowing
     at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
-    at::Tensor softmax_lse;
-    if (!(is_varlen_q || is_flex_q)) {
-        softmax_lse = torch::empty({batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
-    } else {
-        softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
-    }
-    softmax_lse.fill_(std::numeric_limits<float>::infinity() * -1);
-
+    int const num_heads_qo = q.size(1);
+    int const arch = at::cuda::getCurrentDeviceProperties()->major * 10 + at::cuda::getCurrentDeviceProperties()->minor;
     Flash_fwd_params params;
+
+    // Create softmax_lse tensor, need to satisfy two conditions
+    // 1. initialize with -infinity
+    // 2. use float32 to ensure numerical stability
+    auto softmax_lse = torch::full({num_heads_qo, total_q}, std::numeric_limits<float>::infinity() * -1, opts.dtype(at::kFloat));
+
     set_params_fprop(params,
                      batch_size,
                      seqlen_q, seqlen_k,
@@ -953,15 +956,36 @@ mha_fwd(at::Tensor &q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seq
 
     at::Tensor out_accum, softmax_lse_accum;
     auto outaccum_type = at::ScalarType::Float;
-    int const arch = at::cuda::getCurrentDeviceProperties()->major * 10 + at::cuda::getCurrentDeviceProperties()->minor;
     // only support bfloat16 and float16
     TORCH_CHECK(q_type == at::ScalarType::BFloat16 || q_type == at::ScalarType::Half, "Only bfloat16 and float16 are supported");
-    int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
     TORCH_CHECK(params.d == params.dv, "d and dv must be the same");
     TORCH_CHECK(params.d <= 192, "d must be <= 192");
+
+    // Get element size
+    int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
+    // Get q block size, used to initialize range_locks
+    // FIXME: hack way to get the block size
     int const kBlockM = arch >= 90 ? std::get<0>(tile_size_fwd_sm90(params.d, params.dv, false, false, element_size/*element_size*/, false, false, softcap > 0.0)) : 128;
     at::Tensor range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads}, opts.dtype(torch::kInt32));
+    // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads_qo columns
+    
+    // Initialize determin_range_locks tensor, the shape is same as range_locks
+    at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads * 2}, opts.dtype(torch::kInt32));
+    // Initialize determin_conflict_state, num_sm_max rows, ceil_div(total_q, kBlockM) + 1 columns
+    int const num_sm_max = 132; // max sm number for H100
+    at::Tensor determin_conflict_state = torch::empty({num_sm_max, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+
+    // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
+    if (deterministic_enable) {
+        determin_range_locks.zero_();
+        determin_conflict_state.zero_();
+    }
+
     params.range_locks = range_locks.data_ptr<int>();
+
+    params.determin_range_locks = deterministic_enable ? determin_range_locks.data_ptr<int>() : nullptr,
+    params.determin_conflict_state = deterministic_enable ? determin_conflict_state.data_ptr<int>() : nullptr,
+
     out_accum = torch::empty_like(out, opts.dtype(outaccum_type));
     params.oaccum_ptr = out_accum.data_ptr();
     params.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction;

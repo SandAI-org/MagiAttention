@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <thrust/pair.h>
+
 #include "cute/tensor.hpp"
 
 #include <cutlass/cutlass.h>
@@ -49,6 +51,7 @@ public:
     static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
     static constexpr bool SameHeadDim = CollectiveMainloop::SameHeadDim;
     static constexpr bool LargeHeadDimV = CollectiveMainloop::LargeHeadDimV;
+    static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
     static_assert(CollectiveMainloop::LargeHeadDimV == CollectiveEpilogue::LargeHeadDimV);
     using SeqlenInfo_t = typename CollectiveMainloop::SeqlenInfo_t;
 
@@ -64,6 +67,7 @@ public:
     // Epilogue derived types
     using EpilogueArguments = typename CollectiveEpilogue::Arguments;
     using EpilogueParams = typename CollectiveEpilogue::Params;
+    using BlockCoordType = typename CollectiveEpilogue::BlockCoordType;
 
     static_assert(ArchTag::kMinComputeCapability >= 90);
 
@@ -329,7 +333,9 @@ public:
                  work_tile_info.is_valid(params.scheduler);
                  work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info) : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
 
-                auto block_coord = work_tile_info.get_block_coord(params.scheduler);
+                BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
+                // get block_coord without deterministic message
+                auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw), get<3>(block_coord_raw));
                 SeqlenInfo_t seqlen_info{
                     get<2>(block_coord) /*bidb*/,
                     get<0>(params.mainloop.shape_Q),
@@ -378,7 +384,9 @@ public:
                  work_tile_info.is_valid(params.scheduler);
                  // get_next_work will be called before the epilogue
                  ) {
-                auto block_coord = work_tile_info.get_block_coord(params.scheduler);
+                BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
+                // get block_coord without deterministic message
+                auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw), get<3>(block_coord_raw));
                 int const bidb = get<2>(block_coord);
                 SeqlenInfo_t seqlen_info{
                     bidb,
@@ -443,8 +451,13 @@ public:
                 }
                 if (tile_valid) {
                     // if (threadIdx.x == 128) { printf("Before epilogue, bid.x = %d, bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n", blockIdx.x, blockIdx.y, blockIdx.z, m_block, bidb, split_idx); }
-                    epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv,
-                                   threadIdx.x - MmaThreadOffset, block_coord);
+                    if constexpr (!Deterministic) {
+                        epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv,
+                                    threadIdx.x - MmaThreadOffset, block_coord);
+                    } else {
+                        epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv,
+                                    threadIdx.x - MmaThreadOffset, block_coord_raw);
+                    }
                 } else {
                     // Write 0 to gO and -inf to gLSE.
                     epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord);
