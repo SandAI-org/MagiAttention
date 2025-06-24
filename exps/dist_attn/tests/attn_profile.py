@@ -44,11 +44,6 @@ from exps.dist_attn.tests.test_utils import (
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.utils import nvtx
 
-# import sys
-
-
-# import sys
-
 
 class AttnImpl(Enum):
     ULYSSESS = 1
@@ -112,8 +107,8 @@ class MyAttnProfile(MultiProcessTestCase):
             window_num = 2
             rank = int(os.environ.get("RANK", 0))
             assert world_size % window_num == 0
-            device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
-            cp_group = get_loongtrain_pg(device_shard, window_num, rank)
+            device_shard = init_distributed(world_size=world_size, pg_meta=None)
+            cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
 
         # -----    set test param   ---- #
 
