@@ -148,9 +148,7 @@ class TestFlexFlashAttn(TestCase):
             {
                 "name": "deterministic_1k",
                 "seqlen": 1000,
-                "q_ranges": AttnRanges.from_ranges(
-                    [[0, 100], [1, 101]] * 10
-                ),
+                "q_ranges": AttnRanges.from_ranges([[0, 100], [1, 101]] * 10),
                 "k_ranges": AttnRanges.from_ranges(
                     [[i * 50, (i + 1) * 50] for i in range(20)]
                 ),
@@ -222,7 +220,8 @@ class TestFlexFlashAttn(TestCase):
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
 
-        test_case = f"[{attn_mask_config['name']}][{model_config['name']}][{dtype=}][{random_attn_type_map=}][{fwd_deterministic=}]"
+        test_case = f"[{attn_mask_config['name']}][{model_config['name']}][{dtype=}]"
+        f"[{random_attn_type_map=}][{fwd_deterministic=}]"
 
         # construct data
         q = torch.randn(
