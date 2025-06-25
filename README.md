@@ -310,7 +310,7 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
 </details>
 
 
-### Examples to integrate with FSDP2
+### Example to integrate with FSDP2
 
 We provide an example of how to integrate magi_attention with fsdp2 in `example/torch_native`. You can use `bash run.sh` to run the example.
 
@@ -322,13 +322,13 @@ In this example, we build a llama-1b model and apply fsdp2 with magi_attention a
 </details>
 
 
-### Examples to integrate with Megatron-LM
+### Example to integrate with Megatron-LM
 
 We create a new repository [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention/tree/magi_attention), forked from [Megatron-LM v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0), to provide an example of training the llama-1B model with Megatron-LM + MagiAttention. Furthermore, we conducted an experiment training llama-3-1B model from scratch to verify the convergence of magiattention.
 
 For more information, you can refer to `example/megatron/README.md`.
 
-### Examples to integrate with transformers
+### Example to integrate with transformers
 
 We provide an example of how to integrate magi_attention with transformers in `example/transformers`. Furthermore, we conducted a continue-training experiment on llama-3-1B model to verify the convergence of magiattention.
 

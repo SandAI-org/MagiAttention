@@ -1,4 +1,4 @@
-# Using MagiAttention with HuggingFace Transformers
+# Integrate MagiAttention with HuggingFace Transformers
 
 We provide an example for training a Llama-3 1B model with MagiAttention (using a DP+CP approach) based on the Hugging Face [transformers](https://github.com/huggingface/transformers) library.
 
