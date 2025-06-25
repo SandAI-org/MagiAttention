@@ -24,6 +24,10 @@ from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
+from magi_attention.comm.primitive.utils import (
+    sanity_check_for_group_cast_meta_args_per_rank,
+    sanity_check_for_group_reduce_meta_args_per_rank,
+)
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 
@@ -182,7 +186,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                 ],
                 "output_split_size_list_per_rank": [
                     [1, 1, 1],
-                    [2, 2, 1, 2],
+                    [2, 2, 1, 1, 1],
                     [1, 1, 2, 2],
                     [1, 1, 1, 1],
                 ],
@@ -194,7 +198,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                 ],
                 "src_index_list_per_rank": [
                     [1, 2, 3],
-                    [0, 2, 0, 3],
+                    [0, 2, 0, 3, 3],
                     [0, 0, 1, 3],
                     [1, 1, 2, 2],
                 ],
@@ -224,7 +228,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                     [1, 1, 1, 2],
                     [2, 2, 1, 1, 1],
                     [1, 2, 2],
-                    [2, 2],
+                    [1, 1, 1, 1],
                 ],
                 "dst_indices_list_per_rank": [
                     [[0, 1], [1, 2], []],
@@ -236,7 +240,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                     [1, 2, 3, 0],
                     [0, 2, 0, 3, 3],
                     [0, 1, 3],
-                    [2, 1],
+                    [2, 2, 1, 1],
                 ],
             },
         ],
@@ -258,6 +262,26 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             if not async_op or not self.support_hier_comm:
                 return
 
+        # sanity check for meta args per rank
+        input_split_size_list_per_rank = test_case["input_split_size_list_per_rank"]
+        output_split_size_list_per_rank = test_case["output_split_size_list_per_rank"]
+        dst_indices_list_per_rank = test_case["dst_indices_list_per_rank"]
+        src_index_list_per_rank = test_case["src_index_list_per_rank"]
+        sanity_check_for_group_cast_meta_args_per_rank(
+            input_split_size_list_per_rank=input_split_size_list_per_rank,
+            output_split_size_list_per_rank=output_split_size_list_per_rank,
+            dst_indices_list_per_rank=dst_indices_list_per_rank,
+            src_index_list_per_rank=src_index_list_per_rank,
+            world_size=self.world_size,
+            check_nccl_send_recv=True,
+        )
+
+        # prepare meta args for this rank
+        input_split_size_list = input_split_size_list_per_rank[self.rank]
+        output_split_size_list = output_split_size_list_per_rank[self.rank]
+        dst_indices_list = dst_indices_list_per_rank[self.rank]
+        src_index_list = src_index_list_per_rank[self.rank]
+
         # prepare buffers
         send_buffer = torch.tensor(
             test_case["send_buffer_per_rank"][self.rank],
@@ -275,12 +299,6 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             dtype=self.dtype,
             device=self.device,
         )
-
-        # prepare meta args
-        input_split_size_list = test_case["input_split_size_list_per_rank"][self.rank]
-        output_split_size_list = test_case["output_split_size_list_per_rank"][self.rank]
-        dst_indices_list = test_case["dst_indices_list_per_rank"][self.rank]
-        src_index_list = test_case["src_index_list_per_rank"][self.rank]
 
         # run group-cast comm kernel
         with self._switch_hier_comm(enable=use_hier_comm):
@@ -385,7 +403,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                     [1, 1, 1, 2],
                     [2, 2, 1, 1, 1],
                     [1, 2, 2],
-                    [2, 1, 2],
+                    [1, 1, 1, 1, 1],
                 ],
                 "output_split_size_list_per_rank": [
                     [2, 1, 1],
@@ -397,7 +415,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                     [1, 2, 3, 0],
                     [0, 2, 0, 3, 3],
                     [0, 1, 3],
-                    [1, 0, 2],
+                    [1, 1, 0, 2, 2],
                 ],
                 "src_indices_list_per_rank": [
                     [[0, 1], [1, 2], [3]],
@@ -418,6 +436,26 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
         if self.world_size != test_case["world_size"]:
             return
 
+        # sanity check for meta args per rank
+        input_split_size_list_per_rank = test_case["input_split_size_list_per_rank"]
+        output_split_size_list_per_rank = test_case["output_split_size_list_per_rank"]
+        dst_index_list_per_rank = test_case["dst_index_list_per_rank"]
+        src_indices_list_per_rank = test_case["src_indices_list_per_rank"]
+        sanity_check_for_group_reduce_meta_args_per_rank(
+            input_split_size_list_per_rank=input_split_size_list_per_rank,
+            output_split_size_list_per_rank=output_split_size_list_per_rank,
+            dst_index_list_per_rank=dst_index_list_per_rank,
+            src_indices_list_per_rank=src_indices_list_per_rank,
+            world_size=self.world_size,
+            check_nccl_send_recv=True,
+        )
+
+        # prepare meta args for this rank
+        input_split_size_list = input_split_size_list_per_rank[self.rank]
+        output_split_size_list = output_split_size_list_per_rank[self.rank]
+        dst_index_list = dst_index_list_per_rank[self.rank]
+        src_indices_list = src_indices_list_per_rank[self.rank]
+
         # prepare buffers
         send_buffer = torch.tensor(
             test_case["send_buffer_per_rank"][self.rank],
@@ -434,12 +472,6 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             dtype=self.dtype,
             device=self.device,
         )
-
-        # prepare meta args
-        input_split_size_list = test_case["input_split_size_list_per_rank"][self.rank]
-        output_split_size_list = test_case["output_split_size_list_per_rank"][self.rank]
-        dst_index_list = test_case["dst_index_list_per_rank"][self.rank]
-        src_indices_list = test_case["src_indices_list_per_rank"][self.rank]
 
         # run group-reduce comm kernel
         work = group_reduce_collective(
