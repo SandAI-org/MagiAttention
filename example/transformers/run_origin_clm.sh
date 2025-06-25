@@ -14,18 +14,17 @@
 
 set -ex
 
-[ -z "$RANK" ] && RANK=0
-[ -z "$WORLD_SIZE" ] && WORLD_SIZE=1
-[ -z "$MASTER_ADDR" ] && MASTER_ADDR=127.0.0.1
-[ -z "$MASTER_PORT" ] && MASTER_PORT=29533
+RANK=${RANK:-0}
+WORLD_SIZE=${WORLD_SIZE:-1}
+MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+MASTER_PORT=${MASTER_PORT:-29534}
 
 BS=1
 SEQLEN=8192
 PRECISION="bf16=true"
-CP_SIZE=$1
-GA=$2
 NPROC_PER_NODE=8
-export cp_size=$CP_SIZE
+export CP_SIZE=$1
+GA=$2
 
 export WANDB_PROJECT="your_wandb_project"
 MODEL_PATH="your_model_path"

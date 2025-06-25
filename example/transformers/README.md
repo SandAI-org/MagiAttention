@@ -45,7 +45,7 @@ def _prepare_device_mesh(self):
     """
     Prepare the device mesh for distributed training. The dataloader will determine how to load data based on thedevice mesh.
     """
-+   cp_size = int(os.environ.get("cp_size", 1))
++   cp_size = int(os.environ.get("CP_SIZE", 1))
 
     if self.state.torch_tp_plugin:
         return self.state.torch_tp_plugin.torch_device_mesh
@@ -161,7 +161,7 @@ We must scale the loss by cp_size before the backward pass, as the dp/fsdp all_r
 ```diff
 def training_step():
     ...
-+   cp_size = int(os.environ.get("cp_size", 1))
++   cp_size = int(os.environ.get("CP_SIZE", 1))
 +   backward_loss = loss * cp_size
 +   self.accelerator.backward(backward_loss, **kwargs)
 -   self.accelerator.backward(loss, **kwargs)

@@ -74,7 +74,7 @@ class MagiAccelerator(Accelerator):
         Prepare the device mesh for distributed training. The dataloader will determine how to load data based on the
         device mesh.
         """
-        cp_size = int(os.environ.get("cp_size", 1))
+        cp_size = int(os.environ.get("CP_SIZE", 1))
 
         if self.state.torch_tp_plugin:
             return self.state.torch_tp_plugin.torch_device_mesh
@@ -263,7 +263,7 @@ class MagiTrainer(Trainer):
         seqlen = inputs.size(1)
         batch_size = inputs.size(0)
         local_input = squash_batch_dim(inputs)
-        cp_size = int(os.environ.get("cp_size", 1))
+        cp_size = int(os.environ.get("CP_SIZE", 1))
         pad_size, _ = compute_pad_size(local_input.size(0), cp_size, head_dim)
         cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
             batch_size, seqlen
@@ -277,7 +277,7 @@ class MagiTrainer(Trainer):
         if hasattr(self, "cp_group"):
             return self.cp_group
 
-        cp_size = int(os.environ.get("cp_size", 1))
+        cp_size = int(os.environ.get("CP_SIZE", 1))
         device_mesh = torch.arange(0, torch.distributed.get_world_size()).reshape(
             torch.distributed.get_world_size() // cp_size,  # dp_size
             cp_size,
@@ -450,7 +450,7 @@ class MagiTrainer(Trainer):
         if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
             loss = loss / self.args.gradient_accumulation_steps
 
-        cp_size = int(os.environ.get("cp_size", 1))
+        cp_size = int(os.environ.get("CP_SIZE", 1))
         backward_loss = loss * cp_size
         self.accelerator.backward(backward_loss, **kwargs)
 
