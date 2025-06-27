@@ -36,7 +36,8 @@ class AttnMaskType(Enum):
     FULL = "full"
     CAUSAL = "causal"  # NOTE: The causal mask aligns to the bottom-right corner if it's not square
     BICAUSAL = "bicausal"
-    INVCASUAL = "invcausal"
+    INVCAUSAL = "invcausal"
+    INVALID = "invalid"
 
 
 class AttnOverlapMode(Enum):

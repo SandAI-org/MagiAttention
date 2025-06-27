@@ -39,7 +39,10 @@ class AttnSlice:
             if self.mask_type is AttnMaskType.FULL:
                 # just the area of a full rectangle mask
                 self._area = self.q_range.seqlen * self.k_range.seqlen  # type: ignore
-            elif self.mask_type is AttnMaskType.CAUSAL:
+            elif (
+                self.mask_type is AttnMaskType.CAUSAL
+                or self.mask_type is AttnMaskType.INVCAUSAL
+            ):
                 if self.k_range.seqlen > self.q_range.seqlen:  # type: ignore
                     # the area of a trapezoid
                     self._area = (
@@ -49,9 +52,15 @@ class AttnSlice:
                     )
                 else:  # the area of a triangle
                     self._area = (1 + self.k_range.seqlen) * self.k_range.seqlen // 2  # type: ignore
+            elif self.mask_type is AttnMaskType.BICAUSAL:
+                # the area of a parallelogram
+                self._area = (
+                    self.k_range.seqlen - self.q_range.seqlen + 1  # type: ignore
+                ) * self.q_range.seqlen  # type: ignore
             else:
                 raise ValueError(
-                    f"Only support full or causal mask, but got {self.mask_type}."
+                    f"Only support 'full', 'causal', 'inv_causal' and 'bi_causal' mask, "
+                    f"but got {self.mask_type}."
                 )
 
         return self._area
@@ -93,7 +102,10 @@ class MultiKAttnSlice:
                 if mask_type is AttnMaskType.FULL:
                     # just the area of a full rectangle mask
                     self._area += self.q_range.seqlen * k_range.seqlen
-                elif mask_type is AttnMaskType.CAUSAL:
+                elif (
+                    mask_type is AttnMaskType.CAUSAL
+                    or mask_type is AttnMaskType.INVCAUSAL
+                ):
                     if k_range.seqlen > self.q_range.seqlen:  # the area of a trapezoid
                         self._area += (
                             (2 * k_range.seqlen - self.q_range.seqlen + 1)
@@ -102,9 +114,15 @@ class MultiKAttnSlice:
                         )
                     else:  # the area of a triangle
                         self._area += (1 + k_range.seqlen) * k_range.seqlen // 2
+                elif mask_type is AttnMaskType.BICAUSAL:
+                    # the area of a parallelogram
+                    self._area = (
+                        k_range.seqlen - self.q_range.seqlen + 1
+                    ) * self.q_range.seqlen
                 else:
                     raise ValueError(
-                        f"Only support full or causal mask, but got {mask_type} in mask_types."
+                        f"Only support 'full', 'causal', 'inv_causal' and 'bi_causal' mask, "
+                        f"but got {mask_type} in mask_types."
                     )
 
         return self._area

@@ -379,7 +379,7 @@ def magi_attn_flex_key(
         raise ValueError(
             "attn_mask_type: BICAUSAL is not supported for now. This feature is coming in a near future release."
         )
-    if is_list_value_any(attn_mask_type, AttnMaskType.INVCASUAL):
+    if is_list_value_any(attn_mask_type, AttnMaskType.INVCAUSAL):
         raise ValueError(
             "attn_mask_type: INVCASUAL is not supported for now. This feature is coming in a near future release."
         )

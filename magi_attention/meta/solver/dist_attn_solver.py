@@ -37,6 +37,7 @@ from magi_attention.meta.container.bucket import AttnBucket
 from magi_attention.meta.container.chunk import AttnChunk
 from magi_attention.meta.container.slice import AttnSlice, MultiKAttnSlice
 from magi_attention.utils import nvtx, transpose_matrix
+from magi_attention.utils._utils import argsort
 
 from .overlap_solver import OverlapConfig, OverlapSolver, OverlapStageCost
 
@@ -213,6 +214,26 @@ class HostAttnSliceMaker:
         TRIANGLE = "cut_triangle_on_the_far_right"
         PENTAGON = "rotated_trapezoid_or_pentagon"
 
+    class BiCausalType(Enum):
+        RECTANGLE = "rectangle"
+        PARALLELOGRAM = "parallelogram"
+
+    class BiCausalCaseKey(Enum):
+        INVALID = "invalid"
+        CASE_1_2 = "case_1_2"
+        CASE_1_3 = "case_1_3"
+        CASE_1_4 = "case_1_4"
+        CASE_1_5 = "case_1_5"
+        CASE_2_2 = "case_2_2"
+        CASE_2_3 = "case_2_3"
+        CASE_2_4 = "case_2_4"
+        CASE_2_5 = "case_2_5"
+        CASE_3_3 = "case_3_3"
+        CASE_3_4 = "case_3_4"
+        CASE_3_5 = "case_3_5"
+        CASE_4_4 = "case_4_4"
+        CASE_4_5 = "case_4_5"
+
     def __init__(
         self,
         q_range_local: AttnRange,
@@ -240,6 +261,8 @@ class HostAttnSliceMaker:
         # init for causal
         if self.mask_type_global is AttnMaskType.CAUSAL:
             self._init_causal()
+        elif self.mask_type_global is AttnMaskType.INVCAUSAL:
+            self._init_inv_causal()
 
     def _init_causal(self) -> None:
         self.last_k_range_global = self.k_ranges_global[-1]
@@ -270,9 +293,68 @@ class HostAttnSliceMaker:
             self.q_range_local.seqlen - self.calc_k_range_global.seqlen,
         )
 
+        self.diff_len_of_k_range_minus_q_range = max(
+            0,
+            self.calc_k_range_global.seqlen - self.q_range_local.seqlen,
+        )
+
         # ---- determine the causal case key ---- #
 
         self._init_causal_case_key()
+
+    def _init_inv_causal(self) -> None:
+        self.first_k_range_global = self.k_ranges_global[0]
+
+        # ---- calc the start and end of the inv_causal area ---- #
+
+        if self.calc_k_range_global.seqlen > self.q_range_local.seqlen:
+            # the inv causal mask of a trapezoid
+            self.inv_causal_mask_end = (
+                self.calc_k_range_global.start + self.q_range_local.seqlen
+            )
+        else:
+            # the inv causal mask of a triangle or a null slice
+            self.inv_causal_mask_end = self.calc_k_range_global.end
+
+        self.inv_causal_mask_start = self.calc_k_range_global.start
+
+        self.start_distance_to_inv_causal_end = (
+            self.inv_causal_mask_end - self.first_k_range_global.start
+        )
+
+        # when q_range.seqlen > k_range.seqlen, exceed_causal_end is
+        # just a part of the actual exceeded length
+        self.end_distance_to_inv_causal_end = (
+            self.inv_causal_mask_end - self.first_k_range_global.end
+        )
+        # it needs to add the difference between the lengths of q_range and k_range in slice
+        self.diff_len_of_q_range_minus_k_range = max(
+            0,
+            self.q_range_local.seqlen - self.calc_k_range_global.seqlen,
+        )
+
+        # ---- determine the inv causal case key ---- #
+
+        self._init_inv_causal_key()
+
+    def _init_bi_causal(self) -> None:
+        # ---- calc the causal start and inv causal end of the bi_causal area ---- #
+
+        self.diff_len_of_q_range_minus_k_range = (
+            self.q_range_local.seqlen - self.calc_k_range_global.seqlen
+        )
+        self.inv_causal_end = self.calc_k_range_global.start + self.q_range_local.seqlen
+        self.causal_start = self.calc_k_range_global.end - self.q_range_local.seqlen
+
+        if self.inv_causal_end < self.causal_start:
+            self.bi_causal_type = self.BiCausalType.RECTANGLE
+        else:
+            self.bi_causal_type = self.BiCausalType.PARALLELOGRAM
+
+        self.left_point = min(self.inv_causal_end, self.causal_start)
+        self.right_point = max(self.inv_causal_end, self.causal_start)
+
+        self._init_bi_causal_key()
 
     def _init_causal_case_key(self) -> None:
         self.causal_case_key = self.CausalCaseKey.INVALID
@@ -308,6 +390,78 @@ class HostAttnSliceMaker:
             #   when q_range.seqlen > k_range.seqlen in the slice
             self.causal_case_key = self.CausalCaseKey.PENTAGON
 
+    def _init_inv_causal_key(self) -> None:
+        self.inv_causal_case_key = self.CausalCaseKey.INVALID
+        if (
+            self.first_k_range_global.start >= self.inv_causal_mask_end
+            and self.first_k_range_global.end >= self.inv_causal_mask_end
+        ):
+            # case1: the area will be formed as a full rectangle mask
+            self.inv_causal_case_key = self.CausalCaseKey.RECTANGLE
+        elif (
+            self.first_k_range_global.start == self.inv_causal_mask_start
+            and self.first_k_range_global.end >= self.inv_causal_mask_end
+        ):
+            # case2: the area will be formed as a normal causal mask,
+            # i.e. an uncut triangle or a trapezoid
+            self.inv_causal_case_key = self.CausalCaseKey.TRAPEZOID
+        elif (
+            self.first_k_range_global.start == self.inv_causal_mask_start
+            and self.first_k_range_global.end < self.inv_causal_mask_end
+        ):
+            self.inv_causal_case_key = self.CausalCaseKey.TRIANGLE
+        elif (
+            self.first_k_range_global.end >= self.inv_causal_mask_end
+            and self.inv_causal_mask_start
+            < self.first_k_range_global.start
+            < self.inv_causal_mask_end
+        ):
+            # this includes two cases:
+            # case 4: the area of a rotated trapezoid or a pentagon,
+            #   when q_range.seqlen <= k_range.seqlen in the slice
+            # case 5: the area of a cut rotated trapezoid,
+            #   when q_range.seqlen > k_range.seqlen in the slice
+            self.inv_causal_case_key = self.CausalCaseKey.PENTAGON
+
+    def _init_bi_causal_key(self) -> None:
+        self.bi_causal_case_key = [self.BiCausalCaseKey.INVALID] * len(
+            self.k_ranges_global
+        )
+
+        start, left, right, end = (
+            self.calc_k_range_global.start,
+            min(self.inv_causal_end, self.causal_start),
+            max(self.inv_causal_end, self.causal_start),
+            self.calc_k_range_global.end,
+        )
+
+        for index, k_range_global in enumerate(self.k_ranges_global):
+            if k_range_global.start == start:
+                left_index = 1
+            elif k_range_global.start == end:
+                left_index = 5
+            elif k_range_global.start < left:
+                left_index = 2
+            elif k_range_global.start >= right:
+                left_index = 4
+            else:
+                left_index = 3
+
+            if k_range_global.end == start:
+                right_index = 1
+            elif k_range_global.end == end:
+                right_index = 5
+            elif k_range_global.end <= left:
+                right_index = 2
+            elif k_range_global.end > right:
+                right_index = 4
+            else:
+                right_index = 3
+
+            self.bi_causal_case_key[index] = self.BiCausalCaseKey(
+                f"case_{left_index}_{right_index}"
+            )
+
     @nvtx.instrument_nvtx
     def make(self) -> list[AttnSlice]:
         match self.mask_type_global:
@@ -315,6 +469,10 @@ class HostAttnSliceMaker:
                 attn_slices = self._make_slice_for_full_mask()
             case AttnMaskType.CAUSAL:
                 attn_slices = self._make_slice_for_causal_mask()
+            case AttnMaskType.INVCAUSAL:
+                attn_slices = self._make_slice_for_inv_causal_mask()
+            case AttnMaskType.BICAUSAL:
+                attn_slices = self._make_slice_for_bi_causal_mask()
             case _:
                 raise ValueError(f"Got invalid mask type {self.mask_type_global=}.")
 
@@ -359,6 +517,77 @@ class HostAttnSliceMaker:
                 raise ValueError(
                     f"Got invalid causal case key {self.causal_case_key=}."
                 )
+
+        return attn_slices
+
+    def _make_slice_for_inv_causal_mask(self) -> list[AttnSlice]:
+        """For inv casual mask, there're more than one cases to be considered"""
+
+        match self.inv_causal_case_key:
+            case self.CausalCaseKey.RECTANGLE:
+                attn_slices = self._make_slice_for_inv_causal_rectangle_mask()
+            case self.CausalCaseKey.TRAPEZOID:
+                attn_slices = self._make_slice_for_inv_causal_trapezoid_mask()
+            case self.CausalCaseKey.TRIANGLE:
+                attn_slices = self._make_slice_for_inv_causal_triangle_mask()
+            case self.CausalCaseKey.PENTAGON:
+                attn_slices = self._make_slice_for_inv_causal_pentagon_mask()
+            case self.CausalCaseKey.INVALID:
+                raise ValueError(
+                    f"Got invalid range {self.first_k_range_global=} "
+                    f"when {self.inv_causal_mask_start=} and {self.inv_causal_mask_end=}."
+                )
+            case _:
+                raise ValueError(
+                    f"Got invalid causal case key {self.inv_causal_case_key=}."
+                )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_mask(self) -> list[AttnSlice]:
+        """For bi casual mask, there're more than one cases to be considered"""
+
+        total_attn_slices: list[AttnSlice] = []
+
+        for index in range(len(self.bi_causal_case_key)):
+            match self.bi_causal_case_key[index]:
+                case self.BiCausalCaseKey.CASE_1_2:
+                    attn_slices = self._make_slice_for_bi_causal_1_2_case(index=index)
+                case self.BiCausalCaseKey.CASE_1_3:
+                    attn_slices = self._make_slice_for_bi_causal_1_3_case(index=index)
+                case self.BiCausalCaseKey.CASE_1_4:
+                    attn_slices = self._make_slice_for_bi_causal_1_4_case(index=index)
+                case self.BiCausalCaseKey.CASE_1_5:
+                    attn_slices = self._make_slice_for_bi_causal_1_5_case(index=index)
+                case self.BiCausalCaseKey.CASE_2_2:
+                    attn_slices = self._make_slice_for_bi_causal_2_2_case(index=index)
+                case self.BiCausalCaseKey.CASE_2_3:
+                    attn_slices = self._make_slice_for_bi_causal_2_3_case(index=index)
+                case self.BiCausalCaseKey.CASE_2_4:
+                    attn_slices = self._make_slice_for_bi_causal_2_4_case(index=index)
+                case self.BiCausalCaseKey.CASE_2_5:
+                    attn_slices = self._make_slice_for_bi_causal_2_5_case(index=index)
+                case self.BiCausalCaseKey.CASE_3_3:
+                    attn_slices = self._make_slice_for_bi_causal_3_3_case(index=index)
+                case self.BiCausalCaseKey.CASE_3_4:
+                    attn_slices = self._make_slice_for_bi_causal_3_4_case(index=index)
+                case self.BiCausalCaseKey.CASE_3_5:
+                    attn_slices = self._make_slice_for_bi_causal_3_5_case(index=index)
+                case self.BiCausalCaseKey.CASE_4_4:
+                    attn_slices = self._make_slice_for_bi_causal_4_4_case(index=index)
+                case self.BiCausalCaseKey.CASE_4_5:
+                    attn_slices = self._make_slice_for_bi_causal_4_5_case(index=index)
+                case self.CausalCaseKey.INVALID:
+                    raise ValueError(
+                        f"Got invalid range {self.k_ranges_global[index]=} "
+                        f"when {self.calc_k_range_global=}."
+                    )
+                case _:
+                    raise ValueError(
+                        f"Got invalid causal case key {self.bi_causal_case_key[index]=}."
+                    )
+
+            total_attn_slices.extend(attn_slices)
 
         return attn_slices
 
@@ -444,7 +673,7 @@ class HostAttnSliceMaker:
 
         # part1: top causal mask
         top_causal_q_range_local = AttnRange(
-            start=self.q_range_local.start,
+            start=self.q_range_local.start + self.diff_len_of_q_range_minus_k_range,
             end=self.q_range_local.start
             + self.exceed_causal_end
             + self.diff_len_of_q_range_minus_k_range,
@@ -471,6 +700,858 @@ class HostAttnSliceMaker:
                 mask_type=AttnMaskType.FULL,
             ),
         )
+
+        return attn_slices
+
+    def _make_slice_for_inv_causal_rectangle_mask(self) -> list[AttnSlice]:
+        """in such case, we just call the maker for full mask,
+        since a causal rectangle mask equals to a full mask
+        """
+
+        return self._make_slice_for_full_mask()
+
+    def _make_slice_for_inv_causal_trapezoid_mask(self) -> list[AttnSlice]:
+        """in such case, the whole mask will be a single
+        normal inv causal mask after merged
+        """
+
+        k_range_local = self._merge_k_ranges_and_check(
+            self.k_ranges_local,
+            allow_empty=False,
+        )
+
+        return [
+            AttnSlice(
+                q_range=self.q_range_local,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.INVCAUSAL,
+            )
+        ]
+
+    def _make_slice_for_inv_causal_triangle_mask(self) -> list[AttnSlice]:
+        """in such case, the mask will be formed as two parts:
+        part1: a inv causal mask on the far right made by the first k range
+        part2: an optional full mask merged from the later k ranges
+        """
+
+        attn_slices: list[AttnSlice] = []
+
+        # part1: inv causal mask on the left
+        first_inv_causal_k_range_local = self.k_ranges_local[0]
+        first_inv_causal_q_range_local = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.start + self.first_k_range_global.seqlen,
+        )
+        attn_slices.append(
+            AttnSlice(
+                q_range=first_inv_causal_k_range_local,
+                k_range=first_inv_causal_q_range_local,
+                mask_type=AttnMaskType.INVCAUSAL,
+            )
+        )
+
+        # part2 (optional): subsequent full mask
+        subsequent_full_k_ranges_local = self.k_ranges_local[1:]
+        subsequent_full_k_range_local = self._merge_k_ranges_and_check(
+            subsequent_full_k_ranges_local,
+            allow_empty=True,
+        )
+
+        # TODO: The current solution is to divide the slice into a complete rectangle and a small triangle.
+        # TODO: The slice can be cut into a rectangle and a trapezoid to ensure that the k_range is not divided.
+        if not subsequent_full_k_range_local.is_empty():
+            attn_slices.append(
+                AttnSlice(
+                    q_range=self.q_range_local,
+                    k_range=subsequent_full_k_range_local,
+                    mask_type=AttnMaskType.FULL,
+                )
+            )
+
+        return attn_slices
+
+    def _make_slice_for_inv_causal_pentagon_mask(self) -> list[AttnSlice]:
+        """in such case, the mask has to divide from the middle into two parts:
+        part1: the top full mask
+        part2: the bottom inv causal mask
+        """
+
+        attn_slices: list[AttnSlice] = []
+
+        k_range_local = self._merge_k_ranges_and_check(
+            self.k_ranges_local,
+            allow_empty=False,
+        )
+
+        # part1: top full mask
+        top_full_q_range_local = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.end
+            - self.start_distance_to_inv_causal_end
+            - self.diff_len_of_q_range_minus_k_range,
+        )
+        attn_slices.append(
+            AttnSlice(
+                q_range=top_full_q_range_local,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.FULL,
+            ),
+        )
+
+        # part2: bottom causal mask
+        bottom_causal_q_range_local = AttnRange(
+            start=self.q_range_local.end
+            - self.start_distance_to_inv_causal_end
+            - self.diff_len_of_q_range_minus_k_range,
+            end=self.q_range_local.end - self.diff_len_of_q_range_minus_k_range,
+        )
+        attn_slices.append(
+            AttnSlice(
+                q_range=bottom_causal_q_range_local,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.INVCAUSAL,
+            ),
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_1_2_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_local = self.k_ranges_local[index]
+
+        q_range = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.start + k_range_local.seqlen,
+        )
+
+        attn_slices.append(
+            AttnSlice(
+                q_range=q_range,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.INVCAUSAL,
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_1_3_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        if self.bi_causal_type == self.BiCausalType.RECTANGLE:
+            attn_slices.append(
+                AttnSlice(
+                    q_range=self.q_range_local,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.INVCAUSAL,
+                )
+            )
+        else:
+            exceed_left_point = k_range_global.end - self.left_point
+
+            bi_causal_q_range = AttnRange(
+                start=self.q_range_local.start,
+                end=self.q_range_local.start + exceed_left_point,
+            )
+            inv_causal_q_range = AttnRange(
+                start=self.q_range_local.start + exceed_left_point,
+                end=self.q_range_local.start + k_range_global.seqlen,
+            )
+            inv_causal_k_range = AttnRange(
+                start=k_range_local.start + exceed_left_point,
+                end=k_range_local.end,
+            )
+
+            attn_slices.append(
+                AttnSlice(
+                    q_range=bi_causal_q_range,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.BICAUSAL,
+                )
+            )
+            attn_slices.append(
+                AttnSlice(
+                    q_range=inv_causal_q_range,
+                    k_range=inv_causal_k_range,
+                    mask_type=AttnMaskType.INVCAUSAL,
+                )
+            )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_1_4_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        exceed_causal_start = k_range_global.end - self.causal_start
+
+        bi_causal_q_range = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.start + exceed_causal_start,
+        )
+        inv_causal_q_range = AttnRange(
+            start=self.q_range_local.start + exceed_causal_start,
+            end=self.q_range_local.end,
+        )
+        inv_causal_k_range = AttnRange(
+            start=k_range_local.start + exceed_causal_start,
+            end=k_range_local.end,
+        )
+
+        attn_slices.append(
+            AttnSlice(
+                q_range=bi_causal_q_range,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.BICAUSAL,
+            )
+        )
+        attn_slices.append(
+            AttnSlice(
+                q_range=inv_causal_q_range,
+                k_range=inv_causal_k_range,
+                mask_type=AttnMaskType.INVCAUSAL,
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_1_5_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_local = self.k_ranges_local[index]
+
+        attn_slices.append(
+            AttnSlice(
+                q_range=self.q_range_local,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.BICAUSAL,
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_2_2_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        range_start_exceed_slice_start = (
+            k_range_global.start - self.calc_k_range_global.start
+        )
+        range_end_exceed_slice_start = (
+            k_range_global.end - self.calc_k_range_global.start
+        )
+
+        full_q_range = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.start + range_start_exceed_slice_start,
+        )
+        inv_causal_q_range = AttnRange(
+            start=self.q_range_local.start + range_start_exceed_slice_start,
+            end=self.q_range_local.start + range_end_exceed_slice_start,
+        )
+
+        attn_slices.append(
+            AttnSlice(
+                q_range=full_q_range,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.FULL,
+            )
+        )
+        attn_slices.append(
+            AttnSlice(
+                q_range=inv_causal_q_range,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.INVCAUSAL,
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_2_3_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        range_start_exceed_slice_start = (
+            k_range_global.start - self.calc_k_range_global.start
+        )
+
+        if self.bi_causal_type == self.BiCausalType.RECTANGLE:
+            full_q_range_local = AttnRange(
+                start=self.q_range_local.start,
+                end=self.q_range_local.start + range_start_exceed_slice_start,
+            )
+            inv_causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + range_start_exceed_slice_start,
+                end=self.q_range_local.end,
+            )
+
+            attn_slices.append(
+                AttnSlice(
+                    q_range=full_q_range_local,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.FULL,
+                )
+            )
+            attn_slices.append(
+                AttnSlice(
+                    q_range=inv_causal_q_range_local,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.INVCAUSAL,
+                )
+            )
+        else:
+            range_end_exceed_left_point = k_range_global.end - self.left_point
+            range_end_exceed_slice_start = (
+                k_range_global.end - self.calc_k_range_global.start
+            )
+
+            short_length = min(
+                range_start_exceed_slice_start, range_end_exceed_left_point
+            )
+            long_length = max(
+                range_start_exceed_slice_start, range_end_exceed_left_point
+            )
+
+            causal_q_range_local = AttnRange(
+                start=self.q_range_local.start,
+                end=self.q_range_local.start + short_length,
+            )
+            causal_k_range_local = AttnRange(
+                start=k_range_local.start,
+                end=k_range_local.start + self.diff_len_of_q_range_minus_k_range,
+            )
+            full_or_bi_causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + short_length,
+                end=self.q_range_local.start + long_length,
+            )
+            inv_causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + long_length,
+                end=self.q_range_local.start + range_end_exceed_slice_start,
+            )
+            inv_causal_k_range_local = AttnRange(
+                start=k_range_local.end - self.diff_len_of_q_range_minus_k_range,
+                end=k_range_local.end,
+            )
+
+            attn_slices.append(
+                AttnSlice(
+                    q_range=causal_q_range_local,
+                    k_range=k_range_local
+                    if range_start_exceed_slice_start > range_end_exceed_left_point
+                    else causal_k_range_local,
+                    mask_type=AttnMaskType.CAUSAL,
+                )
+            )
+            if full_or_bi_causal_q_range_local.seqlen > 0:
+                attn_slices.append(
+                    AttnSlice(
+                        q_range=full_or_bi_causal_q_range_local,
+                        k_range=k_range_local,
+                        mask_type=AttnMaskType.FULL
+                        if range_start_exceed_slice_start > range_end_exceed_left_point
+                        else AttnMaskType.BICAUSAL,
+                    )
+                )
+            attn_slices.append(
+                AttnSlice(
+                    q_range=inv_causal_q_range_local,
+                    k_range=k_range_local
+                    if range_start_exceed_slice_start > range_end_exceed_left_point
+                    else inv_causal_k_range_local,
+                    mask_type=AttnMaskType.INVCAUSAL,
+                )
+            )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_2_4_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        range_start_exceed_slice_start = (
+            k_range_global.start - self.calc_k_range_global.start
+        )
+        range_end_exceed_causal_start = k_range_global.end - self.causal_start
+
+        short_length = min(
+            range_start_exceed_slice_start, range_end_exceed_causal_start
+        )
+        long_length = max(range_start_exceed_slice_start, range_end_exceed_causal_start)
+
+        causal_q_range_local = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.start + short_length,
+        )
+        causal_k_range_local = AttnRange(
+            start=k_range_local.start,
+            end=k_range_local.start + self.diff_len_of_q_range_minus_k_range,
+        )
+        full_or_bi_causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + short_length,
+            end=self.q_range_local.start + long_length,
+        )
+        inv_causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + long_length,
+            end=self.q_range_local.end,
+        )
+        inv_causal_k_range_local = AttnRange(
+            start=k_range_local.end - self.diff_len_of_q_range_minus_k_range,
+            end=k_range_local.end,
+        )
+
+        attn_slices.append(
+            AttnSlice(
+                q_range=causal_q_range_local,
+                k_range=k_range_local
+                if range_start_exceed_slice_start > range_end_exceed_causal_start
+                else causal_k_range_local,
+                mask_type=AttnMaskType.CAUSAL,
+            )
+        )
+        if full_or_bi_causal_q_range_local.seqlen > 0:
+            attn_slices.append(
+                AttnSlice(
+                    q_range=full_or_bi_causal_q_range_local,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.FULL
+                    if range_start_exceed_slice_start > range_end_exceed_causal_start
+                    else AttnMaskType.BICAUSAL,
+                )
+            )
+        attn_slices.append(
+            AttnSlice(
+                q_range=inv_causal_q_range_local,
+                k_range=k_range_local
+                if range_start_exceed_slice_start > range_end_exceed_causal_start
+                else inv_causal_k_range_local,
+                mask_type=AttnMaskType.INVCAUSAL,
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_2_5_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        range_start_exceed_slice_start = (
+            k_range_global.start - self.calc_k_range_global.start
+        )
+
+        causal_q_range_local = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.start + range_start_exceed_slice_start,
+        )
+        causal_k_range_local = AttnRange(
+            start=k_range_local.start,
+            end=k_range_local.start + self.diff_len_of_q_range_minus_k_range,
+        )
+        bi_causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + range_start_exceed_slice_start,
+            end=self.q_range_local.end,
+        )
+
+        attn_slices.append(
+            AttnSlice(
+                q_range=causal_q_range_local,
+                k_range=causal_k_range_local,
+                mask_type=AttnMaskType.CAUSAL,
+            )
+        )
+        attn_slices.append(
+            AttnSlice(
+                q_range=bi_causal_q_range_local,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.BICAUSAL,
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_3_3_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        if self.bi_causal_type == self.BiCausalType.RECTANGLE:
+            attn_slices.append(
+                AttnSlice(
+                    q_range=self.q_range_local,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.FULL,
+                )
+            )
+        else:
+            range_start_exceed_slice_start = (
+                k_range_global.start - self.calc_k_range_global.start
+            )
+            range_end_exceed_slice_start = (
+                k_range_global.end - self.calc_k_range_global.start
+            )
+            range_end_exceed_causal_start = k_range_global.end - self.causal_start
+            range_start_exceed_causal_start = k_range_global.start - self.causal_start
+
+            short_length = min(
+                range_start_exceed_slice_start, range_end_exceed_causal_start
+            )
+            long_length = max(
+                range_start_exceed_slice_start, range_end_exceed_causal_start
+            )
+
+            causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + range_start_exceed_causal_start,
+                end=self.q_range_local.start + short_length,
+            )
+            causal_k_range_local = AttnRange(
+                start=k_range_local.start,
+                end=k_range_local.start + self.diff_len_of_q_range_minus_k_range,
+            )
+            full_or_bi_causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + short_length,
+                end=self.q_range_local.start + long_length,
+            )
+            inv_causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + long_length,
+                end=self.q_range_local.start + range_end_exceed_slice_start,
+            )
+            inv_causal_k_range_local = AttnRange(
+                start=k_range_local.end - self.diff_len_of_q_range_minus_k_range,
+                end=k_range_local.end,
+            )
+
+            attn_slices.append(
+                AttnSlice(
+                    q_range=causal_q_range_local,
+                    k_range=k_range_local
+                    if range_start_exceed_slice_start > range_end_exceed_causal_start
+                    else causal_k_range_local,
+                    mask_type=AttnMaskType.CAUSAL,
+                )
+            )
+            if full_or_bi_causal_q_range_local.seqlen > 0:
+                attn_slices.append(
+                    AttnSlice(
+                        q_range=full_or_bi_causal_q_range_local,
+                        k_range=k_range_local,
+                        mask_type=AttnMaskType.FULL
+                        if range_start_exceed_slice_start
+                        > range_end_exceed_causal_start
+                        else AttnMaskType.BICAUSAL,
+                    )
+                )
+            attn_slices.append(
+                AttnSlice(
+                    q_range=inv_causal_q_range_local,
+                    k_range=k_range_local
+                    if range_start_exceed_slice_start > range_end_exceed_causal_start
+                    else inv_causal_k_range_local,
+                    mask_type=AttnMaskType.INVCAUSAL,
+                )
+            )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_3_4_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        range_end_exceed_causal_start = k_range_global.end - self.causal_start
+
+        if self.bi_causal_type == self.BiCausalType.RECTANGLE:
+            causal_q_range_local = AttnRange(
+                start=self.q_range_local.start,
+                end=self.q_range_local.start + range_end_exceed_causal_start,
+            )
+            full_causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + range_end_exceed_causal_start,
+                end=self.q_range_local.end,
+            )
+
+            attn_slices.append(
+                AttnSlice(
+                    q_range=causal_q_range_local,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.CAUSAL,
+                )
+            )
+            attn_slices.append(
+                AttnSlice(
+                    q_range=full_causal_q_range_local,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.FULL,
+                )
+            )
+        else:
+            range_start_exceed_slice_start = (
+                k_range_global.start - self.calc_k_range_global.start
+            )
+            range_start_exceed_causal_start = k_range_global.start - self.causal_start
+
+            short_length = min(
+                range_start_exceed_slice_start, range_end_exceed_causal_start
+            )
+            long_length = max(
+                range_start_exceed_slice_start, range_end_exceed_causal_start
+            )
+
+            causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + range_start_exceed_causal_start,
+                end=self.q_range_local.start + short_length,
+            )
+            causal_k_range_local = AttnRange(
+                start=k_range_local.start,
+                end=k_range_local.start + self.diff_len_of_q_range_minus_k_range,
+            )
+            full_or_bi_causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + short_length,
+                end=self.q_range_local.start + long_length,
+            )
+            inv_causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + long_length,
+                end=self.q_range_local.end,
+            )
+            inv_causal_k_range_local = AttnRange(
+                start=k_range_local.end - self.diff_len_of_q_range_minus_k_range,
+                end=k_range_local.end,
+            )
+
+            attn_slices.append(
+                AttnSlice(
+                    q_range=causal_q_range_local,
+                    k_range=k_range_local
+                    if range_start_exceed_slice_start > range_end_exceed_causal_start
+                    else causal_k_range_local,
+                    mask_type=AttnMaskType.CAUSAL,
+                )
+            )
+            if full_or_bi_causal_q_range_local.seqlen > 0:
+                attn_slices.append(
+                    AttnSlice(
+                        q_range=full_or_bi_causal_q_range_local,
+                        k_range=k_range_local,
+                        mask_type=AttnMaskType.FULL
+                        if range_start_exceed_slice_start
+                        > range_end_exceed_causal_start
+                        else AttnMaskType.BICAUSAL,
+                    )
+                )
+            attn_slices.append(
+                AttnSlice(
+                    q_range=inv_causal_q_range_local,
+                    k_range=k_range_local
+                    if range_start_exceed_slice_start > range_end_exceed_causal_start
+                    else inv_causal_k_range_local,
+                    mask_type=AttnMaskType.INVCAUSAL,
+                )
+            )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_3_5_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        if self.bi_causal_type == self.BiCausalType.RECTANGLE:
+            attn_slices.append(
+                AttnSlice(
+                    q_range=self.q_range_local,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.CAUSAL,
+                )
+            )
+        else:
+            range_start_exceed_slice_start = (
+                k_range_global.start - self.calc_k_range_global.start
+            )
+            range_start_exceed_causal_start = k_range_global.start - self.causal_start
+
+            causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + range_start_exceed_causal_start,
+                end=self.q_range_local.start + range_start_exceed_slice_start,
+            )
+            causal_k_range_local = AttnRange(
+                start=k_range_local.start,
+                end=k_range_local.start + self.diff_len_of_q_range_minus_k_range,
+            )
+            bi_causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + range_start_exceed_slice_start,
+                end=self.q_range_local.end,
+            )
+
+            attn_slices.append(
+                AttnSlice(
+                    q_range=causal_q_range_local,
+                    k_range=causal_k_range_local,
+                    mask_type=AttnMaskType.CAUSAL,
+                )
+            )
+            attn_slices.append(
+                AttnSlice(
+                    q_range=bi_causal_q_range_local,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.BICAUSAL,
+                )
+            )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_4_4_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        range_start_exceed_causal_start = k_range_global.start - self.causal_start
+        range_end_exceed_causal_start = k_range_global.end - self.causal_start
+
+        causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + range_start_exceed_causal_start,
+            end=self.q_range_local.start + range_end_exceed_causal_start,
+        )
+        full_q_range_local = AttnRange(
+            start=self.q_range_local.start + range_end_exceed_causal_start,
+            end=self.q_range_local.end,
+        )
+
+        attn_slices.append(
+            AttnSlice(
+                q_range=causal_q_range_local,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.CAUSAL,
+            )
+        )
+        attn_slices.append(
+            AttnSlice(
+                q_range=full_q_range_local,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.FULL,
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_4_5_case(self, index: int) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+        k_range_local = self.k_ranges_local[index]
+
+        range_start_exceed_causal_start = k_range_global.start - self.causal_start
+
+        causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + range_start_exceed_causal_start,
+            end=self.q_range_local.end,
+        )
+
+        attn_slices.append(
+            AttnSlice(
+                q_range=causal_q_range_local,
+                k_range=k_range_local,
+                mask_type=AttnMaskType.CAUSAL,
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_rotated_parallelogram_mask(
+        self,
+        k_range_global: AttnRange,
+        k_range_local: AttnRange,
+    ) -> list[AttnSlice]:
+        attn_slices: list[AttnSlice] = []
+
+        range_start_exceed_slice_start = min(
+            k_range_global.start - self.calc_k_range_global.start,
+            self.q_range_local.seqlen,
+        )
+        range_end_exceed_slice_start = min(
+            k_range_global.end - self.calc_k_range_global.start,
+            self.q_range_local.seqlen,
+        )
+
+        range_end_exceed_causal_start = max(0, k_range_global.end - self.causal_start)
+        range_start_exceed_causal_start = max(
+            0, k_range_global.start - self.causal_start
+        )
+
+        short_length = min(
+            range_start_exceed_slice_start, range_end_exceed_causal_start
+        )
+        long_length = max(range_start_exceed_slice_start, range_end_exceed_causal_start)
+
+        causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + range_start_exceed_causal_start,
+            end=self.q_range_local.start + short_length,
+        )
+        causal_k_range_local = AttnRange(
+            start=k_range_local.start,
+            end=min(
+                k_range_local.end,
+                k_range_local.start + self.diff_len_of_k_range_minus_q_range,
+            ),
+        )
+        full_or_bi_causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + short_length,
+            end=self.q_range_local.start + long_length,
+        )
+        inv_causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + long_length,
+            end=self.q_range_local.start + range_end_exceed_slice_start,
+        )
+        inv_causal_k_range_local = AttnRange(
+            start=max(
+                k_range_local.start,
+                k_range_local.end - self.diff_len_of_k_range_minus_q_range,
+            ),
+            end=k_range_local.end,
+        )
+
+        if causal_q_range_local.seqlen > 0:
+            attn_slices.append(
+                AttnSlice(
+                    q_range=causal_q_range_local,
+                    k_range=causal_k_range_local,
+                    mask_type=AttnMaskType.CAUSAL,
+                )
+            )
+
+        if full_or_bi_causal_q_range_local.seqlen > 0:
+            attn_slices.append(
+                AttnSlice(
+                    q_range=full_or_bi_causal_q_range_local,
+                    k_range=k_range_local,
+                    mask_type=AttnMaskType.FULL
+                    if range_start_exceed_slice_start > range_end_exceed_causal_start
+                    else AttnMaskType.BICAUSAL,
+                )
+            )
+
+        if inv_causal_q_range_local.seqlen > 0:
+            attn_slices.append(
+                AttnSlice(
+                    q_range=inv_causal_q_range_local,
+                    k_range=inv_causal_k_range_local,
+                    mask_type=AttnMaskType.INVCAUSAL,
+                )
+            )
 
         return attn_slices
 
@@ -533,6 +1614,23 @@ class RemoteAttnSliceMaker(HostAttnSliceMaker):
                 and self.causal_mask_start
                 < self.last_k_range_global.end
                 < self.causal_mask_end
+            ):
+                # this contains special sub-type of cases for the pentagon cases
+                # that will be just invalid in host slice maker
+                self.causal_case_key = self.CausalCaseKey.PENTAGON
+                self.special_pentagon_case_type = True
+
+    def _init_inv_causal_key(self):
+        super()._init_inv_causal_key()
+
+        if self.inv_causal_case_key is self.CausalCaseKey.PENTAGON:
+            self.special_pentagon_case_type = False
+        elif self.inv_causal_case_key is self.CausalCaseKey.INVALID:
+            if (
+                self.first_k_range_global.end < self.inv_causal_mask_end
+                and self.inv_causal_mask_start
+                < self.first_k_range_global.start
+                < self.inv_causal_mask_end
             ):
                 # this contains special sub-type of cases for the pentagon cases
                 # that will be just invalid in host slice maker
@@ -744,6 +1842,531 @@ class RemoteAttnSliceMaker(HostAttnSliceMaker):
                 q_range=bottom_full_q_range_local,
                 k_ranges=self.k_ranges_global,
                 mask_types=[AttnMaskType.FULL] * self.batch_size,
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_inv_causal_rectangle_mask(self) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        """in such case, the area is made of only several full rectangles
+
+        thus we just call the maker for full mask
+        """
+
+        return self._make_slice_for_full_mask()
+
+    def _make_slice_for_inv_causal_trapezoid_mask(self) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        """in such case, the area is made of several full rectangles
+        plus a single normal inv causal mask, i.e. an uncut triangle or an uncut trapezoid
+
+        thus the whole masks will be formed as
+        the previous full masks plus a single normal inv causal mask in the first
+        """
+
+        return [
+            MultiKAttnSlice(
+                q_range=self.q_range_local,
+                k_ranges=self.k_ranges_global,
+                mask_types=[AttnMaskType.INVCAUSAL]
+                + [AttnMaskType.FULL] * (self.batch_size - 1),
+            )
+        ]
+
+    def _make_slice_for_inv_causal_triangle_mask(self) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        """in such case, the area is made of several full rectangles
+        plus a cut triangle on the far bottom-left
+
+        the whole masks can be divided from the middle into two parts:
+            part1: the top previous full masks plus a single normal inv causal mask in the first
+            part2: the optional bottom full masks
+        """
+
+        attn_slices: list[MultiKAttnSlice] = []
+
+        triangle_end = self.q_range_local.start + self.first_k_range_global.seqlen
+
+        # part1: inv causal mask + top full masks
+        inv_causal_q_range_local = AttnRange(
+            start=self.q_range_local.start,
+            end=triangle_end,
+        )
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=inv_causal_q_range_local,
+                k_ranges=self.k_ranges_global,
+                mask_types=[AttnMaskType.INVCAUSAL]
+                + [AttnMaskType.FULL] * (self.batch_size - 1),
+            )
+        )
+
+        # part2: optional bottom full masks
+        full_q_range_local = AttnRange(
+            start=triangle_end,
+            end=self.q_range_local.end,
+        )
+        if self.batch_size > 1:
+            attn_slices.append(
+                MultiKAttnSlice(
+                    q_range=full_q_range_local,
+                    k_ranges=self.k_ranges_global[1:],
+                    mask_types=[AttnMaskType.FULL] * (self.batch_size - 1),
+                )
+            )
+
+        return attn_slices
+
+    def _make_slice_for_inv_causal_pentagon_mask(self) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        """this includes three cases, where the area is made of several full rectangles
+        plus either an uncut/cut rotated trapezoid or a pentagon
+
+        we further dispatch them into two sub types of cases:
+            normal type: the plused rotated trapezoid is uncut
+            special type: the plused rotated trapezoid is cut
+        """
+
+        if self.special_pentagon_case_type:
+            return self._make_slice_for_inv_causal_pentagon_mask_special()
+        else:
+            return self._make_slice_for_inv_causal_pentagon_mask_normal()
+
+    def _make_slice_for_inv_causal_pentagon_mask_normal(self) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        """this normal type includes two cases:
+            case1: the area is made of several full rectangles
+                plus either an uncut rotated trapezoid or a pentagon,
+                when q_range.seqlen <= k_range.seqlen in a slice
+            case2: the area is made of a single cut rotated trapezoid,
+                when q_range.seqlen > k_range.seqlen in a slice
+
+        thus the whole masks can be divided from the middle into two parts:
+            part1: the top previous full masks plus a single normal causal mask in the last
+            part2: the bottom full masks
+        """
+
+        attn_slices: list[MultiKAttnSlice] = []
+
+        # part1: top full masks
+        top_full_q_range_local = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.end
+            - self.start_distance_to_inv_causal_end
+            - self.diff_len_of_q_range_minus_k_range,
+        )
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=top_full_q_range_local,
+                k_ranges=self.k_ranges_global,
+                mask_types=[AttnMaskType.FULL] * self.batch_size,
+            )
+        )
+
+        # part2: bottom full masks + causal mask
+        bottom_inv_causal_q_range_local = AttnRange(
+            start=self.q_range_local.end
+            - self.start_distance_to_inv_causal_end
+            - self.diff_len_of_q_range_minus_k_range,
+            end=self.q_range_local.end - self.diff_len_of_q_range_minus_k_range,
+        )
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=bottom_inv_causal_q_range_local,
+                k_ranges=self.k_ranges_global,
+                mask_types=[AttnMaskType.INVCAUSAL]
+                + [AttnMaskType.FULL] * (self.batch_size - 1),
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_inv_causal_pentagon_mask_special(self) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        """this special type includes two cases:
+            case1: the area is made of several full rectangles
+                plus a cut rotated trapezoid,
+                when q_range.seqlen <= k_range.seqlen in a slice
+            case2: the area is made of a single cut rotated trapezoid,
+                when q_range.seqlen > k_range.seqlen in a slice
+            NOTE: the case2 of the special type is the same as the case2 of the normal type
+            we just handle each case2 with the same way as its corr. case1
+
+        thus the whole masks can be divided from the middle into three parts:
+            part1: the top full masks
+            part2: the middle full masks plus a single normal inv causal mask in the last
+            part3: the bottom optional full masks
+        """
+
+        attn_slices: list[MultiKAttnSlice] = []
+
+        # part1: top full masks
+        top_full_q_range_local = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.end
+            - self.start_distance_to_inv_causal_end
+            - self.diff_len_of_q_range_minus_k_range,
+        )
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=top_full_q_range_local,
+                k_ranges=self.k_ranges_global,
+                mask_types=[AttnMaskType.FULL] * self.batch_size,
+            )
+        )
+
+        # part2: middle inv causal mask + full masks
+        mid_inv_causal_q_range_local = AttnRange(
+            start=self.q_range_local.end
+            - self.start_distance_to_inv_causal_end
+            - self.diff_len_of_q_range_minus_k_range,
+            end=self.q_range_local.end
+            - self.end_distance_to_inv_causal_end
+            - self.diff_len_of_q_range_minus_k_range,
+        )
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=mid_inv_causal_q_range_local,
+                k_ranges=self.k_ranges_global,
+                mask_types=[AttnMaskType.INVCAUSAL]
+                + [AttnMaskType.FULL] * (self.batch_size - 1),
+            )
+        )
+
+        # part3: bottom optional full masks
+        bottom_full_q_range_local = AttnRange(
+            start=self.q_range_local.end
+            - self.end_distance_to_inv_causal_end
+            - self.diff_len_of_q_range_minus_k_range,
+            end=self.q_range_local.end,
+        )
+        if self.batch_size > 1:
+            attn_slices.append(
+                MultiKAttnSlice(
+                    q_range=bottom_full_q_range_local,
+                    k_ranges=self.k_ranges_global[1:],
+                    mask_types=[AttnMaskType.FULL] * (self.batch_size - 1),
+                )
+            )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_rotated_parallelogram_mask(  # type: ignore[override]
+        self,
+        k_range_global: AttnRange,
+    ) -> list[MultiKAttnSlice]:
+        attn_slices: list[MultiKAttnSlice] = []
+
+        range_start_exceed_slice_start = min(
+            k_range_global.start - self.calc_k_range_global.start,
+            self.q_range_local.seqlen,
+        )
+        range_end_exceed_slice_start = min(
+            k_range_global.end - self.calc_k_range_global.start,
+            self.q_range_local.seqlen,
+        )
+
+        range_end_exceed_causal_start = max(0, k_range_global.end - self.causal_start)
+        range_start_exceed_causal_start = max(
+            0, k_range_global.start - self.causal_start
+        )
+
+        short_length = min(
+            range_start_exceed_slice_start, range_end_exceed_causal_start
+        )
+        long_length = max(range_start_exceed_slice_start, range_end_exceed_causal_start)
+
+        causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + range_start_exceed_causal_start,
+            end=self.q_range_local.start + short_length,
+        )
+        causal_k_range_local = AttnRange(
+            start=k_range_global.start,
+            end=min(
+                k_range_global.end,
+                k_range_global.start + self.diff_len_of_k_range_minus_q_range,
+            ),
+        )
+        full_or_bi_causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + short_length,
+            end=self.q_range_local.start + long_length,
+        )
+        inv_causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + long_length,
+            end=self.q_range_local.start + range_end_exceed_slice_start,
+        )
+        inv_causal_k_range_local = AttnRange(
+            start=max(
+                k_range_global.start,
+                k_range_global.end - self.diff_len_of_k_range_minus_q_range,
+            ),
+            end=k_range_global.end,
+        )
+
+        if causal_q_range_local.seqlen > 0:
+            attn_slices.append(
+                MultiKAttnSlice(
+                    q_range=causal_q_range_local,
+                    k_ranges=AttnRanges.from_ranges([causal_k_range_local]),
+                    mask_types=[AttnMaskType.CAUSAL],
+                )
+            )
+
+        if full_or_bi_causal_q_range_local.seqlen > 0:
+            attn_slices.append(
+                MultiKAttnSlice(
+                    q_range=full_or_bi_causal_q_range_local,
+                    k_ranges=AttnRanges.from_ranges([k_range_global]),
+                    mask_types=[AttnMaskType.FULL]
+                    if range_start_exceed_slice_start > range_end_exceed_causal_start
+                    else [AttnMaskType.BICAUSAL],
+                )
+            )
+
+        if inv_causal_q_range_local.seqlen > 0:
+            attn_slices.append(
+                MultiKAttnSlice(
+                    q_range=inv_causal_q_range_local,
+                    k_ranges=AttnRanges.from_ranges([inv_causal_k_range_local]),
+                    mask_types=[AttnMaskType.INVCAUSAL],
+                )
+            )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_1_2_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        attn_slices: list[MultiKAttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+
+        q_range = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.start + k_range_global.seqlen,
+        )
+
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=q_range,
+                k_ranges=AttnRanges.from_ranges([k_range_global]),
+                mask_types=[AttnMaskType.INVCAUSAL],
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_1_3_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        attn_slices: list[MultiKAttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+
+        if self.bi_causal_type == self.BiCausalType.RECTANGLE:
+            attn_slices.append(
+                MultiKAttnSlice(
+                    q_range=self.q_range_local,
+                    k_ranges=AttnRanges.from_ranges([k_range_global]),
+                    mask_types=[AttnMaskType.INVCAUSAL],
+                )
+            )
+        else:
+            attn_slices = self._make_slice_for_bi_causal_rotated_parallelogram_mask(
+                k_range_global=k_range_global,
+            )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_1_4_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        k_range_global = self.k_ranges_global[index]
+
+        attn_slices = self._make_slice_for_bi_causal_rotated_parallelogram_mask(
+            k_range_global=k_range_global,
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_1_5_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        attn_slices: list[MultiKAttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=self.q_range_local,
+                k_ranges=AttnRanges.from_ranges([k_range_global]),
+                mask_types=[AttnMaskType.BICAUSAL],
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_2_2_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        attn_slices: list[MultiKAttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+
+        range_start_exceed_slice_start = (
+            k_range_global.start - self.calc_k_range_global.start
+        )
+        range_end_exceed_slice_start = (
+            k_range_global.end - self.calc_k_range_global.start
+        )
+
+        full_q_range = AttnRange(
+            start=self.q_range_local.start,
+            end=self.q_range_local.start + range_start_exceed_slice_start,
+        )
+        inv_causal_q_range = AttnRange(
+            start=self.q_range_local.start + range_start_exceed_slice_start,
+            end=self.q_range_local.start + range_end_exceed_slice_start,
+        )
+
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=full_q_range,
+                k_ranges=AttnRanges.from_ranges([k_range_global]),
+                mask_types=[AttnMaskType.FULL],
+            )
+        )
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=inv_causal_q_range,
+                k_ranges=AttnRanges.from_ranges([k_range_global]),
+                mask_types=[AttnMaskType.INVCAUSAL],
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_2_3_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        attn_slices: list[MultiKAttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+
+        range_start_exceed_slice_start = (
+            k_range_global.start - self.calc_k_range_global.start
+        )
+
+        if self.bi_causal_type == self.BiCausalType.RECTANGLE:
+            full_q_range_local = AttnRange(
+                start=self.q_range_local.start,
+                end=self.q_range_local.start + range_start_exceed_slice_start,
+            )
+            inv_causal_q_range_local = AttnRange(
+                start=self.q_range_local.start + range_start_exceed_slice_start,
+                end=self.q_range_local.end,
+            )
+
+            attn_slices.append(
+                MultiKAttnSlice(
+                    q_range=full_q_range_local,
+                    k_ranges=AttnRanges.from_ranges([k_range_global]),
+                    mask_types=[AttnMaskType.FULL],
+                )
+            )
+            attn_slices.append(
+                MultiKAttnSlice(
+                    q_range=inv_causal_q_range_local,
+                    k_ranges=AttnRanges.from_ranges([k_range_global]),
+                    mask_types=[AttnMaskType.INVCAUSAL],
+                )
+            )
+        else:
+            attn_slices = self._make_slice_for_bi_causal_rotated_parallelogram_mask(
+                k_range_global=k_range_global,
+            )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_2_4_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        k_range_global = self.k_ranges_global[index]
+
+        attn_slices = self._make_slice_for_bi_causal_rotated_parallelogram_mask(
+            k_range_global=k_range_global,
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_2_5_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        k_range_global = self.k_ranges_global[index]
+
+        attn_slices = self._make_slice_for_bi_causal_rotated_parallelogram_mask(
+            k_range_global=k_range_global,
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_3_3_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        k_range_global = self.k_ranges_global[index]
+
+        attn_slices = self._make_slice_for_bi_causal_rotated_parallelogram_mask(
+            k_range_global=k_range_global,
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_3_4_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        k_range_global = self.k_ranges_global[index]
+
+        attn_slices = self._make_slice_for_bi_causal_rotated_parallelogram_mask(
+            k_range_global=k_range_global,
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_3_5_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        k_range_global = self.k_ranges_global[index]
+
+        attn_slices = self._make_slice_for_bi_causal_rotated_parallelogram_mask(
+            k_range_global=k_range_global,
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_4_4_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        attn_slices: list[MultiKAttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+
+        range_start_exceed_causal_start = k_range_global.start - self.causal_start
+        range_end_exceed_causal_start = k_range_global.end - self.causal_start
+
+        causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + range_start_exceed_causal_start,
+            end=self.q_range_local.start + range_end_exceed_causal_start,
+        )
+        full_q_range_local = AttnRange(
+            start=self.q_range_local.start + range_end_exceed_causal_start,
+            end=self.q_range_local.end,
+        )
+
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=causal_q_range_local,
+                k_ranges=AttnRanges.from_ranges([k_range_global]),
+                mask_types=[AttnMaskType.CAUSAL],
+            )
+        )
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=full_q_range_local,
+                k_ranges=AttnRanges.from_ranges([k_range_global]),
+                mask_types=[AttnMaskType.FULL],
+            )
+        )
+
+        return attn_slices
+
+    def _make_slice_for_bi_causal_4_5_case(self, index: int) -> list[MultiKAttnSlice]:  # type: ignore[override]
+        attn_slices: list[MultiKAttnSlice] = []
+
+        k_range_global = self.k_ranges_global[index]
+
+        range_start_exceed_causal_start = k_range_global.start - self.causal_start
+
+        causal_q_range_local = AttnRange(
+            start=self.q_range_local.start + range_start_exceed_causal_start,
+            end=self.q_range_local.end,
+        )
+
+        attn_slices.append(
+            MultiKAttnSlice(
+                q_range=causal_q_range_local,
+                k_ranges=AttnRanges.from_ranges([k_range_global]),
+                mask_types=[AttnMaskType.CAUSAL],
             )
         )
 
@@ -1413,16 +3036,27 @@ class DistAttnSolver:
             remote_rank_entry_for_hb_domain: RemoteRankEntry for high-bandwidth domain
         """
 
-        slice_tuples = [
-            (
-                attn_slice.q_range,
-                attn_slice.k_ranges,
-                attn_slice.mask_types[-1]
-                if len(attn_slice.mask_types) > 0
-                else AttnMaskType.FULL,  # if empty, this is no use but a placeholder
+        slice_tuples = []
+
+        for (
+            attn_slice
+        ) in host_rank_entry_this_rank.attn_calc_remote_slice_list_hb_domain:
+            masktype = AttnMaskType.FULL
+            if len(attn_slice.mask_types) > 0:
+                if attn_slice.mask_types[-1] == AttnMaskType.CAUSAL:
+                    masktype = AttnMaskType.CAUSAL
+                elif attn_slice.mask_types[0] == AttnMaskType.INVCAUSAL:
+                    masktype = AttnMaskType.INVCAUSAL
+                elif attn_slice.mask_types[0] == AttnMaskType.BICAUSAL:
+                    masktype = AttnMaskType.BICAUSAL
+
+            slice_tuples.append(
+                (
+                    attn_slice.q_range,
+                    attn_slice.k_ranges,
+                    masktype,  # if empty, this is no use but a placeholder
+                )
             )
-            for attn_slice in host_rank_entry_this_rank.attn_calc_remote_slice_list_hb_domain
-        ]
 
         return self._make_remote_entry_for_one_stage(
             slice_tuples=slice_tuples,
@@ -1717,6 +3351,82 @@ class DistAttnSolver:
         )
 
     @nvtx.instrument_nvtx
+    def _merge_ranges_and_masktypes(
+        self,
+        q_range: AttnRange,
+        k_ranges: AttnRanges,
+        mask_types: list[AttnMaskType],
+        attn_calc_remote_slice_local_list_this_stage: list[AttnSlice],
+    ):
+        """sort k_ranges and merge with masktype in cases,
+        which q_range is overlaped with multi mask types
+        """
+        # sort k_ranges and masktypes with range start
+        indices = argsort(k_ranges._ranges, key=lambda range: range.start)
+        k_ranges_list = [k_ranges[i] for i in indices]
+        mask_types = [mask_types[i] for i in indices]
+
+        def _calc_new_masktype(
+            old_masktype: AttnMaskType,
+            new_masktype: AttnMaskType,
+        ) -> AttnMaskType:
+            """function to merge masktypes when k_range can be merged"""
+            match (old_masktype, new_masktype):
+                case (AttnMaskType.FULL, AttnMaskType.FULL):
+                    return AttnMaskType.FULL
+                case (AttnMaskType.FULL, AttnMaskType.CAUSAL):
+                    return AttnMaskType.CAUSAL
+                case (AttnMaskType.INVCAUSAL, AttnMaskType.FULL):
+                    return AttnMaskType.INVCAUSAL
+                case (AttnMaskType.INVCAUSAL, AttnMaskType.CAUSAL):
+                    return AttnMaskType.BICAUSAL
+                case _:
+                    return AttnMaskType.INVALID
+
+        # init k_range and masktype
+        k_range_start, k_range_end = k_ranges_list[0].start, k_ranges_list[0].end
+        cur_mask_type = mask_types[0]
+
+        for i in range(1, len(k_ranges)):
+            can_be_merged = False
+            if k_ranges_list[i].start == k_range_end:
+                # calc new masktype when k_range can be merged
+                new_masktype = _calc_new_masktype(cur_mask_type, mask_types[i])
+                # invalid masktype means there is no suitable mask to merge the k_range.
+                if new_masktype is not AttnMaskType.INVALID:
+                    k_range_end = k_ranges_list[i].end
+                    cur_mask_type = new_masktype
+                    can_be_merged = True
+
+            if not can_be_merged:
+                # add the current k_range to the array and set it as the new value
+                k_range = AttnRange(start=k_range_start, end=k_range_end)
+                attn_calc_remote_slice_local_list_this_stage.append(
+                    AttnSlice(
+                        q_range=q_range,
+                        k_range=k_range,
+                        mask_type=cur_mask_type,
+                    )
+                )
+
+                # set to new value
+                k_range_start, k_range_end = (
+                    k_ranges_list[i].start,
+                    k_ranges_list[i].end,
+                )
+                cur_mask_type = mask_types[i]
+
+        # add the last k_range to the array
+        k_range = AttnRange(start=k_range_start, end=k_range_end)
+        attn_calc_remote_slice_local_list_this_stage.append(
+            AttnSlice(
+                q_range=q_range,
+                k_range=k_range,
+                mask_type=cur_mask_type,
+            )
+        )
+
+    @nvtx.instrument_nvtx
     def _calc_remote_rank_q_range_to_k_ranges_map(
         self,
         attn_calc_remote_slice_list_per_chunk_this_stage: list[list[MultiKAttnSlice]],
@@ -1759,16 +3469,70 @@ class DistAttnSolver:
                 # create the segmented q_range.
                 q_range_this_slice = AttnRange(start=boundary_start, end=boundary_end)
 
-                if slice.mask_types[-1] == AttnMaskType.FULL:
+                if (
+                    slice.mask_types[-1] == AttnMaskType.FULL
+                    and slice.mask_types[0] == AttnMaskType.FULL
+                ):
                     # in the case of full, no need to handle k_ranges.
                     map_slice_q_range_to_k_ranges[q_range_this_slice].extend(
                         slice.k_ranges
                     )
                 elif slice.mask_types[-1] == AttnMaskType.CAUSAL:
                     # in the case of causal, the end of the last range in k_ranges may need to be shortened
+                    distance_to_slice_end = slice_q_range_end - boundary_end
+
+                    if distance_to_slice_end == 0:
+                        map_slice_q_range_to_k_ranges[q_range_this_slice].extend(
+                            slice.k_ranges
+                        )
+                    else:
+                        map_slice_q_range_to_k_ranges[q_range_this_slice].extend(
+                            slice.k_ranges[:-1]
+                        )
+                        last_k_range = AttnRange(
+                            start=slice.k_ranges[-1].start,
+                            end=slice.k_ranges[-1].end - distance_to_slice_end,
+                        )
+                        map_slice_q_range_to_k_ranges[q_range_this_slice].append(
+                            last_k_range
+                        )
+
+                    masktype = map_slice_q_range_to_masktype[q_range_this_slice]
+                    if masktype == AttnMaskType.INVCAUSAL:
+                        masktype = AttnMaskType.BICAUSAL
+                    else:
+                        masktype = AttnMaskType.CAUSAL
+                    map_slice_q_range_to_masktype[q_range_this_slice] = masktype
+                elif slice.mask_types[0] == AttnMaskType.INVCAUSAL:
+                    distance_to_slice_start = boundary_start - slice_q_range_start
+
+                    if distance_to_slice_start == 0:
+                        map_slice_q_range_to_k_ranges[q_range_this_slice].extend(
+                            slice.k_ranges
+                        )
+                    else:
+                        map_slice_q_range_to_k_ranges[q_range_this_slice].extend(
+                            slice.k_ranges[1:]
+                        )
+                        first_k_range = AttnRange(
+                            start=slice.k_ranges[0].start + distance_to_slice_start,
+                            end=slice.k_ranges[0].end,
+                        )
+                        map_slice_q_range_to_k_ranges[q_range_this_slice].append(
+                            first_k_range
+                        )
+
+                    masktype = map_slice_q_range_to_masktype[q_range_this_slice]
+                    if masktype == AttnMaskType.CAUSAL:
+                        masktype = AttnMaskType.BICAUSAL
+                    else:
+                        masktype = AttnMaskType.INVCAUSAL
+                    map_slice_q_range_to_masktype[q_range_this_slice] = masktype
+                elif slice.mask_types[0] == AttnMaskType.BICAUSAL:
                     if magi_attention.is_sanity_check_enable():
                         assert (
                             slice_q_range_end == boundary_end
+                            and slice_q_range_start == boundary_start
                         ), "slice_q_range_end should be always equal to boundary_end"
 
                     map_slice_q_range_to_k_ranges[q_range_this_slice].extend(
@@ -1776,11 +3540,11 @@ class DistAttnSolver:
                     )
                     map_slice_q_range_to_masktype[
                         q_range_this_slice
-                    ] = AttnMaskType.CAUSAL
+                    ] = AttnMaskType.BICAUSAL
                 else:
                     raise ValueError(
-                        f"Only support 'full' and 'causal' mask, "
-                        f"but get {slice.mask_types[-1]}"
+                        f"Only support 'full', 'causal', 'inv_causal' and 'bi_causal' mask, "
+                        f"but get {slice.mask_types[-1]} and {slice.mask_types[0]}"
                     )
 
         return (

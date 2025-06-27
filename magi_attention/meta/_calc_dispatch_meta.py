@@ -416,8 +416,6 @@ def _calc_self_attn_areas(
         # Iterate from the current range until the start of the range exceeds the current chunk.
         while cur_range_idx < n and q_ranges[cur_range_idx].start < chunk_end:
             mask_type = attn_mask_type[cur_range_idx]
-            is_causal = mask_type == AttnMaskType.CAUSAL
-
             slice: AttnSlice = AttnSlice(slice_id=slice_id, mask_type=mask_type)
 
             attn_len = k_ranges[cur_range_idx].seqlen
@@ -443,7 +441,7 @@ def _calc_self_attn_areas(
                 None,
             )
 
-            if is_causal:
+            if mask_type == AttnMaskType.CAUSAL:
                 q_range_start = max(attn_q_start, chunk_begin, attn_q_end - attn_len)
                 q_range_end = min(attn_q_end, chunk_end)
                 if q_range_start < q_range_end:
@@ -462,20 +460,66 @@ def _calc_self_attn_areas(
                         * height_of_causal
                         // 2
                     )
-                    # HACK To ensure the correctness of some test cases,
-                    # a special handling is temporarily implemented here, which can be removed later.
-                    q_range_start = max(attn_q_start, chunk_begin)
                 else:
                     # empty slice
                     (q_range_start, q_range_end) = (q_range_start, q_range_start)
                     (k_range_start, k_range_end) = (attn_k_start, attn_k_start)
                     slice.area = 0
-            else:
+            elif mask_type == AttnMaskType.BICAUSAL:
+                q_range_start = max(attn_q_start, chunk_begin)
+                q_range_end = min(attn_q_end, chunk_end, attn_q_start + attn_len)
+                if q_range_start < q_range_end:
+                    # the area of a triangle or a trapezoid
+                    diff_slice_start_and_q_start = q_range_start - attn_q_start
+                    (k_range_start, k_range_end) = (
+                        attn_k_start + diff_slice_start_and_q_start,
+                        attn_k_end,
+                    )
+
+                    # calculate the base and height of the trapezoid
+                    base_of_causal = k_range_end - k_range_start
+                    height_of_causal = q_range_end - q_range_start
+                    slice.area = (
+                        (2 * base_of_causal - height_of_causal + 1)
+                        * height_of_causal
+                        // 2
+                    )
+                else:
+                    # empty slice
+                    (q_range_start, q_range_end) = (q_range_start, q_range_start)
+                    (k_range_start, k_range_end) = (attn_k_start, attn_k_start)
+                    slice.area = 0
+            elif mask_type == AttnMaskType.INVCAUSAL:
+                q_range_start = max(attn_q_start, chunk_begin)
+                q_range_end = min(attn_q_end, chunk_end)
+
+                diff_slice_start_and_q_start = q_range_start - attn_q_start
+                diff_slice_end_and_q_end = attn_q_end - q_range_end
+
+                base_of_parallelogram = attn_len - q_ranges[cur_range_idx].seqlen + 1
+                height_of_parallelogram = q_range_end - q_range_start
+
+                if base_of_parallelogram > 0:
+                    # the area of a parallelogram
+                    slice.area = base_of_parallelogram * height_of_parallelogram
+                    k_range_start = attn_k_start + diff_slice_start_and_q_start
+                    k_range_end = attn_k_end - diff_slice_end_and_q_end
+                else:
+                    # empty slice
+                    (q_range_start, q_range_end) = (q_range_start, q_range_start)
+                    (k_range_start, k_range_end) = (attn_k_start, attn_k_start)
+                    slice.area = 0
+            elif mask_type == AttnMaskType.FULL:
                 # the area of a rectangle
                 q_range_start = max(attn_q_start, chunk_begin)
                 q_range_end = min(attn_q_end, chunk_end)
                 (k_range_start, k_range_end) = (attn_k_start, attn_k_end)
                 slice.area = (q_range_end - q_range_start) * attn_len
+            else:
+                raise ValueError(
+                    f"Only support 'FULL', 'CAUSAL', 'BICAUSAL', 'INVCAUSAL', "
+                    f"but get {mask_type=}"
+                )
             cur_range_idx += 1
 
             # set q_range, k_range for this slice
