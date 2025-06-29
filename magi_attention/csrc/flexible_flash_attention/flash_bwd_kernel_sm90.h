@@ -215,7 +215,7 @@ public:
                      work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
 
                     auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-                    auto [n_block, bidh, bidb_idx, _ /*split_idx*/] = block_coord_;
+                    auto [n_block, bidh, bidb_idx] = block_coord_;
 
                     auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() {
                         scheduler.prefetch_next_work(params.scheduler, work_tile_info);
@@ -252,7 +252,7 @@ public:
                      work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
 
                     auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-                    auto [n_block, bidh, bidb_idx, _ /*split_idx*/] = block_coord_;
+                    auto [n_block, bidh, bidb_idx] = block_coord_;
 
                     if constexpr (RangeMerge) {
                         int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
@@ -299,9 +299,7 @@ public:
                 if constexpr (RangeMerge) {
                     int bidb_idx = get<2>(block_coord);
                     int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-                    int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
-
-                    
+                    int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;     
 
                     for (int idx = 0; idx < loop_count; ++idx) {
                         int bidb = bidb_start + idx;
@@ -330,6 +328,7 @@ public:
                     ++work_idx;
                     epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV,
                                 threadIdx.x - NumCopyThreads, block_coord);
+                    cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
                 } else {
                     epilogue.store_zero(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
                 }

@@ -188,6 +188,7 @@ void set_params_dgrad(Flash_bwd_params &params,
                       void *softmax_lse_log2_d,
                       void *dsoftmax_sum_d,
                       float softmax_scale,
+                      void *tile_count_semaphore_d,
                       const float softcap=0.f,
                       bool deterministic=false,
                       int const sm_margin=0) {
@@ -208,7 +209,7 @@ void set_params_dgrad(Flash_bwd_params &params,
                      /*qk_map_d*/nullptr,
                      /*softmax_lse_d*/softmax_lse_d,
                      /*softmax_scale*/softmax_scale,
-                     /*tile_count_semaphore_d*/nullptr,
+                     /*tile_count_semaphore_d*/tile_count_semaphore_d,
                      /*softcap*/softcap,
                      /*sm_margin*/sm_margin,
                      /*disable_fwd_atomic_reduction*/false);
@@ -840,6 +841,10 @@ std::vector<at::Tensor> mha_bwd(
     softmax_d = torch::empty({batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
     softmax_lse_log2 = torch::empty({batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
 
+    // Create tile_count_semaphore tensor, used to count the number of tiles
+    at::Tensor tile_count_semaphore;  
+    tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
+
     Flash_bwd_params params;
     set_params_dgrad(params,
                      batch_size,
@@ -860,6 +865,7 @@ std::vector<at::Tensor> mha_bwd(
                      softmax_lse_log2.data_ptr(),
                      softmax_d.data_ptr(),
                      softmax_scale,
+                     tile_count_semaphore.data_ptr(),
                      softcap,
                      deterministic,
                      sm_margin);
