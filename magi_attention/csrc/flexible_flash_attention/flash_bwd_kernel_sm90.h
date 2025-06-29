@@ -217,11 +217,11 @@ public:
                     auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
                     auto [n_block, bidh, bidb_idx, _ /*split_idx*/] = block_coord_;
 
-                     auto scheduler_prefetch = [&scheduler, &params, &work_tile_info](bool const is_last_tile) {
-                        if (is_last_tile) {
-                            scheduler.prefetch_next_work(params.scheduler, work_tile_info);
-                        }
+                    auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() {
+                        scheduler.prefetch_next_work(params.scheduler, work_tile_info);
                     };
+
+                    bool tile_valid = false;
 
                     if constexpr (RangeMerge) {
                         int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
@@ -231,18 +231,19 @@ public:
                             int bidb = bidb_start + idx;
                             cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
 
-                            bool const is_first_tile = idx == 0;
-                            bool const is_last_tile = idx == loop_count - 1;
+                            bool tile_valid_tmp = mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write,
+                                        smem_pipe_write_do, shared_storage, block_coord, tile_valid);
 
-                            mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write,
-                                        smem_pipe_write_do, shared_storage, scheduler_prefetch, block_coord, is_first_tile, is_last_tile);
+                            tile_valid = tile_valid || tile_valid_tmp;
                         }
                     }
                     else {
                         auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-                        mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write,
-                                    smem_pipe_write_do, shared_storage, scheduler_prefetch, block_coord, true, true);
+                        tile_valid = mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write,
+                                    smem_pipe_write_do, shared_storage, block_coord, tile_valid);
                     }
+
+                    scheduler_prefetch();
                 }
                 mainloop.load_tail(pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do);
             } else if (warp_idx_in_warpgroup == 1) {
@@ -260,16 +261,12 @@ public:
                         for (int idx = 0; idx < loop_count; ++idx) {
                             int bidb = bidb_start + idx;
                             cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
-
-                            bool const is_first_tile = idx == 0;
-                            bool const is_last_tile = idx == loop_count - 1;
-
-                            mainloop.store_dq(params.mainloop, shared_storage, block_coord, is_first_tile, is_last_tile);
+                            mainloop.store_dq(params.mainloop, shared_storage, block_coord);
                         }
                     }
                     else {
                         auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-                        mainloop.store_dq(params.mainloop, shared_storage, block_coord, true, true);
+                        mainloop.store_dq(params.mainloop, shared_storage, block_coord);
                     }
                 }
             }
@@ -309,25 +306,28 @@ public:
                     for (int idx = 0; idx < loop_count; ++idx) {
                         int bidb = bidb_start + idx;
                         block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
-
-                        bool const is_first_tile = idx == 0;
-                        bool const is_last_tile = idx == loop_count - 1;
                         
                         // dK and dV output accumulator.
                         bool tile_valid_tmp = mainloop.mma(
                             params.mainloop, pipeline_q, pipeline_do, smem_pipe_read, smem_pipe_read_do,
-                            tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage, is_first_tile, is_last_tile);
+                            tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage, tile_valid);
+
                         tile_valid = tile_valid || tile_valid_tmp;
                     }
                 }
                 else {
                     tile_valid = mainloop.mma(
                         params.mainloop, pipeline_q, pipeline_do, smem_pipe_read, smem_pipe_read_do,
-                        tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage, true, true);
+                        tdKrdK, tdVrdV, threadIdx.x - NumCopyThreads, work_idx, block_coord, shared_storage, tile_valid);
                 }
 
 
                 if (tile_valid) {
+                    #pragma unroll
+                    for (int i = 0; i < size(tdKrdK); ++i) { 
+                        tdKrdK(i) *= params.mainloop.softmax_scale; 
+                    }
+                    ++work_idx;
                     epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV,
                                 threadIdx.x - NumCopyThreads, block_coord);
                 } else {

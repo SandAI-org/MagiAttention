@@ -94,8 +94,6 @@ public:
         struct PipelineStorage : cute::aligned_struct<16, _1> {
             alignas(16) BarrierQ barrier_Q;
             alignas(16) cutlass::arch::ClusterBarrier barrier_O;
-            alignas(16) cutlass::arch::ClusterBarrier barrier_producer;  // A workaround to avoid unspecified launch failure
-            alignas(16) cutlass::arch::ClusterBarrier barrier_consumer;  // A workaround to avoid unspecified launch failure
             alignas(16) typename CollectiveMainloop::MainloopPipelineK::SharedStorage pipeline_k;
             alignas(16) typename CollectiveMainloop::MainloopPipelineV::SharedStorage pipeline_v;
             alignas(16) typename TileScheduler::SharedStorage smem_scheduler;
@@ -197,8 +195,6 @@ public:
             shared_storage.pipelines.barrier_Q.init(Use_TMA_Q ? 1 : NumProducerThreads /*numThreads*/);
             // TODO: Fix if TMA store O is used
             shared_storage.pipelines.barrier_O.init(size(ClusterShape{}) * NumMmaThreads);
-            shared_storage.pipelines.barrier_producer.init(size(ClusterShape{}) * NumProducerThreads);
-            shared_storage.pipelines.barrier_consumer.init(size(ClusterShape{}) * NumMmaThreads);
         }
 
         // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
@@ -257,7 +253,6 @@ public:
 
             // Initialize the work index
             int work_idx = 0;
-            int work_idx_complement = 0;
 
             // Get some block-level information
             int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
@@ -294,10 +289,6 @@ public:
                     int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
                     int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
                     for (int idx = 0; idx < loop_count; ++idx) {
-
-                        shared_storage.pipelines.barrier_consumer.wait((work_idx_complement + 1) % 2);
-                        shared_storage.pipelines.barrier_producer.arrive();
-
                         int bidb = bidb_start + idx;
                         block_coord = cute::make_tuple(get<0>(block_coord), get<1>(block_coord), bidb);
                         SeqlenInfo_t seqlen_info{
@@ -307,8 +298,6 @@ public:
                         };
                         bool current_tile_valid = mainloop.load(params.mainloop, pipeline_k, pipeline_v, smem_pipe_write,
                                     shared_storage, scheduler_prefetch, seqlen_info, block_coord, work_idx, tile_valid);
-
-                        ++work_idx_complement;
 
                         tile_valid = tile_valid || current_tile_valid;
                     }
@@ -343,7 +332,6 @@ public:
             mainloop.mma_init();
 
             int work_idx = 0;
-            int work_idx_complement = 0;
 
             CUTLASS_PRAGMA_NO_UNROLL
             for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
@@ -354,6 +342,7 @@ public:
                 // If there's tanh softcap, the scaling will be done before tanh.
                 float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
                 flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/ 0> softmax(softmax_scale_log2);
+                typename flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/ 0>::TensorT scores_scale;
                 // Attention output (GEMM-II) accumulator.
                 Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_MNK_PV{}));
                 clear(tOrO);
@@ -366,8 +355,6 @@ public:
                     int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
                     for (int idx = 0; idx < loop_count; ++idx) {
 
-                        shared_storage.pipelines.barrier_producer.wait((work_idx_complement) % 2);
-
                         int bidb = bidb_start + idx;
                         block_coord = cute::make_tuple(get<0>(block_coord), get<1>(block_coord), bidb);
                         SeqlenInfo_t seqlen_info{
@@ -377,13 +364,10 @@ public:
                         };
                         bool current_tile_valid = mainloop.mma(
                             params.mainloop, pipeline_k, pipeline_v, smem_pipe_read,
-                            tOrO, softmax, threadIdx.x - MmaThreadOffset, work_idx, seqlen_info, block_coord, shared_storage, 
+                            tOrO, softmax, scores_scale, threadIdx.x - MmaThreadOffset, work_idx, seqlen_info, block_coord, shared_storage, 
                             tile_valid
                         );
 
-    
-                        ++work_idx_complement; 
-                        shared_storage.pipelines.barrier_consumer.arrive();
                         tile_valid = tile_valid || current_tile_valid;
                     }
                 }
@@ -395,7 +379,7 @@ public:
                     };
                     tile_valid = mainloop.mma(
                         params.mainloop, pipeline_k, pipeline_v, smem_pipe_read,
-                        tOrO, softmax, threadIdx.x - MmaThreadOffset, work_idx, seqlen_info, block_coord, shared_storage,
+                        tOrO, softmax, scores_scale, threadIdx.x - MmaThreadOffset, work_idx, seqlen_info, block_coord, shared_storage,
                         tile_valid
                     );
                 }
@@ -407,7 +391,6 @@ public:
             
                     cutlass::arch::NamedBarrier::arrive(NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
 
-                    typename flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/ 0>::TensorT scores_scale;
                     // Get the final scores_scale
                     cute::copy(softmax.finalize(), scores_scale);
                     // Rescale tOrO

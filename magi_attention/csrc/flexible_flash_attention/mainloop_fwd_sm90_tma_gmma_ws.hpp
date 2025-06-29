@@ -408,9 +408,8 @@ struct CollectiveMainloopFwdSm90 {
         };
 
         auto load_V = [&] (int const n_block_idx, auto const& smem_pipe_write) {
-            auto pipeline_v_load = pipeline_v;
-            pipeline_v_load.producer_acquire(smem_pipe_write);
-            copy(params.tma_load_V.with(*pipeline_v_load.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
+            pipeline_v.producer_acquire(smem_pipe_write);
+            copy(params.tma_load_V.with(*pipeline_v.producer_get_barrier(smem_pipe_write), mcast_mask_kv, TMA::CacheHintSm90::EVICT_LAST),
                 tVgVt_TMA(_, n_block_idx), tVsVt_TMA(_, smem_pipe_write.index()));
         };
 
@@ -562,7 +561,7 @@ struct CollectiveMainloopFwdSm90 {
         }
     }
 
-    template <typename SharedStorage, typename FrgTensorO, typename Softmax>
+    template <typename SharedStorage, typename FrgTensorO, typename Softmax, typename ScoresScale>
     CUTLASS_DEVICE bool
     mma(Params const& params,
         MainloopPipelineK pipeline_k,
@@ -570,6 +569,7 @@ struct CollectiveMainloopFwdSm90 {
         PipelineState& smem_pipe_read,
         FrgTensorO& tOrO,
         Softmax& softmax,
+        ScoresScale& scores_scale,
         int const thread_idx,
         int& work_idx,
         SeqlenInfo_t const& seqlen_info,
@@ -719,8 +719,11 @@ struct CollectiveMainloopFwdSm90 {
             // }
 
             // Get row-max and row-sum of tSrS
-            Tensor scores_scale = !has_valid_tile ? softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true>(tSrS) 
-                                                : softmax.template max_get_scale</*Is_first=*/false, /*Check_inf=*/true>(tSrS);
+            if (!has_valid_tile) {
+                cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true>(tSrS), scores_scale);
+            } else {
+                cute::copy(softmax.template max_get_scale</*Is_first=*/false, /*Check_inf=*/true>(tSrS), scores_scale);
+            }
             // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
             //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
             //     print_tensor(scores_scale);
@@ -731,10 +734,11 @@ struct CollectiveMainloopFwdSm90 {
             // Apply online softmax
             if (!has_valid_tile) {
                 softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
-            }
-            else {
+            } else {
+                if (!RescaleOBeforeGemm) {
+                    softmax.rescale_o(tOrO, scores_scale);
+                }
                 softmax.template online_softmax</*Is_first=*/false, /*Check_inf=*/true>(tSrS);
-                softmax.rescale_o(tOrO, scores_scale); 
             }
             // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
             //     printf("============================================ tSrS after online_softmax m_block: %d ==============================\n", m_block);
@@ -889,6 +893,9 @@ struct CollectiveMainloopFwdSm90 {
 
             // Only rescale tOrO if RescaleOBeforeGemm is enabled
             if constexpr (RescaleOBeforeGemm) { softmax.rescale_o(tOrO, scores_scale); }
+
+            // Signal that the current stage's V smem has been used up, can continue loading subsequent V
+            consumer_wait(pipeline_v, smem_pipe_read);
 
             // Do P @ V for the most left n_block
             flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, cute::conditional_return<MmaPV_is_RS>(tOrP, tOsP), tOrV(_, _, _, smem_pipe_read.index()), tOrO);
