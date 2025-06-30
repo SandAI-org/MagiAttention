@@ -23,10 +23,12 @@ struct TileSchedulerArguments {
     int const seqlen_k, headdim, headdim_v, element_size;  // Used to calculate L2 swizzling
     int* const tile_count_semaphore = nullptr;
     int* const cu_seqlens = nullptr;
-    int* const q_ranges = nullptr;
+    int* const ranges = nullptr;
     int* const seqused = nullptr;
     // int* const num_m_blocks_ptr = nullptr;
     int* const num_splits_dynamic_ptr = nullptr;
+    int* const merge_ranges = nullptr;
+    int* const range_map = nullptr;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -42,28 +44,33 @@ public:
     struct Params {
         // num_blocks is num_blocks_m, where m is the number of blocks in the M dimension (blockIdx.x)
         // num_head is num_head_q if not PackGQA, else qhead_per_khead
-        // num_batch is num_batch_q, which means q_ranges.size(0)
+        // num_batch is num_batch_q, which means ranges.size(0)
         int const num_blocks, num_head, num_batch, num_splits;
         int const qhead_per_khead;
         int const seqlen;
         cutlass::FastDivmod nsplits_divmod;
         int* const cu_seqlens;
-        int* const q_ranges;
+        int* const ranges;
         int* const seqused;
         int const* const num_splits_dynamic_ptr = nullptr;
+        int* const merge_ranges = nullptr;
+        int* const range_map = nullptr;
     };
 
     static Params
     to_underlying_arguments(TileSchedulerArguments const& args) {
         assert(!Split || !Varlen || args.num_splits_dynamic_ptr != nullptr);
         assert(!Split || !Varlen || args.num_splits < (1 << 16)); // We use the top 16 bits to store num_splits
+        int * const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
         return {args.num_blocks, args.num_head, args.num_batch, !Split ? 1 : args.num_splits,
                 args.qhead_per_khead, args.seqlen,
                 cutlass::FastDivmod(!Split ? 1 : args.num_splits),
                 !Varlen ? nullptr : args.cu_seqlens,
-                !Varlen ? nullptr : args.q_ranges,
+                !Varlen ? nullptr : ranges,
                 !Varlen ? nullptr : args.seqused,
-                args.num_splits_dynamic_ptr};
+                args.num_splits_dynamic_ptr,
+                args.merge_ranges,
+                args.range_map};
     }
 
     static dim3
@@ -123,8 +130,8 @@ public:
                 seqlen = params.seqused[work_info.bidb];
             } else if (params.cu_seqlens) {
                 seqlen = params.cu_seqlens[work_info.bidb + 1] - params.cu_seqlens[work_info.bidb];
-            } else if (params.q_ranges) {
-                seqlen = params.q_ranges[2 * work_info.bidb + 1] - params.q_ranges[2 * work_info.bidb];
+            } else if (params.ranges) {
+                seqlen = params.ranges[2 * work_info.bidb + 1] - params.ranges[2 * work_info.bidb];
             }
             if constexpr (PackGQA) { seqlen *= params.qhead_per_khead; }
             is_valid_tile = work_info.block_idx * kBlock < seqlen;
@@ -158,227 +165,6 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template<bool Split=false>
-class StaticPersistentTileScheduler {
-
-public:
-
-    using SharedStorage = int;
-
-    // Device side kernel params
-    struct Params {
-        int total_blocks;
-        cutlass::FastDivmod m_block_divmod, head_divmod;
-        cutlass::FastDivmod nsplits_divmod;
-    };
-
-    static Params
-    to_underlying_arguments(TileSchedulerArguments const& args) {
-        return {args.num_blocks * args.num_head * args.num_batch * (!Split ? 1 : args.num_splits),
-                cutlass::FastDivmod(args.num_blocks), cutlass::FastDivmod(args.num_head * (!Split ? 1 : args.num_splits)),
-                cutlass::FastDivmod(!Split ? 1 : args.num_splits)};
-    }
-
-    static dim3
-    get_grid_shape(Params const& params, int num_sm) {
-        return {uint32_t(num_sm)};
-    }
-
-    struct WorkTileInfo {
-        int tile_idx;
-
-        CUTLASS_DEVICE
-        bool
-        is_valid(Params const& params) const {
-            return tile_idx < params.total_blocks;
-        }
-
-        CUTLASS_DEVICE
-        cute::tuple<int32_t, int32_t, int32_t, int32_t>
-        get_block_coord(Params const& params) const {
-            int block, bidh, bidb;
-            bidb = params.head_divmod.divmod(bidh, params.m_block_divmod.divmod(block, tile_idx));
-            int split_idx = 0;
-            if constexpr (Split) {
-                bidh = params.nsplits_divmod.divmod(split_idx, bidh);
-            }
-            return {block, bidh, bidb, split_idx};
-        }
-
-    };
-
-    CUTLASS_DEVICE
-    StaticPersistentTileScheduler(SharedStorage* const smem_scheduler) {};
-
-    template<bool IsProducerWarp=false>
-    CUTLASS_DEVICE
-    WorkTileInfo
-    get_initial_work(Params const& params) const {
-        return {int(blockIdx.x)};
-    }
-
-    CUTLASS_DEVICE
-    void
-    init_consumer() const {}
-
-    CUTLASS_DEVICE
-    void
-    prefetch_next_work(Params const& params, WorkTileInfo& current_work) const {}
-
-    template<bool IsProducerWarp=false>
-    CUTLASS_DEVICE
-    WorkTileInfo
-    get_next_work(Params const& params, WorkTileInfo const& current_work) const {
-        return {current_work.tile_idx + int(gridDim.x)};
-    }
-
-};
-
-template<int NumMmaThreads=2 * cutlass::NumThreadsPerWarpGroup, int NumProducerThreads=cutlass::NumThreadsPerWarp,
-        bool Split=false, bool PackGQA=false, bool WarpSpecialized=true>
-class DynamicPersistentTileScheduler {
-
-    // This scheduler targets the causal (or local) case where each tile takes different
-    // amount of time. We use longest-processing-time-first scheduling:
-    // the longest remaining tile is assigned to the first SM that's free.
-    // SM indicates they are free by incrementing a semaphore.
-    // However, we have to make sure K & V still fit into L2 cache, so we perform scheduling
-    // on "sections" of the head & batch dimension, each section consisting of e.g. 8 heads.
-    // This is the L2 swizzling part. The size of each section is precomputed based on the
-    // size of K & V and the L2 cache size.
-
-    static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
-    static constexpr int NumThreads = WarpSpecialized ? NumMmaThreads + NumProducerThreads : NumMmaThreads;
-
-public:
-    using SharedStorage = int;
-
-protected:
-    SharedStorage* const tile_count_smem;
-
-public:
-
-    // Device side kernel params
-    struct Params {
-        int const total_blocks;
-        cutlass::FastDivmod const m_block_divmod, head_divmod;
-        cutlass::FastDivmod const l2_minor_divmod, l2_major_divmod;
-        cutlass::FastDivmod const l2_minor_residual_divmod;
-        int const num_hb_quotient;
-        int* const tile_count_semaphore;
-    };
-
-    static Params
-    to_underlying_arguments(TileSchedulerArguments const& args) {
-        int const size_one_kv_head = args.seqlen_k * (args.headdim + args.headdim_v) * args.element_size * 2;
-        int const size_l2 = 32 * 1024 * 1024;  // 32 MB for K & V
-        // Swizzle is the size of each "section". Round swizzle to a power of 2
-        // If not PackGQA already, the size of each section can increase by qhead_per_khead
-        // Need to be careful about the case where only one head will fit
-        int const swizzle = (size_l2 < size_one_kv_head ? 1 : (1 << cutlass::find_log2(size_l2 / size_one_kv_head))) * (PackGQA ? 1 : args.qhead_per_khead);
-        // If we're in the last section (called residual), we don't want to divide by
-        // swizzle. Instead we want to divide by the remainder.
-        int const num_hb_remainder = (args.num_head * args.num_batch) % swizzle;
-        int const num_split_blocks = args.num_blocks * (!Split ? 1 : args.num_splits);
-        // printf("num_split_blocks = %d, num_head = %d, num_batch = %d, swizzle = %d, PackGQA = %d, qhead_per_khead = %d, num_hb_remainder = %d\n", num_split_blocks, args.num_head, args.num_batch, swizzle, int(PackGQA), args.qhead_per_khead, num_hb_remainder);
-        assert(args.tile_count_semaphore != nullptr);
-        return {num_split_blocks * args.num_head * args.num_batch,
-                cutlass::FastDivmod(args.num_blocks), cutlass::FastDivmod(args.num_head),
-                cutlass::FastDivmod(swizzle), cutlass::FastDivmod(swizzle * num_split_blocks),
-                // don't divide by 0
-                cutlass::FastDivmod(num_hb_remainder > 0 ? num_hb_remainder : 1),
-                (args.num_head * args.num_batch) / swizzle,
-                args.tile_count_semaphore};
-    }
-
-    static dim3
-    get_grid_shape(Params const& params, int num_sm) {
-        return {uint32_t(num_sm)};
-    }
-
-    struct WorkTileInfo {
-        int tile_idx;
-
-        CUTLASS_DEVICE
-        bool
-        is_valid(Params const& params) const {
-            return tile_idx < params.total_blocks;
-        }
-
-        CUTLASS_DEVICE
-        cute::tuple<int32_t, int32_t, int32_t, int32_t>
-        get_block_coord(Params const& params) const {
-            int block, bidh, bidb;
-            int l2_mod, bidhb, bidhb_residual;
-            bidhb = params.l2_major_divmod.divmod(l2_mod, tile_idx);
-            // If we're in the last section (called residual), we don't want to divide by
-            // swizzle. Instead we want to divide by the remainder.
-            if (bidhb < params.num_hb_quotient) {
-                block = params.l2_minor_divmod.divmod(bidhb_residual, l2_mod);
-            } else {
-                block = params.l2_minor_residual_divmod.divmod(bidhb_residual, l2_mod);
-            }
-            bidb = params.head_divmod.divmod(bidh, bidhb * params.l2_minor_divmod.divisor + bidhb_residual);
-            int split_idx = 0;
-            if constexpr (Split) {
-                split_idx = params.m_block_divmod.divmod(block, block);
-            }
-            // Longest-processing-time-first
-            block = params.m_block_divmod.divisor - 1 - block;
-            return {block, bidh, bidb, split_idx};
-        }
-
-    };
-
-    CUTLASS_DEVICE
-    DynamicPersistentTileScheduler(SharedStorage* const smem_scheduler) : tile_count_smem(smem_scheduler) {};
-
-    template<bool IsProducerWarp=false>
-    CUTLASS_DEVICE
-    WorkTileInfo
-    get_initial_work(Params const& params) const {
-        return {int(blockIdx.x)};
-    }
-
-    CUTLASS_DEVICE
-    void
-    init_consumer() const {
-        if (WarpSpecialized || cutlass::canonical_warp_idx_sync() > 0) {
-            flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier0 /*id*/);  // TileCountSmemEmpty
-        }
-    }
-
-    CUTLASS_DEVICE
-    void
-    prefetch_next_work(Params const& params, WorkTileInfo& current_work) const {
-        if (threadIdx.x % NumProducerThreads == 0) {
-            current_work.tile_idx = atomicAdd(params.tile_count_semaphore, 1) + int(gridDim.x);
-        }
-    }
-
-    template<bool IsProducerWarp=false>
-    CUTLASS_DEVICE
-    WorkTileInfo
-    get_next_work(Params const& params, WorkTileInfo const& current_work) const {
-        if constexpr (IsProducerWarp) {
-            // thread 0 already has the right tile_idx, just need to broadcast to the rest of warp 0
-            int new_tile_idx = __shfl_sync(0xffffffff, current_work.tile_idx, 0 /*lane*/);
-            flash::named_barrier_sync(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier0 /*id*/);  // TileCountSmemEmpty
-            if (threadIdx.x % NumProducerThreads == 0) {
-                *tile_count_smem = current_work.tile_idx;
-            }
-            flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/);  // TileCountSmemFull
-            return {new_tile_idx};
-        } else {
-            flash::named_barrier_sync(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/);  // TileCountSmemFull
-            int tile_idx = *tile_count_smem;
-            flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier0 /*id*/);  // TileCountSmemEmpty
-            return {tile_idx};
-        }
-    }
-
-};
-
 template<int kBlock, int NumMmaThreads=2 * cutlass::NumThreadsPerWarpGroup, int NumProducerThreads=cutlass::NumThreadsPerWarp, bool Split=false, bool PackGQA=false, bool WarpSpecialized=true>
 class VarlenDynamicPersistentTileScheduler {
 
@@ -402,10 +188,12 @@ public:
         cutlass::FastDivmod nsplits_divmod;
         int* const tile_count_semaphore;
         int* const cu_seqlens;
-        int* const q_ranges;
+        int* const ranges;
         int* const seqused;
         // int* const num_m_blocks_ptr;
         int const* const num_splits_dynamic_ptr;
+        int* const merge_ranges;
+        int* const range_map;
     };
 
     static Params
@@ -415,13 +203,14 @@ public:
         assert(args.tile_count_semaphore != nullptr);
         assert(args.num_head < (1 << 16));  // We use the top 16 bits to store num_splits & split_idx
         assert(!Split || args.num_splits < (1 << 8)); // We use the top 8 bits to store num_splits
+        int * const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
         return {args.num_head, args.num_batch,
                 args.qhead_per_khead, args.seqlen,
                 cutlass::FastDivmod(args.num_head),
                 cutlass::FastDivmod(!Split ? 1 : args.num_splits),
-                args.tile_count_semaphore, args.cu_seqlens, args.q_ranges, args.seqused,
+                args.tile_count_semaphore, args.cu_seqlens, ranges, args.seqused,
                 // args.num_m_blocks_ptr, args.num_splits_dynamic_ptr};
-                args.num_splits_dynamic_ptr};
+                args.num_splits_dynamic_ptr, args.merge_ranges, args.range_map};
     }
 
     static dim3
@@ -440,10 +229,10 @@ public:
         }
 
         CUTLASS_DEVICE
-        cute::tuple<int32_t, int32_t, int32_t, int32_t>
+        cute::tuple<int32_t, int32_t, int32_t>
         get_block_coord(Params const& params) const {
             if constexpr (!Split) {
-                return {block, bidh, bidb, 0 /*split_idx*/};
+                return {block, bidh, bidb};
             } else {
                 // the top 8 bits of bidh store num_splits and the next 8 bits store split_idx
                 // reinterpret_cast to uint32_t to make sure we're not doing sign extension when we shift
@@ -457,7 +246,7 @@ public:
                 // if (threadIdx.x == 128) {
                 //     printf("blockIdx.x = %d, bidb = %d, bidh = %d, bidh_actual = %d, split_idx = %d\n", blockIdx.x, bidb, bidh, bidh_actual, split_idx);
                 // }
-                return {block, bidh_actual, bidb, split_idx};
+                return {block, bidh_actual, bidb};
             }
         }
     };
@@ -479,8 +268,8 @@ public:
                     int cur_cu_seqlen = batch_idx <= params.num_batch ? params.cu_seqlens[batch_idx] : 0;
                     int next_cu_seqlen = __shfl_down_sync(0xffffffff, cur_cu_seqlen, 1);
                     seqlen = next_cu_seqlen - cur_cu_seqlen;
-                } else if (params.q_ranges) {
-                    seqlen = batch_idx <= params.num_batch ? params.q_ranges[2 * batch_idx + 1] - params.q_ranges[2 * batch_idx] : 0;
+                } else if (params.ranges) {
+                    seqlen = batch_idx < params.num_batch ? params.ranges[2 * batch_idx + 1] - params.ranges[2 * batch_idx] : 0;
                 } else {
                     seqlen = params.seqlen;
                 }
