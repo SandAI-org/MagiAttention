@@ -11,7 +11,7 @@
 #include "cutlass/pipeline/pipeline.hpp"
 #include "cutlass/arch/grid_dependency_control.h"
 
-#include "utils.h"
+#include "../common/utils.h"
 
 
 using namespace cute;

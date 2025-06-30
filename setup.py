@@ -467,6 +467,8 @@ if not SKIP_CUDA_BUILD:
     ffa_dir_abs = repo_dir / "magi_attention" / "csrc" / "flexible_flash_attention"
     ffa_dir_rel = "magi_attention/csrc/flexible_flash_attention"
 
+    common_dir = repo_dir / "magi_attention" / "csrc" / "common"
+
     # custom flags
     DISABLE_SM8x = True
     DISABLE_LOCAL = True
@@ -596,6 +598,7 @@ if not SKIP_CUDA_BUILD:
             ]
         )
     include_dirs = [
+        common_dir,
         ffa_dir_abs,
         cutlass_dir / "include",
     ]

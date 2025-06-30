@@ -12,7 +12,7 @@
 #include "cutlass/cluster_launch.hpp"
 #include "cutlass/kernel_launch.h"
 
-#include "static_switch.h"
+#include "../common/static_switch.h"
 #include "flash.h"
 #include "tile_size.h"
 #include "tile_scheduler.hpp"

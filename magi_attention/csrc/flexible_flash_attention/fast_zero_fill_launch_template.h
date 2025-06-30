@@ -8,9 +8,9 @@
 #include <cutlass/kernel_hardware_info.h>
 #include <cutlass/kernel_launch.h>
 
-#include "static_switch.h"
+#include "../common/static_switch.h"
 #include "flash.h"
-#include "cuda_check.h"
+#include "../common/cuda_check.h"
 #include "fast_zero_fill_kernel.h"
 
 using namespace cute;

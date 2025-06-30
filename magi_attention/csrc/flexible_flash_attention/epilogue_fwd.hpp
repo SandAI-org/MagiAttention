@@ -13,7 +13,7 @@
 
 #include "seqlen.h"
 #include "named_barrier.hpp"
-#include "utils.h"
+#include "../common/utils.h"
 
 namespace flash {
 

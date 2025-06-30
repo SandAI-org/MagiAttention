@@ -10,7 +10,7 @@
 
 #include <cutlass/numeric_types.h>
 
-#include "utils.h"
+#include "../common/utils.h"
 
 namespace flash {
 

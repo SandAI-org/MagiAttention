@@ -8,7 +8,7 @@
 #include "cutlass/arch/barrier.h"
 
 #include "named_barrier.hpp"
-#include "utils.h"
+#include "../common/utils.h"
 
 namespace flash {
 

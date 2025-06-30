@@ -12,7 +12,7 @@
 #include <cutlass/numeric_conversion.h>
 
 #include "seqlen.h"
-#include "utils.h"
+#include "../common/utils.h"
 
 namespace flash {
 
