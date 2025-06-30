@@ -626,7 +626,7 @@ setup(
         )
     ),
     py_modules=["magi_attention"],
-    description="A super fast distributed attention solver",
+    description="A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training",
     long_description=long_description,
     long_description_content_type="text/markdown",
     classifiers=[
