@@ -18,7 +18,7 @@
 #include "seqlen.h"
 #include "block.h"
 #include "mask.h"
-#include "../common/utils.h"
+#include "utils.h"
 #include "sm90_pipeline_no_cluster.hpp"
 
 namespace flash {

@@ -17,7 +17,7 @@
 #include "cutlass/arch/grid_dependency_control.h"
 
 #include "seqlen.h"
-#include "../common/utils.h"
+#include "utils.h"
 #include "softmax.h"
 
 namespace flash {

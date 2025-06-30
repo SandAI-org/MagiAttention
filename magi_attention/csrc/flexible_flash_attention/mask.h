@@ -8,7 +8,7 @@
 
 #include "cutlass/fast_math.h"  // For cutlass::FastDivmod
 
-#include "../common/utils.h"
+#include "utils.h"
 
 namespace flash {
 

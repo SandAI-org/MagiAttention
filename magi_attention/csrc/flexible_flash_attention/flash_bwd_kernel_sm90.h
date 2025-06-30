@@ -15,7 +15,7 @@
 #include <cutlass/kernel_hardware_info.h>
 #include "cutlass/pipeline/pipeline.hpp"
 
-#include "../common/utils.h"
+#include "utils.h"
 
 namespace flash {
 

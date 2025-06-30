@@ -13,9 +13,9 @@
 #include <cute/numeric/arithmetic_tuple.hpp>
 
 #include "flash.h"
-#include "../common/static_switch.h"
+#include "static_switch.h"
 #include "tile_size.h"
-#include "../common/cuda_check.h"
+#include "cuda_check.h"
 
 // Copied from https://github.com/pytorch/pytorch/commit/7931eee5c5ebcdf468bff4d308510b03355cd909
 // This is so that we can pass in torch.dtype as a parameter to the function.

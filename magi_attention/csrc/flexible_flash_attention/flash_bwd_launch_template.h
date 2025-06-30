@@ -10,7 +10,7 @@
 #include "cutlass/kernel_launch.h"  // For kernel_launch
 #include "cutlass/cluster_launch.hpp"  // For ClusterLauncher
 
-#include "../common/static_switch.h"
+#include "static_switch.h"
 #include "flash.h"
 #include "flash_bwd_preprocess_kernel.h"
 #include "tile_size.h"

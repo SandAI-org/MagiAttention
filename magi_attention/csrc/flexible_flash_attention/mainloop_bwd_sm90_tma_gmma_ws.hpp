@@ -20,7 +20,7 @@
 #include "block.h"
 #include "mask.h"
 #include "softmax.h"
-#include "../common/utils.h"
+#include "utils.h"
 #include "copy_sm90_bulk_reduce.hpp"
 
 namespace flash {
