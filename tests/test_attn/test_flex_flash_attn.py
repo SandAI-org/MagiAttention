@@ -315,9 +315,13 @@ class TestFlexFlashAttn(TestCase):
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
-
-        test_case = f"[{attn_mask_config['name']}][{model_config['name']}][{dtype=}]"
-        f"[{random_attn_type_map=}][{auto_range_merge=}]"
+        test_case = (
+            f"[{attn_mask_config['name']}]"
+            f"[{model_config['name']}]"
+            f"[dtype={dtype}]"
+            f"[random_attn_type_map={random_attn_type_map}]"
+            f"[auto_range_merge={auto_range_merge}]"
+        )
 
         # construct data
         q = torch.randn(
