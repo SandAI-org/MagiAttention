@@ -302,7 +302,7 @@ class DistFlashAttnRuntime:
         skip_attn = attn_arg.can_skip(is_bwd=False)
 
         # DE-BUG
-        print(
+        logger.debug(
             f"RANK: {dist.get_rank()}, {q.shape=}, {kv.shape=}, "
             f"{q.device=}, {kv.device=}, "
             f"{attn_arg=}"
