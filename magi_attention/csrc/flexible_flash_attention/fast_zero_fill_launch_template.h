@@ -10,7 +10,7 @@
 
 #include "static_switch.h"
 #include "flash.h"
-#include "cuda_check.h"
+#include "check.h"
 #include "fast_zero_fill_kernel.h"
 
 using namespace cute;

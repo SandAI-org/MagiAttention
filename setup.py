@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import glob
 import itertools
 import os
 import platform
@@ -462,10 +463,13 @@ if not SKIP_CUDA_BUILD:
     # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
+
     repo_dir = Path(this_dir)
+
     cutlass_dir = repo_dir / "magi_attention" / "csrc" / "cutlass"
+
     ffa_dir_abs = repo_dir / "magi_attention" / "csrc" / "flexible_flash_attention"
-    ffa_dir_rel = "magi_attention/csrc/flexible_flash_attention"
+    ffa_dir_rel = ffa_dir_abs.relative_to(repo_dir)
 
     common_dir = repo_dir / "magi_attention" / "csrc" / "common"
 
@@ -603,17 +607,53 @@ if not SKIP_CUDA_BUILD:
         cutlass_dir / "include",
     ]
 
+    extra_compile_args = {
+        "cxx": ["-O3", "-std=c++17"] + feature_args,
+        "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag + feature_args,
+    }
+
     ext_modules.append(
         CUDAExtension(
             name="flexible_flash_attention_cuda",
             sources=sources,
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"] + feature_args,
-                "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag + feature_args,
-            },
+            extra_compile_args=extra_compile_args,
             include_dirs=include_dirs,
         )
     )
+
+    # ------    add magi_nccl extension module    ------ #
+
+    magi_nccl_dir_abs = repo_dir / "magi_attention" / "csrc" / "comm"
+    magi_nccl_dir_rel = magi_nccl_dir_abs.relative_to(repo_dir)
+
+    magi_nccl_sources = []
+    magi_nccl_sources.extend(glob.glob(f"{magi_nccl_dir_rel}/*.cpp"))
+    magi_nccl_sources.extend(glob.glob(f"{magi_nccl_dir_rel}/*.cu"))
+
+    magi_nccl_include_dirs = [
+        common_dir,
+        magi_nccl_dir_abs,
+        cutlass_dir / "include",
+    ]
+
+    magi_nccl_extra_compile_args = {
+        "cxx": ["-O3", "-std=c++17"],
+        "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag,
+    }
+
+    ext_modules.append(
+        CUDAExtension(
+            name="magi_nccl",
+            sources=magi_nccl_sources,
+            include_dirs=magi_nccl_include_dirs,
+            extra_compile_args=magi_nccl_extra_compile_args,
+        )
+    )
+
+
+package_data = {
+    "magi_attention": ["*.pyi", "**/*.pyi"],
+}
 
 
 setup(
@@ -628,6 +668,8 @@ setup(
             "assets",
         )
     ),
+    package_data=package_data,
+    include_package_data=True,
     py_modules=["magi_attention"],
     description="A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training",
     long_description=long_description,

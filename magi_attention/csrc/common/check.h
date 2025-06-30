@@ -1,7 +1,3 @@
-/******************************************************************************
- * Copyright (c) 2024, Tri Dao.
- ******************************************************************************/
-
 #pragma once
 
 #include <assert.h>
@@ -16,4 +12,17 @@
         }                                                                                                 \
     } while(0)
 
+
 #define CHECK_CUDA_KERNEL_LAUNCH() CHECK_CUDA(cudaGetLastError())
+
+
+#define CHECK_NCCL(cmd) do {                             \
+    ncclResult_t res = cmd;                             \
+    if (res != ncclSuccess) {                           \
+        printf(                                         \
+            "Failed, NCCL Error: %s:%d '%s'\n",         \
+            __FILE__, __LINE__, ncclGetErrorString(res) \
+        );                                              \
+        exit(EXIT_FAILURE);                             \
+    }                                                   \
+} while (0)
