@@ -145,6 +145,111 @@ class TestFlexFlashAttn(TestCase):
                 ),
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0],
             },
+            {
+                "name": "sparse_attn_2k",
+                "seqlen": 2048,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [0, 256],
+                        [0, 256],
+                        [256, 512],
+                        [256, 512],
+                        [512, 1024],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1536, 1792],
+                        [1792, 2048],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],  # [0, 256]
+                        [512, 768],
+                        [1011, 1123],
+                        [0, 512],  # [256, 512]
+                        [777, 888],
+                        [0, 1024],  # [512, 1024]
+                        [1024, 1280],  # [1024, 1280]
+                        [0, 128],  # [1280, 1536],
+                        [555, 556],
+                        [777, 982],
+                        [1024, 1536],
+                        [1689, 1898],
+                        [1024, 1792],  # [1536, 1792],
+                        [1024, 2048],  # [1792, 2048]
+                    ],
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            },
+            {
+                "name": "varlen_block_causal_2k_with_disjoint_ranges",
+                "seqlen": 2048,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [256, 512],
+                        [512, 1024],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1792, 2048],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [0, 512],
+                        [0, 1024],
+                        [1024, 1280],
+                        [1024, 1536],
+                        [1024, 2048],
+                    ],
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0],
+            },
+            {
+                "name": "sparse_attn_2k_with_disjoint_ranges",
+                "seqlen": 2048,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [0, 256],
+                        [0, 256],
+                        [256, 512],
+                        [256, 512],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1536, 1792],
+                        [1792, 2048],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],  # [0, 256]
+                        [512, 768],
+                        [1011, 1123],
+                        [0, 512],  # [256, 512]
+                        [777, 888],
+                        [1024, 1280],  # [1024, 1280]
+                        [0, 128],  # [1280, 1536],
+                        [555, 556],
+                        [777, 982],
+                        [1024, 1536],
+                        [1689, 1898],
+                        [1024, 1792],  # [1536, 1792],
+                        [1024, 2048],  # [1792, 2048]
+                    ],
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            },
         ],
     )
     @parameterize(
@@ -178,12 +283,14 @@ class TestFlexFlashAttn(TestCase):
     )
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
+    @parameterize("auto_range_merge", [False, True])
     def test_flex_attn(
         self,
         attn_mask_config: dict[str, Any],
         model_config: dict[str, Any],
         dtype: torch.dtype,
         random_attn_type_map: bool,
+        auto_range_merge: bool = False,
     ):
         # extract config
         seqlen = attn_mask_config["seqlen"]
@@ -208,8 +315,13 @@ class TestFlexFlashAttn(TestCase):
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
-
-        test_case = f"[{attn_mask_config['name']}][{model_config['name']}][{dtype=}][{random_attn_type_map=}]"
+        test_case = (
+            f"[{attn_mask_config['name']}]"
+            f"[{model_config['name']}]"
+            f"[dtype={dtype}]"
+            f"[random_attn_type_map={random_attn_type_map}]"
+            f"[auto_range_merge={auto_range_merge}]"
+        )
 
         # construct data
         q = torch.randn(
@@ -251,6 +363,7 @@ class TestFlexFlashAttn(TestCase):
             max_seqlen_q,
             max_seqlen_k,
             attn_type_map_tensor,
+            auto_range_merge=auto_range_merge,
         )
         o.backward(do)
 

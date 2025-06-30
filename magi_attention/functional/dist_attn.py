@@ -302,7 +302,7 @@ class DistFlashAttnRuntime:
         skip_attn = attn_arg.can_skip(is_bwd=False)
 
         # DE-BUG
-        logger.debug(
+        print(
             f"RANK: {dist.get_rank()}, {q.shape=}, {kv.shape=}, "
             f"{q.device=}, {kv.device=}, "
             f"{attn_arg=}"
@@ -340,6 +340,8 @@ class DistFlashAttnRuntime:
                         k=k,
                         v=v,
                         **attn_arg.to_ffa_args(is_bwd=False),
+                        merge_q_ranges=None,
+                        qk_map=None,
                         softmax_scale=q.shape[-1] ** -0.5,
                         deterministic=deterministic,
                         softcap=0.0,
@@ -351,18 +353,6 @@ class DistFlashAttnRuntime:
                         return_dtype=max_fp_dtype(q.dtype, torch.float32),
                         disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
                     )
-
-                # fill output with zero indexed by "hole" q ranges
-                # TODO: put this logic into kernel
-                out_zero_fill_correction(
-                    out=out,
-                    out_zero_fill_ranges=attn_arg.out_zero_fill_ranges,
-                    # FIXME: this is still an experimental feature,
-                    # we should remove this flag in the future
-                    # when range fill is stable
-                    use_range_fill=True,
-                    **attn_arg.out_zero_range_fill_kwargs,
-                )
 
         return out, lse, skip_attn
 
@@ -416,6 +406,8 @@ class DistFlashAttnRuntime:
                     out=o,
                     softmax_lse=lse,
                     **attn_arg.to_ffa_args(is_bwd=True),
+                    merge_k_ranges=None,
+                    bwd_kq_map=None,
                     softmax_scale=q.shape[-1] ** -0.5,
                     deterministic=deterministic,
                     softcap=0.0,
