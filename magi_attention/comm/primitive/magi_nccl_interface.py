@@ -85,7 +85,7 @@ def group_cast(
     backend = group._get_backend(torch.device("cuda"))
     assert isinstance(
         backend, MagiNCCLBackend
-    ), f"expected MagiNCCLBackend, got {type(group)=}"
+    ), f"expected MagiNCCLBackend, got {type(backend)=}"
 
     work = backend.group_cast(
         input,
@@ -134,7 +134,7 @@ def group_reduce(
     backend = group._get_backend(torch.device("cuda"))
     assert isinstance(
         backend, MagiNCCLBackend
-    ), f"expected MagiNCCLBackend, got {type(group)=}"
+    ), f"expected MagiNCCLBackend, got {type(backend)=}"
 
     work = backend.group_reduce(
         input,

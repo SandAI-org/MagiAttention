@@ -24,7 +24,10 @@ from torch.testing._internal.common_distributed import MultiProcessTestCase
 DEVICE_TYPE = (
     "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else "cpu"
 )
-PG_BACKEND = "nccl" if DEVICE_TYPE == "cuda" else "gloo"
+
+PG_NCCL_BACKEND = "nccl"
+PG_MAGI_NCCL_BACKEND = "cpu:gloo,cuda:magi_nccl"
+PG_DEFAULT_BACKEND = PG_NCCL_BACKEND if DEVICE_TYPE == "cuda" else "gloo"
 
 NUM_DEVICES = 4
 
@@ -51,7 +54,7 @@ class DistTestBase(MultiProcessTestCase):
 
     @property
     def backend(self) -> str:
-        return PG_BACKEND
+        return PG_DEFAULT_BACKEND
 
     def init_pg(self) -> None:
         if "nccl" in self.backend and torch.cuda.device_count() < self.world_size:

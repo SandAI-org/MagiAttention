@@ -900,8 +900,6 @@ class DistAttnSolver:
         overlap_config: OverlapConfig,
         cp_mesh: DeviceMesh | None = None,
     ):
-        assert dist.get_backend(cp_group) == dist.Backend.NCCL
-
         self.cp_rank = dist.get_rank(cp_group)
         self.cp_size = dist.get_world_size(cp_group)
         self.cp_group = cp_group

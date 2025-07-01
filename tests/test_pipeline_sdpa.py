@@ -36,7 +36,12 @@ from magi_attention.config import (
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import DistTestBase, with_comms
+from magi_attention.testing.dist_common import (
+    PG_MAGI_NCCL_BACKEND,
+    PG_NCCL_BACKEND,
+    DistTestBase,
+    with_comms,
+)
 from magi_attention.testing.precision import EPSILON, torch_attn_ref
 from magi_attention.utils import get_attn_mask_from_ranges, str2seed, sync_rng
 from magi_attention.utils._utils import is_list_value_all
@@ -93,12 +98,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # init several pgs with all ranks
         self.nccl_groups = [
-            dist.new_group(list(range(self.world_size)), backend="nccl")
+            dist.new_group(list(range(self.world_size)), backend=self.backend)
             for _ in range(2)
-        ]
-        self.gloo_groups = [
-            dist.new_group(list(range(self.world_size)), backend="gloo")
-            for _ in range(1)
         ]
 
         # NOTE: test using sdpa backend with fp64 dtype support
@@ -125,16 +126,20 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             self.device_mesh = None
 
     @property
+    def backend(self) -> str:
+        return (
+            PG_MAGI_NCCL_BACKEND
+            if magi_attention.is_magi_nccl_backend_enable()
+            else PG_NCCL_BACKEND
+        )
+
+    @property
     def process_group(self):
         return dist.distributed_c10d._get_default_group()
 
     @property
     def nccl_group(self) -> dist.ProcessGroup:
         return self.nccl_groups[0]
-
-    @property
-    def gloo_group(self) -> dist.ProcessGroup:
-        return self.gloo_groups[0]
 
     @property
     def world_size(self) -> int:

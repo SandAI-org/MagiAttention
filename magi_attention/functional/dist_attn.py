@@ -196,9 +196,6 @@ class DistFlashAttnRuntime:
         cp_group_dkv: dist.ProcessGroup,
         deterministic: bool,
     ):
-        assert dist.get_backend(cp_group_kv) == dist.Backend.NCCL
-        assert dist.get_backend(cp_group_dkv) == dist.Backend.NCCL
-
         self.comm_meta = comm_meta
         self.calc_meta = calc_meta
         self.cp_group_kv = cp_group_kv

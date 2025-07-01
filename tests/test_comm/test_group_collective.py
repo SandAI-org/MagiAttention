@@ -29,10 +29,12 @@ from magi_attention.comm.primitive.utils import (
     sanity_check_for_group_reduce_meta_args_per_rank,
 )
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import DistTestBase, with_comms
-
-PG_NCCL_BACKEND = "nccl"
-PG_MAGI_NCCL_BACKEND = "cpu:gloo,cuda:magi_nccl"
+from magi_attention.testing.dist_common import (
+    PG_MAGI_NCCL_BACKEND,
+    PG_NCCL_BACKEND,
+    DistTestBase,
+    with_comms,
+)
 
 
 class TestGroupCollectiveWithWorldSize4(DistTestBase):
