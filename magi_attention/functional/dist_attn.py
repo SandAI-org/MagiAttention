@@ -656,8 +656,8 @@ class DistFlashAttnFunc(torch.autograd.Function):
             )
 
             # reduce ith partial dkv
-            # NOTE: Even if skip_attn is True, we still need to launch the group_reduce_collective,
-            #       because not all ranks are skipped.
+            # NOTE: even if skip_attn is True, we still need to launch the group_reduce_collective,
+            # because not all ranks are skipped.
             partial_local_dkv_work = dist_attn_runtime.reduce_partial_dkv(
                 partial_remote_dkv=partial_remote_dkv,
                 partial_local_dkv=partial_local_dkv,
@@ -666,8 +666,8 @@ class DistFlashAttnFunc(torch.autograd.Function):
 
             partial_local_dkv_works.append(partial_local_dkv_work)
 
-            # NOTE: Because dq reduce is doing on local rank, if skip_attn is True,
-            #       we just skip the reduce operation.
+            # NOTE: since dq reduce is doing on local rank, if skip_attn is True,
+            # we just skip the reduce operation.
             if not skip_attn:
                 # reduce ith partial dq, overlapped with ith remote dkv comm
                 partial_local_dq = dist_attn_runtime.reduce_partial_dq(

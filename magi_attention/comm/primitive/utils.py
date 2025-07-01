@@ -1301,6 +1301,10 @@ def _group_cast_collective_hier(
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
+    # FIXME: add support for magi_nccl backend
+    assert (
+        not magi_attention.is_magi_nccl_backend_enable()
+    ), "Hierarchical group-cast collective is not supported for magi_nccl backend for now."
     assert (
         async_op
     ), "async_op must be True for hierarchical group-cast collective by now"

@@ -72,6 +72,10 @@ class GroupCollectiveArg:
         }
 
         if magi_attention.is_hierarchical_comm_enable():
+            # FIXME: add support for magi_nccl backend
+            assert (
+                not magi_attention.is_magi_nccl_backend_enable()
+            ), "Hierarchical comm is not supported for magi_nccl backend for now."
             assert self.device_mesh.ndim == 2, (
                 f"The hierarchical comm is only supported for 2D device mesh, "
                 f"but got {self.device_mesh.ndim=}."
@@ -95,7 +99,9 @@ class GroupCollectiveArg:
             # when we issue all the comms in advance of all the calcs
             # however, this will introduce cuda-malloc ops when applying range-gather for each comm
             self.group_cast_args_dict_kv_packed["side_stream"] = torch.cuda.Stream()
-        else:
+        elif not magi_attention.is_magi_nccl_backend_enable():
+            # NOTE: if magi_nccl backend is disabled, we fall back to use all2all-v to simulate group cast
+            # thus we pre-calculate the meta args for all2all-v based group-cast here
             (
                 self.group_cast_args_dict_kv_packed["a2a_input_split_size"],
                 self.group_cast_args_dict_kv_packed["perm_before_a2a_kwargs"],
@@ -134,29 +140,34 @@ class GroupCollectiveArg:
             }.items()
         }
 
-        (
-            self.group_reduce_args_dict_kv_packed["a2a_input_split_size"],
-            self.group_reduce_args_dict_kv_packed["perm_before_a2a_kwargs"],
-        ) = _calc_group_reduce_a2a_input_meta_args(
-            input_split_size_list=self.group_reduce_args_dict_kv_packed[
-                "input_split_size_list"
-            ],
-            dst_index_list=self.group_reduce_args_dict_kv_packed["dst_index_list"],
-            world_size=self.world_size,
-            device=device,
-        )
+        if not magi_attention.is_magi_nccl_backend_enable():
+            # NOTE: if magi_nccl backend is disabled, we fall back to use all2all-v to simulate group reduce
+            # thus we pre-calculate the meta args for all2all-v based group-reduce here
+            (
+                self.group_reduce_args_dict_kv_packed["a2a_input_split_size"],
+                self.group_reduce_args_dict_kv_packed["perm_before_a2a_kwargs"],
+            ) = _calc_group_reduce_a2a_input_meta_args(
+                input_split_size_list=self.group_reduce_args_dict_kv_packed[
+                    "input_split_size_list"
+                ],
+                dst_index_list=self.group_reduce_args_dict_kv_packed["dst_index_list"],
+                world_size=self.world_size,
+                device=device,
+            )
 
-        (
-            self.group_reduce_args_dict_kv_packed["a2a_output_split_size"],
-            self.group_reduce_args_dict_kv_packed["range_reduce_kwargs"],
-        ) = _calc_group_reduce_a2a_output_meta_args(
-            output_split_size_list=self.group_reduce_args_dict_kv_packed[
-                "output_split_size_list"
-            ],
-            src_indices_list=self.group_reduce_args_dict_kv_packed["src_indices_list"],
-            world_size=self.world_size,
-            device=device,
-        )
+            (
+                self.group_reduce_args_dict_kv_packed["a2a_output_split_size"],
+                self.group_reduce_args_dict_kv_packed["range_reduce_kwargs"],
+            ) = _calc_group_reduce_a2a_output_meta_args(
+                output_split_size_list=self.group_reduce_args_dict_kv_packed[
+                    "output_split_size_list"
+                ],
+                src_indices_list=self.group_reduce_args_dict_kv_packed[
+                    "src_indices_list"
+                ],
+                world_size=self.world_size,
+                device=device,
+            )
 
     def to_group_cast_args(self) -> dict:
         return self.group_cast_args_dict_kv_packed
