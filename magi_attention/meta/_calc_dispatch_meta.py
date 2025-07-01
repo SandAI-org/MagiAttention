@@ -34,7 +34,7 @@ from magi_attention.utils import (
     perm_idxs2unperm_idxs,
     wrap_to_list,
 )
-from magi_attention.utils._utils import argsort, is_list_value_all
+from magi_attention.utils._utils import argsort
 
 __all__ = [
     "calc_dispatch_meta_from_qk_ranges",
@@ -250,14 +250,6 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
         f"as well as {num_chunks_q=} and {num_chunks_k=}"
     )
 
-    assert (
-        is_list_value_all(attn_mask_type, AttnMaskType.FULL)
-        or q_ranges.is_non_overlap()
-    ), (
-        "Only support q_range overlap when masktype is all full, "
-        "but get other masktype when q_range is overlap"
-    )
-
     # --------------    extract some trivial meta info   -------------- #
 
     total_seqlen = total_seqlen_q
@@ -267,8 +259,8 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
 
     # sort (q_range, k_range, masktype) with (q_range.start, q_range.end)
     sorted_indices = argsort(q_ranges, key=lambda x: (x.start, x.end))
-    q_ranges._ranges = [q_ranges[i] for i in sorted_indices]
-    k_ranges._ranges = [k_ranges[i] for i in sorted_indices]
+    q_ranges = AttnRanges.from_ranges([q_ranges[i] for i in sorted_indices])
+    k_ranges = AttnRanges.from_ranges([k_ranges[i] for i in sorted_indices])
     attn_mask_type = [attn_mask_type[i] for i in sorted_indices]
 
     # -------    calculate attn areas to construct an undispatch bucket   ------- #
@@ -465,7 +457,7 @@ def _calc_self_attn_areas(
                     (q_range_start, q_range_end) = (q_range_start, q_range_start)
                     (k_range_start, k_range_end) = (attn_k_start, attn_k_start)
                     slice.area = 0
-            elif mask_type == AttnMaskType.BICAUSAL:
+            elif mask_type == AttnMaskType.INVCAUSAL:
                 q_range_start = max(attn_q_start, chunk_begin)
                 q_range_end = min(attn_q_end, chunk_end, attn_q_start + attn_len)
                 if q_range_start < q_range_end:
@@ -489,7 +481,7 @@ def _calc_self_attn_areas(
                     (q_range_start, q_range_end) = (q_range_start, q_range_start)
                     (k_range_start, k_range_end) = (attn_k_start, attn_k_start)
                     slice.area = 0
-            elif mask_type == AttnMaskType.INVCAUSAL:
+            elif mask_type == AttnMaskType.BICAUSAL:
                 q_range_start = max(attn_q_start, chunk_begin)
                 q_range_end = min(attn_q_end, chunk_end)
 
