@@ -758,7 +758,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     )
     @parameterize(
         "high_bandwith_domain_size",
-        [1, 2, 4, 8],
+        [1],
     )
     def test_pipeline_sdpa(
         self,

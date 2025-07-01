@@ -877,6 +877,7 @@ def _prepare_meta_for_group_cast_collective_hier(
     src_index_list: list[int],
     intra_group: dist.ProcessGroup,
     inter_group: dist.ProcessGroup,
+    use_a2av_impl: bool = True,
     **kwargs,
 ):
     if "hier_comm_meta_kwargs" in kwargs:
@@ -970,25 +971,26 @@ def _prepare_meta_for_group_cast_collective_hier(
 
     # --------      get a2a meta for 1st step       -------- #
 
-    (
-        a2a_input_split_size_pre_intra,
-        perm_range_gather_kwargs_pre_intra,
-    ) = _calc_group_cast_a2a_input_meta_args(
-        input_split_size_list=input_split_size_list_pre_intra,
-        dst_indices_list=dst_indices_list_pre_intra,
-        world_size=world_size_intra_node,
-        device=device,
-    )
-    (
-        a2a_output_split_size_pre_intra,
-        _,
-    ) = _calc_group_cast_a2a_output_meta_args(
-        output_split_size_list=output_split_size_list_pre_intra,
-        src_index_list=src_index_list_pre_intra,
-        world_size=world_size_intra_node,
-        device=device,
-        calc_unperm_after_a2a_kwargs=False,
-    )
+    if use_a2av_impl:
+        (
+            a2a_input_split_size_pre_intra,
+            perm_range_gather_kwargs_pre_intra,
+        ) = _calc_group_cast_a2a_input_meta_args(
+            input_split_size_list=input_split_size_list_pre_intra,
+            dst_indices_list=dst_indices_list_pre_intra,
+            world_size=world_size_intra_node,
+            device=device,
+        )
+        (
+            a2a_output_split_size_pre_intra,
+            _,
+        ) = _calc_group_cast_a2a_output_meta_args(
+            output_split_size_list=output_split_size_list_pre_intra,
+            src_index_list=src_index_list_pre_intra,
+            world_size=world_size_intra_node,
+            device=device,
+            calc_unperm_after_a2a_kwargs=False,
+        )
 
     # --------      build group-cast meta for 2nd step       -------- #
 
@@ -1112,25 +1114,26 @@ def _prepare_meta_for_group_cast_collective_hier(
 
     # --------      get a2a meta for 2nd step       -------- #
 
-    (
-        a2a_input_split_size_inter,
-        perm_range_gather_kwargs_inter,
-    ) = _calc_group_cast_a2a_input_meta_args(
-        input_split_size_list=input_split_size_list_inter,
-        dst_indices_list=dst_indices_list_inter,
-        world_size=world_size_inter_node,
-        device=device,
-    )
-    (
-        a2a_output_split_size_inter,
-        _,
-    ) = _calc_group_cast_a2a_output_meta_args(
-        output_split_size_list=output_split_size_list_inter,
-        src_index_list=src_index_list_inter,
-        world_size=world_size_inter_node,
-        device=device,
-        calc_unperm_after_a2a_kwargs=False,
-    )
+    if use_a2av_impl:
+        (
+            a2a_input_split_size_inter,
+            perm_range_gather_kwargs_inter,
+        ) = _calc_group_cast_a2a_input_meta_args(
+            input_split_size_list=input_split_size_list_inter,
+            dst_indices_list=dst_indices_list_inter,
+            world_size=world_size_inter_node,
+            device=device,
+        )
+        (
+            a2a_output_split_size_inter,
+            _,
+        ) = _calc_group_cast_a2a_output_meta_args(
+            output_split_size_list=output_split_size_list_inter,
+            src_index_list=src_index_list_inter,
+            world_size=world_size_inter_node,
+            device=device,
+            calc_unperm_after_a2a_kwargs=False,
+        )
 
     # --------      build group-cast meta for 3rd step       -------- #
 
@@ -1197,95 +1200,117 @@ def _prepare_meta_for_group_cast_collective_hier(
 
     # --------      get a2a meta for 3rd step       -------- #
 
-    (
-        a2a_input_split_size_post_intra,
-        perm_range_gather_kwargs_post_intra,
-    ) = _calc_group_cast_a2a_input_meta_args(
-        input_split_size_list=input_split_size_list_post_intra,
-        dst_indices_list=dst_indices_list_post_intra,
-        world_size=world_size_intra_node,
-        device=device,
-    )
-    a2a_input_seqlen_post_intra = sum(a2a_input_split_size_post_intra)
-    (
-        a2a_output_split_size_post_intra,
-        _,
-    ) = _calc_group_cast_a2a_output_meta_args(
-        output_split_size_list=output_split_size_list_post_intra,
-        src_index_list=src_index_list_post_intra,
-        world_size=world_size_intra_node,
-        device=device,
-        calc_unperm_after_a2a_kwargs=False,
-    )
+    if use_a2av_impl:
+        (
+            a2a_input_split_size_post_intra,
+            perm_range_gather_kwargs_post_intra,
+        ) = _calc_group_cast_a2a_input_meta_args(
+            input_split_size_list=input_split_size_list_post_intra,
+            dst_indices_list=dst_indices_list_post_intra,
+            world_size=world_size_intra_node,
+            device=device,
+        )
+        a2a_input_seqlen_post_intra = sum(a2a_input_split_size_post_intra)
+        (
+            a2a_output_split_size_post_intra,
+            _,
+        ) = _calc_group_cast_a2a_output_meta_args(
+            output_split_size_list=output_split_size_list_post_intra,
+            src_index_list=src_index_list_post_intra,
+            world_size=world_size_intra_node,
+            device=device,
+            calc_unperm_after_a2a_kwargs=False,
+        )
 
     # --------      get post-process fn for 4th step       -------- #
 
-    def get_unperm_after_a2a_kwargs_hier(
-        output_split_size_list: list[int],
-        src_index_list: list[int],
-        world_size: int,
-        device: torch.device,
-    ):
-        rank_list_intra = list(
-            range(first_rank_this_intra_node, last_rank_this_intra_node + 1)
-        )
-        rank_list_per_inter_wo_this_intra_node = [
-            [
-                r
-                for inter_offset in range(world_size_inter_node)
-                if not is_rank_within_this_intra_node(
-                    r := inter_offset * world_size_intra_node + intra_offset
-                )
-            ]
-            for intra_offset in range(world_size_intra_node)
-        ]
-        reorder_list = rank_list_intra + list(
-            chain(*rank_list_per_inter_wo_this_intra_node)
-        )
+    if use_a2av_impl:
 
-        _, unperm_after_a2a_kwargs_hier = _calc_group_cast_a2a_output_meta_args(
+        def get_unperm_after_a2a_kwargs_hier(
+            output_split_size_list: list[int],
+            src_index_list: list[int],
+            world_size: int,
+            device: torch.device,
+        ):
+            rank_list_intra = list(
+                range(first_rank_this_intra_node, last_rank_this_intra_node + 1)
+            )
+            rank_list_per_inter_wo_this_intra_node = [
+                [
+                    r
+                    for inter_offset in range(world_size_inter_node)
+                    if not is_rank_within_this_intra_node(
+                        r := inter_offset * world_size_intra_node + intra_offset
+                    )
+                ]
+                for intra_offset in range(world_size_intra_node)
+            ]
+            reorder_list = rank_list_intra + list(
+                chain(*rank_list_per_inter_wo_this_intra_node)
+            )
+
+            _, unperm_after_a2a_kwargs_hier = _calc_group_cast_a2a_output_meta_args(
+                output_split_size_list=output_split_size_list,
+                src_index_list=src_index_list,
+                world_size=world_size,
+                device=device,
+                reorder_list=reorder_list,
+                calc_unperm_after_a2a_kwargs=True,
+            )
+
+            return unperm_after_a2a_kwargs_hier
+
+        unperm_after_a2a_kwargs_hier = get_unperm_after_a2a_kwargs_hier(
             output_split_size_list=output_split_size_list,
             src_index_list=src_index_list,
             world_size=world_size,
             device=device,
-            reorder_list=reorder_list,
-            calc_unperm_after_a2a_kwargs=True,
         )
 
-        return unperm_after_a2a_kwargs_hier
+        post_process_fn = partial(
+            _unpermute_tensor,
+            unperm_after_a2a_kwargs=unperm_after_a2a_kwargs_hier,
+        )
 
-    unperm_after_a2a_kwargs_hier = get_unperm_after_a2a_kwargs_hier(
-        output_split_size_list=output_split_size_list,
-        src_index_list=src_index_list,
-        world_size=world_size,
-        device=device,
-    )
-
-    post_process_fn = partial(
-        _unpermute_tensor,
-        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs_hier,
-    )
-
-    return (
-        # for pre intra
-        output_seqlen_pre_intra,
-        a2a_input_split_size_pre_intra,
-        a2a_output_split_size_pre_intra,
-        perm_range_gather_kwargs_pre_intra,
-        # for inter
-        output_seqlen_inter,
-        a2a_input_split_size_inter,
-        a2a_output_split_size_inter,
-        perm_range_gather_kwargs_inter,
-        # for post intra
-        output_seqlen_post_intra,
-        a2a_input_seqlen_post_intra,
-        a2a_input_split_size_post_intra,
-        a2a_output_split_size_post_intra,
-        perm_range_gather_kwargs_post_intra,
-        # for post process
-        post_process_fn,
-    )
+    if use_a2av_impl:
+        return (
+            # for pre intra
+            output_seqlen_pre_intra,
+            a2a_input_split_size_pre_intra,
+            a2a_output_split_size_pre_intra,
+            perm_range_gather_kwargs_pre_intra,
+            # for inter
+            output_seqlen_inter,
+            a2a_input_split_size_inter,
+            a2a_output_split_size_inter,
+            perm_range_gather_kwargs_inter,
+            # for post intra
+            output_seqlen_post_intra,
+            a2a_input_seqlen_post_intra,
+            a2a_input_split_size_post_intra,
+            a2a_output_split_size_post_intra,
+            perm_range_gather_kwargs_post_intra,
+            # for post process
+            post_process_fn,
+        )
+    else:
+        return (
+            # for pre intra
+            input_split_size_list_pre_intra,
+            output_split_size_list_pre_intra,
+            dst_indices_list_pre_intra,
+            src_index_list_pre_intra,
+            # for inter
+            input_split_size_list_inter,
+            output_split_size_list_inter,
+            dst_indices_list_inter,
+            src_index_list_inter,
+            # for post intra
+            input_split_size_list_post_intra,
+            output_split_size_list_post_intra,
+            dst_indices_list_post_intra,
+            src_index_list_post_intra,
+        )
 
 
 @torch.no_grad()
@@ -1301,10 +1326,6 @@ def _group_cast_collective_hier(
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
-    # FIXME: add support for magi_nccl backend
-    assert (
-        not magi_attention.is_magi_nccl_backend_enable()
-    ), "Hierarchical group-cast collective is not supported for magi_nccl backend for now."
     assert (
         async_op
     ), "async_op must be True for hierarchical group-cast collective by now"
@@ -1315,6 +1336,22 @@ def _group_cast_collective_hier(
 
     side_stream: torch.cuda.Stream = kwargs.pop("side_stream", None)
     assert side_stream is not None
+
+    if magi_attention.is_magi_nccl_backend_enable():
+        # NOTE: use native hierarchical group-cast if magi_nccl backend is enabled
+        return _group_cast_collective_hier_impl_with_magi_nccl_backend(
+            input_tensor=input_tensor,
+            output_tensor=output_tensor,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_indices_list=dst_indices_list,
+            src_index_list=src_index_list,
+            intra_group=intra_group,
+            inter_group=inter_group,
+            side_stream=side_stream,
+            async_op=async_op,
+            **kwargs,
+        )
 
     # --------      get hier-comm meta args       -------- #
 
@@ -1344,6 +1381,7 @@ def _group_cast_collective_hier(
         src_index_list=src_index_list,
         intra_group=intra_group,
         inter_group=inter_group,
+        use_a2av_impl=True,
         **kwargs,
     )
 
@@ -1468,3 +1506,51 @@ def _group_cast_collective_hier(
     )
 
     return work_with_post_process_fn
+
+
+@torch.no_grad()
+@nvtx.instrument_nvtx
+def _group_cast_collective_hier_impl_with_magi_nccl_backend(
+    input_tensor: torch.Tensor,
+    output_tensor: torch.Tensor,
+    input_split_size_list: list[int],
+    output_split_size_list: list[int],
+    dst_indices_list: list[list[int]],
+    src_index_list: list[int],
+    intra_group: dist.ProcessGroup,
+    inter_group: dist.ProcessGroup,
+    side_stream: torch.cuda.Stream,
+    async_op: bool = False,
+    **kwargs,
+):
+    # --------      get hier-comm meta args       -------- #
+
+    (
+        # for pre intra
+        input_split_size_list_pre_intra,
+        output_split_size_list_pre_intra,
+        dst_indices_list_pre_intra,
+        src_index_list_pre_intra,
+        # for inter
+        input_split_size_list_inter,
+        output_split_size_list_inter,
+        dst_indices_list_inter,
+        src_index_list_inter,
+        # for post intra
+        input_split_size_list_post_intra,
+        output_split_size_list_post_intra,
+        dst_indices_list_post_intra,
+        src_index_list_post_intra,
+    ) = _prepare_meta_for_group_cast_collective_hier(
+        input_split_size_list=input_split_size_list,
+        output_split_size_list=output_split_size_list,
+        dst_indices_list=dst_indices_list,
+        src_index_list=src_index_list,
+        intra_group=intra_group,
+        inter_group=inter_group,
+        use_a2av_impl=False,
+        **kwargs,
+    )
+
+    # --------      apply group-cast for 1st step       -------- #
+    # TODO

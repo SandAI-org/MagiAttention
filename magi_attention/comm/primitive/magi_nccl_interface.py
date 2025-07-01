@@ -16,7 +16,6 @@ import importlib
 
 import torch
 import torch.distributed as dist
-from torch.distributed.c10d_logger import _exception_logger
 from torch.distributed.distributed_c10d import (
     ProcessGroupGloo,
     ProcessGroupNCCL,
@@ -54,7 +53,6 @@ def _magi_nccl_shutdown_backend(pg) -> None:
         backend._shutdown()
 
 
-@_exception_logger
 def group_cast(
     input: torch.Tensor,
     output: torch.Tensor,
@@ -103,7 +101,6 @@ def group_cast(
         work.wait()
 
 
-@_exception_logger
 def group_reduce(
     input: torch.Tensor,
     output: torch.Tensor,
