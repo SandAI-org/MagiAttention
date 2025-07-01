@@ -59,7 +59,13 @@ class DistTestBase(MultiProcessTestCase):
                 f"nccl backend requires {self.world_size} GPUs, but only {torch.cuda.device_count()} are available"
             )
 
-        if self.backend not in ["nccl", "gloo", "mpi", "cpu:gloo,cuda:nccl"]:
+        if self.backend not in [
+            "nccl",
+            "gloo",
+            "mpi",
+            "cpu:gloo,cuda:nccl",
+            "cpu:gloo,cuda:magi_nccl",
+        ]:
             raise RuntimeError(f"Backend {self.backend} not supported!")
 
         dist.init_process_group(

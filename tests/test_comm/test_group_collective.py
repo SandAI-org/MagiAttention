@@ -31,6 +31,9 @@ from magi_attention.comm.primitive.utils import (
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 
+PG_NCCL_BACKEND = "nccl"
+PG_MAGI_NCCL_BACKEND = "cpu:gloo,cuda:magi_nccl"
+
 
 class TestGroupCollectiveWithWorldSize4(DistTestBase):
     def init_pg(self):
@@ -76,6 +79,10 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
     @property
     def world_size(self) -> int:
         return 4
+
+    @property
+    def backend(self) -> str:
+        return PG_NCCL_BACKEND
 
     @skip_if_lt_x_gpu(4)
     @with_comms
@@ -259,7 +266,11 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
 
         # skip for hier comm
         if use_hier_comm:
-            if not async_op or not self.support_hier_comm:
+            if (
+                not async_op
+                or not self.support_hier_comm
+                or magi_attention.is_magi_nccl_backend_enable()
+            ):  # FIXME: for now, magi nccl backend is not compatible with hier comm
                 return
 
         # sanity check for meta args per rank
@@ -507,6 +518,27 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
         os.environ[self.hier_comm_env_variable] = old_value
 
 
+class TestGroupCollectiveWithMagiNCCLBackendAndWorldSize4(
+    TestGroupCollectiveWithWorldSize4
+):
+    def init_pg(self):
+        super().init_pg()
+
+        self.magi_nccl_backend_env_variable = "MAGI_NCCL_BACKEND"
+
+        self.old_backend = os.environ.get(self.magi_nccl_backend_env_variable, "0")
+        os.environ[self.magi_nccl_backend_env_variable] = "1"
+
+    def destroy_pg(self):
+        super().destroy_pg()
+
+        os.environ[self.magi_nccl_backend_env_variable] = self.old_backend
+
+    @property
+    def backend(self) -> str:
+        return PG_MAGI_NCCL_BACKEND
+
+
 class TestGroupCollectiveWithWorldSize6(TestGroupCollectiveWithWorldSize4):
     @property
     def world_size(self) -> int:
@@ -521,7 +553,39 @@ class TestGroupCollectiveWithWorldSize6(TestGroupCollectiveWithWorldSize4):
         super().test_group_reduce_collective(*args, **kwargs)
 
 
+class TestGroupCollectiveWithMagiNCCLBackendAndWorldSize6(
+    TestGroupCollectiveWithMagiNCCLBackendAndWorldSize4
+):
+    @property
+    def world_size(self) -> int:
+        return 6
+
+    @skip_if_lt_x_gpu(6)
+    def test_group_cast_collective(self, *args, **kwargs):
+        super().test_group_cast_collective(*args, **kwargs)
+
+    @skip_if_lt_x_gpu(6)
+    def test_group_reduce_collective(self, *args, **kwargs):
+        super().test_group_reduce_collective(*args, **kwargs)
+
+
 class TestGroupCollectiveWithWorldSize8(TestGroupCollectiveWithWorldSize4):
+    @property
+    def world_size(self) -> int:
+        return 8
+
+    @skip_if_lt_x_gpu(8)
+    def test_group_cast_collective(self, *args, **kwargs):
+        super().test_group_cast_collective(*args, **kwargs)
+
+    @skip_if_lt_x_gpu(8)
+    def test_group_reduce_collective(self, *args, **kwargs):
+        super().test_group_reduce_collective(*args, **kwargs)
+
+
+class TestGroupCollectiveWithMagiNCCLBackendAndWorldSize8(
+    TestGroupCollectiveWithMagiNCCLBackendAndWorldSize4
+):
     @property
     def world_size(self) -> int:
         return 8

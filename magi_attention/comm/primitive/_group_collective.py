@@ -18,6 +18,7 @@ import torch
 import torch.distributed as dist
 
 import magi_attention
+from magi_attention.comm.primitive.magi_nccl_interface import group_cast, group_reduce
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.utils import nvtx
 
@@ -104,9 +105,28 @@ def group_cast_collective(
             **kwargs,
         )
 
-    world_size = dist.get_world_size(group)
+    if magi_attention.is_magi_nccl_backend_enable():
+        # NOTE: use native group-cast if magi_nccl backend is enabled
+        work = group_cast(
+            input=input,
+            output=output,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_indices_list=dst_indices_list,
+            src_index_list=src_index_list,
+            group=group,
+            async_op=async_op,
+            **kwargs,
+        )
+
+        return WorkWithPostProcessFn(
+            work=work,
+            post_process_fn=lambda x: x,
+        )
 
     # ---------    calc group cast a2a args     --------- #
+
+    world_size = dist.get_world_size(group)
 
     (
         a2a_output,
@@ -203,9 +223,28 @@ def group_reduce_collective(
     assert len(input_split_size_list) == len(dst_index_list)
     assert len(output_split_size_list) == len(src_indices_list)
 
-    world_size = dist.get_world_size(group)
+    if magi_attention.is_magi_nccl_backend_enable():
+        # NOTE: use native group-reduce if magi_nccl backend is enabled
+        work = group_reduce(
+            input=input,
+            output=output,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_index_list=dst_index_list,
+            src_indices_list=src_indices_list,
+            group=group,
+            async_op=async_op,
+            **kwargs,
+        )
+
+        return WorkWithPostProcessFn(
+            work=work,
+            post_process_fn=lambda x: x,
+        )
 
     # ---------    calc group reduce a2a args     --------- #
+
+    world_size = dist.get_world_size(group)
 
     (
         a2a_output,

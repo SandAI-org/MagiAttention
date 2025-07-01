@@ -40,6 +40,7 @@ __all__ = [
     "_calc_group_reduce_a2a_output_meta_args",
     "_trans_with_dim0",
     "_get_dims_as_trans_with_dim0",
+    "get_pg_backend",
     "sanity_check_for_group_cast_meta_args_per_rank",
     "sanity_check_for_group_reduce_meta_args_per_rank",
 ]
@@ -196,6 +197,10 @@ def _calc_range_reduce_kwargs_from_ranges(
     }
 
     return range_reduce_kwargs
+
+
+def get_pg_backend(pg: dist.ProcessGroup, device: str = "cuda") -> dist.Backend:
+    return pg._get_backend(torch.device(device))
 
 
 # ------------------        utils for group cast collective       ------------------ #
