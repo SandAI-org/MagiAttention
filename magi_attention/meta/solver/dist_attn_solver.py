@@ -24,6 +24,9 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
+from magi_attention.comm.primitive.utils import (
+    sanity_check_for_group_cast_meta_args_per_rank,
+)
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
@@ -2198,6 +2201,34 @@ class DistAttnSolver:
             world_size=self.cp_size,
             device_mesh=self.cp_mesh,
         )
+
+        # sanity check for group-cast arg per rank
+        # NOTE: we don't need to do sanity check for group-reduce arg per rank
+        # since they are symmetric in dist-attn
+        if magi_attention.is_sanity_check_enable():
+            group_collective_arg_per_rank: list[GroupCollectiveArg] = [None] * self.cp_size  # type: ignore
+            dist.all_gather_object(
+                group_collective_arg_per_rank,
+                group_collective_arg,
+                group=self.cp_group,
+            )
+
+            sanity_check_for_group_cast_meta_args_per_rank(
+                input_split_size_list_per_rank=[
+                    arg.input_split_size_list for arg in group_collective_arg_per_rank
+                ],
+                output_split_size_list_per_rank=[
+                    arg.output_split_size_list for arg in group_collective_arg_per_rank
+                ],
+                dst_indices_list_per_rank=[
+                    arg.dst_indices_list for arg in group_collective_arg_per_rank
+                ],
+                src_index_list_per_rank=[
+                    arg.src_index_list for arg in group_collective_arg_per_rank
+                ],
+                world_size=self.cp_size,
+                check_nccl_send_recv=True,
+            )
 
         return group_collective_arg
 

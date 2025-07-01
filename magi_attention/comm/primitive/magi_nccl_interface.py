@@ -41,6 +41,7 @@ def _magi_nccl_shutdown_backend(pg) -> None:
     Currently, only ProcessGroupNCCL, ProcessGroupGloo, and MagiNCCLBackend is supported.
     No op for other backends.
     """
+
     backend = None
     try:
         backend = pg._get_backend(torch.device("cuda"))
