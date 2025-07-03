@@ -51,7 +51,7 @@ from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.utils import get_attn_mask_from_ranges
+from magi_attention.utils._utils import get_attn_mask_from_ffa_args
 
 # impls = ["sdpa", "fa2", "fa3", "ffa", "torch"]
 # impls = ["sdpa", "fa2", "fa3", "ffa"]  # ignore torch native to avoid OOM
@@ -364,12 +364,16 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
         elif "varlen" in mask_type or mask_type == "sliding_window_causal":
             try:
                 # sdpa_mask = make_varlen_causal_sdpa_mask(sq, sk, cu_ranges)
-                sdpa_mask = get_attn_mask_from_ranges(
-                    q_ranges=q_ranges_.to_naive_ranges(),
-                    k_ranges=k_ranges_.to_naive_ranges(),
-                    is_causal_mapping=is_causal_mapping_,
+                attn_type_mapping = [
+                    1 if mapping else 0 for mapping in is_causal_mapping_
+                ]
+                sdpa_mask = get_attn_mask_from_ffa_args(
+                    q_ranges=q_ranges_,
+                    k_ranges=k_ranges_,
+                    attn_type_map=attn_type_mapping,
                     total_seqlen_q=sq,
                     total_seqlen_k=sk,
+                    device=torch.cuda.current_device(),
                 )
             except RuntimeError as e:
                 print(f"make varlen causal sdpa mask failed: {e}")

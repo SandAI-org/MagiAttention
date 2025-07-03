@@ -749,10 +749,18 @@ class HostAttnSliceMaker:
         self,
         index: int,
     ) -> list[AttnSlice]:
+        """For each k_range, split the bi-causal mask,
+        and each bi-causal mask is split into at most three optional parts:
+        part1: the top causal mask
+        part2: the middle full or bi_causal mask
+        part3: the bottom inv_causal mask
+        """
+        # get global and local k_ranges
         k_range_global = self.k_ranges_global[index]
         k_range_local = self.k_ranges_local[index]
         attn_slices: list[AttnSlice] = []
 
+        # calculate k_range exceed slice_start, the maxValue not exceed slice_q_range.seqlen
         range_start_exceed_slice_start = min(
             k_range_global.start - self.calc_k_range_global.start,
             self.q_range_local.seqlen,
@@ -762,16 +770,22 @@ class HostAttnSliceMaker:
             self.q_range_local.seqlen,
         )
 
+        # calculate k_range exceed causal start, the minValue not less than 0
         range_end_exceed_causal_start = max(0, k_range_global.end - self.causal_start)
         range_start_exceed_causal_start = max(
             0, k_range_global.start - self.causal_start
         )
 
+        # Draw vertical lines from the two endpoints of k_range,
+        # which intersect the two hypotenuses of the bi-causal mask at two points.
+        # Calculate the vertical coordinates (heights) of these two intersection points,
+        # and determine which point is above the other by comparison.
         short_length = min(
             range_start_exceed_slice_start, range_end_exceed_causal_start
         )
         long_length = max(range_start_exceed_slice_start, range_end_exceed_causal_start)
 
+        # (part1) calculate q_range and k_range of causal slice
         causal_q_range_local = AttnRange(
             start=self.q_range_local.start + range_start_exceed_causal_start,
             end=self.q_range_local.start + short_length,
@@ -783,10 +797,14 @@ class HostAttnSliceMaker:
                 k_range_local.start + self.diff_len_of_k_range_minus_q_range,
             ),
         )
+
+        # (part2) calculate q_range of full or bi_causal slice
         full_or_bi_causal_q_range_local = AttnRange(
             start=self.q_range_local.start + short_length,
             end=self.q_range_local.start + long_length,
         )
+
+        # (part3) calculate q_range and k_range of inv_causal slice
         inv_causal_q_range_local = AttnRange(
             start=self.q_range_local.start + long_length,
             end=self.q_range_local.start + range_end_exceed_slice_start,
@@ -799,6 +817,7 @@ class HostAttnSliceMaker:
             end=k_range_local.end,
         )
 
+        # exclude invalid causal slice
         if causal_q_range_local.seqlen > 0:
             attn_slices.append(
                 AttnSlice(
@@ -808,6 +827,7 @@ class HostAttnSliceMaker:
                 )
             )
 
+        # exclude invalid full or bi_causal slice
         if full_or_bi_causal_q_range_local.seqlen > 0:
             attn_slices.append(
                 AttnSlice(
@@ -819,6 +839,7 @@ class HostAttnSliceMaker:
                 )
             )
 
+        # exclude invalid inv_causal slice
         if inv_causal_q_range_local.seqlen > 0:
             attn_slices.append(
                 AttnSlice(
@@ -1325,9 +1346,17 @@ class RemoteAttnSliceMaker(HostAttnSliceMaker):
         self,
         index: int,
     ) -> list[MultiKAttnSlice]:
+        """For each k_range, split the bi-causal mask
+
+        each bi-causal mask is split into at most three optional parts:
+            part1: the top causal mask
+            part2: the middle full or bi_causal mask
+            part3: the bottom inv_causal mask
+        """
         k_range_global: AttnRange = self.k_ranges_global[index]
         attn_slices: list[MultiKAttnSlice] = []
 
+        # calculate k_range exceed slice_start, the maxValue not exceed slice_q_range.seqlen
         range_start_exceed_slice_start = min(
             k_range_global.start - self.calc_k_range_global.start,
             self.q_range_local.seqlen,
@@ -1337,16 +1366,22 @@ class RemoteAttnSliceMaker(HostAttnSliceMaker):
             self.q_range_local.seqlen,
         )
 
+        # calculate k_range exceed causal start, the minValue not less than 0
         range_end_exceed_causal_start = max(0, k_range_global.end - self.causal_start)
         range_start_exceed_causal_start = max(
             0, k_range_global.start - self.causal_start
         )
 
+        # Draw vertical lines from the two endpoints of k_range,
+        # which intersect the two hypotenuses of the bi-causal mask at two points.
+        # Calculate the vertical coordinates (heights) of these two intersection points,
+        # and determine which point is above the other by comparison.
         short_length = min(
             range_start_exceed_slice_start, range_end_exceed_causal_start
         )
         long_length = max(range_start_exceed_slice_start, range_end_exceed_causal_start)
 
+        # (part1) calculate q_range and k_range of causal slice
         causal_q_range_local = AttnRange(
             start=self.q_range_local.start + range_start_exceed_causal_start,
             end=self.q_range_local.start + short_length,
@@ -1358,10 +1393,14 @@ class RemoteAttnSliceMaker(HostAttnSliceMaker):
                 k_range_global.start + self.diff_len_of_k_range_minus_q_range,
             ),
         )
+
+        # (part2) calculate q_range of full or bi_causal slice
         full_or_bi_causal_q_range_local = AttnRange(
             start=self.q_range_local.start + short_length,
             end=self.q_range_local.start + long_length,
         )
+
+        # (part3) calculate q_range and k_range of inv_causal slice
         inv_causal_q_range_local = AttnRange(
             start=self.q_range_local.start + long_length,
             end=self.q_range_local.start + range_end_exceed_slice_start,
@@ -1374,6 +1413,7 @@ class RemoteAttnSliceMaker(HostAttnSliceMaker):
             end=k_range_global.end,
         )
 
+        # exclude invalid causal slice
         if causal_q_range_local.seqlen > 0:
             attn_slices.append(
                 MultiKAttnSlice(
@@ -1383,6 +1423,7 @@ class RemoteAttnSliceMaker(HostAttnSliceMaker):
                 )
             )
 
+        # exclude invalid full or bi_causal slice
         if full_or_bi_causal_q_range_local.seqlen > 0:
             attn_slices.append(
                 MultiKAttnSlice(
@@ -1394,6 +1435,7 @@ class RemoteAttnSliceMaker(HostAttnSliceMaker):
                 )
             )
 
+        # exclude invalid inv_causal slice
         if inv_causal_q_range_local.seqlen > 0:
             attn_slices.append(
                 MultiKAttnSlice(
@@ -2509,6 +2551,7 @@ class DistAttnSolver:
                     distance_to_slice_end = slice_q_range_end - boundary_end
 
                     if distance_to_slice_end == 0:
+                        # don't need to shorten k_range
                         map_slice_q_range_to_k_ranges[q_range_this_slice].extend(
                             slice.k_ranges
                         )
@@ -2516,6 +2559,7 @@ class DistAttnSolver:
                         map_slice_q_range_to_k_ranges[q_range_this_slice].extend(
                             slice.k_ranges[:-1]
                         )
+                        # shorten causal k_range
                         last_k_range = AttnRange(
                             start=slice.k_ranges[-1].start,
                             end=slice.k_ranges[-1].end - distance_to_slice_end,
@@ -2529,13 +2573,16 @@ class DistAttnSolver:
                         + [AttnMaskType.CAUSAL]
                     )
                 elif slice.mask_types[0] == AttnMaskType.INVCAUSAL:
+                    # in the case of inv_causal, the start of the first range in k_ranges may need to lengthen
                     distance_to_slice_start = boundary_start - slice_q_range_start
 
                     if distance_to_slice_start == 0:
+                        # don't need to lengthen k_range
                         map_slice_q_range_to_k_ranges[q_range_this_slice].extend(
                             slice.k_ranges
                         )
                     else:
+                        # lengthen inv_causal k_range
                         first_k_range = AttnRange(
                             start=slice.k_ranges[0].start + distance_to_slice_start,
                             end=slice.k_ranges[0].end,
@@ -2552,6 +2599,7 @@ class DistAttnSolver:
                         + [AttnMaskType.FULL] * (len(slice.k_ranges) - 1)
                     )
                 elif slice.mask_types[0] == AttnMaskType.BICAUSAL:
+                    # in case of bicausal, the start and end may both need to change
                     if magi_attention.is_sanity_check_enable():
                         assert len(slice.k_ranges) == 1, (
                             f"when masktype is bi_causal, the length of k_ranges must be 1, "
@@ -2561,13 +2609,13 @@ class DistAttnSolver:
                     distance_to_slice_start = boundary_start - slice_q_range_start
                     distance_to_slice_end = slice_q_range_end - boundary_end
 
-                    bicausal_q_range = AttnRange(
+                    bicausal_k_range = AttnRange(
                         start=slice.k_ranges[0].start + distance_to_slice_start,
                         end=slice.k_ranges[0].end - distance_to_slice_end,
                     )
 
                     map_slice_q_range_to_k_ranges[q_range_this_slice].append(
-                        bicausal_q_range
+                        bicausal_k_range
                     )
                     map_slice_q_range_to_masktype[q_range_this_slice].append(
                         AttnMaskType.BICAUSAL
@@ -3056,6 +3104,14 @@ class DistAttnSolver:
                     for attn_slice in remote_rank_entry_this_stage_this_rank.attn_calc_remote_slice_local_list
                 )
 
+        # init masktype -> int map
+        masktype_to_idx_map = {
+            AttnMaskType.FULL: 0,
+            AttnMaskType.CAUSAL: 1,
+            AttnMaskType.INVCAUSAL: 2,
+            AttnMaskType.BICAUSAL: 3,
+        }
+
         # ---   build local attn args   --- #
 
         host_slice_local_list = (
@@ -3068,8 +3124,8 @@ class DistAttnSolver:
             k_ranges=AttnRanges.from_ranges(
                 [attn_slice.k_range for attn_slice in host_slice_local_list]  # type: ignore[arg-type]
             ),
-            is_causal_mapping=[
-                attn_slice.mask_type == AttnMaskType.CAUSAL
+            attn_type_map=[
+                masktype_to_idx_map[attn_slice.mask_type]  # type: ignore
                 for attn_slice in host_slice_local_list
             ],
             shard_seqlen_q=self.shard_seqlen_q,
@@ -3093,8 +3149,8 @@ class DistAttnSolver:
                     k_ranges=AttnRanges.from_ranges(
                         [attn_slice.k_range for attn_slice in remote_slice_local_list]  # type: ignore[arg-type]
                     ),
-                    is_causal_mapping=[
-                        attn_slice.mask_type == AttnMaskType.CAUSAL
+                    attn_type_map=[
+                        masktype_to_idx_map[attn_slice.mask_type]  # type: ignore
                         for attn_slice in remote_slice_local_list
                     ],
                     shard_seqlen_q=self.shard_seqlen_q,

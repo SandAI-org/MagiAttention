@@ -47,15 +47,11 @@ def add_range_to_array(
                 fx = i + b
                 if j <= fx:
                     array[i][j] = 1
-                else:
-                    array[i][j] = 0
             elif masktype == AttnMaskType.INVCAUSAL:
                 b = y_start - x_start
                 fx = i + b
                 if j >= fx:
                     array[i][j] = 1
-                else:
-                    array[i][j] = 0
             elif masktype == AttnMaskType.BICAUSAL:
                 causal_b = y_end - x_end
                 f_causal = i + causal_b
@@ -64,8 +60,6 @@ def add_range_to_array(
                 f_inv_causal = i + inv_causal_b
                 if j <= f_causal and j >= f_inv_causal:
                     array[i][j] = 1
-                else:
-                    array[i][j] = 0
 
     return array
 
@@ -74,6 +68,16 @@ def make_range_global(
     global_ranges: AttnRanges,
     local_range: AttnRange,
 ) -> AttnRanges:
+    """convert local_range to global_ranges with base global_ranges
+
+    Args:
+        global_ranges (AttnRanges): the actual base global ranges
+        local_range (AttnRange): range need to convert
+
+    Returns:
+        AttnRanges: converted multiple ranges since local range may
+            be converted to multiple segments of ranges
+    """
     assert local_range.seqlen <= global_ranges.total_seqlen
 
     ranges_ = AttnRanges()
@@ -119,27 +123,15 @@ def make_range_global(
     return ranges_
 
 
-def make_ranges_global(
-    global_ranges: AttnRanges,
-    local_ranges: AttnRanges,
-) -> AttnRanges:
-    ranges_ = AttnRanges()
-    for local_range in local_ranges:
-        ranges_.extend(
-            make_range_global(
-                global_ranges=global_ranges,
-                local_range=local_range,
-            )
-        )
-    ranges_.merge()
-    return ranges_
-
-
 def determine_ith_range_masktype(
     i: int,
     length: int,
     masktype: AttnMaskType = AttnMaskType.FULL,
 ):
+    """
+    determine mask type in tests for Slice,
+    when convert local range with one single masktype to global range with multi masktypes
+    """
     if length == 1 and masktype is AttnMaskType.BICAUSAL:
         return AttnMaskType.BICAUSAL
     if i == 0 and masktype is AttnMaskType.BICAUSAL:
