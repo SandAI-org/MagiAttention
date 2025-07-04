@@ -844,7 +844,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 **{k: v for k, v in overlap_config.items() if k not in (NAME,)}
             ),
             high_bandwith_domain_size=high_bandwith_domain_size,
-            deterministic=False,
+            deterministic=True,
         )
 
         # -----    run pipeline test   ---- #

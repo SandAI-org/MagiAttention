@@ -4,6 +4,14 @@
 #define USE_NCCL
 #endif
 
+#ifndef NCCL_HAS_COMM_NONBLOCKING
+#define NCCL_HAS_COMM_NONBLOCKING
+#endif
+
+#ifndef NCCL_HAS_COMM_SPLIT
+#define NCCL_HAS_COMM_SPLIT
+#endif
+
 #include <ATen/Operators.h>
 #include <torch/all.h>
 #include <torch/library.h>

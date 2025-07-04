@@ -1,10 +1,21 @@
-#ifndef USE_NCCL
-#define USE_NCCL
-#endif
-
 #include "group_collective.cuh"
 #include "group_reduce_post_process.cuh"
 
+
+// Default value: 30 minutes
+static int ncclNonblockingTimeout() {
+  static int timeout = -2; // -2 means not initialized
+  if (timeout == -2) {
+    const auto val = c10::utils::get_env("TORCH_NCCL_NONBLOCKING_TIMEOUT");
+    if (val.has_value() && !val.value().empty()) {
+      timeout = stoi(val.value());
+    } else {
+      // Default value consistent with kBackendDefaultTimeout
+      timeout = 30 * 60;
+    }
+  }
+  return timeout;
+}
 
 ncclDataType_t to_nccl_data_type(c10::ScalarType type) {
     switch (type) {
@@ -47,6 +58,148 @@ ncclDataType_t to_nccl_data_type(c10::ScalarType type) {
 
 ncclComm_t to_nccl_comm(torch::cuda::nccl::ncclComm_t var) {
     return reinterpret_cast<ncclComm_t>(var);
+}
+
+ncclResult_t to_nccl_result(torch::cuda::nccl::ncclResult var) {
+  switch (var) {
+    case torch::cuda::nccl::ncclResult::Success:
+      return ncclResult_t::ncclSuccess;
+    case torch::cuda::nccl::ncclResult::UnhandledCudaError:
+      return ncclResult_t::ncclUnhandledCudaError;
+    case torch::cuda::nccl::ncclResult::SystemError:
+      return ncclResult_t::ncclSystemError;
+    case torch::cuda::nccl::ncclResult::InternalError:
+      return ncclResult_t::ncclInternalError;
+    case torch::cuda::nccl::ncclResult::InvalidArgument:
+      return ncclResult_t::ncclInvalidArgument;
+    case torch::cuda::nccl::ncclResult::InvalidUsage:
+      return ncclResult_t::ncclInvalidUsage;
+#ifdef NCCL_HAS_REMOTE_ERROR
+    case torch::cuda::nccl::ncclResult::RemoteError:
+      return ncclResult_t::ncclRemoteError;
+#endif
+#ifdef NCCL_HAS_COMM_NONBLOCKING
+    case torch::cuda::nccl::ncclResult::InProgress:
+      return ncclResult_t::ncclInProgress;
+#endif
+    case torch::cuda::nccl::ncclResult::NumResults:
+      return ncclResult_t::ncclNumResults;
+    default:
+      throw std::runtime_error("Unconvertible NCCL type");
+  }
+}
+
+torch::cuda::nccl::ncclResult from_nccl_result(ncclResult_t var) {
+  switch (var) {
+    case ncclSuccess:
+      return torch::cuda::nccl::ncclResult::Success;
+    case ncclUnhandledCudaError:
+      return torch::cuda::nccl::ncclResult::UnhandledCudaError;
+    case ncclSystemError:
+      return torch::cuda::nccl::ncclResult::SystemError;
+    case ncclInternalError:
+      return torch::cuda::nccl::ncclResult::InternalError;
+    case ncclInvalidArgument:
+      return torch::cuda::nccl::ncclResult::InvalidArgument;
+    case ncclInvalidUsage:
+      return torch::cuda::nccl::ncclResult::InvalidUsage;
+#ifdef NCCL_HAS_REMOTE_ERROR
+    case ncclRemoteError:
+      return torch::cuda::nccl::ncclResult::RemoteError;
+#endif
+#ifdef NCCL_HAS_COMM_NONBLOCKING
+    case ncclInProgress:
+      return torch::cuda::nccl::ncclResult::InProgress;
+#endif
+    case ncclNumResults:
+      return torch::cuda::nccl::ncclResult::NumResults;
+    default:
+      throw std::runtime_error("Unconvertible NCCL type");
+  }
+}
+
+void throw_nccl_error(torch::cuda::nccl::ncclResult status) {
+  std::ostringstream err;
+  err << "NCCL Error " << static_cast<int>(status) << ": "
+      << ncclGetErrorString(to_nccl_result(status));
+  throw std::runtime_error(err.str());
+}
+
+inline void NCCL_CHECK(torch::cuda::nccl::ncclResult status) {
+  if (status != torch::cuda::nccl::ncclResult::Success) {
+    throw_nccl_error(status);
+  }
+}
+
+static void NCCL_CHECK(ncclResult_t result) {
+  NCCL_CHECK(from_nccl_result(result));
+}
+
+static void NCCL_CHECK_TIMEOUT(torch::cuda::nccl::ncclResult status, torch::cuda::nccl::ncclComm_t comm) {
+#ifdef NCCL_HAS_COMM_NONBLOCKING
+  ncclResult_t result = to_nccl_result(status);
+  auto startTimepoint = std::chrono::steady_clock::now();
+  while (result == ncclInProgress) {
+    auto currentTimepoint = std::chrono::steady_clock::now();
+    auto timeElapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                           currentTimepoint - startTimepoint)
+                           .count();
+    if (timeElapsed > ncclNonblockingTimeout()) {
+      throw std::runtime_error(
+          "NCCL timeout when waiting for nonblocking call to become successful.");
+    }
+    sched_yield(); // yield to other threads
+    ncclCommGetAsyncError(to_nccl_comm(comm), &result);
+  }
+  if (result != ncclSuccess) {
+    throw_nccl_error(from_nccl_result(result));
+  }
+#else
+  TORCH_INTERNAL_ASSERT(
+      false, "NCCL COMM NONBLOCKING USED WITH UNSUPPORTED NCCL VERSION.");
+#endif
+}
+
+static void NCCL_CHECK_TIMEOUT(ncclResult_t result, torch::cuda::nccl::ncclComm_t comm) {
+  NCCL_CHECK_TIMEOUT(from_nccl_result(result), comm);
+}
+
+static void NCCL_CHECK_TIMEOUT(torch::cuda::nccl::ncclResult status, std::vector<torch::cuda::nccl::ncclComm_t>& comms) {
+#ifdef NCCL_HAS_COMM_NONBLOCKING
+  ncclResult_t result = to_nccl_result(status);
+  auto startTimepoint = std::chrono::steady_clock::now();
+  if (result == ncclInProgress) {
+    for (const auto i : c10::irange(comms.size())) {
+      do {
+        auto currentTimepoint = std::chrono::steady_clock::now();
+        auto timeElapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                               currentTimepoint - startTimepoint)
+                               .count();
+        if (timeElapsed > ncclNonblockingTimeout()) {
+          throw std::runtime_error(
+              "NCCL timeout when waiting for nonblocking call to become successful.");
+        }
+        sched_yield(); // yield to other threads
+        ncclCommGetAsyncError(to_nccl_comm(comms[i]), &result);
+      } while (result == ncclInProgress);
+      if (result != ncclSuccess) {
+        break; /* fall through to failed case */
+      }
+    }
+  }
+  if (result != ncclSuccess) {
+    throw_nccl_error(from_nccl_result(result));
+  }
+#else
+  TORCH_INTERNAL_ASSERT(
+      false, "NCCL COMM NONBLOCKING USED WITH UNSUPPORTED NCCL VERSION.");
+#endif
+}
+
+static void NCCL_CHECK_TIMEOUT(
+    ncclResult_t result,
+    std::vector<torch::cuda::nccl::ncclComm_t>& comms) {
+  NCCL_CHECK_TIMEOUT(from_nccl_result(result), comms);
 }
 
 
@@ -96,14 +249,48 @@ namespace torch::cuda::nccl {
         );
     }
 
+
+    template <typename scalar_t>
+    __global__ void dummy_cuda_kernel(
+        const scalar_t* input,
+        int64_t num_elements
+    ) {
+        const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < num_elements) {}
+    }
+
+
+    void run_group_cast_post_process(
+      void* recv_buffer,
+      int64_t num_elements,
+      c10::ScalarType type,
+      at::cuda::CUDAStream& stream
+    ) {
+      dim3 gridDims(32);
+      dim3 blockDims(1024);
+
+      AT_DISPATCH_ALL_TYPES_AND2(
+          at::ScalarType::Half, at::ScalarType::BFloat16, /* add float16/bfloat16 to dispatch types */
+          type,
+          "dummy_cuda_kernel",
+          [&] {
+            dummy_cuda_kernel<scalar_t> /* auto-deduced `scalar_t` by the macro */
+              <<<gridDims, blockDims, 0, stream.stream()>>>(
+                  static_cast<const scalar_t*>(recv_buffer),
+                  num_elements
+              );
+          }
+      );
+    }
+
     // group cast collective
-    void group_cast_nccl_kernel(
-        void* send_buffer,
-        void* recv_buffer,
-        const std::vector<int64_t>& input_split_size_list,
-        const std::vector<int64_t>& output_split_size_list,
-        const std::vector<std::vector<int64_t>>& dst_indices_list,
-        const std::vector<int64_t>& src_index_list,
+    void group_cast_nccl_kernel( // world_size = 4, rank = 0
+        void* send_buffer, // [5]
+        void* recv_buffer, // [11]
+        const std::vector<int64_t>& input_split_size_list, // rank0: [2, 3, 1]
+        const std::vector<int64_t>& output_split_size_list, // [3, 5, 1, 2]
+        const std::vector<std::vector<int64_t>>& dst_indices_list, // [[1,2], [3], [1,2,3]]
+        const std::vector<int64_t>& src_index_list, // rank1: [0, 2, 0, 3]
         size_t stride0,
         size_t element_size,
         c10::ScalarType type,
@@ -116,36 +303,45 @@ namespace torch::cuda::nccl {
         auto nccl_data_type = to_nccl_data_type(type);
         auto nccl_comm = to_nccl_comm(comm);
 
-        int64_t input_offset = 0, output_offset = 0;
-        CHECK_NCCL(ncclGroupStart());
+        NCCL_CHECK(ncclGroupStart());
+        size_t input_offset = 0, output_offset = 0;
         for (size_t input_split_idx = 0; input_split_idx < num_input_splits; ++input_split_idx) {
             auto input_size = input_split_size_list[input_split_idx] * stride0;
-            for (auto dst_rank : dst_indices_list[input_split_idx]) {
-                CHECK_NCCL(ncclSend(
-                    (const void*) (send_buffer + input_offset * element_size),
-                    input_size,
-                    nccl_data_type,
-                    dst_rank,
-                    nccl_comm,
-                    stream
+            for (const auto dst_rank : dst_indices_list[input_split_idx]) {
+                NCCL_CHECK(ncclSend(
+                  (const void*) (((char*)send_buffer) + input_offset * element_size),
+                  input_size,
+                  nccl_data_type,
+                  dst_rank,
+                  nccl_comm,
+                  stream.stream()
                 ));
             }
             input_offset += input_size;
         }
         for (size_t output_split_idx = 0; output_split_idx < num_output_splits; ++output_split_idx) {
             auto src_rank = src_index_list[output_split_idx];
-            auto output_size = output_split_size_list[output_split_idx] * stride0;
-            CHECK_NCCL(ncclRecv(
-                (void *) (recv_buffer + output_offset * element_size),
-                output_size,
-                nccl_data_type,
-                src_rank,
-                nccl_comm,
-                stream
+            size_t output_size = output_split_size_list[output_split_idx] * stride0;
+            NCCL_CHECK(ncclRecv(
+              (void *) (((char*)recv_buffer) + output_offset * element_size),
+              output_size,
+              nccl_data_type,
+              src_rank,
+              nccl_comm,
+              stream.stream()
             ));
             output_offset += output_size;
         }
-        CHECK_NCCL(ncclGroupEnd());
+        #ifndef NCCL_HAS_COMM_NONBLOCKING
+          NCCL_CHECK(ncclGroupEnd());
+        #else
+          NCCL_CHECK_TIMEOUT(ncclGroupEnd(), comm);
+        #endif
+
+        /** FIXME: this is a workaround that solved the wrong out with CUDA_DEVICE_MAX_CONNECTIONS=1
+         * and it seems like the kernel goes wrong when overlapping with ffa
+         */
+        run_group_cast_post_process(recv_buffer, output_offset, type, stream);
     }
 
     // group reduce collective
@@ -171,31 +367,31 @@ namespace torch::cuda::nccl {
         auto nccl_comm = to_nccl_comm(comm);
 
         // run group-reduce kernel implemented by nccl group p2p
-        int64_t input_offset = 0, output_offset = 0;
-        CHECK_NCCL(ncclGroupStart());
+        size_t input_offset = 0, output_offset = 0;
+        NCCL_CHECK(ncclGroupStart());
         for (size_t input_split_idx = 0; input_split_idx < num_input_splits; ++input_split_idx) {
             auto dst_rank = dst_index_list[input_split_idx];
             auto input_size = input_split_size_list[input_split_idx] * stride0;
-            CHECK_NCCL(ncclSend(
-                (const void*) (send_buffer + input_offset * element_size),
-                input_size,
-                nccl_data_type,
-                dst_rank,
-                nccl_comm,
-                stream
+            NCCL_CHECK(ncclSend(
+              (const void*) (((char*)send_buffer) + input_offset * element_size),
+              input_size,
+              nccl_data_type,
+              dst_rank,
+              nccl_comm,
+              stream.stream()
             ));
             input_offset += input_size;
         }
         for (size_t output_split_idx = 0; output_split_idx < num_output_splits; ++output_split_idx) {
             auto output_size = output_split_size_list[output_split_idx] * stride0;
             for (auto src_rank : src_indices_list[output_split_idx]) {
-                CHECK_NCCL(ncclRecv(
-                    (void *) (repeated_recv_buffer + output_offset * element_size),
-                    output_size,
-                    nccl_data_type,
-                    src_rank,
-                    nccl_comm,
-                    stream
+                NCCL_CHECK(ncclRecv(
+                  (void *) (((char*)repeated_recv_buffer) + output_offset * element_size),
+                  output_size,
+                  nccl_data_type,
+                  src_rank,
+                  nccl_comm,
+                  stream.stream()
                 ));
                 /** NOTE: since nccl recv can not handle atomic add,
                  * we have to interleavedly repeat the recv buffer
@@ -208,7 +404,11 @@ namespace torch::cuda::nccl {
                 output_offset += output_size;
             }
         }
-        CHECK_NCCL(ncclGroupEnd());
+        #ifndef NCCL_HAS_COMM_NONBLOCKING
+          NCCL_CHECK(ncclGroupEnd());
+        #else
+          NCCL_CHECK_TIMEOUT(ncclGroupEnd(), comm);
+        #endif
 
         // run post-process reduce kernel
         run_group_reduce_post_process(args);

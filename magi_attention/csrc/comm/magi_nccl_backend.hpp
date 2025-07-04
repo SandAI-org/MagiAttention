@@ -4,6 +4,15 @@
 #define USE_C10D_NCCL
 #endif
 
+#ifndef NCCL_HAS_COMM_NONBLOCKING
+#define NCCL_HAS_COMM_NONBLOCKING
+#endif
+
+#ifndef NCCL_HAS_COMM_SPLIT
+#define NCCL_HAS_COMM_SPLIT
+#endif
+
+
 #if defined(__linux__)
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -22,7 +31,7 @@
 #include <unordered_map>
 
 #include <torch/csrc/distributed/c10d/Backend.hpp>
-#include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
+// #include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
 #include <torch/csrc/distributed/c10d/PrefixStore.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
 #include <torch/csrc/distributed/c10d/intra_node_comm.hpp>
@@ -133,7 +142,7 @@ static std::vector<std::string> TORCH_NCCL_CUDA_EVENT_CACHE = {
 
 static std::vector<std::string> TORCH_NCCL_NAN_CHECK = {"TORCH_NCCL_NAN_CHECK"};
 
-constexpr const char* NCCL_BACKEND_NAME = "nccl";
+constexpr const char* MAGI_NCCL_BACKEND_NAME = "magi_nccl";
 
 constexpr const char* EXCEPTION_DUMP = "exception_dump";
 
@@ -608,7 +617,7 @@ class TORCH_API MagiNCCLBackend : public Backend {
   }
 
   const std::string getBackendName() const override {
-    return std::string(NCCL_BACKEND_NAME);
+    return std::string(MAGI_NCCL_BACKEND_NAME);
   }
 
   bool supportsSplitting() const override {
@@ -851,7 +860,7 @@ class TORCH_API MagiNCCLBackend : public Backend {
         py::object register_backend = module.attr("Backend").attr("register_backend");
         // register using the factory method to create an magi nccl process group
         register_backend(
-            "magi_nccl", // backend name
+            MAGI_NCCL_BACKEND_NAME, // backend name
             py::cpp_function(createMagiNCCLBackend), // func
             false, // extended_api: bool, set to false to not using backend options
             "cuda" // supported devices: Optional[Union[str, List[str]]] = None, set to only cuda

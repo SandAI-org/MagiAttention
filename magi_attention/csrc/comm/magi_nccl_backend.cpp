@@ -1,9 +1,3 @@
-
-#ifndef USE_C10D_NCCL
-#define USE_C10D_NCCL
-#endif
-
-
 #include <exception>
 #include <map>
 #include <mutex>
@@ -25,8 +19,8 @@
 #include <c10/util/irange.h>
 #include <c10/util/thread_name.h>
 #include <torch/csrc/cuda/nccl.h>
-#include <torch/csrc/distributed/c10d/FlightRecorder.hpp>
-#include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
+// #include <torch/csrc/distributed/c10d/FlightRecorder.hpp>
+// #include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
 #include <torch/csrc/distributed/c10d/NanCheck.hpp>
 #include <torch/csrc/distributed/c10d/ParamCommsUtils.hpp>
 #include <torch/csrc/distributed/c10d/PrefixStore.hpp>
@@ -1616,10 +1610,10 @@ bool MagiNCCLBackend::dumpDebuggingInfo(bool includeStackTrace /*=true*/) {
       << includeStackTrace;
   if (traceBufferSize_ > 0) {
     // We dump nccl trace into local disk by default and users can register
-    // their customized writer by inheriting `DebugInfoWriter` via
-    // `registerDebugInfoWriter`.
+    // their customized writer by inheriting `MagiDebugInfoWriter` via
+    // `registerMagiDebugInfoWriter`.
     auto ncclTrace = dump_nccl_trace(true, includeStackTrace, false);
-    DebugInfoWriter& writer = DebugInfoWriter::getWriter(globalRank());
+    MagiDebugInfoWriter& writer = MagiDebugInfoWriter::getWriter(globalRank());
     LOG(INFO) << logPrefix() << "MagiNCCLBackend dumping nccl trace to "
               << writer.getWriterTarget();
     writer.write(ncclTrace);
@@ -2983,7 +2977,7 @@ void MagiNCCLBackend::workEnqueue(
 }
 
 MagiNCCLBackend::Options::Options(bool is_high_priority_stream)
-    : Backend::Options(NCCL_BACKEND_NAME, kMagiNCCLBackendDefaultTimeout),
+    : Backend::Options(MAGI_NCCL_BACKEND_NAME, kMagiNCCLBackendDefaultTimeout),
       is_high_priority_stream(is_high_priority_stream) {}
 
 static constexpr int CoalActive = 0x01, CoalColl = 0x02, CoalP2P = 0x04;
@@ -5268,7 +5262,7 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::group_cast(
   check_gpu_single_tensor(inputTensor);
   TORCH_CHECK(
     outputTensor.is_contiguous() && inputTensor.is_contiguous(),
-    "group_cast requires contiguous tensors for both input and output"
+    "group cast requires contiguous tensors for both input and output"
   );
 
   RECORD_PARAM_COMMS_DATA(
@@ -5345,7 +5339,7 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::group_reduce(
   check_gpu_single_tensor(inputTensor);
   TORCH_CHECK(
     outputTensor.is_contiguous() && inputTensor.is_contiguous(),
-    "group_cast requires contiguous tensors for both input and output"
+    "group reduce requires contiguous tensors for both input and output"
   );
 
   RECORD_PARAM_COMMS_DATA(

@@ -59,10 +59,6 @@ class DistAttnConfig:
     deterministic: bool = False
 
     def __post_init__(self):
-        assert (
-            not self.deterministic
-        ), "For now, deterministic mode is not supported by ffa."
-
         if os.environ.get("MAGI_ATTENTION_HIERARCHICAL_COMM", "0") == "1":
             # the if condition equals to "if magi_attention.is_hierarchical_comm_enable():"
             # but due to the circular import issue, we directly use the env variable here

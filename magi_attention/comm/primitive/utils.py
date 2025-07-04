@@ -206,40 +206,67 @@ def get_pg_backend(pg: dist.ProcessGroup, device: str = "cuda") -> dist.Backend:
 # ------------------        utils for group cast collective       ------------------ #
 
 
+def _group_cast_impl_with_batch_p2p(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    input_split_size_list: list[int],
+    output_split_size_list: list[int],
+    dst_indices_list: list[list[int]],
+    src_index_list: list[int],
+    group: dist.Backend = None,
+    async_op: bool = False,
+    **kwargs,
+):
+    # TODO: implement this
+    # input_list = input.split(input_split_size_list, dim=0)
+    # output_list = output.split(output_split_size_list, dim=0)
+    pass
+
+
 def sanity_check_for_group_cast_meta_args_per_rank(
     input_split_size_list_per_rank: list[list[int]],
     output_split_size_list_per_rank: list[list[int]],
     dst_indices_list_per_rank: list[list[list[int]]],
     src_index_list_per_rank: list[list[int]],
     world_size: int,
+    my_rank: int,
     check_nccl_send_recv: bool = False,
 ) -> None:
-    for rank in range(world_size):
-        # sanity check for shape
-        input_split_size_list = input_split_size_list_per_rank[rank]
-        output_split_size_list = output_split_size_list_per_rank[rank]
-        dst_indices_list = dst_indices_list_per_rank[rank]
-        src_index_list = src_index_list_per_rank[rank]
-        assert len(input_split_size_list) == len(dst_indices_list), (
-            f"input_split_size_list and dst_indices_list should have the same length, "
-            f"but got {len(input_split_size_list)=} and {len(dst_indices_list)=}"
-        )
-        assert len(output_split_size_list) == len(src_index_list), (
-            f"output_split_size_list and src_index_list should have the same length, "
-            f"but got {len(output_split_size_list)=} and {len(src_index_list)=}"
-        )
+    # sanity check for shape
+    input_split_size_list = input_split_size_list_per_rank[my_rank]
+    output_split_size_list = output_split_size_list_per_rank[my_rank]
+    dst_indices_list = dst_indices_list_per_rank[my_rank]
+    src_index_list = src_index_list_per_rank[my_rank]
+    assert len(input_split_size_list) == len(dst_indices_list), (
+        f"input_split_size_list and dst_indices_list should have the same length, "
+        f"but got {len(input_split_size_list)=} and {len(dst_indices_list)=}"
+    )
+    assert len(output_split_size_list) == len(src_index_list), (
+        f"output_split_size_list and src_index_list should have the same length, "
+        f"but got {len(output_split_size_list)=} and {len(src_index_list)=}"
+    )
 
-        # sanity check for rank value
-        assert all(
-            0 <= dst_rank < world_size for dst_rank in chain(*dst_indices_list)
-        ), (
-            f"dst_indices_list should contain ranks in [0, {world_size - 1}], "
-            f"but got {dst_indices_list=}"
-        )
-        assert all(0 <= src_rank < world_size for src_rank in src_index_list), (
-            f"src_index_list should contain ranks in [0, {world_size - 1}], "
-            f"but got {src_index_list=}"
-        )
+    # sanity check for rank value
+    assert all(
+        0 <= dst_rank < world_size and dst_rank != my_rank
+        for dst_rank in chain(*dst_indices_list)
+    ), (
+        f"dst_indices_list should contain ranks in [0, {world_size - 1}] while exclude {my_rank=}, "
+        f"but got {dst_indices_list=}"
+    )
+    assert all(
+        0 <= src_rank < world_size and src_rank != my_rank
+        for src_rank in src_index_list
+    ), (
+        f"src_index_list should contain ranks in [0, {world_size - 1}] while exclude {my_rank=}, "
+        f"but got {src_index_list=}"
+    )
+
+    # sanity check for dst rank order and unique
+    for dst_indices in dst_indices_list:
+        assert dst_indices == sorted(
+            list(set(dst_indices))
+        ), f"dst_indices should be sorted and unique, but got {dst_indices_list=}"
 
     # sanity check for nccl send/recv consistent number of calls
     if check_nccl_send_recv:
@@ -539,34 +566,44 @@ def sanity_check_for_group_reduce_meta_args_per_rank(
     dst_index_list_per_rank: list[list[int]],
     src_indices_list_per_rank: list[list[list[int]]],
     world_size: int,
+    my_rank: int,
     check_nccl_send_recv: bool = False,
 ) -> None:
-    for rank in range(world_size):
-        # sanity check for shape
-        input_split_size_list = input_split_size_list_per_rank[rank]
-        output_split_size_list = output_split_size_list_per_rank[rank]
-        dst_index_list = dst_index_list_per_rank[rank]
-        src_indices_list = src_indices_list_per_rank[rank]
-        assert len(input_split_size_list) == len(dst_index_list), (
-            f"input_split_size_list and dst_index_list should have the same length, "
-            f"but got {len(input_split_size_list)=} and {len(dst_index_list)=}"
-        )
-        assert len(output_split_size_list) == len(src_indices_list), (
-            f"output_split_size_list and src_indices_list should have the same length, "
-            f"but got {len(output_split_size_list)=} and {len(src_indices_list)=}"
-        )
+    # sanity check for shape
+    input_split_size_list = input_split_size_list_per_rank[my_rank]
+    output_split_size_list = output_split_size_list_per_rank[my_rank]
+    dst_index_list = dst_index_list_per_rank[my_rank]
+    src_indices_list = src_indices_list_per_rank[my_rank]
+    assert len(input_split_size_list) == len(dst_index_list), (
+        f"input_split_size_list and dst_index_list should have the same length, "
+        f"but got {len(input_split_size_list)=} and {len(dst_index_list)=}"
+    )
+    assert len(output_split_size_list) == len(src_indices_list), (
+        f"output_split_size_list and src_indices_list should have the same length, "
+        f"but got {len(output_split_size_list)=} and {len(src_indices_list)=}"
+    )
 
-        # sanity check for rank value
-        assert all(0 <= dst_rank < world_size for dst_rank in dst_index_list), (
-            f"dst_index_list should contain ranks in [0, {world_size - 1}], "
-            f"but got {dst_index_list=}"
-        )
-        assert all(
-            0 <= src_rank < world_size for src_rank in chain(*src_indices_list)
-        ), (
-            f"src_indices_list should contain ranks in [0, {world_size - 1}], "
-            f"but got {src_indices_list=}"
-        )
+    # sanity check for rank value
+    assert all(
+        0 <= dst_rank < world_size and dst_rank != my_rank
+        for dst_rank in dst_index_list
+    ), (
+        f"dst_index_list should contain ranks in [0, {world_size - 1}], while exclude {my_rank=}, "
+        f"but got {dst_index_list=}"
+    )
+    assert all(
+        0 <= src_rank < world_size and src_rank != my_rank
+        for src_rank in chain(*src_indices_list)
+    ), (
+        f"src_indices_list should contain ranks in [0, {world_size - 1}], while exclude {my_rank=}, "
+        f"but got {src_indices_list=}"
+    )
+
+    # sanity check for src rank order and unique
+    for src_indices in src_indices_list:
+        assert src_indices == sorted(
+            list(set(src_indices))
+        ), f"src_indices should be sorted and unique, but got {src_indices_list=}"
 
     # sanity check for nccl send/recv consistent number of calls
     if check_nccl_send_recv:
@@ -593,9 +630,6 @@ def sanity_check_for_group_reduce_meta_args_per_rank(
         )
 
 
-# TODO: fuse this kernel in the future
-# FIXME: if using torch.compile, it's fused incompletely w/o performance gain
-# what's worse, the re-compilation in online exps would hang the comm
 @nvtx.instrument_nvtx
 def _reduce_to_tensor(
     output: torch.Tensor,

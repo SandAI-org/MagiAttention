@@ -87,7 +87,11 @@ def assert_close(
             )
 
             if mismatch_ratio <= mismatch_threshold:
-                print(mismatch_info)
+                if torch.distributed.is_initialized():
+                    if torch.distributed.get_rank() == 0:
+                        print(mismatch_info)
+                else:
+                    print(mismatch_info)
                 return
             else:
                 raise type(e)(

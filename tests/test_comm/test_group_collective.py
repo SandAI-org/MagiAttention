@@ -286,6 +286,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             dst_indices_list_per_rank=dst_indices_list_per_rank,
             src_index_list_per_rank=src_index_list_per_rank,
             world_size=self.world_size,
+            my_rank=self.rank,
             check_nccl_send_recv=True,
         )
 
@@ -460,6 +461,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             dst_index_list_per_rank=dst_index_list_per_rank,
             src_indices_list_per_rank=src_indices_list_per_rank,
             world_size=self.world_size,
+            my_rank=self.rank,
             check_nccl_send_recv=True,
         )
 
