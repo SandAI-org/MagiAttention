@@ -100,7 +100,7 @@ jobs:
         with:
           branch: gh-pages
           folder: _site
-          target-folder: blog
+          target-folder: blogs
           clean: true
           clean-exclude: |
             docs/
