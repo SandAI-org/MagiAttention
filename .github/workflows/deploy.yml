@@ -101,6 +101,3 @@ jobs:
           branch: gh-pages
           folder: _site
           target-folder: blog
-          clean: false
-          clean-exclude: |
-            docs/
