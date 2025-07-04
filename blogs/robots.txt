@@ -1,4 +1,0 @@
-User-agent: *
-Disallow:
-
-Sitemap: https://SandAI-org.github.io/MagiAttention/blog//sitemap.xml
