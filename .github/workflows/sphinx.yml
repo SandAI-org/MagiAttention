@@ -1,0 +1,32 @@
+name: sphinx deploy
+on:
+  push:
+    branches:
+      - dev
+permissions:
+  contents: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      - name: Install dependencies
+        run: |
+          pip install sphinx
+          pip install sphinx-rtd-theme
+          pip install furo myst_parser
+      - name: Build docs
+        run: |
+          cd docs
+          make clean
+          make html
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        if: ${{ github.event_name == 'push' }}
+        with:
+          branch: gh-pages
+          folder: docs/build/html
+          target-folder: docs
