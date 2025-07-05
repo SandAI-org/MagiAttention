@@ -322,7 +322,7 @@ class DistFlashAttnRuntime:
                         softcap=0.0,
                         sm_margin=0
                         if magi_attention.is_cuda_device_max_connections_one()
-                        else 4,
+                        else 16,  # TODO: make it configurable
                         # NOTE: increase the partial out precision temporarily,
                         # to reduce the error caused by the out correction
                         return_dtype=max_fp_dtype(q.dtype, torch.float32),
@@ -388,7 +388,7 @@ class DistFlashAttnRuntime:
                     softcap=0.0,
                     sm_margin=0
                     if magi_attention.is_cuda_device_max_connections_one()
-                    else 4,
+                    else 16,  # TODO: make it configurable
                 )
             partial_dkv = torch.cat([partial_dk, partial_dv], dim=0)
 

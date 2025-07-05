@@ -2309,7 +2309,7 @@ void MagiNCCLBackend::watchdogHandler() {
           it = workMetaList_.erase(it);
           lastWorkListUpdateTime_ = std::chrono::steady_clock::now();
         }
-        at::cuda::CUDAGraph::dec_pending_event_queries();
+        // NOTE: this is deleted since pytorch in ngc-2505 docker: at::cuda::CUDAGraph::dec_pending_event_queries();
       } else {
         // Increment the iterator if the current WorkNCCL object is not
         // completed.
@@ -3062,12 +3062,12 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::endCoalescing(OpType optype) {
   }
 
   // Notify graphs before we check the capture status preemptively
-  at::cuda::CUDAGraph::inc_pending_event_queries();
+  // NOTE: this is deleted since pytorch in ngc-2505 docker: at::cuda::CUDAGraph::inc_pending_event_queries();
 
   if (enqueue) {
     workEnqueue(work);
   } else {
-    at::cuda::CUDAGraph::dec_pending_event_queries();
+    // NOTE: this is deleted since pytorch in ngc-2505 docker: at::cuda::CUDAGraph::dec_pending_event_queries();
   }
 
   coalescing_state_ = 0;
@@ -3262,11 +3262,11 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::collective(
   }
 
   // Notify graphs before we check the capture status preemptively
-  at::cuda::CUDAGraph::inc_pending_event_queries();
+  // NOTE: this is deleted since pytorch in ngc-2505 docker: at::cuda::CUDAGraph::inc_pending_event_queries();
   if (enqueue) {
     workEnqueue(work);
   } else {
-    at::cuda::CUDAGraph::dec_pending_event_queries();
+    // NOTE: this is deleted since pytorch in ngc-2505 docker: at::cuda::CUDAGraph::dec_pending_event_queries();
   }
 
   return work;
@@ -3471,11 +3471,11 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::collectiveCoalesced(
   any FR events during cudagraph capture? if so, they won't be safe to poll for
   completion status.
   */
-  at::cuda::CUDAGraph::inc_pending_event_queries();
+  // NOTE: this is deleted since pytorch in ngc-2505 docker: at::cuda::CUDAGraph::inc_pending_event_queries();
   if (capture_status == c10::cuda::CaptureStatus::None) {
     workEnqueue(work);
   } else {
-    at::cuda::CUDAGraph::dec_pending_event_queries();
+    // NOTE: this is deleted since pytorch in ngc-2505 docker: at::cuda::CUDAGraph::dec_pending_event_queries();
   }
   // TODO(whc) if the work isn't enqueued, I don't feel great about returning
   // it, since interactions with it by usercode won't behave normally - they
@@ -3722,13 +3722,13 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::pointToPoint(
       c10::cuda::currentStreamCaptureStatusMayInitCtx();
 
   // Notify graphs before we check the capture status preemptively
-  at::cuda::CUDAGraph::inc_pending_event_queries();
+  // NOTE: this is deleted since pytorch in ngc-2505 docker: at::cuda::CUDAGraph::inc_pending_event_queries();
 
   if (!coalescing_state_ && capture_status == c10::cuda::CaptureStatus::None) {
     workEnqueue(work);
     return work;
   } else {
-    at::cuda::CUDAGraph::dec_pending_event_queries();
+    // NOTE: this is deleted since pytorch in ngc-2505 docker: at::cuda::CUDAGraph::dec_pending_event_queries();
     return nullptr;
   }
 }
