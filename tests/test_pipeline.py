@@ -542,12 +542,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     )
     @parameterize(
         "high_bandwith_domain_size",
-        [1],  # NOTE: this feature might be deprecated
-    )
-    @parameterize(
-        "run_bwd",
-        # [True],
-        [False],  # XXX FIXME: only run forward to debug group-cast
+        [1],  # NOTE: this feature might be deprecated soon
     )
     def test_pipeline(
         self,
@@ -558,7 +553,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         dtype: torch.dtype,
         random_causal_mapping: bool,
         high_bandwith_domain_size: int,
-        run_bwd: bool,
+        run_bwd: bool = True,
     ):
         # -----    switch mode   ---- #
 

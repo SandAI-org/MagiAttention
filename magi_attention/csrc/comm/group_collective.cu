@@ -249,48 +249,14 @@ namespace torch::cuda::nccl {
         );
     }
 
-
-    template <typename scalar_t>
-    __global__ void dummy_cuda_kernel(
-        const scalar_t* input,
-        int64_t num_elements
-    ) {
-        const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx < num_elements) {}
-    }
-
-
-    void run_group_cast_post_process(
-      void* recv_buffer,
-      int64_t num_elements,
-      c10::ScalarType type,
-      at::cuda::CUDAStream& stream
-    ) {
-      dim3 gridDims(32);
-      dim3 blockDims(1024);
-
-      AT_DISPATCH_ALL_TYPES_AND2(
-          at::ScalarType::Half, at::ScalarType::BFloat16, /* add float16/bfloat16 to dispatch types */
-          type,
-          "dummy_cuda_kernel",
-          [&] {
-            dummy_cuda_kernel<scalar_t> /* auto-deduced `scalar_t` by the macro */
-              <<<gridDims, blockDims, 0, stream.stream()>>>(
-                  static_cast<const scalar_t*>(recv_buffer),
-                  num_elements
-              );
-          }
-      );
-    }
-
     // group cast collective
-    void group_cast_nccl_kernel( // world_size = 4, rank = 0
-        void* send_buffer, // [5]
-        void* recv_buffer, // [11]
-        const std::vector<int64_t>& input_split_size_list, // rank0: [2, 3, 1]
-        const std::vector<int64_t>& output_split_size_list, // [3, 5, 1, 2]
-        const std::vector<std::vector<int64_t>>& dst_indices_list, // [[1,2], [3], [1,2,3]]
-        const std::vector<int64_t>& src_index_list, // rank1: [0, 2, 0, 3]
+    void group_cast_nccl_kernel(
+        void* send_buffer,
+        void* recv_buffer,
+        const std::vector<int64_t>& input_split_size_list,
+        const std::vector<int64_t>& output_split_size_list,
+        const std::vector<std::vector<int64_t>>& dst_indices_list,
+        const std::vector<int64_t>& src_index_list,
         size_t stride0,
         size_t element_size,
         c10::ScalarType type,
@@ -314,7 +280,7 @@ namespace torch::cuda::nccl {
                   nccl_data_type,
                   dst_rank,
                   nccl_comm,
-                  stream.stream()
+                  stream
                 ));
             }
             input_offset += input_size;
@@ -328,7 +294,7 @@ namespace torch::cuda::nccl {
               nccl_data_type,
               src_rank,
               nccl_comm,
-              stream.stream()
+              stream
             ));
             output_offset += output_size;
         }
@@ -337,11 +303,6 @@ namespace torch::cuda::nccl {
         #else
           NCCL_CHECK_TIMEOUT(ncclGroupEnd(), comm);
         #endif
-
-        /** FIXME: this is a workaround that solved the wrong out with CUDA_DEVICE_MAX_CONNECTIONS=1
-         * and it seems like the kernel goes wrong when overlapping with ffa
-         */
-        run_group_cast_post_process(recv_buffer, output_offset, type, stream);
     }
 
     // group reduce collective
@@ -378,7 +339,7 @@ namespace torch::cuda::nccl {
               nccl_data_type,
               dst_rank,
               nccl_comm,
-              stream.stream()
+              stream
             ));
             input_offset += input_size;
         }
@@ -391,7 +352,7 @@ namespace torch::cuda::nccl {
                   nccl_data_type,
                   src_rank,
                   nccl_comm,
-                  stream.stream()
+                  stream
                 ));
                 /** NOTE: since nccl recv can not handle atomic add,
                  * we have to interleavedly repeat the recv buffer

@@ -215,6 +215,8 @@ public:
                      work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
 
                     auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+                    // uncomment the following line to resume to non-persistent kernel
+                    // auto [n_block, bidh, bidb_idx, _] = block_coord_;
                     auto [n_block, bidh, bidb_idx] = block_coord_;
 
                     auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() {
@@ -252,6 +254,8 @@ public:
                      work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
 
                     auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+                    // uncomment the following line to resume to non-persistent kernel
+                    // auto [n_block, bidh, bidb_idx, _] = block_coord_;
                     auto [n_block, bidh, bidb_idx] = block_coord_;
 
                     if constexpr (RangeMerge) {

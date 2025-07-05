@@ -537,9 +537,11 @@ struct CollectiveEpilogueFwd {
         //     }
         // }
 
-
-
         if constexpr (!DisableFwdAtomicReduction) {
+            /** NOTE: this fence is necessary, otherwise the forward output might be inteferred
+             * and become wrong if some other kernel is also running on other stream
+             */
+            __threadfence();
             flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
             if (thread_idx == 0) {
                 if constexpr (Deterministic) {

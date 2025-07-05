@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
 from typing import Optional
 
 import torch
@@ -120,31 +119,27 @@ def group_cast_collective(
             **kwargs,
         )
 
-    # XXX FIXME
-    # if magi_attention.is_magi_nccl_backend_enable():
-    #     # NOTE: use native group-cast if magi_nccl backend is enabled
-    #     work = group_cast(
-    #         input=input,
-    #         output=output,
-    #         input_split_size_list=input_split_size_list,
-    #         output_split_size_list=output_split_size_list,
-    #         dst_indices_list=dst_indices_list,
-    #         src_index_list=src_index_list,
-    #         group=group,
-    #         async_op=async_op,
-    #         **kwargs,
-    #     )
+    if magi_attention.is_magi_nccl_backend_enable():
+        # NOTE: use native group-cast if magi_nccl backend is enabled
+        work = group_cast(
+            input=input,
+            output=output,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_indices_list=dst_indices_list,
+            src_index_list=src_index_list,
+            group=group,
+            async_op=async_op,
+            **kwargs,
+        )
 
-    #     return WorkWithPostProcessFn(
-    #         work=work,
-    #         post_process_fn=lambda x: x,
-    #         sync=not async_op,
-    #     )
+        return WorkWithPostProcessFn(
+            work=work,
+            post_process_fn=lambda x: x,
+            sync=not async_op,
+        )
 
     # ---------    calc group cast a2a args     --------- #
-
-    # XXX FIXME
-    output1 = torch.empty_like(output)
 
     world_size = dist.get_world_size(group)
 
@@ -156,7 +151,7 @@ def group_cast_collective(
         post_process_fn,
     ) = _calc_group_cast_a2a_args(
         input=input,
-        output=output1,
+        output=output,
         input_split_size_list=input_split_size_list,
         output_split_size_list=output_split_size_list,
         dst_indices_list=dst_indices_list,
@@ -182,43 +177,6 @@ def group_cast_collective(
             input_split_sizes=a2a_input_split_size,
             group=group,
             async_op=async_op,
-        )
-
-    # XXX FIXME
-    if magi_attention.is_magi_nccl_backend_enable():
-        launch_group_cast = True
-
-        def give_ref(out, ref_out):
-            if out.numel() > 0:
-                assert out.data_ptr() != ref_out.data_ptr()
-            if launch_group_cast:
-                assert torch.allclose(out, ref_out)
-            return ref_out
-
-        work.wait()
-        ref_output = post_process_fn(output1)
-        debug_post_process_fn = partial(give_ref, ref_out=ref_output)
-        torch.cuda.synchronize()
-
-        # NOTE: use native group-cast if magi_nccl backend is enabled
-        debug_work = None
-        if launch_group_cast:
-            debug_work = group_cast(
-                input=input,
-                output=output,
-                input_split_size_list=input_split_size_list,
-                output_split_size_list=output_split_size_list,
-                dst_indices_list=dst_indices_list,
-                src_index_list=src_index_list,
-                group=group,
-                async_op=async_op,
-                **kwargs,
-            )
-
-        return WorkWithPostProcessFn(
-            work=debug_work,
-            post_process_fn=debug_post_process_fn,
-            sync=not async_op,
         )
 
     return WorkWithPostProcessFn(

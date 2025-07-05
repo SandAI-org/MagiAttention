@@ -70,6 +70,8 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
             Has_softcap, Deterministic, SdP_swapAB, dKV_swapAB, dQ_swapAB, 
             NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs>;
     using CollectiveEpilogue = flash::CollectiveEpilogueBwd<TileShape_MNK, ElementAccum, ArchTag, CollectiveMainloop::NumMmaThreads, dKV_swapAB, NumMmaWarpGroups * (Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV>;
+    // uncomment the following line to resume to non-persistent kernel
+    // using Scheduler = flash::SingleTileScheduler<Varlen, false /*Split*/, false /*PackGQA*/, kBlockN>;
     using Scheduler = flash::VarlenDynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, false /*Split*/, false /*PackGQA*/, Arch >= 90 /*WarpSpecialized*/>;
     using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
@@ -184,6 +186,8 @@ void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream) {
     static constexpr bool V_in_regs = false;
     
     BOOL_SWITCH(params.deterministic, Deterministic, [&] {
+        // uncomment the following line to resume to non-persistent kernel
+        // constexpr bool RangeMerge = false;
         BOOL_SWITCH(params.merge_k_ranges != nullptr, RangeMerge, [&] {
             run_flash_bwd<
                 /*Arch=*/Arch,

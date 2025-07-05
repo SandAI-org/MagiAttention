@@ -217,10 +217,41 @@ def _group_cast_impl_with_batch_p2p(
     async_op: bool = False,
     **kwargs,
 ):
-    # TODO: implement this
-    # input_list = input.split(input_split_size_list, dim=0)
-    # output_list = output.split(output_split_size_list, dim=0)
-    pass
+    input_list = input.split(input_split_size_list, dim=0)
+    output_list = output.split(output_split_size_list, dim=0)
+
+    p2p_op_list = []
+
+    # send
+    for input_split_idx in range(len(input_split_size_list)):
+        for dst_rank in dst_indices_list[input_split_idx]:
+            p2p_op_list.append(
+                dist.P2POp(
+                    dist.isend,
+                    input_list[input_split_idx],
+                    dst=dst_rank,
+                    group=group,
+                )
+            )
+    # recv
+    for output_split_idx in range(len(output_split_size_list)):
+        src_rank = src_index_list[output_split_idx]
+        p2p_op_list.append(
+            dist.P2POp(
+                dist.irecv,
+                output_list[output_split_idx],
+                src=src_rank,
+                group=group,
+            )
+        )
+
+    work_list = dist.batch_isend_irecv(p2p_op_list)
+
+    return WorkWithPostProcessFn(
+        work=work_list,
+        post_process_fn=lambda x: x,
+        sync=not async_op,
+    )
 
 
 def sanity_check_for_group_cast_meta_args_per_rank(
