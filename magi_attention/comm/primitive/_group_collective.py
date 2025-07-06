@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Optional
 
 import torch
@@ -186,6 +187,32 @@ def group_cast_collective(
 
     # ---------    lauch a2a comm kernel     --------- #
 
+    # XXX FIXME
+    dummy_all2allv_times = int(
+        os.environ.get("MAGI_ATTENTION_DEBUG_DUMMY_ALL2ALLV_TIMES", "0")
+    )
+    if dummy_all2allv_times > 0:
+        dummy_a2a_output = torch.empty(
+            a2a_output.shape[0] * dummy_all2allv_times,
+            a2a_output.shape[1] * dummy_all2allv_times,
+            a2a_output.shape[2] * dummy_all2allv_times,
+            dtype=a2a_output.dtype,
+            device=a2a_output.device,
+        )
+        dummy_a2a_input = torch.empty(
+            a2a_input.shape[0] * dummy_all2allv_times,
+            a2a_input.shape[1] * dummy_all2allv_times,
+            a2a_input.shape[2] * dummy_all2allv_times,
+            dtype=a2a_input.dtype,
+            device=a2a_input.device,
+        )
+        dummy_a2a_output_split_size = [
+            split_size * dummy_all2allv_times for split_size in a2a_output_split_size
+        ]
+        dummy_a2a_input_split_size = [
+            split_size * dummy_all2allv_times for split_size in a2a_input_split_size
+        ]
+
     with nvtx.add_nvtx_event(
         (
             f"{a2a_output.shape=} | "
@@ -199,6 +226,16 @@ def group_cast_collective(
             input=a2a_input,
             output_split_sizes=a2a_output_split_size,
             input_split_sizes=a2a_input_split_size,
+            group=group,
+            async_op=async_op,
+        )
+
+    if dummy_all2allv_times > 0:
+        dist.all_to_all_single(
+            output=dummy_a2a_output,
+            input=dummy_a2a_input,
+            output_split_sizes=dummy_a2a_output_split_size,
+            input_split_sizes=dummy_a2a_input_split_size,
             group=group,
             async_op=async_op,
         )
