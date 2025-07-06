@@ -26,6 +26,7 @@ from .utils import (
     _calc_group_cast_a2a_args,
     _calc_group_reduce_a2a_args,
     _group_cast_collective_hier,
+    _group_cast_impl_with_batch_p2p,
 )
 
 __all__ = [
@@ -106,6 +107,15 @@ def group_cast_collective(
     )
 
     if magi_attention.is_hierarchical_comm_enable():
+        # XXX FIXME
+        assert (
+            not magi_attention.use_batch_p2p_for_group_collective()
+        ), "Hierarchical group-cast does not support batch p2p implementation for now"
+        # XXX FIXME
+        assert (
+            not magi_attention.is_magi_nccl_backend_enable()
+        ), "Hierarchical group-cast does not support magi-nccl backend for now"
+
         # NOTE: a hacky and temporary way to support hierarchical group-cast
         return _group_cast_collective_hier(
             input_tensor=input,
@@ -137,6 +147,20 @@ def group_cast_collective(
             work=work,
             post_process_fn=lambda x: x,
             sync=not async_op,
+        )
+
+    if magi_attention.use_batch_p2p_for_group_collective():
+        # NOTE: here, we use batch p2p to implement group-cast using nccl backend
+        return _group_cast_impl_with_batch_p2p(
+            input=input,
+            output=output,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_indices_list=dst_indices_list,
+            src_index_list=src_index_list,
+            group=group,
+            async_op=async_op,
+            **kwargs,
         )
 
     # ---------    calc group cast a2a args     --------- #

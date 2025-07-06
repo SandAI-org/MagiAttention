@@ -2227,7 +2227,6 @@ class DistAttnSolver:
                     arg.src_index_list for arg in group_collective_arg_per_rank
                 ],
                 world_size=self.cp_size,
-                my_rank=self.cp_rank,
                 check_nccl_send_recv=True,
             )
 

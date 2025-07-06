@@ -67,6 +67,7 @@ def is_sdpa_backend_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_SDPA_BACKEND", "0") == "1"
 
 
+# NOTE: this feature might be deprecated soon
 def is_refactor_bwd_args_enable() -> bool:
     """
     Toggling this env variable to 1 to enable
@@ -110,3 +111,14 @@ def is_magi_nccl_backend_enable() -> bool:
     including `nccl_stream`, `group_cast`, `group_reduce`, etc.
     """
     return os.environ.get("MAGI_NCCL_BACKEND", "0") == "1"
+
+
+# XXX FIXME: this is a temporary env variable to be removed/updated
+def use_batch_p2p_for_group_collective() -> bool:
+    """
+    Toggling this env variable to 1 to use batch p2p for group collective using `nccl` backend
+    instead of simulating group collective through all2all-v plus pre-/post-process
+    """
+    return (
+        os.environ.get("MAGI_ATTENTION_USE_BATCH_P2P_FOR_GROUP_COLLECTIVE", "0") == "1"
+    )
