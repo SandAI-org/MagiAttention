@@ -42,6 +42,7 @@ public:
     using CollectiveEpilogue = CollectiveEpilogue_;
     using EpilogueArguments = typename CollectiveEpilogue::Arguments;
     using EpilogueParams = typename CollectiveEpilogue::Params;
+    static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
 
     static_assert(ArchTag::kMinComputeCapability >= 90);
 
@@ -215,9 +216,9 @@ public:
                      work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
 
                     auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-                    // uncomment the following line to resume to non-persistent kernel
-                    // auto [n_block, bidh, bidb_idx, _] = block_coord_;
-                    auto [n_block, bidh, bidb_idx] = block_coord_;
+                    // get block_coord without deterministic message
+                    auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+                    auto [n_block, bidh, bidb_idx] = block_coord;
 
                     auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() {
                         scheduler.prefetch_next_work(params.scheduler, work_tile_info);
@@ -240,7 +241,6 @@ public:
                         }
                     }
                     else {
-                        auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
                         tile_valid = mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write,
                                     smem_pipe_write_do, shared_storage, block_coord, tile_valid);
                     }
@@ -254,9 +254,9 @@ public:
                      work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
 
                     auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-                    // uncomment the following line to resume to non-persistent kernel
-                    // auto [n_block, bidh, bidb_idx, _] = block_coord_;
-                    auto [n_block, bidh, bidb_idx] = block_coord_;
+                    // get block_coord without deterministic message
+                    auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+                    auto [n_block, bidh, bidb_idx] = block_coord;
 
                     if constexpr (RangeMerge) {
                         int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
@@ -269,7 +269,6 @@ public:
                         }
                     }
                     else {
-                        auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
                         mainloop.store_dq(params.mainloop, shared_storage, block_coord);
                     }
                 }
@@ -292,6 +291,7 @@ public:
                  work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
 
                 auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+                // get block_coord without deterministic message
                 auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
 
                 Tensor tdKrdK = partition_fragment_C(tiled_mma_dKV, select<!dKV_swapAB ? 1 : 2, !dKV_swapAB? 2 : 1>(TileShape_MNK{}));
@@ -330,8 +330,13 @@ public:
                         tdKrdK(i) *= params.mainloop.softmax_scale; 
                     }
                     ++work_idx;
-                    epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV,
-                                threadIdx.x - NumCopyThreads, block_coord);
+                    if constexpr (!Deterministic) {
+                        epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV,
+                                    threadIdx.x - NumCopyThreads, block_coord);
+                    } else {
+                        epilogue.store(params.epilogue, tdKrdK, tdVrdV, shared_storage, tiled_mma_dKV,
+                                    threadIdx.x - NumCopyThreads, block_coord_);
+                    }
                     cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
                 } else {
                     epilogue.store_zero(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);

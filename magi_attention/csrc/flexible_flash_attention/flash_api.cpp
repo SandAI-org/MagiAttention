@@ -197,6 +197,8 @@ void set_params_dgrad(Flash_bwd_params &params,
                       void *tile_count_semaphore_d,
                       const float softcap=0.f,
                       bool deterministic=false,
+                      void *determin_range_locks_d=nullptr,
+                      void *determin_conflict_state_d=nullptr,
                       int const sm_margin=0) {
 
     set_params_fprop(params,
@@ -209,8 +211,8 @@ void set_params_dgrad(Flash_bwd_params &params,
                      /*q_ranges_d*/q_ranges_d, 
                      /*k_ranges_d*/k_ranges_d,
                      /*range_locks_d*/nullptr,
-                     /*determin_range_locks_d*/ nullptr,
-                     /*determin_conflict_state_d*/ nullptr,
+                     /*determin_range_locks_d*/ determin_range_locks_d,
+                     /*determin_conflict_state_d*/ determin_conflict_state_d,
                      /*attn_type_map_d*/attn_type_map_d,
                      /*merge_batch_size*/merge_batch_size,
                      /*merge_q_ranges_d*/nullptr,
@@ -869,6 +871,18 @@ std::vector<at::Tensor> mha_bwd(
     at::Tensor tile_count_semaphore;  
     tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
 
+    // Initialize determin_range_locks tensor, the shape is same as range_locks
+    at::Tensor determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));
+    // Initialize determin_conflict_state, num_sm_max rows, ceil_div(total_k, kBlockN) + 1 columns
+    int const num_sm_max = 132; // max sm number for H100
+    at::Tensor determin_conflict_state = torch::empty({num_sm_max, (total_k + kBlockN - 1) / kBlockN + 1}, opts.dtype(torch::kInt32));
+
+    // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
+    if (deterministic) {
+        determin_range_locks.zero_();
+        determin_conflict_state.zero_();
+    }
+
     Flash_bwd_params params;
     set_params_dgrad(params,
                      batch_size,
@@ -892,6 +906,8 @@ std::vector<at::Tensor> mha_bwd(
                      tile_count_semaphore.data_ptr(),
                      softcap,
                      deterministic,
+                     deterministic ? determin_range_locks.data_ptr() : nullptr,
+                     deterministic ? determin_conflict_state.data_ptr() : nullptr,
                      sm_margin);
 
     #ifdef FLASHATTENTION_DISABLE_SOFTCAP

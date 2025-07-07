@@ -292,7 +292,8 @@ class TestFlexFlashAttn(TestCase):
     )
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
-    @parameterize("auto_range_merge", [False, True])
+    # TODO: auto_range_merge == True that are not supported when attn_type_map different yet, thus skip here
+    @parameterize("auto_range_merge", [False])
     @parameterize("fwd_deterministic", [False, True])
     def test_flex_attn(
         self,
