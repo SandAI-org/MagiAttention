@@ -63,7 +63,7 @@ autodoc_default_options = {
     "undoc-members": False,
 }
 
-autodoc_typehints = 'description'
+autodoc_typehints = "description"
 
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True
@@ -96,14 +96,14 @@ html_baseurl = "https://sandai-org.github.io/MagiAttention/docs/"
 html_show_sourcelink = False
 
 html_theme_options = {
-  "show_nav_level": 1,
-  "show_toc_level": 3,
-  "navigation_depth": 4,
-  "collapse_navigation": False,
-  "show_version_warning_banner": True,
-  "github_url": "https://github.com/SandAI-org/MagiAttention",
-  "logo": {
+    "show_nav_level": 1,
+    "show_toc_level": 3,
+    "navigation_depth": 4,
+    "collapse_navigation": False,
+    "show_version_warning_banner": True,
+    "github_url": "https://github.com/SandAI-org/MagiAttention",
+    "logo": {
         "text": "MagiAttention",
     },
-  "show_prev_next": False
+    "show_prev_next": False,
 }
