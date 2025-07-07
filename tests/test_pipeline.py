@@ -416,6 +416,21 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 10240,
                 "chunk_size": 512,
             },
+            # full_mask_assembled_from_samll_pieces
+            {
+                NAME: "full_mask_assembled_from_samll_pieces_with_8k",
+                SKIP_WORLD_SIZE: [3, 5, 6, 7],
+                "q_ranges": AttnRanges.from_ranges(
+                    [[i * 512, (i + 1) * 512] for i in range(16) for _ in range(8)]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [[i * 1024, (i + 1) * 1024] for _ in range(16) for i in range(8)]
+                ),
+                "attn_type_mapping": [0] * 128,
+                "total_seqlen_q": 8192,
+                "total_seqlen_k": 8192,
+                "chunk_size": 512,
+            },
             # NOTE: profile only case
             # full attn with total seqlen 144k
             # {
@@ -686,7 +701,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                         and q_ranges[i].seqlen == k_ranges[i].seqlen
                     ):
                         attn_type_mapping[i] = random.choice([0, 1, 2])
-                print(f"{attn_type_mapping=}")
 
         # -----    skip for overlapped q_range with causal mask  ---- #
 
