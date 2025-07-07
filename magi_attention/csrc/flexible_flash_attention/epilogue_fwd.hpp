@@ -19,7 +19,8 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MNK_PV_, class ClusterShape_, class Element_, class ArchTag_, int NumEpilogueThreads_, bool DisableFwdAtomicReduction_, bool Deterministic_=false>
+template <class TileShape_MNK_PV_, class ClusterShape_, class Element_, class ArchTag_,
+          int NumEpilogueThreads_, bool DisableFwdAtomicReduction_, bool Deterministic_=false>
 struct CollectiveEpilogueFwd {
     // KblockM, Kheaddim, KblockN
     using TileShape_MNK_PV = TileShape_MNK_PV_;
@@ -614,7 +615,7 @@ struct CollectiveEpilogueFwd {
 
         int offset_o = seqlen_info.offset_q;
         int seqlen_o = seqlen_info.seqlen_q;
-        int qhead_per_khead = 1;
+        // int qhead_per_khead = 1;
         Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE + offset_o * get<0>(params.stride_LSE)),
                                   params.shape_LSE,
                                   params.stride_LSE)(_, bidh);
