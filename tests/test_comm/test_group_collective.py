@@ -271,7 +271,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             if (
                 not async_op
                 or not self.support_hier_comm
-                or magi_attention.is_magi_nccl_backend_enable()
+                or magi_attention.comm.is_magi_nccl_backend_enable()
             ):  # FIXME: for now, magi nccl backend is not compatible with hier comm
                 return
 
@@ -515,7 +515,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
         old_value = os.environ.get(self.hier_comm_env_variable, "0")
         os.environ[self.hier_comm_env_variable] = "1" if enable else "0"
         if enable:  # sanity check
-            assert magi_attention.is_hierarchical_comm_enable()
+            assert magi_attention.comm.is_hierarchical_comm_enable()
         yield
         os.environ[self.hier_comm_env_variable] = old_value
 

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from typing import Optional
 
 import torch
@@ -107,12 +106,12 @@ def group_cast_collective(
         f"but got {sum(output_split_size_list)=} and {output.shape[0]=}"
     )
 
-    if magi_attention.is_hierarchical_comm_enable():
+    if magi_attention.comm.is_hierarchical_comm_enable():
         assert (
-            not magi_attention.use_batch_p2p_for_group_collective()
+            not magi_attention.comm.use_batch_p2p_for_group_collective()
         ), "Hierarchical group-cast does not support batch p2p implementation for now"
         assert (
-            not magi_attention.is_magi_nccl_backend_enable()
+            not magi_attention.comm.is_magi_nccl_backend_enable()
         ), "Hierarchical group-cast does not support magi-nccl backend for now"
 
         # NOTE: a hacky and temporary way to support hierarchical group-cast
@@ -128,7 +127,7 @@ def group_cast_collective(
             **kwargs,
         )
 
-    if magi_attention.is_magi_nccl_backend_enable():
+    if magi_attention.comm.is_magi_nccl_backend_enable():
         # NOTE: use native group-cast if magi_nccl backend is enabled
         work = group_cast(
             input=input,
@@ -148,7 +147,7 @@ def group_cast_collective(
             sync=not async_op,
         )
 
-    if magi_attention.use_batch_p2p_for_group_collective():
+    if magi_attention.comm.use_batch_p2p_for_group_collective():
         # NOTE: here, we use batch p2p to implement group-cast using nccl backend
         return _group_cast_impl_with_batch_p2p(
             input=input,
@@ -185,32 +184,6 @@ def group_cast_collective(
 
     # ---------    lauch a2a comm kernel     --------- #
 
-    # XXX FIXME
-    dummy_all2allv_times = int(
-        os.environ.get("MAGI_ATTENTION_DEBUG_DUMMY_ALL2ALLV_TIMES", "0")
-    )
-    if dummy_all2allv_times > 0:
-        dummy_a2a_output = torch.empty(
-            a2a_output.shape[0] * dummy_all2allv_times,
-            a2a_output.shape[1] * dummy_all2allv_times,
-            a2a_output.shape[2] * dummy_all2allv_times,
-            dtype=a2a_output.dtype,
-            device=a2a_output.device,
-        )
-        dummy_a2a_input = torch.empty(
-            a2a_input.shape[0] * dummy_all2allv_times,
-            a2a_input.shape[1] * dummy_all2allv_times,
-            a2a_input.shape[2] * dummy_all2allv_times,
-            dtype=a2a_input.dtype,
-            device=a2a_input.device,
-        )
-        dummy_a2a_output_split_size = [
-            split_size * dummy_all2allv_times for split_size in a2a_output_split_size
-        ]
-        dummy_a2a_input_split_size = [
-            split_size * dummy_all2allv_times for split_size in a2a_input_split_size
-        ]
-
     with nvtx.add_nvtx_event(
         (
             f"{a2a_output.shape=} | "
@@ -224,16 +197,6 @@ def group_cast_collective(
             input=a2a_input,
             output_split_sizes=a2a_output_split_size,
             input_split_sizes=a2a_input_split_size,
-            group=group,
-            async_op=async_op,
-        )
-
-    if dummy_all2allv_times > 0:
-        dist.all_to_all_single(
-            output=dummy_a2a_output,
-            input=dummy_a2a_input,
-            output_split_sizes=dummy_a2a_output_split_size,
-            input_split_sizes=dummy_a2a_input_split_size,
             group=group,
             async_op=async_op,
         )
@@ -311,7 +274,7 @@ def group_reduce_collective(
         f"but got {sum(output_split_size_list)=} and {output.shape[0]=}"
     )
 
-    if magi_attention.is_magi_nccl_backend_enable():
+    if magi_attention.comm.is_magi_nccl_backend_enable():
         # NOTE: use native group-reduce if magi_nccl backend is enabled
         work = group_reduce(
             input=input,

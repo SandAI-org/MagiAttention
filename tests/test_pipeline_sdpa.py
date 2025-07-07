@@ -107,7 +107,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable() and self.world_size in (
+        if magi_attention.comm.is_hierarchical_comm_enable() and self.world_size in (
             4,
             6,
             8,
@@ -129,7 +129,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     def backend(self) -> str:
         return (
             PG_MAGI_NCCL_BACKEND
-            if magi_attention.is_magi_nccl_backend_enable()
+            if magi_attention.comm.is_magi_nccl_backend_enable()
             else PG_NCCL_BACKEND
         )
 
@@ -790,7 +790,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----    skip for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable():
+        if magi_attention.comm.is_hierarchical_comm_enable():
             if self.world_size not in (4, 6, 8):
                 # skip for invalid world size
                 # when hierarchical comm is enabled

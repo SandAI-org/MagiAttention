@@ -111,7 +111,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable() and self.world_size in (
+        if magi_attention.comm.is_hierarchical_comm_enable() and self.world_size in (
             4,
             6,
             8,
@@ -133,7 +133,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     def backend(self) -> str:
         return (
             PG_MAGI_NCCL_BACKEND
-            if magi_attention.is_magi_nccl_backend_enable()
+            if magi_attention.comm.is_magi_nccl_backend_enable()
             else PG_NCCL_BACKEND
         )
 
@@ -584,7 +584,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         # -----    skip for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable():
+        if magi_attention.comm.is_hierarchical_comm_enable():
             if self.world_size not in (4, 6, 8):
                 # skip for invalid world size
                 # when hierarchical comm is enabled
@@ -1019,9 +1019,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         # -----   raise error if any error occurs   ---- #
 
         if err_msg_list:
-            # raise AssertionError("\n\n".join(err_msg_list))
-            # XXX FIXME
-            print("\n\n".join(err_msg_list))
+            raise AssertionError("\n\n".join(err_msg_list))
 
 
 class TestPipelineWithWorldSize2(TestPipelineBaseWithWorldSize1):

@@ -59,7 +59,7 @@ class TestPositionIdsWithWorldSize1(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable() and self.world_size in (
+        if magi_attention.comm.is_hierarchical_comm_enable() and self.world_size in (
             4,
             6,
             8,
@@ -247,7 +247,7 @@ class TestPositionIdsWithWorldSize1(DistTestBase):
     ):
         # -----    skip for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable():
+        if magi_attention.comm.is_hierarchical_comm_enable():
             if self.world_size not in (4, 6, 8):
                 # skip for invalid world size
                 # when hierarchical comm is enabled
@@ -286,7 +286,7 @@ class TestPositionIdsWithWorldSize1(DistTestBase):
             head_dim=head_dim,
             pad_size=pad_size,
             cp_group=None
-            if magi_attention.is_hierarchical_comm_enable()
+            if magi_attention.comm.is_hierarchical_comm_enable()
             else self.nccl_group,
             cp_mesh=self.device_mesh,
             is_same_source=True,

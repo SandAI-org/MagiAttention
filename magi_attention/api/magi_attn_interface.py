@@ -348,13 +348,13 @@ def magi_attn_flex_key(
         raise ValueError("Only one of cp_group or cp_mesh can be provided")
     if cp_mesh is not None:
         assert cp_mesh.ndim <= 2, "cp_mesh must be 1D or 2D"
-        if magi_attention.is_hierarchical_comm_enable():
+        if magi_attention.comm.is_hierarchical_comm_enable():
             assert (
                 cp_mesh.ndim == 2
             ), "cp_mesh must be 2D when hierarchical comm is enabled"
         cp_group = cp_mesh._flatten().get_group()
     else:
-        assert not magi_attention.is_hierarchical_comm_enable(), (
+        assert not magi_attention.comm.is_hierarchical_comm_enable(), (
             "A 2D cp_mesh must be provided when hierarchical comm is enabled, "
             "instead of a single cp_group"
         )

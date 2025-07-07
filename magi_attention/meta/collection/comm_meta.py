@@ -59,9 +59,9 @@ class GroupCollectiveArg:
             }.items()
         }
 
-        if magi_attention.is_hierarchical_comm_enable():
+        if magi_attention.comm.is_hierarchical_comm_enable():
             assert (
-                not magi_attention.is_magi_nccl_backend_enable()
+                not magi_attention.comm.is_magi_nccl_backend_enable()
             ), "Hierarchical comm is not supported for magi_nccl backend for now."
             assert self.device_mesh.ndim == 2, (
                 f"The hierarchical comm is only supported for 2D device mesh, "
@@ -89,7 +89,7 @@ class GroupCollectiveArg:
             # however, this will introduce cuda-malloc ops when applying range-gather for each comm
             # TODO: use the nccl stream to synchronize directly with magi nccl backend
             self.group_cast_args_dict_kv_packed["side_stream"] = torch.cuda.Stream()
-        elif not magi_attention.is_magi_nccl_backend_enable():
+        elif not magi_attention.comm.is_magi_nccl_backend_enable():
             # NOTE: if magi_nccl backend is disabled, we fall back to use all2all-v to simulate group cast
             # thus we pre-calculate the meta args for all2all-v based group-cast here
             (
@@ -130,7 +130,7 @@ class GroupCollectiveArg:
             }.items()
         }
 
-        if not magi_attention.is_magi_nccl_backend_enable():
+        if not magi_attention.comm.is_magi_nccl_backend_enable():
             # NOTE: if magi_nccl backend is disabled, we fall back to use all2all-v to simulate group reduce
             # thus we pre-calculate the meta args for all2all-v based group-reduce here
             (

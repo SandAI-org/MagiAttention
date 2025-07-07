@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from logging import getLogger
 from typing import Optional
 
@@ -472,46 +471,8 @@ class DistFlashAttnFunc(torch.autograd.Function):
         out_list = []
         lse_list = []
 
-        # XXX FIXME
-        debug_fwd_use_ref = os.getenv("MAGI_ATTENTION_DEBUG_FWD_USE_REF", "none")
-
-        if debug_fwd_use_ref == "set":
-            if os.path.exists(f"ref_kv_{dist.get_rank()}.pt"):
-                ref_kv = torch.load(
-                    f"ref_kv_{dist.get_rank()}.pt",
-                    map_location=f"cuda:{torch.cuda.current_device()}",
-                )
-
-            if os.path.exists(f"ref_local_kv_{dist.get_rank()}.pt"):
-                ref_local_kv = torch.load(
-                    f"ref_local_kv_{dist.get_rank()}.pt",
-                    map_location=f"cuda:{torch.cuda.current_device()}",
-                )
-
-            if os.path.exists(f"ref_local_out_{dist.get_rank()}.pt"):
-                ref_local_out_dict = torch.load(
-                    f"ref_local_out_{dist.get_rank()}.pt",
-                    map_location=f"cuda:{torch.cuda.current_device()}",
-                )
-                ref_local_out = ref_local_out_dict["out"]
-                ref_local_lse = ref_local_out_dict["lse"]
-                ref_local_skip_attn = ref_local_out_dict["skip_attn"]
-
-            if os.path.exists(f"ref_remote_out_{dist.get_rank()}.pt"):
-                ref_remote_out_dict = torch.load(
-                    f"ref_remote_out_{dist.get_rank()}.pt",
-                    map_location=f"cuda:{torch.cuda.current_device()}",
-                )
-                ref_remote_out = ref_remote_out_dict["out"]
-                ref_remote_lse = ref_remote_out_dict["lse"]
-                ref_remote_skip_attn = ref_remote_out_dict["skip_attn"]
-
         # cat local k, v into a single coalesced kv
         local_kv = dist_attn_runtime.concat_kv(local_k, local_v)
-
-        if debug_fwd_use_ref == "get":
-            if not os.path.exists(f"ref_local_kv_{dist.get_rank()}.pt"):
-                torch.save(local_kv, f"ref_local_kv_{dist.get_rank()}.pt")
 
         if magi_attention.is_cuda_device_max_connections_one():
             # pre-fetch 0th remote kv
@@ -532,32 +493,10 @@ class DistFlashAttnFunc(torch.autograd.Function):
         # overlapped with 0th remote kv comm
         out, lse, skip_attn = dist_attn_runtime.attn_fwd_partial(
             q=local_q,
-            kv=ref_local_kv if debug_fwd_use_ref == "set" else local_kv,
+            kv=local_kv,
             overlap_stage=None,
             deterministic=dist_attn_runtime.deterministic,
         )
-
-        if debug_fwd_use_ref == "get":
-            if not os.path.exists(f"ref_local_out_{dist.get_rank()}.pt"):
-                torch.save(
-                    {"out": out, "lse": lse, "skip_attn": skip_attn},
-                    f"ref_local_out_{dist.get_rank()}.pt",
-                )
-
-        if debug_fwd_use_ref == "set":
-            try:
-                torch.testing.assert_close(out, ref_local_out)
-            except AssertionError as e:
-                print(
-                    f"[RANK{dist.get_rank()}] local out is not equal to ref local out with the error: {e}"
-                )
-            try:
-                torch.testing.assert_close(lse, ref_local_lse)
-            except AssertionError as e:
-                print(
-                    f"[RANK{dist.get_rank()}] local lse is not equal to ref local lse with the error: {e}"
-                )
-            assert skip_attn == ref_local_skip_attn
 
         if not skip_attn:
             out_list.append(out)
@@ -587,26 +526,14 @@ class DistFlashAttnFunc(torch.autograd.Function):
             # overlapped with (i+1)th remote kv comm
             out, lse, skip_attn = dist_attn_runtime.attn_fwd_partial(
                 q=local_q,
-                kv=ref_kv if debug_fwd_use_ref == "set" else curr_remote_kv,
+                kv=curr_remote_kv,
                 overlap_stage=ith_overlap_stage,
                 deterministic=dist_attn_runtime.deterministic,
             )
 
-            if debug_fwd_use_ref == "get":
-                if not os.path.exists(f"ref_remote_out_{dist.get_rank()}.pt"):
-                    torch.save(
-                        {"out": out, "lse": lse, "skip_attn": skip_attn},
-                        f"ref_remote_out_{dist.get_rank()}.pt",
-                    )
-
-            if debug_fwd_use_ref == "set":
-                if not ref_remote_skip_attn:
-                    out_list.append(ref_remote_out)
-                    lse_list.append(ref_remote_lse)
-            else:
-                if not skip_attn:
-                    out_list.append(out)
-                    lse_list.append(lse)
+            if not skip_attn:
+                out_list.append(out)
+                lse_list.append(lse)
 
         # do result correction to get final out and lse
         out, lse = result_correction(
@@ -634,25 +561,6 @@ class DistFlashAttnFunc(torch.autograd.Function):
         local_q, local_kv, out, final_lse = ctx.saved_tensors
         dist_attn_runtime: DistFlashAttnRuntime = ctx.dist_attn_runtime
 
-        # XXX FIXME
-        debug_bwd_use_ref = os.getenv("MAGI_ATTENTION_DEBUG_BWD_USE_REF", "none")
-
-        if debug_bwd_use_ref == "set":
-            if os.path.exists(f"ref_local_bwd_{dist.get_rank()}.pt"):
-                ref_local_bwd_dict = torch.load(f"ref_local_bwd_{dist.get_rank()}.pt")
-                ref_grad_output = ref_local_bwd_dict["do"]
-                ref_local_q = ref_local_bwd_dict["q"]
-                ref_local_kv = ref_local_bwd_dict["kv"]
-                ref_out = ref_local_bwd_dict["o"]
-                ref_lse = ref_local_bwd_dict["lse"]
-                ref_local_dq = ref_local_bwd_dict["dq"]
-                ref_local_dkv = ref_local_bwd_dict["dkv"]
-
-            if os.path.exists(f"ref_remote_bwd_{dist.get_rank()}.pt"):
-                ref_remote_bwd_dict = torch.load(f"ref_remote_bwd_{dist.get_rank()}.pt")
-                ref_remote_dq = ref_remote_bwd_dict["dq"]
-                ref_remote_dkv = ref_remote_bwd_dict["dkv"]
-
         if magi_attention.is_cuda_device_max_connections_one():
             # pre-fetch 0th remote kv
             (
@@ -674,46 +582,14 @@ class DistFlashAttnFunc(torch.autograd.Function):
             partial_local_dkv,
             skip_attn,
         ) = dist_attn_runtime.attn_bwd_partial(
-            do=ref_grad_output if debug_bwd_use_ref == "set" else grad_output,
-            q=ref_local_q if debug_bwd_use_ref == "set" else local_q,
-            kv=ref_local_kv if debug_bwd_use_ref == "set" else local_kv,
-            o=ref_out if debug_bwd_use_ref == "set" else out,
-            lse=ref_lse if debug_bwd_use_ref == "set" else final_lse,
+            do=grad_output,
+            q=local_q,
+            kv=local_kv,
+            o=out,
+            lse=final_lse,
             overlap_stage=None,
             deterministic=dist_attn_runtime.deterministic,
         )
-
-        if debug_bwd_use_ref == "get":
-            if not os.path.exists(f"ref_local_bwd_{dist.get_rank()}.pt"):
-                torch.save(
-                    {
-                        # input
-                        "do": grad_output,
-                        "q": local_q,
-                        "kv": local_kv,
-                        "o": out,
-                        "lse": final_lse,
-                        # output
-                        "dq": partial_local_dq,
-                        "dkv": partial_local_dkv,
-                        "skip_attn": skip_attn,
-                    },
-                    f"ref_local_bwd_{dist.get_rank()}.pt",
-                )
-
-        if debug_bwd_use_ref == "set":
-            try:
-                torch.testing.assert_close(partial_local_dq, ref_local_dq)
-            except AssertionError as e:
-                print(
-                    f"[RANK{dist.get_rank()}] local dq is not equal to ref local dq with the error: {e}"
-                )
-            try:
-                torch.testing.assert_close(partial_local_dkv, ref_local_dkv)
-            except AssertionError as e:
-                print(
-                    f"[RANK{dist.get_rank()}] local dkv is not equal to ref local dkv with the error: {e}"
-                )
 
         if skip_attn:
             # NOTE: if local_dq and local_dkv calculation are skipped, we need to zeros initialize them.
@@ -758,31 +634,11 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 deterministic=dist_attn_runtime.deterministic,
             )
 
-            if debug_bwd_use_ref == "get":
-                if not os.path.exists(f"ref_remote_bwd_{dist.get_rank()}.pt"):
-                    torch.save(
-                        {
-                            # input
-                            "do": grad_output,
-                            "q": local_q,
-                            "kv": curr_remote_kv,
-                            "o": out,
-                            "lse": final_lse,
-                            # output
-                            "dq": partial_remote_dq,
-                            "dkv": partial_remote_dkv,
-                            "skip_attn": skip_attn,
-                        },
-                        f"ref_remote_bwd_{dist.get_rank()}.pt",
-                    )
-
             # reduce ith partial dkv
             # NOTE: even if skip_attn is True, we still need to launch the group_reduce_collective,
             # because not all ranks are skipped.
             partial_local_dkv_work = dist_attn_runtime.reduce_partial_dkv(
-                partial_remote_dkv=ref_remote_dkv
-                if debug_bwd_use_ref == "set"
-                else partial_remote_dkv,
+                partial_remote_dkv=partial_remote_dkv,
                 partial_local_dkv=partial_local_dkv,
                 overlap_stage=ith_overlap_stage,
             )
@@ -794,9 +650,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
             if not skip_attn:
                 # reduce ith partial dq, overlapped with ith remote dkv comm
                 partial_local_dq = dist_attn_runtime.reduce_partial_dq(
-                    partial_remote_dq=ref_remote_dq
-                    if debug_bwd_use_ref == "set"
-                    else partial_remote_dq,
+                    partial_remote_dq=partial_remote_dq,
                     partial_local_dq=partial_local_dq,
                 )
 

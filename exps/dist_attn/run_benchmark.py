@@ -157,7 +157,7 @@ def init_dist_environment(
         )
         local_rank = rank % 8
         torch.cuda.set_device(local_rank)
-        if magi_attention.is_hierarchical_comm_enable():
+        if magi_attention.comm.is_hierarchical_comm_enable():
             cp_group = None
         else:
             cp_group = dist.new_group(list(range(world_size)), backend="nccl")
@@ -166,7 +166,7 @@ def init_dist_environment(
 
 
 def init_hierarchical_mesh(world_size: int):
-    if magi_attention.is_hierarchical_comm_enable() and world_size in (
+    if magi_attention.comm.is_hierarchical_comm_enable() and world_size in (
         8,
         16,
         32,
