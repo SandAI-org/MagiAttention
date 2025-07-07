@@ -338,7 +338,7 @@ def flex_flash_attn_func(
         lse: (num_heads, num_tokens_q)
     NOTE: attn_type_map explanation:
         (In addition to the textual explanations provided below, feel free to check out our blog for a visual interpretation:
-        https://sandai-org.github.io/MagiAttention/#flex-flash-attn)
+        https://sandai-org.github.io/MagiAttention/blog/#flex-flash-attn)
         1. full attention
             If seqlen_q = 5 and seqlen_k = 2, the full mask is:
                 1 1

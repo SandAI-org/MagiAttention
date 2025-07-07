@@ -2,7 +2,7 @@
 
 <p align="center">
     <a href="https://static.magi.world/static/files/MAGI_1.pdf"><img alt="paper" src="https://img.shields.io/badge/Paper-Magi_1-red"></a>
-    <a href="https://SandAI-org.github.io/MagiAttention/"><img alt="blog" src="https://img.shields.io/badge/Blog-MagiAttention-purple"></a>
+    <a href="https://SandAI-org.github.io/MagiAttention/blog/"><img alt="blog" src="https://img.shields.io/badge/Blog-MagiAttention-purple"></a>
     <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="license" src="https://img.shields.io/badge/Release-v1.0.0-blue"></a>
 </p>
 
@@ -31,7 +31,7 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 ## Latest News 🔥
 
 - [2025/5] We support overlapped q_ranges when all mask types are `FULL` (see [v1.0.1 release note](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.1) for more details), and release the example code to **integrate Megatron with MagiAttention** with several training convergence experiments (see [here](./example/megatron/README.md) for more details).
-- [2025/4] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/tree/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
+- [2025/4] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/tree/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/blog/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
 
 
 # About
@@ -47,7 +47,7 @@ We are committed to continually improving the performance and generality of Magi
 
 To realize linear scalability for distributed attention, we implement and introduce key designs as follows.
 
-For implementation details, more experimental results and future works, please visit our [blog](https://SandAI-org.github.io/MagiAttention/#methodology).
+For implementation details, more experimental results and future works, please visit our [blog](https://SandAI-org.github.io/MagiAttention/blog/#methodology).
 
 - **Flexible Flash Attention Kernel**. We introduce a generalized formulation for irregular attention mask patterns and implement a flexible flash attention kernel (FFA). It is natively designed for distribution scenarios and provides greater flexibility in handling diverse attention mask types, with performance comparable to [Flash-Attention 3](https://arxiv.org/abs/2407.08608) on Hopper GPUs.
 - **Computation Load-Balance**. With a fine-grained sharding strategy, we elaborate an efficient <em>dispatch solver</em> that ensures balanced attention computational loads across each CP rank in every training iteration.
@@ -357,7 +357,7 @@ To demonstrate FFA kernels' state-of-the-art performance and flexibility in hand
 
 Benchmark settings: for each mask pattern, we vary the sequence length `seqlen` from $4k,8k,16k,...,$ up to $128k$ (`seqlen_q = seqlen_k = seqlen`) while measuring computation power (in $\texttt{TFLOPs/s}$) for forward and backward passes of different attention kernels. Other configurations are fixed using common training settings (see the table above) to focus on the impact of sequence length and mask pattern. For the varlen packed data, we simply follow the variable sequence length distribution in the open-sourced dataset [ChatQA2-Long-SFT-data](https://huggingface.co/datasets/nvidia/ChatQA2-Long-SFT-data), from which we sample to pack and pad to the required `seqlen`.
 
-Some Results are reported in the following figures, see more in our [blog](https://SandAI-org.github.io/MagiAttention/#kernel-level).
+Some Results are reported in the following figures, see more in our [blog](https://SandAI-org.github.io/MagiAttention/blog/#kernel-level).
 
 
 <div align="center">
@@ -406,7 +406,7 @@ The tensor-parallel size `tp_size` is fixed at 8, with sequence-parallel enabled
 
 Therefore, in every training setting, each rank is assigned constantly with `seqlen=64k`, `num_heads_q = 8` and `num_heads_k = 1` for attention propagation, while the remaining activations stays `seqlen=8k`, `num_heads_q = 64` and `num_heads_k = 8` with SP enabled. This setup simulates a common training configuration.
 
-Some of the results are presented in the following figures, see more in our [blog](https://SandAI-org.github.io/MagiAttention/#module-level).
+Some of the results are presented in the following figures, see more in our [blog](https://SandAI-org.github.io/MagiAttention/blog/#module-level).
 
 As demonstrated, MagiAttention exhibits linear scalability as the context length and CP size increase, in both full mask and varlen full mask configurations, for both forward and backward passes. In contrast, baseline methods either face strict limitations in scaling up or experience performance degradation with ultra-long contexts, which worsens with varlen mask patterns.
 
