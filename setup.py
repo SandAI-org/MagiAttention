@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import glob
 import itertools
 import os
 import platform
@@ -618,35 +617,6 @@ if not SKIP_CUDA_BUILD:
             sources=sources,
             extra_compile_args=extra_compile_args,
             include_dirs=include_dirs,
-        )
-    )
-
-    # ------    add magi_nccl extension module    ------ #
-
-    magi_nccl_dir_abs = repo_dir / "magi_attention" / "csrc" / "comm"
-    magi_nccl_dir_rel = magi_nccl_dir_abs.relative_to(repo_dir)
-
-    magi_nccl_sources = []
-    magi_nccl_sources.extend(glob.glob(f"{magi_nccl_dir_rel}/*.cpp"))
-    magi_nccl_sources.extend(glob.glob(f"{magi_nccl_dir_rel}/*.cu"))
-
-    magi_nccl_include_dirs = [
-        common_dir,
-        magi_nccl_dir_abs,
-        cutlass_dir / "include",
-    ]
-
-    magi_nccl_extra_compile_args = {
-        "cxx": ["-O3", "-std=c++17"],
-        "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag,
-    }
-
-    ext_modules.append(
-        CUDAExtension(
-            name="magi_nccl",
-            sources=magi_nccl_sources,
-            include_dirs=magi_nccl_include_dirs,
-            extra_compile_args=magi_nccl_extra_compile_args,
         )
     )
 

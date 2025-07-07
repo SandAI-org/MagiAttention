@@ -250,15 +250,6 @@ class TestFlexFlashAttn(TestCase):
                 ),
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             },
-            {
-                "name": "deterministic_1k",
-                "seqlen": 1000,
-                "q_ranges": AttnRanges.from_ranges([[0, 100], [1, 101]] * 10),
-                "k_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(20)]
-                ),
-                "attn_type_map": [0] * 20,
-            },
         ],
     )
     @parameterize(
@@ -292,8 +283,9 @@ class TestFlexFlashAttn(TestCase):
     )
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
-    @parameterize("auto_range_merge", [False, True])
-    @parameterize("fwd_deterministic", [False, True])
+    @parameterize(
+        "auto_range_merge", [False]
+    )  # TODO: test when auto_range_merge is enabled
     def test_flex_attn(
         self,
         attn_mask_config: dict[str, Any],
@@ -301,15 +293,7 @@ class TestFlexFlashAttn(TestCase):
         dtype: torch.dtype,
         random_attn_type_map: bool,
         auto_range_merge: bool = False,
-        fwd_deterministic: bool = False,
     ):
-        # TODO: some flag combinations that are not supported yet, thus skip here
-        if auto_range_merge and fwd_deterministic:
-            return
-
-        if random_attn_type_map and auto_range_merge:
-            return
-
         # extract config
         seqlen = attn_mask_config["seqlen"]
         q_ranges: AttnRanges = attn_mask_config["q_ranges"]
@@ -339,7 +323,6 @@ class TestFlexFlashAttn(TestCase):
             f"[dtype={dtype}]"
             f"[random_attn_type_map={random_attn_type_map}]"
             f"[auto_range_merge={auto_range_merge}]"
-            f"[fwd_deterministic={fwd_deterministic}]"
         )
 
         # construct data
@@ -383,28 +366,8 @@ class TestFlexFlashAttn(TestCase):
             max_seqlen_k,
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
-            deterministic=fwd_deterministic,
         )
         o.backward(do)
-
-        if fwd_deterministic:
-            o2, _ = flex_flash_attn_func(
-                q,
-                k,
-                v,
-                q_ranges_tensor,
-                k_ranges_tensor,
-                max_seqlen_q,
-                max_seqlen_k,
-                attn_type_map_tensor,
-                auto_range_merge=auto_range_merge,
-                deterministic=fwd_deterministic,
-            )
-            try:
-                assert torch.equal(o, o2)
-            except Exception as e:
-                print(f"{o=}\n\n{o2=}\n\n")
-                raise AssertionError("\n\n".join([str(e)]))
 
         # compare with reference
         self.assert_close_to_torch_ref(

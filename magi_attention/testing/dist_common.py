@@ -25,9 +25,7 @@ DEVICE_TYPE = (
     "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else "cpu"
 )
 
-PG_NCCL_BACKEND = "nccl"
-PG_MAGI_NCCL_BACKEND = "cpu:gloo,cuda:magi_nccl"
-PG_DEFAULT_BACKEND = PG_NCCL_BACKEND if DEVICE_TYPE == "cuda" else "gloo"
+PG_DEFAULT_BACKEND = "nccl" if DEVICE_TYPE == "cuda" else "gloo"
 
 NUM_DEVICES = 4
 
@@ -67,7 +65,6 @@ class DistTestBase(MultiProcessTestCase):
             "gloo",
             "mpi",
             "cpu:gloo,cuda:nccl",
-            "cpu:gloo,cuda:magi_nccl",
         ]:
             raise RuntimeError(f"Backend {self.backend} not supported!")
 

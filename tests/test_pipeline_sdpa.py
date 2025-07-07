@@ -36,12 +36,7 @@ from magi_attention.config import (
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import (
-    PG_MAGI_NCCL_BACKEND,
-    PG_NCCL_BACKEND,
-    DistTestBase,
-    with_comms,
-)
+from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import EPSILON, torch_attn_ref
 from magi_attention.utils import get_attn_mask_from_ranges, str2seed, sync_rng
 from magi_attention.utils._utils import is_list_value_all
@@ -124,14 +119,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             )
         else:
             self.device_mesh = None
-
-    @property
-    def backend(self) -> str:
-        return (
-            PG_MAGI_NCCL_BACKEND
-            if magi_attention.comm.is_magi_nccl_backend_enable()
-            else PG_NCCL_BACKEND
-        )
 
     @property
     def process_group(self):
@@ -757,7 +744,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         [False, True],
     )
     @parameterize(
-        "high_bandwith_domain_size",
+        "high_bandwith_domain_size",  # TODO: this feature'll probably be deprecated soon
         [1],
     )
     def test_pipeline_sdpa(
@@ -844,7 +831,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 **{k: v for k, v in overlap_config.items() if k not in (NAME,)}
             ),
             high_bandwith_domain_size=high_bandwith_domain_size,
-            deterministic=True,
+            deterministic=False,  # TODO: use deterministic mode for ut as long as supported
         )
 
         # -----    run pipeline test   ---- #

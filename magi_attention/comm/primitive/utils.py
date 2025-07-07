@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 from collections import defaultdict
 from functools import partial
 from itertools import accumulate, chain, pairwise
@@ -823,28 +822,6 @@ def _hier_group_cast_impl_with_a2av(
     return work_with_post_process_fn
 
 
-@torch.no_grad()
-@nvtx.instrument_nvtx
-def _group_cast_hier_impl_with_magi_nccl_backend(
-    input_tensor: torch.Tensor,
-    output_tensor: torch.Tensor,
-    input_split_size_list: list[int],
-    output_split_size_list: list[int],
-    dst_indices_list: list[list[int]],
-    src_index_list: list[int],
-    intra_group: dist.ProcessGroup,
-    inter_group: dist.ProcessGroup,
-    side_stream: torch.cuda.Stream,
-    async_op: bool = False,
-    **kwargs,
-):
-    raise NotImplementedError(
-        "This feature is been cut down for now, "
-        "since the native group-collective implemented by "
-        "nccl grouped send/recv shows poor performance."
-    )
-
-
 def _group_cast_impl_with_batch_p2p(
     input: torch.Tensor,
     output: torch.Tensor,
@@ -1203,27 +1180,6 @@ def _calc_group_cast_a2a_args(
 
 
 # ------------------        utils for group reduce collective       ------------------ #
-
-
-def _calc_group_reduce_post_process_bytes_for_magi_nccl(
-    output_shape: list[int],
-    output_split_size_list: list[int],
-    src_indices_list: list[list[int]],
-    dtype: torch.dtype,
-) -> int:
-    seqlen = output_shape[0]
-    stride0 = math.prod(output_shape[1:])
-    repeated_seqlen = sum(
-        [
-            split_size * len(src_indices)
-            for split_size, src_indices in zip(output_split_size_list, src_indices_list)
-        ]
-    )
-
-    num_loads = (seqlen + repeated_seqlen) * stride0
-    num_save = seqlen * stride0
-
-    return (num_loads + num_save) * dtype.itemsize
 
 
 def sanity_check_for_group_reduce_meta_args_per_rank(

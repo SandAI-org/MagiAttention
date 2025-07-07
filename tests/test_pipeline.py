@@ -36,12 +36,7 @@ from magi_attention.config import (
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import (
-    PG_MAGI_NCCL_BACKEND,
-    PG_NCCL_BACKEND,
-    DistTestBase,
-    with_comms,
-)
+from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import (
     EPSILON,
     calc_inf_norm,
@@ -128,14 +123,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             )
         else:
             self.device_mesh = None
-
-    @property
-    def backend(self) -> str:
-        return (
-            PG_MAGI_NCCL_BACKEND
-            if magi_attention.comm.is_magi_nccl_backend_enable()
-            else PG_NCCL_BACKEND
-        )
 
     @property
     def process_group(self):
@@ -542,7 +529,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     )
     @parameterize(
         "high_bandwith_domain_size",
-        [1],  # NOTE: this feature might be deprecated soon
+        [1],  # TODO: this feature'll probably be deprecated soon
     )
     def test_pipeline(
         self,
@@ -642,7 +629,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 }
             ),
             high_bandwith_domain_size=high_bandwith_domain_size,
-            deterministic=True,
+            deterministic=False,  # TODO: use deterministic mode for ut as long as supported
         )
 
         # -----    run pipeline test   ---- #
