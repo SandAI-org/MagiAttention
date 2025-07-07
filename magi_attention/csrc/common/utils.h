@@ -21,7 +21,7 @@
 #include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>
 
-#include "check.h"
+#include "cuda_check.h"
 
 namespace flash {
 

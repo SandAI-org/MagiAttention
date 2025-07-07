@@ -165,11 +165,6 @@ struct Flash_fwd_params : public Qkv_params {
 
     int * __restrict__ tile_count_semaphore;
     int * __restrict__ range_locks;
-
-    // For deterministic
-    int * __restrict__ determin_range_locks;
-    int * __restrict__ determin_conflict_state;
-
     // int * __restrict__ num_m_blocks_ptr;
     // int * __restrict__ num_n_blocks_ptr;
     int * __restrict__ num_splits_dynamic_ptr;

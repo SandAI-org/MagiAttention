@@ -15,7 +15,7 @@
 #include "flash.h"
 #include "static_switch.h"
 #include "tile_size.h"
-#include "check.h"
+#include "cuda_check.h"
 
 // Copied from https://github.com/pytorch/pytorch/commit/7931eee5c5ebcdf468bff4d308510b03355cd909
 // This is so that we can pass in torch.dtype as a parameter to the function.
@@ -81,8 +81,6 @@ void set_params_fprop(Flash_fwd_params &params,
                       void *q_ranges_d,
                       void *k_ranges_d,
                       void *range_locks_d,
-                      void *determin_range_locks_d,
-                      void *determin_conflict_state_d,
                       void *attn_type_map_d,
                       int merge_batch_size,
                       void *merge_q_ranges_d,
@@ -132,10 +130,6 @@ void set_params_fprop(Flash_fwd_params &params,
     // Set kernel utility pointers
     params.range_locks = static_cast<int *>(range_locks_d);
     params.tile_count_semaphore = static_cast<int *>(tile_count_semaphore_d);
-
-    // Set deterministic pointers
-    params.determin_range_locks = static_cast<int *>(determin_range_locks_d);
-    params.determin_conflict_state = static_cast<int *>(determin_conflict_state_d);
 
     // Softmax sum
     params.softmax_lse_ptr = softmax_lse_d;
@@ -209,8 +203,6 @@ void set_params_dgrad(Flash_bwd_params &params,
                      /*q_ranges_d*/q_ranges_d, 
                      /*k_ranges_d*/k_ranges_d,
                      /*range_locks_d*/nullptr,
-                     /*determin_range_locks_d*/ nullptr,
-                     /*determin_conflict_state_d*/ nullptr,
                      /*attn_type_map_d*/attn_type_map_d,
                      /*merge_batch_size*/merge_batch_size,
                      /*merge_q_ranges_d*/nullptr,
@@ -435,8 +427,7 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
         int const sm_margin,
         // performance tuning arguments
         bool const disable_fwd_atomic_reduction,
-        std::optional<at::ScalarType> out_type_,
-        bool const deterministic_enable
+        std::optional<at::ScalarType> out_type_
 ) {
     // Check compute capability
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -582,19 +573,6 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
     }
 
     Flash_fwd_params params;
-    
-    // Initialize determin_range_locks tensor, the shape is same as range_locks
-    at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
-    // Initialize determin_conflict_state, num_sm_max rows, ceil_div(total_q, kBlockM) + 1 columns
-    int const num_sm_max = 132; // max sm number for H100
-    at::Tensor determin_conflict_state = torch::empty({num_sm_max, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
-
-    // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
-    if (deterministic_enable) {
-        determin_range_locks.zero_();
-        determin_conflict_state.zero_();
-    }
-
     set_params_fprop(params,
                      batch_size,
                      max_seqlen_q, max_seqlen_k,
@@ -606,8 +584,6 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
                      /*q_ranges*/ q_ranges.data_ptr(),
                      /*k_ranges*/ k_ranges.data_ptr(),
                      /*range_locks*/ range_locks.data_ptr(),
-                     /*determin_range_locks*/ deterministic_enable ? determin_range_locks.data_ptr() : nullptr,
-                     /*determin_conflict_state*/ deterministic_enable ? determin_conflict_state.data_ptr() : nullptr,
                      /*attn_type_map*/ has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
                      /*merge_batch_size*/ merge_batch_size,
                      /*merge_q_ranges*/ has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
@@ -618,7 +594,7 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
                      /*softcap*/ softcap,
                      /*sm_margin*/ sm_margin,
                      /*disable_fwd_atomic_reduction*/ disable_fwd_atomic_reduction);
-    
+        
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     run_mha_fwd(params, stream);
     run_fast_zero_fill(params, stream);
