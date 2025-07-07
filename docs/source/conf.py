@@ -63,11 +63,11 @@ autodoc_default_options = {
     "undoc-members": False,
 }
 
-autodoc_default_flags = ["members", "special-members"]
+autodoc_typehints = 'description'
 
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True
-napoleon_include_init_with_doc = False
+napoleon_include_init_with_doc = True
 napoleon_include_private_with_doc = False
 napoleon_include_special_with_doc = True
 napoleon_use_admonition_for_examples = False
@@ -90,6 +90,20 @@ master_doc = "index"
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
-html_theme = "furo"
+html_theme = "pydata_sphinx_theme"
 html_static_path = ["_static"]
 html_baseurl = "https://sandai-org.github.io/MagiAttention/docs/"
+html_show_sourcelink = False
+
+html_theme_options = {
+  "show_nav_level": 1,
+  "show_toc_level": 3,
+  "navigation_depth": 4,
+  "collapse_navigation": False,
+  "show_version_warning_banner": True,
+  "github_url": "https://github.com/SandAI-org/MagiAttention",
+  "logo": {
+        "text": "MagiAttention",
+    },
+  "show_prev_next": False
+}

@@ -16,8 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install sphinx
-          pip install sphinx-rtd-theme
-          pip install furo myst_parser
+          pip install pydata-sphinx-theme myst_parser
       - name: Build docs
         run: |
           cd docs
