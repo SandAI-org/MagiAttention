@@ -15,27 +15,24 @@
     document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
     document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
   </script>
-  <!--
-    this give us a css class that will be invisible only if js is disabled
-  -->
-  <noscript>
-    <style>
-      .pst-js-only { display: none !important; }
-
-    </style>
-  </noscript>
   
   <!-- Loaded before other Sphinx assets -->
-  <link href="_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
-<link href="_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+  <link href="_static/styles/theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/bootstrap.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+
+  
+  <link href="_static/vendor/fontawesome/6.5.2/css/all.min.css?digest=dfe6caa3a7d634c4db9b" rel="stylesheet" />
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-solid-900.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-brands-400.woff2" />
+<link rel="preload" as="font" type="font/woff2" crossorigin href="_static/vendor/fontawesome/6.5.2/webfonts/fa-regular-400.woff2" />
 
     <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
   
-  <!-- So that users can add custom icons -->
-  <script src="_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
   <!-- Pre-loaded scripts that we'll load fully later -->
-  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
-<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b" />
+  <script src="_static/vendor/fontawesome/6.5.2/js/all.min.js?digest=dfe6caa3a7d634c4db9b"></script>
 
     <script src="_static/documentation_options.js?v=e562d664"></script>
     <script src="_static/doctools.js?v=9bcbadda"></script>
@@ -46,7 +43,6 @@
     <link rel="search" title="Search" href="search.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="" />
   </head>
   
   
@@ -62,8 +58,19 @@
     <i class="fa-solid fa-arrow-up"></i>Back to top</button>
 
   
-  <dialog id="pst-search-dialog">
-    
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-primary-sidebar-checkbox"/>
+  <label class="overlay overlay-primary" for="pst-primary-sidebar-checkbox"></label>
+  
+  <input type="checkbox"
+          class="sidebar-toggle"
+          id="pst-secondary-sidebar-checkbox"/>
+  <label class="overlay overlay-secondary" for="pst-secondary-sidebar-checkbox"></label>
+  
+  <div class="search-button__wrapper">
+    <div class="search-button__overlay"></div>
+    <div class="search-button__search-container">
 <form class="bd-search d-flex align-items-center"
       action="search.html"
       method="get">
@@ -71,6 +78,7 @@
   <input type="search"
          class="form-control"
          name="q"
+         id="search-input"
          placeholder="Search the docs ..."
          aria-label="Search the docs ..."
          autocomplete="off"
@@ -78,8 +86,8 @@
          autocapitalize="off"
          spellcheck="false"/>
   <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
-</form>
-  </dialog>
+</form></div>
+  </div>
 
   <div class="pst-async-banner-revealer d-none">
   <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
@@ -123,8 +131,8 @@
   <ul class="bd-navbar-elements navbar-nav">
     
 <li class="nav-item ">
-  <a class="nav-link nav-internal" href="ranges.html">
-    Simple Test For AttnRanges
+  <a class="nav-link nav-internal" href="api.html">
+    API Reference
   </a>
 </li>
 
@@ -139,21 +147,29 @@
         <div class="navbar-item navbar-persistent--container">
           
 
-<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
- <i class="fa-solid fa-magnifying-glass"></i>
- <span class="search-button__default-text">Search</span>
- <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
-</button>
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script>
         </div>
       
       
         <div class="navbar-item">
 
-<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
-  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
-  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
-  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
-</button></div>
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script></div>
       
         <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
@@ -178,11 +194,15 @@
   
     <div class="navbar-persistent--mobile">
 
-<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
- <i class="fa-solid fa-magnifying-glass"></i>
- <span class="search-button__default-text">Search</span>
- <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
-</button>
+ <script>
+ document.write(`
+   <button class="btn search-button-field search-button__button" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="fa-solid fa-magnifying-glass"></i>
+    <span class="search-button__default-text">Search</span>
+    <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+   </button>
+ `);
+ </script>
     </div>
   
 
@@ -199,8 +219,7 @@
       
         
       
-      <dialog id="pst-primary-sidebar-modal"></dialog>
-      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar hide-on-wide">
+      <div class="bd-sidebar-primary bd-sidebar hide-on-wide">
         
 
   
@@ -216,8 +235,8 @@
   <ul class="bd-navbar-elements navbar-nav">
     
 <li class="nav-item ">
-  <a class="nav-link nav-internal" href="ranges.html">
-    Simple Test For AttnRanges
+  <a class="nav-link nav-internal" href="api.html">
+    API Reference
   </a>
 </li>
 
@@ -233,11 +252,15 @@
         
           <div class="navbar-item">
 
-<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
-  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
-  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
-  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
-</button></div>
+<script>
+document.write(`
+  <button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button" title="light/dark" aria-label="light/dark" data-bs-placement="bottom" data-bs-toggle="tooltip">
+    <i class="theme-switch fa-solid fa-sun fa-lg" data-mode="light"></i>
+    <i class="theme-switch fa-solid fa-moon fa-lg" data-mode="dark"></i>
+    <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"></i>
+  </button>
+`);
+</script></div>
         
           <div class="navbar-item"><ul class="navbar-icon-links"
     aria-label="Icon Links">
@@ -261,14 +284,9 @@
   
   
   <div class="sidebar-primary-items__end sidebar-primary__section">
-      <div class="sidebar-primary-item">
-<div id="ethical-ad-placement"
-      class="flat"
-      data-ea-publisher="readthedocs"
-      data-ea-type="readthedocs-sidebar"
-      data-ea-manual="true">
-</div></div>
   </div>
+  
+  <div id="rtd-footer-container"></div>
 
 
       </div>
@@ -291,9 +309,140 @@
 <h1 id="index">Index</h1>
 
 <div class="genindex-jumpbox">
- <a href="#M"><strong>M</strong></a>
+ <a href="#A"><strong>A</strong></a>
+ | <a href="#C"><strong>C</strong></a>
+ | <a href="#D"><strong>D</strong></a>
+ | <a href="#E"><strong>E</strong></a>
+ | <a href="#F"><strong>F</strong></a>
+ | <a href="#I"><strong>I</strong></a>
+ | <a href="#M"><strong>M</strong></a>
+ | <a href="#O"><strong>O</strong></a>
+ | <a href="#P"><strong>P</strong></a>
+ | <a href="#S"><strong>S</strong></a>
+ | <a href="#T"><strong>T</strong></a>
+ | <a href="#U"><strong>U</strong></a>
  
 </div>
+<h2 id="A">A</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.append">append() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange">AttnRange (class in magi_attention.common.range)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges">AttnRanges (class in magi_attention.common.ranges)</a>
+</li>
+  </ul></td>
+</tr></table>
+
+<h2 id="C">C</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.check_valid">check_valid() (magi_attention.common.range.AttnRange method)</a>
+
+      <ul>
+        <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.check_valid">(magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.chunk">chunk() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.clear_empty">clear_empty() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+  </ul></td>
+</tr></table>
+
+<h2 id="D">D</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.diff_by">diff_by() (magi_attention.common.range.AttnRange method)</a>
+</li>
+  </ul></td>
+</tr></table>
+
+<h2 id="E">E</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.end">end (magi_attention.common.range.AttnRange property)</a>
+
+      <ul>
+        <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.end">(magi_attention.common.ranges.AttnRanges property)</a>
+</li>
+      </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.extend">extend() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+  </ul></td>
+</tr></table>
+
+<h2 id="F">F</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.find_hole_ranges">find_hole_ranges() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.find_overlap_ranges">find_overlap_ranges() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.from_cu_seqlens">from_cu_seqlens() (magi_attention.common.ranges.AttnRanges static method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.from_range">from_range() (magi_attention.common.range.AttnRange static method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.from_ranges">from_ranges() (magi_attention.common.ranges.AttnRanges static method)</a>
+</li>
+  </ul></td>
+</tr></table>
+
+<h2 id="I">I</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.insert">insert() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.intersect">intersect() (magi_attention.common.range.AttnRange method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.intersect_size">intersect_size() (magi_attention.common.range.AttnRange method)</a>
+
+      <ul>
+        <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.intersect_size">(magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      </ul></li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.intersect_size_with">intersect_size_with() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.is_cu_seqlens">is_cu_seqlens() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.is_empty">is_empty() (magi_attention.common.range.AttnRange method)</a>
+
+      <ul>
+        <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.is_empty">(magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.is_merged">is_merged() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.is_non_overlap">is_non_overlap() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.is_overlap_with">is_overlap_with() (magi_attention.common.range.AttnRange method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.is_sorted">is_sorted() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.is_subrange_of">is_subrange_of() (magi_attention.common.range.AttnRange method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.is_valid">is_valid() (magi_attention.common.range.AttnRange method)</a>
+
+      <ul>
+        <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.is_valid">(magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      </ul></li>
+      <li><a href="ranges.html#magi_attention.common.ranges.is_valid_cu_seqlens">is_valid_cu_seqlens() (in module magi_attention.common.ranges)</a>
+</li>
+  </ul></td>
+</tr></table>
+
 <h2 id="M">M</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
@@ -304,8 +453,16 @@
         <li><a href="ranges.html#module-magi_attention.common">module</a>
 </li>
       </ul></li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.make_range_local">make_range_local() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.make_ranges_local">make_ranges_local() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.max_seqlen">max_seqlen (magi_attention.common.ranges.AttnRanges property)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.merge">merge() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
       <li>
     module
 
@@ -313,6 +470,88 @@
         <li><a href="ranges.html#module-magi_attention.common">magi_attention.common</a>
 </li>
       </ul></li>
+  </ul></td>
+</tr></table>
+
+<h2 id="O">O</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.offset">offset() (magi_attention.common.range.AttnRange method)</a>
+</li>
+  </ul></td>
+</tr></table>
+
+<h2 id="P">P</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.points">points (magi_attention.common.ranges.AttnRanges property)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.pop">pop() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+  </ul></td>
+</tr></table>
+
+<h2 id="S">S</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.seqlen">seqlen (magi_attention.common.range.AttnRange property)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.size">size (magi_attention.common.ranges.AttnRanges property)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.sort">sort() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.start">start (magi_attention.common.range.AttnRange property)</a>
+
+      <ul>
+        <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.start">(magi_attention.common.ranges.AttnRanges property)</a>
+</li>
+      </ul></li>
+  </ul></td>
+</tr></table>
+
+<h2 id="T">T</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.to_cu_seqlens">to_cu_seqlens() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.to_naive_range">to_naive_range() (magi_attention.common.range.AttnRange method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.to_naive_ranges">to_naive_ranges() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.to_tensor">to_tensor() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.total_seqlen">total_seqlen (magi_attention.common.ranges.AttnRanges property)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.truncate">truncate() (magi_attention.common.range.AttnRange method)</a>
+
+      <ul>
+        <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.truncate">(magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      </ul></li>
+  </ul></td>
+</tr></table>
+
+<h2 id="U">U</h2>
+<table style="width: 100%" class="indextable genindextable"><tr>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.union">union() (magi_attention.common.range.AttnRange method)</a>
+</li>
+      <li><a href="ranges.html#magi_attention.common.range.AttnRange.union_size">union_size() (magi_attention.common.range.AttnRange method)</a>
+
+      <ul>
+        <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.union_size">(magi_attention.common.ranges.AttnRanges method)</a>
+</li>
+      </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="ranges.html#magi_attention.common.ranges.AttnRanges.union_size_with">union_size_with() (magi_attention.common.ranges.AttnRanges method)</a>
+</li>
   </ul></td>
 </tr></table>
 
@@ -339,8 +578,8 @@
   </div>
   
   <!-- Scripts loaded after <body> so the DOM is not blocked -->
-  <script defer src="_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
-<script defer src="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+  <script src="_static/scripts/bootstrap.js?digest=dfe6caa3a7d634c4db9b"></script>
+<script src="_static/scripts/pydata-sphinx-theme.js?digest=dfe6caa3a7d634c4db9b"></script>
 
   <footer class="bd-footer">
 <div class="bd-footer__inner bd-page-width">
@@ -373,8 +612,7 @@
       
         <div class="footer-item">
 <p class="theme-version">
-  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
-  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.15.4.
 </p></div>
       
     </div>
