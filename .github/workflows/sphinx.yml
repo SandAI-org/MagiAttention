@@ -13,19 +13,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: 3.12
-      - name: Install dependencies
-        run: |
-          pip install sphinx
-          pip install pydata-sphinx-theme myst_parser
-      - name: Build docs
-        run: |
-          cd docs
-          make clean
-          make html
       - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
         if: ${{ github.event_name == 'push' }}
         with:
           branch: gh-pages
-          folder: docs/build/html
+          folder: docs/html
           target-folder: docs
