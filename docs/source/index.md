@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 % MagiAttention documentation master file, created by
+=======
+% PyTorch documentation master file, created by
+>>>>>>> origin/dev
 %  sphinx-quickstart on Fri Dec 23 13:31:47 2016.
 %  You can adapt this file completely to your liking, but it should at least
 %  contain the root `toctree` directive.
@@ -22,8 +26,13 @@ To address these challenges, we propose MagiAttention, which aims to support a w
 ```{toctree}
 :glob:
 :maxdepth: 2
+<<<<<<< HEAD
 :hidden
 :caption
 
 api
+=======
+
+ranges
+>>>>>>> origin/dev
 ```
