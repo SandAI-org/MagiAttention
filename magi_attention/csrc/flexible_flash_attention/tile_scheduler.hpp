@@ -264,8 +264,8 @@ public:
                 uint32_t bidh_actual_u = bidh_packed & 0x0000FFFF;
                 int bidh_actual = reinterpret_cast<int&>(bidh_actual_u);
                 // Use the top 16 bits of split_idx to store num_splits and the next 16 bits to store split_idx
-                uint32_t split_idx_u = ((bidh_packed & 0x00FF0000) >> 16) + ((bidh_packed & 0xFF000000) >> 8);
-                int split_idx = reinterpret_cast<int&>(split_idx_u);
+                // uint32_t split_idx_u = ((bidh_packed & 0x00FF0000) >> 16) + ((bidh_packed & 0xFF000000) >> 8);
+                // int split_idx = reinterpret_cast<int&>(split_idx_u);
                 // int bidh_actual = params.nsplits_divmod.divmod(split_idx, bidh);
                 // if (threadIdx.x == 128) {
                 //     printf("blockIdx.x = %d, bidb = %d, bidh = %d, bidh_actual = %d, split_idx = %d\n", blockIdx.x, bidb, bidh, bidh_actual, split_idx);

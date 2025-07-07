@@ -28,11 +28,11 @@ template <int Arch, int kHeadDim, int kBlockM, int kBlockN, bool Has_softcap,
           int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1,
           bool V_in_regs=false, bool RangeMerge=false>
 void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
-    constexpr bool Is_causal = false;
-    constexpr bool Is_local = false;
-    constexpr bool Varlen = true;
-    int batch_q = 1;
-    int batch_k = 1;
+    // constexpr bool Is_causal = false;
+    // constexpr bool Is_local = false;
+    // constexpr bool Varlen = true;
+    // int batch_q = 1;
+    // int batch_k = 1;
 
     using ElementAccum = float;
     using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -69,8 +69,8 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
             Element, ElementAccum, cutlass::arch::Sm90, 
             Has_softcap, Deterministic, SdP_swapAB, dKV_swapAB, dQ_swapAB, 
             NumMmaWarpGroups, AtomLayoutMSdP, AtomLayoutNdKV, AtomLayoutMdQ, V_in_regs>;
-    using CollectiveEpilogue = flash::CollectiveEpilogueBwd<TileShape_MNK, ElementAccum, ArchTag, CollectiveMainloop::NumMmaThreads, dKV_swapAB, NumMmaWarpGroups * (Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV>;
-    using Scheduler = flash::VarlenDynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, false /*Split*/, false /*Deterministic*/ ,false /*PackGQA*/, Arch >= 90 /*WarpSpecialized*/>;
+    using CollectiveEpilogue = flash::CollectiveEpilogueBwd<TileShape_MNK, ElementAccum, ArchTag, CollectiveMainloop::NumMmaThreads, dKV_swapAB, NumMmaWarpGroups * (Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV, Deterministic>;
+    using Scheduler = flash::VarlenDynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, false /*Split*/, Deterministic /*Deterministic*/ ,false /*PackGQA*/, Arch >= 90 /*WarpSpecialized*/>;
     using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
     typename CollectiveMainloop::Arguments mainloop_args {
@@ -105,8 +105,10 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         static_cast<typename CollectiveEpilogue::Element*>(params.dv_ptr),
         {params.dv_row_stride, _1{}, params.dv_head_stride},  // stride_dV
         params.h_qo,
+        params.h_kv,
         params.q_ranges,
-        params.k_ranges
+        params.k_ranges,
+        params.determin_range_locks,
     };
 
     int num_blocks_n = cutlass::ceil_div(params.max_seqlen_k, get<1>(TileShape_MNK{}));
@@ -118,7 +120,8 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         params.max_seqlen_q, params.d, params.d, sizeof(Element),
         params.tile_count_semaphore, params.cu_seqlens_k, params.k_ranges, params.seqused_k, nullptr,
         params.merge_k_ranges,
-        params.bwd_kq_map
+        params.bwd_kq_map,
+        params.determin_conflict_state,
     };
 
     int device;
