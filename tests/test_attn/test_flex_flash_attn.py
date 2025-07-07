@@ -283,9 +283,7 @@ class TestFlexFlashAttn(TestCase):
     )
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
-    @parameterize(
-        "auto_range_merge", [False]
-    )  # TODO: test when auto_range_merge is enabled
+    @parameterize("auto_range_merge", [False, True])
     def test_flex_attn(
         self,
         attn_mask_config: dict[str, Any],
