@@ -304,8 +304,6 @@ struct CollectiveEpilogueFwd {
                 acquire_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
             }
             flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-            // REVIEW: is this necessary after we add `__threadfence` below?
-            __threadfence();
             
             // Load lse_prev from gmem -> smem, and calculate lse_final
             #pragma unroll
