@@ -24,6 +24,9 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
+from magi_attention.comm.primitive.utils import (
+    sanity_check_for_group_cast_meta_args_per_rank,
+)
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
@@ -900,8 +903,6 @@ class DistAttnSolver:
         overlap_config: OverlapConfig,
         cp_mesh: DeviceMesh | None = None,
     ):
-        assert dist.get_backend(cp_group) == dist.Backend.NCCL
-
         self.cp_rank = dist.get_rank(cp_group)
         self.cp_size = dist.get_world_size(cp_group)
         self.cp_group = cp_group
@@ -2201,6 +2202,43 @@ class DistAttnSolver:
             device_mesh=self.cp_mesh,
         )
 
+        # sanity check for group-cast arg per rank
+        # NOTE: we don't need to do sanity check for group-reduce arg per rank
+        # since they are symmetric in dist-attn
+        if magi_attention.is_sanity_check_enable():
+            group_collective_arg_per_rank: list[dict] = [None] * self.cp_size  # type: ignore
+            dist.all_gather_object(
+                group_collective_arg_per_rank,
+                # since some attrs of GroupCollectiveArg like process group
+                # can not be serialized, here we only gather the meta args
+                dict(
+                    input_split_size_list=input_split_size_list,
+                    output_split_size_list=output_split_size_list,
+                    dst_indices_list=dst_indices_list,
+                    src_index_list=src_index_list,
+                ),
+                group=self.cp_group,
+            )
+
+            sanity_check_for_group_cast_meta_args_per_rank(
+                input_split_size_list_per_rank=[
+                    arg["input_split_size_list"]
+                    for arg in group_collective_arg_per_rank
+                ],
+                output_split_size_list_per_rank=[
+                    arg["output_split_size_list"]
+                    for arg in group_collective_arg_per_rank
+                ],
+                dst_indices_list_per_rank=[
+                    arg["dst_indices_list"] for arg in group_collective_arg_per_rank
+                ],
+                src_index_list_per_rank=[
+                    arg["src_index_list"] for arg in group_collective_arg_per_rank
+                ],
+                world_size=self.cp_size,
+                check_nccl_send_recv=True,
+            )
+
         return group_collective_arg
 
     @nvtx.instrument_nvtx
@@ -2280,7 +2318,7 @@ class DistAttnSolver:
 
         return attn_calc_meta
 
-    def __repr__(self, title_len: int = 50) -> str:
+    def __repr__(self, title_len: int = 50) -> str:  # pragma: no cover
         repr_contents = []
 
         repr_summary = self._repr_host_info(
@@ -2357,7 +2395,7 @@ class DistAttnSolver:
         remote_rank_entry_per_rank_this_stage: list[RemoteRankEntry],
         title_len: int = 50,
     ) -> str:  # pragma: no cover
-        # 计算每个单元格需要的最大宽度
+        # calculate the max width for each cell
         cell_widths = [[0] * self.cp_size for _ in range(self.cp_size)]
         for send_rank in range(self.cp_size):
             for recv_rank in range(self.cp_size):
@@ -2368,7 +2406,7 @@ class DistAttnSolver:
                 width = max(len(send_str), len(recv_str), len(global_str))
                 cell_widths[send_rank][recv_rank] = width
 
-        # 计算每列的最大宽度
+        # calculate the max width for each column
         col_widths = [
             max(
                 max(cell_widths[row][col] for row in range(self.cp_size)),
@@ -2388,28 +2426,29 @@ class DistAttnSolver:
             for col in range(self.cp_size)
         ]
 
-        # 计算表格的总宽度（考虑到每列分隔符 " | " 以及每行的"row xx |"前缀）
+        # calculate the total width of the table
+        # considering the separators " | " and the "row xx |" prefix
         table_width = (
             sum(col_widths) + 4 * (self.cp_size - 1) + 7
-        )  # 每列间隔宽度4 + row xx | 前缀宽度为7
+        )  # each column separator width is 4 and the prefix width is 7
 
-        # 构建表格
+        # construct table
         repr_info_this_stage = []
 
-        # 添加overlap stage title分割线
+        # add a separator line for each overlap stage
         stage_title = f"  Remote Info for Stage {stage}  "
         repr_info_this_stage.append(
             "\n" + "=" * title_len + stage_title + "=" * title_len + "\n"
         )
 
-        # 添加列标题行（扩展为5行高度）
+        # add a title line for each col (expanded to 5 rows height)
         repr_info_this_stage.append("\n" + "-" * table_width)
 
-        # 第一行：列号
+        # first row: col number
         header_cells = [f"col{j:2d}".center(col_widths[j]) for j in range(self.cp_size)]
         repr_info_this_stage.append("r/c   | " + " | ".join(header_cells) + " |")
 
-        # 第二行：host_k_ranges_global
+        # second row: host_k_ranges_global
         host_cells = [
             f"host_k_ranges_global: {remote_rank_entry_per_rank_this_stage[j].host_k_ranges_global}".ljust(
                 col_widths[j]
@@ -2418,7 +2457,7 @@ class DistAttnSolver:
         ]
         repr_info_this_stage.append("      | " + " | ".join(host_cells) + " |")
 
-        # 第三行：remote_k_ranges_global
+        # third row: remote_k_ranges_global
         remote_cells = [
             f"remote_k_ranges_global: {remote_rank_entry_per_rank_this_stage[j].remote_k_ranges_global}".ljust(
                 col_widths[j]
@@ -2427,7 +2466,7 @@ class DistAttnSolver:
         ]
         repr_info_this_stage.append("      | " + " | ".join(remote_cells) + " |")
 
-        # 第四行：attn_calc_remote_slice_local_list
+        # fourth row: attn_calc_remote_slice_local_list
         remote_slice_cells = [
             "attn_calc_remote_slice_local_list: "
             f"{remote_rank_entry_per_rank_this_stage[j].attn_calc_remote_slice_local_list}".ljust(
@@ -2437,12 +2476,12 @@ class DistAttnSolver:
         ]
         repr_info_this_stage.append("      | " + " | ".join(remote_slice_cells) + " |")
 
-        # 添加分割线
+        # add a separator line
         repr_info_this_stage.append("-" * table_width)
 
-        # 添加每一行
+        # add each row
         for send_rank in range(self.cp_size):
-            # 处理每个单元格的三行内容
+            # add the cell content
             cell_lines = []
             for recv_rank in range(self.cp_size):
                 col_width = col_widths[recv_rank]
@@ -2459,12 +2498,12 @@ class DistAttnSolver:
                 ]
                 cell_lines.append(cell_content)
 
-            # 组装每行的三行内容
+            # concatenate the lines to form the cell
             for line_idx in range(3):
                 prefix = f"row{send_rank:2d} |" if line_idx == 0 else "      |"
                 line = [cell_lines[j][line_idx] for j in range(self.cp_size)]
                 repr_info_this_stage.append(f"{prefix} " + " | ".join(line) + " |")
 
-            repr_info_this_stage.append("-" * table_width)  # 每行后面添加分割线
+            repr_info_this_stage.append("-" * table_width)  # add a separator line
 
         return "\n".join(repr_info_this_stage)

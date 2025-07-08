@@ -24,7 +24,7 @@ from magi_attention.utils import nvtx
 from .utils import (
     _calc_group_cast_a2a_args,
     _calc_group_reduce_a2a_args,
-    _group_cast_collective_hier,
+    _hier_group_cast_impl_with_a2av,
 )
 
 __all__ = [
@@ -87,11 +87,26 @@ def group_cast_collective(
         * Must each splited_output be received from exactly 1 src_rank? Could it be 0?
     """
 
-    assert len(input_split_size_list) == len(dst_indices_list)
-    assert len(output_split_size_list) == len(src_index_list)
+    assert len(input_split_size_list) == len(dst_indices_list), (
+        f"The length of input_split_size_list and dst_indices_list should be the same, "
+        f"but got {len(input_split_size_list)=} and {len(dst_indices_list)=}"
+    )
+    assert len(output_split_size_list) == len(src_index_list), (
+        f"The length of output_split_size_list and src_index_list should be the same, "
+        f"but got {len(output_split_size_list)=} and {len(src_index_list)=}"
+    )
+    assert input.shape[0] == sum(input_split_size_list), (
+        f"The sum of input_split_size_list should be equal to input_seqlen, "
+        f"but got {sum(input_split_size_list)=} and {input.shape[0]=}"
+    )
+    assert output.shape[0] == sum(output_split_size_list), (
+        f"The sum of output_split_size_list should be equal to output_seqlen, "
+        f"but got {sum(output_split_size_list)=} and {output.shape[0]=}"
+    )
 
-    if magi_attention.is_hierarchical_comm_enable():
-        return _group_cast_collective_hier(
+    if magi_attention.comm.is_hierarchical_comm_enable():
+        # NOTE: a hacky and temporary way to support hierarchical group-cast
+        return _hier_group_cast_impl_with_a2av(
             input_tensor=input,
             output_tensor=output,
             input_split_size_list=input_split_size_list,
@@ -103,9 +118,9 @@ def group_cast_collective(
             **kwargs,
         )
 
-    world_size = dist.get_world_size(group)
-
     # ---------    calc group cast a2a args     --------- #
+
+    world_size = dist.get_world_size(group)
 
     (
         a2a_output,
@@ -199,12 +214,26 @@ def group_reduce_collective(
             where each splited_output can be reduced from 0 or multiple src_ranks,
             and the source ranks for reduction are determined by src_indices_list.
     """
-    assert len(input_split_size_list) == len(dst_index_list)
-    assert len(output_split_size_list) == len(src_indices_list)
-
-    world_size = dist.get_world_size(group)
+    assert len(input_split_size_list) == len(dst_index_list), (
+        f"input_split_size_list and dst_index_list should have the same length, "
+        f"but got {len(input_split_size_list)=} and {len(dst_index_list)=}"
+    )
+    assert len(output_split_size_list) == len(src_indices_list), (
+        f"output_split_size_list and src_indices_list should have the same length, "
+        f"but got {len(output_split_size_list)=} and {len(src_indices_list)=}"
+    )
+    assert input.shape[0] == sum(input_split_size_list), (
+        f"The sum of input_split_size_list should be equal to input_seqlen, "
+        f"but got {sum(input_split_size_list)=} and {input.shape[0]=}"
+    )
+    assert output.shape[0] == sum(output_split_size_list), (
+        f"The sum of output_split_size_list should be equal to output_seqlen, "
+        f"but got {sum(output_split_size_list)=} and {output.shape[0]=}"
+    )
 
     # ---------    calc group reduce a2a args     --------- #
+
+    world_size = dist.get_world_size(group)
 
     (
         a2a_output,

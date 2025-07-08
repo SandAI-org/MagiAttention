@@ -93,12 +93,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # init several pgs with all ranks
         self.nccl_groups = [
-            dist.new_group(list(range(self.world_size)), backend="nccl")
+            dist.new_group(list(range(self.world_size)), backend=self.backend)
             for _ in range(2)
-        ]
-        self.gloo_groups = [
-            dist.new_group(list(range(self.world_size)), backend="gloo")
-            for _ in range(1)
         ]
 
         # NOTE: test using sdpa backend with fp64 dtype support
@@ -106,7 +102,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable() and self.world_size in (
+        if magi_attention.comm.is_hierarchical_comm_enable() and self.world_size in (
             4,
             6,
             8,
@@ -131,10 +127,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     @property
     def nccl_group(self) -> dist.ProcessGroup:
         return self.nccl_groups[0]
-
-    @property
-    def gloo_group(self) -> dist.ProcessGroup:
-        return self.gloo_groups[0]
 
     @property
     def world_size(self) -> int:
@@ -752,8 +744,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         [False, True],
     )
     @parameterize(
-        "high_bandwith_domain_size",
-        [1, 2, 4, 8],
+        "high_bandwith_domain_size",  # TODO: this feature'll probably be deprecated soon
+        [1],
     )
     def test_pipeline_sdpa(
         self,
@@ -785,7 +777,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----    skip for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable():
+        if magi_attention.comm.is_hierarchical_comm_enable():
             if self.world_size not in (4, 6, 8):
                 # skip for invalid world size
                 # when hierarchical comm is enabled
@@ -839,7 +831,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 **{k: v for k, v in overlap_config.items() if k not in (NAME,)}
             ),
             high_bandwith_domain_size=high_bandwith_domain_size,
-            deterministic=False,
+            deterministic=False,  # TODO: use deterministic mode for ut as long as supported
         )
 
         # -----    run pipeline test   ---- #

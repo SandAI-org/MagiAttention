@@ -22,8 +22,6 @@ import torch.nn.functional as F
 import magi_attention
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.comm.work import WorkWithPostProcessFn
-from magi_attention.common.range_op import range_fill_
-from magi_attention.common.ranges import NaiveRanges
 from magi_attention.meta.collection import AttnCalcMeta, CommMeta
 from magi_attention.utils import max_fp_dtype, nvtx, to_higher_fp_dtype
 
@@ -151,27 +149,6 @@ def result_correction(
     return curr_out, curr_lse
 
 
-# TODO: put this logic into kernel
-@nvtx.instrument_nvtx
-def out_zero_fill_correction(
-    out: torch.Tensor,
-    out_zero_fill_ranges: NaiveRanges,
-    use_range_fill: bool = True,
-    **kwargs,
-) -> torch.Tensor:
-    if use_range_fill:
-        out = range_fill_(
-            input=out,
-            val=0.0,
-            **kwargs,
-        )
-    else:  # FIXME: when range fill is stable, we can remove this old branch
-        for fill_start, fill_end in out_zero_fill_ranges:
-            out[fill_start:fill_end].fill_(0)
-
-    return out
-
-
 class DistFlashAttnRuntime:
     """
     Runtime class for Distributed Flash Attention.
@@ -196,9 +173,6 @@ class DistFlashAttnRuntime:
         cp_group_dkv: dist.ProcessGroup,
         deterministic: bool,
     ):
-        assert dist.get_backend(cp_group_kv) == dist.Backend.NCCL
-        assert dist.get_backend(cp_group_dkv) == dist.Backend.NCCL
-
         self.comm_meta = comm_meta
         self.calc_meta = calc_meta
         self.cp_group_kv = cp_group_kv
@@ -347,7 +321,7 @@ class DistFlashAttnRuntime:
                         softcap=0.0,
                         sm_margin=0
                         if magi_attention.is_cuda_device_max_connections_one()
-                        else 4,
+                        else 4,  # TODO: make it configurable
                         # NOTE: increase the partial out precision temporarily,
                         # to reduce the error caused by the out correction
                         return_dtype=max_fp_dtype(q.dtype, torch.float32),
@@ -413,7 +387,7 @@ class DistFlashAttnRuntime:
                     softcap=0.0,
                     sm_margin=0
                     if magi_attention.is_cuda_device_max_connections_one()
-                    else 4,
+                    else 4,  # TODO: make it configurable
                 )
             partial_dkv = torch.cat([partial_dk, partial_dv], dim=0)
 
@@ -523,6 +497,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
             overlap_stage=None,
             deterministic=dist_attn_runtime.deterministic,
         )
+
         if not skip_attn:
             out_list.append(out)
             lse_list.append(lse)
@@ -555,6 +530,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
                 deterministic=dist_attn_runtime.deterministic,
             )
+
             if not skip_attn:
                 out_list.append(out)
                 lse_list.append(lse)
@@ -659,8 +635,8 @@ class DistFlashAttnFunc(torch.autograd.Function):
             )
 
             # reduce ith partial dkv
-            # NOTE: Even if skip_attn is True, we still need to launch the group_reduce_collective,
-            #       because not all ranks are skipped.
+            # NOTE: even if skip_attn is True, we still need to launch the group_reduce_collective,
+            # because not all ranks are skipped.
             partial_local_dkv_work = dist_attn_runtime.reduce_partial_dkv(
                 partial_remote_dkv=partial_remote_dkv,
                 partial_local_dkv=partial_local_dkv,
@@ -669,8 +645,8 @@ class DistFlashAttnFunc(torch.autograd.Function):
 
             partial_local_dkv_works.append(partial_local_dkv_work)
 
-            # NOTE: Because dq reduce is doing on local rank, if skip_attn is True,
-            #       we just skip the reduce operation.
+            # NOTE: since dq reduce is doing on local rank, if skip_attn is True,
+            # we just skip the reduce operation.
             if not skip_attn:
                 # reduce ith partial dq, overlapped with ith remote dkv comm
                 partial_local_dq = dist_attn_runtime.reduce_partial_dq(

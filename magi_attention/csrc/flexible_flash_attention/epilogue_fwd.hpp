@@ -304,8 +304,6 @@ struct CollectiveEpilogueFwd {
                 acquire_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
             }
             flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-            // Make sure all writes to global memory before this point are completed
-            __threadfence();     
             
             // Load lse_prev from gmem -> smem, and calculate lse_final
             #pragma unroll
@@ -461,9 +459,9 @@ struct CollectiveEpilogueFwd {
         //     }
         // }
 
-
-
         if constexpr (!DisableFwdAtomicReduction) {
+            // Make sure all writes to global memory before this point are completed
+            __threadfence();
             flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
             if (thread_idx == 0) {
                 release_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);

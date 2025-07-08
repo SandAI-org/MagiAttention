@@ -15,12 +15,12 @@
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeAlias
 
-from torch.cuda import Stream
+from torch.cuda import Event, Stream
 from torch.distributed import Work
 
 from magi_attention.utils import wrap_to_list
 
-GeneralWork: TypeAlias = Work | Stream | None
+GeneralWork: TypeAlias = Work | Stream | Event | None
 
 
 @dataclass
@@ -70,6 +70,12 @@ class WorkWithPostProcessFn:
                 match work:
                     case Stream():
                         work.synchronize()
+                        # torch.cuda.current_stream().wait_stream(work)
+                        # torch.cuda.default_stream().wait_stream(work)
+                    case Event():
+                        work.synchronize()
+                        # torch.cuda.current_stream().wait_event(work)
+                        # torch.cuda.default_stream().wait_event(work)
                     case Work():
                         work.wait()
                     case None:
