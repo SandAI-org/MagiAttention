@@ -61,7 +61,7 @@ def magi_attn_varlen_key(
         chunk_size is fixed as 1536 for now.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
-        causal(bool): if True, all attn_mask_type is CASUAL. else, all attn_mask_type is FULL.
+        causal(bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
@@ -170,7 +170,7 @@ def magi_attn_varlen_dispatch(
         chunk_size is fixed as 1536 for now.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
-        causal(bool): if True, all attn_mask_type is CASUAL. else, all attn_mask_type is FULL.
+        causal(bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
@@ -344,9 +344,9 @@ def magi_attn_flex_key(
         raise ValueError(
             "attn_mask_type: BICAUSAL is not supported for now. This feature is coming in a near future releas."
         )
-    if is_list_value_any(attn_mask_type, AttnMaskType.INVCASUAL):
+    if is_list_value_any(attn_mask_type, AttnMaskType.INVCAUSAL):
         raise ValueError(
-            "attn_mask_type: INVCASUAL is not supported for now. This feature is coming in a near future release."
+            "attn_mask_type: INVCAUSAL is not supported for now. This feature is coming in a near future release."
         )
 
     key = DistAttnRuntimeKey(

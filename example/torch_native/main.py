@@ -272,7 +272,7 @@ def prepare_magi_attention(input, cu_seqlens_q, cu_seqlens_k, pad_size, cp_group
         head_dim=LlamaConfig().head_dim,
         pad_size=pad_size,
         cp_group=cp_group,
-        causal=LlamaConfig().is_casual,
+        causal=LlamaConfig().is_causal,
         dist_attn_config=dist_attn_config,
     )
 
