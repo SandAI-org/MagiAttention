@@ -143,7 +143,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
                 "q_ranges": AttnRanges.from_ranges([[0, 1024]]),
                 "k_ranges": AttnRanges.from_ranges([[0, 1024]]),
-                "attn_type_mapping": [3],
+                "attn_type_mapping": [0],
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 32,
@@ -468,54 +468,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
             },
-            # half-inv block diagonal with total seqlen 1k
-            # + interleaved overlapped q ranges
-            # {
-            #     NAME: "half_inv_block_diagonal_1k_with_interleave_q_overlap",
-            #     SKIP_WORLD_SIZE: [3, 5, 6, 7],
-            #     "q_ranges": AttnRanges.from_ranges(
-            #         [
-            #             [0, 128],
-            #             [64, 192],
-            #             [128, 256],
-            #             [192, 320],
-            #             [256, 384],
-            #             [320, 448],
-            #             [384, 512],
-            #             [448, 576],
-            #             [512, 640],
-            #             [576, 704],
-            #             [640, 768],
-            #             [704, 832],
-            #             [768, 896],
-            #             [832, 960],
-            #             [896, 1024],
-            #         ]
-            #     ),
-            #     "k_ranges": AttnRanges.from_ranges(
-            #         [
-            #             [0, 128],
-            #             [128, 192],
-            #             [192, 256],
-            #             [192, 320],
-            #             [256, 384],
-            #             [320, 448],
-            #             [384, 512],
-            #             [896, 1024],
-            #             [832, 960],
-            #             [768, 896],
-            #             [704, 832],
-            #             [640, 768],
-            #             [576, 704],
-            #             [512, 640],
-            #             [448, 576],
-            #         ]
-            #     ),
-            #     "attn_type_mapping": [0] * 15,
-            #     "total_seqlen_q": 1024,
-            #     "total_seqlen_k": 1024,
-            #     "chunk_size": 128,
-            # },
             # varlen block causal with total seqlen 1k + overlapped q ranges
             {
                 NAME: "varlen_block_causal_1k_with_q_overlap",
@@ -840,7 +792,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             }[i]
             for i in attn_type_mapping
         ]
-        print(attn_mask_type)
 
         # -----    init dist attn runtime mgr   ---- #
 

@@ -30,7 +30,6 @@ def add_range_to_array(
     x_start, x_end = q_range.start, q_range.end
     y_start, y_end = k_range.start, k_range.end
 
-    print(f"{q_range=} {k_range=}")
     if check:
         # check whether the current slice has been filled
         assert np.all(array[x_start:x_end, y_start:y_end] == 0), (

@@ -134,7 +134,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
     @property
     def world_size(self) -> int:
-        return 8
+        return 1
 
     @property
     def seed(self) -> int:
@@ -433,25 +433,25 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             },
             # NOTE: profile only case
             # full attn with total seqlen 144k
-            # {
-            #     PROFILE_ONLY: True,
-            #     NAME: "full_attn_144k",
-            #     SKIP_WORLD_SIZE: [1, 2, 3, 5, 6, 7, 8],
-            #     "q_ranges": AttnRanges.from_ranges(
-            #         [
-            #             [0, 147456],
-            #         ]
-            #     ),
-            #     "k_ranges": AttnRanges.from_ranges(
-            #         [
-            #             [0, 147456],
-            #         ]
-            #     ),
-            #     "attn_type_mapping": [0],
-            #     "total_seqlen_q": 147456,
-            #     "total_seqlen_k": 147456,
-            #     "chunk_size": 2048,
-            # },
+            {
+                PROFILE_ONLY: True,
+                NAME: "full_attn_144k",
+                SKIP_WORLD_SIZE: [1, 2, 3, 5, 6, 7, 8],
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 147456],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 147456],
+                    ]
+                ),
+                "attn_type_mapping": [0],
+                "total_seqlen_q": 147456,
+                "total_seqlen_k": 147456,
+                "chunk_size": 2048,
+            },
             # NOTE: profile only case
             # varlen block causal with total seqlen 144k
             # {
@@ -695,6 +695,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     random.choice([0, 1, 2, 3]) for _ in attn_type_mapping
                 ]
 
+                # FIXME when q_range.seqlen = k_range.seqlen with BICAUSAL masktype
+                # ffa kernel fails to compute correctly. Innore it in testcase temporarily.
                 for i in range(len(q_ranges)):
                     if (
                         attn_type_mapping[i] == 3

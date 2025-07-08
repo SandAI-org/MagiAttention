@@ -214,26 +214,6 @@ class HostAttnSliceMaker:
         TRIANGLE = "cut_triangle_on_the_far_right"
         PENTAGON = "rotated_trapezoid_or_pentagon"
 
-    class BiCausalType(Enum):
-        RECTANGLE = "rectangle"
-        PARALLELOGRAM = "parallelogram"
-
-    class BiCausalCaseKey(Enum):
-        INVALID = "invalid"
-        CASE_1_2 = "case_1_2"
-        CASE_1_3 = "case_1_3"
-        CASE_1_4 = "case_1_4"
-        CASE_1_5 = "case_1_5"
-        CASE_2_2 = "case_2_2"
-        CASE_2_3 = "case_2_3"
-        CASE_2_4 = "case_2_4"
-        CASE_2_5 = "case_2_5"
-        CASE_3_3 = "case_3_3"
-        CASE_3_4 = "case_3_4"
-        CASE_3_5 = "case_3_5"
-        CASE_4_4 = "case_4_4"
-        CASE_4_5 = "case_4_5"
-
     def __init__(
         self,
         q_range_local: AttnRange,
