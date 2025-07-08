@@ -620,6 +620,17 @@ if not SKIP_CUDA_BUILD:
         )
     )
 
+    ext_modules.append(
+        CUDAExtension(
+            name="magi_attention.functional.merge_range",
+            sources=["magi_attention/functional/merge_range.cu"],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
+                "nvcc": ["-O3", "-std=c++17"] + cc_flag,
+            },
+        )
+    )
+
 
 package_data = {
     "magi_attention": ["*.pyi", "**/*.pyi"],
