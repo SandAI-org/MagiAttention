@@ -34,7 +34,7 @@ class LlamaConfig:
         head_dim=None,
         hp_params_dtype=torch.float32,
         params_dtype=torch.float32,
-        is_casual=False,
+        is_causal=False,
         max_seqlen=8192,
     ):
         self.vocab_size = vocab_size
@@ -61,5 +61,5 @@ class LlamaConfig:
 
         self.hp_params_dtype = hp_params_dtype
         self.params_dtype = params_dtype
-        self.is_casual = is_casual
+        self.is_causal = is_causal
         self.max_seqlen = max_seqlen

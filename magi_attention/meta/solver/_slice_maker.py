@@ -280,7 +280,7 @@ class HostAttnSliceMaker:
         return attn_slices
 
     def _make_slice_for_inv_causal_mask(self) -> list[AttnSlice]:
-        """For inv casual mask, there're more than one cases to be considered"""
+        """For inv causal mask, there're more than one cases to be considered"""
 
         match self.inv_causal_case_key:
             case self.CausalCaseKey.RECTANGLE:
@@ -304,7 +304,7 @@ class HostAttnSliceMaker:
         return attn_slices
 
     def _make_slice_for_bi_causal_mask(self) -> list[AttnSlice]:
-        """For bi casual mask, there're more than one cases to be considered"""
+        """For bi causal mask, there're more than one cases to be considered"""
 
         total_attn_slices: list[AttnSlice] = []
 
