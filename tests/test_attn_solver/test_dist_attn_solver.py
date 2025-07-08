@@ -25,12 +25,9 @@ from magi_attention.common import AttnRange, AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DispatchConfig, MinHeapDispatchAlg
 from magi_attention.meta import calc_dispatch_meta_from_qk_ranges
+from magi_attention.meta.container.rank_entry import HostRankEntry, RemoteRankEntry
 from magi_attention.meta.container.slice import AttnSlice, MultiKAttnSlice
-from magi_attention.meta.solver.dist_attn_solver import (
-    DistAttnSolver,
-    HostRankEntry,
-    RemoteRankEntry,
-)
+from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
 from magi_attention.meta.solver.overlap_solver import (
     OverlapConfig,
     OverlapSolver,
