@@ -24,6 +24,7 @@ from magi_attention.comm.primitive.utils import (
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
     _init_hier_group_cast_meta_solver,
+    _init_hier_group_reduce_meta_solver,
 )
 
 
@@ -45,9 +46,9 @@ class GroupCollectiveArg:
     #   group_reduce_args_dict_kv_packed: dict
 
     def __post_init__(self):
-        device = torch.cuda.current_device()
+        self.device = torch.cuda.current_device()
 
-        # -------   group cast args dict for packed kv  ------- #
+        # ----   group cast args dict for packed kv  ---- #
 
         self.group_cast_args_dict_kv_packed = {
             k: v * 2  # concat kv along seqlen dim
@@ -59,61 +60,7 @@ class GroupCollectiveArg:
             }.items()
         }
 
-        if magi_attention.comm.is_hierarchical_comm_enable():
-            assert self.device_mesh.ndim == 2, (
-                f"The hierarchical comm is only supported for 2D device mesh, "
-                f"but got {self.device_mesh.ndim=}."
-            )
-
-            # fetch the intra/inter groups from the device mesh
-            self.group_cast_args_dict_kv_packed[
-                "intra_group"
-            ] = self.device_mesh.get_group(1)
-            self.group_cast_args_dict_kv_packed[
-                "inter_group"
-            ] = self.device_mesh.get_group(0)
-            # init the hierarchial group-cast meta solver
-            (
-                self.group_cast_args_dict_kv_packed["hier_group_cast_meta_solver"]
-            ) = _init_hier_group_cast_meta_solver(
-                **self.group_cast_args_dict_kv_packed,
-            )
-            # HACK: this is a temporary side stream
-            # to apply intermediate range-gather in the post-intra step for hierarchical group-cast
-            # NOTE: we need to allocate each comm for corr. stage a separate stream
-            # to avoid the side stream being blocked by other comms for later stages
-            # since we probably set `CUDA_DEVICE_MAX_CONNECTIONS > 1` when all the comms are issued in advance of all the calcs
-            # however, this will introduce cuda-malloc ops when applying range-gather for each comm
-            # TODO: use the nccl stream to synchronize directly with magi nccl backend
-            self.group_cast_args_dict_kv_packed["side_stream"] = torch.cuda.Stream()
-        else:
-            (
-                self.group_cast_args_dict_kv_packed["a2a_input_split_size"],
-                self.group_cast_args_dict_kv_packed["perm_before_a2a_kwargs"],
-            ) = _calc_group_cast_a2a_input_meta_args(
-                input_split_size_list=self.group_cast_args_dict_kv_packed[
-                    "input_split_size_list"
-                ],
-                dst_indices_list=self.group_cast_args_dict_kv_packed[
-                    "dst_indices_list"
-                ],
-                world_size=self.world_size,
-                device=device,
-            )
-
-            (
-                self.group_cast_args_dict_kv_packed["a2a_output_split_size"],
-                self.group_cast_args_dict_kv_packed["unperm_after_a2a_kwargs"],
-            ) = _calc_group_cast_a2a_output_meta_args(
-                output_split_size_list=self.group_cast_args_dict_kv_packed[
-                    "output_split_size_list"
-                ],
-                src_index_list=self.group_cast_args_dict_kv_packed["src_index_list"],
-                world_size=self.world_size,
-                device=device,
-            )
-
-        # -------   group reduce args dict for packed kv  ------- #
+        # ----   group reduce args dict for packed kv  ---- #
 
         self.group_reduce_args_dict_kv_packed = {
             k: v * 2  # concat kv along seqlen dim
@@ -125,6 +72,93 @@ class GroupCollectiveArg:
             }.items()
         }
 
+        # ----   additional kwargs  ---- #
+
+        if magi_attention.comm.is_hierarchical_comm_enable():
+            assert self.device_mesh.ndim == 2, (
+                f"The hierarchical comm is only supported for 2D device mesh, "
+                f"but got {self.device_mesh.ndim=}."
+            )
+
+            # fetch the intra/inter groups from the device mesh
+            self.intra_group = self.device_mesh.get_group(1)
+            self.inter_group = self.device_mesh.get_group(0)
+
+            # init meta kwargs for hierarchical group-cast/reduce
+            self._init_meta_kwargs_for_hier_group_cast()
+            self._init_meta_kwargs_for_hier_group_reduce()
+        else:
+            # init a2a meta kwargs for group-cast/reduce
+            self._init_a2a_meta_kwargs_for_group_cast()
+            self._init_a2a_meta_kwargs_for_group_reduce()
+
+    def _init_meta_kwargs_for_hier_group_cast(self):
+        self.group_cast_args_dict_kv_packed.update(
+            dict(
+                intra_group=self.intra_group,
+                inter_group=self.inter_group,
+                # HACK: this is a helper side stream
+                # to apply async intermediate range-gather in the post-intra step for hierarchical group-cast
+                # NOTE: we need to allocate each comm for corr. stage a separate stream
+                # to avoid the side stream being blocked by other comms for later stages
+                # since we probably set `CUDA_DEVICE_MAX_CONNECTIONS > 1`
+                # when all the comms are issued in advance of all the calcs
+                # however, this will introduce cuda-malloc ops when applying range-gather for each comm
+                # TODO: use the nccl stream to synchronize directly with magi nccl backend
+                side_stream=torch.cuda.Stream(),
+            )
+        )
+
+        # init the hierarchial group-cast meta solver
+        (
+            self.group_cast_args_dict_kv_packed["hier_group_cast_meta_solver"]
+        ) = _init_hier_group_cast_meta_solver(
+            **self.group_cast_args_dict_kv_packed,
+        )
+
+    def _init_meta_kwargs_for_hier_group_reduce(self):
+        self.group_reduce_args_dict_kv_packed.update(
+            dict(
+                intra_group=self.intra_group,
+                inter_group=self.inter_group,
+                # TODO: add docs
+                side_stream=torch.cuda.Stream(),
+            )
+        )
+
+        # init the hierarchial group-reduce meta solver
+        (
+            self.group_reduce_args_dict_kv_packed["hier_group_reduce_meta_solver"]
+        ) = _init_hier_group_reduce_meta_solver(
+            **self.group_reduce_args_dict_kv_packed,
+        )
+
+    def _init_a2a_meta_kwargs_for_group_cast(self):
+        (
+            self.group_cast_args_dict_kv_packed["a2a_input_split_size"],
+            self.group_cast_args_dict_kv_packed["perm_before_a2a_kwargs"],
+        ) = _calc_group_cast_a2a_input_meta_args(
+            input_split_size_list=self.group_cast_args_dict_kv_packed[
+                "input_split_size_list"
+            ],
+            dst_indices_list=self.group_cast_args_dict_kv_packed["dst_indices_list"],
+            world_size=self.world_size,
+            device=self.device,
+        )
+
+        (
+            self.group_cast_args_dict_kv_packed["a2a_output_split_size"],
+            self.group_cast_args_dict_kv_packed["unperm_after_a2a_kwargs"],
+        ) = _calc_group_cast_a2a_output_meta_args(
+            output_split_size_list=self.group_cast_args_dict_kv_packed[
+                "output_split_size_list"
+            ],
+            src_index_list=self.group_cast_args_dict_kv_packed["src_index_list"],
+            world_size=self.world_size,
+            device=self.device,
+        )
+
+    def _init_a2a_meta_kwargs_for_group_reduce(self):
         (
             self.group_reduce_args_dict_kv_packed["a2a_input_split_size"],
             self.group_reduce_args_dict_kv_packed["perm_before_a2a_kwargs"],
@@ -134,7 +168,7 @@ class GroupCollectiveArg:
             ],
             dst_index_list=self.group_reduce_args_dict_kv_packed["dst_index_list"],
             world_size=self.world_size,
-            device=device,
+            device=self.device,
         )
 
         (
@@ -146,7 +180,7 @@ class GroupCollectiveArg:
             ],
             src_indices_list=self.group_reduce_args_dict_kv_packed["src_indices_list"],
             world_size=self.world_size,
-            device=device,
+            device=self.device,
         )
 
     def to_group_cast_args(self) -> dict:

@@ -43,6 +43,8 @@ __all__ = [
     "_calc_group_reduce_a2a_args",
     "_calc_group_reduce_a2a_input_meta_args",
     "_calc_group_reduce_a2a_output_meta_args",
+    "_init_hier_group_reduce_meta_solver",
+    "_hier_group_reduce_impl_with_a2av",
     # for others
     "get_pg_backend",
 ]
@@ -213,11 +215,65 @@ def _calc_range_reduce_kwargs_from_ranges(
     return range_reduce_kwargs
 
 
+class HierarchicalCommBaseMetaSolver:
+    def __init__(
+        self,
+        intra_group: dist.ProcessGroup,
+        inter_group: dist.ProcessGroup,
+        use_a2av_impl: bool = True,
+    ):
+        self.use_a2av_impl = use_a2av_impl
+
+        # --------   prepare env info  -------- #
+
+        self._prepare_env_info(intra_group, inter_group)
+
+    def _prepare_env_info(
+        self,
+        intra_group: dist.ProcessGroup,
+        inter_group: dist.ProcessGroup,
+    ):
+        self.intra_group = intra_group
+        self.inter_group = inter_group
+
+        self.world_size_intra_node = dist.get_world_size(intra_group)
+        self.world_size_inter_node = dist.get_world_size(inter_group)
+
+        self.rank = dist.get_rank()
+        self.device = torch.cuda.current_device()
+        self.world_size = self.world_size_intra_node * self.world_size_inter_node
+
+        self.local_rank_intra_node = self._to_local_rank_intra_node(self.rank)
+        self.local_rank_inter_node = self._to_local_rank_inter_node(self.rank)
+
+        self.first_rank_this_intra_node = (
+            self.local_rank_inter_node * self.world_size_intra_node
+        )
+        self.last_rank_this_intra_node = (
+            self.first_rank_this_intra_node + self.world_size_intra_node - 1
+        )
+
+    def _to_local_rank_intra_node(self, r):
+        return r % self.world_size_intra_node
+
+    def _to_local_rank_inter_node(self, r):
+        return r // self.world_size_intra_node
+
+    def _is_rank_within_this_intra_node(self, r):
+        return self.first_rank_this_intra_node <= r <= self.last_rank_this_intra_node
+
+    def _to_rank_with_same_local_rank_intra_node(self, r):
+        return (
+            self._to_local_rank_inter_node(r) * self.world_size_intra_node
+            + self.local_rank_intra_node
+        )
+
+
 # ------------------        utils for group cast collective       ------------------ #
 
 
-# TODO: add ut for this meta solver
-class HierarchicalGroupCastMetaSolver:
+# TODO: add ut
+class HierarchicalGroupCastMetaSolver(HierarchicalCommBaseMetaSolver):
     def __init__(
         self,
         input_split_size_list: list[int],
@@ -228,11 +284,7 @@ class HierarchicalGroupCastMetaSolver:
         inter_group: dist.ProcessGroup,
         use_a2av_impl: bool = True,
     ):
-        self.use_a2av_impl = use_a2av_impl
-
-        # --------   prepare env info  -------- #
-
-        self._prepare_env_info(intra_group, inter_group)
+        super().__init__(intra_group, inter_group, use_a2av_impl)
 
         # ----   build group-cast meta for pre-intra  ---- #
 
@@ -281,44 +333,17 @@ class HierarchicalGroupCastMetaSolver:
                 src_index_list=src_index_list,
             )
 
-    def _prepare_env_info(
-        self,
-        intra_group: dist.ProcessGroup,
-        inter_group: dist.ProcessGroup,
-    ):
-        self.intra_group = intra_group
-        self.inter_group = inter_group
-
-        self.world_size_intra_node = dist.get_world_size(intra_group)
-        self.world_size_inter_node = dist.get_world_size(inter_group)
-
-        self.rank = dist.get_rank()
-        self.device = torch.cuda.current_device()
-        self.world_size = self.world_size_intra_node * self.world_size_inter_node
-
-        self.local_rank_intra_node = self._to_local_rank_intra_node(self.rank)
-        self.local_rank_inter_node = self._to_local_rank_inter_node(self.rank)
-
-        self.first_rank_this_intra_node = (
-            self.local_rank_inter_node * self.world_size_intra_node
-        )
-        self.last_rank_this_intra_node = (
-            self.first_rank_this_intra_node + self.world_size_intra_node - 1
-        )
-
-    def _to_local_rank_intra_node(self, r):
-        return r % self.world_size_intra_node
-
-    def _to_local_rank_inter_node(self, r):
-        return r // self.world_size_intra_node
-
-    def _is_rank_within_this_intra_node(self, r):
-        return self.first_rank_this_intra_node <= r <= self.last_rank_this_intra_node
-
-    def _to_rank_with_same_local_rank_intra_node(self, r):
-        return (
-            self._to_local_rank_inter_node(r) * self.world_size_intra_node
-            + self.local_rank_intra_node
+    def _filter_dst_indices_within_this_intra_node(
+        self, dst_indices: list[int], return_local_rank: bool = False
+    ) -> list[int]:
+        return list(
+            map(
+                self._to_local_rank_intra_node if return_local_rank else lambda r: r,
+                filter(
+                    self._is_rank_within_this_intra_node,
+                    dst_indices,
+                ),
+            )
         )
 
     def _build_group_cast_meta_args_pre_intra(
@@ -334,16 +359,9 @@ class HierarchicalGroupCastMetaSolver:
 
         # filter dst indices list within this intra node
         dst_indices_list_pre_intra = [
-            list(
-                map(
-                    self._to_local_rank_intra_node
-                    if return_local_rank
-                    else lambda r: r,
-                    filter(
-                        self._is_rank_within_this_intra_node,
-                        dst_indices,
-                    ),
-                )
+            self._filter_dst_indices_within_this_intra_node(
+                dst_indices=dst_indices,
+                return_local_rank=return_local_rank,
             )
             for dst_indices in dst_indices_list
         ]
@@ -477,16 +495,9 @@ class HierarchicalGroupCastMetaSolver:
 
                     # append filtered dst indices for the third step
                     dst_indices_list_post_intra.append(
-                        list(
-                            map(
-                                self._to_local_rank_intra_node
-                                if return_local_rank
-                                else lambda r: r,
-                                filter(
-                                    self._is_rank_within_this_intra_node,
-                                    dst_indices,
-                                ),
-                            )
+                        self._filter_dst_indices_within_this_intra_node(
+                            dst_indices=dst_indices,
+                            return_local_rank=return_local_rank,
                         )
                     )
 
@@ -692,7 +703,7 @@ def _hier_group_cast_impl_with_a2av(
     side_stream: torch.cuda.Stream = kwargs.pop("side_stream", None)
     assert side_stream is not None
 
-    # --------      get hier-comm meta solver       -------- #
+    # --------      get hier group-cast meta solver       -------- #
 
     meta_solver: HierarchicalGroupCastMetaSolver = _init_hier_group_cast_meta_solver(
         input_split_size_list=input_split_size_list,
@@ -701,11 +712,11 @@ def _hier_group_cast_impl_with_a2av(
         src_index_list=src_index_list,
         intra_group=intra_group,
         inter_group=inter_group,
-        use_a2av_impl=True,
+        use_a2av_impl=True,  # for now, only support a2av impl
         **kwargs,
     )
 
-    # --------      prepare a2a output buffer for 2nd step       -------- #
+    # --------      prepare a2a output buffer for inter       -------- #
 
     output_other_shape = output_tensor.shape[1:]
     a2a_output_inter = torch.empty(
@@ -714,14 +725,14 @@ def _hier_group_cast_impl_with_a2av(
         device=input_tensor.device,
     )
 
-    # --------      prepare a2a input buffer for 2nd step       -------- #
+    # --------      prepare a2a input buffer for inter       -------- #
 
     a2a_input_inter = range_gather(
         input=input_tensor,
         **meta_solver.perm_range_gather_kwargs_inter,
     )
 
-    # --------      apply a2a for 2nd step       -------- #
+    # --------      apply a2a for inter       -------- #
 
     with nvtx.add_nvtx_event(
         (
@@ -740,7 +751,7 @@ def _hier_group_cast_impl_with_a2av(
             async_op=async_op,
         )
 
-    # --------      prepare a2a output buffer for 1st/3rd step     -------- #
+    # --------      prepare a2a output buffer for intra     -------- #
 
     a2a_output_pre_intra, a2a_output_post_intra = torch.split(
         output_tensor,
@@ -748,14 +759,14 @@ def _hier_group_cast_impl_with_a2av(
         dim=0,
     )
 
-    # --------      prepare a2a input buffer for 1st step     -------- #
+    # --------      prepare a2a input buffer for intra     -------- #
 
     a2a_input_pre_intra = range_gather(
         input=input_tensor,
         **meta_solver.perm_range_gather_kwargs_pre_intra,
     )
 
-    # --------      apply a2a for 1st step       -------- #
+    # --------      apply a2a for pre-intra       -------- #
 
     with nvtx.add_nvtx_event(
         (
@@ -774,7 +785,7 @@ def _hier_group_cast_impl_with_a2av(
             async_op=async_op,
         )
 
-    # --------      prepare a2a input buffer for 3rd step     -------- #
+    # --------      prepare a2a input buffer for post-intra     -------- #
 
     a2a_input_post_intra = torch.empty(
         size=[meta_solver.a2a_input_seqlen_post_intra, *output_other_shape],
@@ -1186,6 +1197,130 @@ def _calc_group_cast_a2a_args(
 
 
 # ------------------        utils for group reduce collective       ------------------ #
+
+
+# TODO: add ut
+class HierarchicalGroupReduceMetaSolver(HierarchicalCommBaseMetaSolver):
+    def __init__(
+        self,
+        input_split_size_list: list[int],
+        output_split_size_list: list[int],
+        dst_index_list: list[int],
+        src_indices_list: list[list[int]],
+        intra_group: dist.ProcessGroup,
+        inter_group: dist.ProcessGroup,
+        use_a2av_impl: bool = True,
+    ):
+        super().__init__(intra_group, inter_group, use_a2av_impl)
+
+        # TODO
+
+    def _prepare_env_info(
+        self,
+        intra_group: dist.ProcessGroup,
+        inter_group: dist.ProcessGroup,
+    ):
+        self.intra_group = intra_group
+        self.inter_group = inter_group
+
+        self.world_size_intra_node = dist.get_world_size(intra_group)
+        self.world_size_inter_node = dist.get_world_size(inter_group)
+
+        self.rank = dist.get_rank()
+        self.device = torch.cuda.current_device()
+        self.world_size = self.world_size_intra_node * self.world_size_inter_node
+
+        self.local_rank_intra_node = self._to_local_rank_intra_node(self.rank)
+        self.local_rank_inter_node = self._to_local_rank_inter_node(self.rank)
+
+        self.first_rank_this_intra_node = (
+            self.local_rank_inter_node * self.world_size_intra_node
+        )
+        self.last_rank_this_intra_node = (
+            self.first_rank_this_intra_node + self.world_size_intra_node - 1
+        )
+
+    def _to_local_rank_intra_node(self, r):
+        return r % self.world_size_intra_node
+
+    def _to_local_rank_inter_node(self, r):
+        return r // self.world_size_intra_node
+
+    def _is_rank_within_this_intra_node(self, r):
+        return self.first_rank_this_intra_node <= r <= self.last_rank_this_intra_node
+
+    def _to_rank_with_same_local_rank_intra_node(self, r):
+        return (
+            self._to_local_rank_inter_node(r) * self.world_size_intra_node
+            + self.local_rank_intra_node
+        )
+
+
+def _init_hier_group_reduce_meta_solver(
+    input_split_size_list: list[int],
+    output_split_size_list: list[int],
+    dst_index_list: list[int],
+    src_indices_list: list[list[int]],
+    intra_group: dist.ProcessGroup,
+    inter_group: dist.ProcessGroup,
+    use_a2av_impl: bool = True,
+    **kwargs,
+) -> HierarchicalGroupReduceMetaSolver:
+    if "hier_group_reduce_meta_solver" in kwargs:
+        # if pre-calculated, directly return
+        return kwargs["hier_group_reduce_meta_solver"]
+
+    return HierarchicalGroupReduceMetaSolver(
+        input_split_size_list=input_split_size_list,
+        output_split_size_list=output_split_size_list,
+        dst_index_list=dst_index_list,
+        src_indices_list=src_indices_list,
+        intra_group=intra_group,
+        inter_group=inter_group,
+        use_a2av_impl=use_a2av_impl,
+    )
+
+
+@nvtx.instrument_nvtx
+def _hier_group_reduce_impl_with_a2av(
+    input_tensor: torch.Tensor,
+    output_tensor: torch.Tensor,
+    input_split_size_list: list[int],
+    output_split_size_list: list[int],
+    dst_index_list: list[int],
+    src_indices_list: list[list[int]],
+    group: Optional[dist.ProcessGroup] = None,
+    async_op: bool = False,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    assert (
+        async_op
+    ), "async_op must be True for hierarchical group-reduce collective by now"
+
+    intra_group = kwargs.pop("intra_group", None)
+    inter_group = kwargs.pop("inter_group", None)
+    assert intra_group is not None and inter_group is not None
+
+    side_stream: torch.cuda.Stream = kwargs.pop("side_stream", None)
+    assert side_stream is not None
+
+    # --------      get hier group-reduce meta solver       -------- #
+
+    # meta_solver: HierarchicalGroupReduceMetaSolver = (
+    #     _init_hier_group_reduce_meta_solver(
+    #         input_split_size_list=input_split_size_list,
+    #         output_split_size_list=output_split_size_list,
+    #         dst_index_list=dst_index_list,
+    #         src_indices_list=src_indices_list,
+    #         intra_group=intra_group,
+    #         inter_group=inter_group,
+    #         use_a2av_impl=True,  # for now, only support a2av impl
+    #         **kwargs,
+    #     )
+    # )
+
+    # TODO
+    raise NotImplementedError
 
 
 def sanity_check_for_group_reduce_meta_args_per_rank(

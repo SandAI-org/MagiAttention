@@ -25,6 +25,7 @@ from .utils import (
     _calc_group_cast_a2a_args,
     _calc_group_reduce_a2a_args,
     _hier_group_cast_impl_with_a2av,
+    _hier_group_reduce_impl_with_a2av,
 )
 
 __all__ = [
@@ -105,7 +106,7 @@ def group_cast_collective(
     )
 
     if magi_attention.comm.is_hierarchical_comm_enable():
-        # NOTE: a hacky and temporary way to support hierarchical group-cast
+        # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-cast
         return _hier_group_cast_impl_with_a2av(
             input_tensor=input,
             output_tensor=output,
@@ -230,6 +231,20 @@ def group_reduce_collective(
         f"The sum of output_split_size_list should be equal to output_seqlen, "
         f"but got {sum(output_split_size_list)=} and {output.shape[0]=}"
     )
+
+    if magi_attention.comm.is_hierarchical_comm_enable():
+        # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-reduce
+        return _hier_group_reduce_impl_with_a2av(
+            input_tensor=input,
+            output_tensor=output,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_index_list=dst_index_list,
+            src_indices_list=src_indices_list,
+            group=group,
+            async_op=async_op,
+            **kwargs,
+        )
 
     # ---------    calc group reduce a2a args     --------- #
 
