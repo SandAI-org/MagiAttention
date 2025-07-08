@@ -15,7 +15,7 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update
-          apt-get install rsync
+          apt-get install -y rsync
           pip install sphinx
           pip install pydata-sphinx-theme myst_parser
       - name: Build docs
