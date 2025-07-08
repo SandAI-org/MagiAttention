@@ -44,8 +44,6 @@ __all__ = [
     "_calc_group_reduce_a2a_input_meta_args",
     "_calc_group_reduce_a2a_output_meta_args",
     # for others
-    "_trans_with_dim0",
-    "_get_dims_as_trans_with_dim0",
     "get_pg_backend",
 ]
 
@@ -83,6 +81,14 @@ def _sanity_check_nccl_send_recv(
 def _seqlens2curanges(
     seqlens: list[int],
 ) -> NaiveRanges:
+    """Make seqlens to cumulative ranges
+
+    Args:
+        seqlens (list[int]): the seqlen list, e.g. [4, 2, 7]
+
+    Returns:
+        NaiveRanges: the cumulative ranges, e.g. [(0, 4), (4, 6), (6, 13)]
+    """
     return list(pairwise(accumulate([0] + seqlens)))
 
 
@@ -1481,39 +1487,3 @@ def _calc_group_reduce_a2a_args(
         a2a_input_split_size,
         post_process_fn,
     )
-
-
-# ------------------        utils for all-gather-v       ------------------ #
-
-
-def _trans_with_dim0(x: torch.Tensor, dim: int = 0) -> torch.Tensor:
-    is_first_dim = dim == 0 or (dim == -1 and len(x.shape) == 1)
-
-    if not is_first_dim:
-        x = x.transpose(0, dim)
-    if not x.is_contiguous():
-        x = x.contiguous()
-
-    return x
-
-
-def _get_dims_as_trans_with_dim0(
-    x_shape: list[int],
-    dim: int = 0,
-) -> tuple[int, list[int]]:
-    shape_len = len(x_shape)
-    assert dim == -1 or 0 <= dim < len(
-        x_shape
-    ), f"dim should be in [0, {shape_len - 1}) or -1"
-
-    this_dim = x_shape[dim]
-
-    other_dims = x_shape.copy()
-    other_dims[0] = this_dim
-    other_dims[dim] = x_shape[0]
-    other_dims = other_dims[1:]
-
-    return this_dim, other_dims
-
-
-# ------------------        utils for scatter-v       ------------------ #
