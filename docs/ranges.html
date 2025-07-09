@@ -889,21 +889,26 @@ which means:</p>
 <dl class="py method">
 <dt class="sig sig-object py" id="magi_attention.common.ranges.AttnRanges.make_range_local">
 <span class="sig-name descname"><span class="pre">make_range_local</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">other_attn_range</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_self_merged</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prefix_offset</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.common.ranges.AttnRanges.make_range_local" title="Link to this definition">#</a></dt>
-<dd><p>将other_attn_range映射到self_ranges对应的local_ranges中,
-并返回other_attn_range在local_ranges中的位置 (允许通过可选的位置参数来截断)</p>
+<dd><p>Map the other_attn_range to the corresponding local_ranges within self_ranges,
+and return the position of other_attn_range in local_ranges
+(truncation is allowed via an optional positional parameter).</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>other_attn_range</strong> (<a class="reference internal" href="#magi_attention.common.range.AttnRange" title="magi_attention.common.range.AttnRange"><em>AttnRange</em></a>) – 需要被转换的other_attn_range</p></li>
-<li><p><strong>is_self_merged</strong> (<em>bool</em>) – 是否self已经merge</p></li>
-<li><p><strong>prefix_offset</strong> (<em>list</em><em>[</em><em>int</em><em>] </em><em>| </em><em>None</em>) – 如果prefix_offset为None, 则计算prefix_offset</p></li>
+<li><p><strong>other_attn_range</strong> (<a class="reference internal" href="#magi_attention.common.range.AttnRange" title="magi_attention.common.range.AttnRange"><em>AttnRange</em></a>) – The other_attn_range to be converted.</p></li>
+<li><p><strong>is_self_merged</strong> (<em>bool</em>) – Indicates whether self has been merged.</p></li>
+<li><p><strong>prefix_offset</strong> (<em>list</em><em>[</em><em>int</em><em>] </em><em>| </em><em>None</em>) – If prefix_offset is None, it will be computed.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
-<dd class="field-even"><p>other_attn_range在self的local_ranges中的位置（如果有截断操作，可能返回一个空的range）</p>
+<dd class="field-even"><p><dl class="simple">
+<dt>The position of other_attn_range within self’s local_ranges.</dt><dd><p>(May return an empty range if truncation occurs.)</p>
+</dd>
+</dl>
+</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p>local_range(<a class="reference internal" href="#magi_attention.common.range.AttnRange" title="magi_attention.common.range.AttnRange">AttnRange</a>)</p>
+<dd class="field-odd"><p>local_range (<a class="reference internal" href="#magi_attention.common.range.AttnRange" title="magi_attention.common.range.AttnRange">AttnRange</a>)</p>
 </dd>
 </dl>
 </dd></dl>
