@@ -33,10 +33,14 @@ def maybe_contiguous(x):
 def merge_ranges(
     outer_ranges: torch.Tensor, inner_ranges: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    torch.cuda.nvtx.range_push("merge_ranges")
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
     sorted_inner_ranges = inner_ranges[sorted_idx]
+    torch.cuda.nvtx.range_push("find_unique_pairs")
     merge_outer_ranges, range_map, unique_count = find_unique_pairs(sorted_outer_ranges)
+    torch.cuda.nvtx.range_pop()
+    torch.cuda.nvtx.range_pop()
 
     return (
         merge_outer_ranges,
@@ -198,6 +202,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ), "max_seqlen_k must be an int, otherwise would lead to performance degradation"
 
         if auto_range_merge:
+            torch.cuda.nvtx.range_push("merge_ranges1")
             (
                 merge_q_ranges,
                 fwd_q_ranges,
@@ -205,6 +210,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 fwd_qk_map,
                 fwd_unique_count,
             ) = merge_ranges(q_ranges, k_ranges)
+            torch.cuda.nvtx.range_pop()
+            torch.cuda.nvtx.range_push("merge_ranges2")
             (
                 merge_k_ranges,
                 bwd_k_ranges,
@@ -212,6 +219,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 bwd_kq_map,
                 bwd_unique_count,
             ) = merge_ranges(k_ranges, q_ranges)
+            torch.cuda.nvtx.range_pop()
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -224,6 +232,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_unique_count = None
             bwd_unique_count = None
 
+        torch.cuda.nvtx.range_push("_flex_flash_attn_forward")
         out, softmax_lse = _flex_flash_attn_forward(
             q,
             k,
@@ -243,6 +252,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             return_dtype,
             disable_fwd_atomic_reduction,
         )
+        torch.cuda.nvtx.range_pop()
 
         if auto_range_merge:
             ctx.save_for_backward(
