@@ -68,12 +68,12 @@ public:
 
     /// Register requirement for Load and Math WGs
     // If we use cp.async to load K and V, we need more registers for the producer WG.
-    static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 24 : 40) : 32);
-    static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 240 : 232) : 160);
+    //static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 24 : 40) : 32);
+    //static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 240 : 232) : 160);
     // If you want to print from the producer warp, you'd need to increase the number of registers
     // Otherwise you'll get CUDA error.
-    // static constexpr uint32_t LoadRegisterRequirement = 40;
-    // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
+    static constexpr uint32_t LoadRegisterRequirement = 40;
+    static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
 
     // Kernel level shared memory storage
     // We overlap the shared memory for the mainloop and epilogue. However, we only want smem_o to overlap with smem_v
@@ -286,8 +286,9 @@ public:
                 // TODO: move it to compile time
                 if constexpr (MergeRange) {
                     int bidb_idx = get<2>(block_coord);
-                    int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-                    int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+                    int loop_count = bidb_idx < *params.scheduler.unique_count - 1 ? params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx] : params.scheduler.num_batch - params.scheduler.range_map[bidb_idx];
+                    int bidb_start = params.scheduler.range_map[bidb_idx];
+
                     for (int idx = 0; idx < loop_count; ++idx) {
                         int bidb = bidb_start + idx;
                         block_coord = cute::make_tuple(get<0>(block_coord), get<1>(block_coord), bidb);
@@ -351,8 +352,9 @@ public:
 
                 if constexpr (MergeRange) {
                     int bidb_idx = get<2>(block_coord);
-                    int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-                    int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+                    int loop_count = bidb_idx < *params.scheduler.unique_count - 1 ? params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx] : params.scheduler.num_batch - params.scheduler.range_map[bidb_idx];
+                    int bidb_start = params.scheduler.range_map[bidb_idx];
+
                     for (int idx = 0; idx < loop_count; ++idx) {
 
                         int bidb = bidb_start + idx;

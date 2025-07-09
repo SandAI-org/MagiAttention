@@ -30,22 +30,6 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
-"""
-def merge_ranges(
-    outer_ranges: torch.Tensor, inner_ranges: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
-    sorted_outer_ranges = outer_ranges[sorted_idx]
-    sorted_inner_ranges = inner_ranges[sorted_idx]
-    merge_outer_ranges, inverse_idx, counts = torch.unique_consecutive(
-        sorted_outer_ranges, dim=0, return_inverse=True, return_counts=True
-    )
-    range_map = torch.cumsum(counts, dim=0, dtype=torch.int32)
-
-    return merge_outer_ranges, sorted_outer_ranges, sorted_inner_ranges, range_map
-"""
-
-
 def merge_ranges(
     outer_ranges: torch.Tensor, inner_ranges: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -75,6 +59,7 @@ def _flex_flash_attn_forward(
     attn_type_map,
     merge_q_ranges,
     qk_map,
+    unique_count,
     softmax_scale,
     softcap,
     deterministic,
@@ -104,6 +89,7 @@ def _flex_flash_attn_forward(
             attn_type_map,
             merge_q_ranges,
             qk_map,
+            unique_count,
             softmax_scale,
             softcap,
             sm_margin,
@@ -129,6 +115,7 @@ def _flex_flash_attn_backward(
     attn_type_map,
     merge_k_ranges,
     bwd_kq_map,
+    bwd_unique_count,
     softmax_scale,
     softcap,
     deterministic,
@@ -169,6 +156,7 @@ def _flex_flash_attn_backward(
             attn_type_map,
             merge_k_ranges,
             bwd_kq_map,
+            bwd_unique_count,
             softmax_scale,
             softcap,
             torch.float32,
@@ -314,6 +302,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ) = ctx.saved_tensors
             merge_k_ranges = None
             bwd_kq_map = None
+            bwd_unique_count = None
 
         dq, dk, dv, _ = _flex_flash_attn_backward(
             dout,
