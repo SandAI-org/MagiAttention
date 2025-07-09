@@ -91,6 +91,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
         params.num_splits_dynamic_ptr,
         params.merge_q_ranges,
         params.qk_map,
+        params.unique_count,
     };
 
     int device;

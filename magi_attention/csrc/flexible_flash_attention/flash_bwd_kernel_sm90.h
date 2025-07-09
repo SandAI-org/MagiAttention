@@ -56,12 +56,12 @@ public:
     static_assert(NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
     /// Register requirement for Load and Math WGs
-    static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 2 ? 24 : 32;
-    static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 240 : 160;
+    // static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 2 ? 24 : 32;
+    // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 240 : 160;
     // If you want to print from the producer warp, you'd need to increase the number of registers
     // Otherwise you'll get CUDA error.
-    // static constexpr uint32_t LoadRegisterRequirement = 40;
-    // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
+    static constexpr uint32_t LoadRegisterRequirement = 40;
+    static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
 
     // Kernel level shared memory storage
     struct SharedStorage {
@@ -229,8 +229,8 @@ public:
                     // cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
 
                     if constexpr (RangeMerge) {
-                        int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-                        int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+                        int loop_count = bidb_idx < *params.scheduler.unique_count - 1 ? params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx] : params.scheduler.num_batch - params.scheduler.range_map[bidb_idx];
+                        int bidb_start = params.scheduler.range_map[bidb_idx];
 
                         for (int idx = 0; idx < loop_count; ++idx) {
                             int bidb = bidb_start + idx;
@@ -262,9 +262,9 @@ public:
                     auto [n_block, bidh, bidb_idx] = block_coord_;
 
                     if constexpr (RangeMerge) {
-                        int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-                        int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
-
+                        int loop_count = bidb_idx < *params.scheduler.unique_count - 1 ? params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx] : params.scheduler.num_batch - params.scheduler.range_map[bidb_idx];
+                        int bidb_start = params.scheduler.range_map[bidb_idx];
+                        
                         for (int idx = 0; idx < loop_count; ++idx) {
                             int bidb = bidb_start + idx;
                             cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
@@ -305,9 +305,9 @@ public:
 
                 if constexpr (RangeMerge) {
                     int bidb_idx = get<2>(block_coord);
-                    int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-                    int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;     
-
+                    int loop_count = bidb_idx < *params.scheduler.unique_count - 1 ? params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx] : params.scheduler.num_batch - params.scheduler.range_map[bidb_idx];
+                    int bidb_start = params.scheduler.range_map[bidb_idx];
+                    
                     for (int idx = 0; idx < loop_count; ++idx) {
                         int bidb = bidb_start + idx;
                         block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
