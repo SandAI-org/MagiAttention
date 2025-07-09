@@ -21,6 +21,7 @@ from magi_attention.utils import nvtx
 # isort: off
 # We need to import the CUDA kernels after importing torch
 import flexible_flash_attention_cuda
+from magi_attention.functional.merge_range import find_unique_pairs
 
 # isort: on
 
@@ -29,6 +30,7 @@ def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+"""
 def merge_ranges(
     outer_ranges: torch.Tensor, inner_ranges: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -41,6 +43,24 @@ def merge_ranges(
     range_map = torch.cumsum(counts, dim=0, dtype=torch.int32)
 
     return merge_outer_ranges, sorted_outer_ranges, sorted_inner_ranges, range_map
+"""
+
+
+def merge_ranges(
+    outer_ranges: torch.Tensor, inner_ranges: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
+    sorted_outer_ranges = outer_ranges[sorted_idx]
+    sorted_inner_ranges = inner_ranges[sorted_idx]
+    merge_outer_ranges, range_map, unique_count = find_unique_pairs(sorted_outer_ranges)
+
+    return (
+        merge_outer_ranges,
+        sorted_outer_ranges,
+        sorted_inner_ranges,
+        range_map,
+        unique_count,
+    )
 
 
 @nvtx.instrument_nvtx
@@ -190,12 +210,20 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ), "max_seqlen_k must be an int, otherwise would lead to performance degradation"
 
         if auto_range_merge:
-            merge_q_ranges, fwd_q_ranges, fwd_k_ranges, fwd_qk_map = merge_ranges(
-                q_ranges, k_ranges
-            )
-            merge_k_ranges, bwd_k_ranges, bwd_q_ranges, bwd_kq_map = merge_ranges(
-                k_ranges, q_ranges
-            )
+            (
+                merge_q_ranges,
+                fwd_q_ranges,
+                fwd_k_ranges,
+                fwd_qk_map,
+                fwd_unique_count,
+            ) = merge_ranges(q_ranges, k_ranges)
+            (
+                merge_k_ranges,
+                bwd_k_ranges,
+                bwd_q_ranges,
+                bwd_kq_map,
+                bwd_unique_count,
+            ) = merge_ranges(k_ranges, q_ranges)
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -205,6 +233,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_k_ranges = None
             fwd_qk_map = None
             bwd_kq_map = None
+            fwd_unique_count = None
+            bwd_unique_count = None
 
         out, softmax_lse = _flex_flash_attn_forward(
             q,
@@ -217,6 +247,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             attn_type_map,
             merge_q_ranges,
             fwd_qk_map,
+            fwd_unique_count,
             softmax_scale,
             softcap,
             deterministic,
@@ -237,6 +268,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 attn_type_map,
                 merge_k_ranges,
                 bwd_kq_map,
+                bwd_unique_count,
             )
         else:
             ctx.save_for_backward(
@@ -267,6 +299,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 attn_type_map,
                 merge_k_ranges,
                 bwd_kq_map,
+                bwd_unique_count,
             ) = ctx.saved_tensors
         else:
             (
@@ -296,6 +329,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             attn_type_map,
             merge_k_ranges,
             bwd_kq_map,
+            bwd_unique_count,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
             deterministic=ctx.deterministic,

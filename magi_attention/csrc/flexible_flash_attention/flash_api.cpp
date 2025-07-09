@@ -422,6 +422,7 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
         std::optional<const at::Tensor> &attn_type_map_, // (b, )
         std::optional<const at::Tensor> &merge_q_ranges_,
         std::optional<const at::Tensor> &qk_map_,
+        std::optional<const at::Tensor> &unique_count_,
         float const softmax_scale,
         float const softcap,
         int const sm_margin,
@@ -509,6 +510,17 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
         CHECK_SHAPE(qk_map, merge_batch_size);
         CHECK_CONTIGUOUS(qk_map);
     }
+
+    at::Tensor unique_count;
+    bool const has_unique_count = unique_count_.has_value();
+    if (has_unique_count) {
+        unique_count = unique_count_.value();
+        // Check unique_count (dtype, device, layout)
+        TORCH_CHECK(unique_count.dtype() == torch::kInt32, "unique_count must have dtype torch.int32");
+        CHECK_DEVICE(unique_count);
+        CHECK_SHAPE(unique_count, 1);
+        CHECK_CONTIGUOUS(unique_count);
+    }
     
     // Check head_size is within the supported range
     int const max_headdim = get_max_headdim();
@@ -588,6 +600,7 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
                      /*merge_batch_size*/ merge_batch_size,
                      /*merge_q_ranges*/ has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
                      /*qk_map*/ has_qk_map ? qk_map.data_ptr() : nullptr,
+                     /*unique_count*/ has_unique_count ? unique_count.data_ptr() : nullptr,
                      /*softmax_lse*/ softmax_lse.data_ptr(),
                      /*softmax_scale*/ softmax_scale,
                      /*tile_count_semaphore*/ tile_count_semaphore.data_ptr(),
