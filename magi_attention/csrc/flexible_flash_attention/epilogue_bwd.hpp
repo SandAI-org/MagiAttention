@@ -158,16 +158,14 @@ struct CollectiveEpilogueBwd {
     }
 
     CUTLASS_DEVICE
-    void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int conflict_bidb1_raw, int conflict_bidb2_raw) {
-        int conflict_bidb1 = conflict_bidb1_raw >> 1;
-        int conflict_bidb2 = conflict_bidb2_raw >> 1;
+    void deterministic_sync(int* range_lock, int bidh, int offset, int k_block_size, int num_heads, int conflict_bidb1, int conflict_bidb2) {
         if (conflict_bidb1 == 0 && conflict_bidb2 == 0)
             return ;
 
         // Calculate lock index
-        int block_idx1 = offset / q_block_size;
+        int block_idx1 = offset / k_block_size;
         int index_1 = block_idx1 * num_heads + bidh;
-        int block_idx2 = (offset + q_block_size - 1) / q_block_size;
+        int block_idx2 = (offset + k_block_size - 1) / k_block_size;
 
         // Acquire the first lock
         #pragma unroll 1
@@ -186,13 +184,13 @@ struct CollectiveEpilogueBwd {
     }
     
     CUTLASS_DEVICE
-    void deterministic_arrive(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int bidb, bool l_arrive_twice, bool r_arrive_twice) {
+    void deterministic_arrive(int* range_lock, int bidh, int offset, int k_block_size, int num_heads, int bidb, bool l_arrive_twice, bool r_arrive_twice) {
         // Calculate lock indices
-        int block_idx1 = offset / q_block_size;
+        int block_idx1 = offset / k_block_size;
         int index_1 = block_idx1 * num_heads + bidh;
 
         // Check if we need to release a second lock
-        int block_idx2 = (offset + q_block_size - 1) / q_block_size;
+        int block_idx2 = (offset + k_block_size - 1) / k_block_size;
 
         // Release the second lock
         int index_2 = block_idx2 * num_heads + bidh;
@@ -200,7 +198,7 @@ struct CollectiveEpilogueBwd {
         int tmp = atomicAdd(&range_lock[index_2 * 2 + 1], add_cnt);
         if (tmp + add_cnt == 2) {
             atomicExch(&range_lock[index_2 * 2 + 1], 0);
-            atomicExch(&range_lock[index_2 * 2], bidb + 1);
+            atomicExch(&range_lock[index_2 * 2], bidb);
         }
 
         // Release the first lock
@@ -208,7 +206,7 @@ struct CollectiveEpilogueBwd {
         tmp = atomicAdd(&range_lock[index_1 * 2 + 1], add_cnt);
         if (tmp + add_cnt == 2) {
             atomicExch(&range_lock[index_1 * 2 + 1], 0);
-            atomicExch(&range_lock[index_1 * 2], bidb + 1);
+            atomicExch(&range_lock[index_1 * 2], bidb);
         }
     }
 
@@ -250,8 +248,6 @@ struct CollectiveEpilogueBwd {
         Tensor taccdKsdK = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdK, sdKt));     // ((Atom,AtomNum),PIPE_M,PIPE_N)
         Tensor taccdVsdV = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt));     // ((Atom,AtomNum),PIPE_M,PIPE_N)
 
-        // using Barrier = cutlass::GenericBarrier<cutlass::detail::SyncwarpSync>;
-        // Barrier::wait_eq();
 
         // Make sure all WGs have finished reading K and V
         flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
@@ -281,9 +277,15 @@ struct CollectiveEpilogueBwd {
         int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
         if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
             if constexpr (Deterministic) {
-                // if (cute::elect_one_sync()) {
-                //     deterministic_sync(params.determin_range_locks, bidh, offset_k + n_block * kBlockN, kBlockN, params.nheads, conflict_bidb1, conflict_bidb2);
-                // }
+                if (cute::elect_one_sync()) {
+                    int qheads_per_kheads = params.qhead_per_khead_divmod;
+                    // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
+                    // conflict_bidb >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
+                    // if not conflict, conflict_bidb is 0
+                    int sync_num1 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (conflict_bidb1 >> 1) * qheads_per_kheads;
+                    int sync_num2 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (conflict_bidb2 >> 1) * qheads_per_kheads;
+                    deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
+                }
             }
             cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp,
                                             cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
@@ -291,12 +293,16 @@ struct CollectiveEpilogueBwd {
                 cute::copy(params.tma_store_dV, tdVsdV, tdVgdV);
                 cute::copy(params.tma_store_dK, tdKsdK, tdKgdK);
                 tma_store_arrive();
-                // if constexpr (Deterministic) {
-                //     deterministic_arrive(params.determin_range_locks, bidh, offset_k + n_block * kBlockN, kBlockN, params.nheads, bidb, conflict_bidb1 & 1, conflict_bidb2 & 1);
-                // }
             }
         }
         tma_store_wait<0>();
+        if constexpr(Deterministic) {
+            if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+                int qheads_per_kheads = params.qhead_per_khead_divmod;
+                int arrive_num = bidb * qheads_per_kheads + bidh_idx_in_group + 1;
+                deterministic_arrive(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, arrive_num, conflict_bidb1 & 1, conflict_bidb2 & 1);
+            }
+        }
         // // Tell warp 0 that smem_k and smem_v are ready
         // cutlass::arch::NamedBarrier::arrive(NumEpilogueThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
     }
