@@ -659,7 +659,7 @@ class TestCalcSelfAttnAreas(TestCase):
                         AttnSlice(
                             slice_id=0,
                             mask_type=AttnMaskType.CAUSAL,
-                            q_range=AttnRange(32, 38),
+                            q_range=AttnRange(33, 38),
                             k_range=AttnRange(43, 48),
                             _area=15,
                         ),
@@ -873,7 +873,7 @@ class TestCalcSelfAttnAreas(TestCase):
                         AttnSlice(
                             slice_id=0,
                             mask_type=AttnMaskType.CAUSAL,
-                            q_range=AttnRange(40, 48),
+                            q_range=AttnRange(43, 48),
                             k_range=AttnRange(61, 66),
                             _area=15,
                         ),
@@ -897,7 +897,7 @@ class TestCalcSelfAttnAreas(TestCase):
                         AttnSlice(
                             slice_id=0,
                             mask_type=AttnMaskType.CAUSAL,
-                            q_range=AttnRange(56, 64),
+                            q_range=AttnRange(61, 64),
                             k_range=AttnRange(34, 37),
                             _area=6,
                         ),
@@ -1000,7 +1000,7 @@ class TestCalcSelfAttnAreas(TestCase):
                         AttnSlice(
                             slice_id=1,
                             mask_type=AttnMaskType.CAUSAL,
-                            q_range=AttnRange(1, 10),
+                            q_range=AttnRange(9, 10),
                             k_range=AttnRange(0, 1),
                             _area=1,
                         ),
@@ -1205,6 +1205,8 @@ class TestCalcSelfAttnAreas(TestCase):
         [
             AttnMaskType.FULL,
             AttnMaskType.CAUSAL,
+            AttnMaskType.INVCAUSAL,
+            AttnMaskType.BICAUSAL,
         ],
     )
     @parameterize("chunk_size", [4, 8, 16])

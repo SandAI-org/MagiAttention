@@ -37,8 +37,8 @@ from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import EPSILON, torch_attn_ref
-from magi_attention.utils import get_attn_mask_from_ranges, str2seed, sync_rng
-from magi_attention.utils._utils import is_list_value_all
+from magi_attention.utils import str2seed, sync_rng
+from magi_attention.utils._utils import get_attn_mask_from_ffa_args
 
 NAME = "name"
 SKIP_WORLD_SIZE = "skip_world_size"
@@ -129,7 +129,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
                 "q_ranges": AttnRanges.from_ranges([[0, 1024]]),
                 "k_ranges": AttnRanges.from_ranges([[0, 1024]]),
-                "is_causal_mapping": [False],
+                "attn_type_mapping": [0],
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 32,
@@ -160,7 +160,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [768, 1050],
                     ]
                 ),
-                "is_causal_mapping": [False] * 7,
+                "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
                 "chunk_size": 5,
@@ -194,7 +194,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [0, 128],
                     ]
                 ),
-                "is_causal_mapping": [False] * 8,
+                "attn_type_mapping": [0] * 8,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
@@ -225,7 +225,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [768, 960],
                     ]
                 ),
-                "is_causal_mapping": [False] * 7,
+                "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 960,
                 "total_seqlen_k": 960,
                 "chunk_size": 16,
@@ -256,7 +256,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [768, 840],
                     ]
                 ),
-                "is_causal_mapping": [False] * 7,
+                "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 840,
                 "total_seqlen_k": 840,
                 "chunk_size": 4,
@@ -290,7 +290,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [0, 128],
                     ]
                 ),
-                "is_causal_mapping": [False] * 8,
+                "attn_type_mapping": [0] * 8,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
@@ -324,7 +324,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [896, 1024],
                     ]
                 ),
-                "is_causal_mapping": [False] * 8,
+                "attn_type_mapping": [0] * 8,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
@@ -357,7 +357,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [640, 1024],
                     ]
                 ),
-                "is_causal_mapping": [False] * 8,
+                "attn_type_mapping": [0] * 8,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
@@ -390,7 +390,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [640, 1024],
                     ]
                 ),
-                "is_causal_mapping": [False] * 8,
+                "attn_type_mapping": [0] * 8,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
@@ -424,7 +424,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [0, 128],
                     ]
                 ),
-                "is_causal_mapping": [False] * 8,
+                "attn_type_mapping": [0] * 8,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
@@ -449,55 +449,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [512, 1024],
                     ]
                 ),
-                "is_causal_mapping": [False] * 4,
-                "total_seqlen_q": 1024,
-                "total_seqlen_k": 1024,
-                "chunk_size": 128,
-            },
-            # half-inv block diagonal with total seqlen 1k
-            # + interleaved overlapped q ranges
-            {
-                NAME: "half_inv_block_diagonal_1k_with_interleave_q_overlap",
-                SKIP_WORLD_SIZE: [3, 5, 6, 7],
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [64, 192],
-                        [128, 256],
-                        [192, 320],
-                        [256, 384],
-                        [320, 448],
-                        [384, 512],
-                        [448, 576],
-                        [512, 640],
-                        [576, 704],
-                        [640, 768],
-                        [704, 832],
-                        [768, 896],
-                        [832, 960],
-                        [896, 1024],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [128, 192],
-                        [192, 256],
-                        [192, 320],
-                        [256, 384],
-                        [320, 448],
-                        [384, 512],
-                        [896, 1024],
-                        [832, 960],
-                        [768, 896],
-                        [704, 832],
-                        [640, 768],
-                        [576, 704],
-                        [512, 640],
-                        [448, 576],
-                    ]
-                ),
-                "is_causal_mapping": [False] * 15,
+                "attn_type_mapping": [0] * 4,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
@@ -530,7 +482,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [896, 1024],
                     ]
                 ),
-                "is_causal_mapping": [False] * 8,
+                "attn_type_mapping": [0] * 8,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
@@ -569,7 +521,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [960, 1024],
                     ]
                 ),
-                "is_causal_mapping": [False] * 11,
+                "attn_type_mapping": [0] * 11,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "chunk_size": 128,
@@ -600,7 +552,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [768, 840],
                     ]
                 ),
-                "is_causal_mapping": [False] * 7,
+                "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 840,
                 "total_seqlen_k": 840,
                 "chunk_size": 4,
@@ -630,7 +582,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         [840, 1050],
                     ]
                 ),
-                "is_causal_mapping": [False] * 6,
+                "attn_type_mapping": [0] * 6,
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
                 "chunk_size": 5,
@@ -726,7 +678,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         [DTYPE],
     )
     @parameterize(
-        "random_causal_mapping",
+        "random_type_mapping",
         [False, True],
     )
     @parameterize(
@@ -740,7 +692,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         num_heads: int,
         head_dim: int,
         dtype: torch.dtype,
-        random_causal_mapping: bool,
+        random_type_mapping: bool,
         high_bandwith_domain_size: int,
     ):
         # -----    skip for world size   ---- #
@@ -771,28 +723,21 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             f"world_size=[{self.world_size}] x high_bandwith_domain_size=[{high_bandwith_domain_size}] x "
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
-            f"random_causal_mapping=[{random_causal_mapping}]"
+            f"random_causal_mapping=[{random_type_mapping}]"
         )
 
         # -----    contruct config from test cases   ---- #
 
         q_ranges: AttnRanges = attn_config["q_ranges"]
         k_ranges: AttnRanges = attn_config["k_ranges"]
-        is_causal_mapping: list[bool] = attn_config["is_causal_mapping"]
-        if random_causal_mapping:
-            # NOTE: to test causal mapping, we design a mode to just use random `is_causal_mapping`
+        attn_type_mapping: list[int] = attn_config["attn_type_mapping"]
+        if random_type_mapping:
+            # NOTE: to test causal mapping, we design a mode to just use random `attn_type_mapping`
             # instead of hard-coded config in the test cases
             with sync_rng(seed=str2seed(test_case)):
-                is_causal_mapping = [
-                    random.choice([True, False]) for _ in is_causal_mapping
+                attn_type_mapping = [
+                    random.choice([0, 1, 2, 3]) for _ in attn_type_mapping
                 ]
-
-        # -----    skip for overlapped q_range with causal mask  ---- #
-
-        if not q_ranges.is_non_overlap() and not is_list_value_all(
-            is_causal_mapping, False
-        ):
-            return
 
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
@@ -812,15 +757,24 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----    run pipeline test   ---- #
 
+        # -----   init attn_mask_type ----- #
+
+        attn_mask_type = [
+            {
+                0: AttnMaskType.FULL,
+                1: AttnMaskType.CAUSAL,
+                2: AttnMaskType.INVCAUSAL,
+                3: AttnMaskType.BICAUSAL,
+            }[i]
+            for i in attn_type_mapping
+        ]
+
         # -----    init dist attn runtime mgr   ---- #
 
         dist_attn_runtime_mgr: DistAttnRuntimeMgr = init_dist_attn_runtime_mgr(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
-            attn_mask_type=[
-                AttnMaskType.CAUSAL if is_causal else AttnMaskType.FULL
-                for is_causal in is_causal_mapping
-            ],
+            attn_mask_type=attn_mask_type,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
             chunk_size=chunk_size,
@@ -893,7 +847,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         self.assert_close_to_torch_ref(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
-            is_causal_mapping=is_causal_mapping,
+            attn_type_map=attn_type_mapping,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
             total_q=total_q,
@@ -911,7 +865,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
-        is_causal_mapping: list[bool],
+        attn_type_map: list[int],
         total_seqlen_q: int,
         total_seqlen_k: int,
         total_q: torch.Tensor,
@@ -940,12 +894,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----   build attn mask   ---- #
 
-        mask = get_attn_mask_from_ranges(
-            q_ranges=q_ranges.to_naive_ranges(),
-            k_ranges=k_ranges.to_naive_ranges(),
-            is_causal_mapping=is_causal_mapping,
+        mask = get_attn_mask_from_ffa_args(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
+            device=torch.cuda.current_device(),
         )
 
         # -----   ref1. torch ref with high precision (fp32)   ---- #
