@@ -14,6 +14,7 @@
 
 from .bucket import AttnBucket
 from .chunk import AttnChunk
+from .rank_entry import HostRankEntry, RemoteRankEntry
 from .slice import AttnSlice, MultiKAttnSlice
 
 __all__ = [
@@ -21,4 +22,6 @@ __all__ = [
     "MultiKAttnSlice",
     "AttnChunk",
     "AttnBucket",
+    "HostRankEntry",
+    "RemoteRankEntry",
 ]

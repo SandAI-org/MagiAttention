@@ -16,6 +16,7 @@ import numpy as np
 
 from magi_attention.common import AttnRange
 from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.ranges import AttnRanges
 
 
 def add_range_to_array(
@@ -45,25 +46,99 @@ def add_range_to_array(
                 fx = i + b
                 if j <= fx:
                     array[i][j] = 1
-                else:
-                    array[i][j] = 0
-            # HACK do not support INV_CAUSAL and BI_CAUSAL now
-            # elif masktype == AttnMaskType.INV_CAUSAL:
-            #     b = y_start - x_start
-            #     fx = i + b
-            #     if j >= fx:
-            #         array[i][j] = 1
-            #     else:
-            #         array[i][j] = 0
-            # elif masktype == AttnMaskType.BI_CAUSAL:
-            #     causal_b = y_end - x_end
-            #     f_causal = i + causal_b
+            elif masktype == AttnMaskType.INVCAUSAL:
+                b = y_start - x_start
+                fx = i + b
+                if j >= fx:
+                    array[i][j] = 1
+            elif masktype == AttnMaskType.BICAUSAL:
+                causal_b = y_end - x_end
+                f_causal = i + causal_b
 
-            #     inv_causal_b = y_start - x_start
-            #     f_inv_causal = i + inv_causal_b
-            #     if j <= f_causal and j >= f_inv_causal:
-            #         array[i][j] = 1
-            #     else:
-            #         array[i][j] = 0
+                inv_causal_b = y_start - x_start
+                f_inv_causal = i + inv_causal_b
+                if j <= f_causal and j >= f_inv_causal:
+                    array[i][j] = 1
 
     return array
+
+
+def make_range_global(
+    global_ranges: AttnRanges,
+    local_range: AttnRange,
+) -> AttnRanges:
+    """convert local_range to global_ranges with base global_ranges
+
+    Args:
+        global_ranges (AttnRanges): the actual base global ranges
+        local_range (AttnRange): range need to convert
+
+    Returns:
+        AttnRanges: converted multiple ranges since local range may
+            be converted to multiple segments of ranges
+    """
+    assert local_range.seqlen <= global_ranges.total_seqlen
+
+    ranges_ = AttnRanges()
+
+    local_start, local_length = local_range.start, local_range.seqlen
+
+    global_index = 0
+    current_global_length = 0
+    start_length = local_start
+
+    while global_index < len(global_ranges):
+        if global_ranges[global_index].seqlen <= start_length:
+            start_length -= global_ranges[global_index].seqlen
+            global_index += 1
+        else:
+            current_global_length = start_length
+            break
+
+    while global_index < len(global_ranges):
+        if global_ranges[global_index].seqlen - current_global_length < local_length:
+            range_ = AttnRange(
+                start=global_ranges[global_index].start + current_global_length,
+                end=global_ranges[global_index].end,
+            )
+            local_length = (
+                local_length
+                - global_ranges[global_index].seqlen
+                + current_global_length
+            )
+            global_index += 1
+            current_global_length = 0
+            ranges_.append(range_)
+        else:
+            range_ = AttnRange(
+                start=global_ranges[global_index].start + current_global_length,
+                end=global_ranges[global_index].start
+                + current_global_length
+                + local_length,
+            )
+            ranges_.append(range_)
+            break
+
+    return ranges_
+
+
+def determine_ith_range_masktype(
+    i: int,
+    length: int,
+    masktype: AttnMaskType = AttnMaskType.FULL,
+):
+    """
+    determine mask type in tests for Slice,
+    when convert local range with one single masktype to global range with multi masktypes
+    """
+    if length == 1 and masktype is AttnMaskType.BICAUSAL:
+        return AttnMaskType.BICAUSAL
+    if i == 0 and masktype is AttnMaskType.BICAUSAL:
+        return AttnMaskType.INVCAUSAL
+    if i == length - 1 and masktype is AttnMaskType.BICAUSAL:
+        return AttnMaskType.CAUSAL
+    if i == 0 and masktype is AttnMaskType.INVCAUSAL:
+        return AttnMaskType.INVCAUSAL
+    if i == length - 1 and masktype is AttnMaskType.CAUSAL:
+        return AttnMaskType.CAUSAL
+    return AttnMaskType.FULL

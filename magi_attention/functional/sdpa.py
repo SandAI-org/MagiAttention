@@ -18,7 +18,7 @@ import torch
 from einops import reduce
 
 from magi_attention.meta.collection.calc_meta import AttnArg
-from magi_attention.utils import get_attn_mask_from_ranges
+from magi_attention.utils._utils import get_attn_mask_from_ffa_args
 
 from .utils import safe_subtract
 
@@ -146,12 +146,13 @@ def sdpa_fwd(
         q, k, v = sdpa_fwd_qkv_rearrange(q, k, v)
 
     # construct attn_mask from ranges
-    attn_mask = get_attn_mask_from_ranges(
-        q_ranges=attn_arg.q_ranges.to_naive_ranges(),
-        k_ranges=attn_arg.k_ranges.to_naive_ranges(),
-        is_causal_mapping=attn_arg.is_causal_mapping,
+    attn_mask = get_attn_mask_from_ffa_args(
+        q_ranges=attn_arg.q_ranges,
+        k_ranges=attn_arg.k_ranges,
+        attn_type_map=attn_arg.attn_type_map,
         total_seqlen_q=q.shape[-2],
         total_seqlen_k=k.shape[-2],
+        device=torch.cuda.current_device(),
     )
 
     out, lse = _sdpa_fwd(
@@ -312,12 +313,13 @@ def sdpa_bwd(
         q, k, v, o, do, lse = sdpa_bwd_qkvodo_lse_rearrange(q, k, v, o, do, lse)
 
     # construct attn_mask from ranges
-    attn_mask = get_attn_mask_from_ranges(
-        q_ranges=attn_arg.q_ranges_bwd.to_naive_ranges(),
-        k_ranges=attn_arg.k_ranges_bwd.to_naive_ranges(),
-        is_causal_mapping=attn_arg.is_causal_mapping_bwd,
+    attn_mask = get_attn_mask_from_ffa_args(
+        q_ranges=attn_arg.q_ranges_bwd,
+        k_ranges=attn_arg.k_ranges_bwd,
+        attn_type_map=attn_arg.attn_type_map_bwd,
         total_seqlen_q=q.shape[-2],
         total_seqlen_k=k.shape[-2],
+        device=torch.cuda.current_device(),
     )
 
     dq, dk, dv = _sdpa_bwd(

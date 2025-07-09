@@ -68,7 +68,7 @@ def magi_attn_varlen_key(
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
         NOTE: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
 
-        causal(bool): if True, all attn_mask_type is CASUAL. else, all attn_mask_type is FULL.
+        causal(bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
@@ -182,7 +182,7 @@ def magi_attn_varlen_dispatch(
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
         NOTE: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
 
-        causal(bool): if True, all attn_mask_type is CASUAL. else, all attn_mask_type is FULL.
+        causal(bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
@@ -379,9 +379,9 @@ def magi_attn_flex_key(
         raise ValueError(
             "attn_mask_type: BICAUSAL is not supported for now. This feature is coming in a near future release."
         )
-    if is_list_value_any(attn_mask_type, AttnMaskType.INVCASUAL):
+    if is_list_value_any(attn_mask_type, AttnMaskType.INVCAUSAL):
         raise ValueError(
-            "attn_mask_type: INVCASUAL is not supported for now. This feature is coming in a near future release."
+            "attn_mask_type: INVCAUSAL is not supported for now. This feature is coming in a near future release."
         )
 
     key = DistAttnRuntimeKey(
