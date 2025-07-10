@@ -23,6 +23,18 @@ from magi_attention.utils import nvtx
 __all__ = ["range_reduce"]
 
 
+def _calc_range_reduce_row_map(
+    input_ranges: torch.Tensor, total_size: int
+) -> torch.Tensor:
+    row_map = torch.arange(0, input_ranges.shape[0], device=input_ranges.device)
+    range_sizes = input_ranges[:, 1] - input_ranges[:, 0]
+    row_map = torch.repeat_interleave(
+        row_map, range_sizes, dim=0, output_size=total_size
+    )
+
+    return row_map
+
+
 @triton.jit
 def range_reduce_kernel(
     input_ptr,
@@ -31,15 +43,12 @@ def range_reduce_kernel(
     output_ranges_ptr,
     cu_range_sizes_ptr,
     row_map_ptr,
-    n_ranges,
     input_stride,
     output_stride,
-    M,
     N: tl.constexpr,
     N_BLOCK: tl.constexpr,
     ELEM_PER_BLOCK: tl.constexpr,
 ):
-    # Current thread processes this range index
     row_idx = tl.program_id(0)
     block_idx_in_row = tl.program_id(1)
 
@@ -48,12 +57,7 @@ def range_reduce_kernel(
     row_idx_in_range = row_idx - cu_range_size
 
     input_range_start = tl.load(input_ranges_ptr + range_idx * 2)
-    input_range_end = tl.load(input_ranges_ptr + range_idx * 2 + 1)
-    input_range_size = input_range_end - input_range_start  # noqa
-
     output_range_start = tl.load(output_ranges_ptr + range_idx * 2)
-    output_range_end = tl.load(output_ranges_ptr + range_idx * 2 + 1)
-    output_range_size = output_range_end - output_range_start  # noqa
 
     inp_idx = (
         input_range_start + row_idx_in_range
@@ -65,7 +69,6 @@ def range_reduce_kernel(
     curr_out_ptr = output_ptr + out_idx
 
     is_last_block = block_idx_in_row == N_BLOCK - 1
-
     if not is_last_block:
         cols = tl.arange(0, ELEM_PER_BLOCK)
         inp = tl.load(curr_inp_ptr + cols)
@@ -119,7 +122,7 @@ def range_reduce(
         input_ranges: Tensor of [start, end] ranges in the input
         output_ranges: Tensor of [start, end] ranges in the output
         cu_range_sizes: Cumulative sizes of ranges
-        total_size: Total number of rows to process
+        total_size: Total number of rows of the input to process
         dim: Dimension along which to perform the reduction
         row_map(Optional):  mapping from row indices to range indices
         # TODO(littsk): finish deterministic reduction docstring
@@ -156,12 +159,9 @@ def range_reduce(
     input_stride = input.stride(0)
     output_stride = output.stride(0)
 
+    # Calculate row_map if not provided
     if row_map is None:
-        row_map = torch.arange(0, input_ranges.shape[0], device=input_ranges.device)
-        range_sizes = input_ranges[:, 1] - input_ranges[:, 0]
-        row_map = torch.repeat_interleave(
-            row_map, range_sizes, dim=0, output_size=total_size
-        )
+        row_map = _calc_range_reduce_row_map(input_ranges, total_size)
 
     M = total_size
     N = input.numel() // input.shape[0]
@@ -185,10 +185,8 @@ def range_reduce(
         output_ranges,
         cu_range_sizes,
         row_map,
-        n_ranges,
         input_stride,
         output_stride,
-        M,
         N,
         N_BLOCK,
         ELEM_PER_BLOCK,

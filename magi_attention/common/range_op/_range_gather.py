@@ -23,6 +23,19 @@ from magi_attention.utils import nvtx
 __all__ = ["range_gather"]
 
 
+def _calc_range_gather_row_map(
+    ranges: torch.Tensor,
+    total_size: int,
+) -> torch.Tensor:
+    row_map = torch.arange(0, ranges.shape[0], device=ranges.device)
+    range_sizes = ranges[:, 1] - ranges[:, 0]
+    row_map = torch.repeat_interleave(
+        row_map, range_sizes, dim=0, output_size=total_size
+    )
+
+    return row_map
+
+
 @triton.jit
 def range_gather_kernel(
     input_ptr,
@@ -125,12 +138,9 @@ def range_gather(
     input_stride = input.stride(0)
     output_stride = output.stride(0)
 
+    # Calculate row_map if not provided
     if row_map is None:
-        row_map = torch.arange(0, ranges.shape[0], device=ranges.device)
-        range_sizes = ranges[:, 1] - ranges[:, 0]
-        row_map = torch.repeat_interleave(
-            row_map, range_sizes, dim=0, output_size=total_size
-        )
+        row_map = _calc_range_gather_row_map(ranges, total_size)
 
     M = total_size
     N = input.numel() // input.shape[0]

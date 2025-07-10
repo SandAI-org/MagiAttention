@@ -215,65 +215,11 @@ def _calc_range_reduce_kwargs_from_ranges(
     return range_reduce_kwargs
 
 
-class HierarchicalCommBaseMetaSolver:
-    def __init__(
-        self,
-        intra_group: dist.ProcessGroup,
-        inter_group: dist.ProcessGroup,
-        use_a2av_impl: bool = True,
-    ):
-        self.use_a2av_impl = use_a2av_impl
-
-        # --------   prepare env info  -------- #
-
-        self._prepare_env_info(intra_group, inter_group)
-
-    def _prepare_env_info(
-        self,
-        intra_group: dist.ProcessGroup,
-        inter_group: dist.ProcessGroup,
-    ):
-        self.intra_group = intra_group
-        self.inter_group = inter_group
-
-        self.world_size_intra_node = dist.get_world_size(intra_group)
-        self.world_size_inter_node = dist.get_world_size(inter_group)
-
-        self.rank = dist.get_rank()
-        self.device = torch.cuda.current_device()
-        self.world_size = self.world_size_intra_node * self.world_size_inter_node
-
-        self.local_rank_intra_node = self._to_local_rank_intra_node(self.rank)
-        self.local_rank_inter_node = self._to_local_rank_inter_node(self.rank)
-
-        self.first_rank_this_intra_node = (
-            self.local_rank_inter_node * self.world_size_intra_node
-        )
-        self.last_rank_this_intra_node = (
-            self.first_rank_this_intra_node + self.world_size_intra_node - 1
-        )
-
-    def _to_local_rank_intra_node(self, r):
-        return r % self.world_size_intra_node
-
-    def _to_local_rank_inter_node(self, r):
-        return r // self.world_size_intra_node
-
-    def _is_rank_within_this_intra_node(self, r):
-        return self.first_rank_this_intra_node <= r <= self.last_rank_this_intra_node
-
-    def _to_rank_with_same_local_rank_intra_node(self, r):
-        return (
-            self._to_local_rank_inter_node(r) * self.world_size_intra_node
-            + self.local_rank_intra_node
-        )
-
-
 # ------------------        utils for group cast collective       ------------------ #
 
 
 # TODO: add ut
-class HierarchicalGroupCastMetaSolver(HierarchicalCommBaseMetaSolver):
+class HierGroupCastMetaSolver:
     def __init__(
         self,
         input_split_size_list: list[int],
@@ -284,7 +230,11 @@ class HierarchicalGroupCastMetaSolver(HierarchicalCommBaseMetaSolver):
         inter_group: dist.ProcessGroup,
         use_a2av_impl: bool = True,
     ):
-        super().__init__(intra_group, inter_group, use_a2av_impl)
+        self.use_a2av_impl = use_a2av_impl
+
+        # --------   prepare env info  -------- #
+
+        self._prepare_env_info(intra_group, inter_group)
 
         # ----   build group-cast meta for pre-intra  ---- #
 
@@ -325,13 +275,77 @@ class HierarchicalGroupCastMetaSolver(HierarchicalCommBaseMetaSolver):
         if self.use_a2av_impl:
             self._build_group_cast_a2a_meta_args_post_intra()
 
-        # ----   build a2a post-process fn ---- #
+        # ----   build hier group-cast a2a post-process fn ---- #
 
         if self.use_a2av_impl:
             self._build_group_cast_a2a_post_process_fn(
                 output_split_size_list=output_split_size_list,
                 src_index_list=src_index_list,
             )
+
+    def get_group_cast_meta_pre_intra(self):
+        return (
+            self.input_split_size_list_pre_intra,
+            self.output_split_size_list_pre_intra,
+            self.dst_indices_list_pre_intra,
+            self.src_index_list_pre_intra,
+        )
+
+    def get_group_cast_meta_inter(self):
+        return (
+            self.input_split_size_list_inter,
+            self.output_split_size_list_inter,
+            self.dst_indices_list_inter,
+            self.src_index_list_inter,
+        )
+
+    def get_group_cast_meta_post_intra(self):
+        return (
+            self.input_split_size_list_post_intra,
+            self.output_split_size_list_post_intra,
+            self.dst_indices_list_post_intra,
+            self.src_index_list_post_intra,
+        )
+
+    def _prepare_env_info(
+        self,
+        intra_group: dist.ProcessGroup,
+        inter_group: dist.ProcessGroup,
+    ):
+        self.intra_group = intra_group
+        self.inter_group = inter_group
+
+        self.world_size_intra_node = dist.get_world_size(intra_group)
+        self.world_size_inter_node = dist.get_world_size(inter_group)
+
+        self.rank = dist.get_rank()
+        self.device = torch.cuda.current_device()
+        self.world_size = self.world_size_intra_node * self.world_size_inter_node
+
+        self.local_rank_intra_node = self._to_local_rank_intra_node(self.rank)
+        self.local_rank_inter_node = self._to_local_rank_inter_node(self.rank)
+
+        self.first_rank_this_intra_node = (
+            self.local_rank_inter_node * self.world_size_intra_node
+        )
+        self.last_rank_this_intra_node = (
+            self.first_rank_this_intra_node + self.world_size_intra_node - 1
+        )
+
+    def _to_local_rank_intra_node(self, r):
+        return r % self.world_size_intra_node
+
+    def _to_local_rank_inter_node(self, r):
+        return r // self.world_size_intra_node
+
+    def _is_rank_within_this_intra_node(self, r):
+        return self.first_rank_this_intra_node <= r <= self.last_rank_this_intra_node
+
+    def _to_rank_with_same_local_rank_intra_node(self, r):
+        return (
+            self._to_local_rank_inter_node(r) * self.world_size_intra_node
+            + self.local_rank_intra_node
+        )
 
     def _filter_dst_indices_within_this_intra_node(
         self, dst_indices: list[int], return_local_rank: bool = False
@@ -380,7 +394,7 @@ class HierarchicalGroupCastMetaSolver(HierarchicalCommBaseMetaSolver):
                 output_split_size_list_pre_intra.append(output_split_size)
 
         # set pre-intra group-cast meta
-        self.output_seqlen_pre_intra = sum(output_split_size_list_pre_intra)
+        self.a2a_output_seqlen_pre_intra = sum(output_split_size_list_pre_intra)
         self.input_split_size_list_pre_intra = input_split_size_list_pre_intra
         self.dst_indices_list_pre_intra = dst_indices_list_pre_intra
         self.output_split_size_list_pre_intra = output_split_size_list_pre_intra
@@ -504,7 +518,7 @@ class HierarchicalGroupCastMetaSolver(HierarchicalCommBaseMetaSolver):
         input_split_size_list_post_intra = output_split_size_list_inter
 
         # set inter group-cast meta
-        self.output_seqlen_inter = sum(output_split_size_list_inter)
+        self.a2a_output_seqlen_inter = sum(output_split_size_list_inter)
         self.input_split_size_list_inter = input_split_size_list_inter
         self.dst_indices_list_inter = dst_indices_list_inter
         self.output_split_size_list_inter = output_split_size_list_inter
@@ -586,7 +600,7 @@ class HierarchicalGroupCastMetaSolver(HierarchicalCommBaseMetaSolver):
                     )
 
         # set post-intra group-cast meta
-        self.output_seqlen_post_intra = sum(output_split_size_list_post_intra)
+        self.a2a_output_seqlen_post_intra = sum(output_split_size_list_post_intra)
         self.output_split_size_list_post_intra = output_split_size_list_post_intra
         self.src_index_list_post_intra = src_index_list_post_intra
 
@@ -635,23 +649,32 @@ class HierarchicalGroupCastMetaSolver(HierarchicalCommBaseMetaSolver):
             ]
             for intra_offset in range(self.world_size_intra_node)
         ]
-        reorder_list = rank_list_intra + list(
+
+        self.reorder_list_hier = rank_list_intra + list(
             chain(*rank_list_per_inter_wo_this_intra_node)
         )
 
-        _, unperm_after_a2a_kwargs_hier = _calc_group_cast_a2a_output_meta_args(
+        (
+            _,
+            self.unperm_after_a2a_kwargs_hier,
+            # verbose
+            self.unperm_split_size_list_hier,
+            self.perm_index_list_hier,
+            self.unperm_index_list_hier,
+        ) = _calc_group_cast_a2a_output_meta_args(
             output_split_size_list=output_split_size_list,
             src_index_list=src_index_list,
             world_size=self.world_size,
             device=self.device,
-            reorder_list=reorder_list,
+            reorder_list=self.reorder_list_hier,
             calc_unperm_after_a2a_kwargs=True,
+            return_verbose=True,
         )
 
         # set post-process fn to unperm after a2a
-        self.post_process_fn = partial(
+        self.post_process_fn_hier = partial(
             _unpermute_tensor,
-            unperm_after_a2a_kwargs=unperm_after_a2a_kwargs_hier,
+            unperm_after_a2a_kwargs=self.unperm_after_a2a_kwargs_hier,
         )
 
 
@@ -664,12 +687,12 @@ def _init_hier_group_cast_meta_solver(
     inter_group: dist.ProcessGroup,
     use_a2av_impl: bool = True,
     **kwargs,
-) -> HierarchicalGroupCastMetaSolver:
+) -> HierGroupCastMetaSolver:
     if "hier_group_cast_meta_solver" in kwargs:
         # if pre-calculated, directly return
         return kwargs["hier_group_cast_meta_solver"]
 
-    return HierarchicalGroupCastMetaSolver(
+    return HierGroupCastMetaSolver(
         input_split_size_list=input_split_size_list,
         output_split_size_list=output_split_size_list,
         dst_indices_list=dst_indices_list,
@@ -688,7 +711,7 @@ def _hier_group_cast_impl_with_a2av(
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
-    group: Optional[dist.ProcessGroup] = None,
+    group: Optional[dist.ProcessGroup] = None,  # unused
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
@@ -703,9 +726,9 @@ def _hier_group_cast_impl_with_a2av(
     side_stream: torch.cuda.Stream = kwargs.pop("side_stream", None)
     assert side_stream is not None
 
-    # --------      get hier group-cast meta solver       -------- #
+    # ----    get hier group-cast meta solver     ---- #
 
-    meta_solver: HierarchicalGroupCastMetaSolver = _init_hier_group_cast_meta_solver(
+    meta_solver: HierGroupCastMetaSolver = _init_hier_group_cast_meta_solver(
         input_split_size_list=input_split_size_list,
         output_split_size_list=output_split_size_list,
         dst_indices_list=dst_indices_list,
@@ -716,23 +739,23 @@ def _hier_group_cast_impl_with_a2av(
         **kwargs,
     )
 
-    # --------      prepare a2a output buffer for inter       -------- #
+    # ----    prepare a2a output buffer for inter     ---- #
 
     output_other_shape = output_tensor.shape[1:]
     a2a_output_inter = torch.empty(
-        size=[meta_solver.output_seqlen_inter, *output_other_shape],
+        size=[meta_solver.a2a_output_seqlen_inter, *output_other_shape],
         dtype=input_tensor.dtype,
         device=input_tensor.device,
     )
 
-    # --------      prepare a2a input buffer for inter       -------- #
+    # ----    prepare a2a input buffer for inter     ---- #
 
     a2a_input_inter = range_gather(
         input=input_tensor,
         **meta_solver.perm_range_gather_kwargs_inter,
     )
 
-    # --------      apply a2a for inter       -------- #
+    # ----    apply a2a for inter     ---- #
 
     with nvtx.add_nvtx_event(
         (
@@ -751,22 +774,25 @@ def _hier_group_cast_impl_with_a2av(
             async_op=async_op,
         )
 
-    # --------      prepare a2a output buffer for intra     -------- #
+    # ----    prepare a2a output buffer for pre-/post-intra      ---- #
 
     a2a_output_pre_intra, a2a_output_post_intra = torch.split(
         output_tensor,
-        [meta_solver.output_seqlen_pre_intra, meta_solver.output_seqlen_post_intra],
+        [
+            meta_solver.a2a_output_seqlen_pre_intra,
+            meta_solver.a2a_output_seqlen_post_intra,
+        ],
         dim=0,
     )
 
-    # --------      prepare a2a input buffer for intra     -------- #
+    # ----    prepare a2a input buffer for pre-intra      ---- #
 
     a2a_input_pre_intra = range_gather(
         input=input_tensor,
         **meta_solver.perm_range_gather_kwargs_pre_intra,
     )
 
-    # --------      apply a2a for pre-intra       -------- #
+    # ----    apply a2a for pre-intra     ---- #
 
     with nvtx.add_nvtx_event(
         (
@@ -785,7 +811,7 @@ def _hier_group_cast_impl_with_a2av(
             async_op=async_op,
         )
 
-    # --------      prepare a2a input buffer for post-intra     -------- #
+    # ----    allocate a2a input buffer for post-intra      ---- #
 
     a2a_input_post_intra = torch.empty(
         size=[meta_solver.a2a_input_seqlen_post_intra, *output_other_shape],
@@ -795,7 +821,7 @@ def _hier_group_cast_impl_with_a2av(
 
     side_stream.wait_stream(torch.cuda.default_stream())
     with torch.cuda.stream(side_stream):
-        # --------      prepare a2a input buffer for 3rd step       -------- #
+        # ----    prepare a2a input buffer for post-intra     ---- #
 
         work_inter.wait()
         a2a_input_post_intra_ = range_gather(
@@ -804,7 +830,7 @@ def _hier_group_cast_impl_with_a2av(
             **meta_solver.perm_range_gather_kwargs_post_intra,
         )
 
-        # --------      apply a2a for 3rd step       -------- #
+        # ----    apply a2a for post-intra     ---- #
 
         with nvtx.add_nvtx_event(
             (
@@ -828,11 +854,11 @@ def _hier_group_cast_impl_with_a2av(
     a2a_input_post_intra.record_stream(side_stream)
     a2a_output_post_intra.record_stream(side_stream)
 
-    # ---------    prepare work with post-process fn    --------- #
+    # ----    prepare work with hier group-cast post-process fn    ---- #
 
     work_with_post_process_fn = WorkWithPostProcessFn(
         work=[work_pre_intra, side_stream],
-        post_process_fn=meta_solver.post_process_fn,
+        post_process_fn=meta_solver.post_process_fn_hier,
         sync=not async_op,
     )
 
@@ -1049,7 +1075,8 @@ def _calc_group_cast_a2a_output_meta_args(
     device: torch.device,
     reorder_list: list[int] | None = None,
     calc_unperm_after_a2a_kwargs: bool = True,
-) -> tuple[list[int], dict]:
+    return_verbose: bool = False,
+):
     a2a_output_split_size_per_rank: list[list[int]] = [[] for _ in range(world_size)]
     a2a_output_permute_index_list_per_rank: list[list[int]] = [
         [] for _ in range(world_size)
@@ -1090,6 +1117,16 @@ def _calc_group_cast_a2a_output_meta_args(
         )
     else:
         unperm_range_gather_kwargs = {}
+
+    if return_verbose:
+        return (
+            a2a_output_split_size,
+            unperm_range_gather_kwargs,
+            # verbose
+            a2a_output_tensor_size_list,
+            a2a_output_permute_index_list,
+            a2a_output_unpermute_index_list,
+        )
 
     return (
         a2a_output_split_size,
@@ -1200,7 +1237,7 @@ def _calc_group_cast_a2a_args(
 
 
 # TODO: add ut
-class HierarchicalGroupReduceMetaSolver(HierarchicalCommBaseMetaSolver):
+class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
     def __init__(
         self,
         input_split_size_list: list[int],
@@ -1211,48 +1248,208 @@ class HierarchicalGroupReduceMetaSolver(HierarchicalCommBaseMetaSolver):
         inter_group: dist.ProcessGroup,
         use_a2av_impl: bool = True,
     ):
-        super().__init__(intra_group, inter_group, use_a2av_impl)
+        # --------   init the symmetric hier group-cast meta solver  -------- #
 
-        # TODO
+        super().__init__(
+            input_split_size_list=output_split_size_list,
+            output_split_size_list=input_split_size_list,
+            dst_indices_list=src_indices_list,
+            src_index_list=dst_index_list,
+            intra_group=intra_group,
+            inter_group=inter_group,
+            use_a2av_impl=use_a2av_impl,
+        )
 
-    def _prepare_env_info(
-        self,
-        intra_group: dist.ProcessGroup,
-        inter_group: dist.ProcessGroup,
+        self._build()
+
+    @classmethod
+    def make_from_symmetric_hier_group_cast_meta_solver(
+        cls,
+        hier_group_cast_meta_solver: HierGroupCastMetaSolver,
     ):
-        self.intra_group = intra_group
-        self.inter_group = inter_group
+        instance = cls.__new__(cls)
+        instance.__dict__.update(hier_group_cast_meta_solver.__dict__)
+        instance._build()
+        return instance
 
-        self.world_size_intra_node = dist.get_world_size(intra_group)
-        self.world_size_inter_node = dist.get_world_size(inter_group)
+    def _build(self):
+        # ----   build group-reduce meta for pre-intra  ---- #
 
-        self.rank = dist.get_rank()
-        self.device = torch.cuda.current_device()
-        self.world_size = self.world_size_intra_node * self.world_size_inter_node
+        self._build_group_reduce_meta_args_pre_intra()
 
-        self.local_rank_intra_node = self._to_local_rank_intra_node(self.rank)
-        self.local_rank_inter_node = self._to_local_rank_inter_node(self.rank)
+        # ----   build a2a meta for pre-intra  ---- #
 
-        self.first_rank_this_intra_node = (
-            self.local_rank_inter_node * self.world_size_intra_node
+        if self.use_a2av_impl:
+            self._build_group_reduce_a2a_meta_args_pre_intra()
+
+        # ----   build group-reduce meta for post-intra  ---- #
+
+        self._build_group_reduce_meta_args_post_intra()
+
+        # ----   build a2a meta for post-intra  ---- #
+
+        if self.use_a2av_impl:
+            self._build_group_reduce_a2a_meta_args_post_intra()
+
+        # ----   build group-reduce meta for inter  ---- #
+
+        self._build_group_reduce_meta_args_inter()
+
+        # ----   build a2a meta for inter  ---- #
+
+        if self.use_a2av_impl:
+            self._build_group_reduce_a2a_meta_args_inter()
+
+        # ----   build hier group-reduce a2a pre-process fn ---- #
+
+        if self.use_a2av_impl:
+            self._build_group_reduce_a2a_pre_process_fn()
+
+    def _build_group_reduce_meta_args_pre_intra(self):
+        # build from symmetric group-cast pre-intra meta args
+        (
+            self.output_split_size_list_pre_intra,
+            self.input_split_size_list_pre_intra,
+            self.src_indices_list_pre_intra,
+            self.dst_index_list_pre_intra,
+        ) = self.get_group_cast_meta_pre_intra()
+
+    def _build_group_reduce_a2a_meta_args_pre_intra(self):
+        # a2a input meta args
+        (
+            self.a2a_input_split_size_pre_intra,
+            _,  # perm_range_gather_kwargs_pre_intra,
+        ) = _calc_group_reduce_a2a_input_meta_args(
+            input_split_size_list=self.input_split_size_list_pre_intra,
+            dst_index_list=self.dst_index_list_pre_intra,
+            world_size=self.world_size_intra_node,
+            device=self.device,
         )
-        self.last_rank_this_intra_node = (
-            self.first_rank_this_intra_node + self.world_size_intra_node - 1
+
+        # a2a output meta args
+        (
+            self.a2a_output_split_size_pre_intra,
+            self.range_reduce_kwargs_pre_intra,
+        ) = _calc_group_reduce_a2a_output_meta_args(
+            output_split_size_list=self.output_split_size_list_pre_intra,
+            src_indices_list=self.src_indices_list_pre_intra,
+            world_size=self.world_size_intra_node,
+            device=self.device,
         )
 
-    def _to_local_rank_intra_node(self, r):
-        return r % self.world_size_intra_node
+        # get the pre-intra a2a input seqlen from the corr. a2a output seqlen for hier group-cast
+        self.a2a_input_seqlen_pre_intra = self.a2a_output_seqlen_pre_intra
+        # sanity check
+        assert self.a2a_input_seqlen_pre_intra == sum(
+            self.a2a_input_split_size_pre_intra
+        )
 
-    def _to_local_rank_inter_node(self, r):
-        return r // self.world_size_intra_node
+        # reset the pre-intra a2a output seqlen
+        self.a2a_output_seqlen_pre_intra = sum(self.a2a_output_split_size_pre_intra)
 
-    def _is_rank_within_this_intra_node(self, r):
-        return self.first_rank_this_intra_node <= r <= self.last_rank_this_intra_node
+    def _build_group_reduce_meta_args_post_intra(self):
+        # build from symmetric group-cast post-intra meta args
+        (
+            self.output_split_size_list_post_intra,
+            self.input_split_size_list_post_intra,
+            self.src_indices_list_post_intra,
+            self.dst_index_list_post_intra,
+        ) = self.get_group_cast_meta_post_intra()
 
-    def _to_rank_with_same_local_rank_intra_node(self, r):
-        return (
-            self._to_local_rank_inter_node(r) * self.world_size_intra_node
-            + self.local_rank_intra_node
+    def _build_group_reduce_a2a_meta_args_post_intra(self):
+        # a2a input meta args
+        (
+            self.a2a_input_split_size_post_intra,
+            _,  # perm_range_gather_kwargs_post_intra,
+        ) = _calc_group_reduce_a2a_input_meta_args(
+            input_split_size_list=self.input_split_size_list_post_intra,
+            dst_index_list=self.dst_index_list_post_intra,
+            world_size=self.world_size_intra_node,
+            device=self.device,
+        )
+
+        # a2a output meta args
+        (
+            self.a2a_output_split_size_post_intra,
+            self.range_reduce_kwargs_post_intra,
+        ) = _calc_group_reduce_a2a_output_meta_args(
+            output_split_size_list=self.output_split_size_list_post_intra,
+            src_indices_list=self.src_indices_list_post_intra,
+            world_size=self.world_size_intra_node,
+            device=self.device,
+        )
+
+        # get the post-intra a2a input/output seqlen from the corr. a2a output/input seqlen for hier group-cast
+        (
+            self.a2a_input_seqlen_post_intra,
+            self.a2a_output_seqlen_post_intra,
+        ) = (
+            self.a2a_output_seqlen_post_intra,
+            self.a2a_input_seqlen_post_intra,
+        )
+
+        # sanity check
+        assert self.a2a_input_seqlen_post_intra == sum(
+            self.a2a_input_split_size_post_intra
+        )
+        assert self.a2a_output_seqlen_post_intra == sum(
+            self.a2a_output_split_size_post_intra
+        )
+
+    def _build_group_reduce_meta_args_inter(self):
+        # build from symmetric group-cast inter meta args
+        (
+            self.output_split_size_list_inter,
+            self.input_split_size_list_inter,
+            self.src_indices_list_inter,
+            self.dst_index_list_inter,
+        ) = self.get_group_cast_meta_inter()
+
+    def _build_group_reduce_a2a_meta_args_inter(self):
+        # a2a input meta args
+        (
+            self.a2a_input_split_size_inter,
+            _,  # perm_range_gather_kwargs_inter
+        ) = _calc_group_reduce_a2a_input_meta_args(
+            input_split_size_list=self.input_split_size_list_inter,
+            dst_index_list=self.dst_index_list_inter,
+            world_size=self.world_size_inter_node,
+            device=self.device,
+        )
+
+        # a2a output meta args
+        (
+            self.a2a_output_split_size_inter,
+            self.range_reduce_kwargs_inter,
+        ) = _calc_group_reduce_a2a_output_meta_args(
+            output_split_size_list=self.output_split_size_list_inter,
+            src_indices_list=self.src_indices_list_inter,
+            world_size=self.world_size_inter_node,
+            device=self.device,
+        )
+
+        # get the inter a2a input seqlen from the corr. a2a output seqlen for hier group-cast
+        self.a2a_input_seqlen_inter = self.a2a_output_seqlen_inter
+        # sanity check
+        assert self.a2a_input_seqlen_inter == sum(self.a2a_input_split_size_inter)
+
+        # reset the inter a2a output seqlen
+        self.a2a_output_seqlen_inter = sum(self.a2a_output_split_size_inter)
+
+    def _build_group_reduce_a2a_pre_process_fn(self):
+        self.perm_split_size_list_hier = [
+            self.unperm_split_size_list_hier[idx] for idx in self.unperm_index_list_hier
+        ]
+        self.perm_before_a2a_kwargs_hier = (
+            _calc_unperm_range_gather_kwargs_from_split_size_list(
+                split_size_list=self.perm_split_size_list_hier,
+                unpermute_index_list=self.perm_index_list_hier,
+                device=self.device,
+            )
+        )
+
+        self.pre_process_fn_hier = partial(
+            _unpermute_tensor, unperm_after_a2a_kwargs=self.perm_before_a2a_kwargs_hier
         )
 
 
@@ -1265,12 +1462,12 @@ def _init_hier_group_reduce_meta_solver(
     inter_group: dist.ProcessGroup,
     use_a2av_impl: bool = True,
     **kwargs,
-) -> HierarchicalGroupReduceMetaSolver:
+) -> HierGroupReduceMetaSolver:
     if "hier_group_reduce_meta_solver" in kwargs:
         # if pre-calculated, directly return
         return kwargs["hier_group_reduce_meta_solver"]
 
-    return HierarchicalGroupReduceMetaSolver(
+    return HierGroupReduceMetaSolver(
         input_split_size_list=input_split_size_list,
         output_split_size_list=output_split_size_list,
         dst_index_list=dst_index_list,
@@ -1289,7 +1486,7 @@ def _hier_group_reduce_impl_with_a2av(
     output_split_size_list: list[int],
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
-    group: Optional[dist.ProcessGroup] = None,
+    group: Optional[dist.ProcessGroup] = None,  # unused
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
@@ -1304,23 +1501,159 @@ def _hier_group_reduce_impl_with_a2av(
     side_stream: torch.cuda.Stream = kwargs.pop("side_stream", None)
     assert side_stream is not None
 
-    # --------      get hier group-reduce meta solver       -------- #
+    # ----    get hier group-reduce meta solver     ---- #
 
-    # meta_solver: HierarchicalGroupReduceMetaSolver = (
-    #     _init_hier_group_reduce_meta_solver(
-    #         input_split_size_list=input_split_size_list,
-    #         output_split_size_list=output_split_size_list,
-    #         dst_index_list=dst_index_list,
-    #         src_indices_list=src_indices_list,
-    #         intra_group=intra_group,
-    #         inter_group=inter_group,
-    #         use_a2av_impl=True,  # for now, only support a2av impl
-    #         **kwargs,
-    #     )
-    # )
+    meta_solver: HierGroupReduceMetaSolver = _init_hier_group_reduce_meta_solver(
+        input_split_size_list=input_split_size_list,
+        output_split_size_list=output_split_size_list,
+        dst_index_list=dst_index_list,
+        src_indices_list=src_indices_list,
+        intra_group=intra_group,
+        inter_group=inter_group,
+        use_a2av_impl=True,  # for now, only support a2av impl
+        **kwargs,
+    )
 
-    # TODO
-    raise NotImplementedError
+    # ----    hier group-reduce a2a pre-process    ---- #
+
+    perm_input_tensor = meta_solver.pre_process_fn_hier(input_tensor)
+
+    # ----    prepare a2a input buffer for pre-/post-intra    ---- #
+
+    a2a_input_pre_intra, a2a_input_post_intra = torch.split(
+        perm_input_tensor,
+        [
+            meta_solver.a2a_input_seqlen_pre_intra,
+            meta_solver.a2a_input_seqlen_post_intra,
+        ],
+        dim=0,
+    )
+
+    # ----    allocate a2a output buffer for pre-intra    ---- #
+
+    output_other_shape = output_tensor.shape[1:]
+    a2a_output_pre_intra = torch.empty(
+        size=[meta_solver.a2a_output_seqlen_pre_intra, *output_other_shape],
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+
+    # ----    apply a2a for pre-intra     ---- #
+
+    with nvtx.add_nvtx_event(
+        (
+            f"{a2a_output_pre_intra.shape=} | "
+            f"{a2a_input_pre_intra.shape=} | "
+            f"{meta_solver.a2a_output_split_size_pre_intra=} | "
+            f"{meta_solver.a2a_input_split_size_pre_intra=}"
+        )
+    ):
+        work_pre_intra = dist.all_to_all_single(
+            output=a2a_output_pre_intra,
+            input=a2a_input_pre_intra,
+            output_split_sizes=meta_solver.a2a_output_split_size_pre_intra,
+            input_split_sizes=meta_solver.a2a_input_split_size_pre_intra,
+            group=intra_group,
+            async_op=async_op,
+        )
+        work_pre_intra.wait()  # FIXME: for now use sync op for debug
+
+    # ----    reduce pre-intra to output     ---- #
+
+    output_tensor_ = range_reduce(
+        input=a2a_output_pre_intra,
+        output=output_tensor,
+        **meta_solver.range_reduce_kwargs_pre_intra,
+    )
+    output_tensor.data.copy_(
+        output_tensor_
+    )  # FIXME: triton does not support atomic add for bf16/fp16
+
+    # ----    allocate a2a output buffer for post-intra    ---- #
+
+    a2a_output_post_intra = torch.empty(
+        size=[meta_solver.a2a_output_seqlen_post_intra, *output_other_shape],
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+
+    # ----    apply a2a for post-intra     ---- #
+
+    with nvtx.add_nvtx_event(
+        (
+            f"{a2a_output_post_intra.shape=} | "
+            f"{a2a_input_post_intra.shape=} | "
+            f"{meta_solver.a2a_output_split_size_post_intra=} | "
+            f"{meta_solver.a2a_input_split_size_post_intra=}"
+        )
+    ):
+        work_post_intra = dist.all_to_all_single(
+            output=a2a_output_post_intra,
+            input=a2a_input_post_intra,
+            output_split_sizes=meta_solver.a2a_output_split_size_post_intra,
+            input_split_sizes=meta_solver.a2a_input_split_size_post_intra,
+            group=intra_group,
+            async_op=async_op,
+        )
+        work_post_intra.wait()  # FIXME: for now use sync op for debug
+
+    # ----    prepare a2a input buffer for inter    ---- #
+
+    a2a_input_inter = torch.zeros(
+        size=[meta_solver.a2a_input_seqlen_inter, *output_other_shape],
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+
+    a2a_input_inter = range_reduce(
+        input=a2a_output_post_intra,
+        output=a2a_input_inter,
+        **meta_solver.range_reduce_kwargs_post_intra,
+    )
+
+    # ----    allocate a2a output buffer for inter    ---- #
+
+    a2a_output_inter = torch.empty(
+        size=[meta_solver.a2a_output_seqlen_inter, *output_other_shape],
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+
+    # ----    apply a2a for inter     ---- #
+
+    with nvtx.add_nvtx_event(
+        (
+            f"{a2a_output_inter.shape=} | "
+            f"{a2a_input_inter.shape=} | "
+            f"{meta_solver.a2a_output_split_size_inter=} | "
+            f"{meta_solver.a2a_input_split_size_inter=}"
+        )
+    ):
+        work_inter = dist.all_to_all_single(
+            output=a2a_output_inter,
+            input=a2a_input_inter,
+            output_split_sizes=meta_solver.a2a_output_split_size_inter,
+            input_split_sizes=meta_solver.a2a_input_split_size_inter,
+            group=inter_group,
+            async_op=async_op,
+        )
+        work_inter.wait()  # FIXME: for now use sync op for debug
+
+    # ----    prepare work with hier group-reduce post-process fn    ---- #
+
+    post_process_fn_hier = partial(
+        _reduce_to_tensor,
+        a2a_output=a2a_output_inter,
+        range_reduce_kwargs=meta_solver.range_reduce_kwargs_inter,
+    )
+
+    work_with_post_process_fn = WorkWithPostProcessFn(
+        work=None,  # FIXME: for now use sync op for debug
+        post_process_fn=post_process_fn_hier,
+        sync=not async_op,
+    )
+
+    return work_with_post_process_fn
 
 
 def sanity_check_for_group_reduce_meta_args_per_rank(
