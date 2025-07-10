@@ -457,6 +457,16 @@ class HierGroupCastMetaSolver:
         self.a2a_output_split_size_post_intra = a2a_output_split_size_post_intra
         self.perm_range_gather_kwargs_post_intra = perm_range_gather_kwargs_post_intra
 
+        # HACK: this is a helper side stream
+        # to apply async intermediate range-gather before post-intra a2a for hierarchical group-cast
+        # NOTE: we need to allocate each comm for corr. stage a separate stream
+        # to avoid the side stream being blocked by other comms for later stages
+        # since we probably set `CUDA_DEVICE_MAX_CONNECTIONS > 1`
+        # when all the comms are issued in advance of all the calcs
+        # however, this will introduce cuda-malloc ops when applying range-gather for each comm
+        # TODO: use the nccl stream to synchronize directly with magi nccl backend
+        self.a2a_post_intra_side_stream = torch.cuda.Stream()
+
     def _build_group_cast_a2a_post_process_fn(
         self,
         output_split_size_list: list[int],
@@ -549,9 +559,6 @@ def hier_group_cast_impl_with_a2av(
     inter_group = kwargs.pop("inter_group", None)
     assert intra_group is not None and inter_group is not None
 
-    side_stream: torch.cuda.Stream = kwargs.pop("side_stream", None)
-    assert side_stream is not None
-
     # ----    get hier group-cast meta solver     ---- #
 
     meta_solver: HierGroupCastMetaSolver = init_hier_group_cast_meta_solver(
@@ -630,6 +637,7 @@ def hier_group_cast_impl_with_a2av(
         device=input_tensor.device,
     )
 
+    side_stream = meta_solver.a2a_post_intra_side_stream
     side_stream.wait_stream(torch.cuda.default_stream())
     with torch.cuda.stream(side_stream):
         # ----    prepare a2a input buffer for post-intra     ---- #
@@ -926,6 +934,16 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         # reset the inter a2a output seqlen
         self.a2a_output_seqlen_inter = sum(self.a2a_output_split_size_inter)
 
+        # HACK: this is a helper side stream
+        # to apply async intermediate range-reduce before inter a2a for hierarchical group-reduce
+        # NOTE: we need to allocate each comm for corr. stage a separate stream
+        # to avoid the side stream being blocked by other comms for later stages
+        # since we probably set `CUDA_DEVICE_MAX_CONNECTIONS > 1`
+        # when all the comms are issued in advance of all the calcs
+        # however, this will introduce cuda-malloc ops when applying range-gather for each comm
+        # TODO: use the nccl stream to synchronize directly with magi nccl backend
+        self.a2a_inter_side_stream = torch.cuda.Stream()
+
     def _build_group_reduce_a2a_pre_process_fn(self):
         self.perm_split_size_list_hier = [
             self.unperm_split_size_list_hier[idx] for idx in self.unperm_index_list_hier
@@ -997,9 +1015,6 @@ def hier_group_reduce_impl_with_a2av(
     inter_group = kwargs.pop("inter_group", None)
     assert intra_group is not None and inter_group is not None
 
-    side_stream: torch.cuda.Stream = kwargs.pop("side_stream", None)
-    assert side_stream is not None
-
     # ----    get hier group-reduce meta solver     ---- #
 
     meta_solver: HierGroupReduceMetaSolver = init_hier_group_reduce_meta_solver(
@@ -1065,6 +1080,7 @@ def hier_group_reduce_impl_with_a2av(
         device=input_tensor.device,
     )
 
+    side_stream = meta_solver.a2a_inter_side_stream
     side_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side_stream):
         # ----    prepare a2a input buffer for inter    ---- #

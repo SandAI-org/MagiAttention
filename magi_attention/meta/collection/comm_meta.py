@@ -101,15 +101,6 @@ class GroupCollectiveArg:
             dict(
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
-                # HACK: this is a helper side stream
-                # to apply async intermediate range-gather in the post-intra step for hierarchical group-cast
-                # NOTE: we need to allocate each comm for corr. stage a separate stream
-                # to avoid the side stream being blocked by other comms for later stages
-                # since we probably set `CUDA_DEVICE_MAX_CONNECTIONS > 1`
-                # when all the comms are issued in advance of all the calcs
-                # however, this will introduce cuda-malloc ops when applying range-gather for each comm
-                # TODO: use the nccl stream to synchronize directly with magi nccl backend
-                side_stream=torch.cuda.Stream(),
             )
         )
 
@@ -125,8 +116,6 @@ class GroupCollectiveArg:
             dict(
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
-                # TODO: add docs
-                side_stream=torch.cuda.Stream(),
                 sym_hier_group_cast_meta_solver=(
                     self.group_cast_args_dict_kv_packed.get(
                         "hier_group_cast_meta_solver", None

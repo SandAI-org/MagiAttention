@@ -53,12 +53,10 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             )
             self.intra_group = device_mesh.get_group("intra")
             self.inter_group = device_mesh.get_group("inter")
-            self.side_stream = torch.cuda.Stream()
             self.support_hier_comm = True
         else:
             self.intra_group = None
             self.inter_group = None
-            self.side_stream = None
             self.support_hier_comm = False
 
     @property
@@ -314,7 +312,6 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                 # NOTE: args below for hierarchical comm
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
-                side_stream=self.side_stream,
             )
 
             # post process
@@ -494,7 +491,6 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                 # NOTE: args below for hierarchical comm
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
-                side_stream=self.side_stream,
             )
 
         # post process
