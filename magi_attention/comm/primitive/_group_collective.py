@@ -21,12 +21,11 @@ import magi_attention
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.utils import nvtx
 
-from .utils import (
-    _calc_group_cast_a2a_args,
-    _calc_group_reduce_a2a_args,
-    _hier_group_cast_impl_with_a2av,
-    _hier_group_reduce_impl_with_a2av,
+from ._group_collective_hier import (
+    hier_group_cast_impl_with_a2av,
+    hier_group_reduce_impl_with_a2av,
 )
+from .utils import _calc_group_cast_a2a_args, _calc_group_reduce_a2a_args
 
 __all__ = [
     "group_cast_collective",
@@ -107,7 +106,7 @@ def group_cast_collective(
 
     if magi_attention.comm.is_hierarchical_comm_enable():
         # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-cast
-        return _hier_group_cast_impl_with_a2av(
+        return hier_group_cast_impl_with_a2av(
             input_tensor=input,
             output_tensor=output,
             input_split_size_list=input_split_size_list,
@@ -234,7 +233,7 @@ def group_reduce_collective(
 
     if magi_attention.comm.is_hierarchical_comm_enable():
         # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-reduce
-        return _hier_group_reduce_impl_with_a2av(
+        return hier_group_reduce_impl_with_a2av(
             input_tensor=input,
             output_tensor=output,
             input_split_size_list=input_split_size_list,

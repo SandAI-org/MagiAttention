@@ -18,13 +18,15 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
+from magi_attention.comm.primitive._group_collective_hier import (
+    init_hier_group_cast_meta_solver,
+    init_hier_group_reduce_meta_solver,
+)
 from magi_attention.comm.primitive.utils import (
     _calc_group_cast_a2a_input_meta_args,
     _calc_group_cast_a2a_output_meta_args,
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
-    _init_hier_group_cast_meta_solver,
-    _init_hier_group_reduce_meta_solver,
 )
 
 
@@ -114,7 +116,7 @@ class GroupCollectiveArg:
         # init the hierarchial group-cast meta solver
         (
             self.group_cast_args_dict_kv_packed["hier_group_cast_meta_solver"]
-        ) = _init_hier_group_cast_meta_solver(
+        ) = init_hier_group_cast_meta_solver(
             **self.group_cast_args_dict_kv_packed,
         )
 
@@ -136,7 +138,7 @@ class GroupCollectiveArg:
         # init the hierarchial group-reduce meta solver
         (
             self.group_reduce_args_dict_kv_packed["hier_group_reduce_meta_solver"]
-        ) = _init_hier_group_reduce_meta_solver(
+        ) = init_hier_group_reduce_meta_solver(
             **self.group_reduce_args_dict_kv_packed,
         )
 
