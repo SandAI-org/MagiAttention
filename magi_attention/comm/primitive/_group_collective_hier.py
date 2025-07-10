@@ -14,7 +14,7 @@
 
 from functools import partial
 from itertools import chain
-from typing import Optional
+from typing import Callable
 
 import torch
 import torch.distributed as dist
@@ -536,7 +536,7 @@ def hier_group_cast_impl_with_a2av(
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
-    group: Optional[dist.ProcessGroup] = None,  # unused
+    group: dist.ProcessGroup | None = None,  # unused
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
@@ -627,7 +627,8 @@ def hier_group_cast_impl_with_a2av(
             f"{meta_solver.a2a_input_split_size_pre_intra=}"
         )
     ):
-        work_pre_intra = dist.all_to_all_single(
+        # work_pre_intra = \
+        dist.all_to_all_single(
             output=a2a_output_pre_intra,
             input=a2a_input_pre_intra,
             output_split_sizes=meta_solver.a2a_output_split_size_pre_intra,
@@ -675,14 +676,20 @@ def hier_group_cast_impl_with_a2av(
             )
         work_post_intra.wait()
 
+    # TODO: pre-allocate the buffer to avoid record stream
     a2a_output_inter.record_stream(side_stream)
     a2a_input_post_intra.record_stream(side_stream)
     a2a_output_post_intra.record_stream(side_stream)
 
     # ----    prepare work with hier group-cast post-process fn    ---- #
 
+    # NOTE: no need to wait for work_pre_intra explicitly here
+    # since side_stream will wait for work_post_intra,
+    # which is issued after work_pre_intra's completion
+    # thus we only need to wait for side_stream
     work_with_post_process_fn = WorkWithPostProcessFn(
-        work=[work_pre_intra, side_stream],
+        # work=[work_pre_intra, side_stream],
+        work=side_stream,
         post_process_fn=meta_solver.post_process_fn_hier,
         sync=not async_op,
     )
@@ -728,6 +735,55 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         instance.__dict__.update(sym_hier_group_cast_meta_solver.__dict__)
         instance._build()
         return instance
+
+    def get_group_reduce_meta_pre_intra(self):
+        return (
+            self.input_split_size_list_pre_intra,
+            self.output_split_size_list_pre_intra,
+            self.dst_index_list_pre_intra,
+            self.src_indices_list_pre_intra,
+        )
+
+    def get_group_reduce_meta_inter(self):
+        return (
+            self.input_split_size_list_inter,
+            self.output_split_size_list_inter,
+            self.dst_index_list_inter,
+            self.src_indices_list_inter,
+        )
+
+    def get_group_reduce_meta_post_intra(self):
+        return (
+            self.input_split_size_list_post_intra,
+            self.output_split_size_list_post_intra,
+            self.dst_index_list_post_intra,
+            self.src_indices_list_post_intra,
+        )
+
+    def make_group_reduce_a2a_post_process_fn(
+        self,
+        a2a_output_pre_intra: torch.Tensor,
+        a2a_output_inter: torch.Tensor,
+    ) -> Callable[[torch.Tensor], torch.Tensor]:
+        post_process_fn_pre_intra = partial(
+            _reduce_to_tensor,
+            a2a_output=a2a_output_pre_intra,
+            range_reduce_kwargs=self.range_reduce_kwargs_pre_intra,
+        )
+
+        post_process_fn_inter = partial(
+            _reduce_to_tensor,
+            a2a_output=a2a_output_inter,
+            range_reduce_kwargs=self.range_reduce_kwargs_inter,
+        )
+
+        def post_process_fn_hier(output_tensor: torch.Tensor) -> torch.Tensor:
+            post_process_fn_pre_intra(output_tensor)
+            post_process_fn_inter(output_tensor)
+
+            return output_tensor
+
+        return post_process_fn_hier
 
     def _build(self):
         # ----   build group-reduce meta for pre-intra  ---- #
@@ -952,7 +1008,7 @@ def hier_group_reduce_impl_with_a2av(
     output_split_size_list: list[int],
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
-    group: Optional[dist.ProcessGroup] = None,  # unused
+    group: dist.ProcessGroup | None = None,  # unused
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
@@ -995,45 +1051,9 @@ def hier_group_reduce_impl_with_a2av(
         dim=0,
     )
 
-    # ----    allocate a2a output buffer for pre-intra    ---- #
-
-    output_other_shape = output_tensor.shape[1:]
-    a2a_output_pre_intra = torch.empty(
-        size=[meta_solver.a2a_output_seqlen_pre_intra, *output_other_shape],
-        dtype=input_tensor.dtype,
-        device=input_tensor.device,
-    )
-
-    # ----    apply a2a for pre-intra     ---- #
-
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output_pre_intra.shape=} | "
-            f"{a2a_input_pre_intra.shape=} | "
-            f"{meta_solver.a2a_output_split_size_pre_intra=} | "
-            f"{meta_solver.a2a_input_split_size_pre_intra=}"
-        )
-    ):
-        work_pre_intra = dist.all_to_all_single(
-            output=a2a_output_pre_intra,
-            input=a2a_input_pre_intra,
-            output_split_sizes=meta_solver.a2a_output_split_size_pre_intra,
-            input_split_sizes=meta_solver.a2a_input_split_size_pre_intra,
-            group=intra_group,
-            async_op=async_op,
-        )
-        work_pre_intra.wait()  # FIXME: for now use sync op for debug
-
-    # ----    reduce pre-intra to output     ---- #
-
-    range_reduce(
-        input=a2a_output_pre_intra,
-        output=output_tensor,
-        **meta_solver.range_reduce_kwargs_pre_intra,
-    )
-
     # ----    allocate a2a output buffer for post-intra    ---- #
 
+    output_other_shape = output_tensor.shape[1:]
     a2a_output_post_intra = torch.empty(
         size=[meta_solver.a2a_output_seqlen_post_intra, *output_other_shape],
         dtype=input_tensor.dtype,
@@ -1058,21 +1078,6 @@ def hier_group_reduce_impl_with_a2av(
             group=intra_group,
             async_op=async_op,
         )
-        work_post_intra.wait()  # FIXME: for now use sync op for debug
-
-    # ----    prepare a2a input buffer for inter    ---- #
-
-    a2a_input_inter = torch.zeros(
-        size=[meta_solver.a2a_input_seqlen_inter, *output_other_shape],
-        dtype=input_tensor.dtype,
-        device=input_tensor.device,
-    )
-
-    a2a_input_inter = range_reduce(
-        input=a2a_output_post_intra,
-        output=a2a_input_inter,
-        **meta_solver.range_reduce_kwargs_post_intra,
-    )
 
     # ----    allocate a2a output buffer for inter    ---- #
 
@@ -1082,36 +1087,91 @@ def hier_group_reduce_impl_with_a2av(
         device=input_tensor.device,
     )
 
-    # ----    apply a2a for inter     ---- #
+    # ----    allocate a2a input buffer for inter    ---- #
+
+    # NOTE: since it needs to be reduced, we need a zero buffer
+    a2a_input_inter = torch.zeros(
+        size=[meta_solver.a2a_input_seqlen_inter, *output_other_shape],
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+
+    side_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side_stream):
+        # ----    prepare a2a input buffer for inter    ---- #
+
+        work_post_intra.wait()
+        range_reduce(
+            input=a2a_output_post_intra,
+            output=a2a_input_inter,
+            **meta_solver.range_reduce_kwargs_post_intra,
+        )
+
+        # ----    apply a2a for inter     ---- #
+
+        with nvtx.add_nvtx_event(
+            (
+                f"{a2a_output_inter.shape=} | "
+                f"{a2a_input_inter.shape=} | "
+                f"{meta_solver.a2a_output_split_size_inter=} | "
+                f"{meta_solver.a2a_input_split_size_inter=}"
+            )
+        ):
+            work_inter = dist.all_to_all_single(
+                output=a2a_output_inter,
+                input=a2a_input_inter,
+                output_split_sizes=meta_solver.a2a_output_split_size_inter,
+                input_split_sizes=meta_solver.a2a_input_split_size_inter,
+                group=inter_group,
+                async_op=async_op,
+            )
+        work_inter.wait()
+
+    # TODO: pre-allocate the buffer to avoid record stream
+    a2a_output_post_intra.record_stream(side_stream)
+    a2a_input_inter.record_stream(side_stream)
+    a2a_output_inter.record_stream(side_stream)
+
+    # ----    allocate a2a output buffer for pre-intra    ---- #
+
+    a2a_output_pre_intra = torch.empty(
+        size=[meta_solver.a2a_output_seqlen_pre_intra, *output_other_shape],
+        dtype=input_tensor.dtype,
+        device=input_tensor.device,
+    )
+
+    # ----    apply a2a for pre-intra     ---- #
 
     with nvtx.add_nvtx_event(
         (
-            f"{a2a_output_inter.shape=} | "
-            f"{a2a_input_inter.shape=} | "
-            f"{meta_solver.a2a_output_split_size_inter=} | "
-            f"{meta_solver.a2a_input_split_size_inter=}"
+            f"{a2a_output_pre_intra.shape=} | "
+            f"{a2a_input_pre_intra.shape=} | "
+            f"{meta_solver.a2a_output_split_size_pre_intra=} | "
+            f"{meta_solver.a2a_input_split_size_pre_intra=}"
         )
     ):
-        work_inter = dist.all_to_all_single(
-            output=a2a_output_inter,
-            input=a2a_input_inter,
-            output_split_sizes=meta_solver.a2a_output_split_size_inter,
-            input_split_sizes=meta_solver.a2a_input_split_size_inter,
-            group=inter_group,
+        work_pre_intra = dist.all_to_all_single(
+            output=a2a_output_pre_intra,
+            input=a2a_input_pre_intra,
+            output_split_sizes=meta_solver.a2a_output_split_size_pre_intra,
+            input_split_sizes=meta_solver.a2a_input_split_size_pre_intra,
+            group=intra_group,
             async_op=async_op,
         )
-        work_inter.wait()  # FIXME: for now use sync op for debug
 
     # ----    prepare work with hier group-reduce post-process fn    ---- #
 
-    post_process_fn_hier = partial(
-        _reduce_to_tensor,
-        a2a_output=a2a_output_inter,
-        range_reduce_kwargs=meta_solver.range_reduce_kwargs_inter,
+    post_process_fn_hier = meta_solver.make_group_reduce_a2a_post_process_fn(
+        a2a_output_pre_intra=a2a_output_pre_intra,
+        a2a_output_inter=a2a_output_inter,
     )
 
+    # NOTE: different from hier group-cast,
+    # we have to wait for work_pre_intra explicitly here
+    # since waiting for side_stream only guarantees
+    # work_post_intra and work_inter is done
     work_with_post_process_fn = WorkWithPostProcessFn(
-        work=None,  # FIXME: for now use sync op for debug
+        work=[work_pre_intra, side_stream],
         post_process_fn=post_process_fn_hier,
         sync=not async_op,
     )
