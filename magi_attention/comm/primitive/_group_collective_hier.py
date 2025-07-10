@@ -23,6 +23,7 @@ from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.utils import nvtx
 
+from ._all2all_v import all2all_v
 from .utils import (
     _calc_group_cast_a2a_input_meta_args,
     _calc_group_cast_a2a_output_meta_args,
@@ -582,22 +583,14 @@ def hier_group_cast_impl_with_a2av(
 
     # ----    apply a2a for inter     ---- #
 
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output_inter.shape=} | "
-            f"{a2a_input_inter.shape=} | "
-            f"{meta_solver.a2a_output_split_size_inter=} | "
-            f"{meta_solver.a2a_input_split_size_inter=}"
-        )
-    ):
-        work_inter = dist.all_to_all_single(
-            output=a2a_output_inter,
-            input=a2a_input_inter,
-            output_split_sizes=meta_solver.a2a_output_split_size_inter,
-            input_split_sizes=meta_solver.a2a_input_split_size_inter,
-            group=inter_group,
-            async_op=async_op,
-        )
+    work_inter = all2all_v(
+        input=a2a_input_inter,
+        output=a2a_output_inter,
+        input_split_size_list=meta_solver.a2a_input_split_size_inter,
+        output_split_size_list=meta_solver.a2a_output_split_size_inter,
+        group=inter_group,
+        async_op=async_op,
+    )
 
     # ----    prepare a2a output buffer for pre-/post-intra      ---- #
 
@@ -619,23 +612,15 @@ def hier_group_cast_impl_with_a2av(
 
     # ----    apply a2a for pre-intra     ---- #
 
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output_pre_intra.shape=} | "
-            f"{a2a_input_pre_intra.shape=} | "
-            f"{meta_solver.a2a_output_split_size_pre_intra=} | "
-            f"{meta_solver.a2a_input_split_size_pre_intra=}"
-        )
-    ):
-        # work_pre_intra = \
-        dist.all_to_all_single(
-            output=a2a_output_pre_intra,
-            input=a2a_input_pre_intra,
-            output_split_sizes=meta_solver.a2a_output_split_size_pre_intra,
-            input_split_sizes=meta_solver.a2a_input_split_size_pre_intra,
-            group=intra_group,
-            async_op=async_op,
-        )
+    # work_pre_intra = \
+    all2all_v(
+        input=a2a_input_pre_intra,
+        output=a2a_output_pre_intra,
+        input_split_size_list=meta_solver.a2a_input_split_size_pre_intra,
+        output_split_size_list=meta_solver.a2a_output_split_size_pre_intra,
+        group=intra_group,
+        async_op=async_op,
+    )
 
     # ----    allocate a2a input buffer for post-intra      ---- #
 
@@ -658,22 +643,14 @@ def hier_group_cast_impl_with_a2av(
 
         # ----    apply a2a for post-intra     ---- #
 
-        with nvtx.add_nvtx_event(
-            (
-                f"{a2a_output_post_intra.shape=} | "
-                f"{a2a_input_post_intra.shape=} | "
-                f"{meta_solver.a2a_output_split_size_post_intra=} | "
-                f"{meta_solver.a2a_input_split_size_post_intra=}"
-            )
-        ):
-            work_post_intra = dist.all_to_all_single(
-                output=a2a_output_post_intra,
-                input=a2a_input_post_intra_,
-                output_split_sizes=meta_solver.a2a_output_split_size_post_intra,
-                input_split_sizes=meta_solver.a2a_input_split_size_post_intra,
-                group=intra_group,
-                async_op=async_op,
-            )
+        work_post_intra = all2all_v(
+            input=a2a_input_post_intra_,
+            output=a2a_output_post_intra,
+            input_split_size_list=meta_solver.a2a_input_split_size_post_intra,
+            output_split_size_list=meta_solver.a2a_output_split_size_post_intra,
+            group=intra_group,
+            async_op=async_op,
+        )
         work_post_intra.wait()
 
     # TODO: pre-allocate the buffer to avoid record stream
@@ -1062,22 +1039,14 @@ def hier_group_reduce_impl_with_a2av(
 
     # ----    apply a2a for post-intra     ---- #
 
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output_post_intra.shape=} | "
-            f"{a2a_input_post_intra.shape=} | "
-            f"{meta_solver.a2a_output_split_size_post_intra=} | "
-            f"{meta_solver.a2a_input_split_size_post_intra=}"
-        )
-    ):
-        work_post_intra = dist.all_to_all_single(
-            output=a2a_output_post_intra,
-            input=a2a_input_post_intra,
-            output_split_sizes=meta_solver.a2a_output_split_size_post_intra,
-            input_split_sizes=meta_solver.a2a_input_split_size_post_intra,
-            group=intra_group,
-            async_op=async_op,
-        )
+    work_post_intra = all2all_v(
+        input=a2a_input_post_intra,
+        output=a2a_output_post_intra,
+        input_split_size_list=meta_solver.a2a_input_split_size_post_intra,
+        output_split_size_list=meta_solver.a2a_output_split_size_post_intra,
+        group=intra_group,
+        async_op=async_op,
+    )
 
     # ----    allocate a2a output buffer for inter    ---- #
 
@@ -1109,22 +1078,14 @@ def hier_group_reduce_impl_with_a2av(
 
         # ----    apply a2a for inter     ---- #
 
-        with nvtx.add_nvtx_event(
-            (
-                f"{a2a_output_inter.shape=} | "
-                f"{a2a_input_inter.shape=} | "
-                f"{meta_solver.a2a_output_split_size_inter=} | "
-                f"{meta_solver.a2a_input_split_size_inter=}"
-            )
-        ):
-            work_inter = dist.all_to_all_single(
-                output=a2a_output_inter,
-                input=a2a_input_inter,
-                output_split_sizes=meta_solver.a2a_output_split_size_inter,
-                input_split_sizes=meta_solver.a2a_input_split_size_inter,
-                group=inter_group,
-                async_op=async_op,
-            )
+        work_inter = all2all_v(
+            input=a2a_input_inter,
+            output=a2a_output_inter,
+            input_split_size_list=meta_solver.a2a_input_split_size_inter,
+            output_split_size_list=meta_solver.a2a_output_split_size_inter,
+            group=inter_group,
+            async_op=async_op,
+        )
         work_inter.wait()
 
     # TODO: pre-allocate the buffer to avoid record stream
@@ -1142,22 +1103,14 @@ def hier_group_reduce_impl_with_a2av(
 
     # ----    apply a2a for pre-intra     ---- #
 
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output_pre_intra.shape=} | "
-            f"{a2a_input_pre_intra.shape=} | "
-            f"{meta_solver.a2a_output_split_size_pre_intra=} | "
-            f"{meta_solver.a2a_input_split_size_pre_intra=}"
-        )
-    ):
-        work_pre_intra = dist.all_to_all_single(
-            output=a2a_output_pre_intra,
-            input=a2a_input_pre_intra,
-            output_split_sizes=meta_solver.a2a_output_split_size_pre_intra,
-            input_split_sizes=meta_solver.a2a_input_split_size_pre_intra,
-            group=intra_group,
-            async_op=async_op,
-        )
+    work_pre_intra = all2all_v(
+        input=a2a_input_pre_intra,
+        output=a2a_output_pre_intra,
+        input_split_size_list=meta_solver.a2a_input_split_size_pre_intra,
+        output_split_size_list=meta_solver.a2a_output_split_size_pre_intra,
+        group=intra_group,
+        async_op=async_op,
+    )
 
     # ----    prepare work with hier group-reduce post-process fn    ---- #
 
