@@ -226,7 +226,9 @@ public:
                     bool tile_valid = false;
 
                     if constexpr (RangeMerge) {
-                        int loop_count = bidb_idx < *params.scheduler.unique_count - 1 ? params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx] : params.scheduler.num_batch - params.scheduler.range_map[bidb_idx];
+                        int loop_count = (bidb_idx < *params.scheduler.unique_count - 1)
+                        ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                        : (params.scheduler.num_batch - params.scheduler.range_map[bidb_idx]);
                         int bidb_start = params.scheduler.range_map[bidb_idx];
 
                         for (int idx = 0; idx < loop_count; ++idx) {
@@ -259,7 +261,9 @@ public:
                     auto [n_block, bidh, bidb_idx] = block_coord_;
 
                     if constexpr (RangeMerge) {
-                        int loop_count = bidb_idx < *params.scheduler.unique_count - 1 ? params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx] : params.scheduler.num_batch - params.scheduler.range_map[bidb_idx];
+                        int loop_count = (bidb_idx < *params.scheduler.unique_count - 1)
+                        ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                        : (params.scheduler.num_batch - params.scheduler.range_map[bidb_idx]);
                         int bidb_start = params.scheduler.range_map[bidb_idx];
                         
                         for (int idx = 0; idx < loop_count; ++idx) {
@@ -302,7 +306,9 @@ public:
 
                 if constexpr (RangeMerge) {
                     int bidb_idx = get<2>(block_coord);
-                    int loop_count = bidb_idx < *params.scheduler.unique_count - 1 ? params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx] : params.scheduler.num_batch - params.scheduler.range_map[bidb_idx];
+                    int loop_count = (bidb_idx < *params.scheduler.unique_count - 1)
+                    ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                    : (params.scheduler.num_batch - params.scheduler.range_map[bidb_idx]);
                     int bidb_start = params.scheduler.range_map[bidb_idx];
                     
                     for (int idx = 0; idx < loop_count; ++idx) {
