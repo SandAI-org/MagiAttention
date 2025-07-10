@@ -21,7 +21,7 @@ from magi_attention.utils import nvtx
 # isort: off
 # We need to import the CUDA kernels after importing torch
 import flexible_flash_attention_cuda
-from magi_attention.functional.merge_range import find_unique_pairs
+from magi_attention.functional.merge_range import unique_consecutive_pairs
 
 # isort: on
 
@@ -33,14 +33,36 @@ def maybe_contiguous(x):
 def merge_ranges(
     outer_ranges: torch.Tensor, inner_ranges: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    torch.cuda.nvtx.range_push("merge_ranges")
+    """Sorts and deduplicates range tensors that represent Q-K attention block pairs.
+
+    Args:
+        outer_ranges (torch.Tensor): A tensor of shape `[num_ranges, 2]`,
+            representing the outer ranges (e.g., Q-block ranges).
+        inner_ranges (torch.Tensor): A tensor of shape `[num_ranges, 2]`,
+            where each row is paired with the corresponding row in
+            `outer_ranges`, representing the inner ranges (e.g., K-block ranges).
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        A tuple containing five tensors:
+        - merge_outer_ranges (torch.Tensor): The consecutive and unique ranges
+          extracted from `outer_ranges`. Shape: `[unique_ranges, 2]`.
+        - sorted_outer_ranges (torch.Tensor): The original `outer_ranges` tensor
+          after being sorted. Shape: `[num_ranges, 2]`.
+        - sorted_inner_ranges (torch.Tensor): The original `inner_ranges` tensor,
+          reordered to match the sorting of `outer_ranges`. Shape: `[num_ranges, 2]`.
+        - range_map (torch.Tensor): The inverse index map. A tensor of shape
+          `[num_ranges]`, where the value `range_map[i]` is the index of
+          `sorted_outer_ranges[i]` in the `merge_outer_ranges` tensor.
+        - unique_count (torch.Tensor): A scalar tensor containing a single
+          integer, representing the number of unique ranges in `merge_outer_ranges`.
+    """
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
     sorted_inner_ranges = inner_ranges[sorted_idx]
-    torch.cuda.nvtx.range_push("find_unique_pairs")
-    merge_outer_ranges, range_map, unique_count = find_unique_pairs(sorted_outer_ranges)
-    torch.cuda.nvtx.range_pop()
-    torch.cuda.nvtx.range_pop()
+    merge_outer_ranges, range_map, unique_count = unique_consecutive_pairs(
+        sorted_outer_ranges
+    )
 
     return (
         merge_outer_ranges,

@@ -521,7 +521,7 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
         // Check unique_count (dtype, device, layout)
         TORCH_CHECK(unique_count.dtype() == torch::kInt32, "unique_count must have dtype torch.int32");
         CHECK_DEVICE(unique_count);
-        CHECK_SHAPE(unique_count, 1);
+        CHECK_SHAPE(unique_count);
         CHECK_CONTIGUOUS(unique_count);
     }
     
@@ -794,7 +794,7 @@ std::vector<at::Tensor> mha_bwd(
         // Check dtype, device and layout
         TORCH_CHECK(bwd_unique_count.dtype() == torch::kInt32, "bwd_kq_map must have dtype torch.int32");
         CHECK_DEVICE(bwd_unique_count);
-        CHECK_SHAPE(bwd_unique_count, 1);
+        CHECK_SHAPE(bwd_unique_count);
     }
     // Check head_size
     int const max_headdim = get_max_headdim();

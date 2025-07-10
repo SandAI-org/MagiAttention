@@ -16,7 +16,7 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.functional.merge_range import find_unique_pairs
+from magi_attention.functional.merge_range import unique_consecutive_pairs
 
 
 class TestMergeRange(TestCase):
@@ -44,7 +44,7 @@ class TestMergeRange(TestCase):
         sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
         sorted_outer_ranges = outer_ranges[sorted_idx]
         sorted_inner_ranges = inner_ranges[sorted_idx]
-        merge_outer_ranges, range_map, unique_count = find_unique_pairs(
+        merge_outer_ranges, range_map, unique_count = unique_consecutive_pairs(
             sorted_outer_ranges
         )
 
