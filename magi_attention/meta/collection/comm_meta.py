@@ -62,15 +62,17 @@ class GroupCollectiveArg:
 
         # ----   group reduce args dict for packed kv  ---- #
 
-        self.group_reduce_args_dict_kv_packed = {
-            k: v * 2  # concat kv along seqlen dim
-            for k, v in {
-                "input_split_size_list": self.output_split_size_list,
-                "output_split_size_list": self.input_split_size_list,
-                "dst_index_list": self.src_index_list,
-                "src_indices_list": self.dst_indices_list,
-            }.items()
-        }
+        # symmetric to group-cast
+        self.group_reduce_args_dict_kv_packed = dict(
+            input_split_size_list=self.group_cast_args_dict_kv_packed[
+                "output_split_size_list"
+            ],
+            output_split_size_list=self.group_cast_args_dict_kv_packed[
+                "input_split_size_list"
+            ],
+            dst_index_list=self.group_cast_args_dict_kv_packed["src_index_list"],
+            src_indices_list=self.group_cast_args_dict_kv_packed["dst_indices_list"],
+        )
 
         # ----   additional kwargs  ---- #
 
@@ -123,6 +125,11 @@ class GroupCollectiveArg:
                 inter_group=self.inter_group,
                 # TODO: add docs
                 side_stream=torch.cuda.Stream(),
+                sym_hier_group_cast_meta_solver=(
+                    self.group_cast_args_dict_kv_packed.get(
+                        "hier_group_cast_meta_solver", None
+                    )
+                ),
             )
         )
 

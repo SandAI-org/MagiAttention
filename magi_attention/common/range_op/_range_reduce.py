@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
 
 import torch
 import triton
@@ -109,9 +108,9 @@ def range_reduce(
     cu_range_sizes: torch.Tensor,
     total_size: int,
     dim: int = 0,
-    row_map: Optional[torch.Tensor] = None,
+    row_map: torch.Tensor | None = None,
     deterministic: bool = False,
-    range_split_sizes: Optional[torch.Tensor] = None,
+    range_split_sizes: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Reduce values from input tensor to output tensor based on specified ranges.

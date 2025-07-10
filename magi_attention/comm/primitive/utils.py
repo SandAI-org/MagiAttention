@@ -690,7 +690,7 @@ def _init_hier_group_cast_meta_solver(
 ) -> HierGroupCastMetaSolver:
     if "hier_group_cast_meta_solver" in kwargs:
         # if pre-calculated, directly return
-        return kwargs["hier_group_cast_meta_solver"]
+        return kwargs.pop("hier_group_cast_meta_solver")
 
     return HierGroupCastMetaSolver(
         input_split_size_list=input_split_size_list,
@@ -1263,12 +1263,12 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         self._build()
 
     @classmethod
-    def make_from_symmetric_hier_group_cast_meta_solver(
+    def make_from_sym_hier_group_cast_meta_solver(
         cls,
-        hier_group_cast_meta_solver: HierGroupCastMetaSolver,
-    ):
+        sym_hier_group_cast_meta_solver: HierGroupCastMetaSolver,
+    ) -> "HierGroupReduceMetaSolver":
         instance = cls.__new__(cls)
-        instance.__dict__.update(hier_group_cast_meta_solver.__dict__)
+        instance.__dict__.update(sym_hier_group_cast_meta_solver.__dict__)
         instance._build()
         return instance
 
@@ -1465,7 +1465,16 @@ def _init_hier_group_reduce_meta_solver(
 ) -> HierGroupReduceMetaSolver:
     if "hier_group_reduce_meta_solver" in kwargs:
         # if pre-calculated, directly return
-        return kwargs["hier_group_reduce_meta_solver"]
+        return kwargs.pop("hier_group_reduce_meta_solver")
+
+    if "sym_hier_group_cast_meta_solver" in kwargs:
+        # if the symmetric hier group-cast meta solver exists
+        # then use it to build the hier group-reduce meta solver to avoid re-calculating
+        return HierGroupReduceMetaSolver.make_from_sym_hier_group_cast_meta_solver(
+            sym_hier_group_cast_meta_solver=kwargs.pop(
+                "sym_hier_group_cast_meta_solver"
+            )
+        )
 
     return HierGroupReduceMetaSolver(
         input_split_size_list=input_split_size_list,
