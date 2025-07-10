@@ -15,6 +15,7 @@
 #include <torch/extension.h>
 #include <vector>
 #include <cuda_runtime.h>
+#include <cub/device/device_scan.cuh>
 
 #define CUDA_CHECK(err) { \
     TORCH_CHECK(err == cudaSuccess, "CUDA Error: ", cudaGetErrorString(err)); \
@@ -95,11 +96,17 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
 
     // --- Pass 2: compute unique_count and exclusive_sum from d_flags  ---
     auto d_unique_count_out = d_flags.sum(torch::kInt32);
-    auto inclusive_sum = torch::cumsum(d_flags, 0, torch::kInt32);  // inclusive_sum
-    // get exclusive_sum from d_flags
-    auto zero_prefix = torch::zeros({1}, sorted_input_tensor.options().dtype(torch::kInt32));
-    auto rest_of_sum = inclusive_sum.slice(/*dim=*/0, /*start=*/0, /*end=*/n - 1);
-    d_write_indices = torch::cat({zero_prefix, rest_of_sum}, /*dim=*/0);
+
+    void* d_temp_storage_scan = nullptr;
+    size_t temp_storage_bytes_scan = 0;
+    cub::Sum scan_op;
+    int initial_value = 0;
+
+    cub::DeviceScan::ExclusiveScan(d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n);
+    auto d_temp_storage_tensor = torch::empty({(long)temp_storage_bytes_scan}, sorted_input_tensor.options().dtype(torch::kByte));
+    // Get the raw pointer from this byte tensor. It now points to a memory block of the exact required size.
+    d_temp_storage_scan = d_temp_storage_tensor.data_ptr();
+    cub::DeviceScan::ExclusiveScan(d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n);
 
     // --- out elements ---
     int h_unique_n = n;  // set elements to total_element_num to avoid sync between cpu and gpu.

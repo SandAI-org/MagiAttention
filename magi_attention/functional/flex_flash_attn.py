@@ -46,7 +46,7 @@ def merge_ranges(
         tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         A tuple containing five tensors:
         - merge_outer_ranges (torch.Tensor): The consecutive and unique ranges
-          extracted from `outer_ranges`. Shape: `[unique_ranges, 2]`.
+          extracted from `outer_ranges`. Shape: `[num_ranges, 2]`.
         - sorted_outer_ranges (torch.Tensor): The original `outer_ranges` tensor
           after being sorted. Shape: `[num_ranges, 2]`.
         - sorted_inner_ranges (torch.Tensor): The original `inner_ranges` tensor,
@@ -56,6 +56,41 @@ def merge_ranges(
           `sorted_outer_ranges[i]` in the `merge_outer_ranges` tensor.
         - unique_count (torch.Tensor): A scalar tensor containing a single
           integer, representing the number of unique ranges in `merge_outer_ranges`.
+
+    Example:
+        >>> outer_ranges = torch.tensor([[20, 30], [10, 20], [10, 20], [20, 30]], device='cuda', type=torch.int32)
+        >>> inner_ranges = torch.tensor([[100, 110], [120, 130], [140, 150], [160, 170]], device='cuda', type=torch.int32)
+        >>> (
+        ...     merge_outer_ranges,
+        ...     sorted_outer_ranges,
+        ...     sorted_inner_ranges,
+        ...     range_map,
+        ...     unique_count,
+        ... ) = merge_ranges(outer_ranges, inner_ranges)
+        >>> print("Unique Merged Outer Ranges:", merge_outer_ranges)
+        Unique Merged Outer Ranges:
+         tensor([[10, 20],
+                [20, 30],
+                [0, 0],
+                [0, 0]])
+        >>> print("Sorted Outer Ranges:", sorted_outer_ranges)
+        Sorted Outer Ranges:
+         tensor([[10, 20],
+                [10, 20],
+                [20, 30],
+                [20, 30]])
+        >>> print("Sorted Inner Ranges (paired with sorted outer):", sorted_inner_ranges)
+        Sorted Inner Ranges (paired with sorted outer):
+         tensor([[120, 130],
+                [140, 150],
+                [100, 110],
+                [160, 170]])
+        >>> print("Range Map (inverse indices):", range_map)
+        Range Map (inverse indices):
+         tensor([0, 2, 0, 0])
+        >>> print("Unique Count:", unique_count)
+        Unique Count:
+         tensor(2, dtype=torch.int32)
     """
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
