@@ -120,7 +120,8 @@ void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
         params.max_seqlen_q, params.d, params.d, sizeof(Element),
         params.tile_count_semaphore, params.cu_seqlens_k, params.k_ranges, params.seqused_k, nullptr,
         params.merge_k_ranges,
-        params.bwd_kq_map
+        params.bwd_kq_map,
+        params.bwd_unique_count,
     };
 
     int device;

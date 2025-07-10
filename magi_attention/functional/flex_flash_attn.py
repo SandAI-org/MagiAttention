@@ -21,6 +21,7 @@ from magi_attention.utils import nvtx
 # isort: off
 # We need to import the CUDA kernels after importing torch
 import flexible_flash_attention_cuda
+from magi_attention.functional.merge_range import unique_consecutive_pairs
 
 # isort: on
 
@@ -31,16 +32,80 @@ def maybe_contiguous(x):
 
 def merge_ranges(
     outer_ranges: torch.Tensor, inner_ranges: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sorts and deduplicates range tensors that represent Q-K attention block pairs.
+
+    Args:
+        outer_ranges (torch.Tensor): A tensor of shape `[num_ranges, 2]`,
+            representing the outer ranges (e.g., Q-block ranges).
+        inner_ranges (torch.Tensor): A tensor of shape `[num_ranges, 2]`,
+            where each row is paired with the corresponding row in
+            `outer_ranges`, representing the inner ranges (e.g., K-block ranges).
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        A tuple containing five tensors:
+        - merge_outer_ranges (torch.Tensor): The consecutive and unique ranges
+          extracted from `outer_ranges`. Shape: `[num_ranges, 2]`.
+        - sorted_outer_ranges (torch.Tensor): The original `outer_ranges` tensor
+          after being sorted. Shape: `[num_ranges, 2]`.
+        - sorted_inner_ranges (torch.Tensor): The original `inner_ranges` tensor,
+          reordered to match the sorting of `outer_ranges`. Shape: `[num_ranges, 2]`.
+        - range_map (torch.Tensor): The inverse index map. A tensor of shape
+          `[num_ranges]`, where the value `range_map[i]` is the index of
+          `sorted_outer_ranges[i]` in the `merge_outer_ranges` tensor.
+        - unique_count (torch.Tensor): A scalar tensor containing a single
+          integer, representing the number of unique ranges in `merge_outer_ranges`.
+
+    Example:
+        >>> outer_ranges = torch.tensor([[20, 30], [10, 20], [10, 20], [20, 30]], device='cuda', type=torch.int32)
+        >>> inner_ranges = torch.tensor([[100, 110], [120, 130], [140, 150], [160, 170]], device='cuda', type=torch.int32)
+        >>> (
+        ...     merge_outer_ranges,
+        ...     sorted_outer_ranges,
+        ...     sorted_inner_ranges,
+        ...     range_map,
+        ...     unique_count,
+        ... ) = merge_ranges(outer_ranges, inner_ranges)
+        >>> print("Unique Merged Outer Ranges:", merge_outer_ranges)
+        Unique Merged Outer Ranges:
+         tensor([[10, 20],
+                [20, 30],
+                [0, 0],
+                [0, 0]])
+        >>> print("Sorted Outer Ranges:", sorted_outer_ranges)
+        Sorted Outer Ranges:
+         tensor([[10, 20],
+                [10, 20],
+                [20, 30],
+                [20, 30]])
+        >>> print("Sorted Inner Ranges (paired with sorted outer):", sorted_inner_ranges)
+        Sorted Inner Ranges (paired with sorted outer):
+         tensor([[120, 130],
+                [140, 150],
+                [100, 110],
+                [160, 170]])
+        >>> print("Range Map (inverse indices):", range_map)
+        Range Map (inverse indices):
+         tensor([0, 2, 0, 0])
+        >>> print("Unique Count:", unique_count)
+        Unique Count:
+         tensor(2, dtype=torch.int32)
+    """
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
     sorted_inner_ranges = inner_ranges[sorted_idx]
-    merge_outer_ranges, inverse_idx, counts = torch.unique_consecutive(
-        sorted_outer_ranges, dim=0, return_inverse=True, return_counts=True
+    merge_outer_ranges, range_map, unique_count = unique_consecutive_pairs(
+        sorted_outer_ranges
     )
-    range_map = torch.cumsum(counts, dim=0, dtype=torch.int32)
 
-    return merge_outer_ranges, sorted_outer_ranges, sorted_inner_ranges, range_map
+    return (
+        merge_outer_ranges,
+        sorted_outer_ranges,
+        sorted_inner_ranges,
+        range_map,
+        unique_count,
+    )
 
 
 @nvtx.instrument_nvtx
@@ -55,6 +120,7 @@ def _flex_flash_attn_forward(
     attn_type_map,
     merge_q_ranges,
     qk_map,
+    unique_count,
     softmax_scale,
     softcap,
     deterministic,
@@ -84,6 +150,7 @@ def _flex_flash_attn_forward(
             attn_type_map,
             merge_q_ranges,
             qk_map,
+            unique_count,
             softmax_scale,
             softcap,
             sm_margin,
@@ -109,6 +176,7 @@ def _flex_flash_attn_backward(
     attn_type_map,
     merge_k_ranges,
     bwd_kq_map,
+    bwd_unique_count,
     softmax_scale,
     softcap,
     deterministic,
@@ -149,6 +217,7 @@ def _flex_flash_attn_backward(
             attn_type_map,
             merge_k_ranges,
             bwd_kq_map,
+            bwd_unique_count,
             softmax_scale,
             softcap,
             torch.float32,
@@ -190,12 +259,20 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ), "max_seqlen_k must be an int, otherwise would lead to performance degradation"
 
         if auto_range_merge:
-            merge_q_ranges, fwd_q_ranges, fwd_k_ranges, fwd_qk_map = merge_ranges(
-                q_ranges, k_ranges
-            )
-            merge_k_ranges, bwd_k_ranges, bwd_q_ranges, bwd_kq_map = merge_ranges(
-                k_ranges, q_ranges
-            )
+            (
+                merge_q_ranges,
+                fwd_q_ranges,
+                fwd_k_ranges,
+                fwd_qk_map,
+                fwd_unique_count,
+            ) = merge_ranges(q_ranges, k_ranges)
+            (
+                merge_k_ranges,
+                bwd_k_ranges,
+                bwd_q_ranges,
+                bwd_kq_map,
+                bwd_unique_count,
+            ) = merge_ranges(k_ranges, q_ranges)
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -205,6 +282,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_k_ranges = None
             fwd_qk_map = None
             bwd_kq_map = None
+            fwd_unique_count = None
+            bwd_unique_count = None
 
         out, softmax_lse = _flex_flash_attn_forward(
             q,
@@ -217,6 +296,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             attn_type_map,
             merge_q_ranges,
             fwd_qk_map,
+            fwd_unique_count,
             softmax_scale,
             softcap,
             deterministic,
@@ -237,6 +317,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 attn_type_map,
                 merge_k_ranges,
                 bwd_kq_map,
+                bwd_unique_count,
             )
         else:
             ctx.save_for_backward(
@@ -267,6 +348,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 attn_type_map,
                 merge_k_ranges,
                 bwd_kq_map,
+                bwd_unique_count,
             ) = ctx.saved_tensors
         else:
             (
@@ -281,6 +363,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ) = ctx.saved_tensors
             merge_k_ranges = None
             bwd_kq_map = None
+            bwd_unique_count = None
 
         dq, dk, dv, _ = _flex_flash_attn_backward(
             dout,
@@ -296,6 +379,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             attn_type_map,
             merge_k_ranges,
             bwd_kq_map,
+            bwd_unique_count,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
             deterministic=ctx.deterministic,
