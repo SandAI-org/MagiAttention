@@ -535,7 +535,6 @@ struct CollectiveEpilogueFwd {
 
         int offset_o = seqlen_info.offset_q;
         int seqlen_o = seqlen_info.seqlen_q;
-        int qhead_per_khead = 1;
         Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE + offset_o * get<0>(params.stride_LSE)),
                                   params.shape_LSE,
                                   params.stride_LSE)(_, bidh);

@@ -7,6 +7,8 @@
 #include <cuda.h>
 #include <vector>
 
+#include <torch/extension.h>
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Qkv_params {
@@ -39,7 +41,6 @@ struct Flash_fwd_params : public Qkv_params {
 
     // The O matrix (output).
     void * __restrict__ o_ptr;
-    void * __restrict__ oaccum_ptr;
 
     // The stride between rows of O.
     index_t o_batch_stride;
@@ -49,17 +50,6 @@ struct Flash_fwd_params : public Qkv_params {
     // The pointer to the softmax sum.
     void * __restrict__ softmax_lse_ptr;
     void * __restrict__ softmax_lseaccum_ptr;
-
-    // For FP8 scaling
-    float * __restrict__ q_descale_ptr;
-    float * __restrict__ k_descale_ptr;
-    float * __restrict__ v_descale_ptr;
-    index_t q_descale_batch_stride;
-    index_t q_descale_head_stride;
-    index_t k_descale_batch_stride;
-    index_t k_descale_head_stride;
-    index_t v_descale_batch_stride;
-    index_t v_descale_head_stride;
 
     // The dimensions.
     // b = q_ranges.shape[0]; seqlen_q: max_seqlen_q, seqlen_k: max_seqlen_k
@@ -82,93 +72,16 @@ struct Flash_fwd_params : public Qkv_params {
     int * __restrict__ merge_k_ranges;
     int * __restrict__ bwd_kq_map;
 
-    // array of length b+1 holding starting offset of each sequence.
-    int * __restrict__ cu_seqlens_q;
-    int * __restrict__ cu_seqlens_k;
-    int * __restrict__ cu_seqlens_knew;
-    int * __restrict__ leftpad_k;
+    at::ScalarType compute_type;
+    at::ScalarType out_type;
 
-    // If provided, the actual length of each q/k sequence.
-    int *__restrict__ seqused_q;
-    int *__restrict__ seqused_k;
-
-    // The stride between rows of Oaccum.
-    index_t oaccum_split_stride;
-    index_t oaccum_batch_stride;
-    index_t oaccum_row_stride;
-    index_t oaccum_head_stride;
-
-    // The stride between rows of LSEaccum.
-    index_t lseaccum_split_stride;
-    index_t lseaccum_batch_stride;
-    index_t lseaccum_head_stride;
-
-    // The K_new and V_new matrices.
-    void * __restrict__ knew_ptr;
-    void * __restrict__ vnew_ptr;
-
-    // The stride between rows of the Q, K and V matrices.
-    index_t knew_batch_stride;
-    index_t vnew_batch_stride;
-    index_t knew_row_stride;
-    index_t vnew_row_stride;
-    index_t knew_head_stride;
-    index_t vnew_head_stride;
-
-    void *__restrict__ qv_ptr;
-    index_t qv_batch_stride;
-    index_t qv_row_stride;
-    index_t qv_head_stride;
-
-    // The cos and sin matrices for rotary embedding.
-    void * __restrict__ rotary_cos_ptr;
-    void * __restrict__ rotary_sin_ptr;
-    int *__restrict__ seqlens_rotary;
-
-    // The indices to index into the KV cache.
-    int * __restrict__ kv_batch_idx;
-
-    // Paged KV cache
-    int * __restrict__ page_table;
-    index_t page_table_batch_stride;
-    int page_size;
-    int num_pages;
-    bool pagedkv_tma;
-
-    // The dropout probability (probability of keeping an activation).
-    float p_dropout;
-    // uint32_t p_dropout_in_uint;
-    // uint16_t p_dropout_in_uint16_t;
-    uint8_t p_dropout_in_uint8_t;
-
-    // Scale factor of 1 / (1 - p_dropout).
-    float rp_dropout;
-
-    // Local window size
-    int window_size_left, window_size_right;
-
-    // Pointer to the RNG seed (idx 0) and offset (idx 1).
-    uint64_t * rng_state;
-
-    bool is_bf16;
-    bool is_fp32;
-    bool is_e4m3;
-    bool is_causal;
-    bool is_local;
-    bool is_fp32_out;
-
-    bool is_rotary_interleaved;
     bool disable_fwd_atomic_reduction;
-
-    int num_splits;  // For split-KV version
-    bool pack_gqa;
 
     int * __restrict__ tile_count_semaphore;
     int * __restrict__ range_locks;
     // int * __restrict__ num_m_blocks_ptr;
     // int * __restrict__ num_n_blocks_ptr;
     int * __restrict__ num_splits_dynamic_ptr;
-    bool skip_scheduler_metadata_computation;
 
     int arch;
     int num_sm;
@@ -178,6 +91,10 @@ struct Flash_fwd_params : public Qkv_params {
 
 struct Flash_bwd_params : public Flash_fwd_params {
     using index_t = int64_t;
+
+    at::ScalarType dkv_type;
+
+    bool disable_bwd_dkv_atomic_reduction;
 
     // The dO and dQKV matrices.
     void *__restrict__ do_ptr;
@@ -225,7 +142,7 @@ struct Flash_bwd_params : public Flash_fwd_params {
 template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction>
 void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
 
-template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap>
+template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction>
 void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
 
 template <typename T_out, uint32_t kHeadDim>

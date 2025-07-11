@@ -616,7 +616,6 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum);  // (TMA, TMA_M, TMA_K)
         Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
-        int const num_head = get<2>(params.shape_Q);
         using Barrier = cutlass::GenericBarrier<cutlass::detail::SyncwarpSync>;
         bool const lane_predicate = cute::elect_one_sync();
         int m_block = m_block_min;

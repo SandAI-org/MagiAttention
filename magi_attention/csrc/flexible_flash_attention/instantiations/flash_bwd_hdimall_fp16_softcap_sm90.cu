@@ -1,0 +1,22 @@
+// Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
+// Splitting the different template instantiations to different files to speed up compilation.
+// This file is auto-generated. See "generate_kernels.py"
+
+#include "flash_bwd_hdim64_fp16_fp16_softcap_sm90.cu"
+#include "flash_bwd_hdim64_fp16_fp16_softcap_disable_bwd_dkv_atomic_reduction_sm90.cu"
+#include "flash_bwd_hdim128_fp16_fp16_softcap_sm90.cu"
+#include "flash_bwd_hdim128_fp16_fp16_softcap_disable_bwd_dkv_atomic_reduction_sm90.cu"
+#include "flash_bwd_hdim192_fp16_fp16_softcap_sm90.cu"
+#include "flash_bwd_hdim192_fp16_fp16_softcap_disable_bwd_dkv_atomic_reduction_sm90.cu"
+#include "flash_bwd_hdim64_fp16_bf16_softcap_sm90.cu"
+#include "flash_bwd_hdim64_fp16_bf16_softcap_disable_bwd_dkv_atomic_reduction_sm90.cu"
+#include "flash_bwd_hdim128_fp16_bf16_softcap_sm90.cu"
+#include "flash_bwd_hdim128_fp16_bf16_softcap_disable_bwd_dkv_atomic_reduction_sm90.cu"
+#include "flash_bwd_hdim192_fp16_bf16_softcap_sm90.cu"
+#include "flash_bwd_hdim192_fp16_bf16_softcap_disable_bwd_dkv_atomic_reduction_sm90.cu"
+#include "flash_bwd_hdim64_fp16_fp32_softcap_sm90.cu"
+#include "flash_bwd_hdim64_fp16_fp32_softcap_disable_bwd_dkv_atomic_reduction_sm90.cu"
+#include "flash_bwd_hdim128_fp16_fp32_softcap_sm90.cu"
+#include "flash_bwd_hdim128_fp16_fp32_softcap_disable_bwd_dkv_atomic_reduction_sm90.cu"
+#include "flash_bwd_hdim192_fp16_fp32_softcap_sm90.cu"
+#include "flash_bwd_hdim192_fp16_fp32_softcap_disable_bwd_dkv_atomic_reduction_sm90.cu"

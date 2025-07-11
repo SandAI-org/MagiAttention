@@ -153,7 +153,7 @@ struct CollectiveMainloopFwdSm90 {
     using GmemTiledCopyKV = decltype(cutlass::gemm::collective::detail::sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape{})));
     
     // Set the shape and stride for Q and KV
-    using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>;  // (seqlen, d, head, batch)
+    using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>;  // (seqlen, head_dim, num_heads)
     using StrideQK = cute::Stride<int64_t, _1, int64_t>;
     using StrideV = StrideQK;
     
