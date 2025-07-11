@@ -750,10 +750,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 if self.rank == 0 and iter == prof_end_iter:
                     torch.cuda.profiler.stop()
 
-            # -----    barrier at the beginning of each iteration   ---- #
-
-            dist.barrier()
-            torch.cuda.synchronize()
+                # barrier at the beginning of each iteration
+                dist.barrier()
+                torch.cuda.synchronize()
 
             # -----    init dist attn runtime mgr   ---- #
 
@@ -812,6 +811,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
             # -----   run dist attn forward on local qkv for local o   ---- #
 
+            if profile_mode:
+                # barrier before fwd to wait for the processes with slow solver
+                dist.barrier()
+                torch.cuda.synchronize()
+
             local_out, _ = dist_attn_runtime_mgr.calc_attn(local_q, local_k, local_v)
 
             # -----   undispatch local o to global o   ---- #
@@ -823,6 +827,12 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if run_bwd:
                 grad_total_out = torch.randn_like(total_out).detach()
                 dist.all_reduce(grad_total_out.data, group=self.nccl_group)
+
+                if profile_mode:
+                    # barrier before bwd to wait for the processes with slow fwd
+                    dist.barrier()
+                    torch.cuda.synchronize()
+
                 total_out.backward(grad_total_out)
                 grad_total_q, grad_total_k, grad_total_v = (
                     total_q.grad,

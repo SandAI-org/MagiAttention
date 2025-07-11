@@ -15,11 +15,43 @@
 import torch
 import torch.distributed as dist
 
-from .utils import _get_dims_as_trans_with_dim0, _trans_with_dim0
+from magi_attention.utils import nvtx
 
 __all__ = ["all_gather_v"]
 
 
+def _trans_with_dim0(x: torch.Tensor, dim: int = 0) -> torch.Tensor:
+    is_first_dim = dim == 0 or (dim == -1 and len(x.shape) == 1)
+
+    if not is_first_dim:
+        x = x.transpose(0, dim)
+    if not x.is_contiguous():
+        x = x.contiguous()
+
+    return x
+
+
+def _split_dims(
+    x_shape: list[int],
+    dim: int = 0,
+) -> tuple[int, list[int]]:
+    shape_len = len(x_shape)
+    assert dim == -1 or 0 <= dim < len(
+        x_shape
+    ), f"dim should be in [0, {shape_len - 1}) or -1"
+
+    this_dim = x_shape[dim]
+
+    other_dims = x_shape.copy()
+    other_dims[0] = this_dim
+    other_dims[dim] = x_shape[0]
+    other_dims = other_dims[1:]
+
+    return this_dim, other_dims
+
+
+@torch.no_grad()
+@nvtx.instrument_nvtx
 def all_gather_v(
     x_local: torch.Tensor,
     group: dist.ProcessGroup,
@@ -33,7 +65,7 @@ def all_gather_v(
     Args:
         x_local (torch.Tensor): the local tensor to be gathered
         group (dist.ProcessGroup): the process group to be used
-        dim (int): the dim to be gathered along
+        dim (int): the dim to be gathered along. Defaults to 0.
         split_sizes (list[int] | None): the split sizes along the dim,
             where len(split_sizes) should equal to the world size of the group,
                 and split_sizes[rank] is the dim size of this local tensor,
@@ -44,29 +76,19 @@ def all_gather_v(
         torch.Tensor: the gathered tensor 'x_gather'
     """
 
-    rank, world_size = dist.get_rank(group), dist.get_world_size(group)
-    x_local_shape = list(x_local.shape)
-    this_dim, other_dims = _get_dims_as_trans_with_dim0(x_local_shape, dim)
+    world_size = dist.get_world_size(group)
+    this_dim, other_dims = _split_dims(list(x_local.shape), dim)
 
     x_local = _trans_with_dim0(x_local, dim)
 
     if split_sizes is None:  # all local tensors share the same shape
-        x_gather_shape = [this_dim * world_size] + other_dims
         x_gather = torch.empty(
-            x_gather_shape,
+            [this_dim * world_size] + other_dims,
             dtype=x_local.dtype,
             device=x_local.device,
         )
         dist.all_gather_into_tensor(x_gather, x_local, group=group)  # all-gather
     else:  # each local tensor may have a different shape along the dim
-        assert (
-            len(split_sizes) == world_size
-        ), f"The length of {split_sizes=} should equal to {world_size=}"  # noqa
-        assert split_sizes[rank] == this_dim, (
-            f"The {rank}-th split size of {split_sizes=} should equal to "
-            f"the {dim}-th dim size of {x_local_shape=}"  # noqa
-        )
-
         x_gather_list = [
             torch.empty(
                 [split_sizes[r]] + other_dims,
@@ -75,7 +97,6 @@ def all_gather_v(
             )
             for r in range(world_size)
         ]
-
         dist.all_gather(x_gather_list, x_local, group=group)  # all-gather-v
         x_gather = torch.cat(x_gather_list, dim=0)
 

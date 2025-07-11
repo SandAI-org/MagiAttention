@@ -15,20 +15,42 @@
 import torch
 import torch.distributed as dist
 
+from magi_attention.utils import nvtx
+
 __all__ = ["scatter_v"]
 
 
+@torch.no_grad()
+@nvtx.instrument_nvtx
 def scatter_v(
-    input: torch.Tensor,
+    x_global: torch.Tensor,
     group: dist.ProcessGroup,
     dim: int = 0,
     split_sizes: list[int] | None = None,
 ) -> torch.Tensor:
-    rank = dist.get_rank(group)
+    """Scatter the global tensor 'x_global' along its dim,
+    and return the scattered tensor 'x_scatter',
+    if not equally split along the dim, then scatter indicated by the split sizes
 
-    if split_sizes is None:
-        input_split = torch.chunk(input, chunks=dist.get_world_size(group), dim=dim)
-    else:
-        input_split = torch.split(input, split_sizes, dim=dim)
+    Args:
+        x_global (torch.Tensor): the global tensor to be scattered
+        group (dist.ProcessGroup): the process group to be used
+        dim (int, optional): the dim to be scattered along. Defaults to 0.
+        split_sizes (list[int] | None): the split sizes along the dim,
+            where len(split_sizes) should equal to the world size of the group,
+                and split_sizes[rank] is the dim size of this local tensor,
+                and sum(split_sizes) should equal to the dim size of the global tensor,
+            NOTE: if None, then all local tensors should share the same shape
 
-    return input_split[rank]
+    Returns:
+        torch.Tensor: the scattered tensor 'x_scatter'
+    """
+
+    rank, world_size = dist.get_rank(group), dist.get_world_size(group)
+
+    if split_sizes is None:  # all local tensors share the same shape
+        x_scatter = torch.chunk(x_global, chunks=world_size, dim=dim)[rank]
+    else:  # each local tensor may have a different shape along the dim
+        x_scatter = torch.split(x_global, split_sizes, dim=dim)[rank]
+
+    return x_scatter

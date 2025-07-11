@@ -53,12 +53,10 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             )
             self.intra_group = device_mesh.get_group("intra")
             self.inter_group = device_mesh.get_group("inter")
-            self.side_stream = torch.cuda.Stream()
             self.support_hier_comm = True
         else:
             self.intra_group = None
             self.inter_group = None
-            self.side_stream = None
             self.support_hier_comm = False
 
     @property
@@ -250,8 +248,8 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
     def test_group_cast_collective(
         self,
         test_case: dict[str, Any],
-        use_hier_comm: bool,
         async_op: bool,
+        use_hier_comm: bool,
     ):
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
@@ -314,7 +312,6 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                 # NOTE: args below for hierarchical comm
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
-                side_stream=self.side_stream,
             )
 
             # post process
@@ -426,15 +423,22 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             },
         ],
     )
+    @parameterize("use_hier_comm", [False, True])
     @parameterize("async_op", [True])  # skip async_op=False to speed up
     def test_group_reduce_collective(
         self,
         test_case: dict[str, Any],
         async_op: bool,
+        use_hier_comm: bool,
     ):
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
             return
+
+        # skip for hier comm
+        if use_hier_comm:
+            if not async_op or not self.support_hier_comm:
+                return
 
         # sanity check for meta args per rank
         input_split_size_list_per_rank = test_case["input_split_size_list_per_rank"]
@@ -474,16 +478,20 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
         )
 
         # run group-reduce comm kernel
-        work = group_reduce_collective(
-            input=send_buffer,
-            output=recv_buffer_before_reduce,
-            input_split_size_list=input_split_size_list,
-            output_split_size_list=output_split_size_list,
-            dst_index_list=dst_index_list,
-            src_indices_list=src_indices_list,
-            group=self.process_group,
-            async_op=async_op,
-        )
+        with self._switch_hier_comm(enable=use_hier_comm):
+            work = group_reduce_collective(
+                input=send_buffer,
+                output=recv_buffer_before_reduce,
+                input_split_size_list=input_split_size_list,
+                output_split_size_list=output_split_size_list,
+                dst_index_list=dst_index_list,
+                src_indices_list=src_indices_list,
+                group=self.process_group,
+                async_op=async_op,
+                # NOTE: args below for hierarchical comm
+                intra_group=self.intra_group,
+                inter_group=self.inter_group,
+            )
 
         # post process
         recv_buffer_after_reduce = work.wait_post_process(recv_buffer_before_reduce)

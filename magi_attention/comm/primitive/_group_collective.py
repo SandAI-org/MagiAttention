@@ -21,11 +21,12 @@ import magi_attention
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.utils import nvtx
 
-from .utils import (
-    _calc_group_cast_a2a_args,
-    _calc_group_reduce_a2a_args,
-    _hier_group_cast_impl_with_a2av,
+from ._all2all_v import all2all_v
+from ._group_collective_hier import (
+    hier_group_cast_impl_with_a2av,
+    hier_group_reduce_impl_with_a2av,
 )
+from .utils import _calc_group_cast_a2a_args, _calc_group_reduce_a2a_args
 
 __all__ = [
     "group_cast_collective",
@@ -105,8 +106,8 @@ def group_cast_collective(
     )
 
     if magi_attention.comm.is_hierarchical_comm_enable():
-        # NOTE: a hacky and temporary way to support hierarchical group-cast
-        return _hier_group_cast_impl_with_a2av(
+        # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-cast
+        return hier_group_cast_impl_with_a2av(
             input_tensor=input,
             output_tensor=output,
             input_split_size_list=input_split_size_list,
@@ -141,22 +142,14 @@ def group_cast_collective(
 
     # ---------    lauch a2a comm kernel     --------- #
 
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output.shape=} | "
-            f"{a2a_input.shape=} | "
-            f"{a2a_output_split_size=} | "
-            f"{a2a_input_split_size=}"
-        )
-    ):
-        work = dist.all_to_all_single(
-            output=a2a_output,
-            input=a2a_input,
-            output_split_sizes=a2a_output_split_size,
-            input_split_sizes=a2a_input_split_size,
-            group=group,
-            async_op=async_op,
-        )
+    work = all2all_v(
+        input=a2a_input,
+        output=a2a_output,
+        input_split_size_list=a2a_input_split_size,
+        output_split_size_list=a2a_output_split_size,
+        group=group,
+        async_op=async_op,
+    )
 
     return WorkWithPostProcessFn(
         work=work,
@@ -231,6 +224,20 @@ def group_reduce_collective(
         f"but got {sum(output_split_size_list)=} and {output.shape[0]=}"
     )
 
+    if magi_attention.comm.is_hierarchical_comm_enable():
+        # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-reduce
+        return hier_group_reduce_impl_with_a2av(
+            input_tensor=input,
+            output_tensor=output,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_index_list=dst_index_list,
+            src_indices_list=src_indices_list,
+            group=group,
+            async_op=async_op,
+            **kwargs,
+        )
+
     # ---------    calc group reduce a2a args     --------- #
 
     world_size = dist.get_world_size(group)
@@ -254,22 +261,14 @@ def group_reduce_collective(
 
     # ---------    lauch a2a comm kernel     --------- #
 
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output.shape=} | "
-            f"{a2a_input.shape=} | "
-            f"{a2a_output_split_size=} | "
-            f"{a2a_input_split_size=}"
-        )
-    ):
-        work = dist.all_to_all_single(
-            output=a2a_output,
-            input=a2a_input,
-            output_split_sizes=a2a_output_split_size,
-            input_split_sizes=a2a_input_split_size,
-            group=group,
-            async_op=async_op,
-        )
+    work = all2all_v(
+        input=a2a_input,
+        output=a2a_output,
+        input_split_size_list=a2a_input_split_size,
+        output_split_size_list=a2a_output_split_size,
+        group=group,
+        async_op=async_op,
+    )
 
     return WorkWithPostProcessFn(
         work=work,

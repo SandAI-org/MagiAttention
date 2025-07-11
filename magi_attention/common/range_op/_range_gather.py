@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
 
 import torch
 import triton
@@ -23,6 +22,19 @@ from magi_attention.utils import nvtx
 __all__ = ["range_gather"]
 
 
+def _calc_range_gather_row_map(
+    ranges: torch.Tensor,
+    total_size: int,
+) -> torch.Tensor:
+    row_map = torch.arange(0, ranges.shape[0], device=ranges.device)
+    range_sizes = ranges[:, 1] - ranges[:, 0]
+    row_map = torch.repeat_interleave(
+        row_map, range_sizes, dim=0, output_size=total_size
+    )
+
+    return row_map
+
+
 @triton.jit
 def range_gather_kernel(
     input_ptr,
@@ -30,15 +42,12 @@ def range_gather_kernel(
     ranges_ptr,
     cu_range_sizes_ptr,
     row_map_ptr,
-    n_ranges,
     input_stride,
     output_stride,
-    M,
     N: tl.constexpr,
     N_BLOCK: tl.constexpr,
     ELEM_PER_BLOCK: tl.constexpr,
 ):
-    # Current thread processes this range index
     row_idx = tl.program_id(0)
     block_idx_in_row = tl.program_id(1)
 
@@ -47,8 +56,6 @@ def range_gather_kernel(
     row_idx_in_range = row_idx - cu_range_size
 
     range_start = tl.load(ranges_ptr + range_idx * 2)
-    range_end = tl.load(ranges_ptr + range_idx * 2 + 1)
-    range_size = range_end - range_start  # noqa
 
     inp_idx = (
         range_start + row_idx_in_range
@@ -79,8 +86,8 @@ def range_gather(
     cu_range_sizes: torch.Tensor,
     total_size: int,
     dim: int = 0,
-    row_map: Optional[torch.Tensor] = None,
-    output: Optional[torch.Tensor] = None,
+    row_map: torch.Tensor | None = None,
+    output: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Gather values from input tensor based on specified ranges into a new output tensor.
@@ -102,12 +109,12 @@ def range_gather(
         output_shape = list(input.shape)
         output_shape[dim] = total_size
         output = torch.empty(output_shape, device=input.device, dtype=input.dtype)
-
-    # Get the number of ranges
-    n_ranges = ranges.shape[0]
+    else:
+        assert dim == 0, "dim must be 0 when output is provided"
+        assert output.is_contiguous(), "output must be contiguous when provided"
 
     # Return directly if empty tensor
-    if n_ranges == 0 or input.numel() == 0:
+    if ranges.shape[0] == 0 or input.numel() == 0:
         return output
 
     # Handle the case when dim is not 0
@@ -120,25 +127,23 @@ def range_gather(
 
     ranges = ranges.contiguous()
     cu_range_sizes = cu_range_sizes.contiguous()
+    # Calculate row_map if not provided
+    if row_map is None:
+        row_map = _calc_range_gather_row_map(ranges, total_size)
+    else:
+        row_map = row_map.contiguous()
 
     # Calculate stride (considering memory step size of elements)
     input_stride = input.stride(0)
     output_stride = output.stride(0)
 
-    if row_map is None:
-        row_map = torch.arange(0, ranges.shape[0], device=ranges.device)
-        range_sizes = ranges[:, 1] - ranges[:, 0]
-        row_map = torch.repeat_interleave(
-            row_map, range_sizes, dim=0, output_size=total_size
-        )
-
+    # Calculate grid size
     M = total_size
     N = input.numel() // input.shape[0]
 
     ELEM_PER_BLOCK = 2048 // input.element_size()
     N_BLOCK = triton.cdiv(N, ELEM_PER_BLOCK)
 
-    # Calculate grid size
     grid = (M, N_BLOCK)
 
     # Launch kernel
@@ -148,10 +153,8 @@ def range_gather(
         ranges,
         cu_range_sizes,
         row_map,
-        n_ranges,
         input_stride,
         output_stride,
-        M,
         N,
         N_BLOCK,
         ELEM_PER_BLOCK,
