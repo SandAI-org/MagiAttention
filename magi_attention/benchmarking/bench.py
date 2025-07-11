@@ -232,7 +232,6 @@ class Benchmark:
         ylabel: str | dict[str, str] = "",
         x_log: bool = False,
         y_log: bool = False,
-        color=None,
         styles=None,
     ):
         """
@@ -335,8 +334,7 @@ class Mark(object):
         save_path: str,
         show_plots: bool,
         print_data: bool,
-        diff_col=False,
-        save_precision=6,
+        print_value_on_bar: bool,
         **kwargs,
     ):
         # run the benchmark functions
@@ -419,7 +417,7 @@ class Mark(object):
                             color="red",
                             zorder=4,
                         )
-                    else:  # normal value
+                    elif print_value_on_bar:  # normal value
                         ax.text(
                             x_indices[idx] + i * bar_width,
                             value + 1.0,
@@ -542,11 +540,12 @@ class Mark(object):
 
     def run(
         self,
-        show_plots=False,
-        print_data=False,
-        save_path="",
-        return_df=False,
-        report_all_name="perf_report_all",
+        show_plots: bool = False,
+        print_data: bool = False,
+        print_value_on_bar: bool = False,
+        save_path: str = "",
+        return_df: bool = False,
+        report_all_name: str = "perf_report_all",
         **kwargs,
     ):
         has_single_bench = isinstance(self.benchmarks, Benchmark)
@@ -567,7 +566,14 @@ class Mark(object):
             if bench_save_path:
                 os.makedirs(bench_save_path, exist_ok=True)
 
-            dfs = self._run(bench, bench_save_path, show_plots, print_data, **kwargs)
+            dfs = self._run(
+                bench,
+                bench_save_path,
+                show_plots,
+                print_data,
+                print_value_on_bar,
+                **kwargs,
+            )
             result_dfs.append(dfs)
 
             if bench_save_path:
