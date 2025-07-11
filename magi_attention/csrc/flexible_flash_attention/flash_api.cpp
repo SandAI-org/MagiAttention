@@ -95,9 +95,12 @@ void set_params_fprop(Flash_fwd_params &params,
     // Reset the parameters
     params = {};
 
-    params.is_bf16 = q.dtype() == torch::kBFloat16;
-    params.is_fp32_out = kernel_out.dtype() == torch::kFloat32;
-    params.is_e4m3 = q.dtype() == torch::kFloat8_e4m3fn;
+    // Set the compute and output types for the kernel.
+    // Compute type is the type of the input tensors.
+    // Output type is the type of the output tensor.
+    params.compute_type = q.scalar_type();
+    params.out_type = kernel_out.scalar_type();
+
     params.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction;
 
     // Set the pointers of Q, K, V
@@ -190,8 +193,9 @@ void set_params_dgrad(Flash_bwd_params &params,
                       float softmax_scale,
                       void *tile_count_semaphore_d,
                       const float softcap=0.f,
-                      bool deterministic=false,
-                      int const sm_margin=0) {
+                      bool const deterministic=false,
+                      int const sm_margin=0,
+                      bool const disable_bwd_dkv_atomic_reduction=false) {
 
     set_params_fprop(params,
                      b, max_seqlen_q, max_seqlen_k, 
@@ -216,8 +220,12 @@ void set_params_dgrad(Flash_bwd_params &params,
 
     params.merge_k_ranges = static_cast<int *>(merge_k_ranges_d);
     params.bwd_kq_map = static_cast<int *>(bwd_kq_map_d);
+    params.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction;
 
-    // Set the pointers and strides.
+    // HACK: override compute_type
+    params.compute_type = dout.scalar_type();
+    params.dkv_type = dk.scalar_type();
+
     params.do_ptr = dout.data_ptr();
     params.do_row_stride = dout.stride(-3);
     params.do_head_stride = dout.stride(-2);
@@ -240,46 +248,20 @@ void set_params_dgrad(Flash_bwd_params &params,
 }
 
 void run_fast_zero_fill(Flash_fwd_params &params, cudaStream_t stream) {
-    if (params.is_fp32_out) {
+    OUT_DTYPE_SWITCH(params.out_type, TOut, [&] {
         #ifndef FLASHATTENTION_DISABLE_HDIM64
-        if (params.d <= 64) { return run_fast_zero_fill_<float, 64>(params, stream); }
+        if (params.d <= 64) { return run_fast_zero_fill_<TOut, 64>(params, stream); }
         #endif
         #ifndef FLASHATTENTION_DISABLE_HDIM128
-        if (params.d <= 128) { return run_fast_zero_fill_<float, 128>(params, stream); }
+        if (params.d <= 128) { return run_fast_zero_fill_<TOut, 128>(params, stream); }
         #endif
         #ifndef FLASHATTENTION_DISABLE_HDIM192
-        if (params.d <= 192) { return run_fast_zero_fill_<float, 192>(params, stream); }
+        if (params.d <= 192) { return run_fast_zero_fill_<TOut, 192>(params, stream); }
         #endif
         #ifndef FLASHATTENTION_DISABLE_HDIM256
-        if (params.d <= 256) { return run_fast_zero_fill_<float, 256>(params, stream); }
+        if (params.d <= 256) { return run_fast_zero_fill_<TOut, 256>(params, stream); }
         #endif
-    } else if (params.is_bf16) {
-        #ifndef FLASHATTENTION_DISABLE_HDIM64
-        if (params.d <= 64) { return run_fast_zero_fill_<cutlass::bfloat16_t, 64>(params, stream); }
-        #endif
-        #ifndef FLASHATTENTION_DISABLE_HDIM128
-        if (params.d <= 128) { return run_fast_zero_fill_<cutlass::bfloat16_t, 128>(params, stream); }
-        #endif
-        #ifndef FLASHATTENTION_DISABLE_HDIM192
-        if (params.d <= 192) { return run_fast_zero_fill_<cutlass::bfloat16_t, 192>(params, stream); }
-        #endif
-        #ifndef FLASHATTENTION_DISABLE_HDIM256
-        if (params.d <= 256) { return run_fast_zero_fill_<cutlass::bfloat16_t, 256>(params, stream); }
-        #endif
-    } else {
-        #ifndef FLASHATTENTION_DISABLE_HDIM64
-        if (params.d <= 64) { return run_fast_zero_fill_<cutlass::half_t, 64>(params, stream); }
-        #endif
-        #ifndef FLASHATTENTION_DISABLE_HDIM128
-        if (params.d <= 128) { return run_fast_zero_fill_<cutlass::half_t, 128>(params, stream); }
-        #endif
-        #ifndef FLASHATTENTION_DISABLE_HDIM192
-        if (params.d <= 192) { return run_fast_zero_fill_<cutlass::half_t, 192>(params, stream); }
-        #endif
-        #ifndef FLASHATTENTION_DISABLE_HDIM256
-        if (params.d <= 256) { return run_fast_zero_fill_<cutlass::half_t, 256>(params, stream); }
-        #endif
-    }
+    });
 }
 
 inline int get_max_headdim() {
@@ -325,80 +307,25 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     ARCH_SWITCH(params.arch, Arch, [&] {
         SOFTCAP_SWITCH(params.softcap > 0.0, Has_softcap, [&] {
             BOOL_SWITCH(params.disable_fwd_atomic_reduction, DisableFwdAtomicReduction, [&] {
-                if (params.is_bf16) {
-                    if (params.is_fp32_out) {
+                COMPUTE_DTYPE_SWITCH(params.compute_type, TCompute, [&] {
+                    OUT_DTYPE_SWITCH(params.out_type, TOut, [&] {
                         #ifndef FLASHATTENTION_DISABLE_HDIM64
-                        if (params.d <= 64) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, float, 64, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
+                        if (params.d <= 64) { return run_mha_fwd_<Arch, TCompute, TOut, 64, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
                         #endif
                         #ifndef FLASHATTENTION_DISABLE_HDIM96
-                        if (params.d <= 96) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, float, 96, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
+                        if (params.d <= 96) { return run_mha_fwd_<Arch, TCompute, TOut, 96, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
                         #endif
                         #ifndef FLASHATTENTION_DISABLE_HDIM128
-                        if (params.d <= 128) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, float, 128, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
+                        if (params.d <= 128) { return run_mha_fwd_<Arch, TCompute, TOut, 128, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
                         #endif
                         #ifndef FLASHATTENTION_DISABLE_HDIM192
-                        if (params.d <= 192) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, float, 192, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
+                        if (params.d <= 192) { return run_mha_fwd_<Arch, TCompute, TOut, 192, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
                         #endif
                         #ifndef FLASHATTENTION_DISABLE_HDIM256
-                        if (params.d <= 256) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, float, 256, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
+                        if (params.d <= 256) { return run_mha_fwd_<Arch, TCompute, TOut, 256, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
                         #endif
-                    } else {
-                        #ifndef FLASHATTENTION_DISABLE_HDIM64
-                        if (params.d <= 64) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, cutlass::bfloat16_t, 64, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM96
-                        if (params.d <= 96) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, cutlass::bfloat16_t, 96, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM128
-                        if (params.d <= 128) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, cutlass::bfloat16_t, 128, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM192
-                        if (params.d <= 192) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, cutlass::bfloat16_t, 192, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM256
-                        if (params.d <= 256) { return run_mha_fwd_<Arch, cutlass::bfloat16_t, cutlass::bfloat16_t, 256, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                    }
-                } else {
-                    #ifndef FLASHATTENTION_DISABLE_FP16
-                    if (params.is_fp32_out) {
-                        #ifndef FLASHATTENTION_DISABLE_HDIM64
-                        if (params.d <= 64) { return run_mha_fwd_<Arch, cutlass::half_t, float, 64, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM96
-                        if (params.d <= 96) { return run_mha_fwd_<Arch, cutlass::half_t, float, 96, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM128
-                        if (params.d <= 128) { return run_mha_fwd_<Arch, cutlass::half_t, float, 128, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM192
-                        if (params.d <= 192) { return run_mha_fwd_<Arch, cutlass::half_t, float, 192, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM256
-                        if (params.d <= 256) { return run_mha_fwd_<Arch, cutlass::half_t, float, 256, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                    }
-                    else{
-                        #ifndef FLASHATTENTION_DISABLE_HDIM64
-                        if (params.d <= 64) { return run_mha_fwd_<Arch, cutlass::half_t, cutlass::half_t, 64, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM96
-                        if (params.d <= 96) { return run_mha_fwd_<Arch, cutlass::half_t, cutlass::half_t, 96, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM128
-                        if (params.d <= 128) { return run_mha_fwd_<Arch, cutlass::half_t, cutlass::half_t, 128, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM192
-                        if (params.d <= 192) { return run_mha_fwd_<Arch, cutlass::half_t, cutlass::half_t, 192, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                        #ifndef FLASHATTENTION_DISABLE_HDIM256
-                        if (params.d <= 256) { return run_mha_fwd_<Arch, cutlass::half_t, cutlass::half_t, 256, Has_softcap, DisableFwdAtomicReduction>(params, stream); }
-                        #endif
-                    }
-                    #else
-                    TORCH_CHECK(false, "This flash attention build does not support FP16.");
-                    #endif
-                }
+                    });
+                });
             });
         });
     });
@@ -521,15 +448,6 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
 
     auto opts = q.options();
 
-    // Determine output dtype
-    at::ScalarType out_type;
-    if (out_type_.has_value()) {
-        TORCH_CHECK(out_type_.value() == at::ScalarType::Half || out_type_.value() == at::ScalarType::BFloat16 || out_type_.value() == at::ScalarType::Float, "Flexible Flash Attention only supports fp16, bf16 and float output dtype");
-        out_type = out_type_.value();
-    } else {
-        out_type = q_type;
-    }
-
     // Define a helper function to round up to multiple of m
     auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
 
@@ -550,9 +468,9 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
     auto softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
     
     // Use float32 to ensure numerical stability when enable atomic reduction
-    at::ScalarType kernel_out_type = !disable_fwd_atomic_reduction ? at::kFloat : out_type;
+    at::ScalarType out_type = !disable_fwd_atomic_reduction ? at::kFloat : q_type;
     // Create Kernel output tensor
-    auto kernel_out = torch::empty({total_q, num_heads_qo, head_size}, opts.dtype(kernel_out_type));  
+    auto out = torch::empty({total_q, num_heads_qo, head_size}, opts.dtype(out_type));  
     // Get element size
     int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
     // Get q block size, used to initialize range_locks
@@ -580,7 +498,7 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
                      total_q, total_k,
                      num_heads_qo, num_heads_kv,
                      head_size, head_size_rounded,
-                     q, k, v, kernel_out,
+                     q, k, v, out,
                      /*q_ranges*/ q_ranges.data_ptr(),
                      /*k_ranges*/ k_ranges.data_ptr(),
                      /*range_locks*/ range_locks.data_ptr(),
@@ -599,8 +517,6 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
     run_mha_fwd(params, stream);
     run_fast_zero_fill(params, stream);
 
-    // Cast kernel_out to user specified output type
-    auto out = kernel_out.to(out_type);
     return {out, softmax_lse};
 }
 
@@ -608,43 +524,27 @@ void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
     #ifndef FLASHATTENTION_DISABLE_BACKWARD
     ARCH_SWITCH(params.arch, Arch, [&] {
         SOFTCAP_SWITCH(params.softcap > 0.f, Has_softcap, [&] {
-            if (!params.is_bf16) {
-                #ifndef FLASHATTENTION_DISABLE_FP16
-                #ifndef FLASHATTENTION_DISABLE_HDIM64
-                if (params.d <= 64) { return run_mha_bwd_<Arch, cutlass::half_t, float, 64, Has_softcap>(params, stream); }
-                #endif
-                #ifndef FLASHATTENTION_DISABLE_HDIM96
-                if (params.d <= 96) { return run_mha_bwd_<Arch, cutlass::half_t, float, 96, Has_softcap>(params, stream); }
-                #endif
-                #ifndef FLASHATTENTION_DISABLE_HDIM128
-                if (params.d <= 128) { return run_mha_bwd_<Arch, cutlass::half_t, float, 128, Has_softcap>(params, stream); }
-                #endif
-                #ifndef FLASHATTENTION_DISABLE_HDIM192
-                if (params.d <= 192) { return run_mha_bwd_<Arch, cutlass::half_t, float, 192, Has_softcap>(params, stream); }
-                #endif
-                #ifndef FLASHATTENTION_DISABLE_HDIM256
-                if (params.d <= 256) { return run_mha_bwd_<Arch, cutlass::half_t, float, 256, Has_softcap>(params, stream); }
-                #endif
-                #else
-                TORCH_CHECK(false, "This flash attention build does not support FP16.");
-                #endif
-            } else {
-                #ifndef FLASHATTENTION_DISABLE_HDIM64
-                if (params.d <= 64) { return run_mha_bwd_<Arch, cutlass::bfloat16_t, float, 64, Has_softcap>(params, stream); }
-                #endif
-                #ifndef FLASHATTENTION_DISABLE_HDIM96
-                if (params.d <= 96) { return run_mha_bwd_<Arch, cutlass::bfloat16_t, float, 96, Has_softcap>(params, stream); }
-                #endif
-                #ifndef FLASHATTENTION_DISABLE_HDIM128
-                if (params.d <= 128) { return run_mha_bwd_<Arch, cutlass::bfloat16_t, float, 128, Has_softcap>(params, stream); }
-                #endif
-                #ifndef FLASHATTENTION_DISABLE_HDIM192
-                if (params.d <= 192) { return run_mha_bwd_<Arch, cutlass::bfloat16_t, float, 192, Has_softcap>(params, stream); }
-                #endif
-                #ifndef FLASHATTENTION_DISABLE_HDIM256
-                if (params.d <= 256) { return run_mha_bwd_<Arch, cutlass::bfloat16_t, float, 256, Has_softcap>(params, stream); }
-                #endif
-            }
+            BOOL_SWITCH(params.disable_bwd_dkv_atomic_reduction, DisableBwdDkvAtomicReduction, [&] {
+                COMPUTE_DTYPE_SWITCH(params.compute_type, TCompute, [&] {
+                    OUT_DTYPE_SWITCH(params.dkv_type, TDkv, [&] {
+                        #ifndef FLASHATTENTION_DISABLE_HDIM64
+                        if (params.d <= 64) { return run_mha_bwd_<Arch, TCompute, TDkv, 64, Has_softcap, DisableBwdDkvAtomicReduction>(params, stream); }
+                        #endif
+                        #ifndef FLASHATTENTION_DISABLE_HDIM96
+                        if (params.d <= 96) { return run_mha_bwd_<Arch, TCompute, TDkv, 96, Has_softcap, DisableBwdDkvAtomicReduction>(params, stream); }
+                        #endif
+                        #ifndef FLASHATTENTION_DISABLE_HDIM128
+                        if (params.d <= 128) { return run_mha_bwd_<Arch, TCompute, TDkv, 128, Has_softcap, DisableBwdDkvAtomicReduction>(params, stream); }
+                        #endif
+                        #ifndef FLASHATTENTION_DISABLE_HDIM192
+                        if (params.d <= 192) { return run_mha_bwd_<Arch, TCompute, TDkv, 192, Has_softcap, DisableBwdDkvAtomicReduction>(params, stream); }
+                        #endif
+                        #ifndef FLASHATTENTION_DISABLE_HDIM256
+                        if (params.d <= 256) { return run_mha_bwd_<Arch, TCompute, TDkv, 256, Has_softcap, DisableBwdDkvAtomicReduction>(params, stream); }
+                        #endif
+                    });
+                });
+            });
         });
     });
     #endif
@@ -675,7 +575,10 @@ std::vector<at::Tensor> mha_bwd(
     std::optional<const at::Tensor> &bwd_kq_map_,
     float const softmax_scale,
     float const softcap,
-    std::optional<at::ScalarType> out_type_,
+    bool disable_bwd_dkv_atomic_reduction,
+    std::optional<at::ScalarType> dq_type_,
+    std::optional<at::ScalarType> dk_type_,
+    std::optional<at::ScalarType> dv_type_,
     bool const deterministic,
     int const sm_margin) {
 
@@ -790,14 +693,37 @@ std::vector<at::Tensor> mha_bwd(
     int const max_seqlen_k_rounded = round_multiple(max_seqlen_k, kBlockN);
 
     // Determine output dtype for dq, dk, dv
-    at::ScalarType out_type;
-    if (out_type_.has_value()) {
-        TORCH_CHECK(out_type_.value() == at::ScalarType::Half || out_type_.value() == at::ScalarType::BFloat16 || out_type_.value() == at::ScalarType::Float, "Flexible Flash Attention only supports fp16, bf16 and float output dtype");
-        out_type = out_type_.value();
+    at::ScalarType dq_type;
+    if (dq_type_.has_value()) {
+        dq_type = dq_type_.value();
     } else {
-        out_type = q_type;
+        dq_type = at::ScalarType::Float;
     }
-
+    TORCH_CHECK(dq_type == at::ScalarType::Float, "Flexible Flash Attention only supports float for dq");
+    at::ScalarType dk_type;
+    if (dk_type_.has_value()) {
+        dk_type = dk_type_.value();
+    } 
+    else if (dk_.has_value()) {
+        dk_type = dk_.value().scalar_type();
+    }
+    else {
+        dk_type = at::ScalarType::Float;
+    }
+    TORCH_CHECK(dk_type == at::ScalarType::Float || dk_type == at::ScalarType::BFloat16 || dk_type == at::ScalarType::Half, "Flexible Flash Attention only supports float, bf16 and fp16 for dk");
+    at::ScalarType dv_type;
+    if (dv_type_.has_value()) {
+        dv_type = dv_type_.value();
+    } 
+    else if (dv_.has_value()) {
+        dv_type = dv_.value().scalar_type();
+    }
+    else {
+        dv_type = at::ScalarType::Float;
+    }
+    TORCH_CHECK(dv_type == at::ScalarType::Float || dv_type == at::ScalarType::BFloat16 || dv_type == at::ScalarType::Half, "Flexible Flash Attention only supports float, bf16 and fp16 for dv");
+    TORCH_CHECK(dk_type == dv_type, "dk and dv must have the same dtype");
+    
     // Get tensor options including dtype, device and layout
     auto opts = q.options();
 
@@ -806,30 +732,30 @@ std::vector<at::Tensor> mha_bwd(
     at::Tensor dq, dk, dv;
     if (dq_.has_value()) {
         dq = dq_.value();
-        TORCH_CHECK(dq.scalar_type() == out_type, "dq must have the same dtype as out_type (or same as query if out_type is not specified)");
+        TORCH_CHECK(dq.scalar_type() == dq_type, "dq must have the same dtype as dq_type (if given)");
         CHECK_DEVICE(dq);
         CHECK_SHAPE(dq, total_q, num_heads_qo, head_size);
         TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
     } else {
-        dq = torch::zeros_like(q, opts.dtype(out_type));
+        dq = torch::zeros_like(q, opts.dtype(dq_type));
     }
     if (dk_.has_value()) {
         dk = dk_.value();
-        TORCH_CHECK(dk.dtype() == out_type, "dk must have the same dtype as out_type (or same as key if out_type is not specified)");
+        TORCH_CHECK(dk.dtype() == dk_type, "dk must have the same dtype as dk_type (if given)");
         CHECK_DEVICE(dk);
         CHECK_SHAPE(dk, total_k, num_heads_kv, head_size);
         TORCH_CHECK(dk.stride(-1) == 1, "dk must have contiguous last dimension");
     } else {
-        dk = torch::zeros_like(k, opts.dtype(out_type));
+        dk = torch::zeros_like(k, opts.dtype(dk_type));
     }
     if (dv_.has_value()) {
         dv = dv_.value();
-        TORCH_CHECK(dv.dtype() == out_type, "dv must have the same dtype as out_type (or same as value if out_type is not specified)");
+        TORCH_CHECK(dv.dtype() == dv_type, "dv must have the same dtype as dv_type (if given)");
         CHECK_DEVICE(dv);
         CHECK_SHAPE(dv, total_k, num_heads_kv, head_size);
         TORCH_CHECK(dv.stride(-1) == 1, "dv must have contiguous last dimension");
     } else {
-        dv = torch::zeros_like(v, opts.dtype(out_type));
+        dv = torch::zeros_like(v, opts.dtype(dv_type));
     }
 
     // Otherwise the kernel will be launched from cuda:0 device
@@ -868,7 +794,8 @@ std::vector<at::Tensor> mha_bwd(
                      tile_count_semaphore.data_ptr(),
                      softcap,
                      deterministic,
-                     sm_margin);
+                     sm_margin,
+                     disable_bwd_dkv_atomic_reduction);
 
     #ifdef FLASHATTENTION_DISABLE_SOFTCAP
     TORCH_CHECK(params.softcap == 0.0, "This flash attention build does not support tanh softcapping.");

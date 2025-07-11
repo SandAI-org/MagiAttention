@@ -473,108 +473,43 @@ if not SKIP_CUDA_BUILD:
     common_dir = repo_dir / "magi_attention" / "csrc" / "common"
 
     # custom flags
-    DISABLE_SM8x = True
-    DISABLE_LOCAL = True
-    DISABLE_HDIM256 = True
+    DISABLE_HDIM64 = False
     DISABLE_HDIM96 = True
-    DISABLE_FP8 = True
-    DISABLE_PACKGQA = True
-    DISABLE_PAGEDKV = True
-    DISABLE_APPENDKV = True
-    DISABLE_SPLIT = True
+    DISABLE_HDIM128 = False
+    DISABLE_HDIM192 = True
+    DISABLE_HDIM256 = True
     DISABLE_FP16 = False
     DISABLE_BACKWARD = False
     DISABLE_SOFTCAP = False
-    DISABLE_VARLEN = False
     DISABLE_CLUSTER = False
-    DISABLE_HDIM64 = False
-    DISABLE_HDIM128 = False
-    DISABLE_HDIM192 = True
-    ENABLE_VCOLMAJOR = False
 
     feature_args = (
         []
         + (["-DFLASHATTENTION_DISABLE_BACKWARD"] if DISABLE_BACKWARD else [])
-        + (["-DFLASHATTENTION_DISABLE_PAGEDKV"] if DISABLE_PAGEDKV else [])
-        + (["-DFLASHATTENTION_DISABLE_SPLIT"] if DISABLE_SPLIT else [])
-        + (["-DFLASHATTENTION_DISABLE_APPENDKV"] if DISABLE_APPENDKV else [])
-        + (["-DFLASHATTENTION_DISABLE_LOCAL"] if DISABLE_LOCAL else [])
         + (["-DFLASHATTENTION_DISABLE_SOFTCAP"] if DISABLE_SOFTCAP else [])
-        + (["-DFLASHATTENTION_DISABLE_PACKGQA"] if DISABLE_PACKGQA else [])
         + (["-DFLASHATTENTION_DISABLE_FP16"] if DISABLE_FP16 else [])
-        + (["-DFLASHATTENTION_DISABLE_FP8"] if DISABLE_FP8 else [])
-        + (["-DFLASHATTENTION_DISABLE_VARLEN"] if DISABLE_VARLEN else [])
         + (["-DFLASHATTENTION_DISABLE_CLUSTER"] if DISABLE_CLUSTER else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM64"] if DISABLE_HDIM64 else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM96"] if DISABLE_HDIM96 else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM128"] if DISABLE_HDIM128 else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM192"] if DISABLE_HDIM192 else [])
         + (["-DFLASHATTENTION_DISABLE_HDIM256"] if DISABLE_HDIM256 else [])
-        + (["-DFLASHATTENTION_DISABLE_SM8x"] if DISABLE_SM8x else [])
-        + (["-DFLASHATTENTION_ENABLE_VCOLMAJOR"] if ENABLE_VCOLMAJOR else [])
     )
 
-    DTYPE_FWD_SM80 = ["bf16"] + (["fp16"] if not DISABLE_FP16 else [])
-    DTYPE_FWD_SM90 = (
-        ["bf16"]
-        + (["fp16"] if not DISABLE_FP16 else [])
-        + (["e4m3"] if not DISABLE_FP8 else [])
-    )
-    DTYPE_BWD = ["bf16"] + (["fp16"] if not DISABLE_FP16 else [])
-    HEAD_DIMENSIONS_BWD = (
-        []
-        + ([64] if not DISABLE_HDIM64 else [])
-        + ([96] if not DISABLE_HDIM96 else [])
-        + ([128] if not DISABLE_HDIM128 else [])
-        + ([192] if not DISABLE_HDIM192 else [])
-        + ([256] if not DISABLE_HDIM256 else [])
-    )
-    HEAD_DIMENSIONS_FWD = ["all"]
-    HEAD_DIMENSIONS_FWD_SM80 = HEAD_DIMENSIONS_BWD
-    SPLIT = [""] + (["_split"] if not DISABLE_SPLIT else [])
-    PAGEDKV = [""] + (["_paged"] if not DISABLE_PAGEDKV else [])
+    DTYPE = ["bf16"] + (["fp16"] if not DISABLE_FP16 else [])
+    HEAD_DIMENSIONS = ["all"]
     SOFTCAP = [""] + (["_softcap"] if not DISABLE_SOFTCAP else [])
-    SOFTCAP_ALL = [""] if DISABLE_SOFTCAP else ["_softcapall"]
-    PACKGQA = [""] + (["_packgqa"] if not DISABLE_PACKGQA else [])
-    # We already always hard-code PackGQA=true for Sm8x
-    sources_fwd_sm80 = [
-        f"{ffa_dir_rel}/instantiations/flash_fwd_hdim{hdim}_{dtype}{paged}{split}{softcap}_sm80.cu"
-        for hdim, dtype, split, paged, softcap in itertools.product(
-            HEAD_DIMENSIONS_FWD_SM80, DTYPE_FWD_SM80, SPLIT, PAGEDKV, SOFTCAP_ALL
-        )
-    ]
-    # We already always hard-code PackGQA=true for Sm9x if PagedKV or Split
     sources_fwd_sm90 = [
-        f"{ffa_dir_rel}/instantiations/flash_fwd_hdim{hdim}_{dtype}{paged}{split}{softcap}{packgqa}_sm90.cu"
-        for hdim, dtype, split, paged, softcap, packgqa in itertools.product(
-            HEAD_DIMENSIONS_FWD, DTYPE_FWD_SM90, SPLIT, PAGEDKV, SOFTCAP, PACKGQA
-        )
-        if not (packgqa and (paged or split))
-    ]
-    sources_bwd_sm80 = [
-        f"{ffa_dir_rel}/instantiations/flash_bwd_hdim{hdim}_{dtype}{softcap}_sm80.cu"
-        for hdim, dtype, softcap in itertools.product(
-            HEAD_DIMENSIONS_BWD, DTYPE_BWD, SOFTCAP
-        )
+        f"{ffa_dir_rel}/instantiations/flash_fwd_hdim{hdim}_{dtype}{softcap}_sm90.cu"
+        for hdim, dtype, softcap in itertools.product(HEAD_DIMENSIONS, DTYPE, SOFTCAP)
     ]
     sources_bwd_sm90 = [
         f"{ffa_dir_rel}/instantiations/flash_bwd_hdim{hdim}_{dtype}{softcap}_sm90.cu"
-        for hdim, dtype, softcap in itertools.product(
-            HEAD_DIMENSIONS_BWD, DTYPE_BWD, SOFTCAP_ALL
-        )
+        for hdim, dtype, softcap in itertools.product(HEAD_DIMENSIONS, DTYPE, SOFTCAP)
     ]
     if DISABLE_BACKWARD:
         sources_bwd_sm90 = []
-        sources_bwd_sm80 = []
-    sources = (
-        [f"{ffa_dir_rel}/flash_api.cpp"]
-        + (sources_fwd_sm80 if not DISABLE_SM8x else [])
-        + sources_fwd_sm90
-        + (sources_bwd_sm80 if not DISABLE_SM8x else [])
-        + sources_bwd_sm90
-    )
-    if not DISABLE_SPLIT:
-        sources += [f"{ffa_dir_rel}/flash_fwd_combine.cu"]
+    sources = [f"{ffa_dir_rel}/flash_api.cpp"] + sources_fwd_sm90 + sources_bwd_sm90
     sources += [f"{ffa_dir_rel}/fast_zero_fill.cu"]
     nvcc_flags = [
         "-O3",
