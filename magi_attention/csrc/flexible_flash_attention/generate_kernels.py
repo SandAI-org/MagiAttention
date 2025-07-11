@@ -27,6 +27,7 @@ SM = [90]  # Sm kernels support up to
 HEAD_DIMENSIONS = [64, 128, 192]
 SOFTCAP = [False, True]
 DISABLE_FWD_ATOMIC_REDUCTION = [False, True]
+DISABLE_BWD_DKV_ATOMIC_REDUCTION = [False, True]
 
 KERNEL_IMPL_TEMPLATE_FWD_SM90 = """#include "flash_fwd_launch_template.h"
 
@@ -39,7 +40,7 @@ template void run_mha_fwd_<{ARCH}, {DTYPE}, {DTYPE_OUT}, {HEAD_DIM}, {SOFTCAP}, 
 KERNEL_IMPL_TEMPLATE_BWD_SM90 = """#include "flash_bwd_launch_template.h"
 
 #ifndef FLASHATTENTION_DISABLE_HDIM{HEAD_DIM}
-template void run_mha_bwd_<{ARCH}, {DTYPE}, {DTYPE_OUT}, {HEAD_DIM}, {SOFTCAP}>(Flash_bwd_params &params, cudaStream_t stream);
+template void run_mha_bwd_<{ARCH}, {DTYPE}, {DTYPE_OUT}, {HEAD_DIM}, {SOFTCAP}, {DISABLE_BWD_DKV_ATOMIC_REDUCTION}>(Flash_bwd_params &params, cudaStream_t stream);
 #endif
 """
 
@@ -50,8 +51,9 @@ class Kernel:
     dtype_out: str
     head_dim: int
     softcap: bool
-    disable_fwd_atomic_reduction: bool
     direction: str
+    disable_fwd_atomic_reduction: bool = False  # Only used for fwd kernels
+    disable_bwd_dkv_atomic_reduction: bool = False  # Only used for bwd kernels
 
     @property
     def template(self) -> str:
@@ -75,13 +77,20 @@ class Kernel:
                     DTYPE_OUT=DTYPE_OUT_MAP[self.dtype_out],
                     HEAD_DIM=self.head_dim,
                     SOFTCAP=str(self.softcap).lower(),
+                    DISABLE_BWD_DKV_ATOMIC_REDUCTION=str(self.disable_bwd_dkv_atomic_reduction).lower(),
                 )
             else:
                 ...
 
     @property
     def filename(self) -> str:
-        return f"flash_{self.direction}_hdim{self.head_dim}_{self.dtype}_{self.dtype_out}{'_softcap' if self.softcap else ''}{'_disable_fwd_atomic_reduction' if self.disable_fwd_atomic_reduction else ''}_sm{self.sm}.cu"
+        return (
+            f"flash_{self.direction}_hdim{self.head_dim}_{self.dtype}_{self.dtype_out}"
+            f"{'_softcap' if self.softcap else ''}"
+            f"{'_disable_fwd_atomic_reduction' if self.disable_fwd_atomic_reduction else ''}"
+            f"{'_disable_bwd_dkv_atomic_reduction' if self.disable_bwd_dkv_atomic_reduction else ''}"
+            f"_sm{self.sm}.cu"
+        )
 
 
 def get_all_kernels() -> List[Kernel]:
@@ -94,12 +103,12 @@ def get_all_kernels() -> List[Kernel]:
             dtype_out=dtype_out,
             head_dim=head_dim,
             softcap=softcap,
-            disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
             direction="fwd",
+            disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
         )
-        
-    for dtype, dtype_out, head_dim, softcap, sm in itertools.product(
-        DTYPE_MAP.keys(), DTYPE_OUT_MAP.keys(), HEAD_DIMENSIONS, SOFTCAP, SM
+
+    for dtype, dtype_out, head_dim, softcap, disable_bwd_dkv_atomic_reduction, sm in itertools.product(
+        DTYPE_MAP.keys(), DTYPE_OUT_MAP.keys(), HEAD_DIMENSIONS, SOFTCAP, DISABLE_BWD_DKV_ATOMIC_REDUCTION, SM
     ):
         yield Kernel(
             sm=sm,
@@ -107,8 +116,8 @@ def get_all_kernels() -> List[Kernel]:
             dtype_out=dtype_out,
             head_dim=head_dim,
             softcap=softcap,
-            disable_fwd_atomic_reduction=False,
             direction="bwd",
+            disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         )
 
 
@@ -135,7 +144,7 @@ def batch_fwd(kernels_all) -> List[KERNEL_BATCH]:
 
 def batch_bwd(kernels_all) -> List[KERNEL_BATCH]:
     # Bwd
-    for dtype, head_dim, sm in itertools.product(DTYPE_MAP.keys(), HEAD_DIMENSIONS, SM):
+    for dtype, softcap, sm in itertools.product(DTYPE_MAP.keys(), SOFTCAP, SM):
         if sm < 90:
             continue
 
@@ -144,11 +153,11 @@ def batch_bwd(kernels_all) -> List[KERNEL_BATCH]:
             for k in kernels_all
             if k.direction == "bwd"
             and k.dtype == dtype
-            and k.head_dim == head_dim
+            and k.softcap == softcap
             and k.sm == sm
         ]
         if len(kernels) > 0:
-            filename = f"flash_bwd_hdim{head_dim}_{dtype}_softcapall_sm{sm}.cu"
+            filename = f"flash_bwd_hdimall_{dtype}{'_softcap' if softcap else ''}_sm{sm}.cu"
             template = "\n".join([f'#include "{k.filename}"' for k in kernels])
             yield KERNEL_BATCH(template, filename)
 

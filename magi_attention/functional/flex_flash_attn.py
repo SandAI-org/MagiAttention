@@ -91,7 +91,7 @@ def _flex_flash_attn_forward(
             return_dtype,
         )
 
-    return out, softmax_lse
+    return out.to(q.dtype), softmax_lse
 
 
 @nvtx.instrument_nvtx
@@ -111,6 +111,10 @@ def _flex_flash_attn_backward(
     bwd_kq_map,
     softmax_scale,
     softcap,
+    disable_bwd_dkv_atomic_reduction,
+    dq_type,
+    dk_type,
+    dv_type,
     deterministic,
     sm_margin,
 ):
@@ -151,7 +155,10 @@ def _flex_flash_attn_backward(
             bwd_kq_map,
             softmax_scale,
             softcap,
-            torch.float32,
+            disable_bwd_dkv_atomic_reduction,
+            dq_type,
+            dk_type,
+            dv_type,
             deterministic,
             sm_margin,
         )
@@ -298,6 +305,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_kq_map,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
+            disable_bwd_dkv_atomic_reduction=False,
+            dq_type=torch.float32,
+            dk_type=torch.float32,
+            dv_type=torch.float32,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
         )
