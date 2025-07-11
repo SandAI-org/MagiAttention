@@ -712,4 +712,5 @@ if __name__ == "__main__":
     out_root = os.path.join(
         script_dir, os.path.join("outs", f"bench_attn_{current_time}")
     )
-    attn_benchmark.run(print_data=True, save_path=out_root)
+
+    attn_benchmark.run(print_data=True, print_value_on_bar=False, save_path=out_root)
