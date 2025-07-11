@@ -356,9 +356,7 @@ class Mark(object):
                 "grid.linewidth": 1.2,
             },
         )
-        COLOR_PALETTE = sns.color_palette(
-            "viridis", n_colors=len(bench.line_names)
-        )  # 改用专业渐变色[7,8](@ref)
+        COLOR_PALETTE = sns.color_palette("viridis", n_colors=len(bench.line_names))
 
         if not bench.plot_name:
             return
@@ -377,7 +375,7 @@ class Mark(object):
                 data = dfs[k][provider].dropna().values
                 all_data.append(data)
 
-            # 画柱状图
+            # draw bar plots
             for i, (data, label) in enumerate(zip(all_data, labels)):
                 edge_color = COLOR_PALETTE[i] + (0.7,)
                 ax.bar(
@@ -392,9 +390,9 @@ class Mark(object):
                     zorder=2,
                 )
 
-                # Annotate bars where value is -1 or -2
+                # Annotate bars
                 for idx, value in enumerate(data):
-                    if value == -1:
+                    if value == -1:  # OOM
                         ax.text(
                             x_indices[idx] + i * bar_width,
                             value + 0.2,  # Position text slightly above the bar
@@ -408,7 +406,7 @@ class Mark(object):
                             color="red",
                             zorder=4,
                         )
-                    elif value == -2:
+                    elif value == -2:  # not supported
                         ax.text(
                             x_indices[idx] + i * bar_width,
                             value + 0.2,
@@ -421,8 +419,20 @@ class Mark(object):
                             color="red",
                             zorder=4,
                         )
+                    else:  # normal value
+                        ax.text(
+                            x_indices[idx] + i * bar_width,
+                            value + 1.0,
+                            f"{value:.2f}",
+                            ha="center",
+                            va="bottom",
+                            fontsize=10,
+                            # color=COLOR_PALETTE[i],
+                            color="black",
+                            zorder=4,
+                        )
 
-            # 画曲线图
+            # draw line plots
             for i, (data, label) in enumerate(zip(all_data, labels)):
                 # Create a copy of the data to modify
                 plot_data = data.copy().astype(float)
@@ -519,6 +529,14 @@ class Mark(object):
             if show_plots:
                 plt.show()
             plt.close()
+
+        if save_path:
+            for name, df in dfs.items():
+                df.to_csv(os.path.join(save_path, f"{name}.csv"), index=False)
+
+        if print_data:
+            for name, df in dfs.items():
+                print(df)
 
         return dfs
 
