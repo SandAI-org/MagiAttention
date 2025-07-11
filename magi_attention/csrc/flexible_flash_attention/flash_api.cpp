@@ -342,6 +342,8 @@ std::vector<at::Tensor>
 mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
         const at::Tensor &k, // (total_k, h_k, d)
         const at::Tensor &v, // (total_k, h_k, d)
+        std::optional<at::Tensor> &out_, // (total_q, h_q, d)
+        std::optional<at::Tensor> &softmax_lse_, // (hq, total_q)
         const at::Tensor &q_ranges,  // (b, 2)
         const at::Tensor &k_ranges,  // (b, 2)
         int max_seqlen_q,
@@ -351,10 +353,11 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
         std::optional<const at::Tensor> &qk_map_,
         float const softmax_scale,
         float const softcap,
-        int const sm_margin,
         // performance tuning arguments
         bool const disable_fwd_atomic_reduction,
-        std::optional<at::ScalarType> out_type_
+        std::optional<at::ScalarType> out_type_,
+        bool const deterministic,
+        int const sm_margin
 ) {
     // Check compute capability
     auto dprops = at::cuda::getCurrentDeviceProperties();
@@ -462,15 +465,50 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
     // Cast to char to avoid compiler warning about narrowing
     at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
-    // Create softmax_lse tensor, need to satisfy two conditions
-    // 1. initialize with -infinity
-    // 2. use float32 to ensure numerical stability
-    auto softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
+    at::Tensor softmax_lse;
+    // If softmax_lse is provided, check its dtype, device, and layout.
+    // Otherwise, create a new tensor with the appropriate dtype and shape.
+    if (softmax_lse_.has_value()) {
+        softmax_lse = softmax_lse_.value();
+        TORCH_CHECK(softmax_lse.scalar_type() == at::kFloat, "softmax_lse must have dtype float32");
+        CHECK_DEVICE(softmax_lse);
+        CHECK_SHAPE(softmax_lse, num_heads_qo, total_q);
+        CHECK_CONTIGUOUS(softmax_lse);
+    } else {
+        // Create softmax_lse tensor, need to satisfy two conditions
+        // 1. initialize with -infinity
+        // 2. use float32 to ensure numerical stability
+        softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
+    }
     
-    // Use float32 to ensure numerical stability when enable atomic reduction
-    at::ScalarType out_type = !disable_fwd_atomic_reduction ? at::kFloat : q_type;
-    // Create Kernel output tensor
-    auto out = torch::empty({total_q, num_heads_qo, head_size}, opts.dtype(out_type));  
+    // Determine the output type
+    at::ScalarType out_type;
+    if (out_type_.has_value()) {
+        out_type = out_type_.value();
+    }
+    else if(out_.has_value()){
+        out_type = out_.value().scalar_type();
+    }
+    else {
+        // Use float32 to ensure numerical stability when enable atomic reduction
+        out_type = !disable_fwd_atomic_reduction ? at::kFloat : q_type;
+    }
+    TORCH_CHECK(out_type == at::kFloat || out_type == at::kBFloat16 || out_type == at::kHalf, "Flexible Flash Attention only supports float, bf16 and fp16 for output");
+    
+    // If the output tensor 'out' is provided, check its dtype, device, and layout.
+    // Otherwise, create a new output tensor with the appropriate dtype and shape.
+    at::Tensor out;
+    if (out_.has_value()) {
+        out = out_.value();
+        TORCH_CHECK(out.scalar_type() == out_type, "out must have the same dtype as out_type (if given)");
+        CHECK_DEVICE(out);
+        CHECK_SHAPE(out, total_q, num_heads_qo, head_size);
+        TORCH_CHECK(out.stride(-1) == 1, "out must have contiguous last dimension");
+    } else {
+        // If out is not provided, create a new tensor
+        out = torch::empty_like(q, opts.dtype(out_type));
+    }
+
     // Get element size
     int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
     // Get q block size, used to initialize range_locks
@@ -692,14 +730,20 @@ std::vector<at::Tensor> mha_bwd(
     int const max_seqlen_q_rounded = round_multiple(max_seqlen_q, kBlockM);
     int const max_seqlen_k_rounded = round_multiple(max_seqlen_k, kBlockN);
 
-    // Determine output dtype for dq, dk, dv
+    // Determine output dtype for dq
     at::ScalarType dq_type;
     if (dq_type_.has_value()) {
         dq_type = dq_type_.value();
-    } else {
+    } 
+    else if (dq_.has_value()) {
+        dq_type = dq_.value().scalar_type();
+    }
+    else {
         dq_type = at::ScalarType::Float;
     }
     TORCH_CHECK(dq_type == at::ScalarType::Float, "Flexible Flash Attention only supports float for dq");
+
+    // Determine output dtype for dk
     at::ScalarType dk_type;
     if (dk_type_.has_value()) {
         dk_type = dk_type_.value();
@@ -708,9 +752,11 @@ std::vector<at::Tensor> mha_bwd(
         dk_type = dk_.value().scalar_type();
     }
     else {
-        dk_type = at::ScalarType::Float;
+        dk_type = !disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type;
     }
     TORCH_CHECK(dk_type == at::ScalarType::Float || dk_type == at::ScalarType::BFloat16 || dk_type == at::ScalarType::Half, "Flexible Flash Attention only supports float, bf16 and fp16 for dk");
+
+    // Determine output dtype for dv
     at::ScalarType dv_type;
     if (dv_type_.has_value()) {
         dv_type = dv_type_.value();
@@ -719,9 +765,11 @@ std::vector<at::Tensor> mha_bwd(
         dv_type = dv_.value().scalar_type();
     }
     else {
-        dv_type = at::ScalarType::Float;
+        dv_type = !disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type;
     }
     TORCH_CHECK(dv_type == at::ScalarType::Float || dv_type == at::ScalarType::BFloat16 || dv_type == at::ScalarType::Half, "Flexible Flash Attention only supports float, bf16 and fp16 for dv");
+
+    // Check dk_type is same as dv_type
     TORCH_CHECK(dk_type == dv_type, "dk and dv must have the same dtype");
     
     // Get tensor options including dtype, device and layout

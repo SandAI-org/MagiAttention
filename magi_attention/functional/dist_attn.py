@@ -324,7 +324,7 @@ class DistFlashAttnRuntime:
                         else 4,  # TODO: make it configurable
                         # NOTE: increase the partial out precision temporarily,
                         # to reduce the error caused by the out correction
-                        return_dtype=max_fp_dtype(q.dtype, torch.float32),
+                        out_type=max_fp_dtype(q.dtype, torch.float32),
                         disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
                     )
 
