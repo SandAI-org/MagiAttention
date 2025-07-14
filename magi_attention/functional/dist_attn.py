@@ -100,7 +100,7 @@ def correct_attn_output(
     return o.to(o1.dtype)
 
 
-# TODO: fuse this kernel in the future
+# TODO: consolidate this process to ffa fwd kernel
 @nvtx.instrument_nvtx
 def result_correction(
     out_list: list[torch.Tensor],
@@ -122,7 +122,8 @@ def result_correction(
         - lse: [num_heads, num_tokens_q]
     """
     if len(lse_list) == 1:
-        # NOTE: if there is only one out and lse, we just return them directly, no need to correct
+        # NOTE: if there is only one out and lse,
+        # we just return them directly, no need to correct
         return out_list[0], lse_list[0]
 
     curr_lse = None
@@ -319,9 +320,7 @@ class DistFlashAttnRuntime:
                         softmax_scale=q.shape[-1] ** -0.5,
                         deterministic=deterministic,
                         softcap=0.0,
-                        sm_margin=0
-                        if magi_attention.is_cuda_device_max_connections_one()
-                        else 4,  # TODO: make it configurable
+                        sm_margin=magi_attention.comm.ffa_fwd_sm_margin_save_for_comm(),
                         # NOTE: increase the partial out precision temporarily,
                         # to reduce the error caused by the out correction
                         return_dtype=max_fp_dtype(q.dtype, torch.float32),
@@ -385,9 +384,7 @@ class DistFlashAttnRuntime:
                     softmax_scale=q.shape[-1] ** -0.5,
                     deterministic=deterministic,
                     softcap=0.0,
-                    sm_margin=0
-                    if magi_attention.is_cuda_device_max_connections_one()
-                    else 4,  # TODO: make it configurable
+                    sm_margin=magi_attention.comm.ffa_bwd_sm_margin_save_for_comm(),
                 )
             partial_dkv = torch.cat([partial_dk, partial_dv], dim=0)
 
@@ -481,7 +478,10 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 remote_kv_buffer,
             ) = dist_attn_runtime.fetch_remote_kv(local_kv=local_kv, overlap_stage=0)
         else:
-            # TODO: add docs
+            # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
+            # we issue all fetch-remote-kv comms in advance of ffa fwd
+            # and ffa fwd can still overlap with these comms
+            # with the support of `sm_margin`, thx to persistent kernel design
             remote_kv_works_with_buffers = [
                 dist_attn_runtime.fetch_remote_kv(
                     local_kv=local_kv, overlap_stage=ith_overlap_stage
@@ -568,7 +568,10 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 remote_kv_buffer,
             ) = dist_attn_runtime.fetch_remote_kv(local_kv=local_kv, overlap_stage=0)
         else:
-            # TODO: add docs
+            # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
+            # we issue all fetch-remote-kv comms in advance of ffa bwd
+            # and ffa bwd can still overlap with these comms
+            # with the support of `sm_margin`, thx to persistent kernel design
             remote_kv_works_with_buffers = [
                 dist_attn_runtime.fetch_remote_kv(
                     local_kv=local_kv, overlap_stage=ith_overlap_stage
