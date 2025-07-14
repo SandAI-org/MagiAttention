@@ -198,7 +198,7 @@ class DistAttnRuntimeMgr:
                     host_global_perm_sorted_q_ranges
                 ),
                 k_ranges=host_global_unperm_xattn_k_ranges,
-                is_causal_mapping=[False] * len(host_global_perm_sorted_q_ranges),
+                attn_type_map=[0] * len(host_global_perm_sorted_q_ranges),
                 shard_seqlen_q=host_global_perm_sorted_q_ranges.total_seqlen,
             )
             return attn_arg
@@ -230,7 +230,7 @@ class DistAttnRuntimeMgr:
         attn_arg = AttnArg(
             q_ranges=total_global_perm_sorted_q_ranges,
             k_ranges=total_global_unperm_xattn_k_ranges,
-            is_causal_mapping=[False] * len(total_global_perm_sorted_q_ranges),
+            attn_type_map=[0] * len(total_global_perm_sorted_q_ranges),
             shard_seqlen_q=total_global_perm_sorted_q_ranges.total_seqlen,
         )
         return attn_arg

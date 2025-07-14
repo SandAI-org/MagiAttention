@@ -462,10 +462,15 @@ if not SKIP_CUDA_BUILD:
     # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
+
     repo_dir = Path(this_dir)
+
     cutlass_dir = repo_dir / "magi_attention" / "csrc" / "cutlass"
+
     ffa_dir_abs = repo_dir / "magi_attention" / "csrc" / "flexible_flash_attention"
-    ffa_dir_rel = "magi_attention/csrc/flexible_flash_attention"
+    ffa_dir_rel = ffa_dir_abs.relative_to(repo_dir)
+
+    common_dir = repo_dir / "magi_attention" / "csrc" / "common"
 
     # custom flags
     DISABLE_SM8x = True
@@ -484,7 +489,7 @@ if not SKIP_CUDA_BUILD:
     DISABLE_CLUSTER = False
     DISABLE_HDIM64 = False
     DISABLE_HDIM128 = False
-    DISABLE_HDIM192 = False
+    DISABLE_HDIM192 = True
     ENABLE_VCOLMAJOR = False
 
     feature_args = (
@@ -524,7 +529,7 @@ if not SKIP_CUDA_BUILD:
         + ([192] if not DISABLE_HDIM192 else [])
         + ([256] if not DISABLE_HDIM256 else [])
     )
-    HEAD_DIMENSIONS_FWD = ["all", "diff"]
+    HEAD_DIMENSIONS_FWD = ["all"]
     HEAD_DIMENSIONS_FWD_SM80 = HEAD_DIMENSIONS_BWD
     SPLIT = [""] + (["_split"] if not DISABLE_SPLIT else [])
     PAGEDKV = [""] + (["_paged"] if not DISABLE_PAGEDKV else [])
@@ -570,9 +575,11 @@ if not SKIP_CUDA_BUILD:
     )
     if not DISABLE_SPLIT:
         sources += [f"{ffa_dir_rel}/flash_fwd_combine.cu"]
-    sources += [f"{ffa_dir_rel}/flash_prepare_scheduler.cu"]
+    sources += [f"{ffa_dir_rel}/fast_zero_fill.cu"]
     nvcc_flags = [
         "-O3",
+        "-Xptxas",
+        "-v",
         "-std=c++17",
         "--ftemplate-backtrace-limit=0",  # To debug template code
         "--use_fast_math",
@@ -594,21 +601,29 @@ if not SKIP_CUDA_BUILD:
             ]
         )
     include_dirs = [
+        common_dir,
         ffa_dir_abs,
         cutlass_dir / "include",
     ]
+
+    extra_compile_args = {
+        "cxx": ["-O3", "-std=c++17"] + feature_args,
+        "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag + feature_args,
+    }
 
     ext_modules.append(
         CUDAExtension(
             name="flexible_flash_attention_cuda",
             sources=sources,
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"] + feature_args,
-                "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag + feature_args,
-            },
+            extra_compile_args=extra_compile_args,
             include_dirs=include_dirs,
         )
     )
+
+
+package_data = {
+    "magi_attention": ["*.pyi", "**/*.pyi"],
+}
 
 
 setup(
@@ -623,8 +638,10 @@ setup(
             "assets",
         )
     ),
+    package_data=package_data,
+    include_package_data=True,
     py_modules=["magi_attention"],
-    description="A super fast distributed attention solver",
+    description="A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training",
     long_description=long_description,
     long_description_content_type="text/markdown",
     classifiers=[

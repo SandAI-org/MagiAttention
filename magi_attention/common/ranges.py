@@ -347,16 +347,18 @@ class AttnRanges:
         prefix_offset: list[int] | None = None,
     ) -> AttnRange:
         """
-        将other_attn_range映射到self_ranges对应的local_ranges中,
-        并返回other_attn_range在local_ranges中的位置 (允许通过可选的位置参数来截断)
+        Map the other_attn_range to the corresponding local_ranges within self_ranges,
+        and return the position of other_attn_range in local_ranges
+        (truncation is allowed via an optional positional parameter).
 
         Args:
-            other_attn_range(AttnRange): 需要被转换的other_attn_range
-            is_self_merged(bool): 是否self已经merge
-            prefix_offset(list[int] | None): 如果prefix_offset为None, 则计算prefix_offset
+            other_attn_range (AttnRange): The other_attn_range to be converted.
+            is_self_merged (bool): Indicates whether self has been merged.
+            prefix_offset (list[int] | None): If prefix_offset is None, it will be computed.
 
         Returns:
-            local_range(AttnRange): other_attn_range在self的local_ranges中的位置（如果有截断操作，可能返回一个空的range）
+            local_range (AttnRange): The position of other_attn_range within self's local_ranges.
+                (May return an empty range if truncation occurs.)
         """
 
         merged_ranges = self if is_self_merged else self.merge()

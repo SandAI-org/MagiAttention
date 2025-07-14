@@ -21,11 +21,12 @@ import magi_attention
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.utils import nvtx
 
-from .utils import (
-    _calc_group_cast_a2a_args,
-    _calc_group_reduce_a2a_args,
-    _group_cast_collective_hier,
+from ._all2all_v import all2all_v
+from ._group_collective_hier import (
+    hier_group_cast_impl_with_a2av,
+    hier_group_reduce_impl_with_a2av,
 )
+from .utils import _calc_group_cast_a2a_args, _calc_group_reduce_a2a_args
 
 __all__ = [
     "group_cast_collective",
@@ -87,11 +88,26 @@ def group_cast_collective(
         * Must each splited_output be received from exactly 1 src_rank? Could it be 0?
     """
 
-    assert len(input_split_size_list) == len(dst_indices_list)
-    assert len(output_split_size_list) == len(src_index_list)
+    assert len(input_split_size_list) == len(dst_indices_list), (
+        f"The length of input_split_size_list and dst_indices_list should be the same, "
+        f"but got {len(input_split_size_list)=} and {len(dst_indices_list)=}"
+    )
+    assert len(output_split_size_list) == len(src_index_list), (
+        f"The length of output_split_size_list and src_index_list should be the same, "
+        f"but got {len(output_split_size_list)=} and {len(src_index_list)=}"
+    )
+    assert input.shape[0] == sum(input_split_size_list), (
+        f"The sum of input_split_size_list should be equal to input_seqlen, "
+        f"but got {sum(input_split_size_list)=} and {input.shape[0]=}"
+    )
+    assert output.shape[0] == sum(output_split_size_list), (
+        f"The sum of output_split_size_list should be equal to output_seqlen, "
+        f"but got {sum(output_split_size_list)=} and {output.shape[0]=}"
+    )
 
-    if magi_attention.is_hierarchical_comm_enable():
-        return _group_cast_collective_hier(
+    if magi_attention.comm.is_hierarchical_comm_enable():
+        # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-cast
+        return hier_group_cast_impl_with_a2av(
             input_tensor=input,
             output_tensor=output,
             input_split_size_list=input_split_size_list,
@@ -103,9 +119,9 @@ def group_cast_collective(
             **kwargs,
         )
 
-    world_size = dist.get_world_size(group)
-
     # ---------    calc group cast a2a args     --------- #
+
+    world_size = dist.get_world_size(group)
 
     (
         a2a_output,
@@ -126,22 +142,14 @@ def group_cast_collective(
 
     # ---------    lauch a2a comm kernel     --------- #
 
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output.shape=} | "
-            f"{a2a_input.shape=} | "
-            f"{a2a_output_split_size=} | "
-            f"{a2a_input_split_size=}"
-        )
-    ):
-        work = dist.all_to_all_single(
-            output=a2a_output,
-            input=a2a_input,
-            output_split_sizes=a2a_output_split_size,
-            input_split_sizes=a2a_input_split_size,
-            group=group,
-            async_op=async_op,
-        )
+    work = all2all_v(
+        input=a2a_input,
+        output=a2a_output,
+        input_split_size_list=a2a_input_split_size,
+        output_split_size_list=a2a_output_split_size,
+        group=group,
+        async_op=async_op,
+    )
 
     return WorkWithPostProcessFn(
         work=work,
@@ -199,12 +207,40 @@ def group_reduce_collective(
             where each splited_output can be reduced from 0 or multiple src_ranks,
             and the source ranks for reduction are determined by src_indices_list.
     """
-    assert len(input_split_size_list) == len(dst_index_list)
-    assert len(output_split_size_list) == len(src_indices_list)
+    assert len(input_split_size_list) == len(dst_index_list), (
+        f"input_split_size_list and dst_index_list should have the same length, "
+        f"but got {len(input_split_size_list)=} and {len(dst_index_list)=}"
+    )
+    assert len(output_split_size_list) == len(src_indices_list), (
+        f"output_split_size_list and src_indices_list should have the same length, "
+        f"but got {len(output_split_size_list)=} and {len(src_indices_list)=}"
+    )
+    assert input.shape[0] == sum(input_split_size_list), (
+        f"The sum of input_split_size_list should be equal to input_seqlen, "
+        f"but got {sum(input_split_size_list)=} and {input.shape[0]=}"
+    )
+    assert output.shape[0] == sum(output_split_size_list), (
+        f"The sum of output_split_size_list should be equal to output_seqlen, "
+        f"but got {sum(output_split_size_list)=} and {output.shape[0]=}"
+    )
 
-    world_size = dist.get_world_size(group)
+    if magi_attention.comm.is_hierarchical_comm_enable():
+        # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-reduce
+        return hier_group_reduce_impl_with_a2av(
+            input_tensor=input,
+            output_tensor=output,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_index_list=dst_index_list,
+            src_indices_list=src_indices_list,
+            group=group,
+            async_op=async_op,
+            **kwargs,
+        )
 
     # ---------    calc group reduce a2a args     --------- #
+
+    world_size = dist.get_world_size(group)
 
     (
         a2a_output,
@@ -225,22 +261,14 @@ def group_reduce_collective(
 
     # ---------    lauch a2a comm kernel     --------- #
 
-    with nvtx.add_nvtx_event(
-        (
-            f"{a2a_output.shape=} | "
-            f"{a2a_input.shape=} | "
-            f"{a2a_output_split_size=} | "
-            f"{a2a_input_split_size=}"
-        )
-    ):
-        work = dist.all_to_all_single(
-            output=a2a_output,
-            input=a2a_input,
-            output_split_sizes=a2a_output_split_size,
-            input_split_sizes=a2a_input_split_size,
-            group=group,
-            async_op=async_op,
-        )
+    work = all2all_v(
+        input=a2a_input,
+        output=a2a_output,
+        input_split_size_list=a2a_input_split_size,
+        output_split_size_list=a2a_output_split_size,
+        group=group,
+        async_op=async_op,
+    )
 
     return WorkWithPostProcessFn(
         work=work,

@@ -27,7 +27,7 @@ from magi_attention.utils import is_list_value_all
 class AttnArg:
     q_ranges: AttnRanges
     k_ranges: AttnRanges
-    is_causal_mapping: list[bool]
+    attn_type_map: list[int]
 
     # REVIEW(xiaowu): Is shard_seqlen_q an appropriate name?
     shard_seqlen_q: int
@@ -42,14 +42,14 @@ class AttnArg:
     # skip_attn: bool
     # q_ranges_tensor: torch.Tensor
     # k_ranges_tensor: torch.Tensor
-    # is_causal_mapping_tensor: torch.Tensor
+    # attn_type_map_tensor: torch.Tensor
     # out_zero_fill_ranges: list[tuple[int, int]]
 
     def __post_init__(self):
         # shape check
         assert (
-            len(self.q_ranges) == len(self.k_ranges) == len(self.is_causal_mapping)
-        ), f"{len(self.q_ranges)=}, {len(self.k_ranges)=}, {len(self.is_causal_mapping)=}"
+            len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
+        ), f"{len(self.q_ranges)=}, {len(self.k_ranges)=}, {len(self.attn_type_map)=}"
         # assert len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
 
         # init out zero-fill ranges for fwd out correction
@@ -69,42 +69,35 @@ class AttnArg:
     def _filter_out_empty_slice(self) -> None:
         filtered_q_ranges = AttnRanges()
         filtered_k_ranges = AttnRanges()
-        filtered_is_causal_mapping: list[bool] = []
+        filtered_attn_type_map: list[int] = []
 
         # filter out k_ranges with seqlen == 0
-        for q_range, k_range, is_causal_mapping in zip(
-            self.q_ranges, self.k_ranges, self.is_causal_mapping
+        for q_range, k_range, attn_type_map in zip(
+            self.q_ranges, self.k_ranges, self.attn_type_map
         ):
             if not k_range.is_empty():
                 filtered_q_ranges.append(q_range)
                 filtered_k_ranges.append(k_range)
-                filtered_is_causal_mapping.append(is_causal_mapping)
+                filtered_attn_type_map.append(attn_type_map)
 
         # overwrite the original inputs
         (
             self.q_ranges,
             self.k_ranges,
-            self.is_causal_mapping,
+            self.attn_type_map,
         ) = (
             filtered_q_ranges,
             filtered_k_ranges,
-            filtered_is_causal_mapping,
+            filtered_attn_type_map,
         )
 
         # sanity check
         if magi_attention.is_sanity_check_enable():
             # shape check
-            assert (
-                len(self.q_ranges) == len(self.k_ranges) == len(self.is_causal_mapping)
-            )
+            assert len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
             # check non-empty k ranges
             for k_range in self.k_ranges:
                 assert not k_range.is_empty()
-
-            # check non-overlapped q ranges
-            assert self.q_ranges.is_non_overlap() or is_list_value_all(
-                self.is_causal_mapping, False
-            )
 
     def _init_out_zero_fill_ranges(self) -> None:
         device = torch.cuda.current_device()
@@ -156,7 +149,7 @@ class AttnArg:
             device=torch.cuda.current_device()
         )
         mask_type_tensor_fwd = torch.tensor(
-            self.is_causal_mapping,
+            self.attn_type_map,
             dtype=torch.int32,
             device=torch.cuda.current_device(),
         )
@@ -193,7 +186,7 @@ class AttnArg:
             (
                 self.q_ranges_bwd,
                 self.k_ranges_bwd,
-                self.is_causal_mapping_bwd,
+                self.attn_type_map_bwd,
             ) = self._refactor_bwd_ranges_and_types()
 
             # init skip attn flag
@@ -208,7 +201,7 @@ class AttnArg:
                 device=torch.cuda.current_device()
             )
             mask_type_tensor_bwd = torch.tensor(
-                self.is_causal_mapping_bwd,
+                self.attn_type_map_bwd,
                 dtype=torch.int32,
                 device=torch.cuda.current_device(),
             )
@@ -241,13 +234,13 @@ class AttnArg:
             self.skip_attn_bwd = self.skip_attn_fwd
             self.q_ranges_bwd = self.q_ranges
             self.k_ranges_bwd = self.k_ranges
-            self.is_causal_mapping_bwd = self.is_causal_mapping
+            self.attn_type_map_bwd = self.attn_type_map
 
             self.ffa_bwd_args_dict = self.ffa_fwd_args_dict
 
     def _refactor_bwd_ranges_and_types(
         self,
-    ) -> tuple[AttnRanges, AttnRanges, list[bool]]:
+    ) -> tuple[AttnRanges, AttnRanges, list[int]]:
         """Refactor bwd ffa args including q,k ranges and mask types
         from fwd ffa args (i.e. original ffa args) for bwd dkv load-store efficiency
         TODO:
@@ -258,18 +251,18 @@ class AttnArg:
                 the top-p minhp dispatcher with IOU affinity considered
         """
         # get fwd ranges and mask type
-        q_ranges_fwd, k_ranges_fwd, is_causal_mapping_fwd = (
+        q_ranges_fwd, k_ranges_fwd, attn_type_map_fwd = (
             self.q_ranges,
             self.k_ranges,
-            self.is_causal_mapping,
+            self.attn_type_map,
         )
 
         # TODO: support causal mask
         assert is_list_value_all(
-            is_causal_mapping_fwd,
-            False,
+            attn_type_map_fwd,
+            0,
             allow_empty=True,
-        ), f"Only support all full masks for now, but got {is_causal_mapping_fwd=}"
+        ), f"Only support all full masks for now, but got {attn_type_map_fwd=}"
 
         # init two map q_range->k_ranges and k_range->q_ranges
         map_slice_q_range_to_k_ranges: defaultdict[AttnRange, AttnRanges] = defaultdict(
@@ -330,12 +323,12 @@ class AttnArg:
                 q_ranges_bwd.append(q_range)
                 k_ranges_bwd.append(k_range)
 
-        is_causal_mapping_bwd = [False] * len(q_ranges_bwd)
+        attn_type_map_bwd = [0] * len(q_ranges_bwd)
 
         return (
             q_ranges_bwd,
             k_ranges_bwd,
-            is_causal_mapping_bwd,
+            attn_type_map_bwd,
         )
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
@@ -346,7 +339,7 @@ class AttnArg:
 
     def __repr__(self) -> str:
         return (
-            f"AttnArg(q_ranges={self.q_ranges}, k_ranges={self.k_ranges}, is_causal_mapping={self.is_causal_mapping}, "
+            f"AttnArg(q_ranges={self.q_ranges}, k_ranges={self.k_ranges}, attn_type_map={self.attn_type_map}, "
             f"shard_seqlen_q={self.shard_seqlen_q}, total_area={self.total_area}"
         )
 

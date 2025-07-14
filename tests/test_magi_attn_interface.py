@@ -51,7 +51,7 @@ from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import EPSILON, torch_attn_ref
-from magi_attention.utils import get_attn_mask_from_ranges
+from magi_attention.utils._utils import get_attn_mask_from_ffa_args, is_list_value_all
 
 NAME = "name"
 SKIP_WORLD_SIZE = "skip_world_size"
@@ -147,7 +147,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable() and self.world_size in (
+        if magi_attention.comm.is_hierarchical_comm_enable() and self.world_size in (
             4,
             6,
             8,
@@ -488,7 +488,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
 
         # -----    skip for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable():
+        if magi_attention.comm.is_hierarchical_comm_enable():
             if self.world_size not in (4, 6, 8):
                 # skip for invalid world size
                 # when hierarchical comm is enabled
@@ -514,7 +514,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
         q_ranges: AttnRanges = attn_config_["q_ranges"]
         k_ranges: AttnRanges = attn_config_["k_ranges"]
         interface: str = attn_config_[INTERFACE]
-        is_causal_mapping: bool | list[bool] = attn_config_["is_causal_mapping"]
+        attn_type_mapping: int | list[int] = attn_config_["attn_type_mapping"]
         total_seqlen_q: int = attn_config_["total_seqlen_q"]
         total_seqlen_k: int = attn_config_["total_seqlen_k"]
 
@@ -528,6 +528,17 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             high_bandwith_domain_size=high_bandwith_domain_size,
             deterministic=False,
         )
+
+        if isinstance(attn_type_mapping, list):
+            assert is_list_value_all(attn_type_mapping, 0) or is_list_value_all(
+                attn_type_mapping, 1
+            ), "only support full or causal now"
+            is_causal = attn_type_mapping[0] == 1
+        else:
+            assert (
+                attn_type_mapping == 0 or attn_type_mapping == 1
+            ), "only support full or causal now"
+            is_causal = attn_type_mapping == 1
 
         # -----    run pipeline test   ---- #
 
@@ -565,12 +576,10 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 head_dim=head_dim,
                 pad_size=pad_size,
                 cp_group=None
-                if magi_attention.is_hierarchical_comm_enable()
+                if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
                 cp_mesh=self.device_mesh,
-                causal=is_causal_mapping[0]
-                if isinstance(is_causal_mapping, list)
-                else is_causal_mapping,
+                causal=is_causal,
                 dist_attn_config=dist_attn_config,
             )
 
@@ -584,25 +593,23 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 head_dim=head_dim,
                 pad_size=pad_size,
                 cp_group=None
-                if magi_attention.is_hierarchical_comm_enable()
+                if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
                 cp_mesh=self.device_mesh,
-                causal=is_causal_mapping[0]
-                if isinstance(is_causal_mapping, list)
-                else is_causal_mapping,
+                causal=is_causal,
                 dist_attn_config=dist_attn_config,
             )
 
         if interface == "magi_attn_flex":
             attn_mask_type: AttnMaskType | list[AttnMaskType]
-            if isinstance(is_causal_mapping, list):
+            if isinstance(attn_type_mapping, list):
                 attn_mask_type = [
-                    AttnMaskType.CAUSAL if is_causal else AttnMaskType.FULL
-                    for is_causal in is_causal_mapping
+                    AttnMaskType.CAUSAL if is_causal == 1 else AttnMaskType.FULL
+                    for is_causal in attn_type_mapping
                 ]
             else:
                 attn_mask_type = (
-                    AttnMaskType.CAUSAL if is_causal_mapping else AttnMaskType.FULL
+                    AttnMaskType.CAUSAL if attn_type_mapping == 1 else AttnMaskType.FULL
                 )
 
             x_padded, dist_attn_runtime_key = magi_attn_flex_dispatch(
@@ -615,7 +622,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 head_dim=head_dim,
                 pad_size=pad_size,
                 cp_group=None
-                if magi_attention.is_hierarchical_comm_enable()
+                if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
                 cp_mesh=self.device_mesh,
                 is_same_source=True,
@@ -653,7 +660,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             x_grad=x.grad,
             q_ranges=q_ranges,
             k_ranges=k_ranges,
-            is_causal_mapping=is_causal_mapping,
+            attn_type_map=attn_type_mapping,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
             total_out=total_out,
@@ -668,7 +675,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
         x_grad: torch.Tensor,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
-        is_causal_mapping: bool | list[bool],
+        attn_type_map: int | list[int],
         total_seqlen_q: int,
         total_seqlen_k: int,
         total_out: torch.Tensor,
@@ -682,14 +689,19 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
 
         dq_atol = EPSILON
         dq_rtol = EPSILON
+
         # -----   build attn mask   ---- #
 
-        mask = get_attn_mask_from_ranges(
-            q_ranges=q_ranges.to_naive_ranges(),
-            k_ranges=k_ranges.to_naive_ranges(),
-            is_causal_mapping=is_causal_mapping,
+        if isinstance(attn_type_map, int):
+            attn_type_map = [attn_type_map] * len(q_ranges)
+
+        mask = get_attn_mask_from_ffa_args(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
+            device=torch.cuda.current_device(),
         )
 
         # -----   get total qkv   ---- #

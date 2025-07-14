@@ -111,7 +111,7 @@ class TestDispatcher(DistTestBase):
             is_k_permutable=is_k_permutable,
             # pass a placeholder since required
             high_bandwith_domain_size=1
-            if magi_attention.is_hierarchical_comm_enable()
+            if magi_attention.comm.is_hierarchical_comm_enable()
             else self.world_size // 2,
         )
 

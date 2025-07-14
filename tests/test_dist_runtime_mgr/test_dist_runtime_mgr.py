@@ -48,7 +48,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable():
+        if magi_attention.comm.is_hierarchical_comm_enable():
             assert self.world_size == 4
             world_size_inter_node, world_size_intra_node = 2, 2
             self.device_mesh = init_device_mesh(

@@ -205,7 +205,7 @@ class LlamaAttention(nn.Module):
         )
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
-        self.is_causal = config.is_casual
+        self.is_causal = config.is_causal
         self.rope = LlamaRotaryEmbedding(self.config)
 
         self.q_proj = nn.Linear(

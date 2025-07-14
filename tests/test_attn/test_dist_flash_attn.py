@@ -43,7 +43,7 @@ class TestDistFlashAttn(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.is_hierarchical_comm_enable():
+        if magi_attention.comm.is_hierarchical_comm_enable():
             assert self.world_size == 4
             world_size_inter_node, world_size_intra_node = 2, 2
             self.device_mesh = init_device_mesh(
@@ -86,7 +86,7 @@ class TestDistFlashAttn(DistTestBase):
             local_attn_arg=AttnArg(
                 q_ranges=AttnRanges.from_ranges([[0, 128]]),
                 k_ranges=AttnRanges.from_ranges([[0, 128]]),
-                is_causal_mapping=[False],
+                attn_type_map=[0],
                 shard_seqlen_q=128,
                 total_area=128 * 128,
             ),
@@ -94,7 +94,7 @@ class TestDistFlashAttn(DistTestBase):
                 AttnArg(
                     q_ranges=AttnRanges.from_ranges([[0, 128]]),
                     k_ranges=AttnRanges.from_ranges([[0, 128 * 3]]),
-                    is_causal_mapping=[False],
+                    attn_type_map=[0],
                     shard_seqlen_q=128,
                     total_area=128 * 128 * 3,
                 ),

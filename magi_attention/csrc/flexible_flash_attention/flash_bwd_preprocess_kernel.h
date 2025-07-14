@@ -18,7 +18,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQaccum, bool Varlen>
+template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQ, bool Clear_dK, bool Clear_dV>
 class FlashAttnBwdPreprocess {
 
 public:
@@ -59,12 +59,12 @@ public:
                         GmemLayoutAtomAccum{},
                         Layout<Shape<Int<kGmemElemsPerLoadAccum>>>{}));  // Val layout, 4 vals per store
 
-    using ShapeO = cute::Shape<int32_t, int32_t, int32_t, int32_t>;  // (seqlen_q, d, head, batch)
-    using StrideO = cute::Stride<int64_t, _1, int64_t, int64_t>;
-    using ShapedPsum = cute::Shape<int32_t, int32_t, int32_t>;  // (seqlen_q, head, batch)
+    using ShapeO = cute::Shape<int32_t, int32_t, int32_t>;  // (seqlen_q, d, head)
+    using StrideO = cute::Stride<int64_t, _1, int64_t>;
+    using ShapedPsum = cute::Shape<int32_t, int32_t, int32_t>;  // (max_seqlen_q, head, batch)
     using StridedPsum = cute::Stride<_1, int64_t, int64_t>;
-    using ShapedQaccum = cute::Shape<int32_t, int32_t, int32_t>;  // (seqlen_q * d, head, batch)
-    using StridedQaccum = cute::Stride<_1, int64_t, int64_t>;
+    using ShapeLSE = cute::Shape<int32_t, int32_t>;  // (total_q, head)
+    using StrideLSE = cute::Stride<_1, int64_t>; 
 
     // Device side arguments
     struct Arguments {
@@ -76,18 +76,13 @@ public:
         float* ptr_dPsum;
         ShapedPsum const shape_dPsum;
         StridedPsum const stride_dPsum;
+        ShapeLSE const shape_LSE;
         float const* ptr_LSE;
-        StridedPsum const stride_LSE;
+        StrideLSE const stride_LSE;
         float *ptr_LSE_log2;
         StridedPsum const stride_LSE_log2;
-        ElementAccum* ptr_dQaccum;
-        ShapedQaccum const shape_dQaccum;
-        StridedQaccum const stride_dQaccum;
-        int num_batch;  // We need this to know the size of dq_semaphore in case of varlen
-        int* dq_semaphore;
-        int const* cu_seqlens = nullptr;
-        int const* ranges = nullptr;
-        int const* seqused = nullptr;
+        int const * q_ranges;
+        int const * k_ranges;
     };
 
     // Kernel entry point API
@@ -100,18 +95,13 @@ public:
         float* ptr_dPsum;
         ShapedPsum const shape_dPsum;
         StridedPsum const stride_dPsum;
+        ShapeLSE const shape_LSE;
         float const* ptr_LSE;
-        StridedPsum const stride_LSE;
+        StrideLSE const stride_LSE;
         float* ptr_LSE_log2;
         StridedPsum const stride_LSE_log2;
-        ElementAccum* ptr_dQaccum;
-        ShapedQaccum const shape_dQaccum;
-        StridedQaccum const stride_dQaccum;
-        int num_batch;
-        int* dq_semaphore;
-        int const* cu_seqlens = nullptr;
-        int const* ranges = nullptr;
-        int const* seqused = nullptr;
+        int const* q_ranges = nullptr;
+        int const* k_ranges = nullptr;
     };
 
     // Convert to underlying arguments. In this case, a simple copy for the aliased type.
@@ -127,28 +117,25 @@ public:
             args.ptr_dPsum,
             args.shape_dPsum,
             args.stride_dPsum,
+            args.shape_LSE,
             args.ptr_LSE,
             args.stride_LSE,
             args.ptr_LSE_log2,
             args.stride_LSE_log2,
-            args.ptr_dQaccum,
-            args.shape_dQaccum,
-            args.stride_dQaccum,
-            args.num_batch,
-            args.dq_semaphore,
-            args.cu_seqlens,
-            args.ranges,
-            args.seqused
+            args.q_ranges,
+            args.k_ranges,
         };
     }
 
     CUTLASS_DEVICE
     void
     operator()(Params const& params, [[maybe_unused]] char* smem_buf) {
-        // REVIEW(littsk): 这个kernel在干啥？
-
         static constexpr int kBlockM = get<0>(TileShape_MK{});
 
+        // 1个thread处理一行，因此需要保证kBlockM <= MaxThreadsPerBlock
+        static_assert(kBlockM <= MaxThreadsPerBlock);
+
+        // Get block coordinates
         int const thread_idx = threadIdx.x;
 
         /**
@@ -163,32 +150,41 @@ public:
         int const bidh = blockIdx.z;
         int const bidb = blockIdx.x;
 
-        flash::SeqlenInfoBwd<Varlen, kBlockM> seqlen_info(bidb, size<0>(params.shape_O), params.cu_seqlens, params.ranges, params.seqused);
-        bool const is_varlen = Varlen && (params.cu_seqlens || params.ranges);
-        int const seqlen_o = seqlen_info.seqlen;
-        if (is_varlen && m_block * kBlockM >= seqlen_o) { return; }
+        // Initialize the seqlen info
+        flash::DistributedSeqlenInfo seqlen_info(bidb, params.q_ranges, params.k_ranges);
+        int const seqlen_o = seqlen_info.seqlen_q;
 
-        Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh, !is_varlen ? bidb : 0);
-        Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{}));  // (M, K)
-        Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh, !is_varlen ? bidb : 0);
-        Tensor gdO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{}));  // (M, K)
+        // Early return if the current block is out of range
+        if (m_block * kBlockM >= seqlen_o) { 
+            return; 
+        }
 
-        auto shape_LSE = select<0, 2, 3>(params.shape_O);
-        Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), shape_LSE, params.stride_LSE)(_, bidh, !is_varlen ? bidb : 0);
-        Tensor gLSE = local_tile(cute::domain_offset(make_coord(seqlen_info.offset), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
-        static_assert(kBlockM <= MaxThreadsPerBlock);
+        // TODO: remove to params
+        // auto shape_LSE = select<0, 2>(params.shape_O);
+
+        // Initialize the tensors for O, dO, and LSE
+        Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
+        Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{}));  // (M, K)
+        Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh);
+        Tensor gdO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{}));  // (M, K)
+        Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
+        Tensor gLSE = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
+
         // REVIEW(littsk): 为什么是infinity而不是-infinity？
         float lse = thread_idx < seqlen_o - m_block * kBlockM && thread_idx < kBlockM ? gLSE(thread_idx) : INFINITY;
 
+        // Initialize the tiled copy for O and dO
         GmemTiledCopy gmem_tiled_copy_O;
         auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
 
         Tensor tOgO = gmem_thr_copy_O.partition_S(gO);
         Tensor tOgdO = gmem_thr_copy_O.partition_S(gdO);
+
         // Construct identity layout for gO
         Tensor cO = cute::make_identity_tensor(TileShape_MK{});  // (BLK_M,BLK_K) -> (blk_m,blk_k)
         // Repeat the partitioning with identity layouts
         Tensor tOcO = gmem_thr_copy_O.partition_D(cO);
+
         Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOgO)));
         #pragma unroll
         for (int k = 0; k < size(tOpO); ++k) { tOpO(k) = get<1>(tOcO(_0{}, _0{}, k)) < get<1>(params.shape_O); }
@@ -242,7 +238,7 @@ public:
             gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
         }
 
-        // if constexpr (Clear_dQaccum) {
+        // if constexpr (Clear_dQ) {
         //     Tensor mdQaccum = make_tensor(make_gmem_ptr(params.ptr_dQaccum), params.shape_dQaccum, params.stride_dQaccum)(_, bidh, !is_varlen ? bidb : 0);
         //     Tensor gdQaccum = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_padded * kHeadDim), mdQaccum), Shape<Int<kBlockM * kHeadDim>>{}, make_coord(m_block));
         //     GmemTiledCopyAccum gmem_tiled_copy_dQaccum;
@@ -252,13 +248,6 @@ public:
         //     clear(zero);
         //     cute::copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{}, zero, tdQgdQaccum);
         // }
-
-        if (params.dq_semaphore != nullptr && thread_idx == 0) {
-            int const num_batch = params.num_batch;
-            int const num_head = get<2>(params.shape_O);
-            params.dq_semaphore[bidh + bidb * num_head + m_block * num_head * num_batch] = 0;
-        }
-
     }
 
 };

@@ -88,9 +88,11 @@ def write_rank(
 
 
 def setup_dist_env(
-    base_seed: int | None = None, seed_bias: Callable = lambda rank: 0
+    backend: str = "nccl",
+    base_seed: int | None = None,
+    seed_bias: Callable = lambda rank: 0,
 ) -> tuple[int, int, dist.ProcessGroup, str, int | None]:
-    """set up distributed environment with NCCL backend,
+    """set up distributed environment with the specified process group backend,
     NOTE: the test script using this func to set up should be executed through torchrun
     """
     rank = int(os.environ["LOCAL_RANK"])
@@ -98,7 +100,7 @@ def setup_dist_env(
     torch.cuda.set_device(rank)
 
     dist.init_process_group(
-        backend="nccl",
+        backend=backend,
         rank=rank,
         world_size=world_size,
     )

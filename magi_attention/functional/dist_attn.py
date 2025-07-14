@@ -22,8 +22,6 @@ import torch.nn.functional as F
 import magi_attention
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.comm.work import WorkWithPostProcessFn
-from magi_attention.common.range_op import range_fill_
-from magi_attention.common.ranges import NaiveRanges
 from magi_attention.meta.collection import AttnCalcMeta, CommMeta
 from magi_attention.utils import max_fp_dtype, nvtx, to_higher_fp_dtype
 
@@ -102,7 +100,7 @@ def correct_attn_output(
     return o.to(o1.dtype)
 
 
-# TODO: fuse this kernel in the future
+# TODO: consolidate this process to ffa fwd kernel
 @nvtx.instrument_nvtx
 def result_correction(
     out_list: list[torch.Tensor],
@@ -124,7 +122,8 @@ def result_correction(
         - lse: [num_heads, num_tokens_q]
     """
     if len(lse_list) == 1:
-        # NOTE: if there is only one out and lse, we just return them directly, no need to correct
+        # NOTE: if there is only one out and lse,
+        # we just return them directly, no need to correct
         return out_list[0], lse_list[0]
 
     curr_lse = None
@@ -151,27 +150,6 @@ def result_correction(
     return curr_out, curr_lse
 
 
-# TODO: put this logic into kernel
-@nvtx.instrument_nvtx
-def out_zero_fill_correction(
-    out: torch.Tensor,
-    out_zero_fill_ranges: NaiveRanges,
-    use_range_fill: bool = True,
-    **kwargs,
-) -> torch.Tensor:
-    if use_range_fill:
-        out = range_fill_(
-            input=out,
-            val=0.0,
-            **kwargs,
-        )
-    else:  # FIXME: when range fill is stable, we can remove this old branch
-        for fill_start, fill_end in out_zero_fill_ranges:
-            out[fill_start:fill_end].fill_(0)
-
-    return out
-
-
 class DistFlashAttnRuntime:
     """
     Runtime class for Distributed Flash Attention.
@@ -196,9 +174,6 @@ class DistFlashAttnRuntime:
         cp_group_dkv: dist.ProcessGroup,
         deterministic: bool,
     ):
-        assert dist.get_backend(cp_group_kv) == dist.Backend.NCCL
-        assert dist.get_backend(cp_group_dkv) == dist.Backend.NCCL
-
         self.comm_meta = comm_meta
         self.calc_meta = calc_meta
         self.cp_group_kv = cp_group_kv
@@ -340,29 +315,17 @@ class DistFlashAttnRuntime:
                         k=k,
                         v=v,
                         **attn_arg.to_ffa_args(is_bwd=False),
+                        merge_q_ranges=None,
+                        qk_map=None,
                         softmax_scale=q.shape[-1] ** -0.5,
                         deterministic=deterministic,
                         softcap=0.0,
-                        sm_margin=0
-                        if magi_attention.is_cuda_device_max_connections_one()
-                        else 4,
+                        sm_margin=magi_attention.comm.ffa_fwd_sm_margin_save_for_comm(),
                         # NOTE: increase the partial out precision temporarily,
                         # to reduce the error caused by the out correction
                         return_dtype=max_fp_dtype(q.dtype, torch.float32),
                         disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
                     )
-
-                # fill output with zero indexed by "hole" q ranges
-                # TODO: put this logic into kernel
-                out_zero_fill_correction(
-                    out=out,
-                    out_zero_fill_ranges=attn_arg.out_zero_fill_ranges,
-                    # FIXME: this is still an experimental feature,
-                    # we should remove this flag in the future
-                    # when range fill is stable
-                    use_range_fill=True,
-                    **attn_arg.out_zero_range_fill_kwargs,
-                )
 
         return out, lse, skip_attn
 
@@ -416,12 +379,12 @@ class DistFlashAttnRuntime:
                     out=o,
                     softmax_lse=lse,
                     **attn_arg.to_ffa_args(is_bwd=True),
+                    merge_k_ranges=None,
+                    bwd_kq_map=None,
                     softmax_scale=q.shape[-1] ** -0.5,
                     deterministic=deterministic,
                     softcap=0.0,
-                    sm_margin=0
-                    if magi_attention.is_cuda_device_max_connections_one()
-                    else 4,
+                    sm_margin=magi_attention.comm.ffa_bwd_sm_margin_save_for_comm(),
                 )
             partial_dkv = torch.cat([partial_dk, partial_dv], dim=0)
 
@@ -515,7 +478,10 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 remote_kv_buffer,
             ) = dist_attn_runtime.fetch_remote_kv(local_kv=local_kv, overlap_stage=0)
         else:
-            # TODO: add docs
+            # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
+            # we issue all fetch-remote-kv comms in advance of ffa fwd
+            # and ffa fwd can still overlap with these comms
+            # with the support of `sm_margin`, thx to persistent kernel design
             remote_kv_works_with_buffers = [
                 dist_attn_runtime.fetch_remote_kv(
                     local_kv=local_kv, overlap_stage=ith_overlap_stage
@@ -531,6 +497,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
             overlap_stage=None,
             deterministic=dist_attn_runtime.deterministic,
         )
+
         if not skip_attn:
             out_list.append(out)
             lse_list.append(lse)
@@ -563,6 +530,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
                 deterministic=dist_attn_runtime.deterministic,
             )
+
             if not skip_attn:
                 out_list.append(out)
                 lse_list.append(lse)
@@ -600,7 +568,10 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 remote_kv_buffer,
             ) = dist_attn_runtime.fetch_remote_kv(local_kv=local_kv, overlap_stage=0)
         else:
-            # TODO: add docs
+            # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
+            # we issue all fetch-remote-kv comms in advance of ffa bwd
+            # and ffa bwd can still overlap with these comms
+            # with the support of `sm_margin`, thx to persistent kernel design
             remote_kv_works_with_buffers = [
                 dist_attn_runtime.fetch_remote_kv(
                     local_kv=local_kv, overlap_stage=ith_overlap_stage
@@ -667,8 +638,8 @@ class DistFlashAttnFunc(torch.autograd.Function):
             )
 
             # reduce ith partial dkv
-            # NOTE: Even if skip_attn is True, we still need to launch the group_reduce_collective,
-            #       because not all ranks are skipped.
+            # NOTE: even if skip_attn is True, we still need to launch the group_reduce_collective,
+            # because not all ranks are skipped.
             partial_local_dkv_work = dist_attn_runtime.reduce_partial_dkv(
                 partial_remote_dkv=partial_remote_dkv,
                 partial_local_dkv=partial_local_dkv,
@@ -677,8 +648,8 @@ class DistFlashAttnFunc(torch.autograd.Function):
 
             partial_local_dkv_works.append(partial_local_dkv_work)
 
-            # NOTE: Because dq reduce is doing on local rank, if skip_attn is True,
-            #       we just skip the reduce operation.
+            # NOTE: since dq reduce is doing on local rank, if skip_attn is True,
+            # we just skip the reduce operation.
             if not skip_attn:
                 # reduce ith partial dq, overlapped with ith remote dkv comm
                 partial_local_dq = dist_attn_runtime.reduce_partial_dq(
