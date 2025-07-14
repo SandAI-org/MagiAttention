@@ -66,7 +66,8 @@ def magi_attn_varlen_key(
 
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
-        chunk_size (int): chunk size to chunk the permutable tensor.
+        chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
+        to control the granularity of computation load-balance.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
@@ -185,7 +186,8 @@ def magi_attn_varlen_dispatch(
 
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
-        chunk_size (int): chunk size to chunk the q,k,v
+        chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
+        to control the granularity of computation load-balance.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
@@ -288,7 +290,8 @@ def magi_attn_flex_key(
 
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
-        chunk_size (int): chunk size to chunk the permutable tensor.
+        chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
+        to control the granularity of computation load-balance.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
@@ -363,15 +366,14 @@ def magi_attn_flex_key(
     attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
     assert is_list_type_all(attn_mask_type, (str, AttnMaskType)), (
         f"attn_mask_type must be a list of str or AttnMaskType or their mixed combination, "
-        f"but get {attn_mask_type=}"
+        f"but got {attn_mask_type=}"
     )
     attn_mask_type = [  # transform str to AttnMaskType, might raise ValueError
-        AttnMaskType(type_name) if isinstance(type_name, str) else type_name
-        for type_name in attn_mask_type
+        AttnMaskType(type_name) for type_name in attn_mask_type
     ]
     assert len(attn_mask_type) == len(q_ranges), (
         f"the length of attn_mask_type must be same as q_ranges, "
-        f"but get {len(attn_mask_type)=} and {len(q_ranges)=}"
+        f"but got {len(attn_mask_type)=} and {len(q_ranges)=}"
     )
 
     # Validate process group (or device mesh)
@@ -527,7 +529,8 @@ def magi_attn_flex_dispatch(
 
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
-        chunk_size (int): chunk size to chunk the permutable tensor
+        chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
+        to control the granularity of computation load-balance.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now

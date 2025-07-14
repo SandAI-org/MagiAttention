@@ -363,7 +363,7 @@ class MaskIterator:
     def __iter__(self):
         assert (
             self.generate_times > 0
-        ), f"generate times must greater than 0, but get {self.generate_times}"
+        ), f"generate times must greater than 0, but got {self.generate_times}"
         return self
 
     def __next__(self):

@@ -510,7 +510,7 @@ def _calc_self_attn_areas(
             else:
                 raise ValueError(
                     f"Only support 'FULL', 'CAUSAL', 'BICAUSAL', 'INVCAUSAL', "
-                    f"but get {mask_type=}"
+                    f"but got {mask_type=}"
                 )
             cur_range_idx += 1
 

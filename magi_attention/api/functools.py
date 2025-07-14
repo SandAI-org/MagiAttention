@@ -158,7 +158,7 @@ def init_hierarchical_mesh(
     """
     assert world_size == world_size_inter_node * world_size_intra_node, (
         f"world_size must be equal to inter_node * intra_node, "
-        f"but get {world_size=}, {world_size_inter_node=} and {world_size_intra_node=}"
+        f"but got {world_size=}, {world_size_inter_node=} and {world_size_intra_node=}"
     )
     if magi_attention.comm.is_hierarchical_comm_enable():
         device_mesh = init_device_mesh(
@@ -245,7 +245,7 @@ def infer_attn_mask_from_sliding_window(
     assert len(window_size) == 2, "window size must be of 2 int"
     assert window_size[0] < k_range.seqlen and window_size[1] < k_range.seqlen, (
         "the num of window_size must be -1 or < k_range.seqlen",
-        f"but get {window_size=}",
+        f"but got {window_size=}",
     )
 
     q_ranges_, k_ranges_ = AttnRanges(), AttnRanges()
