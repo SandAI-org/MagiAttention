@@ -34,6 +34,7 @@ from .functools import (
 from .magi_attn_interface import (
     calc_attn,
     dispatch,
+    get_most_recent_key,
     get_position_ids,
     magi_attn_flex_dispatch,
     magi_attn_flex_key,
@@ -50,6 +51,7 @@ __all__ = [
     "magi_attn_varlen_dispatch",
     "magi_attn_varlen_key",
     "undispatch",
+    "get_most_recent_key",
     "flex_flash_attn_func",
     "get_position_ids",
     "compute_pad_size",

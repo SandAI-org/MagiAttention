@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+from typing import Sequence, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -38,7 +39,9 @@ DistAttnRuntimeDict = FixedLenDict(
 )  # [DistAttnRuntimeKey, DistAttnRuntimeMgr]
 
 
-# TODO: update docstring for cp_mesh
+GeneralAttnMaskType: TypeAlias = str | AttnMaskType | Sequence[str | AttnMaskType]
+
+
 def magi_attn_varlen_key(
     x: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
@@ -51,10 +54,9 @@ def magi_attn_varlen_key(
     causal: bool = False,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
-    """
-    flash_attn_varlen like interface. Generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q,
-    cu_seqlens_k and causal.
-    Pad the input tensor, Caculate DistAttnRuntimeKey and generate the corresponding DistAttnRuntimeMgr.
+    """This is a flash_attn_varlen like interface, to
+    generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k and causal,
+    further to pad the input tensor, caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
 
     Args:
         x (torch.Tensor): input tensor
@@ -168,11 +170,12 @@ def magi_attn_varlen_dispatch(
     cp_group: dist.ProcessGroup | None = None,
     cp_mesh: DeviceMesh | None = None,
     causal: bool = False,
-    dist_attn_config: DistAttnConfig = DistAttnConfig(),  # deterministic is hidden in dist_attn_config
+    dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ):
-    """
-    flash_attn_varlen like interface.
-    Generate dist_attn_key and dispatch the padded input tensor.
+    """This is a flash_attn_varlen like interface, to
+    generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k and causal,
+    further to pad the input tensor, caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr,
+    and finally dispatch the input tensor to local tensor.
 
     Args:
         x (torch.Tensor): input tensor
@@ -182,7 +185,7 @@ def magi_attn_varlen_dispatch(
 
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
-        chunk_size (int): chunk size to chunk the permutable tensor.
+        chunk_size (int): chunk size to chunk the q,k,v
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
@@ -246,15 +249,17 @@ def magi_attn_varlen_dispatch(
         causal=causal,
         dist_attn_config=dist_attn_config,
     )
-    dx = dispatch(padded_x, key)
-    return (dx, key)
+
+    local_x = dispatch(padded_x, key)
+
+    return (local_x, key)
 
 
 def magi_attn_flex_key(
     x: torch.Tensor,
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
-    attn_mask_type: list[AttnMaskType],
+    attn_mask_type: GeneralAttnMaskType,
     total_seqlen_q: int,
     total_seqlen_k: int,
     head_dim: int,
@@ -262,19 +267,21 @@ def magi_attn_flex_key(
     chunk_size: int,
     cp_group: dist.ProcessGroup | None = None,
     cp_mesh: DeviceMesh | None = None,
+    dist_attn_config: DistAttnConfig = DistAttnConfig(),
     is_same_source: bool = True,
     is_q_permutable: bool = True,
     is_k_permutable: bool = True,
-    dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
-    """
-    Pad the input tensor, Caculate DistAttnRuntimeKey and generate the corresponding DistAttnRuntimeMgr.
+    """This is the most flexible interface,
+    directly passing in q_ranges, k_ranges and attn_mask_type to
+    pad the input tensor x, caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
 
     Args:
         x (torch.Tensor): input tensor
         q_ranges (AttnRanges): global query ranges in the ref attn mask
         k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (AttnMaskType | list[AttnMaskType]): attn mask type (list)
+        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]): attn mask type (list)
+            represented by str or enum `AttnMaskType` or their mixed combination
 
         total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
         total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
@@ -287,21 +294,21 @@ def magi_attn_flex_key(
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
         NOTE: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
 
+        dist_attn_config (DistAttnConfig): dist attn config
+
         is_same_source (bool): is query tensor and key tensor share the same source
         is_q_permutable (bool): is query tensor permutable
         is_k_permutable (bool): is key tensor permutable
         NOTE: e.g.
-                1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
-                    a) is_same_source is True
-                    b) both q and k are permutable, as long as they are permuted in the same way.
-                2. for encoder-decoder transformer like t5, it applies 'cross-attn' as follows:
-                    a) is_same_source is False
-                    b) q is permutable but k is not
-                3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
-                    a) is_same_source is False
-                    b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
-
-        dist_attn_config (DistAttnConfig): dist attn config
+        1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
+        a) is_same_source is True
+        b) both q and k are permutable, as long as they are permuted in the same way.
+        2. for encoder-decoder transformer like t5, it applies 'cross-attn' as follows:
+        a) is_same_source is False
+        b) q is permutable but k is not
+        3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
+        a) is_same_source is False
+        b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
 
     Returns:
         x (torch.Tensor): the input tensor after padding.
@@ -318,7 +325,7 @@ def magi_attn_flex_key(
         ...     ),
         ...     q_ranges=AttnRanges.from_ranges([[0, 2048], [2048, 4096]]),
         ...     k_ranges=AttnRanges.from_ranges([[0, 2048], [0, 4096]]),
-        ...     attn_mask_type=AttnMaskType.FULL,
+        ...     attn_mask_type="full",
         ...     total_seqlen_q=4096,
         ...     total_seqlen_k=4096,
         ...     pad_size=compute_pad_size(4096, 4, 64, 512),  # seqlen, cp_size, head_dim, chunk_size
@@ -352,6 +359,20 @@ def magi_attn_flex_key(
         >>> # Gather local attention results to global result
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
+    # Validate and transform attn_mask_type
+    attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
+    assert is_list_type_all(attn_mask_type, (str, AttnMaskType)), (
+        f"attn_mask_type must be a list of str or AttnMaskType or their mixed combination, "
+        f"but get {attn_mask_type=}"
+    )
+    attn_mask_type = [  # transform str to AttnMaskType, might raise ValueError
+        AttnMaskType(type_name) if isinstance(type_name, str) else type_name
+        for type_name in attn_mask_type
+    ]
+    assert len(attn_mask_type) == len(q_ranges), (
+        f"the length of attn_mask_type must be same as q_ranges, "
+        f"but get {len(attn_mask_type)=} and {len(q_ranges)=}"
+    )
 
     # Validate process group (or device mesh)
     if cp_group is None and cp_mesh is None:
@@ -389,8 +410,7 @@ def magi_attn_flex_key(
         dist_attn_config,
     )
 
-    # deepcopy qk range and attn_mask and do padding to avoid the modification of
-    # key.
+    # deepcopy qk range and attn_mask and do padding to avoid the modification of key
     def apply_padding(q_ranges, k_ranges, attn_mask_type):
         q_range = AttnRanges.from_ranges(q_ranges.to_naive_ranges(), check=True)
         k_range = AttnRanges.from_ranges(k_ranges.to_naive_ranges(), check=True)
@@ -431,6 +451,7 @@ def magi_attn_flex_key(
         is_k_permutable=is_k_permutable,
         high_bandwith_domain_size=dist_attn_config.high_bandwith_domain_size,
     )
+
     if key not in DistAttnRuntimeDict.keys():
         # calculate dist attn runtime key
         comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
@@ -476,7 +497,7 @@ def magi_attn_flex_dispatch(
     x: torch.Tensor,
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
-    attn_mask_type: AttnMaskType | list[AttnMaskType] | str | list[str],
+    attn_mask_type: GeneralAttnMaskType,
     total_seqlen_q: int,
     total_seqlen_k: int,
     head_dim: int,
@@ -485,15 +506,21 @@ def magi_attn_flex_dispatch(
     cp_group: dist.ProcessGroup | None = None,
     cp_mesh: DeviceMesh | None = None,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
+    is_same_source: bool = True,
+    is_q_permutable: bool = True,
+    is_k_permutable: bool = True,
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
-    """
-    Generate dist_attn_key and dispatch the padded input tensor.
+    """This is the most flexible interface,
+    directly passing in q_ranges, k_ranges and attn_mask_type to
+    pad the input tensor x, caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr,
+    and dispatch the input tensor to local tensor.
 
     Args:
         x (torch.Tensor): input tensor
         q_ranges (AttnRanges): global query ranges in the ref attn mask
         k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (AttnMaskType | list[AttnMaskType]): attn mask type (list)
+        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]): attn mask type (list)
+            represented by str or enum `AttnMaskType` or their mixed combination
 
         total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
         total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
@@ -508,8 +535,22 @@ def magi_attn_flex_dispatch(
 
         dist_attn_config (DistAttnConfig): dist attn config
 
+        is_same_source (bool): is query tensor and key tensor share the same source
+        is_q_permutable (bool): is query tensor permutable
+        is_k_permutable (bool): is key tensor permutable
+        NOTE: e.g.
+        1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
+        a) is_same_source is True
+        b) both q and k are permutable, as long as they are permuted in the same way.
+        2. for encoder-decoder transformer like t5, it applies 'cross-attn' as follows:
+        a) is_same_source is False
+        b) q is permutable but k is not
+        3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
+        a) is_same_source is False
+        b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
+
     Returns:
-        dx (torch.Tensor): the local input x after padding.
+        local_x (torch.Tensor): the local input x after padding.
         key (DistAttnRuntimeKey): DistAttnRuntimeKey.
 
     Example:
@@ -523,7 +564,7 @@ def magi_attn_flex_dispatch(
         ...     ),
         ...     q_ranges=AttnRanges.from_ranges([[0, 2048], [2048, 4096]]),
         ...     k_ranges=AttnRanges.from_ranges([[0, 2048], [0, 4096]]),
-        ...     attn_mask_type=AttnMaskType.FULL,
+        ...     attn_mask_type="full",
         ...     total_seqlen_q=4096,
         ...     total_seqlen_k=4096,
         ...     pad_size=compute_pad_size(4096, 4, 64, 512),  # seqlen, cp_size, head_dim, chun_size
@@ -542,6 +583,9 @@ def magi_attn_flex_dispatch(
         ...             alg=OverlapAlgType.UNIFORM,
         ...         ),
         ...     ),
+        ...     is_same_source=True,
+        ...     is_q_permutable=True,
+        ...     is_k_permutable=True,
         ... )
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>> # Do local attention computation
@@ -549,14 +593,6 @@ def magi_attn_flex_dispatch(
         >>> # Gather local attention results to global result
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
-    # Validate attn_mask_type
-    attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
-    if not is_list_type_all(attn_mask_type, AttnMaskType):
-        attn_mask_type = [AttnMaskType(type_name) for type_name in attn_mask_type]
-    assert len(attn_mask_type) == len(q_ranges), (
-        f"the length of attn_mask_type must be same as q_ranges, "
-        f"but get {len(attn_mask_type)=} and {len(q_ranges)=}"
-    )
 
     padded_x, key = magi_attn_flex_key(
         x=x,
@@ -571,10 +607,16 @@ def magi_attn_flex_dispatch(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        # TODO: think through other scnearios besides self-attn and cross-attn
+        # and find a better way to represent these flags
+        # now keep it here temporarily for consistency
+        is_same_source=is_same_source,
+        is_q_permutable=is_q_permutable,
+        is_k_permutable=is_k_permutable,
     )
 
-    dx = dispatch(padded_x, key)
-    return (dx, key)
+    local_x = dispatch(padded_x, key)
+    return (local_x, key)
 
 
 def dispatch(
@@ -582,13 +624,14 @@ def dispatch(
     key: DistAttnRuntimeKey,
 ) -> torch.Tensor:
     """
-    Dispatch the input total tensor to local tensor on each rank.
+    Dispatch the input tensor to local tensor on each rank along dim0 (seqlen dim).
     args:
         x (torch.Tensor): input total tensor.
-        key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+        key (DistAttnRuntimeKey): the object that holds some inner meta data
+        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
 
     returns:
-        dx (torch.Tensor): local tensor.
+        local_x (torch.Tensor): the dispatched local tensor.
 
     Raises:
         ValueError: If the provided `key` does not exist in `DistAttnRuntimeDict`.
@@ -601,17 +644,18 @@ def dispatch(
 
 
 def undispatch(
-    dx: torch.tensor,
+    x: torch.Tensor,
     key: DistAttnRuntimeKey,
 ) -> torch.Tensor:
     """
-    UnDispatch local tensor to total tensor and unpad the total tensor at dim0(seqlen).
+    Undispatch local tensor to total tensor and unpad the total tensor at dim0 (seqlen dim).
     args:
-        dx (torch.Tensor): local tensor,
-        key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+        x (torch.Tensor): local tensor
+        key (DistAttnRuntimeKey): the object that holds some inner meta data
+        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
 
     returns:
-        unpad_total_x (torch.Tensor): The undispatched and unpadded tensor.
+        unpad_total_x (torch.Tensor): the undispatched and unpadded tensor.
 
     Raises:
         ValueError: If the provided `key` does not exist in `DistAttnRuntimeDict`.
@@ -620,7 +664,7 @@ def undispatch(
     if mgr is None:
         raise ValueError("DistRunTimeKey not exists!")
 
-    total_x = mgr.undispatch_qo(dx)
+    total_x = mgr.undispatch_qo(x)
     pad_size = key.pad_size
     unpad_total_x = unpad_at_dim(total_x, 0, pad_size)
 
@@ -628,7 +672,10 @@ def undispatch(
 
 
 def calc_attn(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, key: DistAttnRuntimeKey
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    key: DistAttnRuntimeKey,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Do attention computation.
@@ -637,7 +684,8 @@ def calc_attn(
         q (torch.Tensor): Query tensor of shape `(num_tokens_q, num_heads, head_dim)`.
         k (torch.Tensor): Key tensor of shape `(num_tokens_k, num_heads, head_dim)`.
         v (torch.Tensor): Value tensor of shape `(num_tokens_v, num_heads, head_dim)`.
-        key (DistAttnRuntimeKey):  DistAttnRuntimeKey.
+        key (DistAttnRuntimeKey): the object that holds some inner meta data
+        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
 
     Returns:
         out (torch.Tensor): Attention output tensor of shape.
@@ -658,7 +706,8 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
     Get the position ids of local tensor to global tensor after dispatching.
 
     Args:
-        key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+        key (DistAttnRuntimeKey): the object that holds some inner meta data
+        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
     Returns:
         position_ids (torch.Tensor): postion_ids of local tensor to global tensor.
     """
@@ -667,3 +716,12 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
         raise ValueError("DistRunTimeKey not exists!")
 
     return mgr.get_position_ids()
+
+
+def get_most_recent_key() -> DistAttnRuntimeKey:
+    """Get the most recent inserted key.
+
+    Returns:
+        key (DistAttnRuntimeKey): the most recent inserted key.
+    """
+    return DistAttnRuntimeDict.get_most_recent_key()

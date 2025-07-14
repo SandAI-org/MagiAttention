@@ -127,7 +127,8 @@ class MultiHeadAttention(nn.Module):
         return q, k, v
 
 
-# TODO: merge this test script with `test_pipeline_sdpa.py`
+# TODO: rewrite the specific ut for magi_attn_interface
+# instead of a fork of `test_pipeline_sdpa`
 class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
@@ -208,7 +209,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                         [1024, 2048],
                     ]
                 ),
-                "is_causal_mapping": True,
+                "attn_type_mapping": 1,
                 "total_seqlen_q": 2048,
                 "total_seqlen_k": 2048,
             },
@@ -232,7 +233,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                         [4096, 6144],
                     ]
                 ),
-                "is_causal_mapping": [False, False, False],
+                "attn_type_mapping": [0, 0, 0],
                 "total_seqlen_q": 6144,
                 "total_seqlen_k": 6144,
             },
@@ -263,7 +264,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                         [768, 1050],
                     ]
                 ),
-                "is_causal_mapping": False,
+                "attn_type_mapping": 0,
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
             },
@@ -299,7 +300,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                         [768, 1050],
                     ]
                 ),
-                "is_causal_mapping": [False] * 7,
+                "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
             },
@@ -330,7 +331,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                         [768, 960],
                     ]
                 ),
-                "is_causal_mapping": [False] * 7,
+                "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 960,
                 "total_seqlen_k": 960,
             },
@@ -361,7 +362,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                         [768, 840],
                     ]
                 ),
-                "is_causal_mapping": [False] * 7,
+                "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 840,
                 "total_seqlen_k": 840,
             },
@@ -532,12 +533,12 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
         if isinstance(attn_type_mapping, list):
             assert is_list_value_all(attn_type_mapping, 0) or is_list_value_all(
                 attn_type_mapping, 1
-            ), "only support full or causal now"
+            ), "we need to check varlen interface, which supports full or causal now"
             is_causal = attn_type_mapping[0] == 1
         else:
             assert (
                 attn_type_mapping == 0 or attn_type_mapping == 1
-            ), "only support full or causal now"
+            ), "we need to check varlen interface, which supports full or causal now"
             is_causal = attn_type_mapping == 1
 
         # -----    run pipeline test   ---- #

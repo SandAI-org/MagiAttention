@@ -247,6 +247,11 @@ class TestCommonUtils(TestCase):
         ):
             is_list_type_all([1, 2, 3], _type=4, just_same=True)
 
+        # ---------    a list of mixed types     --------- #
+
+        self.assertTrue(is_list_type_all([1, "2", 3, "4"], _type=(int, str)))
+        self.assertFalse(is_list_type_all([1, "2", 3.0, "4"], _type=(int, str)))
+
         # ---------    all same type list     --------- #
 
         self.assertTrue(is_list_type_all([2, 3, 4, 5], _type=int))
