@@ -172,7 +172,7 @@ def range_reduce(
 
     # Calculate stride (considering memory step size of elements)
     input_stride = input.stride(0)
-    output_stride = output.stride(0)
+    output_stride = output_.stride(0)
 
     # Calculate grid size
     M = total_size
