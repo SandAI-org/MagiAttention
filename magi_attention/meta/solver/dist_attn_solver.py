@@ -1062,7 +1062,7 @@ class DistAttnSolver:
                     if magi_attention.is_sanity_check_enable():
                         assert len(slice.k_ranges) == 1, (
                             f"when masktype is bi_causal, the length of k_ranges must be 1, "
-                            f"but get {len(slice.k_ranges)=}"
+                            f"but got {len(slice.k_ranges)=}"
                         )
 
                     distance_to_slice_start = boundary_start - slice_q_range_start
@@ -1082,7 +1082,7 @@ class DistAttnSolver:
                 else:
                     raise ValueError(
                         f"Only support 'full', 'causal', 'inv_causal' and 'bi_causal' mask, "
-                        f"but get {slice.mask_types[-1]} and {slice.mask_types[0]}"
+                        f"but got {slice.mask_types[-1]} and {slice.mask_types[0]}"
                     )
 
         return (
