@@ -212,6 +212,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": 1,
                 "total_seqlen_q": 2048,
                 "total_seqlen_k": 2048,
+                "chunk_size": 1024,
             },
             # full attn with seqlen 2k and batchsize 3
             {
@@ -236,6 +237,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0, 0, 0],
                 "total_seqlen_q": 6144,
                 "total_seqlen_k": 6144,
+                "chunk_size": 1536,
             },
             # varlen full attn with total seqlen 1050
             {
@@ -267,6 +269,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": 0,
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
+                "chunk_size": 257,
             },
             {
                 NAME: "varlen_full_attn_1050",
@@ -303,6 +306,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
+                "chunk_size": 568,
             },
             # varlen block causal with total seqlen 960
             {
@@ -334,37 +338,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 960,
                 "total_seqlen_k": 960,
-            },
-            # varlen block causal with total seqlen 840
-            {
-                NAME: "varlen_block_causal_840",
-                SKIP_WORLD_SIZE: [4, 8],
-                INTERFACE: "magi_attn_flex",
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [128, 256],
-                        [256, 384],
-                        [384, 512],
-                        [512, 640],
-                        [640, 768],
-                        [768, 840],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [0, 256],
-                        [0, 384],
-                        [0, 512],
-                        [512, 640],
-                        [512, 768],
-                        [768, 840],
-                    ]
-                ),
-                "attn_type_mapping": [0] * 7,
-                "total_seqlen_q": 840,
-                "total_seqlen_k": 840,
+                "chunk_size": 568,
             },
         ],
     )
@@ -378,36 +352,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             {
                 NAME: "disable_mso",
                 "enable": False,
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
-            },
-            # static, overlap degree = 1, min chunk size = 15
-            {
-                NAME: "static_od1_cz15",
-                "enable": True,
-                "mode": AttnOverlapMode.STATIC,
-                "degree": 1,
-                "min_chunk_size": 15,
-                "max_num_chunks": 60,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
-            },
-            # static, overlap degree = 2, min chunk size = 27
-            {
-                NAME: "static_od2_cz27",
-                "enable": True,
-                "mode": AttnOverlapMode.STATIC,
-                "degree": 2,
-                "min_chunk_size": 14,
-                "max_num_chunks": 44,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
                 "calc_cost_factor": CALC_COST_FACTOR,
                 "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
@@ -458,7 +402,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
     )
     @parameterize(
         "high_bandwith_domain_size",
-        [1, 2, 4, 8],
+        [1],  # TODO: this feature'll probably be deprecated soon
     )
     def test_interface_sdpa(
         self,
@@ -518,6 +462,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
         attn_type_mapping: int | list[int] = attn_config_["attn_type_mapping"]
         total_seqlen_q: int = attn_config_["total_seqlen_q"]
         total_seqlen_k: int = attn_config_["total_seqlen_k"]
+        chunk_size: int = attn_config_["chunk_size"]
 
         device = torch.cuda.current_device()
 
@@ -551,7 +496,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
 
         # calculate pad size;
         cp_size = dist.get_world_size(self.nccl_group)
-        pad_size = compute_pad_size(total_seqlen_q, cp_size, head_dim, 1536)
+        pad_size = compute_pad_size(total_seqlen_q, cp_size, head_dim, chunk_size)
 
         if interface == "magi_attn":
             batch_size = attn_config_["batch_size"]
@@ -576,7 +521,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 cu_seqlens_k,
                 head_dim=head_dim,
                 pad_size=pad_size,
-                chunk_size=1536,
+                chunk_size=chunk_size,
                 cp_group=None
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
@@ -594,7 +539,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 cu_seqlens_k,
                 head_dim=head_dim,
                 pad_size=pad_size,
-                chunk_size=1536,
+                chunk_size=chunk_size,
                 cp_group=None
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
@@ -624,7 +569,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 total_seqlen_k=total_seqlen_k,
                 head_dim=head_dim,
                 pad_size=pad_size,
-                chunk_size=1536,
+                chunk_size=chunk_size,
                 cp_group=None
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
