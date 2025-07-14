@@ -550,7 +550,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
 
         # calculate pad size;
         cp_size = dist.get_world_size(self.nccl_group)
-        pad_size, _ = compute_pad_size(total_seqlen_q, cp_size, head_dim)
+        pad_size = compute_pad_size(total_seqlen_q, cp_size, head_dim, 1536)
 
         if interface == "magi_attn":
             batch_size = attn_config_["batch_size"]
@@ -575,6 +575,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 cu_seqlens_k,
                 head_dim=head_dim,
                 pad_size=pad_size,
+                chunk_size=1536,
                 cp_group=None
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
@@ -592,6 +593,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 cu_seqlens_k,
                 head_dim=head_dim,
                 pad_size=pad_size,
+                chunk_size=1536,
                 cp_group=None
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
@@ -621,13 +623,11 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 total_seqlen_k=total_seqlen_k,
                 head_dim=head_dim,
                 pad_size=pad_size,
+                chunk_size=1536,
                 cp_group=None
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
                 cp_mesh=self.device_mesh,
-                is_same_source=True,
-                is_q_permutable=True,
-                is_k_permutable=True,
                 dist_attn_config=dist_attn_config,
             )
 

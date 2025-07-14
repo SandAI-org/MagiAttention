@@ -28,9 +28,10 @@ from magi_attention.meta import (
     calc_attn_meta_from_dispatch_meta,
     calc_dispatch_meta_from_qk_ranges,
 )
-from magi_attention.utils import is_list_value_all, is_list_value_any, wrap_to_list
+from magi_attention.utils import wrap_to_list
+from magi_attention.utils._utils import is_list_type_all
 
-from .functools import FixedLenDict, compute_pad_size, pad_at_dim, unpad_at_dim
+from .functools import FixedLenDict, pad_at_dim, unpad_at_dim
 
 DistAttnRuntimeDict = FixedLenDict(
     max_size=100
@@ -44,6 +45,7 @@ def magi_attn_varlen_key(
     cu_seqlens_k: torch.Tensor,
     head_dim: int,
     pad_size: int,
+    chunk_size: int,
     cp_group: dist.ProcessGroup | None = None,
     cp_mesh: DeviceMesh | None = None,
     causal: bool = False,
@@ -62,18 +64,18 @@ def magi_attn_varlen_key(
 
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
-        chunk_size is fixed as 1536 for now.
+        chunk_size (int): chunk size to chunk the permutable tensor.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
         NOTE: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
 
-        causal(bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
+        causal (bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
-        x(torch.Tensor): the input tensor after padding.
-        DistAttnRuntimeKey(DistAttnRuntimeKey): DistAttbRuntimeKey.
+        x (torch.Tensor): the input tensor after padding.
+        DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
 
     Example:
         >>> local_x, dist_attn_runtime_key = magi_attn_varlen_key(
@@ -144,6 +146,7 @@ def magi_attn_varlen_key(
         total_seqlen_k=total_seqlen_k,
         head_dim=head_dim,
         pad_size=pad_size,
+        chunk_size=chunk_size,
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         is_same_source=True,
@@ -159,7 +162,8 @@ def magi_attn_varlen_dispatch(
     cu_seqlens_k: torch.Tensor,
     head_dim: int,
     pad_size: int,
-    cp_group: dist.ProcessGroup,
+    chunk_size: int,
+    cp_group: dist.ProcessGroup | None = None,
     cp_mesh: DeviceMesh | None = None,
     causal: bool = False,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),  # deterministic is hidden in dist_attn_config
@@ -176,18 +180,18 @@ def magi_attn_varlen_dispatch(
 
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
-        chunk_size is fixed as 1536 for now.
+        chunk_size (int): chunk size to chunk the permutable tensor.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
         NOTE: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
 
-        causal(bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
+        causal (bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
-        x(torch.Tensor): the input tensor after padding.
-        DistAttnRuntimeKey(DistAttnRuntimeKey): DistAttbRuntimeKey.
+        x (torch.Tensor): the input tensor after padding.
+        DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
 
     Example:
         >>> padded_x, dist_attn_runtime_key = magi_attn_varlen_dispatch(
@@ -232,6 +236,7 @@ def magi_attn_varlen_dispatch(
         cu_seqlens_k=cu_seqlens_k,
         head_dim=head_dim,
         pad_size=pad_size,
+        chunk_size=chunk_size,
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         causal=causal,
@@ -245,11 +250,12 @@ def magi_attn_flex_key(
     x: torch.Tensor,
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
-    attn_mask_type: AttnMaskType | list[AttnMaskType],
+    attn_mask_type: list[AttnMaskType],
     total_seqlen_q: int,
     total_seqlen_k: int,
     head_dim: int,
     pad_size: int,
+    chunk_size: int,
     cp_group: dist.ProcessGroup | None = None,
     cp_mesh: DeviceMesh | None = None,
     is_same_source: bool = True,
@@ -271,7 +277,7 @@ def magi_attn_flex_key(
 
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
-        chunk_size is fixed as 1536 for now.
+        chunk_size (int): chunk size to chunk the permutable tensor.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
@@ -294,8 +300,8 @@ def magi_attn_flex_key(
         dist_attn_config (DistAttnConfig): dist attn config
 
     Returns:
-        x(torch.Tensor): the input tensor after padding.
-        DistAttnRuntimeKey(DistAttnRuntimeKey): DistAttbRuntimeKey.
+        x (torch.Tensor): the input tensor after padding.
+        DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
 
     Example:
         >>> padded_x, dist_attn_runtime_key = magi_attn_flex_key(
@@ -365,25 +371,6 @@ def magi_attn_flex_key(
     if head_dim > 192:
         raise ValueError(f"head_dim ({head_dim}) must be ≤ 192")
 
-    # Validate q_ranges, k_ranges and attn_mask_type
-    attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
-    assert (
-        is_list_value_all(attn_mask_type, AttnMaskType.FULL)  # type: ignore[arg-type]
-        or q_ranges.is_non_overlap()
-    ), (
-        "Only support q_range overlap when masktype is all full, "
-        "other masktype is not supported for now."
-    )
-
-    if is_list_value_any(attn_mask_type, AttnMaskType.BICAUSAL):
-        raise ValueError(
-            "attn_mask_type: BICAUSAL is not supported for now. This feature is coming in a near future release."
-        )
-    if is_list_value_any(attn_mask_type, AttnMaskType.INVCAUSAL):
-        raise ValueError(
-            "attn_mask_type: INVCAUSAL is not supported for now. This feature is coming in a near future release."
-        )
-
     key = DistAttnRuntimeKey(
         cp_group,  # FIXME: ignore cp_mesh to be part of key for now
         pad_size,
@@ -422,14 +409,6 @@ def magi_attn_flex_key(
     # Validate sequence length
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
-    pad_size, chunk_size = compute_pad_size(total_seqlen_q, cp_size, head_dim)
-
-    if pad_size > 0:
-        raise ValueError(
-            f"Invalid total_seqlen_q {total_seqlen_q}."
-            f"total_seqlen_q should be divisible by cp_size * chunk_size ({cp_size} * {chunk_size})"
-            f"You need to pad {pad_size} more tokens."
-        )
 
     q_dispatch_meta, k_dispatch_meta, attn_buckets = calc_dispatch_meta_from_qk_ranges(
         q_ranges=q_ranges,
@@ -491,16 +470,14 @@ def magi_attn_flex_dispatch(
     x: torch.Tensor,
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
-    attn_mask_type: AttnMaskType | list[AttnMaskType],
+    attn_mask_type: AttnMaskType | list[AttnMaskType] | str | list[str],
     total_seqlen_q: int,
     total_seqlen_k: int,
     head_dim: int,
     pad_size: int,
+    chunk_size: int,
     cp_group: dist.ProcessGroup | None = None,
     cp_mesh: DeviceMesh | None = None,
-    is_same_source: bool = True,
-    is_q_permutable: bool = True,
-    is_k_permutable: bool = True,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
     """
@@ -517,31 +494,17 @@ def magi_attn_flex_dispatch(
 
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
-        chunk_size is fixed as 1536 for now.
+        chunk_size (int): chunk size to chunk the permutable tensor
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
         NOTE: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
 
-        is_same_source (bool): is query tensor and key tensor share the same source
-        is_q_permutable (bool): is query tensor permutable
-        is_k_permutable (bool): is key tensor permutable
-        NOTE: e.g.
-                1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
-                    a) is_same_source is True
-                    b) both q and k are permutable, as long as they are permuted in the same way.
-                2. for encoder-decoder transformer like t5, it applies 'cross-attn' as follows:
-                    a) is_same_source is False
-                    b) q is permutable but k is not
-                3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
-                    a) is_same_source is False
-                    b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
-
         dist_attn_config (DistAttnConfig): dist attn config
 
     Returns:
-        dx(torch.Tensor): the local input x after padding.
-        key(DistAttnRuntimeKey): DistAttnRuntimeKey.
+        dx (torch.Tensor): the local input x after padding.
+        key (DistAttnRuntimeKey): DistAttnRuntimeKey.
 
     Example:
         >>> local_x, dist_attn_runtime_key = magi_attn_flex_dispatch(
@@ -581,6 +544,15 @@ def magi_attn_flex_dispatch(
         >>> # Gather local attention results to global result
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
+    # Validate attn_mask_type
+    attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
+    if not is_list_type_all(attn_mask_type, AttnMaskType):
+        attn_mask_type = [AttnMaskType(type_name) for type_name in attn_mask_type]
+    assert len(attn_mask_type) == len(q_ranges), (
+        f"the length of attn_mask_type must be same as q_ranges, "
+        f"but get {len(attn_mask_type)=} and {len(q_ranges)=}"
+    )
+
     padded_x, key = magi_attn_flex_key(
         x=x,
         q_ranges=q_ranges,
@@ -590,11 +562,9 @@ def magi_attn_flex_dispatch(
         total_seqlen_k=total_seqlen_k,
         head_dim=head_dim,
         pad_size=pad_size,
+        chunk_size=chunk_size,
         cp_group=cp_group,
         cp_mesh=cp_mesh,
-        is_same_source=is_same_source,
-        is_q_permutable=is_q_permutable,
-        is_k_permutable=is_k_permutable,
         dist_attn_config=dist_attn_config,
     )
 

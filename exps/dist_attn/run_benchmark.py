@@ -91,6 +91,7 @@ CP_PG_META = {
 
 # Optional Magi params
 DISPATCH_ALG = MinHeapDispatchAlg()
+CHUNK_SIZE = 512
 
 
 def init_dist_environment(
@@ -322,6 +323,7 @@ def run_magi_attn(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
     world_size: int,
+    chunk_size: int,
     attn_mask_type: list[AttnMaskType],
     attn_impl: AttnImpl,
     cp_group,
@@ -353,7 +355,12 @@ def run_magi_attn(
 
     # -----   init dispatch mata ----- #
 
-    pad_size, _ = compute_pad_size(total_seqlen, world_size, hidden_size)
+    pad_size = compute_pad_size(
+        total_seqlen_q=total_seqlen,
+        cp_size=world_size,
+        head_dim=hidden_size,
+        chunk_size=chunk_size,
+    )
 
     dist_attn_config = DistAttnConfig(
         dispatch_config=DispatchConfig(alg=DISPATCH_ALG),
@@ -387,11 +394,9 @@ def run_magi_attn(
         total_seqlen_k=total_seqlen,
         head_dim=hidden_size,
         pad_size=pad_size,
+        chunk_size=chunk_size,
         cp_group=cp_group,
         cp_mesh=cp_mesh,
-        is_same_source=True,
-        is_q_permutable=True,
-        is_k_permutable=True,
         dist_attn_config=dist_attn_config,
     )
 
@@ -476,6 +481,7 @@ def run_benchmark(
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,
                 world_size=WORLD_SIZE,
+                chunk_size=CHUNK_SIZE,
                 attn_mask_type=attn_mask_type,
                 attn_impl=ATTN_IMPL,
                 cp_group=cp_group,
