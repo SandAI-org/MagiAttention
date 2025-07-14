@@ -92,9 +92,11 @@ def magi_attn_varlen_key(
         ...     cu_seqlen_k=torch.tensor(
                     [0, 2048, 4096], dtype=torch.int32
                 ),
-        ...     pad_size=compute_pad_size(4096, 4, 64), # seqlne, cp_size, head_dim
+        ...     pad_size=compute_pad_size(4096, 4, 64, 512), # seqlne, cp_size, head_dim, chunk_size
+        ...     chunk_size=512,
         ...     head_dim=64,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
+        ...     cp_mesh=None,
         ...     causal=False,
         ...     dist_attn_config=DistAttnConfig(
         ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
@@ -208,9 +210,11 @@ def magi_attn_varlen_dispatch(
         ...     cu_seqlen_k=torch.tensor(
         ...         [0, 2048, 4096], dtype=torch.int32
         ...     ),
-        ...     pad_size=compute_pad_size(4096, 4, 64),  # seqlen, cp_size, head_dim
+        ...     pad_size=compute_pad_size(4096, 4, 64, 512),  # seqlen, cp_size, head_dim, chunk_size
+        ...     chunk_size=512,
         ...     head_dim=64,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
+        ...     cp_mesh=None,
         ...     causal=False,
         ...     dist_attn_config=DistAttnConfig(
         ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
@@ -317,9 +321,11 @@ def magi_attn_flex_key(
         ...     attn_mask_type=AttnMaskType.FULL,
         ...     total_seqlen_q=4096,
         ...     total_seqlen_k=4096,
-        ...     pad_size=compute_pad_size(4096, 4, 64),  # seqlen, cp_size, head_dim
+        ...     pad_size=compute_pad_size(4096, 4, 64, 512),  # seqlen, cp_size, head_dim, chunk_size
+        ...     chunk_size=512,
         ...     head_dim=64,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
+        ...     cp_mesh=None,
         ...     is_same_source=True,
         ...     is_q_permutable=True,
         ...     is_k_permutable=True,
@@ -520,12 +526,11 @@ def magi_attn_flex_dispatch(
         ...     attn_mask_type=AttnMaskType.FULL,
         ...     total_seqlen_q=4096,
         ...     total_seqlen_k=4096,
-        ...     pad_size=compute_pad_size(4096, 4, 64),  # seqlen, cp_size, head_dim
+        ...     pad_size=compute_pad_size(4096, 4, 64, 512),  # seqlen, cp_size, head_dim, chun_size
+        ...     chunk_size=512,
         ...     head_dim=64,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
-        ...     is_same_source=True,
-        ...     is_q_permutable=True,
-        ...     is_k_permutable=True,
+        ...     cp_mesh=None,
         ...     dist_attn_config=DistAttnConfig(
         ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
