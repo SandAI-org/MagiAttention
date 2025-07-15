@@ -225,6 +225,9 @@ public:
 
                     bool tile_valid = false;
 
+                    // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
+                    // cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+
                     if constexpr (RangeMerge) {
                         int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
                         int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
