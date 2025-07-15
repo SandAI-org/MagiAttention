@@ -500,15 +500,6 @@ class HierGroupCastMetaSolver:
             chain(*rank_list_per_inter_wo_this_intra_node)
         )
 
-        # print(
-        #     f"[RANK {dist.get_rank()}] \n"
-        #     f"{output_split_size_list=}, \n"
-        #     f"{src_index_list=}, \n"
-        #     f"{rank_list_intra=}, \n"
-        #     f"{rank_list_per_inter_wo_this_intra_node=}, \n"
-        #     f"{self.reorder_list_hier=}, \n"
-        # )
-
         (
             _,
             self.unperm_after_a2a_kwargs_hier,
