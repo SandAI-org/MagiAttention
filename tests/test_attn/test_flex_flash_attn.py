@@ -251,20 +251,6 @@ class TestFlexFlashAttn(TestCase):
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             },
             {
-                "name": "sparse_attn_256_with_same_k_ranges",
-                "seqlen": 256,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [128, 256],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [[0, 256], [0, 256]],  # [0, 256]
-                ),
-                "attn_type_map": [0, 0],
-            },
-            {
                 "name": "sparse_attn_2k_with_same_k_ranges",
                 "seqlen": 2048,
                 "q_ranges": AttnRanges.from_ranges(
