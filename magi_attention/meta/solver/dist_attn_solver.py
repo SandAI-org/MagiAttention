@@ -1500,6 +1500,7 @@ class DistAttnSolver:
             output_split_size_list=output_split_size_list,
             dst_indices_list=dst_indices_list,
             src_index_list=src_index_list,
+            rank=self.cp_rank,
             world_size=self.cp_size,
             device_mesh=self.cp_mesh,
         )

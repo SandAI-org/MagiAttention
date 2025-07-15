@@ -102,14 +102,15 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.comm.is_hierarchical_comm_enable() and self.world_size in (
-            4,
-            6,
-            8,
-        ):
+        if magi_attention.comm.is_hierarchical_comm_enable():
             world_size_inter_node, world_size_intra_node = {
+                1: (1, 1),
+                2: (1, 2),
+                3: (3, 1),
                 4: (2, 2),
+                5: (1, 5),
                 6: (3, 2),
+                7: (1, 7),
                 8: (2, 4),
             }[self.world_size]
             self.device_mesh = init_device_mesh(
@@ -730,10 +731,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----    skip for hier comm   ---- #
 
         if magi_attention.comm.is_hierarchical_comm_enable():
-            if self.world_size not in (4, 6, 8):
-                # skip for invalid world size
-                # when hierarchical comm is enabled
-                return
             if high_bandwith_domain_size > 1:
                 return
 

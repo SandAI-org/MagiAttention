@@ -113,6 +113,7 @@ class TestDistFlashAttn(DistTestBase):
                     src_index_list=[
                         rank for rank in range(self.world_size) if rank != self.rank
                     ],
+                    rank=self.rank,
                     world_size=self.world_size,
                     device_mesh=self.device_mesh,
                 )

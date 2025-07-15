@@ -40,24 +40,23 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
 
         self.hier_comm_env_variable = "MAGI_ATTENTION_HIERARCHICAL_COMM"
 
-        if self.world_size in (4, 6, 8):
-            world_size_inter_node, world_size_intra_node = {
-                4: (2, 2),
-                6: (3, 2),
-                8: (2, 4),
-            }[self.world_size]
-            device_mesh = init_device_mesh(
-                device_type="cuda",
-                mesh_shape=(world_size_inter_node, world_size_intra_node),
-                mesh_dim_names=("inter", "intra"),
-            )
-            self.intra_group = device_mesh.get_group("intra")
-            self.inter_group = device_mesh.get_group("inter")
-            self.support_hier_comm = True
-        else:
-            self.intra_group = None
-            self.inter_group = None
-            self.support_hier_comm = False
+        world_size_inter_node, world_size_intra_node = {
+            1: (1, 1),
+            2: (1, 2),
+            3: (3, 1),
+            4: (2, 2),
+            5: (1, 5),
+            6: (3, 2),
+            7: (1, 7),
+            8: (2, 4),
+        }[self.world_size]
+        device_mesh = init_device_mesh(
+            device_type="cuda",
+            mesh_shape=(world_size_inter_node, world_size_intra_node),
+            mesh_dim_names=("inter", "intra"),
+        )
+        self.intra_group = device_mesh.get_group("intra")
+        self.inter_group = device_mesh.get_group("inter")
 
     @property
     def device(self) -> int:
@@ -257,7 +256,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
 
         # skip for hier comm
         if use_hier_comm:
-            if not async_op or not self.support_hier_comm:
+            if not async_op:
                 return
 
         # sanity check for meta args per rank
@@ -437,7 +436,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
 
         # skip for hier comm
         if use_hier_comm:
-            if not async_op or not self.support_hier_comm:
+            if not async_op:
                 return
 
         # sanity check for meta args per rank
