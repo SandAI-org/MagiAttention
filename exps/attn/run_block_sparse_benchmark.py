@@ -23,12 +23,13 @@ from baselines.utils import (
     generate_gqa_ranges_from_3d_mask,
     generate_ranges_from_mask,
     get_sdpa_mask_from_block_sparse_mask,
+    get_vsa_mask_from_block_sparse_score,
 )
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
-impls = ["ffa"]
+impls = ["ffa", "vsa"]
 
 # actual seqlen
 seqlen = 49152
@@ -37,11 +38,19 @@ sparsity_ratio = [0.1, 0.2, 0.5, 0.8, 1.0]
 # ss = [k * 1024 for k in [4, 96, 128]]
 ds = [128]
 wds = ["fwd", "bwd"]
-block_sizes = [64, 128]
+if "vsa" in impls:
+    # currently vsa only supports block size == 64
+    block_sizes = [64]
+else:
+    block_sizes = [64, 128]
 
 b = 1
 nhq = 48
-nhk = 8
+if "vsa" in impls:
+    # currently vsa doesn't support gqa
+    nhk = nhq
+else:
+    nhk = 8
 dtype = torch.bfloat16
 
 bias = None
@@ -105,7 +114,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
     # prepare q, k ranges and caculate attn_flops
     # for now, we only do bench for block sparse mask.
-    block_mask = generate_global_block_sparse_pattern(
+    block_mask, scores = generate_global_block_sparse_pattern(
         orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
     )
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
@@ -128,7 +137,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         k = k.view(b * orig_seq_len_k * nhk, 1, hd)
         v = v.view(b * orig_seq_len_k * nhk, 1, hd)
 
-    if attn_impl in ("sdpa"):
+    if attn_impl in ("sdpa", "vsa"):
         q = rearrange(q, "b s h d -> b h s d")
         k = rearrange(k, "b s h d -> b h s d")
         v = rearrange(v, "b s h d -> b h s d")
@@ -187,6 +196,42 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
             def fn():
                 o.backward(do, retain_graph=True)
+    
+    elif attn_impl == "vsa":
+        try:
+            from vsa import block_sparse_fwd, block_sparse_bwd
+        except ImportError:
+            raise ImportError("Please install FastVideo VSA following https://github.com/hao-ai-lab/FastVideo/tree/main/csrc/attn.")
+
+        topk = int(sparsity_ratio * num_kv_blocks_orig)
+        q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num = get_vsa_mask_from_block_sparse_score(
+            scores, 
+            k=topk, 
+        )
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+        def fn():
+            return block_sparse_fwd(
+                q, k, v, q2k_block_sparse_index, q2k_block_sparse_num
+            )
+        
+        if wd == "bwd":
+            do = do.contiguous()
+            try:
+                o, l_vec = fn()
+            except Exception as e:
+                if "CUDA out of memory" not in str(e):
+                    print(
+                        f"Error occured before running {attn_impl} with {block_size} mask "
+                        f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                    )
+                    raise e
+                already_known_oom_before_run = True
+            
+            def fn():
+                block_sparse_bwd(q, k, v, o, l_vec, do, k2q_block_sparse_index, k2q_block_sparse_num)
 
     elif attn_impl == "sdpa":
         sdpa_mask = get_sdpa_mask_from_block_sparse_mask(
