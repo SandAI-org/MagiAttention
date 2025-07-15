@@ -52,6 +52,8 @@ class HierGroupCastMetaSolver:
         output_split_size_list: list[int],
         dst_indices_list: list[list[int]],
         src_index_list: list[int],
+        rank: int,
+        world_size: int,
         intra_group: dist.ProcessGroup,
         inter_group: dist.ProcessGroup,
         use_a2av_impl: bool = True,
@@ -60,7 +62,7 @@ class HierGroupCastMetaSolver:
 
         # --------   prepare env info  -------- #
 
-        self._prepare_env_info(intra_group, inter_group)
+        self._prepare_env_info(rank, world_size, intra_group, inter_group)
 
         # ----   build group-cast meta for pre-intra  ---- #
 
@@ -135,18 +137,26 @@ class HierGroupCastMetaSolver:
 
     def _prepare_env_info(
         self,
+        rank: int,
+        world_size: int,
         intra_group: dist.ProcessGroup,
         inter_group: dist.ProcessGroup,
     ):
+        self.rank = rank
+        self.world_size = world_size
         self.intra_group = intra_group
         self.inter_group = inter_group
 
+        self.device = torch.cuda.current_device()
+
         self.world_size_intra_node = dist.get_world_size(intra_group)
         self.world_size_inter_node = dist.get_world_size(inter_group)
-
-        self.rank = dist.get_rank()
-        self.device = torch.cuda.current_device()
-        self.world_size = self.world_size_intra_node * self.world_size_inter_node
+        assert (
+            self.world_size == self.world_size_intra_node * self.world_size_inter_node
+        ), (
+            f"The {self.world_size=} should be equal to the product of "
+            f"{self.world_size_inter_node=} x {self.world_size_intra_node=}."
+        )
 
         self.local_rank_intra_node = self._to_local_rank_intra_node(self.rank)
         self.local_rank_inter_node = self._to_local_rank_inter_node(self.rank)
@@ -490,6 +500,15 @@ class HierGroupCastMetaSolver:
             chain(*rank_list_per_inter_wo_this_intra_node)
         )
 
+        # print(
+        #     f"[RANK {dist.get_rank()}] \n"
+        #     f"{output_split_size_list=}, \n"
+        #     f"{src_index_list=}, \n"
+        #     f"{rank_list_intra=}, \n"
+        #     f"{rank_list_per_inter_wo_this_intra_node=}, \n"
+        #     f"{self.reorder_list_hier=}, \n"
+        # )
+
         (
             _,
             self.unperm_after_a2a_kwargs_hier,
@@ -519,6 +538,8 @@ def init_hier_group_cast_meta_solver(
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
+    rank: int,
+    world_size: int,
     intra_group: dist.ProcessGroup,
     inter_group: dist.ProcessGroup,
     use_a2av_impl: bool = True,
@@ -533,6 +554,8 @@ def init_hier_group_cast_meta_solver(
         output_split_size_list=output_split_size_list,
         dst_indices_list=dst_indices_list,
         src_index_list=src_index_list,
+        rank=rank,
+        world_size=world_size,
         intra_group=intra_group,
         inter_group=inter_group,
         use_a2av_impl=use_a2av_impl,
@@ -547,13 +570,16 @@ def hier_group_cast_impl_with_a2av(
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
-    group: dist.ProcessGroup | None = None,  # unused
+    group: dist.ProcessGroup | None = None,
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     assert (
         async_op
     ), "async_op must be True for hierarchical group-cast collective by now"
+
+    rank = kwargs.pop("rank", dist.get_rank(group))
+    world_size = kwargs.pop("world_size", dist.get_world_size(group))
 
     intra_group = kwargs.pop("intra_group", None)
     inter_group = kwargs.pop("inter_group", None)
@@ -566,6 +592,8 @@ def hier_group_cast_impl_with_a2av(
         output_split_size_list=output_split_size_list,
         dst_indices_list=dst_indices_list,
         src_index_list=src_index_list,
+        rank=rank,
+        world_size=world_size,
         intra_group=intra_group,
         inter_group=inter_group,
         use_a2av_impl=True,  # for now, only support a2av impl
@@ -693,6 +721,8 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         output_split_size_list: list[int],
         dst_index_list: list[int],
         src_indices_list: list[list[int]],
+        rank: int,
+        world_size: int,
         intra_group: dist.ProcessGroup,
         inter_group: dist.ProcessGroup,
         use_a2av_impl: bool = True,
@@ -704,6 +734,8 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
             output_split_size_list=input_split_size_list,
             dst_indices_list=src_indices_list,
             src_index_list=dst_index_list,
+            rank=rank,
+            world_size=world_size,
             intra_group=intra_group,
             inter_group=inter_group,
             use_a2av_impl=use_a2av_impl,
@@ -966,6 +998,8 @@ def init_hier_group_reduce_meta_solver(
     output_split_size_list: list[int],
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
+    rank: int,
+    world_size: int,
     intra_group: dist.ProcessGroup,
     inter_group: dist.ProcessGroup,
     use_a2av_impl: bool = True,
@@ -989,6 +1023,8 @@ def init_hier_group_reduce_meta_solver(
         output_split_size_list=output_split_size_list,
         dst_index_list=dst_index_list,
         src_indices_list=src_indices_list,
+        rank=rank,
+        world_size=world_size,
         intra_group=intra_group,
         inter_group=inter_group,
         use_a2av_impl=use_a2av_impl,
@@ -1003,13 +1039,16 @@ def hier_group_reduce_impl_with_a2av(
     output_split_size_list: list[int],
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
-    group: dist.ProcessGroup | None = None,  # unused
+    group: dist.ProcessGroup | None = None,
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     assert (
         async_op
     ), "async_op must be True for hierarchical group-reduce collective by now"
+
+    rank = kwargs.pop("rank", dist.get_rank(group))
+    world_size = kwargs.pop("world_size", dist.get_world_size(group))
 
     intra_group = kwargs.pop("intra_group", None)
     inter_group = kwargs.pop("inter_group", None)
@@ -1022,6 +1061,8 @@ def hier_group_reduce_impl_with_a2av(
         output_split_size_list=output_split_size_list,
         dst_index_list=dst_index_list,
         src_indices_list=src_indices_list,
+        rank=rank,
+        world_size=world_size,
         intra_group=intra_group,
         inter_group=inter_group,
         use_a2av_impl=True,  # for now, only support a2av impl
