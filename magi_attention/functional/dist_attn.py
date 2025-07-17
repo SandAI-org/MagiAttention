@@ -23,8 +23,12 @@ import magi_attention
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.meta.collection import AttnCalcMeta, CommMeta
-from magi_attention.testing.utils import is_same_process_group
-from magi_attention.utils import max_fp_dtype, nvtx, to_higher_fp_dtype
+from magi_attention.utils import (
+    is_same_process_group,
+    max_fp_dtype,
+    nvtx,
+    to_higher_fp_dtype,
+)
 
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd

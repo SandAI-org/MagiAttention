@@ -21,7 +21,7 @@ from magi_attention.common.ranges import AttnRanges
 from magi_attention.testing import parameterize
 
 
-class TestCalcSelfAttnAreas(TestCase):
+class TestApiFunction(TestCase):
     @parameterize(
         "testcase",
         [

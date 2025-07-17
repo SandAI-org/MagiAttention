@@ -40,8 +40,12 @@ from magi_attention.meta.container.transfer_table import (
     TransferInfo,
     TransferTable,
 )
-from magi_attention.testing.utils import is_same_device_mesh, is_same_process_group
-from magi_attention.utils import nvtx, transpose_matrix
+from magi_attention.utils import (
+    is_same_device_mesh,
+    is_same_process_group,
+    nvtx,
+    transpose_matrix,
+)
 from magi_attention.utils._utils import argsort
 
 from ._slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker

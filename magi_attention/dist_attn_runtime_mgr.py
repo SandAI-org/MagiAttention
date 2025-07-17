@@ -31,8 +31,7 @@ from magi_attention.meta import (
 from magi_attention.meta.collection import DispatchMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
-from magi_attention.testing.utils import is_same_process_group
-from magi_attention.utils import is_list_value_all, wrap_to_list
+from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_to_list
 
 
 # @dataclass(frozen=True)
