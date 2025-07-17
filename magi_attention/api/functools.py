@@ -140,6 +140,44 @@ def from_mask(
     )
 
 
+def apply_padding(
+    q_ranges: AttnRanges,
+    k_ranges: AttnRanges,
+    attn_mask_type: list[AttnMaskType],
+    total_seqlen: int,
+    pad_size: int,
+) -> tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
+    """
+    Appends padding to the attention ranges and updates the corresponding mask type.
+
+    This function adds a padding query range at the end of `q_ranges`, a dummy key
+    range to `k_ranges`, and appends a `FULL` attention mask type to maintain alignment.
+    It is typically used when padding is required for alignment or block-wise processing.
+
+    Args:
+        q_ranges (AttnRanges): Query token ranges before padding.
+        k_ranges (AttnRanges): Key token ranges before padding.
+        attn_mask_type (list[AttnMaskType]): List of attention mask types corresponding to the ranges.
+        total_seqlen (int): The total original sequence length (used to place the padding at the end).
+        pad_size (int): The size of the padding to append.
+
+    Returns:
+        tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
+            - Updated query ranges with padding added.
+            - Updated key ranges with a dummy range for padding.
+            - Updated attention mask type list with a FULL mask for the padding block.
+    """
+    q_range = AttnRanges.from_ranges(q_ranges.to_naive_ranges(), check=True)
+    k_range = AttnRanges.from_ranges(k_ranges.to_naive_ranges(), check=True)
+    attn_mask_types = [attn_mask_type[i] for i in range(len(attn_mask_type))]
+
+    q_range.append(AttnRange(start=total_seqlen, end=total_seqlen + pad_size))
+    k_range.append(AttnRange(start=0, end=0))
+    attn_mask_types.append(AttnMaskType.FULL)
+
+    return q_range, k_range, attn_mask_types
+
+
 def init_hierarchical_mesh(
     world_size: int,
     world_size_inter_node: int,

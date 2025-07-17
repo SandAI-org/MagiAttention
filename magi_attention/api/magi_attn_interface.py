@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 from typing import Sequence, TypeAlias
 
 import torch
@@ -20,7 +19,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
-from magi_attention.common import AttnRange, AttnRanges
+from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DistAttnConfig
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeKey, DistAttnRuntimeMgr
@@ -32,7 +31,7 @@ from magi_attention.meta import (
 from magi_attention.utils import wrap_to_list
 from magi_attention.utils._utils import is_list_type_all
 
-from .functools import FixedLenDict, pad_at_dim, unpad_at_dim
+from .functools import FixedLenDict, apply_padding, pad_at_dim, unpad_at_dim
 
 DistAttnRuntimeDict = FixedLenDict(
     max_size=100
@@ -412,23 +411,15 @@ def magi_attn_flex_key(
         dist_attn_config,
     )
 
-    # deepcopy qk range and attn_mask and do padding to avoid the modification of key
-    def apply_padding(q_ranges, k_ranges, attn_mask_type):
-        q_range = AttnRanges.from_ranges(q_ranges.to_naive_ranges(), check=True)
-        k_range = AttnRanges.from_ranges(k_ranges.to_naive_ranges(), check=True)
-        attn_mask_types = copy.deepcopy(attn_mask_type)
-
-        q_range.append(AttnRange(start=total_seqlen_q, end=total_seqlen_q + pad_size))
-        k_range.append(AttnRange(start=0, end=0))
-        attn_mask_types.append(AttnMaskType.FULL)
-
-        return q_range, k_range, attn_mask_types
-
     # Apply padding at seq_dim(dim 0）
     if pad_size > 0:
         x = pad_at_dim(x, 0, pad_size)
         q_ranges, k_ranges, attn_mask_type = apply_padding(
-            q_ranges, k_ranges, attn_mask_type
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            total_seqlen=total_seqlen_q,
+            pad_size=pad_size,
         )
 
         total_seqlen_q += pad_size
