@@ -512,3 +512,55 @@ def sync_rng(seed: int) -> Generator[None, None, None]:
         set_random_seed(seed)
         yield
         _set_rng_states(states)
+
+
+def is_same_process_group(
+    group1: dist.ProcessGroup | None,
+    group2: dist.ProcessGroup | None,
+) -> bool:
+    """Determine whether two communication groups are the same
+
+    Args:
+        group1 (dist.ProcessGroup | None): process group 1
+        group2 (dist.ProcessGroup | None): process group 2
+
+    Returns:
+        bool: whether two communication groups are the same
+    """
+    if group1 is None and group2 is None:
+        return True
+    if not isinstance(group1, dist.ProcessGroup) or not isinstance(
+        group2, dist.ProcessGroup
+    ):
+        return False
+
+    group1_ranks = sorted(dist.get_process_group_ranks(group=group1))
+    group2_ranks = sorted(dist.get_process_group_ranks(group=group2))
+    if group1_ranks == group2_ranks:
+        return True
+    return False
+
+
+def is_same_device_mesh(
+    mesh1: dist.device_mesh.DeviceMesh | None,
+    mesh2: dist.device_mesh.DeviceMesh | None,
+) -> bool:
+    """Determine whether two device meshs are the same
+
+    Args:
+        mesh1 (dist.device_mesh.DeviceMesh | None): device mesh1
+        mesh2 (dist.device_mesh.DeviceMesh | None): device mesh2
+
+    Returns:
+        bool: whether two device meshs are the same
+    """
+    if mesh1 is None and mesh2 is None:
+        return True
+    if not isinstance(mesh1, dist.device_mesh.DeviceMesh) or not isinstance(
+        mesh2, dist.device_mesh.DeviceMesh
+    ):
+        return False
+
+    return mesh1.device_type == mesh2.device_type and torch.equal(
+        mesh1.mesh, mesh2.mesh
+    )
