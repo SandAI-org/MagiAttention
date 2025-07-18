@@ -286,8 +286,11 @@ public:
                 // TODO: move it to compile time
                 if constexpr (MergeRange) {
                     int bidb_idx = get<2>(block_coord);
-                    int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-                    int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+                    int loop_count = (bidb_idx < *params.scheduler.unique_count - 1)
+                    ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                    : (params.scheduler.num_batch - params.scheduler.range_map[bidb_idx]);
+                    int bidb_start = params.scheduler.range_map[bidb_idx];
+
                     for (int idx = 0; idx < loop_count; ++idx) {
                         int bidb = bidb_start + idx;
                         block_coord = cute::make_tuple(get<0>(block_coord), get<1>(block_coord), bidb);
@@ -351,8 +354,11 @@ public:
 
                 if constexpr (MergeRange) {
                     int bidb_idx = get<2>(block_coord);
-                    int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-                    int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+                    int loop_count = (bidb_idx < *params.scheduler.unique_count - 1)
+                        ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                        : (params.scheduler.num_batch - params.scheduler.range_map[bidb_idx]);
+                    int bidb_start = params.scheduler.range_map[bidb_idx];
+
                     for (int idx = 0; idx < loop_count; ++idx) {
 
                         int bidb = bidb_start + idx;

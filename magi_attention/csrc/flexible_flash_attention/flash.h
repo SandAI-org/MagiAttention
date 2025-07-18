@@ -79,8 +79,10 @@ struct Flash_fwd_params : public Qkv_params {
     int * __restrict__ attn_type_map;
     int * __restrict__ merge_q_ranges;
     int * __restrict__ qk_map;
+    int * __restrict__ unique_count;
     int * __restrict__ merge_k_ranges;
     int * __restrict__ bwd_kq_map;
+    int * __restrict__ bwd_unique_count;
 
     // array of length b+1 holding starting offset of each sequence.
     int * __restrict__ cu_seqlens_q;

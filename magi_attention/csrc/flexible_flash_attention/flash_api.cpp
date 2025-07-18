@@ -85,6 +85,7 @@ void set_params_fprop(Flash_fwd_params &params,
                       int merge_batch_size,
                       void *merge_q_ranges_d,
                       void *qk_map_d,
+                      void *unique_count_d,
                       void *softmax_lse_d,
                       float softmax_scale,
                       void *tile_count_semaphore_d,
@@ -126,7 +127,7 @@ void set_params_fprop(Flash_fwd_params &params,
     params.attn_type_map = static_cast<int *>(attn_type_map_d);
     params.merge_q_ranges = static_cast<int *>(merge_q_ranges_d);
     params.qk_map = static_cast<int *>(qk_map_d);
-
+    params.unique_count = static_cast<int *>(unique_count_d);
     // Set kernel utility pointers
     params.range_locks = static_cast<int *>(range_locks_d);
     params.tile_count_semaphore = static_cast<int *>(tile_count_semaphore_d);
@@ -184,6 +185,7 @@ void set_params_dgrad(Flash_bwd_params &params,
                       int merge_batch_size,
                       void *merge_k_ranges_d,
                       void *bwd_kq_map_d,
+                      void *bwd_unique_count_d,
                       void *softmax_lse_d,
                       void *softmax_lse_log2_d,
                       void *dsoftmax_sum_d,
@@ -207,6 +209,7 @@ void set_params_dgrad(Flash_bwd_params &params,
                      /*merge_batch_size*/merge_batch_size,
                      /*merge_q_ranges_d*/nullptr,
                      /*qk_map_d*/nullptr,
+                     /*unique_count*/nullptr,
                      /*softmax_lse_d*/softmax_lse_d,
                      /*softmax_scale*/softmax_scale,
                      /*tile_count_semaphore_d*/tile_count_semaphore_d,
@@ -216,7 +219,7 @@ void set_params_dgrad(Flash_bwd_params &params,
 
     params.merge_k_ranges = static_cast<int *>(merge_k_ranges_d);
     params.bwd_kq_map = static_cast<int *>(bwd_kq_map_d);
-
+    params.bwd_unique_count = static_cast<int *>(bwd_unique_count_d);
     // Set the pointers and strides.
     params.do_ptr = dout.data_ptr();
     params.do_row_stride = dout.stride(-3);
@@ -422,6 +425,7 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
         std::optional<const at::Tensor> &attn_type_map_, // (b, )
         std::optional<const at::Tensor> &merge_q_ranges_,
         std::optional<const at::Tensor> &qk_map_,
+        std::optional<const at::Tensor> &unique_count_,
         float const softmax_scale,
         float const softcap,
         int const sm_margin,
@@ -433,7 +437,6 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
     auto dprops = at::cuda::getCurrentDeviceProperties();
     bool is_sm9x = dprops->major >= 9;
     TORCH_CHECK(is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
-
 
     int const batch_size = q_ranges.size(0);
     int const total_q = q.size(0);
@@ -508,6 +511,18 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
         CHECK_DEVICE(qk_map);
         CHECK_SHAPE(qk_map, merge_batch_size);
         CHECK_CONTIGUOUS(qk_map);
+    }
+
+    at::Tensor unique_count;
+    bool const has_unique_count = unique_count_.has_value();
+    
+    if (has_unique_count) {
+        unique_count = unique_count_.value();
+        // Check unique_count (dtype, device, layout)
+        TORCH_CHECK(unique_count.dtype() == torch::kInt32, "unique_count must have dtype torch.int32");
+        CHECK_DEVICE(unique_count);
+        CHECK_SHAPE(unique_count);
+        CHECK_CONTIGUOUS(unique_count);
     }
     
     // Check head_size is within the supported range
@@ -588,6 +603,7 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
                      /*merge_batch_size*/ merge_batch_size,
                      /*merge_q_ranges*/ has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
                      /*qk_map*/ has_qk_map ? qk_map.data_ptr() : nullptr,
+                     /*unique_count*/ has_unique_count ? unique_count.data_ptr() : nullptr,
                      /*softmax_lse*/ softmax_lse.data_ptr(),
                      /*softmax_scale*/ softmax_scale,
                      /*tile_count_semaphore*/ tile_count_semaphore.data_ptr(),
@@ -673,6 +689,7 @@ std::vector<at::Tensor> mha_bwd(
     std::optional<const at::Tensor> &attn_type_map_, // (b, )
     std::optional<const at::Tensor> &merge_k_ranges_,
     std::optional<const at::Tensor> &bwd_kq_map_,
+    std::optional<const at::Tensor> &bwd_unique_count_,
     float const softmax_scale,
     float const softcap,
     std::optional<at::ScalarType> out_type_,
@@ -748,8 +765,11 @@ std::vector<at::Tensor> mha_bwd(
     // check merge_k_ranges, bwd_kq_map (dtype, device, layout) if given
     at::Tensor merge_k_ranges;
     at::Tensor bwd_kq_map;
+    at::Tensor bwd_unique_count;
     bool const has_merge_k_ranges = merge_k_ranges_.has_value();
     bool const has_bwd_kq_map = bwd_kq_map_.has_value();
+    bool const has_bwd_unique_count = bwd_unique_count_.has_value();
+
     int merge_batch_size = batch_size;
     if (has_merge_k_ranges) {
         merge_k_ranges = merge_k_ranges_.value();
@@ -769,7 +789,13 @@ std::vector<at::Tensor> mha_bwd(
         CHECK_SHAPE(bwd_kq_map, merge_batch_size);
     }
     TORCH_CHECK(has_merge_k_ranges == has_bwd_kq_map, "merge_k_ranges and bwd_kq_map must be both given or both not given");
-    
+    if (has_bwd_unique_count) {
+        bwd_unique_count = bwd_unique_count_.value();
+        // Check dtype, device and layout
+        TORCH_CHECK(bwd_unique_count.dtype() == torch::kInt32, "bwd_kq_map must have dtype torch.int32");
+        CHECK_DEVICE(bwd_unique_count);
+        CHECK_SHAPE(bwd_unique_count);
+    }
     // Check head_size
     int const max_headdim = get_max_headdim();
     TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
@@ -861,6 +887,7 @@ std::vector<at::Tensor> mha_bwd(
                      merge_batch_size,
                      has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,
                      has_bwd_kq_map ? bwd_kq_map.data_ptr() : nullptr,
+                     has_bwd_unique_count ? bwd_unique_count.data_ptr() : nullptr,
                      softmax_lse.data_ptr(),
                      softmax_lse_log2.data_ptr(),
                      softmax_d.data_ptr(),
