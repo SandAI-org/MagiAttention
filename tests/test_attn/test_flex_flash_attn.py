@@ -251,7 +251,7 @@ class TestFlexFlashAttn(TestCase):
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             },
             {
-                "name": "deterministic_1k",
+                "name": "deterministic_sample",
                 "seqlen": 1000,
                 "q_ranges": AttnRanges.from_ranges([[0, 100], [1, 101]] * 10),
                 "k_ranges": AttnRanges.from_ranges(
@@ -292,8 +292,7 @@ class TestFlexFlashAttn(TestCase):
     )
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
-    # TODO: auto_range_merge == True that are not supported when attn_type_map different yet, thus skip here
-    @parameterize("auto_range_merge", [False])
+    @parameterize("auto_range_merge", [False, True])
     @parameterize("fwd_deterministic", [False, True])
     def test_flex_attn(
         self,
@@ -304,6 +303,14 @@ class TestFlexFlashAttn(TestCase):
         auto_range_merge: bool = False,
         fwd_deterministic: bool = False,
     ):
+        # TODO: auto_range_merge == True that are not supported when attn_type_map different yet, thus skip here
+        if auto_range_merge and fwd_deterministic:
+            return
+        if auto_range_merge and random_attn_type_map:
+            return
+        if auto_range_merge and attn_mask_config["name"] == "deterministic_sample":
+            return
+
         # extract config
         seqlen = attn_mask_config["seqlen"]
         q_ranges: AttnRanges = attn_mask_config["q_ranges"]
