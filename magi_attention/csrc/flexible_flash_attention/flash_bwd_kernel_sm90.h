@@ -249,6 +249,7 @@ public:
                 }
                 mainloop.load_tail(pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do);
             } else if (warp_idx_in_warpgroup == 1) {
+                int bidb_last = 0;
                 for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
                      work_tile_info.is_valid(params.scheduler);
                      work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
@@ -265,11 +266,21 @@ public:
                         for (int idx = 0; idx < loop_count; ++idx) {
                             int bidb = bidb_start + idx;
                             cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
-                            mainloop.store_dq(params.mainloop, shared_storage, block_coord);
+                            if constexpr (!Deterministic) {
+                                mainloop.store_dq(params.mainloop, shared_storage, block_coord);
+                            } else {
+                                mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
+                                bidb_last = bidb;
+                            }
                         }
                     }
                     else {
-                        mainloop.store_dq(params.mainloop, shared_storage, block_coord);
+                        if constexpr (!Deterministic) {
+                            mainloop.store_dq(params.mainloop, shared_storage, block_coord);
+                        } else {
+                            mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
+                            bidb_last = bidb_idx;
+                        }
                     }
                 }
             }
