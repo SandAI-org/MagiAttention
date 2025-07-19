@@ -121,7 +121,7 @@ We provide an example(pseudo-code) of how to use flex_flash_attention(kernel) an
 You can refer to the magi_attention/api/magi_attn_interface.py for more information.
 
 <details>
-<summary>Basic Usage</summary>
+<summary>Basic Usage For flex_flash_attention</summary>
 
 flex_flash_attention(kernel):
 ```python
@@ -152,7 +152,7 @@ k_ranges=AttnRanges.from_ranges(
                 ),
 max_seqlen_q=512
 max_seqlen_k=512
-attn_type_map=torch.tensor([0， 1， 2, 3], device=device)  # we support different mask type for different qk ranges.
+attn_type_map=torch.tensor([0, 1, 2, 3], device=device)  # we support different mask type for different qk ranges.
 '''
 attn type map:
 0: full attention
@@ -185,140 +185,296 @@ out.backward(g)
 
 ```
 
+</details>
+
+<details>
+<summary>Basic Usage For MagiAttention Varlen Api</summary>
 
 flash_attn_varlen like interface(magi_attn_varlen_dispatch):
 ```python
-from magi_attention.api import magi_attn_flex_dispatch, undispatch, calc_attn, squash_batch_dim, full_attention_to_varlen_attention, compute_pad_size   # func tools and interface
+import os
+from datetime import timedelta
+
+import torch
+import torch.distributed as dist
+
+from magi_attention.api import (
+    AttnOverlapMode,
+    DispatchConfig,
+    DistAttnConfig,
+    MinHeapDispatchAlg,
+    OverlapConfig,
+    UniformOverlapAlg,
+    calc_attn,
+    compute_pad_size,
+    full_attention_to_varlen_attention,
+    magi_attn_varlen_dispatch,
+    squash_batch_dim,
+    undispatch,
+)
 
 # ---  prepare data and args for magi_attention --- #
+# init params
+embed_dim = 1024
+dtype = torch.bfloat16
+cp_size = 2
+head_dim = 128
+chunk_size = 512
+q_heads = 48
+kv_heads = 8
+batch_size = 5
+seqlen = 25
+
+dist_attn_config = DistAttnConfig(
+    dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+    overlap_config=OverlapConfig(
+        enable=True,
+        mode=AttnOverlapMode.STATIC,
+        degree=2,
+        min_chunk_size=512,
+        max_num_chunks=64,
+        alg=UniformOverlapAlg(
+            random_costs=True,
+            random_seed=42,
+        ),
+    ),
+    high_bandwith_domain_size=1,
+)
+
+# init distributed environment if necessary
+rank = int(os.environ["RANK"])
+world_size = int(os.environ["WORLD_SIZE"])
+assert world_size == cp_size
+dist.init_process_group(
+    backend="nccl",
+    world_size=world_size,
+    rank=rank,
+    timeout=timedelta(minutes=30),
+)
+local_rank = rank % 8
+torch.cuda.set_device(local_rank)
+device = torch.cuda.current_device()
+
+# init cp_group
+cp_group = dist.new_group(list(range(cp_size)), backend="nccl")
+cp_mesh = None
+# if you want to use hierarchical_comm
+# first export MAGI_ATTENTION_HIERARCHICAL_COMM = 1 and CUDA_DEVICE_MAX_CONNECTIONS = 8
+# second set cp_group = None and init cp_mesh with init_hierarchical_mesh function
 
 # create input data with shape (bs, seqlen, h)
-x = torch.randn(
-            batchsize,
-            seqlen,
-            h,
-            device=device,
-            dtype=dtype,
-            requires_grad = True
-        )
+x_with_batch = torch.randn(
+    batch_size, seqlen, embed_dim, device=device, dtype=dtype, requires_grad=True
+)
 
 # squash the batch dim, magi_attention do not support input data with batch dim.
 x = squash_batch_dim(x_with_batch)  # ((b, seqlen), h)
 
 # get cu_seqlens_q,k after squashing.
-cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
-                                batch_size, seqlen
-                             )
+cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(batch_size, seqlen)
+total_seqlen_q: int = batch_size * seqlen
+total_seqlen_k: int = batch_size * seqlen
 
 # pad input seqlen for better performance
-pad_size, _ = compute_pad_size(x, cp_size, head_dim)
-
-total_seqlen_q: int = batchsize * seqlen
-total_seqlen_k: int = batchsize * seqlen
+pad_size = compute_pad_size(total_seqlen_q, cp_size, head_dim, chunk_size)
 
 # ---   magi_attention dispatch   --- #
 
 # dispatch global input tensor to each rank and get the runtime_key
-local_x, magi_attn_runtime_key = magi_attn_varlen_dispatch(  # local_x with shape ((total_seq + pad_size) / cp_size), h)
-        x,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        head_dim=head_dim,
-        pad_size=pad_size,
-        cp_group=cp_group,
-        causal=False,
-        dist_attn_config=DistAttnConfig(
-                dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
-                overlap_config=OverlapConfig(
-                enable=True,
-                mode=AttnOverlapMode.STATIC,
-                degree=2,
-                min_chunk_size=512,
-                max_num_chunks=64,
-                alg=OverlapAlgType.UNIFORM,
-                ),
-            ),
-        )
-
-......
+(
+    local_x,
+    magi_attn_runtime_key,
+) = magi_attn_varlen_dispatch(  # local_x with shape ((total_seq + pad_size) / cp_size), h)
+    x,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    head_dim=head_dim,
+    pad_size=pad_size,
+    chunk_size=chunk_size,
+    cp_group=cp_group,
+    cp_mesh=cp_mesh,
+    causal=False,
+    dist_attn_config=dist_attn_config,
+)
 
 # ---  magi_attention calculation and undispatch  --- #
-# do q k v projection
-local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)  # q, k, v with shape (bs * seqlen / cp_size, nh, hd)
+# do q k v projection, here's just an example
+q_proj = torch.nn.Linear(embed_dim, q_heads * head_dim, dtype=dtype, device=device)
+k_proj = torch.nn.Linear(embed_dim, kv_heads * head_dim, dtype=dtype, device=device)
+v_proj = torch.nn.Linear(embed_dim, kv_heads * head_dim, dtype=dtype, device=device)
+
+local_q, local_k, local_v = (
+    q_proj(local_x).view(-1, q_heads, head_dim),
+    k_proj(local_x).view(-1, kv_heads, head_dim),
+    v_proj(local_x).view(-1, kv_heads, head_dim),
+)  # q, k, v with shape ((bs * seqlen + pad_size) / cp_size, nh, hd)
 
 # Do local attention computation with runtime key
-local_out, _ = calc_attn(local_q, local_k, local_v, magi_attn_runtime_key) # local out with shape (bs * seqlen / cp_size, h)
+local_out, _ = calc_attn(
+    local_q, local_k, local_v, magi_attn_runtime_key
+)  # local out with shape ((bs * seqlen + pad_size) / cp_size, nh, hd)
 
 # Gather local attention results to global result with runtime key
-total_out = undispatch(local_out, magi_attn_runtime_key)   # total out with shape (bs * seqlen, h)
+total_out = undispatch(
+    local_out, magi_attn_runtime_key
+)  # total out with shape (bs * seqlen, nh, hd)
 ```
+
+</details>
+
+<details>
+<summary>Basic Usage For MagiAttention Flexible Api</summary>
 
 magi_attn_flex_dispatch(more flexible):
 ```python
+import os
+from datetime import timedelta
 
-x = torch.randn(
-          seqlen,
-          h,
-          device=device,
-          dtype=dtype,
-          requires_grad = True
-      )
-# block mask
-q_ranges = AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [128, 256],
-                        [256, 384],
-                        [384, 512],
-                        [512, 640],
-                        [640, 768],
-                        [768, 960],
-                    ]
-                ),
-k_ranges = AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [0, 256],
-                        [0, 384],
-                        [0, 512],
-                        [512, 640],
-                        [512, 768],
-                        [768, 960],
-                    ]
-                ),
+import torch
+import torch.distributed as dist
 
+from magi_attention.api import (
+    AttnMaskType,
+    AttnOverlapMode,
+    AttnRanges,
+    DispatchConfig,
+    DistAttnConfig,
+    MinHeapDispatchAlg,
+    OverlapConfig,
+    UniformOverlapAlg,
+    calc_attn,
+    compute_pad_size,
+    magi_attn_flex_dispatch,
+    undispatch,
+)
+
+# init params
+embed_dim = 1024
+dtype = torch.bfloat16
+cp_size = 2
+head_dim = 128
 total_seqlen_q = 960
 total_seqlen_k = 960
+chunk_size = 512
+q_heads = 48
+kv_heads = 8
+
+dist_attn_config = DistAttnConfig(
+    dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+    overlap_config=OverlapConfig(
+        enable=True,
+        mode=AttnOverlapMode.STATIC,
+        degree=2,
+        min_chunk_size=512,
+        max_num_chunks=64,
+        alg=UniformOverlapAlg(
+            random_costs=True,
+            random_seed=42,
+        ),
+    ),
+    high_bandwith_domain_size=1,
+)
+
+# init distributed environment if necessary
+rank = int(os.environ["RANK"])
+world_size = int(os.environ["WORLD_SIZE"])
+assert world_size == cp_size
+dist.init_process_group(
+    backend="nccl",
+    world_size=world_size,
+    rank=rank,
+    timeout=timedelta(minutes=30),
+)
+local_rank = rank % 8
+torch.cuda.set_device(local_rank)
+device = torch.cuda.current_device()
+
+# init cp_group
+cp_group = dist.new_group(list(range(cp_size)), backend="nccl")
+cp_mesh = None
+# if you want to use hierarchical_comm
+# first export MAGI_ATTENTION_HIERARCHICAL_COMM = 1 and CUDA_DEVICE_MAX_CONNECTIONS = 8
+# second set cp_group = None and init cp_mesh with init_hierarchical_mesh function
+
+# init x input
+x = torch.randn(
+    total_seqlen_q, embed_dim, device=device, dtype=dtype, requires_grad=True
+)
+
+# init mask shape
+q_ranges = AttnRanges.from_ranges(
+    [
+        [0, 128],
+        [128, 256],
+        [256, 384],
+        [384, 512],
+        [512, 640],
+        [640, 768],
+        [768, 960],
+    ]
+)
+
+k_ranges = AttnRanges.from_ranges(
+    [
+        [0, 128],
+        [0, 256],
+        [0, 384],
+        [0, 512],
+        [512, 640],
+        [512, 768],
+        [768, 960],
+    ]
+)
+
+# you can also init attn_mask_type with list[str]
+# such as  attn_mask_type = ["full"] * 7
 attn_mask_type = [AttnMaskType.FULL] * 7
-pad_size, _ = compute_pad_size(total_seqlen_q, cp_size, head_dim)
 
-local_x, magi_attn_runtime_key = magi_attn_flex_dispatch( # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
-                x,
-                q_ranges=q_ranges,
-                k_ranges=k_ranges,
-                attn_mask_type=attn_mask_type,
-                total_seqlen_q=total_seqlen_q,
-                total_seqlen_k=total_seqlen_k,
-                head_dim=head_dim,
-                pad_size=pad_size,
-                cp_group=self.nccl_group,
-                is_same_source=True,
-                is_q_permutable=True,
-                is_k_permutable=True,
-                dist_attn_config=dist_attn_config,
-          )
+# calc pad_size
+pad_size = compute_pad_size(total_seqlen_q, cp_size, head_dim, chunk_size)
 
-......
+(
+    local_x,
+    magi_attn_runtime_key,
+) = magi_attn_flex_dispatch(  # local_x with shape (total_seqlen_q + pad_size) / cp_size, h)
+    x,
+    q_ranges=q_ranges,
+    k_ranges=k_ranges,
+    attn_mask_type=attn_mask_type,
+    total_seqlen_q=total_seqlen_q,
+    total_seqlen_k=total_seqlen_k,
+    head_dim=head_dim,
+    pad_size=pad_size,
+    chunk_size=chunk_size,
+    cp_group=cp_group,
+    cp_mesh=cp_mesh,
+    dist_attn_config=dist_attn_config,
+    is_same_source=True,
+    is_q_permutable=True,
+    is_k_permutable=True,
+)
 
 # ---  magi_attention calculation and undispatch  --- #
-# do q k v projection
-local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)  # q, k, v with shape (s, nh, hd)
+# do q k v projection, here's just an example
+q_proj = torch.nn.Linear(embed_dim, q_heads * head_dim, dtype=dtype, device=device)
+k_proj = torch.nn.Linear(embed_dim, kv_heads * head_dim, dtype=dtype, device=device)
+v_proj = torch.nn.Linear(embed_dim, kv_heads * head_dim, dtype=dtype, device=device)
+
+local_q, local_k, local_v = (
+    q_proj(local_x).view(-1, q_heads, head_dim),
+    k_proj(local_x).view(-1, kv_heads, head_dim),
+    v_proj(local_x).view(-1, kv_heads, head_dim),
+)  # q, k, v with shape (s, nh, hd)
 
 # Do local attention computation with runtime key
-local_out, _ = calc_attn(local_q, local_k, local_v, magi_attn_runtime_key) # local out with shape (s, h)
+local_out, _ = calc_attn(
+    local_q, local_k, local_v, magi_attn_runtime_key
+)  # local out with shape (s, nh, hd)
 
 # Gather local attention results and unpad to global result with runtime key
-total_out = undispatch(local_out, magi_attn_runtime_key)   # total out with shape (totoal_seqlen_q, h)
+total_out = undispatch(
+    local_out, magi_attn_runtime_key
+)  # total out with shape (totoal_seqlen_q, nh, hd)
 ```
 
 </details>

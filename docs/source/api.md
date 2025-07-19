@@ -1,10 +1,9 @@
 # API Reference
 
 ```{toctree}
-:caption: Test For Doc
-:maxdepth: 4
-:hidden:
+:caption: How to use MagiAttention
+:maxdepth: 2
 
-ranges.md
+magi_api.md
 
 ```
