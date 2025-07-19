@@ -26,8 +26,6 @@ from .functools import (
     compute_pad_size,
     from_mask,
     full_attention_to_varlen_attention,
-    infer_attn_mask_from_sliding_window,
-    infer_attn_mask_from_window_size,
     init_hierarchical_mesh,
     squash_batch_dim,
 )

@@ -66,18 +66,19 @@ def magi_attn_varlen_key(
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
-        to control the granularity of computation load-balance.
+            to control the granularity of computation load-balance.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
-        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
-        NOTE: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
+        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
+            **NOTE**: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
 
         causal (bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
-        x (torch.Tensor): the input tensor after padding.
-        DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
+        tuple[torch.Tensor, DistAttnRuntimeKey]:
+            - x (torch.Tensor): the input tensor after padding.
+            - DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
 
     Example:
         >>> local_x, dist_attn_runtime_key = magi_attn_varlen_key(
@@ -186,18 +187,19 @@ def magi_attn_varlen_dispatch(
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
-        to control the granularity of computation load-balance.
+            to control the granularity of computation load-balance.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
-        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
-        NOTE: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
+        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
+            **NOTE**: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
 
         causal (bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
-        x (torch.Tensor): the input tensor after padding.
-        DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
+        tuple[torch.Tensor, DistAttnRuntimeKey]:
+            - x (torch.Tensor): the input tensor after padding.
+            - DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
 
     Example:
         >>> padded_x, dist_attn_runtime_key = magi_attn_varlen_dispatch(
@@ -290,31 +292,35 @@ def magi_attn_flex_key(
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
-        to control the granularity of computation load-balance.
+            to control the granularity of computation load-balance.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
-        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
-        NOTE: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
+        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
+            **NOTE**: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
 
         dist_attn_config (DistAttnConfig): dist attn config
 
         is_same_source (bool): is query tensor and key tensor share the same source
         is_q_permutable (bool): is query tensor permutable
         is_k_permutable (bool): is key tensor permutable
-        NOTE: e.g.
-        1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
-        a) is_same_source is True
-        b) both q and k are permutable, as long as they are permuted in the same way.
-        2. for encoder-decoder transformer like t5, it applies 'cross-attn' as follows:
-        a) is_same_source is False
-        b) q is permutable but k is not
-        3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
-        a) is_same_source is False
-        b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
 
     Returns:
-        x (torch.Tensor): the input tensor after padding.
-        DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
+        tuple[torch.Tensor, DistAttnRuntimeKey]:
+            - x (torch.Tensor): the input tensor after padding.
+            - DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
+
+    NOTE:
+        1. For decoder-only transformers (e.g., GPT), it applies 'self-attn' as follows:
+            a. `is_same_source` is True.
+            b. Both `q` and `k` are permutable, as long as they are permuted in the same way.
+
+        2. For encoder-decoder transformers (e.g., T5), it applies 'cross-attn' as follows:
+            a. `is_same_source` is False.
+            b. `q` is permutable but `k` is not.
+
+        3. For multi-modal transformers with external encoders, it applies 'cross-attn' as follows:
+            a. `is_same_source` is False.
+            b. `q` is unpermutable due to self-attn, but `k` is permutable even in a different way.
 
     Example:
         >>> padded_x, dist_attn_runtime_key = magi_attn_flex_key(
@@ -521,31 +527,35 @@ def magi_attn_flex_dispatch(
         head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
-        to control the granularity of computation load-balance.
+            to control the granularity of computation load-balance.
 
         cp_group (dist.ProcessGroup): process group, only support nccl backend for now
-        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
-        NOTE: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
+        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
+            **NOTE**: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
 
         dist_attn_config (DistAttnConfig): dist attn config
 
         is_same_source (bool): is query tensor and key tensor share the same source
         is_q_permutable (bool): is query tensor permutable
         is_k_permutable (bool): is key tensor permutable
-        NOTE: e.g.
-        1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
-        a) is_same_source is True
-        b) both q and k are permutable, as long as they are permuted in the same way.
-        2. for encoder-decoder transformer like t5, it applies 'cross-attn' as follows:
-        a) is_same_source is False
-        b) q is permutable but k is not
-        3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
-        a) is_same_source is False
-        b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
 
     Returns:
-        local_x (torch.Tensor): the local input x after padding.
-        key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+        tuple[torch.Tensor, DistAttnRuntimeKey]:
+            - local_x (torch.Tensor): the local input x after padding.
+            - key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+
+    NOTE:
+        1. For decoder-only transformers (e.g., GPT), it applies 'self-attn' as follows:
+            a. `is_same_source` is True.
+            b. Both `q` and `k` are permutable, as long as they are permuted in the same way.
+
+        2. For encoder-decoder transformers (e.g., T5), it applies 'cross-attn' as follows:
+            a. `is_same_source` is False.
+            b. `q` is permutable but `k` is not.
+
+        3. For multi-modal transformers with external encoders, it applies 'cross-attn' as follows:
+            a. `is_same_source` is False.
+            b. `q` is unpermutable due to self-attn, but `k` is permutable even in a different way.
 
     Example:
         >>> local_x, dist_attn_runtime_key = magi_attn_flex_dispatch(
@@ -643,13 +653,14 @@ def undispatch(
 ) -> torch.Tensor:
     """
     Undispatch local tensor to total tensor and unpad the total tensor at dim0 (seqlen dim).
-    args:
+
+    Args:
         x (torch.Tensor): local tensor
         key (DistAttnRuntimeKey): the object that holds some inner meta data
-        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
 
-    returns:
-        unpad_total_x (torch.Tensor): the undispatched and unpadded tensor.
+    Returns:
+        torch.Tensor: the undispatched and unpadded tensor.
 
     Raises:
         ValueError: If the provided `key` does not exist in `DistAttnRuntimeDict`.
@@ -679,11 +690,12 @@ def calc_attn(
         k (torch.Tensor): Key tensor of shape `(num_tokens_k, num_heads, head_dim)`.
         v (torch.Tensor): Value tensor of shape `(num_tokens_v, num_heads, head_dim)`.
         key (DistAttnRuntimeKey): the object that holds some inner meta data
-        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
 
     Returns:
-        out (torch.Tensor): Attention output tensor of shape.
-        lse (torch.Tensor): Log-sum-exp values for numerical stability.
+        tuple[torch.Tensor, torch.Tensor]:
+            - out (torch.Tensor): Attention output tensor of shape.
+            - lse (torch.Tensor): Log-sum-exp values for numerical stability.
 
     Raises:
         ValueError: If the provided `key` does not exist in `DistAttnRuntimeDict`.

@@ -43,6 +43,7 @@ extensions = [
     "sphinx.ext.coverage",
     "sphinx.ext.mathjax",
     "myst_parser",
+    "sphinx_copybutton",
 ]
 
 myst_enable_extensions = [
@@ -69,13 +70,17 @@ napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 napoleon_include_init_with_doc = True
 napoleon_include_private_with_doc = False
-napoleon_include_special_with_doc = True
+napoleon_include_special_with_doc = False
 napoleon_use_admonition_for_examples = False
-napoleon_use_admonition_for_notes = False
+napoleon_use_admonition_for_notes = True
 napoleon_use_admonition_for_references = False
-napoleon_use_ivar = False
+napoleon_use_ivar = True
 napoleon_use_param = True
 napoleon_use_rtype = True
+
+copybutton_prompt_text = r">>> |\.\.\. |\$ "
+copybutton_prompt_is_regexp = True
+pygments_style = "colorful"
 
 templates_path = ["_templates"]
 exclude_patterns = []  # type: ignore
@@ -107,3 +112,11 @@ html_theme_options = {
     },
     "show_prev_next": False,
 }
+
+
+def skip_signature(app, what, name, obj, options, signature, return_annotation):
+    return "", None
+
+
+def setup(app):
+    app.connect("autodoc-process-signature", skip_signature)
