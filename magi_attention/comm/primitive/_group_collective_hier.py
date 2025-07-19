@@ -135,6 +135,25 @@ class HierGroupCastMetaSolver:
             self.src_index_list_post_intra,
         )
 
+    def make_group_cast_a2a_post_process_fn(
+        self,
+        stashed_tensors: list[torch.Tensor] | None = None,
+    ):
+        core_post_process_fn_hier = partial(
+            _unpermute_tensor,
+            unperm_after_a2a_kwargs=self.unperm_after_a2a_kwargs_hier,
+        )
+
+        def post_process_fn_hier(tensor: torch.Tensor):
+            try:
+                return core_post_process_fn_hier(tensor)
+            finally:
+                nonlocal stashed_tensors
+                if stashed_tensors is not None:
+                    stashed_tensors.clear()
+
+        return post_process_fn_hier
+
     def _prepare_env_info(
         self,
         rank: int,
@@ -517,12 +536,6 @@ class HierGroupCastMetaSolver:
             return_verbose=True,
         )
 
-        # set post-process fn to unperm after a2a
-        self.post_process_fn_hier = partial(
-            _unpermute_tensor,
-            unperm_after_a2a_kwargs=self.unperm_after_a2a_kwargs_hier,
-        )
-
 
 def init_hier_group_cast_meta_solver(
     input_split_size_list: list[int],
@@ -657,12 +670,12 @@ def hier_group_cast_impl_with_a2av(
     )
 
     side_stream = meta_solver.a2a_post_intra_side_stream
-    side_stream.wait_stream(torch.cuda.default_stream())
+    side_stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side_stream):
         # ----    prepare a2a input buffer for post-intra     ---- #
 
         work_inter.wait()
-        a2a_input_post_intra_ = range_gather(
+        range_gather(
             input=a2a_output_inter,
             output=a2a_input_post_intra,
             **meta_solver.perm_range_gather_kwargs_post_intra,
@@ -671,7 +684,7 @@ def hier_group_cast_impl_with_a2av(
         # ----    apply a2a for post-intra     ---- #
 
         work_post_intra = all2all_v(
-            input=a2a_input_post_intra_,
+            input=a2a_input_post_intra,
             output=a2a_output_post_intra,
             input_split_size_list=meta_solver.a2a_input_split_size_post_intra,
             output_split_size_list=meta_solver.a2a_output_split_size_post_intra,
@@ -680,12 +693,21 @@ def hier_group_cast_impl_with_a2av(
         )
         work_post_intra.wait()
 
-    # TODO: pre-allocate the buffer to avoid record stream
-    a2a_output_inter.record_stream(side_stream)
-    a2a_input_post_intra.record_stream(side_stream)
-    a2a_output_post_intra.record_stream(side_stream)
-
     # ----    prepare work with hier group-cast post-process fn    ---- #
+
+    post_process_fn_hier = meta_solver.make_group_cast_a2a_post_process_fn(
+        stashed_tensors=[
+            # pre-intra
+            a2a_input_pre_intra,
+            # a2a_output_pre_intra,
+            # inter
+            a2a_input_inter,
+            a2a_output_inter,
+            # post-intra
+            a2a_input_post_intra,
+            # a2a_output_post_intra,
+        ],
+    )
 
     # NOTE: no need to wait for work_pre_intra explicitly here
     # since side_stream will wait for work_post_intra,
@@ -694,7 +716,7 @@ def hier_group_cast_impl_with_a2av(
     work_with_post_process_fn = WorkWithPostProcessFn(
         # work=[work_pre_intra, side_stream],
         work=side_stream,
-        post_process_fn=meta_solver.post_process_fn_hier,
+        post_process_fn=post_process_fn_hier,
         sync=not async_op,
     )
 
@@ -772,6 +794,7 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         self,
         a2a_output_pre_intra: torch.Tensor,
         a2a_output_inter: torch.Tensor,
+        stashed_tensors: list[torch.Tensor] | None = None,
     ) -> Callable[[torch.Tensor], torch.Tensor]:
         post_process_fn_pre_intra = partial(
             _reduce_to_tensor,
@@ -786,8 +809,13 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         )
 
         def post_process_fn_hier(output_tensor: torch.Tensor) -> torch.Tensor:
-            post_process_fn_pre_intra(output_tensor)
-            post_process_fn_inter(output_tensor)
+            try:
+                post_process_fn_pre_intra(output_tensor)
+                post_process_fn_inter(output_tensor)
+            finally:
+                nonlocal stashed_tensors
+                if stashed_tensors is not None:
+                    stashed_tensors.clear()
 
             return output_tensor
 
@@ -1136,11 +1164,6 @@ def hier_group_reduce_impl_with_a2av(
         )
         work_inter.wait()
 
-    # TODO: pre-allocate the buffer to avoid record stream
-    a2a_output_post_intra.record_stream(side_stream)
-    a2a_input_inter.record_stream(side_stream)
-    a2a_output_inter.record_stream(side_stream)
-
     # ----    allocate a2a output buffer for pre-intra    ---- #
 
     a2a_output_pre_intra = torch.empty(
@@ -1165,6 +1188,17 @@ def hier_group_reduce_impl_with_a2av(
     post_process_fn_hier = meta_solver.make_group_reduce_a2a_post_process_fn(
         a2a_output_pre_intra=a2a_output_pre_intra,
         a2a_output_inter=a2a_output_inter,
+        stashed_tensors=[
+            # pre-intra
+            # a2a_input_pre_intra,
+            # a2a_output_pre_intra,
+            # inter
+            a2a_input_inter,
+            # a2a_output_inter,
+            # post-intra
+            # a2a_input_post_intra,
+            a2a_output_post_intra,
+        ],
     )
 
     # NOTE: different from hier group-cast,
