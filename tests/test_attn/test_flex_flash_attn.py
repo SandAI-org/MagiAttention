@@ -250,6 +250,17 @@ class TestFlexFlashAttn(TestCase):
                 ),
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             },
+            {
+                "name": "deterministic_sample",
+                "seqlen": 2500,
+                "q_ranges": AttnRanges.from_ranges(
+                    [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [[i * 50, (i + 1) * 50] for i in range(50)] * 50
+                ),
+                "attn_type_map": [0, 1] * 1250,
+            },
         ],
     )
     @parameterize(
@@ -284,6 +295,7 @@ class TestFlexFlashAttn(TestCase):
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
     @parameterize("auto_range_merge", [False, True])
+    @parameterize("deterministic", [False, True])
     def test_flex_attn(
         self,
         attn_mask_config: dict[str, Any],
@@ -291,7 +303,16 @@ class TestFlexFlashAttn(TestCase):
         dtype: torch.dtype,
         random_attn_type_map: bool,
         auto_range_merge: bool = False,
+        deterministic: bool = False,
     ):
+        # TODO: auto_range_merge == True that are not supported when attn_type_map different yet, thus skip here
+        if auto_range_merge and deterministic:
+            return
+        if auto_range_merge and random_attn_type_map:
+            return
+        if auto_range_merge and attn_mask_config["name"] == "deterministic_sample":
+            return
+
         # extract config
         seqlen = attn_mask_config["seqlen"]
         q_ranges: AttnRanges = attn_mask_config["q_ranges"]
@@ -321,6 +342,7 @@ class TestFlexFlashAttn(TestCase):
             f"[dtype={dtype}]"
             f"[random_attn_type_map={random_attn_type_map}]"
             f"[auto_range_merge={auto_range_merge}]"
+            f"[deterministic={deterministic}]"
         )
 
         # construct data
@@ -364,8 +386,52 @@ class TestFlexFlashAttn(TestCase):
             max_seqlen_k,
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
+            deterministic=deterministic,
         )
         o.backward(do)
+
+        if deterministic:
+            q2 = q.clone().detach().requires_grad_(True)
+            k2 = k.clone().detach().requires_grad_(True)
+            v2 = v.clone().detach().requires_grad_(True)
+            do2 = do.clone()
+            o2, _ = flex_flash_attn_func(
+                q2,
+                k2,
+                v2,
+                q_ranges_tensor,
+                k_ranges_tensor,
+                max_seqlen_q,
+                max_seqlen_k,
+                attn_type_map_tensor,
+                auto_range_merge=auto_range_merge,
+                deterministic=deterministic,
+            )
+            o2.backward(do2)
+
+            try:
+                assert torch.equal(o, o2)
+            except Exception as e:
+                print("forward output not deterministic")
+                raise AssertionError("\n\n".join([str(e)]))
+
+            try:
+                assert torch.equal(q.grad, q2.grad)
+            except Exception as e:
+                print("backward dq not deterministic")
+                raise AssertionError("\n\n".join([str(e)]))
+
+            try:
+                assert torch.equal(k.grad, k2.grad)
+            except Exception as e:
+                print("backward dk not deterministic")
+                raise AssertionError("\n\n".join([str(e)]))
+
+            try:
+                assert torch.equal(v.grad, v2.grad)
+            except Exception as e:
+                print("backward dv not deterministic")
+                raise AssertionError("\n\n".join([str(e)]))
 
         # compare with reference
         self.assert_close_to_torch_ref(

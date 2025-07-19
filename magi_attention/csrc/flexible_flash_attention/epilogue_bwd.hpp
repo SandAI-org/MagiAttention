@@ -19,7 +19,8 @@ namespace flash {
 using namespace cute;
 
 template <class TileShape_MNK_, class Element_, class ArchTag_,
-          int NumEpilogueThreads_, bool dKV_swapAB_, int AtomLayoutKdKV=1>
+          int NumEpilogueThreads_, bool dKV_swapAB_, int AtomLayoutKdKV=1,
+          bool Deterministic_=false>
 struct CollectiveEpilogueBwd {
 
     using TileShape_MNK = TileShape_MNK_;
@@ -28,6 +29,7 @@ struct CollectiveEpilogueBwd {
     static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
     static constexpr bool dKV_swapAB = dKV_swapAB_;
     static constexpr bool Use_TMA = ArchTag::kMinComputeCapability >= 90;
+    static constexpr bool Deterministic = Deterministic_;
 
     static_assert(ArchTag::kMinComputeCapability >= 80);
 
@@ -86,6 +88,12 @@ struct CollectiveEpilogueBwd {
         std::nullptr_t
         >;
 
+    using BlockCoordType = std::conditional_t<
+        Deterministic,
+        cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>,
+        cute::tuple<int32_t, int32_t, int32_t>
+    >;
+
     // Host side kernel arguments
     struct Arguments {
         Element* ptr_dK;
@@ -94,8 +102,10 @@ struct CollectiveEpilogueBwd {
         Element* ptr_dV;
         StridedKV const stride_dV;
         int const num_heads_q;
+        int32_t const nheads_kv;
         int const* q_ranges;
         int const* k_ranges;
+        int * determin_range_locks = nullptr;
     };
 
     // Device side kernel params
@@ -109,6 +119,8 @@ struct CollectiveEpilogueBwd {
         int const* q_ranges;
         int const* k_ranges;
         cutlass::FastDivmod qhead_per_khead_divmod;
+        int const nheads;
+        int * determin_range_locks = nullptr;
     };
 
     static Params
@@ -131,7 +143,9 @@ struct CollectiveEpilogueBwd {
         }();
         return {args.ptr_dK, args.shape_dK, args.stride_dK, args.ptr_dV, args.stride_dV,
                 tma_store_dK, tma_store_dV, args.q_ranges, args.k_ranges,
-                cutlass::FastDivmod(cute::ceil_div(args.num_heads_q, get<2>(args.shape_dK)))};
+                cutlass::FastDivmod(cute::ceil_div(args.num_heads_q, get<2>(args.shape_dK))),
+                args.nheads_kv, args.determin_range_locks
+            };
     }
 
     /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -143,6 +157,59 @@ struct CollectiveEpilogueBwd {
         }
     }
 
+    CUTLASS_DEVICE
+    void deterministic_sync(int* range_lock, int bidh, int offset, int k_block_size, int num_heads, int conflict_bidb1, int conflict_bidb2) {
+        if (conflict_bidb1 == 0 && conflict_bidb2 == 0)
+            return ;
+
+        // Calculate lock index
+        int block_idx1 = offset / k_block_size;
+        int index_1 = block_idx1 * num_heads + bidh;
+        int block_idx2 = (offset + k_block_size - 1) / k_block_size;
+
+        // Acquire the first lock
+        #pragma unroll 1
+        while (atomicCAS(&range_lock[index_1 * 2], conflict_bidb1, conflict_bidb1) != conflict_bidb1) {
+        }
+
+        // If we need a second lock
+        if (block_idx1 != block_idx2) {
+            int index_2 = block_idx2 * num_heads + bidh;
+
+            // Try to acquire the second lock
+            #pragma unroll 1
+            while (atomicCAS(&range_lock[index_2 * 2], conflict_bidb2, conflict_bidb2) != conflict_bidb2) {
+            }
+        }
+    }
+    
+    CUTLASS_DEVICE
+    void deterministic_arrive(int* range_lock, int bidh, int offset, int k_block_size, int num_heads, int bidb, bool l_arrive_twice, bool r_arrive_twice) {
+        // Calculate lock indices
+        int block_idx1 = offset / k_block_size;
+        int index_1 = block_idx1 * num_heads + bidh;
+
+        // Check if we need to release a second lock
+        int block_idx2 = (offset + k_block_size - 1) / k_block_size;
+
+        // Release the second lock
+        int index_2 = block_idx2 * num_heads + bidh;
+        int add_cnt = r_arrive_twice ? 2 : 1;
+        int tmp = atomicAdd(&range_lock[index_2 * 2 + 1], add_cnt);
+        if (tmp + add_cnt == 2) {
+            atomicExch(&range_lock[index_2 * 2 + 1], 0);
+            atomicExch(&range_lock[index_2 * 2], bidb);
+        }
+
+        // Release the first lock
+        add_cnt = l_arrive_twice ? 2 : 1;
+        tmp = atomicAdd(&range_lock[index_1 * 2 + 1], add_cnt);
+        if (tmp + add_cnt == 2) {
+            atomicExch(&range_lock[index_1 * 2 + 1], 0);
+            atomicExch(&range_lock[index_1 * 2], bidb);
+        }
+    }
+
     template <typename SharedStorage, typename FrgTensorO, typename TiledMma>
     CUTLASS_DEVICE void
     store(Params const& params,
@@ -151,10 +218,20 @@ struct CollectiveEpilogueBwd {
           SharedStorage& shared_storage,
           TiledMma tiled_mma,
           int thread_idx,
-          cute::tuple<int32_t, int32_t, int32_t> const& block_coord
+          BlockCoordType const& block_coord
           ) {
 
-        auto [n_block, bidh, bidb] = block_coord;
+        // auto [n_block, bidh, bidb] = block_coord;
+        // Get block coordinates for current job(tile)
+        int n_block = get<0>(block_coord);
+        int bidh = get<1>(block_coord);
+        int bidb = get<2>(block_coord);
+        int conflict_bidb1 = 0, conflict_bidb2 = 0;
+        if constexpr (Deterministic) {
+            conflict_bidb1 = get<3>(block_coord);
+            conflict_bidb2 = get<4>(block_coord);
+        }
+
         int bidh_idx_in_group;
         int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
         Tensor sdK = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKV{}));
@@ -170,6 +247,7 @@ struct CollectiveEpilogueBwd {
         // if (blockIdx.x == 0 && threadIdx.x == 128) { print(smem_thr_copy_dKV); print(sdK); printf("\n"); print(sdKt); printf("\n"); }
         Tensor taccdKsdK = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdK, sdKt));     // ((Atom,AtomNum),PIPE_M,PIPE_N)
         Tensor taccdVsdV = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt));     // ((Atom,AtomNum),PIPE_M,PIPE_N)
+
 
         // Make sure all WGs have finished reading K and V
         flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
@@ -194,9 +272,21 @@ struct CollectiveEpilogueBwd {
         Tensor tdVgdV = block_tma_dV.partition_D(gdV);  // (TMA, TMA_M, TMA_K)
         Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_M, TMA_K)
 
+        int offset_k = seqlen_info.offset_k;
 
         int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
         if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+            if constexpr (Deterministic) {
+                if (cute::elect_one_sync()) {
+                    int qheads_per_kheads = params.qhead_per_khead_divmod;
+                    // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
+                    // conflict_bidb >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
+                    // if not conflict, conflict_bidb is 0
+                    int sync_num1 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (conflict_bidb1 >> 1) * qheads_per_kheads;
+                    int sync_num2 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (conflict_bidb2 >> 1) * qheads_per_kheads;
+                    deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
+                }
+            }
             cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp,
                                             cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
             if (cute::elect_one_sync()) {
@@ -206,6 +296,13 @@ struct CollectiveEpilogueBwd {
             }
         }
         tma_store_wait<0>();
+        if constexpr(Deterministic) {
+            if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+                int qheads_per_kheads = params.qhead_per_khead_divmod;
+                int arrive_num = bidb * qheads_per_kheads + bidh_idx_in_group + 1;
+                deterministic_arrive(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, arrive_num, conflict_bidb1 & 1, conflict_bidb2 & 1);
+            }
+        }
         // // Tell warp 0 that smem_k and smem_v are ready
         // cutlass::arch::NamedBarrier::arrive(NumEpilogueThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
     }
