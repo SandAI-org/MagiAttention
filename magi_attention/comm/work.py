@@ -62,6 +62,10 @@ class WorkWithPostProcessFn:
         ret = self.post_process_fn(*args, **kwargs)
 
         self._work_done = True
+        # when work is done, the post process fn is no longer needed
+        # so we set it to a no-op, to avoid some long lived objects
+        # e.g. some partial funcs might hold on some tensors
+        self.post_process_fn = lambda *args, **kwargs: None
 
         return ret
 
