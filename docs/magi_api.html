@@ -1,0 +1,775 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>MagiAttention Api &#8212; MagiAttention v1.0.2 documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+  
+  <!-- So that users can add custom icons -->
+  <script src="_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+
+    <script src="_static/documentation_options.js?v=e562d664"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=fd10adb8"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'magi_api';</script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/magi_api.html" />
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="Installation" href="install.html" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="api.html">
+    API Reference
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">GitHub</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="api.html">
+    API Reference
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="GitHub" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-square-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">GitHub</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<nav class="bd-docs-nav bd-links"
+     aria-label="Section Navigation">
+  <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
+  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">How to use MagiAttention</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="install.html">Installation</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">MagiAttention Api</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="api.html" class="nav-link">API Reference</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">MagiAttention Api</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="module-magi_attention.api">
+<span id="magiattention-api"></span><h1>MagiAttention Api<a class="headerlink" href="#module-magi_attention.api" title="Link to this heading">#</a></h1>
+<nav class="contents local" id="contents">
+<ul class="simple">
+<li><p><a class="reference internal" href="#flexible-flash-attention" id="id1">Flexible Flash Attention</a></p></li>
+<li><p><a class="reference internal" href="#how-to-use-magiattention" id="id2">How to use MagiAttention</a></p></li>
+<li><p><a class="reference internal" href="#compute-pad-size" id="id3">Compute Pad Size</a></p></li>
+<li><p><a class="reference internal" href="#dispatch-function" id="id4">Dispatch Function</a></p>
+<ul>
+<li><p><a class="reference internal" href="#dispatch-for-varlen-masks" id="id5">Dispatch for varlen masks</a></p></li>
+<li><p><a class="reference internal" href="#dispatch-for-multi-masks" id="id6">Dispatch for multi masks</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#attention-calc" id="id7">Attention Calc</a></p></li>
+<li><p><a class="reference internal" href="#undispatch" id="id8">Undispatch</a></p></li>
+<li><p><a class="reference internal" href="#utility-functions-needed" id="id9">Utility functions needed</a></p></li>
+</ul>
+</nav>
+<section id="flexible-flash-attention">
+<h2><a class="toc-backref" href="#id1" role="doc-backlink">Flexible Flash Attention</a><a class="headerlink" href="#flexible-flash-attention" title="Link to this heading">#</a></h2>
+<p>To support computing irregular-shaped masks, we implemented a <code class="docutils literal notranslate"><span class="pre">flexible_flash_attention</span></code> kernel, which can be invoked through the following interface.</p>
+</section>
+<section id="how-to-use-magiattention">
+<h2><a class="toc-backref" href="#id2" role="doc-backlink">How to use MagiAttention</a><a class="headerlink" href="#how-to-use-magiattention" title="Link to this heading">#</a></h2>
+<p>The typical process for calling MagiAttention is: initialize the required parameters → use <code class="docutils literal notranslate"><span class="pre">compute_pad_size</span></code> to get the pad size → call the dispatch function → pass x through projection to obtain qkv → perform attention calculation → undispatch. An example call is shown below.</p>
+<details>
+<summary>Basic Usage For Varlen Api</summary>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">timedelta</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">AttnOverlapMode</span><span class="p">,</span>
+    <span class="n">DispatchConfig</span><span class="p">,</span>
+    <span class="n">DistAttnConfig</span><span class="p">,</span>
+    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
+    <span class="n">OverlapConfig</span><span class="p">,</span>
+    <span class="n">UniformOverlapAlg</span><span class="p">,</span>
+    <span class="n">calc_attn</span><span class="p">,</span>
+    <span class="n">compute_pad_size</span><span class="p">,</span>
+    <span class="n">full_attention_to_varlen_attention</span><span class="p">,</span>
+    <span class="n">magi_attn_varlen_dispatch</span><span class="p">,</span>
+    <span class="n">squash_batch_dim</span><span class="p">,</span>
+    <span class="n">undispatch</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># ---  prepare data and args for magi_attention --- #</span>
+<span class="c1"># init params</span>
+<span class="n">embed_dim</span> <span class="o">=</span> <span class="mi">1024</span>
+<span class="n">dtype</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span>
+<span class="n">cp_size</span> <span class="o">=</span> <span class="mi">2</span>
+<span class="n">head_dim</span> <span class="o">=</span> <span class="mi">128</span>
+<span class="n">chunk_size</span> <span class="o">=</span> <span class="mi">512</span>
+<span class="n">q_heads</span> <span class="o">=</span> <span class="mi">48</span>
+<span class="n">kv_heads</span> <span class="o">=</span> <span class="mi">8</span>
+<span class="n">batch_size</span> <span class="o">=</span> <span class="mi">5</span>
+<span class="n">seqlen</span> <span class="o">=</span> <span class="mi">25</span>
+
+<span class="n">dist_attn_config</span> <span class="o">=</span> <span class="n">DistAttnConfig</span><span class="p">(</span>
+    <span class="n">dispatch_config</span><span class="o">=</span><span class="n">DispatchConfig</span><span class="p">(</span><span class="n">alg</span><span class="o">=</span><span class="n">MinHeapDispatchAlg</span><span class="p">()),</span>
+    <span class="n">overlap_config</span><span class="o">=</span><span class="n">OverlapConfig</span><span class="p">(</span>
+        <span class="n">enable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="n">mode</span><span class="o">=</span><span class="n">AttnOverlapMode</span><span class="o">.</span><span class="n">STATIC</span><span class="p">,</span>
+        <span class="n">degree</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+        <span class="n">min_chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+        <span class="n">max_num_chunks</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>
+        <span class="n">alg</span><span class="o">=</span><span class="n">UniformOverlapAlg</span><span class="p">(</span>
+            <span class="n">random_costs</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+            <span class="n">random_seed</span><span class="o">=</span><span class="mi">42</span><span class="p">,</span>
+        <span class="p">),</span>
+    <span class="p">),</span>
+    <span class="n">high_bandwith_domain_size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># init distributed environment if necessary</span>
+<span class="n">rank</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;RANK&quot;</span><span class="p">])</span>
+<span class="n">world_size</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;WORLD_SIZE&quot;</span><span class="p">])</span>
+<span class="k">assert</span> <span class="n">world_size</span> <span class="o">==</span> <span class="n">cp_size</span>
+<span class="n">dist</span><span class="o">.</span><span class="n">init_process_group</span><span class="p">(</span>
+    <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">,</span>
+    <span class="n">world_size</span><span class="o">=</span><span class="n">world_size</span><span class="p">,</span>
+    <span class="n">rank</span><span class="o">=</span><span class="n">rank</span><span class="p">,</span>
+    <span class="n">timeout</span><span class="o">=</span><span class="n">timedelta</span><span class="p">(</span><span class="n">minutes</span><span class="o">=</span><span class="mi">30</span><span class="p">),</span>
+<span class="p">)</span>
+<span class="n">local_rank</span> <span class="o">=</span> <span class="n">rank</span> <span class="o">%</span> <span class="mi">8</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">set_device</span><span class="p">(</span><span class="n">local_rank</span><span class="p">)</span>
+<span class="n">device</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">current_device</span><span class="p">()</span>
+
+<span class="c1"># init cp_group</span>
+<span class="n">cp_group</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">cp_size</span><span class="p">)),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">)</span>
+<span class="n">cp_mesh</span> <span class="o">=</span> <span class="kc">None</span>
+<span class="c1"># if you want to use hierarchical_comm</span>
+<span class="c1"># first export MAGI_ATTENTION_HIERARCHICAL_COMM = 1 and CUDA_DEVICE_MAX_CONNECTIONS = 8</span>
+<span class="c1"># second set cp_group = None and init cp_mesh with init_hierarchical_mesh function</span>
+
+<span class="c1"># create input data with shape (bs, seqlen, h)</span>
+<span class="n">x_with_batch</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+    <span class="n">batch_size</span><span class="p">,</span> <span class="n">seqlen</span><span class="p">,</span> <span class="n">embed_dim</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span>
+<span class="p">)</span>
+
+<span class="c1"># squash the batch dim, magi_attention do not support input data with batch dim.</span>
+<span class="n">x</span> <span class="o">=</span> <span class="n">squash_batch_dim</span><span class="p">(</span><span class="n">x_with_batch</span><span class="p">)</span>  <span class="c1"># ((b, seqlen), h)</span>
+
+<span class="c1"># get cu_seqlens_q,k after squashing.</span>
+<span class="n">cu_seqlens_q</span><span class="p">,</span> <span class="n">cu_seqlens_k</span> <span class="o">=</span> <span class="n">full_attention_to_varlen_attention</span><span class="p">(</span><span class="n">batch_size</span><span class="p">,</span> <span class="n">seqlen</span><span class="p">)</span>
+<span class="n">total_seqlen_q</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">batch_size</span> <span class="o">*</span> <span class="n">seqlen</span>
+<span class="n">total_seqlen_k</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">batch_size</span> <span class="o">*</span> <span class="n">seqlen</span>
+
+<span class="c1"># pad input seqlen for better performance</span>
+<span class="n">pad_size</span> <span class="o">=</span> <span class="n">compute_pad_size</span><span class="p">(</span><span class="n">total_seqlen_q</span><span class="p">,</span> <span class="n">cp_size</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">chunk_size</span><span class="p">)</span>
+
+<span class="c1"># ---   magi_attention dispatch   --- #</span>
+
+<span class="c1"># dispatch global input tensor to each rank and get the runtime_key</span>
+<span class="p">(</span>
+    <span class="n">local_x</span><span class="p">,</span>
+    <span class="n">magi_attn_runtime_key</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">=</span> <span class="n">magi_attn_varlen_dispatch</span><span class="p">(</span>  <span class="c1"># local_x with shape ((total_seq + pad_size) / cp_size), h)</span>
+    <span class="n">x</span><span class="p">,</span>
+    <span class="n">cu_seqlens_q</span><span class="p">,</span>
+    <span class="n">cu_seqlens_k</span><span class="p">,</span>
+    <span class="n">head_dim</span><span class="o">=</span><span class="n">head_dim</span><span class="p">,</span>
+    <span class="n">pad_size</span><span class="o">=</span><span class="n">pad_size</span><span class="p">,</span>
+    <span class="n">chunk_size</span><span class="o">=</span><span class="n">chunk_size</span><span class="p">,</span>
+    <span class="n">cp_group</span><span class="o">=</span><span class="n">cp_group</span><span class="p">,</span>
+    <span class="n">cp_mesh</span><span class="o">=</span><span class="n">cp_mesh</span><span class="p">,</span>
+    <span class="n">causal</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+    <span class="n">dist_attn_config</span><span class="o">=</span><span class="n">dist_attn_config</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># ---  magi_attention calculation and undispatch  --- #</span>
+<span class="c1"># do q k v projection, here&#39;s just an example</span>
+<span class="n">q_proj</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">embed_dim</span><span class="p">,</span> <span class="n">q_heads</span> <span class="o">*</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">k_proj</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">embed_dim</span><span class="p">,</span> <span class="n">kv_heads</span> <span class="o">*</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">v_proj</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">embed_dim</span><span class="p">,</span> <span class="n">kv_heads</span> <span class="o">*</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+
+<span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">q_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">q_heads</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">),</span>
+    <span class="n">k_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">kv_heads</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">),</span>
+    <span class="n">v_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">kv_heads</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">),</span>
+<span class="p">)</span>  <span class="c1"># q, k, v with shape ((bs * seqlen + pad_size) / cp_size, nh, hd)</span>
+
+<span class="c1"># Do local attention computation with runtime key</span>
+<span class="n">local_out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span>
+    <span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span><span class="p">,</span> <span class="n">magi_attn_runtime_key</span>
+<span class="p">)</span>  <span class="c1"># local out with shape ((bs * seqlen + pad_size) / cp_size, nh, hd)</span>
+
+<span class="c1"># Gather local attention results to global result with runtime key</span>
+<span class="n">total_out</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span>
+    <span class="n">local_out</span><span class="p">,</span> <span class="n">magi_attn_runtime_key</span>
+<span class="p">)</span>  <span class="c1"># total out with shape (bs * seqlen, nh, hd)</span>
+</pre></div>
+</div>
+</details>
+<details>
+<summary>Basic Usage For Flexible Api</summary>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">timedelta</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">AttnMaskType</span><span class="p">,</span>
+    <span class="n">AttnOverlapMode</span><span class="p">,</span>
+    <span class="n">AttnRanges</span><span class="p">,</span>
+    <span class="n">DispatchConfig</span><span class="p">,</span>
+    <span class="n">DistAttnConfig</span><span class="p">,</span>
+    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
+    <span class="n">OverlapConfig</span><span class="p">,</span>
+    <span class="n">UniformOverlapAlg</span><span class="p">,</span>
+    <span class="n">calc_attn</span><span class="p">,</span>
+    <span class="n">compute_pad_size</span><span class="p">,</span>
+    <span class="n">magi_attn_flex_dispatch</span><span class="p">,</span>
+    <span class="n">undispatch</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># init params</span>
+<span class="n">embed_dim</span> <span class="o">=</span> <span class="mi">1024</span>
+<span class="n">dtype</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span>
+<span class="n">cp_size</span> <span class="o">=</span> <span class="mi">2</span>
+<span class="n">head_dim</span> <span class="o">=</span> <span class="mi">128</span>
+<span class="n">total_seqlen_q</span> <span class="o">=</span> <span class="mi">960</span>
+<span class="n">total_seqlen_k</span> <span class="o">=</span> <span class="mi">960</span>
+<span class="n">chunk_size</span> <span class="o">=</span> <span class="mi">512</span>
+<span class="n">q_heads</span> <span class="o">=</span> <span class="mi">48</span>
+<span class="n">kv_heads</span> <span class="o">=</span> <span class="mi">8</span>
+
+<span class="n">dist_attn_config</span> <span class="o">=</span> <span class="n">DistAttnConfig</span><span class="p">(</span>
+    <span class="n">dispatch_config</span><span class="o">=</span><span class="n">DispatchConfig</span><span class="p">(</span><span class="n">alg</span><span class="o">=</span><span class="n">MinHeapDispatchAlg</span><span class="p">()),</span>
+    <span class="n">overlap_config</span><span class="o">=</span><span class="n">OverlapConfig</span><span class="p">(</span>
+        <span class="n">enable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="n">mode</span><span class="o">=</span><span class="n">AttnOverlapMode</span><span class="o">.</span><span class="n">STATIC</span><span class="p">,</span>
+        <span class="n">degree</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+        <span class="n">min_chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+        <span class="n">max_num_chunks</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>
+        <span class="n">alg</span><span class="o">=</span><span class="n">UniformOverlapAlg</span><span class="p">(</span>
+            <span class="n">random_costs</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+            <span class="n">random_seed</span><span class="o">=</span><span class="mi">42</span><span class="p">,</span>
+        <span class="p">),</span>
+    <span class="p">),</span>
+    <span class="n">high_bandwith_domain_size</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># init distributed environment if necessary</span>
+<span class="n">rank</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;RANK&quot;</span><span class="p">])</span>
+<span class="n">world_size</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s2">&quot;WORLD_SIZE&quot;</span><span class="p">])</span>
+<span class="k">assert</span> <span class="n">world_size</span> <span class="o">==</span> <span class="n">cp_size</span>
+<span class="n">dist</span><span class="o">.</span><span class="n">init_process_group</span><span class="p">(</span>
+    <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">,</span>
+    <span class="n">world_size</span><span class="o">=</span><span class="n">world_size</span><span class="p">,</span>
+    <span class="n">rank</span><span class="o">=</span><span class="n">rank</span><span class="p">,</span>
+    <span class="n">timeout</span><span class="o">=</span><span class="n">timedelta</span><span class="p">(</span><span class="n">minutes</span><span class="o">=</span><span class="mi">30</span><span class="p">),</span>
+<span class="p">)</span>
+<span class="n">local_rank</span> <span class="o">=</span> <span class="n">rank</span> <span class="o">%</span> <span class="mi">8</span>
+<span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">set_device</span><span class="p">(</span><span class="n">local_rank</span><span class="p">)</span>
+<span class="n">device</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">current_device</span><span class="p">()</span>
+
+<span class="c1"># init cp_group</span>
+<span class="n">cp_group</span> <span class="o">=</span> <span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">cp_size</span><span class="p">)),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">)</span>
+<span class="n">cp_mesh</span> <span class="o">=</span> <span class="kc">None</span>
+<span class="c1"># if you want to use hierarchical_comm</span>
+<span class="c1"># first export MAGI_ATTENTION_HIERARCHICAL_COMM = 1 and CUDA_DEVICE_MAX_CONNECTIONS = 8</span>
+<span class="c1"># second set cp_group = None and init cp_mesh with init_hierarchical_mesh function</span>
+
+<span class="c1"># init x input</span>
+<span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+    <span class="n">total_seqlen_q</span><span class="p">,</span> <span class="n">embed_dim</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span>
+<span class="p">)</span>
+
+<span class="c1"># init mask shape</span>
+<span class="n">q_ranges</span> <span class="o">=</span> <span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">(</span>
+    <span class="p">[</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">128</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">128</span><span class="p">,</span> <span class="mi">256</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">256</span><span class="p">,</span> <span class="mi">384</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">384</span><span class="p">,</span> <span class="mi">512</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">512</span><span class="p">,</span> <span class="mi">640</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">640</span><span class="p">,</span> <span class="mi">768</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">768</span><span class="p">,</span> <span class="mi">960</span><span class="p">],</span>
+    <span class="p">]</span>
+<span class="p">)</span>
+
+<span class="n">k_ranges</span> <span class="o">=</span> <span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">(</span>
+    <span class="p">[</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">128</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">256</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">384</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">512</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">512</span><span class="p">,</span> <span class="mi">640</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">512</span><span class="p">,</span> <span class="mi">768</span><span class="p">],</span>
+        <span class="p">[</span><span class="mi">768</span><span class="p">,</span> <span class="mi">960</span><span class="p">],</span>
+    <span class="p">]</span>
+<span class="p">)</span>
+
+<span class="c1"># you can also init attn_mask_type with list[str]</span>
+<span class="c1"># such as  attn_mask_type = [&quot;full&quot;] * 7</span>
+<span class="n">attn_mask_type</span> <span class="o">=</span> <span class="p">[</span><span class="n">AttnMaskType</span><span class="o">.</span><span class="n">FULL</span><span class="p">]</span> <span class="o">*</span> <span class="mi">7</span>
+
+<span class="c1"># calc pad_size</span>
+<span class="n">pad_size</span> <span class="o">=</span> <span class="n">compute_pad_size</span><span class="p">(</span><span class="n">total_seqlen_q</span><span class="p">,</span> <span class="n">cp_size</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">chunk_size</span><span class="p">)</span>
+
+<span class="p">(</span>
+    <span class="n">local_x</span><span class="p">,</span>
+    <span class="n">magi_attn_runtime_key</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">=</span> <span class="n">magi_attn_flex_dispatch</span><span class="p">(</span>  <span class="c1"># local_x with shape (total_seqlen_q + pad_size) / cp_size, h)</span>
+    <span class="n">x</span><span class="p">,</span>
+    <span class="n">q_ranges</span><span class="o">=</span><span class="n">q_ranges</span><span class="p">,</span>
+    <span class="n">k_ranges</span><span class="o">=</span><span class="n">k_ranges</span><span class="p">,</span>
+    <span class="n">attn_mask_type</span><span class="o">=</span><span class="n">attn_mask_type</span><span class="p">,</span>
+    <span class="n">total_seqlen_q</span><span class="o">=</span><span class="n">total_seqlen_q</span><span class="p">,</span>
+    <span class="n">total_seqlen_k</span><span class="o">=</span><span class="n">total_seqlen_k</span><span class="p">,</span>
+    <span class="n">head_dim</span><span class="o">=</span><span class="n">head_dim</span><span class="p">,</span>
+    <span class="n">pad_size</span><span class="o">=</span><span class="n">pad_size</span><span class="p">,</span>
+    <span class="n">chunk_size</span><span class="o">=</span><span class="n">chunk_size</span><span class="p">,</span>
+    <span class="n">cp_group</span><span class="o">=</span><span class="n">cp_group</span><span class="p">,</span>
+    <span class="n">cp_mesh</span><span class="o">=</span><span class="n">cp_mesh</span><span class="p">,</span>
+    <span class="n">dist_attn_config</span><span class="o">=</span><span class="n">dist_attn_config</span><span class="p">,</span>
+    <span class="n">is_same_source</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">is_q_permutable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">is_k_permutable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># ---  magi_attention calculation and undispatch  --- #</span>
+<span class="c1"># do q k v projection, here&#39;s just an example</span>
+<span class="n">q_proj</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">embed_dim</span><span class="p">,</span> <span class="n">q_heads</span> <span class="o">*</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">k_proj</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">embed_dim</span><span class="p">,</span> <span class="n">kv_heads</span> <span class="o">*</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">v_proj</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">embed_dim</span><span class="p">,</span> <span class="n">kv_heads</span> <span class="o">*</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+
+<span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">q_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">q_heads</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">),</span>
+    <span class="n">k_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">kv_heads</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">),</span>
+    <span class="n">v_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">kv_heads</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">),</span>
+<span class="p">)</span>  <span class="c1"># q, k, v with shape (s, nh, hd)</span>
+
+<span class="c1"># Do local attention computation with runtime key</span>
+<span class="n">local_out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span>
+    <span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span><span class="p">,</span> <span class="n">magi_attn_runtime_key</span>
+<span class="p">)</span>  <span class="c1"># local out with shape (s, nh, hd)</span>
+
+<span class="c1"># Gather local attention results and unpad to global result with runtime key</span>
+<span class="n">total_out</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span>
+    <span class="n">local_out</span><span class="p">,</span> <span class="n">magi_attn_runtime_key</span>
+<span class="p">)</span>  <span class="c1"># total out with shape (totoal_seqlen_q, nh, hd)</span>
+</pre></div>
+</div>
+</details>
+</section>
+<section id="compute-pad-size">
+<h2><a class="toc-backref" href="#id3" role="doc-backlink">Compute Pad Size</a><a class="headerlink" href="#compute-pad-size" title="Link to this heading">#</a></h2>
+<p>During the use of MagiAttention, we divide the <code class="docutils literal notranslate"><span class="pre">total_seqlen</span></code> into multiple chunks of size <code class="docutils literal notranslate"><span class="pre">chunk_size</span></code> and evenly distribute them across multiple GPUs. To ensure that <code class="docutils literal notranslate"><span class="pre">total_seqlen</span></code> is divisible by <code class="docutils literal notranslate"><span class="pre">chunk_size</span></code> and that each GPU receives the same number of chunks, we need to pad the original input. You can call <code class="docutils literal notranslate"><span class="pre">compute_pad_size</span></code> to calculate the required padding length, and use this value as a parameter in subsequent functions.</p>
+</section>
+<section id="dispatch-function">
+<h2><a class="toc-backref" href="#id4" role="doc-backlink">Dispatch Function</a><a class="headerlink" href="#dispatch-function" title="Link to this heading">#</a></h2>
+<section id="dispatch-for-varlen-masks">
+<h3><a class="toc-backref" href="#id5" role="doc-backlink">Dispatch for varlen masks</a><a class="headerlink" href="#dispatch-for-varlen-masks" title="Link to this heading">#</a></h3>
+<p>If you’re using a mask defined by <code class="docutils literal notranslate"><span class="pre">cu_seqlens</span></code>, such as a varlen full or varlen causal mask, we’ve designed a similar interface inspired by FlashAttention’s API, making it easy for you to get started quickly. In the function named <code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_dispatch</span></code>, you can obtain the dispatched <code class="docutils literal notranslate"><span class="pre">x</span></code> and <code class="docutils literal notranslate"><span class="pre">key</span></code>.</p>
+<p>The logic of the <code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_dispatch</span></code> function mainly consists of two parts: it first calls <code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_key</span></code> to compute a key value, and then uses this key to dispatch the input x. The description of <code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_key</span></code> is as follows.</p>
+</section>
+<section id="dispatch-for-multi-masks">
+<h3><a class="toc-backref" href="#id6" role="doc-backlink">Dispatch for multi masks</a><a class="headerlink" href="#dispatch-for-multi-masks" title="Link to this heading">#</a></h3>
+<p>If the masks you’re using are not limited to varlen full or varlen causal, but also include sliding window masks or other more diverse types, we recommend using the following API. By calling <code class="docutils literal notranslate"><span class="pre">magi_attn_flex_dispatch</span></code>, you can obtain the dispatched x and key.</p>
+<p>Similar to the logic of <code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_dispatch</span></code>, <code class="docutils literal notranslate"><span class="pre">magi_attn_flex_dispatch</span></code> first calls <code class="docutils literal notranslate"><span class="pre">magi_attn_flex_key</span></code> to obtain a key, and then uses this key to dispatch x. The description of <code class="docutils literal notranslate"><span class="pre">magi_attn_flex_key</span></code> is as follows.</p>
+</section>
+</section>
+<section id="attention-calc">
+<h2><a class="toc-backref" href="#id7" role="doc-backlink">Attention Calc</a><a class="headerlink" href="#attention-calc" title="Link to this heading">#</a></h2>
+<p>After dispatch and projection, you should obtain the query, key, and value needed for computation. Using the key obtained from the dispatch function mentioned above, you can perform the computation by calling <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code>, which returns the results out and lse. The description of calc_attn is as follows.</p>
+</section>
+<section id="undispatch">
+<h2><a class="toc-backref" href="#id8" role="doc-backlink">Undispatch</a><a class="headerlink" href="#undispatch" title="Link to this heading">#</a></h2>
+<p>After the attention computation, communication is needed to gather the results back to all GPUs. We provide an API to perform the undispatch process.</p>
+</section>
+<section id="utility-functions-needed">
+<h2><a class="toc-backref" href="#id9" role="doc-backlink">Utility functions needed</a><a class="headerlink" href="#utility-functions-needed" title="Link to this heading">#</a></h2>
+<p>To initialize <code class="docutils literal notranslate"><span class="pre">attn_mask_type</span></code>, you can use either the <code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code> enum type or its corresponding string representation.</p>
+<p>In the dispatch function, a parameter of type <code class="docutils literal notranslate"><span class="pre">DistAttnConfig</span></code> is required. You can configure it according to the following instructions.</p>
+<p>In the dispatch function, you can enable the hierarchical mode by setting <code class="docutils literal notranslate"><span class="pre">cp_group</span></code> to <code class="docutils literal notranslate"><span class="pre">None</span></code> and providing a <code class="docutils literal notranslate"><span class="pre">DeviceMesh</span></code> type parameter instead. We offer the <code class="docutils literal notranslate"><span class="pre">init_hierarchical_mesh</span></code> function to help you easily initialize the <code class="docutils literal notranslate"><span class="pre">cp_mesh</span></code>.</p>
+</section>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#flexible-flash-attention">Flexible Flash Attention</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#how-to-use-magiattention">How to use MagiAttention</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#compute-pad-size">Compute Pad Size</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#dispatch-function">Dispatch Function</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dispatch-for-varlen-masks">Dispatch for varlen masks</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dispatch-for-multi-masks">Dispatch for multi masks</a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#attention-calc">Attention Calc</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#undispatch">Undispatch</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#utility-functions-needed">Utility functions needed</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
+<script defer src="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

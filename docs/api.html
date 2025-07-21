@@ -30,7 +30,8 @@
   <link href="_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
 <link href="_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
 
-    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
   
   <!-- So that users can add custom icons -->
   <script src="_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
@@ -41,11 +42,13 @@
     <script src="_static/documentation_options.js?v=e562d664"></script>
     <script src="_static/doctools.js?v=9bcbadda"></script>
     <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=fd10adb8"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'api';</script>
     <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/api.html" />
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="next" title="Simple Test For AttnRanges" href="ranges.html" />
+    <link rel="next" title="Installation" href="install.html" />
     <link rel="prev" title="MagiAttention documentation" href="index.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
@@ -265,9 +268,10 @@
 <nav class="bd-docs-nav bd-links"
      aria-label="Section Navigation">
   <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
-  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">Test For Doc</span></p>
+  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">How to use MagiAttention</span></p>
 <ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="ranges.html">Simple Test For AttnRanges</a></li>
+<li class="toctree-l1"><a class="reference internal" href="install.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="magi_api.html">MagiAttention Api</a></li>
 </ul>
 </div>
 </nav></div>
@@ -328,6 +332,25 @@
   <section id="api-reference">
 <h1>API Reference<a class="headerlink" href="#api-reference" title="Link to this heading">#</a></h1>
 <div class="toctree-wrapper compound">
+<p aria-level="2" class="caption" role="heading"><span class="caption-text">How to use MagiAttention</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="install.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="install.html#step1-activate-an-ngc-pytorch-docker-container">Step1: Activate an NGC pytorch docker container</a></li>
+<li class="toctree-l2"><a class="reference internal" href="install.html#step2-install-required-packages">Step2: Install required packages</a></li>
+<li class="toctree-l2"><a class="reference internal" href="install.html#step3-install-magiattention-from-source">Step3: Install MagiAttention from source</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="magi_api.html">MagiAttention Api</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="magi_api.html#flexible-flash-attention">Flexible Flash Attention</a></li>
+<li class="toctree-l2"><a class="reference internal" href="magi_api.html#how-to-use-magiattention">How to use MagiAttention</a></li>
+<li class="toctree-l2"><a class="reference internal" href="magi_api.html#compute-pad-size">Compute Pad Size</a></li>
+<li class="toctree-l2"><a class="reference internal" href="magi_api.html#dispatch-function">Dispatch Function</a></li>
+<li class="toctree-l2"><a class="reference internal" href="magi_api.html#attention-calc">Attention Calc</a></li>
+<li class="toctree-l2"><a class="reference internal" href="magi_api.html#undispatch">Undispatch</a></li>
+<li class="toctree-l2"><a class="reference internal" href="magi_api.html#utility-functions-needed">Utility functions needed</a></li>
+</ul>
+</li>
+</ul>
 </div>
 </section>
 
