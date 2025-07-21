@@ -18,9 +18,10 @@ jobs:
           apt-get install -y rsync
           pip install sphinx
           pip install pydata-sphinx-theme myst_parser sphinx-copybutton
+          git submodule update --init --recursive
+          pip install -e . -v --no-build-isolation
       - name: Build docs
         run: |
-          pip install -e . -v --no-build-isolation
           cd docs
           make clean
           sphinx-build -b html source/ html/
