@@ -188,12 +188,10 @@ struct CollectiveEpilogueBwd {
         // Calculate lock indices
         int block_idx1 = offset / k_block_size;
         int index_1 = block_idx1 * num_heads + bidh;
-
-        // Check if we need to release a second lock
         int block_idx2 = (offset + k_block_size - 1) / k_block_size;
+        int index_2 = block_idx2 * num_heads + bidh;
 
         // Release the second lock
-        int index_2 = block_idx2 * num_heads + bidh;
         int add_cnt = r_arrive_twice ? 2 : 1;
         int tmp = atomicAdd(&range_lock[index_2 * 2 + 1], add_cnt);
         if (tmp + add_cnt == 2) {

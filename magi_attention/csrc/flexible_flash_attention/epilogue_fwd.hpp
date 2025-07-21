@@ -246,9 +246,7 @@ struct CollectiveEpilogueFwd {
     }
 
     CUTLASS_DEVICE
-    void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int conflict_bidb1_raw, int conflict_bidb2_raw) {
-        int conflict_bidb1 = conflict_bidb1_raw >> 1;
-        int conflict_bidb2 = conflict_bidb2_raw >> 1;
+    void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int conflict_bidb1, int conflict_bidb2) {
         if (conflict_bidb1 == 0 && conflict_bidb2 == 0)
             return ;
 
@@ -278,12 +276,10 @@ struct CollectiveEpilogueFwd {
         // Calculate lock indices
         int block_idx1 = offset / q_block_size;
         int index_1 = block_idx1 * num_heads + bidh;
-
-        // Check if we need to release a second lock
         int block_idx2 = (offset + q_block_size - 1) / q_block_size;
+        int index_2 = block_idx2 * num_heads + bidh;
 
         // Release the second lock
-        int index_2 = block_idx2 * num_heads + bidh;
         int add_cnt = r_arrive_twice ? 2 : 1;
         int tmp = atomicAdd(&range_lock[index_2 * 2 + 1], add_cnt);
         if (tmp + add_cnt == 2) {
@@ -376,7 +372,7 @@ struct CollectiveEpilogueFwd {
             // Acquire range lock to prevent multiple threads from writing to gmem simultaneously
             if (thread_idx == 0) {
                 if constexpr (Deterministic) {
-                    deterministic_sync(params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, conflict_bidb1, conflict_bidb2);
+                    deterministic_sync(params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, conflict_bidb1 >> 1, conflict_bidb2 >> 1);
                 }
                 acquire_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
             }

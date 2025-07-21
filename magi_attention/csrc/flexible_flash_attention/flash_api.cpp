@@ -199,7 +199,6 @@ void set_params_dgrad(Flash_bwd_params &params,
                       bool deterministic=false,
                       void *determin_range_locks_d=nullptr,
                       void *determin_conflict_state_d=nullptr,
-                      void *dq_semaphore_d=nullptr,
                       void *dq_determin_conflict_state_d=nullptr,
                       void *dq_determin_range_locks_d=nullptr,
                       int const sm_margin=0) {
@@ -250,7 +249,6 @@ void set_params_dgrad(Flash_bwd_params &params,
     
     // Set the deterministic flag
     params.deterministic = deterministic;
-    params.dq_semaphore = static_cast<int *>(dq_semaphore_d);
     params.dq_determin_conflict_state = static_cast<int *>(dq_determin_conflict_state_d);
     params.dq_determin_range_locks = static_cast<int *>(dq_determin_range_locks_d);
 }
@@ -884,14 +882,11 @@ std::vector<at::Tensor> mha_bwd(
     int const num_sm_max = 132; // max sm number for H100
     at::Tensor determin_conflict_state = torch::empty({num_sm_max, (total_k + kBlockN - 1) / kBlockN + 1}, opts.dtype(torch::kInt32));
     at::Tensor dq_determin_conflict_state = torch::empty({num_sm_max, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
-    // Initialize dq_semaphore
-    at::Tensor dq_semaphore = torch::empty({batch_size, num_heads_qo}, opts.dtype(torch::kInt32));
 
     // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
     if (deterministic) {
         determin_range_locks.zero_();
         determin_conflict_state.zero_();
-        dq_semaphore.zero_();
         dq_determin_range_locks.zero_();
         dq_determin_conflict_state.zero_();
     }
@@ -921,7 +916,6 @@ std::vector<at::Tensor> mha_bwd(
                      deterministic,
                      deterministic ? determin_range_locks.data_ptr() : nullptr,
                      deterministic ? determin_conflict_state.data_ptr() : nullptr,
-                     deterministic ? dq_semaphore.data_ptr() : nullptr,
                      deterministic ? dq_determin_conflict_state.data_ptr() : nullptr,
                      deterministic ? dq_determin_range_locks.data_ptr() : nullptr,
                      sm_margin);

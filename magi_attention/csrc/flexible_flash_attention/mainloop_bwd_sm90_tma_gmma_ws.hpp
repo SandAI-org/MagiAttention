@@ -326,7 +326,6 @@ struct CollectiveMainloopBwdSm90 {
         float const softcap_val;
         int const* const q_ranges;
         int const* const k_ranges;
-        int* const dq_semaphore;
         int* dq_determin_conflict_state;
         int* dq_determin_range_locks;
         int const* const attn_type_map = nullptr;
@@ -353,9 +352,9 @@ struct CollectiveMainloopBwdSm90 {
         float const softcap_val;
         int const* const q_ranges;
         int const* const k_ranges;
-        int* const dq_semaphore;
         int* dq_determin_conflict_state;
         int* dq_determin_range_locks;
+        int const n_block_max_num;
         int const* const attn_type_map = nullptr;
     };
 
@@ -397,7 +396,6 @@ struct CollectiveMainloopBwdSm90 {
             _1{}); // no mcast for dQ
 
         if constexpr (Deterministic) { 
-            assert(args.dq_semaphore != nullptr); 
             assert(args.dq_determin_conflict_state != nullptr); 
             assert(args.dq_determin_range_locks != nullptr); 
         }
@@ -420,7 +418,8 @@ struct CollectiveMainloopBwdSm90 {
                 !Has_softcap ? float(args.softmax_scale * M_LOG2E) : float(args.softcap_val * M_LOG2E),
                 !Has_softcap ? 0.f : args.softmax_scale / args.softcap_val,
                 args.q_ranges, args.k_ranges,
-                args.dq_semaphore, args.dq_determin_conflict_state, args.dq_determin_range_locks,
+                args.dq_determin_conflict_state, args.dq_determin_range_locks,
+                cute::ceil_div(get<0>(args.shape_K), kBlockN),
                 args.attn_type_map};
     }
 
@@ -635,17 +634,15 @@ struct CollectiveMainloopBwdSm90 {
         // Calculate lock indices
         int block_idx1 = offset / q_block_size;
         int index_1 = block_idx1 * num_heads + bidh;
-
-        // Check if we need to release a second lock
         int block_idx2 = (offset + q_block_size - 1) / q_block_size;
+        int index_2 = block_idx2 * num_heads + bidh;
 
         // Release the second lock
-        int index_2 = block_idx2 * num_heads + bidh;
         int add_cnt = r_arrive_twice ? 2 : 1;
         int tmp = atomicAdd(&range_lock[index_2 * 2 + 1], add_cnt);
         if (tmp + add_cnt == 2) {
             atomicExch(&range_lock[index_2 * 2 + 1], 0);
-            atomicExch(&range_lock[index_2 * 2], bidb + 1);
+            atomicExch(&range_lock[index_2 * 2], bidb);
         }
 
         // Release the first lock
@@ -653,7 +650,7 @@ struct CollectiveMainloopBwdSm90 {
         tmp = atomicAdd(&range_lock[index_1 * 2 + 1], add_cnt);
         if (tmp + add_cnt == 2) {
             atomicExch(&range_lock[index_1 * 2 + 1], 0);
-            atomicExch(&range_lock[index_1 * 2], bidb + 1);
+            atomicExch(&range_lock[index_1 * 2], bidb);
         }
     }
 
@@ -707,45 +704,41 @@ struct CollectiveMainloopBwdSm90 {
         int const m_block_num = cute::ceil_div(seqlen_info.seqlen_q, kBlockM);
         bool const lane_predicate = cute::elect_one_sync();
         int const num_heads = get<2>(params.shape_Q);
-
+        // batch i use [i * n_block_max_num + 1 , i * n_block_max_num + n_block_size - 1] for add rank of same qhead
+        // except for the last n_block_id, the last is always (i + 1) * n_block_max_num
         auto m_block_sync = [&] (int m_block_id) {
             uint32_t smid = blockIdx.x;
             uint32_t sm_stride = gridDim.x;
             int conflict_dq_index1 = seqlen_info.offset_q / kBlockM + m_block_id;
             int conflict_dq_index2 = (seqlen_info.offset_q + kBlockM - 1) / kBlockM + m_block_id;
-            int conflict_bidb1 = params.dq_determin_conflict_state[conflict_dq_index1 * sm_stride + smid];
-            int conflict_bidb2 = params.dq_determin_conflict_state[conflict_dq_index2 * sm_stride + smid];
-            deterministic_sync(params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, conflict_bidb1, conflict_bidb2);
+            int sync_num1 = n_block == 0 ? params.dq_determin_conflict_state[conflict_dq_index1 * sm_stride + smid] * params.n_block_max_num
+                                    : bidb * params.n_block_max_num + n_block;
+            int sync_num2 = n_block == 0 ? params.dq_determin_conflict_state[conflict_dq_index2 * sm_stride + smid] * params.n_block_max_num
+                                    : bidb * params.n_block_max_num + n_block;
+            deterministic_sync(params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
         };
 
         auto m_block_arrive = [&] (int m_block_id) {
             bool l_arrive_twice = (m_block_id == 0) && (seqlen_info.offset_q % kBlockM != 0);
             bool r_arrive_twice = (m_block_id == m_block_num - 1) && (seqlen_info.offset_q % kBlockM != 0);
-            deterministic_arrive(params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, bidb, l_arrive_twice, r_arrive_twice);
+            int arrive_num = n_block == last_n_block ? (bidb + 1) * params.n_block_max_num
+                                    : bidb * params.n_block_max_num + n_block + 1;
+            deterministic_arrive(params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
         };
 
-        using Barrier = cutlass::GenericBarrier<cutlass::detail::SyncwarpSync>;
-        // lock_ptr to control deterministic add dq order in same bidb and bidh
-        int *lock_ptr = !Deterministic ? nullptr : params.dq_semaphore + bidb * num_heads + bidh;
-        using Barrier = cutlass::GenericBarrier<cutlass::detail::SyncwarpSync>;
-        
         // It's possible to have m_block_max <= m_block_min. Exit early
         if (m_block_max <= m_block_min) { 
             if constexpr (Deterministic) {
                 // make work_tile add dq in order within same batch
-                Barrier::wait_eq(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, 0, n_block);
+                // Barrier::wait_eq(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, 0, n_block);
                 // Wait for the previous batch with overlapping q ranges
-                if (lane_predicate && (n_block == 0 || n_block == last_n_block)) {
+                if (lane_predicate) {
                     for (int m_block = 0; m_block < m_block_num; ++m_block) {
-                        if (n_block == 0) {
-                            m_block_sync(m_block);
-                        }
-                        if (n_block == last_n_block) {
-                            m_block_arrive(m_block);
-                        }
+                        m_block_sync(m_block);
+                        m_block_arrive(m_block);
                     }
                 }
-                Barrier::arrive_inc(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, 0);
+                // Barrier::arrive_inc(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, 0);
             }
             return;
         }
@@ -760,17 +753,10 @@ struct CollectiveMainloopBwdSm90 {
 
         int m_block = m_block_min;
         if constexpr(Deterministic) {
-            // make work_tile add dq in order within same batch
-            Barrier::wait_eq(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, 0, n_block);
-            // Wait for the previous batch with overlapping q ranges
-            if (lane_predicate && (n_block == 0 || n_block == last_n_block)) {
+            if (lane_predicate) {
                 for (int m_block = 0; m_block < m_block_min; ++m_block) {
-                    if (n_block == 0) {
-                        m_block_sync(m_block);
-                    }
-                    if (n_block == last_n_block) {
-                        m_block_arrive(m_block);
-                    }
+                    m_block_sync(m_block);
+                    m_block_arrive(m_block);
                 }
             }
         }
@@ -783,19 +769,13 @@ struct CollectiveMainloopBwdSm90 {
 
             if (lane_predicate) {
                 if constexpr (Deterministic) {
-                    if (n_block == 0) {
-                        // Wait for the previous batch with overlapping q ranges
-                        m_block_sync(m_block);
-                    }
+                    m_block_sync(m_block);
                 }
                 cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
                 tma_store_arrive();
                 tma_store_wait<0>();
                 if constexpr (Deterministic) {
-                    if (n_block == last_n_block) {
-                        // Wait for the previous batch with overlapping q ranges
-                        m_block_arrive(m_block);
-                    }
+                    m_block_arrive(m_block);
                 }
             }
             // Note, the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
@@ -804,19 +784,12 @@ struct CollectiveMainloopBwdSm90 {
             });
         }
         if constexpr (Deterministic) {
-            // Wait for the previous batch with overlapping q ranges
-            if (lane_predicate && (n_block == 0 || n_block == last_n_block)) {
+            if (lane_predicate) {
                 for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
-                    if (n_block == 0) {
-                        m_block_sync(m_block);
-                    }
-                    if (n_block == last_n_block) {
-                        m_block_arrive(m_block);
-                    }
+                    m_block_sync(m_block);
+                    m_block_arrive(m_block);
                 }
             }
-            // make work_tile add dq in order within same batch
-            Barrier::arrive_inc(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, 0);
         }
     }
 

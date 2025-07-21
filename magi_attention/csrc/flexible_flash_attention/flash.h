@@ -217,7 +217,6 @@ struct Flash_bwd_params : public Flash_fwd_params {
     void *__restrict__ dsoftmax_sum;
     void *__restrict__ softmax_lse_log2_ptr;
 
-    int *__restrict__ dq_semaphore;
     int *__restrict__ dq_determin_conflict_state;
     int *__restrict__ dq_determin_range_locks;
 
