@@ -1,4 +1,4 @@
-# MagiAttention Api
+# MagiAttention API
 
 ```{eval-rst}
 .. py:module:: magi_attention.api
@@ -20,7 +20,7 @@ To support computing irregular-shaped masks, we implemented a `flexible_flash_at
 .. autofunction:: flex_flash_attn_func
 ```
 
-## How to use MagiAttention
+## How to Use MagiAttention
 
 The typical process for calling MagiAttention is: initialize the required parameters → use `compute_pad_size` to get the pad size → call the dispatch function → pass x through projection to obtain qkv → perform attention calculation → undispatch. An example call is shown below.
 
@@ -326,7 +326,7 @@ During the use of MagiAttention, we divide the `total_seqlen` into multiple chun
 .. autofunction:: compute_pad_size
 ```
 
-## Dispatch Function
+## Dispatch
 
 ### Dispatch for varlen masks
 
@@ -346,7 +346,7 @@ The logic of the `magi_attn_varlen_dispatch` function mainly consists of two par
 .. autofunction:: magi_attn_varlen_key
 ```
 
-### Dispatch for multi masks
+### Dispatch for flexible masks
 
 If the masks you're using are not limited to varlen full or varlen causal, but also include sliding window masks or other more diverse types, we recommend using the following API. By calling `magi_attn_flex_dispatch`, you can obtain the dispatched x and key.
 
@@ -364,7 +364,7 @@ Similar to the logic of `magi_attn_varlen_dispatch`, `magi_attn_flex_dispatch` f
 .. autofunction:: magi_attn_flex_key
 ```
 
-## Attention Calc
+## Calculate Attention
 
 After dispatch and projection, you should obtain the query, key, and value needed for computation. Using the key obtained from the dispatch function mentioned above, you can perform the computation by calling `calc_attn`, which returns the results out and lse. The description of calc_attn is as follows.
 
@@ -388,7 +388,7 @@ After the attention computation, communication is needed to gather the results b
 .. autofunction:: undispatch
 ```
 
-## Utility functions needed
+## Utility Functions
 
 To initialize `attn_mask_type`, you can use either the `AttnMaskType` enum type or its corresponding string representation.
 
