@@ -1,5 +1,5 @@
-/* 控制导航栏左上角 logo 大小 */
+/* control the size of the logo in the top left of the navigation bar */
 .navbar-brand img {
-    height: 32px !important;  /* 你可以调整为想要的高度 */
-    width: auto !important;   /* 保持宽高比 */
+    height: 32px !important;
+    width: auto !important;
 }
