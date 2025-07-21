@@ -19,8 +19,6 @@ jobs:
         https_proxy: ${{ secrets.HTTP_PROXY }}
         http_proxy_cn: ${{ secrets.HTTP_PROXY_CN }}
         https_proxy_cn: ${{ secrets.HTTP_PROXY_CN }}
-        WANDB_ENTITY: ${{ secrets.WANDB_ENTITY }}
-        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
         GITHUB_SHA: ${{ github.sha }}
     steps:
       - name: echo proxy
