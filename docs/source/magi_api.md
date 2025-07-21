@@ -8,6 +8,18 @@
 :local: true
 ```
 
+## Flexible Flash Attention
+
+To support computing irregular-shaped masks, we implemented a `flexible_flash_attention` kernel, which can be invoked through the following interface.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.functional.flex_flash_attn
+```
+
+```{eval-rst}
+.. autofunction:: flex_flash_attn_func
+```
+
 ## How to use MagiAttention
 
 The typical process for calling MagiAttention is: initialize the required parameters → use `compute_pad_size` to get the pad size → call the dispatch function → pass x through projection to obtain qkv → perform attention calculation → undispatch. An example call is shown below.

@@ -21,7 +21,7 @@ To address these challenges, we propose MagiAttention, which aims to support a w
 
 ```{toctree}
 :glob:
-:maxdepth: 3
+:maxdepth: 2
 :caption: Contents
 
 api
