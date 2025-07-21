@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from logging import getLogger
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -23,7 +23,12 @@ import magi_attention
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.meta.collection import AttnCalcMeta, CommMeta
-from magi_attention.utils import max_fp_dtype, nvtx, to_higher_fp_dtype
+from magi_attention.utils import (
+    is_same_process_group,
+    max_fp_dtype,
+    nvtx,
+    to_higher_fp_dtype,
+)
 
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
@@ -434,6 +439,16 @@ class DistFlashAttnRuntime:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """chunk the kv tensor into k, v tensor views"""
         return torch.chunk(kv, 2, dim=0)
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, DistFlashAttnRuntime):
+            return False
+        return (
+            is_same_process_group(self.cp_group_kv, other.cp_group_kv)
+            and is_same_process_group(self.cp_group_dkv, other.cp_group_dkv)
+            and (self.comm_meta, self.calc_meta, self.deterministic)
+            == (other.comm_meta, other.calc_meta, other.deterministic)
+        )
 
 
 class DistFlashAttnFunc(torch.autograd.Function):

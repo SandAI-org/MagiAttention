@@ -15,6 +15,7 @@
 from bisect import bisect_left
 from collections import defaultdict
 from itertools import chain
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -39,7 +40,12 @@ from magi_attention.meta.container.transfer_table import (
     TransferInfo,
     TransferTable,
 )
-from magi_attention.utils import nvtx, transpose_matrix
+from magi_attention.utils import (
+    is_same_device_mesh,
+    is_same_process_group,
+    nvtx,
+    transpose_matrix,
+)
 from magi_attention.utils._utils import argsort
 
 from ._slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
@@ -1628,6 +1634,30 @@ class DistAttnSolver:
         )
 
         return attn_calc_meta
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, DistAttnSolver):
+            return False
+
+        for key in self.__dict__:
+            self_val = getattr(self, key)
+            other_val = getattr(other, key, object())
+
+            if isinstance(self_val, dist.ProcessGroup) or isinstance(
+                other_val, dist.ProcessGroup
+            ):
+                if not is_same_process_group(self_val, other_val):
+                    return False
+
+            elif isinstance(self_val, DeviceMesh) or isinstance(other_val, DeviceMesh):
+                if not is_same_device_mesh(self_val, other_val):
+                    return False
+
+            else:
+                if self_val != other_val:
+                    return False
+
+        return True
 
     def __repr__(self, title_len: int = 50) -> str:  # pragma: no cover
         repr_contents = []

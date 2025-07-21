@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -30,7 +31,7 @@ from magi_attention.meta import (
 from magi_attention.meta.collection import DispatchMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
-from magi_attention.utils import is_list_value_all, wrap_to_list
+from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_to_list
 
 
 # @dataclass(frozen=True)
@@ -256,6 +257,38 @@ class DistAttnRuntimeMgr:
             return self._k_position_ids
         else:
             raise ValueError(f"Invalid attn role: {attn_role}")
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, DistAttnRuntimeMgr):
+            return False
+
+        return (
+            self.q_dispatch_meta,
+            self.k_dispatch_meta,
+            self.chunk_size,
+            self.dist_attn_config,
+            self.attn_solver,
+            self.dist_attn_runtime,
+            self.ref_q_ranges,
+            self.ref_k_ranges,
+            self.is_same_source,
+            self.is_q_permutable,
+            self.is_k_permutable,
+        ) == (
+            other.q_dispatch_meta,
+            other.k_dispatch_meta,
+            other.chunk_size,
+            other.dist_attn_config,
+            other.attn_solver,
+            other.dist_attn_runtime,
+            other.ref_q_ranges,
+            other.ref_k_ranges,
+            other.is_same_source,
+            other.is_q_permutable,
+            other.is_k_permutable,
+        ) and is_same_process_group(
+            self.cp_group, other.cp_group
+        )
 
 
 def init_dist_attn_runtime_mgr(
