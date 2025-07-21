@@ -306,12 +306,15 @@ class TestFlexFlashAttn(TestCase):
         deterministic: bool = False,
     ):
         # TODO: auto_range_merge == True that are not supported when attn_type_map different yet, thus skip here
-        if auto_range_merge and deterministic:
-            return
-        if auto_range_merge and random_attn_type_map:
-            return
-        if auto_range_merge and attn_mask_config["name"] == "deterministic_sample":
-            return
+        # TODO: deterministic == Ture that are not supported when auto_range_merge == True yet, thus skip here
+        if auto_range_merge:
+            have_mask_type_not_zero = random_attn_type_map or deterministic
+            for i in attn_mask_config["attn_type_map"]:
+                if i != 0:
+                    have_mask_type_not_zero = True
+                    break
+            if have_mask_type_not_zero:
+                return
 
         # extract config
         seqlen = attn_mask_config["seqlen"]
@@ -390,6 +393,10 @@ class TestFlexFlashAttn(TestCase):
         )
         o.backward(do)
 
+        # -----   init error message list   ---- #
+
+        err_msg_list: list[str] = []
+
         if deterministic:
             q2 = q.clone().detach().requires_grad_(True)
             k2 = k.clone().detach().requires_grad_(True)
@@ -410,28 +417,32 @@ class TestFlexFlashAttn(TestCase):
             o2.backward(do2)
 
             try:
-                assert torch.equal(o, o2)
+                assert torch.equal(
+                    o, o2
+                ), f"For {test_case=}: forward output not deterministic"
             except Exception as e:
-                print("forward output not deterministic")
-                raise AssertionError("\n\n".join([str(e)]))
+                err_msg_list.append(str(e))
 
             try:
-                assert torch.equal(q.grad, q2.grad)
+                assert torch.equal(
+                    q.grad, q2.grad
+                ), f"For {test_case=}: backward dq not deterministic"
             except Exception as e:
-                print("backward dq not deterministic")
-                raise AssertionError("\n\n".join([str(e)]))
+                err_msg_list.append(str(e))
 
             try:
-                assert torch.equal(k.grad, k2.grad)
+                assert torch.equal(
+                    k.grad, k2.grad
+                ), f"For {test_case=}: backward dk not deterministic"
             except Exception as e:
-                print("backward dk not deterministic")
-                raise AssertionError("\n\n".join([str(e)]))
+                err_msg_list.append(str(e))
 
             try:
-                assert torch.equal(v.grad, v2.grad)
+                assert torch.equal(
+                    v.grad, v2.grad
+                ), f"For {test_case=}: backward dv not deterministic"
             except Exception as e:
-                print("backward dv not deterministic")
-                raise AssertionError("\n\n".join([str(e)]))
+                err_msg_list.append(str(e))
 
         # compare with reference
         self.assert_close_to_torch_ref(
@@ -450,6 +461,7 @@ class TestFlexFlashAttn(TestCase):
             grad_total_out=do,
             dtype=dtype,
             test_case=test_case,
+            err_msg_list=err_msg_list,
         )
 
     def assert_close_to_torch_ref(
@@ -469,6 +481,7 @@ class TestFlexFlashAttn(TestCase):
         grad_total_out: torch.Tensor,
         dtype: torch.dtype,
         test_case: str = "",
+        err_msg_list: list[str] = [],
     ) -> None:
         # -----   customize tolerance threshold  ---- #
 
@@ -545,10 +558,6 @@ class TestFlexFlashAttn(TestCase):
             total_k.grad,
             total_v.grad,
         )
-
-        # -----   init error message list   ---- #
-
-        err_msg_list: list[str] = []
 
         # -----   assert close for fwd out   ---- #
 
