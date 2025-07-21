@@ -32,4 +32,4 @@ jobs:
         with:
           branch: gh-pages
           folder: docs/html
-          target-folder: docs
+          target-folder: docs/v1.0.3
