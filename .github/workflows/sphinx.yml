@@ -2,7 +2,7 @@ name: sphinx deploy
 on:
   push:
     branches:
-      - dev
+      - fix_dev_doc
 permissions:
   contents: write
 jobs:
