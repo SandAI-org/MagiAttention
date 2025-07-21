@@ -22,8 +22,7 @@
 // Copied from
 // https://github.com/pytorch/pytorch/commit/7931eee5c5ebcdf468bff4d308510b03355cd909
 // This is so that we can pass in torch.dtype as a parameter to the function.
-#if TORCH_VERSION_MAJOR < 2 || \
-    (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 4)
+#if TORCH_VERSION_MAJOR < 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 4)
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -48,10 +47,7 @@ struct type_caster<at::ScalarType> {
     }
     return false;
   }
-  static handle cast(
-      const at::ScalarType& src,
-      return_value_policy /* policy */,
-      handle /* parent */) {
+  static handle cast(const at::ScalarType& src, return_value_policy /* policy */, handle /* parent */) {
     return Py_NewRef(torch::getTHPDtype(src));
   }
 };
@@ -61,12 +57,8 @@ struct type_caster<at::ScalarType> {
 #endif
 
 #define CHECK_DEVICE(x) TORCH_CHECK(x.is_cuda(), #x " must be on CUDA")
-#define CHECK_SHAPE(x, ...)                           \
-  TORCH_CHECK(                                        \
-      x.sizes() == torch::IntArrayRef({__VA_ARGS__}), \
-      #x " must have shape (" #__VA_ARGS__ ")")
-#define CHECK_CONTIGUOUS(x) \
-  TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+#define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
+#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 
 void set_params_fprop(
     Flash_fwd_params& params,
@@ -163,10 +155,8 @@ void set_params_fprop(
   params.softcap = softcap;
 
   // Set the architecture and number of SMs to used in the kernel.
-  params.arch = at::cuda::getCurrentDeviceProperties()->major * 10 +
-      at::cuda::getCurrentDeviceProperties()->minor;
-  params.num_sm =
-      at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
+  params.arch = at::cuda::getCurrentDeviceProperties()->major * 10 + at::cuda::getCurrentDeviceProperties()->minor;
+  params.num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
 }
 
 void set_params_dgrad(
@@ -343,68 +333,37 @@ inline int round_up_headdim(int head_size) {
 void run_mha_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   ARCH_SWITCH(params.arch, Arch, [&] {
     SOFTCAP_SWITCH(params.softcap > 0.0, Has_softcap, [&] {
-      BOOL_SWITCH(
-          params.disable_fwd_atomic_reduction, DisableFwdAtomicReduction, [&] {
-            COMPUTE_DTYPE_SWITCH(params.compute_type, TCompute, [&] {
-              OUT_DTYPE_SWITCH(params.out_type, TOut, [&] {
+      BOOL_SWITCH(params.disable_fwd_atomic_reduction, DisableFwdAtomicReduction, [&] {
+        COMPUTE_DTYPE_SWITCH(params.compute_type, TCompute, [&] {
+          OUT_DTYPE_SWITCH(params.out_type, TOut, [&] {
 #ifndef FLASHATTENTION_DISABLE_HDIM64
-                if (params.d <= 64) {
-                  return run_mha_fwd_<
-                      Arch,
-                      TCompute,
-                      TOut,
-                      64,
-                      Has_softcap,
-                      DisableFwdAtomicReduction>(params, stream);
-                }
+            if (params.d <= 64) {
+              return run_mha_fwd_<Arch, TCompute, TOut, 64, Has_softcap, DisableFwdAtomicReduction>(params, stream);
+            }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM96
-                if (params.d <= 96) {
-                  return run_mha_fwd_<
-                      Arch,
-                      TCompute,
-                      TOut,
-                      96,
-                      Has_softcap,
-                      DisableFwdAtomicReduction>(params, stream);
-                }
+            if (params.d <= 96) {
+              return run_mha_fwd_<Arch, TCompute, TOut, 96, Has_softcap, DisableFwdAtomicReduction>(params, stream);
+            }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM128
-                if (params.d <= 128) {
-                  return run_mha_fwd_<
-                      Arch,
-                      TCompute,
-                      TOut,
-                      128,
-                      Has_softcap,
-                      DisableFwdAtomicReduction>(params, stream);
-                }
+            if (params.d <= 128) {
+              return run_mha_fwd_<Arch, TCompute, TOut, 128, Has_softcap, DisableFwdAtomicReduction>(params, stream);
+            }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM192
-                if (params.d <= 192) {
-                  return run_mha_fwd_<
-                      Arch,
-                      TCompute,
-                      TOut,
-                      192,
-                      Has_softcap,
-                      DisableFwdAtomicReduction>(params, stream);
-                }
+            if (params.d <= 192) {
+              return run_mha_fwd_<Arch, TCompute, TOut, 192, Has_softcap, DisableFwdAtomicReduction>(params, stream);
+            }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM256
-                if (params.d <= 256) {
-                  return run_mha_fwd_<
-                      Arch,
-                      TCompute,
-                      TOut,
-                      256,
-                      Has_softcap,
-                      DisableFwdAtomicReduction>(params, stream);
-                }
+            if (params.d <= 256) {
+              return run_mha_fwd_<Arch, TCompute, TOut, 256, Has_softcap, DisableFwdAtomicReduction>(params, stream);
+            }
 #endif
-              });
-            });
           });
+        });
+      });
     });
   });
 }
@@ -439,8 +398,7 @@ std::vector<at::Tensor> mha_fwd(
   // Check compute capability
   auto dprops = at::cuda::getCurrentDeviceProperties();
   bool is_sm9x = dprops->major >= 9;
-  TORCH_CHECK(
-      is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
+  TORCH_CHECK(is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
 
   int const batch_size = q_ranges.size(0);
   int const total_q = q.size(0);
@@ -451,39 +409,24 @@ std::vector<at::Tensor> mha_fwd(
 
   // Check q, k, v (dtype, device, layout)
   auto q_type = q.scalar_type();
-  TORCH_CHECK(
-      q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16,
-      "Flexible Flash Attention only supports fp16 and bf16 data type");
-  TORCH_CHECK(
-      k.scalar_type() == q_type, "query and key must have the same dtype");
-  TORCH_CHECK(
-      v.scalar_type() == q_type, "query and value must have the same dtype");
+  TORCH_CHECK(q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16, "Flexible Flash Attention only supports fp16 and bf16 data type");
+  TORCH_CHECK(k.scalar_type() == q_type, "query and key must have the same dtype");
+  TORCH_CHECK(v.scalar_type() == q_type, "query and value must have the same dtype");
   CHECK_DEVICE(q);
   CHECK_DEVICE(k);
   CHECK_DEVICE(v);
-  TORCH_CHECK(
-      q.dim() == 3,
-      "query tensor must be a 3D tensor(total_q, num_heads_qo, head_size)");
-  TORCH_CHECK(
-      k.dim() == 3,
-      "key tensor must be a 3D tensor(total_k, num_heads_kv, head_size)");
-  TORCH_CHECK(
-      v.dim() == 3,
-      "value tensor must be a 3D tensor(total_k, num_heads_kv, head_size)");
+  TORCH_CHECK(q.dim() == 3, "query tensor must be a 3D tensor(total_q, num_heads_qo, head_size)");
+  TORCH_CHECK(k.dim() == 3, "key tensor must be a 3D tensor(total_k, num_heads_kv, head_size)");
+  TORCH_CHECK(v.dim() == 3, "value tensor must be a 3D tensor(total_k, num_heads_kv, head_size)");
   CHECK_SHAPE(q, total_q, num_heads_qo, head_size);
   CHECK_SHAPE(k, total_k, num_heads_kv, head_size);
   CHECK_SHAPE(v, total_k, num_heads_kv, head_size);
-  TORCH_CHECK(
-      q.stride(-1) == 1, "query tensor must have contiguous last dimension");
-  TORCH_CHECK(
-      k.stride(-1) == 1, "key tensor must have contiguous last dimension");
-  TORCH_CHECK(
-      v.stride(-1) == 1, "value tensor must have contiguous last dimension");
+  TORCH_CHECK(q.stride(-1) == 1, "query tensor must have contiguous last dimension");
+  TORCH_CHECK(k.stride(-1) == 1, "key tensor must have contiguous last dimension");
+  TORCH_CHECK(v.stride(-1) == 1, "value tensor must have contiguous last dimension");
 
   // Check q_ranges (dtype, device, layout)
-  TORCH_CHECK(
-      q_ranges.dtype() == torch::kInt32,
-      "q_ranges must have dtype torch.int32");
+  TORCH_CHECK(q_ranges.dtype() == torch::kInt32, "q_ranges must have dtype torch.int32");
   CHECK_DEVICE(q_ranges);
   TORCH_CHECK(q_ranges.dim() == 2, "q_ranges must be a 2D tensor");
   TORCH_CHECK(q_ranges.size(1) == 2, "q_ranges must have 2 columns");
@@ -492,9 +435,7 @@ std::vector<at::Tensor> mha_fwd(
 
   // Check k_ranges (dtype, device, layout)
   CHECK_DEVICE(k_ranges);
-  TORCH_CHECK(
-      k_ranges.dtype() == torch::kInt32,
-      "k_ranges must have dtype torch.int32");
+  TORCH_CHECK(k_ranges.dtype() == torch::kInt32, "k_ranges must have dtype torch.int32");
   TORCH_CHECK(k_ranges.dim() == 2, "k_ranges must be a 2D tensor");
   TORCH_CHECK(k_ranges.size(1) == 2, "k_ranges must have 2 columns");
   CHECK_SHAPE(k_ranges, batch_size, 2);
@@ -508,9 +449,7 @@ std::vector<at::Tensor> mha_fwd(
     // Check attn_type_map (dtype, device, layout)
     attn_type_map = attn_type_map_.value();
     CHECK_DEVICE(attn_type_map);
-    TORCH_CHECK(
-        attn_type_map.dtype() == torch::kInt32,
-        "attn_type_map must have dtype torch.int32");
+    TORCH_CHECK(attn_type_map.dtype() == torch::kInt32, "attn_type_map must have dtype torch.int32");
     TORCH_CHECK(attn_type_map.dim() == 1, "attn_type_map must be a 1D tensor");
     CHECK_SHAPE(attn_type_map, batch_size);
     CHECK_CONTIGUOUS(attn_type_map);
@@ -522,9 +461,7 @@ std::vector<at::Tensor> mha_fwd(
   if (has_merge_q_ranges) {
     merge_q_ranges = merge_q_ranges_.value();
     // Check merge_q_ranges (dtype, device, layout)
-    TORCH_CHECK(
-        merge_q_ranges.dtype() == torch::kInt32,
-        "merge_q_ranges must have dtype torch.int32");
+    TORCH_CHECK(merge_q_ranges.dtype() == torch::kInt32, "merge_q_ranges must have dtype torch.int32");
     CHECK_DEVICE(merge_q_ranges);
     merge_batch_size = merge_q_ranges.size(0);
     CHECK_CONTIGUOUS(merge_q_ranges);
@@ -535,8 +472,7 @@ std::vector<at::Tensor> mha_fwd(
   if (has_qk_map) {
     qk_map = qk_map_.value();
     // Check qk_map (dtype, device, layout)
-    TORCH_CHECK(
-        qk_map.dtype() == torch::kInt32, "qk_map must have dtype torch.int32");
+    TORCH_CHECK(qk_map.dtype() == torch::kInt32, "qk_map must have dtype torch.int32");
     CHECK_DEVICE(qk_map);
     CHECK_SHAPE(qk_map, merge_batch_size);
     CHECK_CONTIGUOUS(qk_map);
@@ -544,19 +480,12 @@ std::vector<at::Tensor> mha_fwd(
 
   // Check head_size is within the supported range
   int const max_headdim = get_max_headdim();
-  TORCH_CHECK(
-      head_size <= max_headdim,
-      "Flexible Flash Attention forward only supports head dimension at most " +
-          std::to_string(max_headdim));
+  TORCH_CHECK(head_size <= max_headdim, "Flexible Flash Attention forward only supports head dimension at most " + std::to_string(max_headdim));
   // Check head_size is a multiple of 8
   int const head_alignment = 8;
-  TORCH_CHECK(
-      head_size % head_alignment == 0,
-      "head_size should be a multiple of " + std::to_string(head_alignment));
+  TORCH_CHECK(head_size % head_alignment == 0, "head_size should be a multiple of " + std::to_string(head_alignment));
   // Check num_heads_qo is a multiple of num_heads_kv
-  TORCH_CHECK(
-      num_heads_qo % num_heads_kv == 0,
-      "Number of heads in key/value must divide number of heads in query");
+  TORCH_CHECK(num_heads_qo % num_heads_kv == 0, "Number of heads in key/value must divide number of heads in query");
 
   auto opts = q.options();
 
@@ -579,9 +508,7 @@ std::vector<at::Tensor> mha_fwd(
   // Otherwise, create a new tensor with the appropriate dtype and shape.
   if (softmax_lse_.has_value()) {
     softmax_lse = softmax_lse_.value();
-    TORCH_CHECK(
-        softmax_lse.scalar_type() == at::kFloat,
-        "softmax_lse must have dtype float32");
+    TORCH_CHECK(softmax_lse.scalar_type() == at::kFloat, "softmax_lse must have dtype float32");
     CHECK_DEVICE(softmax_lse);
     CHECK_SHAPE(softmax_lse, num_heads_qo, total_q);
     CHECK_CONTIGUOUS(softmax_lse);
@@ -589,10 +516,7 @@ std::vector<at::Tensor> mha_fwd(
     // Create softmax_lse tensor, need to satisfy two conditions
     // 1. initialize with -infinity
     // 2. use float32 to ensure numerical stability
-    softmax_lse = torch::full(
-        {num_heads_qo, total_q},
-        -std::numeric_limits<float>::infinity(),
-        opts.dtype(at::kFloat));
+    softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
   }
 
   // Determine the output type
@@ -605,10 +529,7 @@ std::vector<at::Tensor> mha_fwd(
     // Use float32 to ensure numerical stability when enable atomic reduction
     out_type = !disable_fwd_atomic_reduction ? at::kFloat : q_type;
   }
-  TORCH_CHECK(
-      out_type == at::kFloat || out_type == at::kBFloat16 ||
-          out_type == at::kHalf,
-      "Flexible Flash Attention only supports float, bf16 and fp16 for output");
+  TORCH_CHECK(out_type == at::kFloat || out_type == at::kBFloat16 || out_type == at::kHalf, "Flexible Flash Attention only supports float, bf16 and fp16 for output");
 
   // If the output tensor 'out' is provided, check its dtype, device, and
   // layout. Otherwise, create a new output tensor with the appropriate dtype
@@ -616,9 +537,7 @@ std::vector<at::Tensor> mha_fwd(
   at::Tensor out;
   if (out_.has_value()) {
     out = out_.value();
-    TORCH_CHECK(
-        out.scalar_type() == out_type,
-        "out must have the same dtype as out_type (if given)");
+    TORCH_CHECK(out.scalar_type() == out_type, "out must have the same dtype as out_type (if given)");
     CHECK_DEVICE(out);
     CHECK_SHAPE(out, total_q, num_heads_qo, head_size);
     TORCH_CHECK(out.stride(-1) == 1, "out must have contiguous last dimension");
@@ -628,18 +547,13 @@ std::vector<at::Tensor> mha_fwd(
   }
 
   // Get element size
-  int element_size = (q_type == at::ScalarType::BFloat16)
-      ? sizeof(cutlass::bfloat16_t)
-      : sizeof(cutlass::half_t);
+  int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
   // Get q block size, used to initialize range_locks
   // FIXME: hack way to get the block size
-  int const kBlockM =
-      std::get<0>(tile_size_fwd_sm90(head_size, element_size, softcap > 0.0));
+  int const kBlockM = std::get<0>(tile_size_fwd_sm90(head_size, element_size, softcap > 0.0));
   // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads_qo
   // columns
-  at::Tensor range_locks = torch::empty(
-      {(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo},
-      opts.dtype(torch::kInt32));
+  at::Tensor range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo}, opts.dtype(torch::kInt32));
   // Initialize is_first_store_map tensor, used to store whether the first store
   // to the global memory The shape is same as range_locks
 
@@ -676,7 +590,7 @@ std::vector<at::Tensor> mha_fwd(
       /*attn_type_map*/ has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
       /*merge_batch_size*/ merge_batch_size,
       /*merge_q_ranges*/
-          has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
+      has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
       /*qk_map*/ has_qk_map ? qk_map.data_ptr() : nullptr,
       /*softmax_lse*/ softmax_lse.data_ptr(),
       /*softmax_scale*/ softmax_scale,
@@ -696,70 +610,37 @@ void run_mha_bwd(Flash_bwd_params& params, cudaStream_t stream) {
 #ifndef FLASHATTENTION_DISABLE_BACKWARD
   ARCH_SWITCH(params.arch, Arch, [&] {
     SOFTCAP_SWITCH(params.softcap > 0.f, Has_softcap, [&] {
-      BOOL_SWITCH(
-          params.disable_bwd_dkv_atomic_reduction,
-          DisableBwdDkvAtomicReduction,
-          [&] {
-            COMPUTE_DTYPE_SWITCH(params.compute_type, TCompute, [&] {
-              OUT_DTYPE_SWITCH(params.dkv_type, TDkv, [&] {
+      BOOL_SWITCH(params.disable_bwd_dkv_atomic_reduction, DisableBwdDkvAtomicReduction, [&] {
+        COMPUTE_DTYPE_SWITCH(params.compute_type, TCompute, [&] {
+          OUT_DTYPE_SWITCH(params.dkv_type, TDkv, [&] {
 #ifndef FLASHATTENTION_DISABLE_HDIM64
-                if (params.d <= 64) {
-                  return run_mha_bwd_<
-                      Arch,
-                      TCompute,
-                      TDkv,
-                      64,
-                      Has_softcap,
-                      DisableBwdDkvAtomicReduction>(params, stream);
-                }
+            if (params.d <= 64) {
+              return run_mha_bwd_<Arch, TCompute, TDkv, 64, Has_softcap, DisableBwdDkvAtomicReduction>(params, stream);
+            }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM96
-                if (params.d <= 96) {
-                  return run_mha_bwd_<
-                      Arch,
-                      TCompute,
-                      TDkv,
-                      96,
-                      Has_softcap,
-                      DisableBwdDkvAtomicReduction>(params, stream);
-                }
+            if (params.d <= 96) {
+              return run_mha_bwd_<Arch, TCompute, TDkv, 96, Has_softcap, DisableBwdDkvAtomicReduction>(params, stream);
+            }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM128
-                if (params.d <= 128) {
-                  return run_mha_bwd_<
-                      Arch,
-                      TCompute,
-                      TDkv,
-                      128,
-                      Has_softcap,
-                      DisableBwdDkvAtomicReduction>(params, stream);
-                }
+            if (params.d <= 128) {
+              return run_mha_bwd_<Arch, TCompute, TDkv, 128, Has_softcap, DisableBwdDkvAtomicReduction>(params, stream);
+            }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM192
-                if (params.d <= 192) {
-                  return run_mha_bwd_<
-                      Arch,
-                      TCompute,
-                      TDkv,
-                      192,
-                      Has_softcap,
-                      DisableBwdDkvAtomicReduction>(params, stream);
-                }
+            if (params.d <= 192) {
+              return run_mha_bwd_<Arch, TCompute, TDkv, 192, Has_softcap, DisableBwdDkvAtomicReduction>(params, stream);
+            }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM256
-                if (params.d <= 256) {
-                  return run_mha_bwd_<
-                      Arch,
-                      TCompute,
-                      TDkv,
-                      256,
-                      Has_softcap,
-                      DisableBwdDkvAtomicReduction>(params, stream);
-                }
+            if (params.d <= 256) {
+              return run_mha_bwd_<Arch, TCompute, TDkv, 256, Has_softcap, DisableBwdDkvAtomicReduction>(params, stream);
+            }
 #endif
-              });
-            });
           });
+        });
+      });
     });
   });
 #endif
@@ -803,8 +684,7 @@ std::vector<at::Tensor> mha_bwd(
   // Check compute capability
   auto dprops = at::cuda::getCurrentDeviceProperties();
   bool is_sm9x = dprops->major >= 9;
-  TORCH_CHECK(
-      is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
+  TORCH_CHECK(is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
 
   // Get dims of input tensors
   int batch_size = q_ranges.size(0);
@@ -817,14 +697,11 @@ std::vector<at::Tensor> mha_bwd(
   // Check q, k, v, out, dout (dtype, device, layout)
   // dtype
   auto q_type = q.scalar_type();
-  TORCH_CHECK(
-      q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16,
-      "Flexible Flash Attention only supports fp16 and bf16 data type");
+  TORCH_CHECK(q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16, "Flexible Flash Attention only supports fp16 and bf16 data type");
   TORCH_CHECK(k.dtype() == q_type, "query and key must have the same dtype");
   TORCH_CHECK(v.dtype() == q_type, "query and value must have the same dtype");
   TORCH_CHECK(out.dtype() == q_type, "query and out must have the same dtype");
-  TORCH_CHECK(
-      dout.dtype() == q_type, "query and dout must have the same dtype");
+  TORCH_CHECK(dout.dtype() == q_type, "query and dout must have the same dtype");
   // device
   CHECK_DEVICE(q);
   CHECK_DEVICE(k);
@@ -837,34 +714,21 @@ std::vector<at::Tensor> mha_bwd(
   CHECK_SHAPE(dout, total_q, num_heads_qo, head_size);
   CHECK_SHAPE(k, total_k, num_heads_kv, head_size);
   CHECK_SHAPE(v, total_k, num_heads_kv, head_size);
-  TORCH_CHECK(
-      q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
-  TORCH_CHECK(
-      k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
-  TORCH_CHECK(
-      v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
-  TORCH_CHECK(
-      out.stride(-1) == 1, "out tensor must have contiguous last dimension");
-  TORCH_CHECK(
-      dout.stride(-1) == 1, "dout tensor must have contiguous last dimension");
+  TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+  TORCH_CHECK(k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+  TORCH_CHECK(v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+  TORCH_CHECK(out.stride(-1) == 1, "out tensor must have contiguous last dimension");
+  TORCH_CHECK(dout.stride(-1) == 1, "dout tensor must have contiguous last dimension");
 
   // check softmax_lse (dtype, device, layout)
-  TORCH_CHECK(
-      softmax_lse.dtype() == at::kFloat,
-      "softmax_lse must have dtype torch.float32");
+  TORCH_CHECK(softmax_lse.dtype() == at::kFloat, "softmax_lse must have dtype torch.float32");
   CHECK_DEVICE(softmax_lse);
   CHECK_SHAPE(softmax_lse, num_heads_qo, total_q);
-  TORCH_CHECK(
-      softmax_lse.stride(-1) == 1,
-      "softmax_lse tensor must have contiguous last dimension");
+  TORCH_CHECK(softmax_lse.stride(-1) == 1, "softmax_lse tensor must have contiguous last dimension");
 
   // check q_ranges, k_ranges (dtype, device, layout)
-  TORCH_CHECK(
-      q_ranges.dtype() == torch::kInt32,
-      "q_ranges must have dtype torch.int32");
-  TORCH_CHECK(
-      k_ranges.dtype() == torch::kInt32,
-      "k_ranges must have dtype torch.int32");
+  TORCH_CHECK(q_ranges.dtype() == torch::kInt32, "q_ranges must have dtype torch.int32");
+  TORCH_CHECK(k_ranges.dtype() == torch::kInt32, "k_ranges must have dtype torch.int32");
   CHECK_DEVICE(q_ranges);
   CHECK_DEVICE(k_ranges);
   CHECK_SHAPE(q_ranges, batch_size, 2);
@@ -879,9 +743,7 @@ std::vector<at::Tensor> mha_bwd(
   if (has_attn_type_map) {
     // If attn_type_map is given, check dtype, device and layout.
     attn_type_map = attn_type_map_.value();
-    TORCH_CHECK(
-        attn_type_map.dtype() == torch::kInt32,
-        "attn_type_map must have dtype torch.int32");
+    TORCH_CHECK(attn_type_map.dtype() == torch::kInt32, "attn_type_map must have dtype torch.int32");
     CHECK_DEVICE(attn_type_map);
     CHECK_SHAPE(attn_type_map, batch_size);
     CHECK_CONTIGUOUS(attn_type_map);
@@ -898,9 +760,7 @@ std::vector<at::Tensor> mha_bwd(
     // HACK
     merge_batch_size = merge_k_ranges.size(0);
     // Check dtype, device and layout
-    TORCH_CHECK(
-        merge_k_ranges.dtype() == torch::kInt32,
-        "merge_k_ranges must have dtype torch.int32");
+    TORCH_CHECK(merge_k_ranges.dtype() == torch::kInt32, "merge_k_ranges must have dtype torch.int32");
     CHECK_DEVICE(merge_k_ranges);
     CHECK_SHAPE(merge_k_ranges, merge_batch_size, 2);
     CHECK_CONTIGUOUS(merge_k_ranges);
@@ -908,38 +768,25 @@ std::vector<at::Tensor> mha_bwd(
   if (has_bwd_kq_map) {
     bwd_kq_map = bwd_kq_map_.value();
     // Check dtype, device and layout
-    TORCH_CHECK(
-        bwd_kq_map.dtype() == torch::kInt32,
-        "bwd_kq_map must have dtype torch.int32");
+    TORCH_CHECK(bwd_kq_map.dtype() == torch::kInt32, "bwd_kq_map must have dtype torch.int32");
     CHECK_DEVICE(bwd_kq_map);
     CHECK_SHAPE(bwd_kq_map, merge_batch_size);
   }
-  TORCH_CHECK(
-      has_merge_k_ranges == has_bwd_kq_map,
-      "merge_k_ranges and bwd_kq_map must be both given or both not given");
+  TORCH_CHECK(has_merge_k_ranges == has_bwd_kq_map, "merge_k_ranges and bwd_kq_map must be both given or both not given");
 
   // Check head_size
   int const max_headdim = get_max_headdim();
   TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
-  TORCH_CHECK(
-      head_size <= max_headdim,
-      "FlashAttention forward only supports head dimension at most " +
-          std::to_string(max_headdim));
+  TORCH_CHECK(head_size <= max_headdim, "FlashAttention forward only supports head dimension at most " + std::to_string(max_headdim));
   // Check num_heads_qo and num_heads_kv
-  TORCH_CHECK(
-      num_heads_qo % num_heads_kv == 0,
-      "Number of heads in key/value must divide number of heads in query");
+  TORCH_CHECK(num_heads_qo % num_heads_kv == 0, "Number of heads in key/value must divide number of heads in query");
   // Get rounded head_size
   int const head_size_rounded = round_up_headdim(head_size);
 
   // Get block size for tiling
-  int element_size = (q_type == at::ScalarType::BFloat16)
-      ? sizeof(cutlass::bfloat16_t)
-      : sizeof(cutlass::half_t);
-  int const kBlockM =
-      std::get<0>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
-  int const kBlockN =
-      std::get<1>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
+  int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
+  int const kBlockM = std::get<0>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
+  int const kBlockN = std::get<1>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
 
   // Get rounded max_seqlen
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
@@ -955,9 +802,7 @@ std::vector<at::Tensor> mha_bwd(
   } else {
     dq_type = at::ScalarType::Float;
   }
-  TORCH_CHECK(
-      dq_type == at::ScalarType::Float,
-      "Flexible Flash Attention only supports float for dq");
+  TORCH_CHECK(dq_type == at::ScalarType::Float, "Flexible Flash Attention only supports float for dq");
 
   // Determine output dtype for dk
   at::ScalarType dk_type;
@@ -966,12 +811,10 @@ std::vector<at::Tensor> mha_bwd(
   } else if (dk_.has_value()) {
     dk_type = dk_.value().scalar_type();
   } else {
-    dk_type =
-        !disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type;
+    dk_type = !disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type;
   }
   TORCH_CHECK(
-      dk_type == at::ScalarType::Float || dk_type == at::ScalarType::BFloat16 ||
-          dk_type == at::ScalarType::Half,
+      dk_type == at::ScalarType::Float || dk_type == at::ScalarType::BFloat16 || dk_type == at::ScalarType::Half,
       "Flexible Flash Attention only supports float, bf16 and fp16 for dk");
 
   // Determine output dtype for dv
@@ -981,12 +824,10 @@ std::vector<at::Tensor> mha_bwd(
   } else if (dv_.has_value()) {
     dv_type = dv_.value().scalar_type();
   } else {
-    dv_type =
-        !disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type;
+    dv_type = !disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type;
   }
   TORCH_CHECK(
-      dv_type == at::ScalarType::Float || dv_type == at::ScalarType::BFloat16 ||
-          dv_type == at::ScalarType::Half,
+      dv_type == at::ScalarType::Float || dv_type == at::ScalarType::BFloat16 || dv_type == at::ScalarType::Half,
       "Flexible Flash Attention only supports float, bf16 and fp16 for dv");
 
   // Check dk_type is same as dv_type
@@ -1000,9 +841,7 @@ std::vector<at::Tensor> mha_bwd(
   at::Tensor dq, dk, dv;
   if (dq_.has_value()) {
     dq = dq_.value();
-    TORCH_CHECK(
-        dq.scalar_type() == dq_type,
-        "dq must have the same dtype as dq_type (if given)");
+    TORCH_CHECK(dq.scalar_type() == dq_type, "dq must have the same dtype as dq_type (if given)");
     CHECK_DEVICE(dq);
     CHECK_SHAPE(dq, total_q, num_heads_qo, head_size);
     TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
@@ -1011,9 +850,7 @@ std::vector<at::Tensor> mha_bwd(
   }
   if (dk_.has_value()) {
     dk = dk_.value();
-    TORCH_CHECK(
-        dk.dtype() == dk_type,
-        "dk must have the same dtype as dk_type (if given)");
+    TORCH_CHECK(dk.dtype() == dk_type, "dk must have the same dtype as dk_type (if given)");
     CHECK_DEVICE(dk);
     CHECK_SHAPE(dk, total_k, num_heads_kv, head_size);
     TORCH_CHECK(dk.stride(-1) == 1, "dk must have contiguous last dimension");
@@ -1022,9 +859,7 @@ std::vector<at::Tensor> mha_bwd(
   }
   if (dv_.has_value()) {
     dv = dv_.value();
-    TORCH_CHECK(
-        dv.dtype() == dv_type,
-        "dv must have the same dtype as dv_type (if given)");
+    TORCH_CHECK(dv.dtype() == dv_type, "dv must have the same dtype as dv_type (if given)");
     CHECK_DEVICE(dv);
     CHECK_SHAPE(dv, total_k, num_heads_kv, head_size);
     TORCH_CHECK(dv.stride(-1) == 1, "dv must have contiguous last dimension");
@@ -1039,10 +874,8 @@ std::vector<at::Tensor> mha_bwd(
   at::Tensor softmax_d, softmax_lse_log2;
   // Need softmax_d and softmax_lse_log2 to have max_seqlen_q_rounded since we
   // want its address to be aligned by 16/8 bytes for TMA / LDG.64
-  softmax_d = torch::empty(
-      {batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
-  softmax_lse_log2 = torch::empty(
-      {batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
+  softmax_d = torch::empty({batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
+  softmax_lse_log2 = torch::empty({batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
 
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore;
@@ -1087,9 +920,7 @@ std::vector<at::Tensor> mha_bwd(
       disable_bwd_dkv_atomic_reduction);
 
 #ifdef FLASHATTENTION_DISABLE_SOFTCAP
-  TORCH_CHECK(
-      params.softcap == 0.0,
-      "This flash attention build does not support tanh softcapping.");
+  TORCH_CHECK(params.softcap == 0.0, "This flash attention build does not support tanh softcapping.");
 #endif
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();

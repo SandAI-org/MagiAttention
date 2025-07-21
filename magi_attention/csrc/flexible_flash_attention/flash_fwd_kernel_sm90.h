@@ -19,8 +19,8 @@
 
 #include "seqlen.h"
 #include "softmax.h"
-#include "utils.h"
 #include "tile_scheduler.hpp"
+#include "utils.h"
 
 namespace flash {
 

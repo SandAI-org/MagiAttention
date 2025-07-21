@@ -16,8 +16,8 @@
 #include <cutlass/numeric_types.h>
 #include <cutlass/pipeline/pipeline.hpp>
 
-#include "utils.h"
 #include "tile_scheduler.hpp"
+#include "utils.h"
 
 namespace flash {
 

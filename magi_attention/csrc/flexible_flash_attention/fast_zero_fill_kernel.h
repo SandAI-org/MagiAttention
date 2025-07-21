@@ -1,18 +1,20 @@
 #pragma once
 
-#include "cute/tensor.hpp"
+#include <cute/layout.hpp>
+#include <cute/tensor.hpp>
 
+#include <cutlass/arch/grid_dependency_control.h>
 #include <cutlass/arch/reg_reconfig.h>
 #include <cutlass/array.h>
 #include <cutlass/cutlass.h>
 #include <cutlass/kernel_hardware_info.h>
 #include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>
-#include <cutlass/arch/grid_dependency_control.h>
 #include <cutlass/pipeline/pipeline.hpp>
 
 #include "utils.h"
 
+namespace flash {
 using namespace cute;
 
 template <typename T_out_, uint32_t kBlockM_, uint32_t kHeadDim_, class ArchTag_>
@@ -51,12 +53,12 @@ class FastZeroFillKernel {
   static_assert(kBlockM % kGmemThreadsPerRow == 0, "kBlockM must be a multiple of kGmemThreadsPerRow");
 
   // Layout of Epilogue threads, named GmemLayoutAtom
-  using GmemLayoutAtom = Layout<Shape<Int<kBlockM / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
+  using GmemLayoutAtom = cute::Layout<Shape<Int<kBlockM / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
 
   using GmemTiledCopyO = decltype(make_tiled_copy(
       Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, T_out>{},
       GmemLayoutAtom{},
-      Layout<Shape<_1, Int<kGmemElemsPerStore>>>{})); // Val layout, 8 or 16 vals per store
+      cute::Layout<Shape<_1, Int<kGmemElemsPerStore>>>{})); // Val layout, 8 or 16 vals per store
 
   static constexpr int SharedStorageSize = 0;
   static constexpr uint32_t MaxThreadsPerBlock = kBlockM;
@@ -175,3 +177,4 @@ class FastZeroFillKernel {
     flash::copy2<false, false, false, false>(gmem_tiled_copy_O, tOrO, tOgO, tOcO, tOpOk, tOpOm);
   }
 };
+} // namespace flash

@@ -4,9 +4,9 @@
 
 #pragma once
 
+#include <cute/tensor.hpp>
 #include <cutlass/cutlass.h>
 #include <cutlass/fast_math.h> // For FastDivMod
-#include <cute/tensor.hpp>
 
 #include "cutlass/epilogue/collective/builders/sm90_common.inl"
 #include "cutlass/gemm/collective/builders/sm90_common.inl"

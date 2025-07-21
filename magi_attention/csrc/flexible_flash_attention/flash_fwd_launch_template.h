@@ -6,10 +6,10 @@
 
 #include <cute/tensor.hpp>
 
-#include <cutlass/kernel_hardware_info.h>
 #include <cutlass/cluster_launch.hpp>
 #include <cutlass/cutlass.h>
 #include <cutlass/device_kernel.h> // For device_kernel
+#include <cutlass/kernel_hardware_info.h>
 #include <cutlass/kernel_launch.h>
 
 #include "epilogue_fwd.hpp"

@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include <cutlass/fast_math.h>
 #include <cutlass/arch/barrier.h>
+#include <cutlass/fast_math.h>
 
 #include "named_barrier.hpp"
 #include "utils.h"
