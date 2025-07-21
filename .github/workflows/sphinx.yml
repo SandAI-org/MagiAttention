@@ -7,7 +7,7 @@ permissions:
   contents: write
 jobs:
   deploy:
-    runs-on: [self-hosted, integration]
+    runs-on: [self-hosted]
     container:
       image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.02.6
       options: --gpus all --ipc host
