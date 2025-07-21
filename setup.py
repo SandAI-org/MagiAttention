@@ -470,8 +470,6 @@ if not SKIP_CUDA_BUILD:
     ffa_dir_abs = repo_dir / "magi_attention" / "csrc" / "flexible_flash_attention"
     ffa_dir_rel = ffa_dir_abs.relative_to(repo_dir)
 
-    common_dir = repo_dir / "magi_attention" / "csrc" / "common"
-
     # custom flags
     DISABLE_SM8x = True
     DISABLE_LOCAL = True
@@ -529,7 +527,7 @@ if not SKIP_CUDA_BUILD:
         + ([192] if not DISABLE_HDIM192 else [])
         + ([256] if not DISABLE_HDIM256 else [])
     )
-    HEAD_DIMENSIONS_FWD = ["all"]
+    HEAD_DIMENSIONS_FWD = ["all", "diff"]
     HEAD_DIMENSIONS_FWD_SM80 = HEAD_DIMENSIONS_BWD
     SPLIT = [""] + (["_split"] if not DISABLE_SPLIT else [])
     PAGEDKV = [""] + (["_paged"] if not DISABLE_PAGEDKV else [])
@@ -575,7 +573,7 @@ if not SKIP_CUDA_BUILD:
     )
     if not DISABLE_SPLIT:
         sources += [f"{ffa_dir_rel}/flash_fwd_combine.cu"]
-    sources += [f"{ffa_dir_rel}/fast_zero_fill.cu"]
+    sources += [f"{ffa_dir_rel}/flash_prepare_scheduler.cu"]
     nvcc_flags = [
         "-O3",
         "-Xptxas",
@@ -601,7 +599,6 @@ if not SKIP_CUDA_BUILD:
             ]
         )
     include_dirs = [
-        common_dir,
         ffa_dir_abs,
         cutlass_dir / "include",
     ]
