@@ -29,9 +29,11 @@ from magi_attention.api.functools import (
     apply_padding,
     compute_pad_size,
     full_attention_to_varlen_attention,
+    pad_at_dim,
 )
 from magi_attention.api.magi_attn_interface import (
     DistAttnRuntimeDict,
+    get_position_ids,
     magi_attn_flex_dispatch,
     magi_attn_varlen_dispatch,
 )
@@ -126,8 +128,6 @@ class MultiHeadAttention(nn.Module):
         return q, k, v
 
 
-# TODO: rewrite the specific ut for magi_attn_interface
-# instead of a fork of `test_pipeline_sdpa`
 class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
@@ -473,6 +473,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})]"
         )
+
         # -----    contruct config from test cases   ---- #
 
         q_ranges: AttnRanges = attn_config["q_ranges"]
@@ -495,15 +496,19 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
         )
 
         # ----- init input data and module ----- #
+
         x = torch.randn(
             total_seqlen_q, head_dim, device=device, dtype=dtype, requires_grad=True
         )
 
         # --------- calculate pad size --------- #
-        cp_size = dist.get_world_size(self.nccl_group)
-        pad_size = compute_pad_size(total_seqlen_q, cp_size, head_dim, chunk_size)
+
+        pad_size = compute_pad_size(
+            total_seqlen_q, self.world_size, head_dim, chunk_size
+        )
 
         # ------ calculate attn_mask_type ------ #
+
         if isinstance(attn_type_mapping, list):
             attn_mask_type = [
                 [
@@ -579,7 +584,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
 
         if interface == "magi_attn_flex":
             use_str_masktype: bool = attn_config["use_str_masktype"]
-            _, dist_attn_runtime_key = magi_attn_flex_dispatch(
+            local_x_padded, dist_attn_runtime_key = magi_attn_flex_dispatch(
                 x,
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,
@@ -644,6 +649,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
         ]
 
         # -------   calc ref_attn_runtime_mgr -------- #
+
         if pad_size > 0:
             q_ranges, k_ranges, attn_mask_type = apply_padding(
                 q_ranges=q_ranges,
@@ -670,7 +676,26 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
 
         assert (
             dist_attn_runtime_mgr == ref_attn_runtime_mgr
-        ), f"the answer is not correct when {test_case}"
+        ), f"the answer is not correct when {test_case=}"
+
+        # -------   test position ids -------- #
+
+        if interface == "magi_attn_flex":
+            global_x_padded = pad_at_dim(x, 0, pad_size)
+
+            #  -----  get position_ids and check  -----  #
+
+            position_ids = get_position_ids(dist_attn_runtime_key)
+            position_ids = position_ids[
+                position_ids < total_seqlen_q - 1
+            ]  # remove padded id
+            valid_length = position_ids.size(0)
+
+            self.assertTrue(
+                torch.equal(
+                    local_x_padded[:valid_length], global_x_padded[position_ids]
+                )
+            )
 
 
 class TestInterfaceSDPAWithWorldSize2(TestInterfaceSDPABaseWithWorldSize1):
