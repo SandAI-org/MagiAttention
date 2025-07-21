@@ -5,5 +5,5 @@
 #include "flash_bwd_launch_template.h"
 
 #ifndef FLASHATTENTION_DISABLE_HDIM64
-template void run_mha_bwd_<90, cutlass::half_t, cutlass::half_t, 64, true, true>(Flash_bwd_params &params, cudaStream_t stream);
+template void run_mha_bwd_<90, cutlass::half_t, cutlass::half_t, 64, true, true>(Flash_bwd_params& params, cudaStream_t stream);
 #endif
