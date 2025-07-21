@@ -7,10 +7,28 @@ permissions:
   contents: write
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, integration]
     container:
-      image: nvcr.io/nvidia/pytorch:25.02-py3
+      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.02.6
+      options: --gpus all --ipc host
+      credentials:
+        username: ${{ secrets.DOCKER_USER_NAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+      env:
+        http_proxy: ${{ secrets.HTTP_PROXY }}
+        https_proxy: ${{ secrets.HTTP_PROXY }}
+        http_proxy_cn: ${{ secrets.HTTP_PROXY_CN }}
+        https_proxy_cn: ${{ secrets.HTTP_PROXY_CN }}
+        WANDB_ENTITY: ${{ secrets.WANDB_ENTITY }}
+        WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+        GITHUB_SHA: ${{ github.sha }}
     steps:
+      - name: echo proxy
+        run: |
+          echo "http_proxy: $http_proxy"
+          echo "https_proxy: $https_proxy"
+          echo "secret.HTTP_PROXY: ${{ secrets.HTTP_PROXY }}"
+          echo "secret.HTTPS_PROXY: ${{ secrets.HTTP_PROXY }}"
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
