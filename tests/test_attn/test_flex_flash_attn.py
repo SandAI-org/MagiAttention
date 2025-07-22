@@ -365,7 +365,6 @@ class TestFlexFlashAttn(TestCase):
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
         )
-        print(f"wtf {o.dtype=} {q.dtype=} {k.dtype=} {v.dtype=}")
         o.backward(do)
 
         # compare with reference
