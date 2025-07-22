@@ -264,7 +264,7 @@ class MagiTrainer(Trainer):
         batch_size = inputs.size(0)
         local_input = squash_batch_dim(inputs)
         cp_size = int(os.environ.get("CP_SIZE", 1))
-        pad_size, _ = compute_pad_size(local_input.size(0), cp_size, head_dim)
+        pad_size = compute_pad_size(local_input.size(0), cp_size, chunk_size=512)
         cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
             batch_size, seqlen
         )
@@ -307,7 +307,7 @@ class MagiTrainer(Trainer):
             inputs,
             cu_seqlens_q,
             cu_seqlens_k,
-            head_dim=head_dim,
+            chunk_size=512,
             pad_size=pad_size,
             cp_group=cp_group,
             causal=True,

@@ -108,7 +108,7 @@ def train(model, optimizer, lr_scheduler, device_mesh, train_iter):
         ):
             # dispatched input and prepare magi_attn key.
             input, dist_attn_runtime_key = prepare_magi_attention(
-                input, cu_seqlens_q, cu_seqlens_k, pad_size, device_mesh.get_group("cp")
+                input, cu_seqlens_q, cu_seqlens_k, pad_size, CHUNK_SIZE, device_mesh.get_group("cp")
             )
 
         output = model(input, dist_attn_runtime_key)
@@ -148,7 +148,7 @@ def prepare_data(device_mesh, train_iter):
     head_dim = LlamaConfig().head_dim
 
     # pad seqlen of input data for better performance.
-    pad_size, _ = compute_pad_size(local_input.size(0), cp_size, head_dim)
+    pad_size = compute_pad_size(local_input.size(0), cp_size, CHUNK_SIZE)
     cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
         batch_size // dp_size, seqlen
     )
@@ -169,8 +169,8 @@ def prepare_magi_attention(input, cu_seqlens_q, cu_seqlens_k, pad_size, cp_group
         input,
         cu_seqlens_q,
         cu_seqlens_k,
-        head_dim=LlamaConfig().head_dim,
         pad_size=pad_size,
+        chunk_size=CHUNK_SIZE,
         cp_group=cp_group,
         causal=LlamaConfig().is_causal,
         dist_attn_config=dist_attn_config,

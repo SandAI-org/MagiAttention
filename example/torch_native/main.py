@@ -42,6 +42,7 @@ from magi_attention.config import (
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeKey
 
 SEED = 42
+CHUNK_SIZE = 512  # chunk_size for magiattention
 
 
 def _reduce_mean_among_cp(
@@ -228,11 +229,10 @@ def prepare_data(device_mesh, train_iter):
     # magi_attention do not support data with batch dim.
     local_input = squash_batch_dim(local_input)
     cp_size = parallel_config["context_parallel_size"]
-    head_dim = LlamaConfig().head_dim
 
     logger(f"data after squash batch dim: {local_input.shape=}", rank=0)
     # pad seqlen of input data for better performance.
-    pad_size, _ = compute_pad_size(local_input.size(0), cp_size, head_dim)
+    pad_size = compute_pad_size(local_input.size(0), cp_size, CHUNK_SIZE)
     logger(f"{pad_size=}", rank=0)
 
     cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
@@ -269,8 +269,8 @@ def prepare_magi_attention(input, cu_seqlens_q, cu_seqlens_k, pad_size, cp_group
         input,
         cu_seqlens_q,
         cu_seqlens_k,
-        head_dim=LlamaConfig().head_dim,
         pad_size=pad_size,
+        chunk_size=CHUNK_SIZE,
         cp_group=cp_group,
         causal=LlamaConfig().is_causal,
         dist_attn_config=dist_attn_config,
