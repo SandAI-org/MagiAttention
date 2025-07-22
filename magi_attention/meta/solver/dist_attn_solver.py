@@ -15,6 +15,7 @@
 from bisect import bisect_left
 from collections import defaultdict
 from itertools import chain
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -39,7 +40,12 @@ from magi_attention.meta.container.transfer_table import (
     TransferInfo,
     TransferTable,
 )
-from magi_attention.utils import nvtx, transpose_matrix
+from magi_attention.utils import (
+    is_same_device_mesh,
+    is_same_process_group,
+    nvtx,
+    transpose_matrix,
+)
 from magi_attention.utils._utils import argsort
 
 from ._slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
@@ -1062,7 +1068,7 @@ class DistAttnSolver:
                     if magi_attention.is_sanity_check_enable():
                         assert len(slice.k_ranges) == 1, (
                             f"when masktype is bi_causal, the length of k_ranges must be 1, "
-                            f"but get {len(slice.k_ranges)=}"
+                            f"but got {len(slice.k_ranges)=}"
                         )
 
                     distance_to_slice_start = boundary_start - slice_q_range_start
@@ -1082,7 +1088,7 @@ class DistAttnSolver:
                 else:
                     raise ValueError(
                         f"Only support 'full', 'causal', 'inv_causal' and 'bi_causal' mask, "
-                        f"but get {slice.mask_types[-1]} and {slice.mask_types[0]}"
+                        f"but got {slice.mask_types[-1]} and {slice.mask_types[0]}"
                     )
 
         return (
@@ -1500,6 +1506,7 @@ class DistAttnSolver:
             output_split_size_list=output_split_size_list,
             dst_indices_list=dst_indices_list,
             src_index_list=src_index_list,
+            rank=self.cp_rank,
             world_size=self.cp_size,
             device_mesh=self.cp_mesh,
         )
@@ -1627,6 +1634,30 @@ class DistAttnSolver:
         )
 
         return attn_calc_meta
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, DistAttnSolver):
+            return False
+
+        for key in self.__dict__:
+            self_val = getattr(self, key)
+            other_val = getattr(other, key, object())
+
+            if isinstance(self_val, dist.ProcessGroup) or isinstance(
+                other_val, dist.ProcessGroup
+            ):
+                if not is_same_process_group(self_val, other_val):
+                    return False
+
+            elif isinstance(self_val, DeviceMesh) or isinstance(other_val, DeviceMesh):
+                if not is_same_device_mesh(self_val, other_val):
+                    return False
+
+            else:
+                if self_val != other_val:
+                    return False
+
+        return True
 
     def __repr__(self, title_len: int = 50) -> str:  # pragma: no cover
         repr_contents = []

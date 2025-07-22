@@ -4,11 +4,11 @@
 
 #pragma once
 
-#include "cute/tensor.hpp"
+#include <cute/tensor.hpp>
 
-#include "cutlass/cluster_launch.hpp" // For ClusterLauncher
-#include "cutlass/device_kernel.h" // For device_kernel
-#include "cutlass/kernel_launch.h" // For kernel_launch
+#include <cutlass/cluster_launch.hpp> // For ClusterLauncher
+#include <cutlass/device_kernel.h> // For device_kernel
+#include <cutlass/kernel_launch.h> // For kernel_launch
 
 #include "epilogue_bwd.hpp"
 #include "flash.h"
@@ -28,7 +28,7 @@ template <
     int kBlockN,
     bool Has_softcap,
     typename Element,
-    typename ElementOut,
+    typename ElementDkv,
     bool Deterministic,
     int Stages = 2,
     int Stages_dO = 2,
@@ -41,14 +41,9 @@ template <
     int AtomLayoutNdKV = 2,
     int AtomLayoutMdQ = 1,
     bool V_in_regs = false,
-    bool RangeMerge = false>
+    bool RangeMerge = false,
+    bool DisableBwdDkvAtomicReduction = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
-  constexpr bool Is_causal = false;
-  constexpr bool Is_local = false;
-  constexpr bool Varlen = true;
-  int batch_q = 1;
-  int batch_k = 1;
-
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
 
@@ -101,20 +96,17 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       V_in_regs>;
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
+      ElementDkv,
       ElementAccum,
       ArchTag,
       CollectiveMainloop::NumMmaThreads,
       dKV_swapAB,
-      NumMmaWarpGroups*(Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV>;
+      NumMmaWarpGroups*(Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV,
+      DisableBwdDkvAtomicReduction>;
   // uncomment the following line to resume to non-persistent kernel
   // using Scheduler = flash::SingleTileScheduler<Varlen, false /*Split*/, false /*PackGQA*/, kBlockN>;
-  using Scheduler = flash::VarlenDynamicPersistentTileScheduler<
-      kBlockN,
-      CollectiveMainloop::NumMmaThreads,
-      CollectiveMainloop::NumProducerThreads,
-      false /*Split*/,
-      false /*PackGQA*/,
-      Arch >= 90 /*WarpSpecialized*/>;
+  using Scheduler =
+      flash::DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{
@@ -141,6 +133,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.q_ranges,
       params.k_ranges,
       params.attn_type_map};
+
   // The case work with GQA is ugly but idk how to fix it.
   typename CollectiveEpilogue::Arguments epilogue_args{
       static_cast<typename CollectiveEpilogue::Element*>(params.dk_ptr),
@@ -155,25 +148,13 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   int num_blocks_n = cutlass::ceil_div(params.max_seqlen_k, get<1>(TileShape_MNK{}));
   num_blocks_n = cutlass::round_up(num_blocks_n, size<1>(ClusterShape{}));
   typename flash::TileSchedulerArguments scheduler_args{
-      num_blocks_n,
-      params.h_qo,
-      params.merge_batch_size,
-      1 /*num_splits*/,
-      params.h_qo / params.h_kv,
-      params.max_seqlen_k,
-      params.max_seqlen_q,
-      params.d,
-      params.d,
-      sizeof(Element),
-      params.tile_count_semaphore,
-      params.cu_seqlens_k,
-      params.k_ranges,
-      params.seqused_k,
-      nullptr,
-      params.merge_k_ranges,
-      params.bwd_kq_map,
-      params.bwd_unique_count,
-  };
+      /*num_heads*/ params.h_qo,
+      /*num_batches*/ params.merge_batch_size,
+      /*tile_count_semaphore*/ params.tile_count_semaphore,
+      /*ranges*/ params.k_ranges,
+      /*merge_ranges*/ params.merge_k_ranges,
+      /*range_map*/ params.bwd_kq_map,
+      /*bwd_unique_count*/ params.bwd_unique_count};
 
   int device;
   cudaGetDevice(&device);
@@ -214,7 +195,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   CHECK_CUDA_KERNEL_LAUNCH();
 }
 
-template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap>
+template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
@@ -246,7 +227,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
           /*kBlockN=*/kBlockN,
           /*Has_softcap=*/Has_softcap,
           /*Element=*/T,
-          /*ElementOut=*/T_out,
+          /*ElementDkv=*/TDkv,
           /*Deterministic=*/Deterministic,
           /*Stages=*/Stages,
           /*Stages_dO=*/Stages_dO,
@@ -259,7 +240,8 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
           /*AtomLayoutNdKV=*/AtomLayoutNdKV,
           /*AtomLayoutMdQ=*/AtomLayoutMdQ,
           /*V_in_regs=*/V_in_regs,
-          /*RangeMerge=*/RangeMerge>(params, stream);
+          /*RangeMerge=*/RangeMerge,
+          /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction>(params, stream);
     });
   });
 }

@@ -4,13 +4,13 @@
 
 #pragma once
 
-#include "cute/tensor.hpp"
+#include <cute/tensor.hpp>
 
+#include <cutlass/cluster_launch.hpp>
+#include <cutlass/cutlass.h>
+#include <cutlass/device_kernel.h> // For device_kernel
 #include <cutlass/kernel_hardware_info.h>
-#include "cutlass/cluster_launch.hpp"
-#include "cutlass/cutlass.h"
-#include "cutlass/device_kernel.h" // For device_kernel
-#include "cutlass/kernel_launch.h"
+#include <cutlass/kernel_launch.h>
 
 #include "epilogue_fwd.hpp"
 #include "flash.h"
@@ -46,13 +46,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       flash::CollectiveEpilogueFwd<TileShape_MNK_PV, ClusterShape, ElementOut, ArchTag, CollectiveMainloop::NumMmaThreads, DisableFwdAtomicReduction>;
 
   static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
-  using SchedulerPersistent = flash::VarlenDynamicPersistentTileScheduler<
-      kBlockM,
-      CollectiveMainloop::NumMmaThreads,
-      NumProducerThreads,
-      false /*Split*/,
-      false /*PackGQA*/,
-      Arch >= 90 /*WarpSpecialized*/>;
+  using SchedulerPersistent = flash::DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, NumProducerThreads, Arch >= 90 /*WarpSpecialized*/>;
   using Scheduler = SchedulerPersistent;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
 
@@ -90,25 +84,13 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   int num_blocks_m = cutlass::ceil_div(params.total_q * qhead_per_khead, get<0>(TileShape_MNK{}));
   num_blocks_m = cutlass::round_up(num_blocks_m, size<0>(ClusterShape{}));
   typename flash::TileSchedulerArguments scheduler_args{
-      num_blocks_m,
-      params.h_qo,
-      params.merge_batch_size,
-      params.num_splits,
-      params.h_qo / params.h_kv,
-      params.total_q,
-      params.total_k,
-      params.d,
-      params.d,
-      sizeof(Element),
-      params.tile_count_semaphore,
-      params.cu_seqlens_q,
-      params.q_ranges,
-      params.seqused_q,
-      // params.num_m_blocks_ptr, params.num_splits_dynamic_ptr,
-      params.num_splits_dynamic_ptr,
-      params.merge_q_ranges,
-      params.qk_map,
-      params.unique_count,
+      /*num_heads*/ params.h_qo,
+      /*num_batches*/ params.merge_batch_size,
+      /*tile_count_semaphore*/ params.tile_count_semaphore,
+      /*ranges*/ params.q_ranges,
+      /*merge_ranges*/ params.merge_q_ranges,
+      /*range_map*/ params.qk_map,
+      /*unique_count*/ params.unique_count
   };
 
   int device;

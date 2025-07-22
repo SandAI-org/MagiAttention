@@ -1375,7 +1375,7 @@ class DispatchSolver(nn.Module):
         sample_areas: list[int] = dispatch_data.sample_areas  # type: ignore
         assert (
             sample_areas is not None and len(sample_areas) > 0
-        ), f"sorted sequential select solver need areas of each sample, but get {sample_areas=}"
+        ), f"sorted sequential select solver need areas of each sample, but got {sample_areas=}"
 
         sample_ids_sorted = argsort(sample_areas, key=lambda x: -x)
 

@@ -209,7 +209,7 @@ class TestCalcSelfAttnAreas(TestCase):
         assert global_bucket == result_bucket, (
             f"The test of testcase one is not passed!\n"
             f"expect result={result_bucket}\n"
-            f"but get {global_bucket}."
+            f"but got {global_bucket}."
         )
 
     def test_calc_self_attn_areas_two(self):
@@ -364,7 +364,7 @@ class TestCalcSelfAttnAreas(TestCase):
         assert global_bucket == result_bucket, (
             f"The test in testcase one is not passed!\n"
             f"expect result={result_bucket}\n"
-            f"but get {global_bucket}."
+            f"but got {global_bucket}."
         )
 
     def test_calc_self_attn_areas_all_full(self):
@@ -599,7 +599,7 @@ class TestCalcSelfAttnAreas(TestCase):
         assert global_bucket == result_bucket, (
             f"The test of all full is not passed!\n"
             f"expect result={result_bucket}\n"
-            f"but get {global_bucket}."
+            f"but got {global_bucket}."
         )
 
     def test_calc_self_attn_areas_all_causal_1(self):
@@ -818,7 +818,7 @@ class TestCalcSelfAttnAreas(TestCase):
         assert global_bucket == result_bucket, (
             f"The test in all_causal_1 is not passed!\n"
             f"expect result={result_bucket}\n"
-            f"but get {global_bucket}."
+            f"but got {global_bucket}."
         )
 
     def test_calc_self_attn_areas_all_causal_2(self):
@@ -1010,7 +1010,7 @@ class TestCalcSelfAttnAreas(TestCase):
         assert global_bucket == result_bucket, (
             f"The testcase of causal_2 is not passed!\n"
             f"expect result={result_bucket}\n"
-            f"but get {global_bucket}."
+            f"but got {global_bucket}."
         )
 
     def test_calc_self_attn_areas_one_line(self):
@@ -1059,7 +1059,7 @@ class TestCalcSelfAttnAreas(TestCase):
         assert global_bucket == result_bucket, (
             f"The testcase of one line is not passed!\n"
             f"expect result={result_bucket}\n"
-            f"but get {global_bucket}."
+            f"but got {global_bucket}."
         )
 
     @parameterize(
@@ -1284,7 +1284,7 @@ class TestCalcSelfAttnAreas(TestCase):
 
         assert (
             len(global_bucket.q_chunks) == num_chunks
-        ), f"The num of chunks must be {num_chunks}, but get {len(global_bucket.q_chunks)}"
+        ), f"The num of chunks must be {num_chunks}, but got {len(global_bucket.q_chunks)}"
 
         answer = np.zeros((q_ranges.end, q_ranges.end), dtype=np.int32)
         result = np.zeros((q_ranges.end, q_ranges.end), dtype=np.int32)

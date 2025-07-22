@@ -1,11 +1,12 @@
 
 /******************************************************************************
- * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
+ * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar,
+ *Pradeep Ramani, Tri Dao.
  ******************************************************************************/
 
 #pragma once
 
-#include "cute/tensor.hpp"
+#include <cute/tensor.hpp>
 
 #include <cutlass/arch/reg_reconfig.h>
 #include <cutlass/array.h>
@@ -13,8 +14,9 @@
 #include <cutlass/kernel_hardware_info.h>
 #include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>
-#include "cutlass/pipeline/pipeline.hpp"
+#include <cutlass/pipeline/pipeline.hpp>
 
+#include "tile_scheduler.hpp"
 #include "utils.h"
 
 namespace flash {
@@ -57,10 +59,10 @@ class FlashAttnBwdSm90 {
   /// Register requirement for Load and Math WGs
   static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 2 ? 24 : 32;
   static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 240 : 160;
-  // If you want to print from the producer warp, you'd need to increase the number of registers
-  // Otherwise you'll get CUDA error.
-  // static constexpr uint32_t LoadRegisterRequirement = 40;
-  // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
+  // If you want to print from the producer warp, you'd need to increase the
+  // number of registers Otherwise you'll get CUDA error. static constexpr
+  // uint32_t LoadRegisterRequirement = 40; static constexpr uint32_t
+  // MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
 
   // Kernel level shared memory storage
   struct SharedStorage {
@@ -101,7 +103,8 @@ class FlashAttnBwdSm90 {
   // Methods
   //
 
-  // Convert to underlying arguments. In this case, a simple copy for the aliased type.
+  // Convert to underlying arguments. In this case, a simple copy for the
+  // aliased type.
   static Params to_underlying_arguments(Arguments const& args) {
     CUTLASS_TRACE_HOST("to_underlying_arguments():");
 
@@ -182,7 +185,8 @@ class FlashAttnBwdSm90 {
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
 
-    // We need this to guarantee that the Pipeline init is visible to all producers and consumer blocks in the Cluster
+    // We need this to guarantee that the Pipeline init is visible to all
+    // producers and consumer blocks in the Cluster
     if constexpr (size(ClusterShape{}) > 1) {
       cute::cluster_arrive_relaxed();
       cute::cluster_wait();
@@ -211,11 +215,11 @@ class FlashAttnBwdSm90 {
           bool tile_valid = false;
 
           // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
-          // cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+          cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
 
           if constexpr (RangeMerge) {
             int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                             : (params.scheduler.num_batch - params.scheduler.range_map[bidb_idx]);
+                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
             int bidb_start = params.scheduler.range_map[bidb_idx];
 
             for (int idx = 0; idx < loop_count; ++idx) {
@@ -245,7 +249,7 @@ class FlashAttnBwdSm90 {
 
           if constexpr (RangeMerge) {
             int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                             : (params.scheduler.num_batch - params.scheduler.range_map[bidb_idx]);
+                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
             int bidb_start = params.scheduler.range_map[bidb_idx];
 
             for (int idx = 0; idx < loop_count; ++idx) {
@@ -286,7 +290,7 @@ class FlashAttnBwdSm90 {
         if constexpr (RangeMerge) {
           int bidb_idx = get<2>(block_coord);
           int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                           : (params.scheduler.num_batch - params.scheduler.range_map[bidb_idx]);
+                                                                           : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
           int bidb_start = params.scheduler.range_map[bidb_idx];
 
           for (int idx = 0; idx < loop_count; ++idx) {

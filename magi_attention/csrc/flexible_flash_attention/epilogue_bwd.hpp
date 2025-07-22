@@ -4,9 +4,9 @@
 
 #pragma once
 
-#include "cute/tensor.hpp"
-#include "cutlass/barrier.h"
-#include "cutlass/cutlass.h"
+#include <cute/tensor.hpp>
+#include <cutlass/barrier.h>
+#include <cutlass/cutlass.h>
 
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 
@@ -18,10 +18,23 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MNK_, class Element_, class ArchTag_, int NumEpilogueThreads_, bool dKV_swapAB_, int AtomLayoutKdKV = 1>
+template <
+    class TileShape_MNK_,
+    class Element_,
+    class ElementAccum_,
+    class ArchTag_,
+    int NumEpilogueThreads_,
+    bool dKV_swapAB_,
+    int AtomLayoutKdKV = 1,
+    bool DisableBwdDkvAtomicReduction_ = false>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
   using Element = Element_;
+  using ElementAccum = ElementAccum_;
+
+  static constexpr bool IsSameType = cute::is_same_v<Element, ElementAccum>;
+  static constexpr bool DisableBwdDkvAtomicReduction = DisableBwdDkvAtomicReduction_;
+
   using ArchTag = ArchTag_;
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool dKV_swapAB = dKV_swapAB_;
@@ -29,7 +42,8 @@ struct CollectiveEpilogueBwd {
 
   static_assert(ArchTag::kMinComputeCapability >= 80);
 
-  using GmemTiledCopydKVTMA = cute::SM90_TMA_REDUCE_ADD;
+  // Select the appropriate TMA copy type based on DisableBwdDkvAtomicReduction
+  using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
 
   // These are for storing the output tensor without TMA (e.g., for setting output to zero)
   static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
@@ -166,8 +180,29 @@ struct CollectiveEpilogueBwd {
     auto smem_tiled_copy_dKV = make_tiled_copy_C(SmemCopyAtomdKV{}, tiled_mma);
     auto smem_thr_copy_dKV = smem_tiled_copy_dKV.get_thread_slice(thread_idx);
 
-    Tensor taccdKrdK = smem_thr_copy_dKV.retile_S(tdKrdK); // ((Atom,AtomNum), MMA_M, MMA_N)
-    Tensor taccdVrdV = smem_thr_copy_dKV.retile_S(tdVrdV); // ((Atom,AtomNum), MMA_M, MMA_N)
+    // Convert the type of tdVrdV and tdKrdK to Element if they are not the same as ElementAccum
+    Tensor tdVrdV_out = [&] {
+      if constexpr (IsSameType) {
+        return tdVrdV;
+      } else {
+        auto out = make_tensor_like<Element>(tdVrdV);
+        flash::convert_type_out(tdVrdV, out);
+        return out;
+      }
+    }();
+
+    Tensor tdKrdK_out = [&] {
+      if constexpr (IsSameType) {
+        return tdKrdK;
+      } else {
+        auto out = make_tensor_like<Element>(tdKrdK);
+        flash::convert_type_out(tdKrdK, out);
+        return out;
+      }
+    }();
+
+    Tensor taccdKrdK = smem_thr_copy_dKV.retile_S(tdKrdK_out); // ((Atom,AtomNum), MMA_M, MMA_N)
+    Tensor taccdVrdV = smem_thr_copy_dKV.retile_S(tdVrdV_out); // ((Atom,AtomNum), MMA_M, MMA_N)
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print(smem_thr_copy_dKV); print(sdK); printf("\n"); print(sdKt); printf("\n"); }
     Tensor taccdKsdK = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdK, sdKt)); // ((Atom,AtomNum),PIPE_M,PIPE_N)
     Tensor taccdVsdV = smem_thr_copy_dKV.partition_D(cute::conditional_return<!dKV_swapAB>(sdV, sdVt)); // ((Atom,AtomNum),PIPE_M,PIPE_N)

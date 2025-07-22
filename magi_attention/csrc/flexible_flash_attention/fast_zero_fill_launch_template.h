@@ -1,24 +1,23 @@
 #pragma once
 
-#include "cute/tensor.hpp"
+#include <cute/tensor.hpp>
 
+#include <cutlass/arch/arch.h>
+#include <cutlass/cutlass.h>
+#include <cutlass/device_kernel.h> // For device_kernel
 #include <cutlass/kernel_hardware_info.h>
 #include <cutlass/kernel_launch.h>
-#include "cutlass/arch/arch.h"
-#include "cutlass/cutlass.h"
-#include "cutlass/device_kernel.h" // For device_kernel
 
 #include "cuda_check.h"
 #include "fast_zero_fill_kernel.h"
 #include "flash.h"
-#include "static_switch.h"
 
 using namespace cute;
 
 template <typename T_out, uint32_t kBlockM, uint32_t kHeadDim>
 void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = cutlass::arch::Sm90;
-  using ZeroFillKernel = FastZeroFillKernel<T_out, kBlockM, kHeadDim, ArchTag>;
+  using ZeroFillKernel = flash::FastZeroFillKernel<T_out, kBlockM, kHeadDim, ArchTag>;
 
   auto kernel_params = ZeroFillKernel::to_underlying_arguments(
       {static_cast<T_out*>(params.o_ptr),

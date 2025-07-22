@@ -34,9 +34,9 @@ class AttnMaskType(Enum):
     """The enum used to specify the unit type of attention mask we support"""
 
     FULL = "full"
-    CAUSAL = "causal"  # NOTE: The causal mask aligns to the bottom-right corner if it's not square
-    BICAUSAL = "bicausal"
-    INVCAUSAL = "invcausal"
+    CAUSAL = "causal"
+    BICAUSAL = "bi_causal"
+    INVCAUSAL = "inv_causal"
 
 
 class AttnOverlapMode(Enum):

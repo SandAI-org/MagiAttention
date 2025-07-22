@@ -64,12 +64,3 @@ repos:
     -   id: mypy
         files: \.py$
         args: [--config=mypy.ini, --ignore-missing-imports]
-# -   repo: https://github.com/PyCQA/pydocstyle
-#     rev: 6.3.0
-#     hooks:
-#     -   id: pydocstyle
-#         args: [
-#             "--convention=google",
-#             "--add-ignore=D100,D104",
-#         ]
-#         additional_dependencies: [toml]

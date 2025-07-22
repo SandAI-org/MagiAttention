@@ -40,6 +40,8 @@ from rich import print as rprint
 from . import nvtx
 
 if TYPE_CHECKING:
+    from magi_attention.common.enum import AttnMaskType
+    from magi_attention.common.range import AttnRange
     from magi_attention.common.ranges import AttnRanges, NaiveRanges
 
 
@@ -91,13 +93,23 @@ def setup_dist_env(
     backend: str = "nccl",
     base_seed: int | None = None,
     seed_bias: Callable = lambda rank: 0,
-) -> tuple[int, int, dist.ProcessGroup, str, int | None]:
+) -> tuple[int, int, int, dist.ProcessGroup, int, int | None]:
     """set up distributed environment with the specified process group backend,
     NOTE: the test script using this func to set up should be executed through torchrun
+
+    Args:
+        backend (str, optional): the process group backend. Defaults to "nccl".
+        base_seed (int | None, optional): the base seed. Defaults to None to not set seed.
+        seed_bias (Callable, optional): the seed bias func for each rank. Defaults to lambda rank: 0, i.e., no bias.
+
+    Returns:
+        rank, local_rank, world_size, wolrd_group, device, seed
     """
-    rank = int(os.environ["LOCAL_RANK"])
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    torch.cuda.set_device(rank)
+    torch.cuda.set_device(local_rank)
+    device = torch.cuda.current_device()
 
     dist.init_process_group(
         backend=backend,
@@ -105,12 +117,19 @@ def setup_dist_env(
         world_size=world_size,
     )
 
-    manual_seed = None
+    seed = None
     if base_seed is not None:
-        manual_seed = base_seed + seed_bias(rank)
-        torch.manual_seed(manual_seed)
+        seed = base_seed + seed_bias(rank)
+        torch.manual_seed(seed)
 
-    return rank, world_size, dist.group.WORLD, f"cuda:{rank}", manual_seed  # noqa: E231
+    return (
+        rank,
+        local_rank,
+        world_size,
+        dist.group.WORLD,
+        device,
+        seed,
+    )  # noqa: E231
 
 
 def clearup_dist_env() -> None:
@@ -512,3 +531,215 @@ def sync_rng(seed: int) -> Generator[None, None, None]:
         set_random_seed(seed)
         yield
         _set_rng_states(states)
+
+
+def is_same_process_group(
+    group1: dist.ProcessGroup | None,
+    group2: dist.ProcessGroup | None,
+) -> bool:
+    """Determine whether two communication groups are the same
+
+    Args:
+        group1 (dist.ProcessGroup | None): process group 1
+        group2 (dist.ProcessGroup | None): process group 2
+
+    Returns:
+        bool: whether two communication groups are the same
+    """
+    if group1 is None and group2 is None:
+        return True
+    if not isinstance(group1, dist.ProcessGroup) or not isinstance(
+        group2, dist.ProcessGroup
+    ):
+        return False
+
+    group1_ranks = sorted(dist.get_process_group_ranks(group=group1))
+    group2_ranks = sorted(dist.get_process_group_ranks(group=group2))
+    if group1_ranks == group2_ranks:
+        return True
+    return False
+
+
+def is_same_device_mesh(
+    mesh1: dist.device_mesh.DeviceMesh | None,
+    mesh2: dist.device_mesh.DeviceMesh | None,
+) -> bool:
+    """Determine whether two device meshs are the same
+
+    Args:
+        mesh1 (dist.device_mesh.DeviceMesh | None): device mesh1
+        mesh2 (dist.device_mesh.DeviceMesh | None): device mesh2
+
+    Returns:
+        bool: whether two device meshs are the same
+    """
+    if mesh1 is None and mesh2 is None:
+        return True
+    if not isinstance(mesh1, dist.device_mesh.DeviceMesh) or not isinstance(
+        mesh2, dist.device_mesh.DeviceMesh
+    ):
+        return False
+
+    return mesh1.device_type == mesh2.device_type and torch.equal(
+        mesh1.mesh, mesh2.mesh
+    )
+
+
+# FIXME fix bugs and move to magi_attention/api/functools
+def infer_attn_mask_from_window_size(
+    q_ranges: "AttnRanges",
+    k_ranges: "AttnRanges",
+    window_size_list: list[list[int]],
+) -> tuple["AttnRanges", "AttnRanges", list["AttnMaskType"]]:
+    """Convert full, causal, and sliding window masks into representations using q_ranges, k_ranges, and mask types.
+    The mask type is specified using window_size, and multiple masks can be processed simultaneously.
+
+    Args:
+        q_ranges (AttnRanges): q_range of masks
+        k_ranges (AttnRanges): k_range of masks
+        window_size_list (list[list[int]]): masktype of each (q_range, k_range) area,
+            the mask type is specified using window_size.
+
+    Returns:
+        tuple[AttnRanges, AttnRanges, list[AttnMaskType]]: processed (q_ranges, k_ranges, masktypes) triple,
+            sliding window mask have been cutted into triple representation.
+    """
+    processed_q_ranges: "AttnRanges" = AttnRanges()
+    processed_k_ranges: "AttnRanges" = AttnRanges()
+    attn_mask_type: list["AttnMaskType"] = []
+
+    for q_range, k_range, window_size in zip(q_ranges, k_ranges, window_size_list):
+        if window_size == [-1, -1]:
+            processed_q_ranges.append(q_range)
+            processed_k_ranges.append(k_range)
+            attn_mask_type.append(AttnMaskType.FULL)
+        elif window_size == [-1, 0]:
+            processed_q_ranges.append(q_range)
+            processed_k_ranges.append(k_range)
+            attn_mask_type.append(AttnMaskType.CAUSAL)
+        elif window_size == [0, -1]:
+            processed_q_ranges.append(q_range)
+            processed_k_ranges.append(k_range)
+            attn_mask_type.append(AttnMaskType.INVCAUSAL)
+        else:
+            # sliding window
+            (
+                sw_q_ranges,
+                sw_k_ranges,
+                sw_attn_mask_type,
+            ) = infer_attn_mask_from_sliding_window(
+                q_range=q_range,
+                k_range=k_range,
+                window_size=window_size,
+            )
+            processed_q_ranges.extend(sw_q_ranges)
+            processed_k_ranges.extend(sw_k_ranges)
+            attn_mask_type.extend(sw_attn_mask_type)
+
+    return processed_q_ranges, processed_k_ranges, attn_mask_type
+
+
+def infer_attn_mask_from_sliding_window(
+    q_range: "AttnRange",
+    k_range: "AttnRange",
+    window_size: list[int],
+) -> tuple["AttnRanges", "AttnRanges", list["AttnMaskType"]]:
+    """Convert only one sliding window masks into representations using q_range, k_range, and mask type.
+    The mask type is specified using window_size.
+
+    Args:
+        q_range (AttnRange): q_range of this sliding window mask
+        k_range (AttnRange): k_range of this sliding window mask
+        window_size (list[int]): window_size of sliding window mask
+
+    Returns:
+        tuple[AttnRanges, AttnRanges, list[AttnMaskType]]: processed (q_ranges, k_ranges, masktypes) triple,
+            sliding window mask have been cutted into triple representation.
+    """
+    assert len(window_size) == 2, "window size must be of 2 int"
+    assert window_size[0] < k_range.seqlen and window_size[1] < k_range.seqlen, (
+        "the num of window_size must be -1 or < k_range.seqlen",
+        f"but got {window_size=}",
+    )
+
+    q_ranges_, k_ranges_ = AttnRanges(), AttnRanges()
+    attn_mask_type_: list["AttnMaskType"] = []
+
+    left_window_size = window_size[0] if window_size[0] != -1 else k_range.seqlen - 1
+    right_window_size = window_size[1] if window_size[1] != -1 else k_range.seqlen - 1
+
+    if left_window_size + right_window_size + 1 < k_range.seqlen:
+        sliding_window_length = left_window_size = right_window_size + 1
+        top_length = left_window_size + 1 if left_window_size > 0 else 0
+        bottom_length = right_window_size + 1 if right_window_size > 0 else 0
+
+        causal_q_range = AttnRange(
+            start=q_range.start,
+            end=q_range.start + top_length,
+        )
+        bi_causal_q_range = AttnRange(
+            start=q_range.start + top_length,
+            end=q_range.end - bottom_length,
+        )
+        inv_causal_q_range = AttnRange(
+            start=q_range.end - bottom_length,
+            end=q_range.end,
+        )
+
+        if causal_q_range.seqlen > 0:
+            causal_k_range = AttnRange(
+                start=k_range.start,
+                end=k_range.start + sliding_window_length,
+            )
+
+            q_ranges_.append(causal_q_range)
+            k_ranges_.append(causal_k_range)
+            attn_mask_type_.append(AttnMaskType.CAUSAL)
+
+        if bi_causal_q_range.seqlen > 0:
+            q_ranges_.append(bi_causal_q_range)
+            k_ranges_.append(k_range)
+            attn_mask_type_.append(AttnMaskType.BICAUSAL)
+
+        if inv_causal_q_range.seqlen > 0:
+            inv_causal_k_range = AttnRange(
+                start=k_range.end - sliding_window_length,
+                end=k_range.end,
+            )
+
+            q_ranges_.append(inv_causal_q_range)
+            k_ranges_.append(inv_causal_k_range)
+            attn_mask_type_.append(AttnMaskType.INVCAUSAL)
+    else:
+        top_length = q_range.seqlen - right_window_size - 1
+        bottom_length = q_range.seqlen - left_window_size - 1
+
+        causal_q_range = AttnRange(
+            start=q_range.start,
+            end=q_range.start + top_length,
+        )
+        bi_causal_q_range = AttnRange(
+            start=q_range.start + top_length,
+            end=q_range.end - bottom_length,
+        )
+        inv_causal_q_range = AttnRange(
+            start=q_range.end - bottom_length,
+            end=q_range.end,
+        )
+
+        if causal_q_range.seqlen > 0:
+            q_ranges_.append(causal_q_range)
+            k_ranges_.append(k_range)
+            attn_mask_type_.append(AttnMaskType.CAUSAL)
+
+        if bi_causal_q_range.seqlen > 0:
+            q_ranges_.append(bi_causal_q_range)
+            k_ranges_.append(k_range)
+            attn_mask_type_.append(AttnMaskType.FULL)
+
+        if inv_causal_q_range.seqlen > 0:
+            q_ranges_.append(inv_causal_q_range)
+            k_ranges_.append(k_range)
+            attn_mask_type_.append(AttnMaskType.INVCAUSAL)
+
+    return q_ranges_, k_ranges_, attn_mask_type_

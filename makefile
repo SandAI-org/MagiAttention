@@ -1,16 +1,33 @@
-.PHONY: refresh build install build_dist json release test clean
+.PHONY: refresh build install build_dist json release test clean format
 
 refresh: clean build install
 
+# Format code
+format:
+	@echo "Formatting code..."
+	@find magi_attention/csrc/flexible_flash_attention -name "*.h" -o -name "*.hpp" -o -name "*.cpp" -o -name "*.cu" | xargs clang-format -i
+	@find magi_attention/csrc/common -name "*.h" -o -name "*.hpp" -o -name "*.cpp" -o -name "*.cu" | xargs clang-format -i
+	@echo "Code formatting completed!"
+
+# Check code format (does not modify files, only checks)
+format-check:
+	@echo "Checking code format..."
+	@find magi_attention/csrc/flexible_flash_attention -name "*.h" -o -name "*.hpp" -o -name "*.cpp" -o -name "*.cu" | xargs clang-format --dry-run --Werror
+	@find magi_attention/csrc/common -name "*.h" -o -name "*.hpp" -o -name "*.cpp" -o -name "*.cu" | xargs clang-format --dry-run --Werror
+	@echo "Code format check completed!"
+
 build:
-	python -m build --wheel
+	git submodule update --init --recursive
+	python -m build --wheel --no-isolation
 
 install:
-	pip install .
+	git submodule update --init --recursive
+	pip install --no-build-isolation .
 
 build_dist:
 	make clean
-	python -m build --wheel
+	git submodule update --init --recursive
+	python -m build --wheel --no-isolation
 	pip install dist/*.whl
 	make test
 
@@ -18,7 +35,7 @@ release:
 	python -m twine upload dist/*
 
 test:
-	pytest tests/
+	pytest -q -s tests/
 
 coverage:
 	rm -f .coverage
@@ -32,7 +49,7 @@ clean:
 	rm -rf __pycache__
 	rm -rf tests/__pycache__
 	rm -rf magi_attention/__pycache__
-	rm -rf magi_attention/version.py
+	rm -rf magi_attention/_version.py
 	rm -rf build
 	rm -rf dist
 	rm -rf magi_attention.egg-info

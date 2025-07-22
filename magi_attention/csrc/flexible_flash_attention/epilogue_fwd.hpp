@@ -4,9 +4,9 @@
 
 #pragma once
 
+#include <cute/tensor.hpp>
 #include <cutlass/cutlass.h>
 #include <cutlass/fast_math.h> // For FastDivMod
-#include "cute/tensor.hpp"
 
 #include "cutlass/epilogue/collective/builders/sm90_common.inl"
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
@@ -525,7 +525,6 @@ struct CollectiveEpilogueFwd {
 
     int offset_o = seqlen_info.offset_q;
     int seqlen_o = seqlen_info.seqlen_q;
-    int qhead_per_khead = 1;
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE + offset_o * get<0>(params.stride_LSE)), params.shape_LSE, params.stride_LSE)(_, bidh);
     Tensor gLSE = local_tile(mLSE, Shape<Int<kBlockM>>{}, make_coord(m_block));
 

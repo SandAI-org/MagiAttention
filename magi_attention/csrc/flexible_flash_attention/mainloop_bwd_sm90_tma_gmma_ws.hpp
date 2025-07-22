@@ -9,9 +9,9 @@
 #include <cutlass/cutlass.h>
 #include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>
-#include "cutlass/pipeline/pipeline.hpp"
+#include <cutlass/pipeline/pipeline.hpp>
 
-#include "cute/tensor.hpp"
+#include <cute/tensor.hpp>
 
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 
@@ -609,7 +609,6 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
-    int const num_head = get<2>(params.shape_Q);
     using Barrier = cutlass::GenericBarrier<cutlass::detail::SyncwarpSync>;
     bool const lane_predicate = cute::elect_one_sync();
     int m_block = m_block_min;

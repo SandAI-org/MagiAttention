@@ -17,8 +17,13 @@ from collections import OrderedDict
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
+import magi_attention
+from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.mask import AttnMask
+from magi_attention.common.range import AttnRange
+from magi_attention.common.ranges import AttnRanges
 
 
 class FixedLenDict(OrderedDict):
@@ -47,33 +52,47 @@ class FixedLenDict(OrderedDict):
             return value
         return default
 
+    def get_most_recent_key(self):
+        """
+        Gets and returns the most recently added or accessed key.
+        If the dictionary is empty, returns None.
+        """
+        if not self:
+            return None
 
-def compute_pad_size(total_seqlen_q, cp_size, head_dim):
+        return next(reversed(self.keys()))
+
+
+def compute_pad_size(
+    total_seqlen_q: int,
+    cp_size: int,
+    head_dim: int,
+    chunk_size: int,
+) -> int:
     """
-    Get the size need to pad(for better performance).
-    args:
-        total_seqlen_q: seqlen of q.
-        cp_size: The size of cp group.
-        head_dim: head dim for q k v.
+    Get the size need to pad (for better performance).
 
-    returns:
-        tokens_to_pad: tokens need to pad.
-        q_block_size: block size.
+    Args:
+        total_seqlen_q (int): seqlen of q.
+        cp_size (int): The size of cp group.
+        head_dim (int): head dim for q k v.
+        chunk_size (int): chunk size to chunk the permutable tensor
+
+    Returns:
+        int: tokens need to pad.
     """
     if head_dim % 8 != 0:
         raise ValueError(f"head_dim ({head_dim}) must be divisible by 8")
     if head_dim > 192:
         raise ValueError(f"head_dim ({head_dim}) must be ≤ 192")
 
-    # for size the chunk_size is fixed as 1536
-    chunk_size = 1536
     # Validate sequence length
     block_requirement = chunk_size * cp_size
     tokens_to_pad = 0
     if (remainder := total_seqlen_q % block_requirement) != 0:
         tokens_to_pad = block_requirement - remainder
 
-    return tokens_to_pad, chunk_size
+    return tokens_to_pad
 
 
 def squash_batch_dim(x):
@@ -119,3 +138,72 @@ def from_mask(
     return AttnMask.from_mask(
         mask=mask,
     )
+
+
+def apply_padding(
+    q_ranges: AttnRanges,
+    k_ranges: AttnRanges,
+    attn_mask_type: list[AttnMaskType],
+    total_seqlen: int,
+    pad_size: int,
+) -> tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
+    """
+    Appends padding to the attention ranges and updates the corresponding mask type.
+
+    This function adds a padding query range at the end of `q_ranges`, a dummy key
+    range to `k_ranges`, and appends a `FULL` attention mask type to maintain alignment.
+    It is typically used when padding is required for alignment or block-wise processing.
+
+    Args:
+        q_ranges (AttnRanges): Query token ranges before padding.
+        k_ranges (AttnRanges): Key token ranges before padding.
+        attn_mask_type (list[AttnMaskType]): List of attention mask types corresponding to the ranges.
+        total_seqlen (int): The total original sequence length (used to place the padding at the end).
+        pad_size (int): The size of the padding to append.
+
+    Returns:
+        tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
+            - Updated query ranges with padding added.
+            - Updated key ranges with a dummy range for padding.
+            - Updated attention mask type list with a FULL mask for the padding block.
+    """
+    q_range = AttnRanges.from_ranges(q_ranges.to_naive_ranges(), check=True)
+    k_range = AttnRanges.from_ranges(k_ranges.to_naive_ranges(), check=True)
+    attn_mask_types = [attn_mask_type[i] for i in range(len(attn_mask_type))]
+
+    q_range.append(AttnRange(start=total_seqlen, end=total_seqlen + pad_size))
+    k_range.append(AttnRange(start=0, end=0))
+    attn_mask_types.append(AttnMaskType.FULL)
+
+    return q_range, k_range, attn_mask_types
+
+
+def init_hierarchical_mesh(
+    world_size: int,
+    world_size_inter_node: int,
+    world_size_intra_node: int,
+) -> DeviceMesh | None:
+    """Generate device mesh for hierarchical comm
+
+    Args:
+        world_size (int): total world size for cp
+        world_size_inter_node (int): inter-machine world size
+        world_size_intra_node (int): in-machine world size
+
+    Returns:
+        Optional[DeviceMesh]: The device mesh object if using hierarchical
+    """
+    assert world_size == world_size_inter_node * world_size_intra_node, (
+        f"world_size must be equal to inter_node * intra_node, "
+        f"but got {world_size=}, {world_size_inter_node=} and {world_size_intra_node=}"
+    )
+    if magi_attention.comm.is_hierarchical_comm_enable():
+        device_mesh = init_device_mesh(
+            device_type="cuda",
+            mesh_shape=(world_size_inter_node, world_size_intra_node),
+            mesh_dim_names=("inter", "intra"),
+        )
+    else:
+        device_mesh = None
+
+    return device_mesh

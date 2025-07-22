@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.abspath("../../"))
 project = "MagiAttention"
 copyright = "2025, Sandai"
 author = "Sandai"
-release = "v1.0.2"
+release = "v1.0.3"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -43,6 +43,7 @@ extensions = [
     "sphinx.ext.coverage",
     "sphinx.ext.mathjax",
     "myst_parser",
+    "sphinx_copybutton",
 ]
 
 myst_enable_extensions = [
@@ -69,13 +70,17 @@ napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 napoleon_include_init_with_doc = True
 napoleon_include_private_with_doc = False
-napoleon_include_special_with_doc = True
+napoleon_include_special_with_doc = False
 napoleon_use_admonition_for_examples = False
-napoleon_use_admonition_for_notes = False
+napoleon_use_admonition_for_notes = True
 napoleon_use_admonition_for_references = False
-napoleon_use_ivar = False
+napoleon_use_ivar = True
 napoleon_use_param = True
 napoleon_use_rtype = True
+
+copybutton_prompt_text = r">>> |\.\.\. |\$ "
+copybutton_prompt_is_regexp = True
+pygments_style = "colorful"
 
 templates_path = ["_templates"]
 exclude_patterns = []  # type: ignore
@@ -103,7 +108,34 @@ html_theme_options = {
     "show_version_warning_banner": True,
     "github_url": "https://github.com/SandAI-org/MagiAttention",
     "logo": {
+        "image_light": "_static/sand-logos/magi-black.png",
+        "image_dark": "_static/sand-logos/magi-black.png",
         "text": "MagiAttention",
     },
     "show_prev_next": False,
+    "navbar_start": ["navbar-logo", "version-switcher"],
+    "switcher": {
+        "json_url": (
+            "https://raw.githubusercontent.com/SandAI-org/MagiAttention/"
+            "refs/heads/dev/docs/source/_static/versions.json"
+        ),
+        "version_match": "1.0.3",
+    },
+    "icon_links": [
+        {
+            "name": "Blog",
+            "url": "https://sandai-org.github.io/MagiAttention/blog/",
+            "icon": "fas fa-book-bookmark",
+            "type": "fontawesome",
+        },
+    ],
 }
+
+
+def skip_signature(app, what, name, obj, options, signature, return_annotation):
+    return "", None
+
+
+def setup(app):
+    app.connect("autodoc-process-signature", skip_signature)
+    app.add_css_file("custom.css")

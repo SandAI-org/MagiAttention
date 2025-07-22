@@ -15,6 +15,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeAlias
 
+import torch
 from torch.cuda import Event, Stream
 from torch.distributed import Work
 
@@ -61,6 +62,10 @@ class WorkWithPostProcessFn:
         ret = self.post_process_fn(*args, **kwargs)
 
         self._work_done = True
+        # when work is done, the post process fn is no longer needed
+        # so we set it to a no-op, to avoid some long lived objects
+        # e.g. some partial funcs might hold on some tensors
+        self.post_process_fn = lambda *args, **kwargs: None
 
         return ret
 
@@ -69,17 +74,15 @@ class WorkWithPostProcessFn:
             for work in self.work:
                 match work:
                     case Stream():
-                        work.synchronize()
-                        # torch.cuda.current_stream().wait_stream(work)
-                        # torch.cuda.default_stream().wait_stream(work)
+                        torch.cuda.current_stream().wait_stream(work)
                     case Event():
-                        work.synchronize()
-                        # torch.cuda.current_stream().wait_event(work)
-                        # torch.cuda.default_stream().wait_event(work)
+                        torch.cuda.current_stream().wait_event(work)
                     case Work():
+                        # NOTE: WorkNCCL::wait default only blocks the current stream on the NCCL stream
+                        # unless in blocking mode then it will block CPU as well
                         work.wait()
                     case None:
                         pass
                     case _:
-                        raise TypeError(f"Unsupported type: {type(work)}")
+                        raise TypeError(f"Unsupported type: {type(work)=}")
             self.work = None

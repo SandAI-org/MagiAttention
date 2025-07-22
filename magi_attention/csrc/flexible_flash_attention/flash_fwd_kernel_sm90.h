@@ -1,5 +1,6 @@
 /******************************************************************************
- * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
+ * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar,
+ *Pradeep Ramani, Tri Dao.
  ******************************************************************************/
 
 #pragma once
@@ -12,12 +13,13 @@
 #include <cutlass/kernel_hardware_info.h>
 #include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>
-#include "cutlass/pipeline/pipeline.hpp"
+#include <cutlass/pipeline/pipeline.hpp>
 
-#include "cutlass/arch/grid_dependency_control.h"
+#include <cutlass/arch/grid_dependency_control.h>
 
 #include "seqlen.h"
 #include "softmax.h"
+#include "tile_scheduler.hpp"
 #include "utils.h"
 
 namespace flash {
@@ -65,17 +67,19 @@ class FlashAttnFwdSm90 {
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
   /// Register requirement for Load and Math WGs
-  // If we use cp.async to load K and V, we need more registers for the producer WG.
+  // If we use cp.async to load K and V, we need more registers for the producer
+  // WG.
   static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 24 : 40) : 32);
   static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 240 : 232) : 160);
-  // If you want to print from the producer warp, you'd need to increase the number of registers
-  // Otherwise you'll get CUDA error.
-  // static constexpr uint32_t LoadRegisterRequirement = 40;
-  // static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
+  // If you want to print from the producer warp, you'd need to increase the
+  // number of registers Otherwise you'll get CUDA error. static constexpr
+  // uint32_t LoadRegisterRequirement = 40; static constexpr uint32_t
+  // MmaRegisterRequirement = NumMmaWarpGroups == 2 ? 232 : 152;
 
   // Kernel level shared memory storage
-  // We overlap the shared memory for the mainloop and epilogue. However, we only want smem_o to overlap with smem_v
-  // and nothing else, so we'll pad in case sizeof(smem_o) > sizeof(smem_v).
+  // We overlap the shared memory for the mainloop and epilogue. However, we
+  // only want smem_o to overlap with smem_v and nothing else, so we'll pad in
+  // case sizeof(smem_o) > sizeof(smem_v).
   static constexpr int mainloop_smem_padding_ =
       int(sizeof(typename CollectiveEpilogue::TensorStorage)) - int(sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v)));
   static constexpr int mainloop_smem_padding = mainloop_smem_padding_ < 0 ? 0 : mainloop_smem_padding_;
@@ -121,7 +125,8 @@ class FlashAttnFwdSm90 {
   // Methods
   //
 
-  // Convert to underlying arguments. In this case, a simple copy for the aliased type.
+  // Convert to underlying arguments. In this case, a simple copy for the
+  // aliased type.
   static Params to_underlying_arguments(Arguments const& args) {
     CUTLASS_TRACE_HOST("to_underlying_arguments():");
 
@@ -171,7 +176,8 @@ class FlashAttnFwdSm90 {
     int const lane_predicate = cute::elect_one_sync();
     int const warp_idx = cutlass::canonical_warp_idx_sync();
 
-    // Issue Tma Descriptor Prefetch from a single thread (the first thread of the first warp)
+    // Issue Tma Descriptor Prefetch from a single thread (the first thread of
+    // the first warp)
     if (warp_idx == 0 && lane_predicate) {
       CollectiveMainloop::prefetch_tma_descriptors(params.mainloop);
       CollectiveEpilogue::prefetch_tma_descriptors(params.epilogue);
@@ -212,7 +218,8 @@ class FlashAttnFwdSm90 {
       }
     }();
 
-    // MainloopPipelineV pipeline_v(shared_storage.pipelines.pipeline_v, pipeline_params_v, ClusterShape{});
+    // MainloopPipelineV pipeline_v(shared_storage.pipelines.pipeline_v,
+    // pipeline_params_v, ClusterShape{});
     MainloopPipelineV pipeline_v = [&] {
       if constexpr (Use_TMA_KV) {
         return MainloopPipelineV(shared_storage.pipelines.pipeline_v, pipeline_params_v, ClusterShape{});
@@ -224,7 +231,8 @@ class FlashAttnFwdSm90 {
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue;
 
-    // We need this to guarantee that the Pipeline init is visible to all producers and consumer blocks in the Cluster
+    // We need this to guarantee that the Pipeline init is visible to all
+    // producers and consumer blocks in the Cluster
     if constexpr (size(ClusterShape{}) > 1) {
       cute::cluster_arrive_relaxed();
       cute::cluster_wait();
@@ -235,7 +243,8 @@ class FlashAttnFwdSm90 {
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
-      // Deallocate the registers for the producer WG, this makes the consumer WG have more registers
+      // Deallocate the registers for the producer WG, this makes the consumer
+      // WG have more registers
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
       // Initialize the producer pipeline state
@@ -249,7 +258,8 @@ class FlashAttnFwdSm90 {
       // Currently, SingleProducerWarp is always true
       static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-      // Only the first warp in the warp group needs to issue the TMA load instruction
+      // Only the first warp in the warp group needs to issue the TMA load
+      // instruction
       if constexpr (SingleProducerWarp) {
         if (warp_idx_in_warpgroup != 0) {
           return;
@@ -279,7 +289,7 @@ class FlashAttnFwdSm90 {
         if constexpr (MergeRange) {
           int bidb_idx = get<2>(block_coord);
           int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                           : (params.scheduler.num_batch - params.scheduler.range_map[bidb_idx]);
+                                                                           : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
           int bidb_start = params.scheduler.range_map[bidb_idx];
 
           for (int idx = 0; idx < loop_count; ++idx) {
@@ -318,8 +328,9 @@ class FlashAttnFwdSm90 {
       TiledMmaPV tiled_mma_pv;
 
       PipelineState smem_pipe_read;
-      // We don't need separate variables smem_pipe_release_k and smem_pipe_release_v
-      // (like in Cutlass's gemm) because the read and release pipeline states are always the same.
+      // We don't need separate variables smem_pipe_release_k and
+      // smem_pipe_release_v (like in Cutlass's gemm) because the read and
+      // release pipeline states are always the same.
 
       scheduler.init_consumer();
       mainloop.mma_init();
@@ -333,7 +344,9 @@ class FlashAttnFwdSm90 {
         // If there's tanh softcap, the scaling will be done before tanh.
         float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
         flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/0> softmax(softmax_scale_log2);
-        typename flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/0>::TensorT scores_scale;
+        typename flash::Softmax<
+            2 * (2 * kBlockM / NumMmaThreads),
+            /*Max_offset=*/0>::TensorT scores_scale;
         // Attention output (GEMM-II) accumulator.
         Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_MNK_PV{}));
         clear(tOrO);
@@ -343,7 +356,7 @@ class FlashAttnFwdSm90 {
         if constexpr (MergeRange) {
           int bidb_idx = get<2>(block_coord);
           int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                           : (params.scheduler.num_batch - params.scheduler.range_map[bidb_idx]);
+                                                                           : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
           int bidb_start = params.scheduler.range_map[bidb_idx];
 
           for (int idx = 0; idx < loop_count; ++idx) {
@@ -393,7 +406,8 @@ class FlashAttnFwdSm90 {
               tile_valid);
         }
 
-        // Do this here before the epilogue so that the next tile is ready to go.
+        // Do this here before the epilogue so that the next tile is ready to
+        // go.
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
         if (tile_valid) {
           ++work_idx;
@@ -406,8 +420,9 @@ class FlashAttnFwdSm90 {
           // Rescale tOrO
           softmax.rescale_o(tOrO, scores_scale);
 
-          // if (threadIdx.x == 128) { printf("Before epilogue, bid.x = %d, bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n", blockIdx.x, blockIdx.y,
-          // blockIdx.z, m_block, bidb, split_idx); }
+          // if (threadIdx.x == 128) { printf("Before epilogue, bid.x = %d,
+          // bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n",
+          // blockIdx.x, blockIdx.y, blockIdx.z, m_block, bidb, split_idx); }
           epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord);
         } else {
           // Write 0 to gO and -inf to gLSE.

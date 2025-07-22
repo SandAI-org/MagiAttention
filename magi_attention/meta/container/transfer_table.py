@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Any, Iterator
 
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
@@ -217,4 +217,13 @@ class TransferTable:
         ].k_ranges_local_in_recv_buf = remote_k_ranges_global_for_recv_rank.make_ranges_local(
             self._transfer_table[send_rank][recv_rank].k_ranges_global,
             is_self_merged=True,
+        )
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, TransferTable):
+            return False
+
+        return (self.cp_size, self._transfer_table) == (
+            other.cp_size,
+            other._transfer_table,
         )
