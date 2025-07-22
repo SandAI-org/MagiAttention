@@ -604,53 +604,53 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     CUTLASS_DEVICE
-    void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int conflict_bidb1, int conflict_bidb2) {
-        if (conflict_bidb1 == 0 && conflict_bidb2 == 0)
+    void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
+        if (left_range_sync_num == 0 && right_range_sync_num == 0)
             return ;
 
         // Calculate lock index
-        int block_idx1 = offset / q_block_size;
-        int index_1 = block_idx1 * num_heads + bidh;
-        int block_idx2 = (offset + q_block_size - 1) / q_block_size;
+        int left_range_block_idx = offset / q_block_size;
+        int left_range_index = left_range_block_idx * num_heads + bidh;
+        int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
 
         // Acquire the first lock
         #pragma unroll 1
-        while (atomicCAS(&range_lock[index_1 * 2], conflict_bidb1, conflict_bidb1) != conflict_bidb1) {
+        while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
         }
 
         // If we need a second lock
-        if (block_idx1 != block_idx2) {
-            int index_2 = block_idx2 * num_heads + bidh;
+        if (left_range_block_idx != right_range_block_idx) {
+            int right_range_index = right_range_block_idx * num_heads + bidh;
 
             // Try to acquire the second lock
             #pragma unroll 1
-            while (atomicCAS(&range_lock[index_2 * 2], conflict_bidb2, conflict_bidb2) != conflict_bidb2) {
+            while (atomicCAS(&range_lock[right_range_index * 2], right_range_sync_num, right_range_sync_num) != right_range_sync_num) {
             }
         }
     }
     
     CUTLASS_DEVICE
-    void deterministic_arrive(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int bidb, bool l_arrive_twice, bool r_arrive_twice) {
+    void deterministic_arrive(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int arrive_num, bool left_range_arrive_twice, bool right_range_arrive_twice) {
         // Calculate lock indices
-        int block_idx1 = offset / q_block_size;
-        int index_1 = block_idx1 * num_heads + bidh;
-        int block_idx2 = (offset + q_block_size - 1) / q_block_size;
-        int index_2 = block_idx2 * num_heads + bidh;
+        int left_range_block_idx = offset / q_block_size;
+        int left_range_index = left_range_block_idx * num_heads + bidh;
+        int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+        int right_range_index = right_range_block_idx * num_heads + bidh;
 
         // Release the second lock
-        int add_cnt = r_arrive_twice ? 2 : 1;
-        int tmp = atomicAdd(&range_lock[index_2 * 2 + 1], add_cnt);
+        int add_cnt = right_range_arrive_twice ? 2 : 1;
+        int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
         if (tmp + add_cnt == 2) {
-            atomicExch(&range_lock[index_2 * 2 + 1], 0);
-            atomicExch(&range_lock[index_2 * 2], bidb);
+            atomicExch(&range_lock[right_range_index * 2 + 1], 0);
+            atomicExch(&range_lock[right_range_index * 2], arrive_num);
         }
 
         // Release the first lock
-        add_cnt = l_arrive_twice ? 2 : 1;
-        tmp = atomicAdd(&range_lock[index_1 * 2 + 1], add_cnt);
+        add_cnt = left_range_arrive_twice ? 2 : 1;
+        tmp = atomicAdd(&range_lock[left_range_index * 2 + 1], add_cnt);
         if (tmp + add_cnt == 2) {
-            atomicExch(&range_lock[index_1 * 2 + 1], 0);
-            atomicExch(&range_lock[index_1 * 2], bidb);
+            atomicExch(&range_lock[left_range_index * 2 + 1], 0);
+            atomicExch(&range_lock[left_range_index * 2], arrive_num);
         }
     }
 
@@ -705,11 +705,11 @@ struct CollectiveMainloopBwdSm90 {
         auto m_block_sync = [&] (int m_block_id) {
             uint32_t smid = blockIdx.x;
             uint32_t sm_stride = gridDim.x;
-            int conflict_dq_index1 = seqlen_info.offset_q / kBlockM + m_block_id;
-            int conflict_dq_index2 = (seqlen_info.offset_q + kBlockM - 1) / kBlockM + m_block_id;
-            int sync_num1 = n_block == 0 ? params.dq_determin_conflict_state[conflict_dq_index1 * sm_stride + smid] * params.n_block_max_num
+            int left_dq_conflict_index = seqlen_info.offset_q / kBlockM + m_block_id;
+            int right_dq_conflict_index = (seqlen_info.offset_q + kBlockM - 1) / kBlockM + m_block_id;
+            int sync_num1 = n_block == 0 ? params.dq_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                     : bidb * params.n_block_max_num + n_block;
-            int sync_num2 = n_block == 0 ? params.dq_determin_conflict_state[conflict_dq_index2 * sm_stride + smid] * params.n_block_max_num
+            int sync_num2 = n_block == 0 ? params.dq_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                     : bidb * params.n_block_max_num + n_block;
             deterministic_sync(params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
         };
@@ -857,8 +857,7 @@ struct CollectiveMainloopBwdSm90 {
                       size<0>(typename TiledMmaSdP::ALayout{}) == cutlass::NumThreadsPerWarpGroup and
                       size<0>(typename TiledMmaSdP::BLayout{}) == cutlass::NumThreadsPerWarpGroup,
                       "Stride of the first mode must be 0 and the size of the mode must be NumThreadsPerWarpGroup");
-        constexpr int MmaWarpGroups = NumMmaThreads / cutlass::NumThreadsPerWarpGroup; // ??? I think MmaWarpGroups == NumMmaWarpGroups 
-        Layout warp_group_thread_layout = make_layout(make_shape(Int<MmaWarpGroups>{}),
+        Layout warp_group_thread_layout = make_layout(make_shape(Int<NumMmaWarpGroups>{}),
                                                       make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));
         Layout warp_group_thread_layout_dq = make_layout(make_shape(Int<NumMmaWarpGroups>{}),
                                                       make_stride(Int<cutlass::NumThreadsPerWarpGroup>{}));

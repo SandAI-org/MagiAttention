@@ -28,12 +28,6 @@ template <int Arch, int kHeadDim, int kBlockM, int kBlockN, bool Has_softcap,
           int NumMmaWarpGroups=2, int AtomLayoutMSdP=1, int AtomLayoutNdKV=2, int AtomLayoutMdQ=1,
           bool V_in_regs=false, bool RangeMerge=false>
 void run_flash_bwd(Flash_bwd_params &params, cudaStream_t stream) {
-    // constexpr bool Is_causal = false;
-    // constexpr bool Is_local = false;
-    // constexpr bool Varlen = true;
-    // int batch_q = 1;
-    // int batch_k = 1;
-
     using ElementAccum = float;
     using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
 

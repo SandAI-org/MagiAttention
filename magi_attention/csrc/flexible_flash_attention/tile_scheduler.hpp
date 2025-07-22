@@ -413,11 +413,11 @@ public:
                 int r = params.ranges[2 * bidb_now + 1];
                 bool l_arrive_twice = (l % kBlock != 0) && (block_now == 0);
                 bool r_arrive_twice = (l % kBlock != 0) && (block_now == (r - l + kBlock - 1) / kBlock - 1);
-                int conflict_o_index1 = l / kBlock + block_now;
-                int conflict_o_index2 = (l + kBlock - 1) / kBlock + block_now;
+                int left_conflict_index = l / kBlock + block_now;
+                int right_conflict_index = (l + kBlock - 1) / kBlock + block_now;
                 __syncwarp();
-                return cute::make_tuple((conflict_state[conflict_o_index1 * sm_stride + smid] << 1) | l_arrive_twice,
-                                        (conflict_state[conflict_o_index2 * sm_stride + smid] << 1) | r_arrive_twice);
+                return cute::make_tuple((conflict_state[left_conflict_index * sm_stride + smid] << 1) | l_arrive_twice,
+                                        (conflict_state[right_conflict_index * sm_stride + smid] << 1) | r_arrive_twice);
             };
 
             auto conflict_bidb = get_conflict_bidb(current_work.bidb, bidb, block);

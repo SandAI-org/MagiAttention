@@ -591,9 +591,9 @@ mha_fwd(const at::Tensor &q, // (total_q, h_q, d)
     
     // Initialize determin_range_locks tensor, the shape is same as range_locks
     at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
-    // Initialize determin_conflict_state, num_sm_max rows, ceil_div(total_q, kBlockM) + 1 columns
-    int const num_sm_max = 132; // max sm number for H100
-    at::Tensor determin_conflict_state = torch::empty({num_sm_max, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+    // Initialize determin_conflict_state, num_sm rows, ceil_div(total_q, kBlockM) + 1 columns
+    int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
+    at::Tensor determin_conflict_state = torch::empty({num_sm, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
 
     // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
     if (deterministic_enable) {
@@ -878,10 +878,10 @@ std::vector<at::Tensor> mha_bwd(
     // Initialize determin_range_locks tensor, the shape is same as range_locks
     at::Tensor determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));
     at::Tensor dq_determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
-    // Initialize determin_conflict_state, num_sm_max rows, ceil_div(total_k, kBlockN) + 1 columns
-    int const num_sm_max = 132; // max sm number for H100
-    at::Tensor determin_conflict_state = torch::empty({num_sm_max, (total_k + kBlockN - 1) / kBlockN + 1}, opts.dtype(torch::kInt32));
-    at::Tensor dq_determin_conflict_state = torch::empty({num_sm_max, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+    // Initialize determin_conflict_state, num_sm rows, ceil_div(total_k, kBlockN) + 1 columns
+    int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
+    at::Tensor determin_conflict_state = torch::empty({num_sm, (total_k + kBlockN - 1) / kBlockN + 1}, opts.dtype(torch::kInt32));
+    at::Tensor dq_determin_conflict_state = torch::empty({num_sm, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
 
     // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
     if (deterministic) {

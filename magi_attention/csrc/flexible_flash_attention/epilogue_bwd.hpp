@@ -158,53 +158,53 @@ struct CollectiveEpilogueBwd {
     }
 
     CUTLASS_DEVICE
-    void deterministic_sync(int* range_lock, int bidh, int offset, int k_block_size, int num_heads, int conflict_bidb1, int conflict_bidb2) {
-        if (conflict_bidb1 == 0 && conflict_bidb2 == 0)
+    void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
+        if (left_range_sync_num == 0 && right_range_sync_num == 0)
             return ;
 
         // Calculate lock index
-        int block_idx1 = offset / k_block_size;
-        int index_1 = block_idx1 * num_heads + bidh;
-        int block_idx2 = (offset + k_block_size - 1) / k_block_size;
+        int left_range_block_idx = offset / q_block_size;
+        int left_range_index = left_range_block_idx * num_heads + bidh;
+        int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
 
         // Acquire the first lock
         #pragma unroll 1
-        while (atomicCAS(&range_lock[index_1 * 2], conflict_bidb1, conflict_bidb1) != conflict_bidb1) {
+        while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
         }
 
         // If we need a second lock
-        if (block_idx1 != block_idx2) {
-            int index_2 = block_idx2 * num_heads + bidh;
+        if (left_range_block_idx != right_range_block_idx) {
+            int right_range_index = right_range_block_idx * num_heads + bidh;
 
             // Try to acquire the second lock
             #pragma unroll 1
-            while (atomicCAS(&range_lock[index_2 * 2], conflict_bidb2, conflict_bidb2) != conflict_bidb2) {
+            while (atomicCAS(&range_lock[right_range_index * 2], right_range_sync_num, right_range_sync_num) != right_range_sync_num) {
             }
         }
     }
     
     CUTLASS_DEVICE
-    void deterministic_arrive(int* range_lock, int bidh, int offset, int k_block_size, int num_heads, int bidb, bool l_arrive_twice, bool r_arrive_twice) {
+    void deterministic_arrive(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int arrive_num, bool left_range_arrive_twice, bool right_range_arrive_twice) {
         // Calculate lock indices
-        int block_idx1 = offset / k_block_size;
-        int index_1 = block_idx1 * num_heads + bidh;
-        int block_idx2 = (offset + k_block_size - 1) / k_block_size;
-        int index_2 = block_idx2 * num_heads + bidh;
+        int left_range_block_idx = offset / q_block_size;
+        int left_range_index = left_range_block_idx * num_heads + bidh;
+        int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+        int right_range_index = right_range_block_idx * num_heads + bidh;
 
         // Release the second lock
-        int add_cnt = r_arrive_twice ? 2 : 1;
-        int tmp = atomicAdd(&range_lock[index_2 * 2 + 1], add_cnt);
+        int add_cnt = right_range_arrive_twice ? 2 : 1;
+        int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
         if (tmp + add_cnt == 2) {
-            atomicExch(&range_lock[index_2 * 2 + 1], 0);
-            atomicExch(&range_lock[index_2 * 2], bidb);
+            atomicExch(&range_lock[right_range_index * 2 + 1], 0);
+            atomicExch(&range_lock[right_range_index * 2], arrive_num);
         }
 
         // Release the first lock
-        add_cnt = l_arrive_twice ? 2 : 1;
-        tmp = atomicAdd(&range_lock[index_1 * 2 + 1], add_cnt);
+        add_cnt = left_range_arrive_twice ? 2 : 1;
+        tmp = atomicAdd(&range_lock[left_range_index * 2 + 1], add_cnt);
         if (tmp + add_cnt == 2) {
-            atomicExch(&range_lock[index_1 * 2 + 1], 0);
-            atomicExch(&range_lock[index_1 * 2], bidb);
+            atomicExch(&range_lock[left_range_index * 2 + 1], 0);
+            atomicExch(&range_lock[left_range_index * 2], arrive_num);
         }
     }
 
@@ -219,15 +219,14 @@ struct CollectiveEpilogueBwd {
           BlockCoordType const& block_coord
           ) {
 
-        // auto [n_block, bidh, bidb] = block_coord;
         // Get block coordinates for current job(tile)
         int n_block = get<0>(block_coord);
         int bidh = get<1>(block_coord);
         int bidb = get<2>(block_coord);
-        int conflict_bidb1 = 0, conflict_bidb2 = 0;
+        int left_range_conflict_msg = 0, right_range_conflict_msg = 0;
         if constexpr (Deterministic) {
-            conflict_bidb1 = get<3>(block_coord);
-            conflict_bidb2 = get<4>(block_coord);
+            left_range_conflict_msg = get<3>(block_coord);
+            right_range_conflict_msg = get<4>(block_coord);
         }
 
         int bidh_idx_in_group;
@@ -278,10 +277,10 @@ struct CollectiveEpilogueBwd {
                 if (cute::elect_one_sync()) {
                     int qheads_per_kheads = params.qhead_per_khead_divmod;
                     // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
-                    // conflict_bidb >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
+                    // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
                     // if not conflict, conflict_bidb is 0
-                    int sync_num1 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (conflict_bidb1 >> 1) * qheads_per_kheads;
-                    int sync_num2 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (conflict_bidb2 >> 1) * qheads_per_kheads;
+                    int sync_num1 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
+                    int sync_num2 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
                     deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
                 }
             }
@@ -298,7 +297,7 @@ struct CollectiveEpilogueBwd {
             if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
                 int qheads_per_kheads = params.qhead_per_khead_divmod;
                 int arrive_num = bidb * qheads_per_kheads + bidh_idx_in_group + 1;
-                deterministic_arrive(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, arrive_num, conflict_bidb1 & 1, conflict_bidb2 & 1);
+                deterministic_arrive(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, arrive_num, left_range_conflict_msg & 1, right_range_conflict_msg & 1);
             }
         }
         // // Tell warp 0 that smem_k and smem_v are ready
