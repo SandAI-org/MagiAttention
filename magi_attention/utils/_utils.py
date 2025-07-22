@@ -93,13 +93,23 @@ def setup_dist_env(
     backend: str = "nccl",
     base_seed: int | None = None,
     seed_bias: Callable = lambda rank: 0,
-) -> tuple[int, int, dist.ProcessGroup, str, int | None]:
+) -> tuple[int, int, int, dist.ProcessGroup, int, int | None]:
     """set up distributed environment with the specified process group backend,
     NOTE: the test script using this func to set up should be executed through torchrun
+
+    Args:
+        backend (str, optional): the process group backend. Defaults to "nccl".
+        base_seed (int | None, optional): the base seed. Defaults to None to not set seed.
+        seed_bias (Callable, optional): the seed bias func for each rank. Defaults to lambda rank: 0, i.e., no bias.
+
+    Returns:
+        rank, local_rank, world_size, wolrd_group, device, seed
     """
-    rank = int(os.environ["LOCAL_RANK"])
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    torch.cuda.set_device(rank)
+    torch.cuda.set_device(local_rank)
+    device = torch.cuda.current_device()
 
     dist.init_process_group(
         backend=backend,
@@ -107,12 +117,19 @@ def setup_dist_env(
         world_size=world_size,
     )
 
-    manual_seed = None
+    seed = None
     if base_seed is not None:
-        manual_seed = base_seed + seed_bias(rank)
-        torch.manual_seed(manual_seed)
+        seed = base_seed + seed_bias(rank)
+        torch.manual_seed(seed)
 
-    return rank, world_size, dist.group.WORLD, f"cuda:{rank}", manual_seed  # noqa: E231
+    return (
+        rank,
+        local_rank,
+        world_size,
+        dist.group.WORLD,
+        device,
+        seed,
+    )  # noqa: E231
 
 
 def clearup_dist_env() -> None:
