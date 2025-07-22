@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include <assert.h>
-#include <stdlib.h>
+#include <cassert>
+#include <cstdlib>
 
 #define CHECK_CUDA(call)                                                                            \
   do {                                                                                              \

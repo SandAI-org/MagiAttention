@@ -4,9 +4,9 @@
 
 #pragma once
 
-#include <assert.h>
-#include <stdint.h>
-#include <stdlib.h>
+#include <cassert>
+#include <cstdint>
+#include <cstdlib>
 
 #include <cuda_fp16.h>
 
@@ -14,9 +14,6 @@
 #include <cuda_bf16.h>
 #endif
 
-#include <cute/tensor.hpp>
-
-#include <cutlass/array.h>
 #include <cutlass/cutlass.h>
 #include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>

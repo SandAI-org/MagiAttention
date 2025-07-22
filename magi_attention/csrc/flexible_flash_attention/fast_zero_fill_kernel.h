@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cute/layout.hpp>
-#include <cute/tensor.hpp>
 
 #include <cutlass/arch/grid_dependency_control.h>
 #include <cutlass/arch/reg_reconfig.h>
