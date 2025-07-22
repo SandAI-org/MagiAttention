@@ -49,47 +49,44 @@ struct Flash_fwd_params : public Qkv_params {
 
   // The pointer to the softmax sum.
   void* __restrict__ softmax_lse_ptr;
-  void* __restrict__ softmax_lseaccum_ptr;
 
-  // The dimensions.
-  // b = q_ranges.shape[0]; seqlen_q: max_seqlen_q, seqlen_k: max_seqlen_k
-  int b, merge_batch_size, max_seqlen_q, max_seqlen_k, max_seqlen_knew, d, max_seqlen_q_rounded, max_seqlen_k_rounded, d_rounded, rotary_dim;
-  int total_q, total_k, total_knew;
-  int b_k; // When having KV cache and with cache_batch_idx, K & V might have larger batch size than Q
-  int dv, dv_rounded; // For the case where V headdim is different from Q/K headdim
+  // Dimensions params
+  int b, d, d_rounded;
+  int max_seqlen_q, max_seqlen_k, max_seqlen_q_rounded, max_seqlen_k_rounded;
+  int total_q, total_k;
 
   // The scaling factors for the kernel.
   float scale_softmax;
   float softcap;
 
-  // array of length b holding the starting index and ending index of each sequence.
-  // only used for flex flash attention.
+  // Ranges params (The triplet determines the specific computation)
   int* __restrict__ q_ranges;
   int* __restrict__ k_ranges;
   int* __restrict__ attn_type_map;
+
+  // RangeMerge params
+  int merge_batch_size;
   int* __restrict__ merge_q_ranges;
   int* __restrict__ qk_map;
   int* __restrict__ unique_count;
-  int* __restrict__ merge_k_ranges;
-  int* __restrict__ bwd_kq_map;
-  int* __restrict__ bwd_unique_count;
 
+  // Dtype params
   at::ScalarType compute_type;
   at::ScalarType out_type;
 
+  // Performance tuning params
   bool disable_fwd_atomic_reduction;
-
-  int* __restrict__ tile_count_semaphore;
   int* __restrict__ range_locks;
-  // int * __restrict__ num_m_blocks_ptr;
-  // int * __restrict__ num_n_blocks_ptr;
-  int* __restrict__ num_splits_dynamic_ptr;
 
-  // For deterministic
+  // Deterministic params
+  bool deterministic;
   int* __restrict__ determin_range_locks;
   int* __restrict__ determin_conflict_state;
+
+  // Kernel utility params
   int arch;
   int num_sm;
+  int* __restrict__ tile_count_semaphore;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -97,9 +94,13 @@ struct Flash_fwd_params : public Qkv_params {
 struct Flash_bwd_params : public Flash_fwd_params {
   using index_t = int64_t;
 
-  at::ScalarType dkv_type;
+  // RangeMerge params
+  int* __restrict__ merge_k_ranges;
+  int* __restrict__ bwd_kq_map;
+  int* __restrict__ bwd_unique_count;
 
-  bool disable_bwd_dkv_atomic_reduction;
+  // Dtype params
+  at::ScalarType dkv_type;
 
   // The dO and dQKV matrices.
   void* __restrict__ do_ptr;
@@ -112,20 +113,12 @@ struct Flash_bwd_params : public Flash_fwd_params {
   void* __restrict__ dk_accum_ptr;
   void* __restrict__ dv_accum_ptr;
 
-  // // To accumulate dK and dV in case we're splitting the bwd along seqlen_q
-  // dimension void *__restrict__ dk_accum_ptr; void *__restrict__
-  // dv_accum_ptr;
-
   // The stride between rows of the dO, dQ, dK and dV matrices.
-  index_t do_batch_stride;
   index_t do_row_stride;
-  index_t do_head_stride;
-  index_t dq_batch_stride;
-  index_t dk_batch_stride;
-  index_t dv_batch_stride;
   index_t dq_row_stride;
   index_t dk_row_stride;
   index_t dv_row_stride;
+  index_t do_head_stride;
   index_t dq_head_stride;
   index_t dk_head_stride;
   index_t dv_head_stride;
@@ -134,11 +127,12 @@ struct Flash_bwd_params : public Flash_fwd_params {
   void* __restrict__ dsoftmax_sum;
   void* __restrict__ softmax_lse_log2_ptr;
 
+  // Performance tuning params
+  bool disable_bwd_dkv_atomic_reduction;
+
+  // Deterministic params
   int* __restrict__ dq_determin_conflict_state;
   int* __restrict__ dq_determin_range_locks;
-
-  bool deterministic;
-  index_t dq_accum_split_stride;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
