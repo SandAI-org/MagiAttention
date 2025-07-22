@@ -21,18 +21,6 @@ To support computing irregular-shaped masks, we implemented a `flexible_flash_at
 ```
 
 
-## Compute Pad Size
-
-During the use of MagiAttention, we divide the `total_seqlen` into multiple chunks of size `chunk_size` and evenly distribute them across multiple GPUs. To ensure that `total_seqlen` is divisible by `chunk_size` and that each GPU receives the same number of chunks, we need to pad the original input. You can call `compute_pad_size` to calculate the required padding length, and use this value as a parameter in subsequent functions.
-
-```{eval-rst}
-.. currentmodule:: magi_attention.api.functools
-```
-
-```{eval-rst}
-.. autofunction:: compute_pad_size
-```
-
 ## Dispatch
 
 ### Dispatch for varlen masks
@@ -71,6 +59,18 @@ Similar to the logic of `magi_attn_varlen_dispatch`, `magi_attn_flex_dispatch` f
 .. autofunction:: magi_attn_flex_key
 ```
 
+### Dispatch Function
+
+If you already have the key, you can call `dispatch` to get the padded and dispatched local tensor.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.magi_attn_interface
+```
+
+```{eval-rst}
+.. autofunction:: dispatch
+```
+
 ## Calculate Attention
 
 After dispatch and projection, you should obtain the query, key, and value needed for computation. Using the key obtained from the dispatch function mentioned above, you can perform the computation by calling `calc_attn`, which returns the results out and lse. The description of calc_attn is as follows.
@@ -93,4 +93,47 @@ After the attention computation, communication is needed to gather the results b
 
 ```{eval-rst}
 .. autofunction:: undispatch
+```
+
+
+## Utility Functions
+
+### Compute Pad Size
+
+During the use of MagiAttention, we divide the `total_seqlen` into multiple chunks of size `chunk_size` and evenly distribute them across multiple GPUs. To ensure that `total_seqlen` is divisible by `chunk_size` and that each GPU receives the same number of chunks, we need to pad the original input. You can call `compute_pad_size` to calculate the required padding length, and use this value as a parameter in subsequent functions.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.functools
+```
+
+```{eval-rst}
+.. autofunction:: compute_pad_size
+```
+
+
+### Get Position Ids
+
+Since MagiAttention needs to permute the input tensor along the seqlen dim, some token-aware ops might be affected, such as RoPE. Therefore, we provide a function `get_position_ids` to get the position ids of the input tensor similar to Llama.
+
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.magi_attn_interface
+```
+
+```{eval-rst}
+.. autofunction:: get_position_ids
+```
+
+
+### Get Most Recent Key
+
+If you have trouble accessing the meta key, and meanwhile you need to get the most recent key, then you can call `get_most_recent_key` to get it. However, we strongly recommend you to access the key passed through the arguments,
+in case of unexpected inconsistency.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.magi_attn_interface
+```
+
+```{eval-rst}
+.. autofunction:: get_most_recent_key
 ```

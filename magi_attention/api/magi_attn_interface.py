@@ -73,8 +73,7 @@ def magi_attn_varlen_key(
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
-        tuple[torch.Tensor, DistAttnRuntimeKey]:
-            - DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
+        DistAttnRuntimeKey: the key points to the inner DistAttnRuntimeMgr.
 
     Example:
         >>> dist_attn_runtime_key = magi_attn_varlen_key(
@@ -162,9 +161,9 @@ def magi_attn_varlen_dispatch(
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ):
     """This is a flash_attn_varlen like interface, to
-    generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k and causal,
-    further to pad the input tensor, caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr,
-    and finally dispatch the input tensor to local tensor.
+    generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k and causal flag,
+    further caculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
+    finally pad and dispatch the input tensor to local tensor.
 
     Args:
         x (torch.Tensor): input tensor
@@ -187,7 +186,7 @@ def magi_attn_varlen_dispatch(
     Returns:
         tuple[torch.Tensor, DistAttnRuntimeKey]:
             - x (torch.Tensor): the input tensor after padding.
-            - DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
+            - key (DistAttnRuntimeKey): the key points to the inner DistAttnRuntimeMgr.
 
     Example:
         >>> local_x, dist_attn_runtime_key = magi_attn_varlen_dispatch(
@@ -263,7 +262,7 @@ def magi_attn_flex_key(
 ) -> DistAttnRuntimeKey:
     """This is the most flexible interface,
     directly passing in q_ranges, k_ranges and attn_mask_type to
-    pad the input tensor x, caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
+    caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
 
     Args:
         x (torch.Tensor): input tensor
@@ -291,10 +290,9 @@ def magi_attn_flex_key(
         is_k_permutable (bool): is key tensor permutable
 
     Returns:
-        tuple[torch.Tensor, DistAttnRuntimeKey]:
-            - DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
+        DistAttnRuntimeKey: the key points to the inner DistAttnRuntimeMgr.
 
-    NOTE:
+    Note:
         1. For decoder-only transformers (e.g., GPT), it applies 'self-attn' as follows:
 
             a. ``is_same_source`` is True.
@@ -492,8 +490,8 @@ def magi_attn_flex_dispatch(
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
     """This is the most flexible interface,
     directly passing in q_ranges, k_ranges and attn_mask_type to
-    pad the input tensor x, caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr,
-    and dispatch the input tensor to local tensor.
+    caculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
+    finally pad and dispatch the input tensor to local tensor.
 
     Args:
         x (torch.Tensor): input tensor
@@ -523,7 +521,7 @@ def magi_attn_flex_dispatch(
     Returns:
         tuple[torch.Tensor, DistAttnRuntimeKey]:
             - local_x (torch.Tensor): the local input x after padding.
-            - key (DistAttnRuntimeKey): DistAttnRuntimeKey.
+            - key (DistAttnRuntimeKey): the key points to the inner DistAttnRuntimeMgr.
 
     NOTE:
         1. For decoder-only transformers (e.g., GPT), it applies 'self-attn' as follows:
@@ -610,21 +608,22 @@ def dispatch(
     key: DistAttnRuntimeKey,
 ) -> torch.Tensor:
     """
-    Dispatch the input tensor to local tensor on each rank along dim0 (seqlen dim).
-    args:
-        x (torch.Tensor): input total tensor.
-        key (DistAttnRuntimeKey): the object that holds some inner meta data
-        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+    Pad and dispatch the input tensor to local tensor on each rank along the seqlen dim.
 
-    returns:
-        local_x (torch.Tensor): the dispatched local tensor.
+    Args:
+        x (torch.Tensor): input total tensor.
+        key (DistAttnRuntimeKey): the key that holds some inner meta data,
+            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+
+    Returns:
+        torch.Tensor: the padded and dispatched local tensor.
 
     Raises:
         ValueError: If the provided ``key`` does not exist in ``DistAttnRuntimeDict``.
     """
     mgr = DistAttnRuntimeDict.get(key)
     if mgr is None:
-        raise ValueError("DistRunTimeKey not exists!")
+        raise ValueError("The DistAttnRuntimeKey does not exist!")
 
     pad_size = key.pad_size
     padded_x = pad_at_dim(x, 0, pad_size)
@@ -637,11 +636,11 @@ def undispatch(
     key: DistAttnRuntimeKey,
 ) -> torch.Tensor:
     """
-    Undispatch local tensor to total tensor and unpad the total tensor at dim0 (seqlen dim).
+    Undispatch and unpad the local tensor to global tensor along the seqlen dim.
 
     Args:
         x (torch.Tensor): local tensor
-        key (DistAttnRuntimeKey): the object that holds some inner meta data
+        key (DistAttnRuntimeKey): the key that holds some inner meta data,
             as one argument for many other magi_attention APIs, about which the users may have no bother to care.
 
     Returns:
@@ -652,7 +651,7 @@ def undispatch(
     """
     mgr = DistAttnRuntimeDict.get(key)
     if mgr is None:
-        raise ValueError("DistRunTimeKey not exists!")
+        raise ValueError("The DistAttnRuntimeKey does not exist!")
 
     total_x = mgr.undispatch_qo(x)
     pad_size = key.pad_size
@@ -687,7 +686,7 @@ def calc_attn(
     """
     mgr = DistAttnRuntimeDict.get(key)
     if mgr is None:
-        raise ValueError("DistRunTimeKey not exists!")
+        raise ValueError("The DistAttnRuntimeKey does not exist!")
 
     return mgr.calc_attn(q, k, v)
 
@@ -697,14 +696,15 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
     Get the position ids of local tensor to global tensor after dispatching.
 
     Args:
-        key (DistAttnRuntimeKey): the object that holds some inner meta data
-        as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+        key (DistAttnRuntimeKey): the key that holds some inner meta data,
+            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+
     Returns:
-        position_ids (torch.Tensor): postion_ids of local tensor to global tensor.
+        torch.Tensor: postion ids of local tensor w.r.t. global tensor.
     """
     mgr: DistAttnRuntimeMgr = DistAttnRuntimeDict.get(key)
     if mgr is None:
-        raise ValueError("DistRunTimeKey not exists!")
+        raise ValueError("The DistAttnRuntimeKey does not exist!")
 
     return mgr.get_position_ids()
 
@@ -712,7 +712,12 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
 def get_most_recent_key() -> DistAttnRuntimeKey:
     """Get the most recent inserted key.
 
+    This is useful when you can not access the key through the arguments,
+    and meanwhile you only need the most recent inserted key.
+    However, we strongly recommend you to access the key passed through the arguments,
+    in case of unexpected inconsistency.
+
     Returns:
-        key (DistAttnRuntimeKey): the most recent inserted key.
+        DistAttnRuntimeKey: the most recent inserted key.
     """
     return DistAttnRuntimeDict.get_most_recent_key()
