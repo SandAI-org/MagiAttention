@@ -2,8 +2,9 @@
 
 <p align="center">
     <a href="https://static.magi.world/static/files/MAGI_1.pdf"><img alt="paper" src="https://img.shields.io/badge/Paper-Magi_1-red"></a>
+    <a href="https://SandAI-org.github.io/MagiAttention/docs/"><img alt="docs" src="https://img.shields.io/badge/Docs-MagiAttention-green"></a>
     <a href="https://SandAI-org.github.io/MagiAttention/blog/"><img alt="blog" src="https://img.shields.io/badge/Blog-MagiAttention-purple"></a>
-    <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="license" src="https://img.shields.io/badge/Release-v1.0.0-blue"></a>
+    <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="license" src="https://img.shields.io/badge/Release-v1.0.3-blue"></a>
 </p>
 
 <p align="center">
@@ -339,7 +340,7 @@ For more information, you can refer to `example/transformers/README.md`.
 
 ## Documentation
 
-Coming soon ...
+Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
 
 
 ## Performance Benchmarks 📊
