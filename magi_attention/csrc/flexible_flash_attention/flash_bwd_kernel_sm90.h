@@ -226,56 +226,52 @@ class FlashAttnBwdSm90 {
               bool tile_valid_tmp =
                   mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
 
-                            tile_valid = tile_valid || tile_valid_tmp;
-                        }
-                    }
-                    else {
-                        tile_valid = mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write,
-                                    smem_pipe_write_do, shared_storage, block_coord, tile_valid);
-                    }
+              tile_valid = tile_valid || tile_valid_tmp;
+            }
+          } else {
+            tile_valid = mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
+          }
 
-                    scheduler_prefetch();
-                }
-                mainloop.load_tail(pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do);
-            } else if (warp_idx_in_warpgroup == 1) {
-              int bidb_last = 0;
-              for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
-                    work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+          scheduler_prefetch();
+        }
+        mainloop.load_tail(pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do);
+      } else if (warp_idx_in_warpgroup == 1) {
+        int bidb_last = 0;
+        for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
+             work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+          auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
+          // get block_coord without deterministic message
+          auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
+          auto [n_block, bidh, bidb_idx] = block_coord;
 
-                  auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
-                  // get block_coord without deterministic message
-                  auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
-                  auto [n_block, bidh, bidb_idx] = block_coord;
+          if constexpr (RangeMerge) {
+            int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
+            int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
 
-                if constexpr (RangeMerge) {
-                  int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-                  int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
-
-                  for (int idx = 0; idx < loop_count; ++idx) {
-                    int bidb = bidb_start + idx;
-                    cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
-                    if constexpr (!Deterministic) {
-                      mainloop.store_dq(params.mainloop, shared_storage, block_coord);
-                    } else {
-                      mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
-                      bidb_last = bidb;
-                    }
-                  }
-                }
-                else {
-                  if constexpr (!Deterministic) {
-                    mainloop.store_dq(params.mainloop, shared_storage, block_coord);
-                  } else {
-                    mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
-                    bidb_last = bidb_idx;
-                  }
-                }
+            for (int idx = 0; idx < loop_count; ++idx) {
+              int bidb = bidb_start + idx;
+              cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
+              if constexpr (!Deterministic) {
+                mainloop.store_dq(params.mainloop, shared_storage, block_coord);
+              } else {
+                mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
+                bidb_last = bidb;
               }
             }
-        } else {  // Consumer
-            cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
-            // Initialize matmul objects.
-            TiledMmadKV tiled_mma_dKV;
+          } else {
+            if constexpr (!Deterministic) {
+              mainloop.store_dq(params.mainloop, shared_storage, block_coord);
+            } else {
+              mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
+              bidb_last = bidb_idx;
+            }
+          }
+        }
+      }
+    } else { // Consumer
+      cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
+      // Initialize matmul objects.
+      TiledMmadKV tiled_mma_dKV;
 
       PipelineState smem_pipe_read;
       PipelineState_dO smem_pipe_read_do;

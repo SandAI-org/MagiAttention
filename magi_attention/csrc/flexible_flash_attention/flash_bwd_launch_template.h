@@ -106,61 +106,61 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       Deterministic>;
   // uncomment the following line to resume to non-persistent kernel
   // using Scheduler = flash::SingleTileScheduler<Varlen, false /*Split*/, false /*PackGQA*/, kBlockN>;
-  using Scheduler =
-      flash::DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
+  using Scheduler = flash::
+      DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
-    typename CollectiveMainloop::Arguments mainloop_args {
-        static_cast<Element const*>(params.q_ptr),
-        {params.total_q, params.d, params.h_qo},  // shape_Q
-        {params.q_row_stride, _1{}, params.q_head_stride},  // stride_Q
-        static_cast<Element const*>(params.k_ptr),
-        {params.total_k, params.d, params.h_kv},  // shape_K
-        {params.k_row_stride, _1{}, params.k_head_stride},  // stride_K
-        static_cast<Element const*>(params.v_ptr),
-        {params.v_row_stride, _1{}, params.v_head_stride},  // stride_V
-        static_cast<Element const*>(params.do_ptr),
-        {params.do_row_stride, _1{}, params.do_head_stride},  // stride_dO
-        static_cast<ElementAccum*>(params.dq_ptr),
-        {params.total_q, params.d, params.h_qo},  // shape_dQ
-        {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
-        static_cast<float*>(params.softmax_lse_log2_ptr),
-        {params.max_seqlen_q_rounded, params.h_qo, params.b},   // shape_LSE
-        {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded},  // stride_LSE_log2
-        static_cast<float*>(params.dsoftmax_sum),
-        {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded},  // stride_dPsum
-        params.scale_softmax,
-        params.softcap,
-        params.q_ranges, params.k_ranges,
-        params.dq_determin_conflict_state,
-        params.dq_determin_range_locks,
-        params.attn_type_map
-    };
-    // The case work with GQA is ugly but idk how to fix it.
-    typename CollectiveEpilogue::Arguments epilogue_args {
-        static_cast<typename CollectiveEpilogue::Element*>(params.dk_ptr),
-        {params.total_k, params.d, params.h_kv},  // shape_dK
-        {params.dk_row_stride, _1{}, params.dk_head_stride},  // stride_dK
-        static_cast<typename CollectiveEpilogue::Element*>(params.dv_ptr),
-        {params.dv_row_stride, _1{}, params.dv_head_stride},  // stride_dV
-        params.h_qo,
-        params.h_kv,
-        params.q_ranges,
-        params.k_ranges,
-        params.determin_range_locks,
-    };
+  typename CollectiveMainloop::Arguments mainloop_args{
+      static_cast<Element const*>(params.q_ptr),
+      {params.total_q, params.d, params.h_qo}, // shape_Q
+      {params.q_row_stride, _1{}, params.q_head_stride}, // stride_Q
+      static_cast<Element const*>(params.k_ptr),
+      {params.total_k, params.d, params.h_kv}, // shape_K
+      {params.k_row_stride, _1{}, params.k_head_stride}, // stride_K
+      static_cast<Element const*>(params.v_ptr),
+      {params.v_row_stride, _1{}, params.v_head_stride}, // stride_V
+      static_cast<Element const*>(params.do_ptr),
+      {params.do_row_stride, _1{}, params.do_head_stride}, // stride_dO
+      static_cast<ElementAccum*>(params.dq_ptr),
+      {params.total_q, params.d, params.h_qo}, // shape_dQ
+      {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
+      static_cast<float*>(params.softmax_lse_log2_ptr),
+      {params.max_seqlen_q_rounded, params.h_qo, params.b}, // shape_LSE
+      {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_LSE_log2
+      static_cast<float*>(params.dsoftmax_sum),
+      {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_dPsum
+      params.scale_softmax,
+      params.softcap,
+      params.q_ranges,
+      params.k_ranges,
+      params.dq_determin_conflict_state,
+      params.dq_determin_range_locks,
+      params.attn_type_map};
+  // The case work with GQA is ugly but idk how to fix it.
+  typename CollectiveEpilogue::Arguments epilogue_args{
+      static_cast<typename CollectiveEpilogue::Element*>(params.dk_ptr),
+      {params.total_k, params.d, params.h_kv}, // shape_dK
+      {params.dk_row_stride, _1{}, params.dk_head_stride}, // stride_dK
+      static_cast<typename CollectiveEpilogue::Element*>(params.dv_ptr),
+      {params.dv_row_stride, _1{}, params.dv_head_stride}, // stride_dV
+      params.h_qo,
+      params.h_kv,
+      params.q_ranges,
+      params.k_ranges,
+      params.determin_range_locks,
+  };
 
-    int num_blocks_n = cutlass::ceil_div(params.max_seqlen_k, get<1>(TileShape_MNK{}));
-    num_blocks_n = cutlass::round_up(num_blocks_n, size<1>(ClusterShape{}));
-    typename flash::TileSchedulerArguments scheduler_args {
-        /*num_heads*/ params.h_qo,
-        /*num_batches*/ params.merge_batch_size,
-        /*tile_count_semaphore*/ params.tile_count_semaphore,
-        /*ranges*/ params.k_ranges,
-        /*merge_ranges*/ params.merge_k_ranges,
-        /*range_map*/ params.bwd_kq_map,
-        /*determin_conflict_state*/params.determin_conflict_state,
-    };
+  int num_blocks_n = cutlass::ceil_div(params.max_seqlen_k, get<1>(TileShape_MNK{}));
+  num_blocks_n = cutlass::round_up(num_blocks_n, size<1>(ClusterShape{}));
+  typename flash::TileSchedulerArguments scheduler_args{
+      /*num_heads*/ params.h_qo,
+      /*num_batches*/ params.merge_batch_size,
+      /*tile_count_semaphore*/ params.tile_count_semaphore,
+      /*ranges*/ params.k_ranges,
+      /*merge_ranges*/ params.merge_k_ranges,
+      /*range_map*/ params.bwd_kq_map,
+      /*determin_conflict_state*/ params.determin_conflict_state,
+  };
 
   int device;
   cudaGetDevice(&device);

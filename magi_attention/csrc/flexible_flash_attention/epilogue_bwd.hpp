@@ -27,7 +27,7 @@ template <
     bool dKV_swapAB_,
     int AtomLayoutKdKV = 1,
     bool DisableBwdDkvAtomicReduction_ = false,
-    bool Deterministic_=false>
+    bool Deterministic_ = false>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
   using Element = Element_;
@@ -98,12 +98,8 @@ struct CollectiveEpilogueBwd {
           select<1, 2>(TileShape_MNK{}),
           _1{})), // no mcast for dKV
       std::nullptr_t>;
-    
-  using BlockCoordType = std::conditional_t<
-    Deterministic,
-    cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>,
-    cute::tuple<int32_t, int32_t, int32_t>
-  >;
+
+  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
   // Host side kernel arguments
   struct Arguments {
@@ -175,56 +171,64 @@ struct CollectiveEpilogueBwd {
     }
   }
 
-    CUTLASS_DEVICE
-    void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
-        if (left_range_sync_num == 0 && right_range_sync_num == 0)
-            return ;
+  CUTLASS_DEVICE
+  void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
+    if (left_range_sync_num == 0 && right_range_sync_num == 0)
+      return;
 
-        // Calculate lock index
-        int left_range_block_idx = offset / q_block_size;
-        int left_range_index = left_range_block_idx * num_heads + bidh;
-        int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+    // Calculate lock index
+    int left_range_block_idx = offset / q_block_size;
+    int left_range_index = left_range_block_idx * num_heads + bidh;
+    int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
 
-        // Acquire the first lock
-        #pragma unroll 1
-        while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
-        }
-
-        // If we need a second lock
-        if (left_range_block_idx != right_range_block_idx) {
-            int right_range_index = right_range_block_idx * num_heads + bidh;
-
-            // Try to acquire the second lock
-            #pragma unroll 1
-            while (atomicCAS(&range_lock[right_range_index * 2], right_range_sync_num, right_range_sync_num) != right_range_sync_num) {
-            }
-        }
+// Acquire the first lock
+#pragma unroll 1
+    while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
     }
-    
-    CUTLASS_DEVICE
-    void deterministic_arrive(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int arrive_num, bool left_range_arrive_twice, bool right_range_arrive_twice) {
-        // Calculate lock indices
-        int left_range_block_idx = offset / q_block_size;
-        int left_range_index = left_range_block_idx * num_heads + bidh;
-        int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
-        int right_range_index = right_range_block_idx * num_heads + bidh;
 
-        // Release the second lock
-        int add_cnt = right_range_arrive_twice ? 2 : 1;
-        int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
-        if (tmp + add_cnt == 2) {
-            atomicExch(&range_lock[right_range_index * 2 + 1], 0);
-            atomicExch(&range_lock[right_range_index * 2], arrive_num);
-        }
+    // If we need a second lock
+    if (left_range_block_idx != right_range_block_idx) {
+      int right_range_index = right_range_block_idx * num_heads + bidh;
 
-        // Release the first lock
-        add_cnt = left_range_arrive_twice ? 2 : 1;
-        tmp = atomicAdd(&range_lock[left_range_index * 2 + 1], add_cnt);
-        if (tmp + add_cnt == 2) {
-            atomicExch(&range_lock[left_range_index * 2 + 1], 0);
-            atomicExch(&range_lock[left_range_index * 2], arrive_num);
-        }
+// Try to acquire the second lock
+#pragma unroll 1
+      while (atomicCAS(&range_lock[right_range_index * 2], right_range_sync_num, right_range_sync_num) != right_range_sync_num) {
+      }
     }
+  }
+
+  CUTLASS_DEVICE
+  void deterministic_arrive(
+      int* range_lock,
+      int bidh,
+      int offset,
+      int q_block_size,
+      int num_heads,
+      int arrive_num,
+      bool left_range_arrive_twice,
+      bool right_range_arrive_twice) {
+    // Calculate lock indices
+    int left_range_block_idx = offset / q_block_size;
+    int left_range_index = left_range_block_idx * num_heads + bidh;
+    int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+    int right_range_index = right_range_block_idx * num_heads + bidh;
+
+    // Release the second lock
+    int add_cnt = right_range_arrive_twice ? 2 : 1;
+    int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
+    if (tmp + add_cnt == 2) {
+      atomicExch(&range_lock[right_range_index * 2 + 1], 0);
+      atomicExch(&range_lock[right_range_index * 2], arrive_num);
+    }
+
+    // Release the first lock
+    add_cnt = left_range_arrive_twice ? 2 : 1;
+    tmp = atomicAdd(&range_lock[left_range_index * 2 + 1], add_cnt);
+    if (tmp + add_cnt == 2) {
+      atomicExch(&range_lock[left_range_index * 2 + 1], 0);
+      atomicExch(&range_lock[left_range_index * 2], arrive_num);
+    }
+  }
 
   template <typename SharedStorage, typename FrgTensorO, typename TiledMma>
   CUTLASS_DEVICE void store(
@@ -324,11 +328,19 @@ struct CollectiveEpilogueBwd {
       }
     }
     tma_store_wait<0>();
-    if constexpr(Deterministic) {
+    if constexpr (Deterministic) {
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
         int qheads_per_kheads = params.qhead_per_khead_divmod;
         int arrive_num = bidb * qheads_per_kheads + bidh_idx_in_group + 1;
-        deterministic_arrive(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, arrive_num, left_range_conflict_msg & 1, right_range_conflict_msg & 1);
+        deterministic_arrive(
+            params.determin_range_locks,
+            bidh_kv,
+            offset_k + n_block * kBlockN,
+            kBlockN,
+            params.nheads,
+            arrive_num,
+            left_range_conflict_msg & 1,
+            right_range_conflict_msg & 1);
       }
     }
     // // Tell warp 0 that smem_k and smem_v are ready

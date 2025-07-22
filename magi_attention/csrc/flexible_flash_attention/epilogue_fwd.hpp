@@ -19,8 +19,14 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MNK_PV_, class ClusterShape_, class Element_, class ArchTag_,
-          int NumEpilogueThreads_, bool DisableFwdAtomicReduction_, bool Deterministic_=false>
+template <
+    class TileShape_MNK_PV_,
+    class ClusterShape_,
+    class Element_,
+    class ArchTag_,
+    int NumEpilogueThreads_,
+    bool DisableFwdAtomicReduction_,
+    bool Deterministic_ = false>
 struct CollectiveEpilogueFwd {
   // KblockM, Kheaddim, KblockN
   using TileShape_MNK_PV = TileShape_MNK_PV_;
@@ -93,11 +99,7 @@ struct CollectiveEpilogueFwd {
       decltype(cutlass::epilogue::collective::detail::sm90_get_smem_store_op_for_accumulator<StrideO, ElementPartial>()),
       AutoVectorizingCopyWithAssumedAlignment<128>>;
 
-  using BlockCoordType = std::conditional_t<
-      Deterministic,
-      cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>,
-      cute::tuple<int32_t, int32_t, int32_t>
-  >;
+  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
   // static constexpr size_t SmemAlignmentO = cutlass::detail::alignment_for_swizzle(SmemLayoutO{});
   // static_assert(SmemAlignmentO >= 128, "Require at least 128B alignment");
@@ -244,15 +246,15 @@ struct CollectiveEpilogueFwd {
   CUTLASS_DEVICE
   void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
     if (left_range_sync_num == 0 && right_range_sync_num == 0)
-      return ;
+      return;
 
     // Calculate lock index
     int left_range_block_idx = offset / q_block_size;
     int left_range_index = left_range_block_idx * num_heads + bidh;
     int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
 
-    // Acquire the first lock
-    #pragma unroll 1
+// Acquire the first lock
+#pragma unroll 1
     while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
     }
 
@@ -260,15 +262,23 @@ struct CollectiveEpilogueFwd {
     if (left_range_block_idx != right_range_block_idx) {
       int right_range_index = right_range_block_idx * num_heads + bidh;
 
-      // Try to acquire the second lock
-      #pragma unroll 1
+// Try to acquire the second lock
+#pragma unroll 1
       while (atomicCAS(&range_lock[right_range_index * 2], right_range_sync_num, right_range_sync_num) != right_range_sync_num) {
       }
     }
   }
 
   CUTLASS_DEVICE
-  void deterministic_arrive(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int arrive_num, bool left_range_arrive_twice, bool right_range_arrive_twice) {
+  void deterministic_arrive(
+      int* range_lock,
+      int bidh,
+      int offset,
+      int q_block_size,
+      int num_heads,
+      int arrive_num,
+      bool left_range_arrive_twice,
+      bool right_range_arrive_twice) {
     // Calculate lock indices
     int left_range_block_idx = offset / q_block_size;
     int left_range_index = left_range_block_idx * num_heads + bidh;
@@ -307,8 +317,8 @@ struct CollectiveEpilogueFwd {
     int bidb = get<2>(block_coord);
     int left_range_conflict_msg = 0, right_range_conflict_msg = 0;
     if constexpr (Deterministic) {
-        left_range_conflict_msg = get<3>(block_coord);
-        right_range_conflict_msg = get<4>(block_coord);
+      left_range_conflict_msg = get<3>(block_coord);
+      right_range_conflict_msg = get<4>(block_coord);
     }
 
     // Get seqlen info for batch that current tile belongs to
@@ -365,7 +375,8 @@ struct CollectiveEpilogueFwd {
       // Acquire range lock to prevent multiple threads from writing to gmem simultaneously
       if (thread_idx == 0) {
         if constexpr (Deterministic) {
-          deterministic_sync(params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
+          deterministic_sync(
+              params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
         }
         acquire_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
       }
@@ -533,7 +544,15 @@ struct CollectiveEpilogueFwd {
       flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
       if (thread_idx == 0) {
         if constexpr (Deterministic) {
-          deterministic_arrive(params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, bidb + 1, left_range_conflict_msg & 1, right_range_conflict_msg & 1);
+          deterministic_arrive(
+              params.determin_range_locks,
+              bidh,
+              offset_o + m_block * kBlockM,
+              kBlockM,
+              params.nheads,
+              bidb + 1,
+              left_range_conflict_msg & 1,
+              right_range_conflict_msg & 1);
         }
         release_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
       }

@@ -137,8 +137,8 @@ void set_params_fprop(
   params.tile_count_semaphore = static_cast<int*>(tile_count_semaphore_d);
 
   // Set deterministic pointers
-  params.determin_range_locks = static_cast<int *>(determin_range_locks_d);
-  params.determin_conflict_state = static_cast<int *>(determin_conflict_state_d);
+  params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
+  params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
   // Softmax sum
   params.softmax_lse_ptr = softmax_lse_d;
 
@@ -200,10 +200,10 @@ void set_params_dgrad(
     void* tile_count_semaphore_d,
     const float softcap = 0.f,
     bool const deterministic = false,
-    void* determin_range_locks_d=nullptr,
-    void* determin_conflict_state_d=nullptr,
-    void* dq_determin_conflict_state_d=nullptr,
-    void* dq_determin_range_locks_d=nullptr,
+    void* determin_range_locks_d = nullptr,
+    void* determin_conflict_state_d = nullptr,
+    void* dq_determin_conflict_state_d = nullptr,
+    void* dq_determin_range_locks_d = nullptr,
     int const sm_margin = 0,
     bool const disable_bwd_dkv_atomic_reduction = false) {
   set_params_fprop(
@@ -266,8 +266,8 @@ void set_params_dgrad(
 
   // Set the deterministic flag
   params.deterministic = deterministic;
-  params.dq_determin_conflict_state = static_cast<int *>(dq_determin_conflict_state_d);
-  params.dq_determin_range_locks = static_cast<int *>(dq_determin_range_locks_d);
+  params.dq_determin_conflict_state = static_cast<int*>(dq_determin_conflict_state_d);
+  params.dq_determin_range_locks = static_cast<int*>(dq_determin_range_locks_d);
 }
 
 void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
@@ -587,8 +587,8 @@ std::vector<at::Tensor> mha_fwd(
 
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
   if (deterministic) {
-      determin_range_locks.zero_();
-      determin_conflict_state.zero_();
+    determin_range_locks.zero_();
+    determin_conflict_state.zero_();
   }
 
   Flash_fwd_params params;
@@ -918,10 +918,10 @@ std::vector<at::Tensor> mha_bwd(
 
   // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
   if (deterministic) {
-      determin_range_locks.zero_();
-      determin_conflict_state.zero_();
-      dq_determin_range_locks.zero_();
-      dq_determin_conflict_state.zero_();
+    determin_range_locks.zero_();
+    determin_conflict_state.zero_();
+    dq_determin_range_locks.zero_();
+    dq_determin_conflict_state.zero_();
   }
 
   Flash_bwd_params params;

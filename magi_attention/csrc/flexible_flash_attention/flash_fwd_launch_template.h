@@ -22,7 +22,16 @@
 
 using namespace cute;
 
-template <int Arch, int kHeadDim, int ClusterM, typename Element, typename ElementOut, bool Has_softcap, bool DisableFwdAtomicReduction, bool Deterministic, bool MergeRange>
+template <
+    int Arch,
+    int kHeadDim,
+    int ClusterM,
+    typename Element,
+    typename ElementOut,
+    bool Has_softcap,
+    bool DisableFwdAtomicReduction,
+    bool Deterministic,
+    bool MergeRange>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
@@ -46,7 +55,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       flash::CollectiveEpilogueFwd<TileShape_MNK_PV, ClusterShape, ElementOut, ArchTag, CollectiveMainloop::NumMmaThreads, DisableFwdAtomicReduction, Deterministic>;
 
   static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
-  using SchedulerPersistent = flash::DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
+  using SchedulerPersistent =
+      flash::DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
   using Scheduler = SchedulerPersistent;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
 
@@ -88,7 +98,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       /*ranges*/ params.q_ranges,
       /*merge_ranges*/ params.merge_q_ranges,
       /*range_map*/ params.qk_map,
-      /*determin_conflict_state*/params.determin_conflict_state,
+      /*determin_conflict_state*/ params.determin_conflict_state,
   };
 
   int device;
