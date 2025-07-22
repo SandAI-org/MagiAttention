@@ -23,7 +23,51 @@ from magi_attention.common.range import AttnRange
 from magi_attention.meta._calc_dispatch_meta import _calc_self_attn_areas
 from magi_attention.meta.container import AttnBucket, AttnChunk, AttnSlice
 from magi_attention.testing import parameterize
-from magi_attention.utils import add_range_to_array, argsort
+from magi_attention.utils import argsort
+
+
+def add_range_to_array(
+    array: np.ndarray,
+    q_range: AttnRange,
+    k_range: AttnRange,
+    masktype: AttnMaskType = AttnMaskType.FULL,
+    check: bool = False,
+):
+    # get start and end of range
+    x_start, x_end = q_range.start, q_range.end
+    y_start, y_end = k_range.start, k_range.end
+
+    if check:
+        # check whether the current slice has been filled
+        assert np.all(array[x_start:x_end, y_start:y_end] == 0), (
+            f"Part of the area has been added," f"when {q_range=} and {k_range=}"
+        )
+
+    # fill the area according to the type of the mask.
+    for i in range(x_start, x_end):
+        for j in range(y_start, y_end):
+            if masktype == AttnMaskType.FULL:
+                array[i][j] = 1
+            elif masktype == AttnMaskType.CAUSAL:
+                b = y_end - x_end
+                fx = i + b
+                if j <= fx:
+                    array[i][j] = 1
+            elif masktype == AttnMaskType.INVCAUSAL:
+                b = y_start - x_start
+                fx = i + b
+                if j >= fx:
+                    array[i][j] = 1
+            elif masktype == AttnMaskType.BICAUSAL:
+                causal_b = y_end - x_end
+                f_causal = i + causal_b
+
+                inv_causal_b = y_start - x_start
+                f_inv_causal = i + inv_causal_b
+                if j <= f_causal and j >= f_inv_causal:
+                    array[i][j] = 1
+
+    return array
 
 
 class TestCalcSelfAttnAreas(TestCase):

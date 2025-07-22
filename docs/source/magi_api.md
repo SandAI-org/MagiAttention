@@ -1,4 +1,4 @@
-# MagiAttention API
+# API Reference
 
 ```{eval-rst}
 .. py:module:: magi_attention.api
@@ -23,7 +23,7 @@ To support computing irregular-shaped masks, we implemented a `flexible_flash_at
 
 ## Dispatch
 
-### Dispatch for varlen masks
+### Varlen Dispatch
 
 If you're using a mask defined by `cu_seqlens`, such as a varlen full or varlen causal mask, we've designed a similar interface inspired by FlashAttention's API, making it easy for you to get started quickly. In the function named `magi_attn_varlen_dispatch`, you can obtain the dispatched `x` and `key`.
 
@@ -41,7 +41,7 @@ The logic of the `magi_attn_varlen_dispatch` function mainly consists of two par
 .. autofunction:: magi_attn_varlen_key
 ```
 
-### Dispatch for flexible masks
+### Flexible Dispatch
 
 If the masks you're using are not limited to varlen full or varlen causal, but also include sliding window masks or other more diverse types, we recommend using the following API. By calling `magi_attn_flex_dispatch`, you can obtain the dispatched x and key.
 
@@ -61,7 +61,7 @@ Similar to the logic of `magi_attn_varlen_dispatch`, `magi_attn_flex_dispatch` f
 
 ### Dispatch Function
 
-If you already have the key, you can call `dispatch` to get the padded and dispatched local tensor.
+If you already have the key, you can call `dispatch` function to get the padded and dispatched local tensor.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.magi_attn_interface
@@ -85,7 +85,10 @@ After dispatch and projection, you should obtain the query, key, and value neede
 
 ## Undispatch
 
-After the attention computation, communication is needed to gather the results back to all GPUs. We provide an API to perform the undispatch process.
+
+### Undispatch Function
+
+When you need to recover the complete global tensor from the local tensor like computing the loss, you can call `undispatch` function to unpad and undispatch the local tensor along the seqlen dim.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.magi_attn_interface
