@@ -123,7 +123,7 @@ html_theme_options = {
     },
     "icon_links": [
         {
-            "name": "blog",
+            "name": "Blog",
             "url": "https://sandai-org.github.io/MagiAttention/blog/",
             "icon": "fas fa-book-bookmark",
             "type": "fontawesome",
