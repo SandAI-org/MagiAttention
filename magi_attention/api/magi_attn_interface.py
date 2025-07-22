@@ -42,7 +42,6 @@ GeneralAttnMaskType: TypeAlias = str | AttnMaskType | Sequence[str | AttnMaskTyp
 
 
 def magi_attn_varlen_key(
-    x: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
     head_dim: int,
@@ -52,14 +51,12 @@ def magi_attn_varlen_key(
     cp_mesh: DeviceMesh | None = None,
     causal: bool = False,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
-) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
+) -> DistAttnRuntimeKey:
     """This is a flash_attn_varlen like interface, to
     generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k and causal,
-    further to pad the input tensor, caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
+    caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
 
     Args:
-        x (torch.Tensor): input tensor
-
         cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
         cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
 
@@ -77,18 +74,10 @@ def magi_attn_varlen_key(
 
     Returns:
         tuple[torch.Tensor, DistAttnRuntimeKey]:
-            - x (torch.Tensor): the input tensor after padding.
             - DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
 
     Example:
-        >>> local_x, dist_attn_runtime_key = magi_attn_varlen_key(
-        ...     x=torch.randn(
-        ...         4096, # seqlen
-        ...         2048,  # hidden_size
-        ...         device=device,
-        ...         dtype=dtype,
-        ...         requires_grad = True
-        ...     ),
+        >>> dist_attn_runtime_key = magi_attn_varlen_key(
         ...     cu_seqlen_q=torch.tensor(
                     [0, 2048, 4096], dtype=torch.int32
                 ),
@@ -143,7 +132,6 @@ def magi_attn_varlen_key(
     # call magi_attn_flex_key
     # for flash_attn_varlen: is_same_source, is_q_permute and is_k_permute are all set to true.
     return magi_attn_flex_key(
-        x=x,
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
@@ -240,8 +228,7 @@ def magi_attn_varlen_dispatch(
         >>> # Gather local attention results to global result
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
-    padded_x, key = magi_attn_varlen_key(
-        x=x,
+    key = magi_attn_varlen_key(
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
         head_dim=head_dim,
@@ -253,13 +240,12 @@ def magi_attn_varlen_dispatch(
         dist_attn_config=dist_attn_config,
     )
 
-    local_x = dispatch(padded_x, key)
+    local_x = dispatch(x, key)
 
     return (local_x, key)
 
 
 def magi_attn_flex_key(
-    x: torch.Tensor,
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
     attn_mask_type: GeneralAttnMaskType,
@@ -274,7 +260,7 @@ def magi_attn_flex_key(
     is_same_source: bool = True,
     is_q_permutable: bool = True,
     is_k_permutable: bool = True,
-) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
+) -> DistAttnRuntimeKey:
     """This is the most flexible interface,
     directly passing in q_ranges, k_ranges and attn_mask_type to
     pad the input tensor x, caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
@@ -306,7 +292,6 @@ def magi_attn_flex_key(
 
     Returns:
         tuple[torch.Tensor, DistAttnRuntimeKey]:
-            - x (torch.Tensor): the input tensor after padding.
             - DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
 
     NOTE:
@@ -323,14 +308,7 @@ def magi_attn_flex_key(
             b. `q` is unpermutable due to self-attn, but `k` is permutable even in a different way.
 
     Example:
-        >>> padded_x, dist_attn_runtime_key = magi_attn_flex_key(
-        ...     x = torch.randn(
-        ...         4096,
-        ...         2048,
-        ...         device=device,
-        ...         dtype=dtype,
-        ...         requires_grad = True
-        ...     ),
+        >>> dist_attn_runtime_key = magi_attn_flex_key(
         ...     q_ranges=AttnRanges.from_ranges([[0, 2048], [2048, 4096]]),
         ...     k_ranges=AttnRanges.from_ranges([[0, 2048], [0, 4096]]),
         ...     attn_mask_type="full",
@@ -405,21 +383,9 @@ def magi_attn_flex_key(
     if head_dim > 192:
         raise ValueError(f"head_dim ({head_dim}) must be ≤ 192")
 
-    key = DistAttnRuntimeKey(
-        cp_group,  # FIXME: ignore cp_mesh to be part of key for now
-        pad_size,
-        head_dim,
-        q_ranges,
-        k_ranges,
-        attn_mask_type,
-        total_seqlen_q,
-        total_seqlen_k,
-        dist_attn_config,
-    )
-
     # Apply padding at seq_dim(dim 0）
     if pad_size > 0:
-        x = pad_at_dim(x, 0, pad_size)
+        # x = pad_at_dim(x, 0, pad_size)
         q_ranges, k_ranges, attn_mask_type = apply_padding(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
@@ -430,6 +396,19 @@ def magi_attn_flex_key(
 
         total_seqlen_q += pad_size
         total_seqlen_k += pad_size
+
+    key = DistAttnRuntimeKey(
+        cp_group,  # FIXME: ignore cp_mesh to be part of key for now
+        chunk_size,
+        pad_size,
+        head_dim,
+        q_ranges,
+        k_ranges,
+        attn_mask_type,
+        total_seqlen_q,
+        total_seqlen_k,
+        dist_attn_config,
+    )
 
     # Validate sequence length
     cp_size = dist.get_world_size(cp_group)
@@ -489,7 +468,7 @@ def magi_attn_flex_key(
 
         DistAttnRuntimeDict[key] = value
 
-    return (x, key)
+    return key
 
 
 def magi_attn_flex_dispatch(
@@ -597,9 +576,7 @@ def magi_attn_flex_dispatch(
         >>> # Gather local attention results to global result
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
-
-    padded_x, key = magi_attn_flex_key(
-        x=x,
+    key = magi_attn_flex_key(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
@@ -619,7 +596,7 @@ def magi_attn_flex_dispatch(
         is_k_permutable=is_k_permutable,
     )
 
-    local_x = dispatch(padded_x, key)
+    local_x = dispatch(x, key)
     return (local_x, key)
 
 
@@ -644,7 +621,10 @@ def dispatch(
     if mgr is None:
         raise ValueError("DistRunTimeKey not exists!")
 
-    return mgr.dispatch_qo(x)
+    pad_size = key.pad_size
+    padded_x = pad_at_dim(x, 0, pad_size)
+
+    return mgr.dispatch_qo(padded_x)
 
 
 def undispatch(
