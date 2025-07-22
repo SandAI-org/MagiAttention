@@ -88,7 +88,9 @@ class TestRangeReduce(TestCase):
             )
 
             # Verify results match
-            assert torch.equal(result, expected)
+            assert torch.equal(
+                result, expected
+            ), f"Expected {result=} to be equal to {expected=}"
             return result, expected
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

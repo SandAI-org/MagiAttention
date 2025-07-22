@@ -13,9 +13,15 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, TypeAlias
 
+import torch
+from torch.cuda import Event, Stream
 from torch.distributed import Work
+
+from magi_attention.utils import wrap_to_list
+
+GeneralWork: TypeAlias = Work | Stream | Event | None
 
 
 @dataclass
@@ -28,11 +34,11 @@ class WorkWithPostProcessFn:
         the user are not supposed to use this object anymore
     """
 
-    work: Work | None = None
+    work: GeneralWork | list[GeneralWork] = None
     post_process_fn: Callable = field(
         default_factory=lambda: lambda *args, **kwargs: None
     )
-    sync: bool = False
+    sync: bool = False  # use `sync` due to `async` is a reserved keyword
 
     def __post_init__(self):
         # the flag to note if
@@ -40,21 +46,43 @@ class WorkWithPostProcessFn:
         # to avoid repeatedly calling post process fn
         self._work_done = False
 
+        if self.work is not None:
+            self.work = wrap_to_list(self.work)
+
         # if sync mode, the given work needs to wait immediately
-        if self.sync and self.work is not None:
-            self.work.wait()
-            self.work = None
+        if self.sync:
+            self._wait_work()
 
     def wait_post_process(self, *args, **kwargs) -> Any:
         if self._work_done:
             raise RuntimeError("Work has already been done.")
 
-        if self.work is not None:
-            self.work.wait()
-            self.work = None
+        self._wait_work()
 
         ret = self.post_process_fn(*args, **kwargs)
 
         self._work_done = True
+        # when work is done, the post process fn is no longer needed
+        # so we set it to a no-op, to avoid some long lived objects
+        # e.g. some partial funcs might hold on some tensors
+        self.post_process_fn = lambda *args, **kwargs: None
 
         return ret
+
+    def _wait_work(self) -> None:
+        if self.work is not None:
+            for work in self.work:
+                match work:
+                    case Stream():
+                        torch.cuda.current_stream().wait_stream(work)
+                    case Event():
+                        torch.cuda.current_stream().wait_event(work)
+                    case Work():
+                        # NOTE: WorkNCCL::wait default only blocks the current stream on the NCCL stream
+                        # unless in blocking mode then it will block CPU as well
+                        work.wait()
+                    case None:
+                        pass
+                    case _:
+                        raise TypeError(f"Unsupported type: {type(work)=}")
+            self.work = None
