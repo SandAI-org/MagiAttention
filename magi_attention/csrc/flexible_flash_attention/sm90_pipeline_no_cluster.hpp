@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include<cutlass/pipeline/sm90_pipeline.hpp>
+#include <cutlass/pipeline/sm90_pipeline.hpp>
 
 namespace cutlass {
 
@@ -18,9 +18,9 @@ using namespace cute;
 // PipelineTmaAsync before v3.6.0 where only 1 out of 128 threads signals the barrier.
 //
 // Assumption: params.num_consumers % NumThreadsPerWarpGroup == 0
-template <int Stages_, class Base=cutlass::PipelineTmaAsync<Stages_>>
-class PipelineTmaAsyncNoCluster: public Base {
-public:
+template <int Stages_, class Base = cutlass::PipelineTmaAsync<Stages_>>
+class PipelineTmaAsyncNoCluster : public Base {
+ public:
   using FullBarrier = typename Base::FullBarrier;
   using EmptyBarrier = typename Base::EmptyBarrier;
   static constexpr uint32_t Stages = Stages_;
@@ -30,10 +30,7 @@ public:
   using ThreadCategory = typename Base::ThreadCategory;
   using Params = typename Base::Params;
 
-  static
-  CUTLASS_DEVICE
-  void
-  init_barriers(SharedStorage& storage, Params params) {
+  static CUTLASS_DEVICE void init_barriers(SharedStorage& storage, Params params) {
     int warp_idx = canonical_warp_idx_sync();
     bool is_initializing_warp = (warp_idx == 0);
     if (is_initializing_warp) {
@@ -48,12 +45,10 @@ public:
     cutlass::arch::fence_barrier_init();
   }
 
-  template<class ClusterShape, class InitBarriers, class InitMasks>
-  CUTLASS_DEVICE
-  PipelineTmaAsyncNoCluster(SharedStorage& storage, Params params, ClusterShape cluster_shape, InitBarriers = {}, InitMasks = {})
-      : Base(storage, params, make_shape(_1{}, _1{}, _1{}) /*cluster_shape*/, cute::false_type{} /*init_barriers*/, cute::false_type{} /*init_masks*/)
-      , empty_barrier_ptr_(&storage.empty_barrier_[0]) {
-
+  template <class ClusterShape, class InitBarriers, class InitMasks>
+  CUTLASS_DEVICE PipelineTmaAsyncNoCluster(SharedStorage& storage, Params params, ClusterShape cluster_shape, InitBarriers = {}, InitMasks = {})
+      : Base(storage, params, make_shape(_1{}, _1{}, _1{}) /*cluster_shape*/, cute::false_type{} /*init_barriers*/, cute::false_type{} /*init_masks*/),
+        empty_barrier_ptr_(&storage.empty_barrier_[0]) {
     int warp_idx = canonical_warp_idx_sync();
     int lane_predicate = cute::elect_one_sync();
 
@@ -62,26 +57,23 @@ public:
     if constexpr (cute::is_same_v<InitBarriers, cute::true_type>) {
       init_barriers(storage, params);
     }
-
   }
 
   // Constructor
-  template<class ClusterShape>
-  CUTLASS_DEVICE
-  PipelineTmaAsyncNoCluster(SharedStorage& storage, Params params, ClusterShape cluster_shape)
-      : PipelineTmaAsyncNoCluster(storage, params, cluster_shape, cute::true_type{}, cute::true_type{}) { }
+  template <class ClusterShape>
+  CUTLASS_DEVICE PipelineTmaAsyncNoCluster(SharedStorage& storage, Params params, ClusterShape cluster_shape)
+      : PipelineTmaAsyncNoCluster(storage, params, cluster_shape, cute::true_type{}, cute::true_type{}) {}
 
-  template<class ClusterShape, class InitBarriers>
-  CUTLASS_DEVICE
-  PipelineTmaAsyncNoCluster(SharedStorage& storage, Params params, ClusterShape cluster_shape, InitBarriers = {})
-      : PipelineTmaAsyncNoCluster(storage, params, cluster_shape, InitBarriers{}, cute::true_type{}) { }
+  template <class ClusterShape, class InitBarriers>
+  CUTLASS_DEVICE PipelineTmaAsyncNoCluster(SharedStorage& storage, Params params, ClusterShape cluster_shape, InitBarriers = {})
+      : PipelineTmaAsyncNoCluster(storage, params, cluster_shape, InitBarriers{}, cute::true_type{}) {}
 
   CUTLASS_DEVICE
   void consumer_release(PipelineState state) {
     consumer_release(state.index());
   }
 
-private:
+ private:
   EmptyBarrier* const empty_barrier_ptr_ = nullptr;
 
   // Consumer signalling Producer of completion
@@ -90,9 +82,7 @@ private:
   void consumer_release(uint32_t stage, uint32_t skip = false) {
     empty_barrier_ptr_[stage].arrive(0 /*dst_blockid_*/, uint32_t(threadIdx.x % cutlass::NumThreadsPerWarpGroup == 0) & (!skip) /*is_signaling_thread*/);
   }
-
 };
-
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 

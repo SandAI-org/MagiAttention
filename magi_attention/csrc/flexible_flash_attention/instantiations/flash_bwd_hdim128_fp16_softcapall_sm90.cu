@@ -2,9 +2,9 @@
 // Splitting the different template instantiations to different files to speed up compilation.
 // This file is auto-generated. See "generate_kernels.py"
 
-#include "flash_bwd_hdim128_fp16_fp16_sm90.cu"
-#include "flash_bwd_hdim128_fp16_fp16_softcap_sm90.cu"
 #include "flash_bwd_hdim128_fp16_bf16_sm90.cu"
 #include "flash_bwd_hdim128_fp16_bf16_softcap_sm90.cu"
+#include "flash_bwd_hdim128_fp16_fp16_sm90.cu"
+#include "flash_bwd_hdim128_fp16_fp16_softcap_sm90.cu"
 #include "flash_bwd_hdim128_fp16_fp32_sm90.cu"
 #include "flash_bwd_hdim128_fp16_fp32_softcap_sm90.cu"
