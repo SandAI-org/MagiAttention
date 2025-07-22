@@ -119,7 +119,6 @@ def _prepare_inputs():
 +        inputs,
 +        cu_seqlens_q,
 +        cu_seqlens_k,
-+        head_dim=head_dim,
 +        pad_size=pad_size,
 +        cp_group=cp_group,
 +        causal=True,

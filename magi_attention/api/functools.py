@@ -66,25 +66,20 @@ class FixedLenDict(OrderedDict):
 def compute_pad_size(
     total_seqlen_q: int,
     cp_size: int,
-    head_dim: int,
     chunk_size: int,
 ) -> int:
     """
-    Get the size need to pad (for better performance).
+    Compute the size to pad to the input tensor along the seqlen dim at last.
 
     Args:
         total_seqlen_q (int): seqlen of q.
         cp_size (int): The size of cp group.
-        head_dim (int): head dim for q k v.
-        chunk_size (int): chunk size to chunk the permutable tensor
+        chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
+            to control the granularity of computation load-balance.
 
     Returns:
-        int: tokens need to pad.
+        int: the number of tokens to pad.
     """
-    if head_dim % 8 != 0:
-        raise ValueError(f"head_dim ({head_dim}) must be divisible by 8")
-    if head_dim > 192:
-        raise ValueError(f"head_dim ({head_dim}) must be ≤ 192")
 
     # Validate sequence length
     block_requirement = chunk_size * cp_size
