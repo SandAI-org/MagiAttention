@@ -44,7 +44,6 @@ GeneralAttnMaskType: TypeAlias = str | AttnMaskType | Sequence[str | AttnMaskTyp
 def magi_attn_varlen_key(
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
-    head_dim: int,
     pad_size: int,
     chunk_size: int,
     cp_group: dist.ProcessGroup | None = None,
@@ -60,7 +59,6 @@ def magi_attn_varlen_key(
         cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
         cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
 
-        head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
@@ -83,9 +81,8 @@ def magi_attn_varlen_key(
         ...     cu_seqlen_k=torch.tensor(
                     [0, 2048, 4096], dtype=torch.int32
                 ),
-        ...     pad_size=compute_pad_size(4096, 4, 64, 512), # seqlne, cp_size, head_dim, chunk_size
+        ...     pad_size=compute_pad_size(4096, 4, 512), # seqlne, cp_size, chunk_size
         ...     chunk_size=512,
-        ...     head_dim=64,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
         ...     cp_mesh=None,
         ...     causal=False,
@@ -136,7 +133,6 @@ def magi_attn_varlen_key(
         attn_mask_type=attn_mask_type,
         total_seqlen_q=total_seqlen_q,
         total_seqlen_k=total_seqlen_k,
-        head_dim=head_dim,
         pad_size=pad_size,
         chunk_size=chunk_size,
         cp_group=cp_group,
@@ -152,7 +148,6 @@ def magi_attn_varlen_dispatch(
     x: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
-    head_dim: int,
     pad_size: int,
     chunk_size: int,
     cp_group: dist.ProcessGroup | None = None,
@@ -171,7 +166,6 @@ def magi_attn_varlen_dispatch(
         cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
         cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
 
-        head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
@@ -203,9 +197,8 @@ def magi_attn_varlen_dispatch(
         ...     cu_seqlen_k=torch.tensor(
         ...         [0, 2048, 4096], dtype=torch.int32
         ...     ),
-        ...     pad_size=compute_pad_size(4096, 4, 64, 512),  # seqlen, cp_size, head_dim, chunk_size
+        ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chunk_size
         ...     chunk_size=512,
-        ...     head_dim=64,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
         ...     cp_mesh=None,
         ...     causal=False,
@@ -230,7 +223,6 @@ def magi_attn_varlen_dispatch(
     key = magi_attn_varlen_key(
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
-        head_dim=head_dim,
         pad_size=pad_size,
         chunk_size=chunk_size,
         cp_group=cp_group,
@@ -250,7 +242,6 @@ def magi_attn_flex_key(
     attn_mask_type: GeneralAttnMaskType,
     total_seqlen_q: int,
     total_seqlen_k: int,
-    head_dim: int,
     pad_size: int,
     chunk_size: int,
     cp_group: dist.ProcessGroup | None = None,
@@ -274,7 +265,6 @@ def magi_attn_flex_key(
         total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
         total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
 
-        head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
@@ -315,9 +305,8 @@ def magi_attn_flex_key(
         ...     attn_mask_type="full",
         ...     total_seqlen_q=4096,
         ...     total_seqlen_k=4096,
-        ...     pad_size=compute_pad_size(4096, 4, 64, 512),  # seqlen, cp_size, head_dim, chunk_size
+        ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chunk_size
         ...     chunk_size=512,
-        ...     head_dim=64,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
         ...     cp_mesh=None,
         ...     is_same_source=True,
@@ -378,12 +367,6 @@ def magi_attn_flex_key(
             "instead of a single cp_group"
         )
 
-    # Validate head_dim
-    if head_dim % 8 != 0:
-        raise ValueError(f"head_dim ({head_dim}) must be divisible by 8")
-    if head_dim > 192:
-        raise ValueError(f"head_dim ({head_dim}) must be ≤ 192")
-
     # Apply padding at seq_dim(dim 0）
     if pad_size > 0:
         q_ranges, k_ranges, attn_mask_type = apply_padding(
@@ -401,7 +384,6 @@ def magi_attn_flex_key(
         cp_group,  # FIXME: ignore cp_mesh to be part of key for now
         chunk_size,
         pad_size,
-        head_dim,
         q_ranges,
         k_ranges,
         attn_mask_type,
@@ -478,7 +460,6 @@ def magi_attn_flex_dispatch(
     attn_mask_type: GeneralAttnMaskType,
     total_seqlen_q: int,
     total_seqlen_k: int,
-    head_dim: int,
     pad_size: int,
     chunk_size: int,
     cp_group: dist.ProcessGroup | None = None,
@@ -503,7 +484,6 @@ def magi_attn_flex_dispatch(
         total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
         total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
 
-        head_dim (int): head dim for q k v. The head_dim must be divisible by 8 and <= 192.
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
@@ -553,9 +533,8 @@ def magi_attn_flex_dispatch(
         ...     attn_mask_type="full",
         ...     total_seqlen_q=4096,
         ...     total_seqlen_k=4096,
-        ...     pad_size=compute_pad_size(4096, 4, 64, 512),  # seqlen, cp_size, head_dim, chun_size
+        ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chun_size
         ...     chunk_size=512,
-        ...     head_dim=64,
         ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
         ...     cp_mesh=None,
         ...     dist_attn_config=DistAttnConfig(
@@ -585,7 +564,6 @@ def magi_attn_flex_dispatch(
         attn_mask_type=attn_mask_type,
         total_seqlen_q=total_seqlen_q,
         total_seqlen_k=total_seqlen_k,
-        head_dim=head_dim,
         pad_size=pad_size,
         chunk_size=chunk_size,
         cp_group=cp_group,

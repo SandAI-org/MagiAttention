@@ -253,7 +253,6 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
   pad_size = compute_pad_size( # pad embeds along seqlen dim for better performance
     total_seqlen_q=total_seqlen_q,
     cp_size=world_size, # assuming we only have 1-dim context parallelism (cp)
-    head_dim=head_dim,
     chunk_size=chunk_size,
   )
 
@@ -272,7 +271,6 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
       attn_mask_type=attn_mask_type,
       total_seqlen_q=total_seqlen_q,
       total_seqlen_k=total_seqlen_k,
-      head_dim=head_dim,
       pad_size=pad_size,
       chunk_size=chunk_size,
       cp_group=world_group, # assuming we only have 1-dim context parallelism (cp)

@@ -358,7 +358,6 @@ def run_magi_attn(
     pad_size = compute_pad_size(
         total_seqlen_q=total_seqlen,
         cp_size=world_size,
-        head_dim=hidden_size,
         chunk_size=chunk_size,
     )
 
@@ -392,7 +391,6 @@ def run_magi_attn(
         attn_mask_type=attn_mask_type,
         total_seqlen_q=total_seqlen,
         total_seqlen_k=total_seqlen,
-        head_dim=hidden_size,
         pad_size=pad_size,
         chunk_size=chunk_size,
         cp_group=cp_group,

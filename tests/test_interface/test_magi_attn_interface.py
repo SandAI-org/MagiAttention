@@ -503,9 +503,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
 
         # --------- calculate pad size --------- #
 
-        pad_size = compute_pad_size(
-            total_seqlen_q, self.world_size, head_dim, chunk_size
-        )
+        pad_size = compute_pad_size(total_seqlen_q, self.world_size, chunk_size)
 
         # ------ calculate attn_mask_type ------ #
 
@@ -546,7 +544,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 x,
                 cu_seqlens_q,
                 cu_seqlens_k,
-                head_dim=head_dim,
                 pad_size=pad_size,
                 chunk_size=chunk_size,
                 cp_group=None
@@ -571,7 +568,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 x,
                 cu_seqlens_q,
                 cu_seqlens_k,
-                head_dim=head_dim,
                 pad_size=pad_size,
                 chunk_size=chunk_size,
                 cp_group=None
@@ -593,7 +589,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 else attn_mask_type,
                 total_seqlen_q=total_seqlen_q,
                 total_seqlen_k=total_seqlen_k,
-                head_dim=head_dim,
                 pad_size=pad_size,
                 chunk_size=chunk_size,
                 cp_group=None
@@ -613,7 +608,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                         attn_mask_type=attn_mask_type,
                         total_seqlen_q=total_seqlen_q,
                         total_seqlen_k=total_seqlen_k,
-                        head_dim=head_dim,
                         pad_size=pad_size,
                         chunk_size=chunk_size,
                         cp_group=self.nccl_group,
@@ -632,7 +626,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                     attn_mask_type=invalid_mask_type,
                     total_seqlen_q=total_seqlen_q,
                     total_seqlen_k=total_seqlen_k,
-                    head_dim=head_dim,
                     pad_size=pad_size,
                     chunk_size=chunk_size,
                     cp_group=None
