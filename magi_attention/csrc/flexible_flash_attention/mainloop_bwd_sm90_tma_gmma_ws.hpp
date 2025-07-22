@@ -677,15 +677,11 @@ struct CollectiveMainloopBwdSm90 {
 
         if constexpr (Deterministic) {
             // update conflict state of batches
-            // l_output_offset = params.q_ranges[2 * bidb]
-            // r_output_offset = params.q_ranges[2 * bidb + 1]
             // [l, r) is the range of bidb, r is not include
-            // block_size = kBlockM
             int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
             uint32_t smid = blockIdx.x;
             uint32_t sm_stride = gridDim.x;
             int * conflict_state = params.dq_determin_conflict_state;
-            // update conflict state
             while (bidb_last < bidb) {
                 int q_l_index = params.q_ranges[2 * bidb_last], q_r_index = params.q_ranges[2 * bidb_last + 1];
                 int l = q_l_index / kBlockM + lane;
@@ -729,16 +725,12 @@ struct CollectiveMainloopBwdSm90 {
         // It's possible to have m_block_max <= m_block_min. Exit early
         if (m_block_max <= m_block_min) { 
             if constexpr (Deterministic) {
-                // make work_tile add dq in order within same batch
-                // Barrier::wait_eq(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, 0, n_block);
-                // Wait for the previous batch with overlapping q ranges
                 if (lane_predicate) {
                     for (int m_block = 0; m_block < m_block_num; ++m_block) {
                         m_block_sync(m_block);
                         m_block_arrive(m_block);
                     }
                 }
-                // Barrier::arrive_inc(lock_ptr, threadIdx.x % cutlass::NumThreadsPerWarp, 0);
             }
             return;
         }
