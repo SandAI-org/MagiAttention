@@ -96,6 +96,14 @@ def setup_dist_env(
 ) -> tuple[int, int, int, dist.ProcessGroup, int, int | None]:
     """set up distributed environment with the specified process group backend,
     NOTE: the test script using this func to set up should be executed through torchrun
+
+    Args:
+        backend (str, optional): the process group backend. Defaults to "nccl".
+        base_seed (int | None, optional): the base seed. Defaults to None to not set seed.
+        seed_bias (Callable, optional): the seed bias func for each rank. Defaults to lambda rank: 0, i.e., no bias.
+
+    Returns:
+        rank, local_rank, world_size, wolrd_group, device, seed
     """
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -109,10 +117,10 @@ def setup_dist_env(
         world_size=world_size,
     )
 
-    manual_seed = None
+    seed = None
     if base_seed is not None:
-        manual_seed = base_seed + seed_bias(rank)
-        torch.manual_seed(manual_seed)
+        seed = base_seed + seed_bias(rank)
+        torch.manual_seed(seed)
 
     return (
         rank,
@@ -120,7 +128,7 @@ def setup_dist_env(
         world_size,
         dist.group.WORLD,
         device,
-        manual_seed,
+        seed,
     )  # noqa: E231
 
 
