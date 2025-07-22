@@ -153,7 +153,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*tile_count_semaphore*/ params.tile_count_semaphore,
       /*ranges*/ params.k_ranges,
       /*merge_ranges*/ params.merge_k_ranges,
-      /*range_map*/ params.bwd_kq_map};
+      /*range_map*/ params.bwd_kq_map,
+      /*bwd_unique_count*/ params.bwd_unique_count};
 
   int device;
   cudaGetDevice(&device);

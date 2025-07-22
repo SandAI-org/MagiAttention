@@ -511,6 +511,7 @@ if not SKIP_CUDA_BUILD:
         sources_bwd_sm90 = []
     sources = [f"{ffa_dir_rel}/flash_api.cpp"] + sources_fwd_sm90 + sources_bwd_sm90
     sources += [f"{ffa_dir_rel}/fast_zero_fill.cu"]
+    sources += [f"{ffa_dir_rel}/unique_consecutive_pairs.cu"]
     nvcc_flags = [
         "-O3",
         "-Xptxas",
@@ -554,7 +555,6 @@ if not SKIP_CUDA_BUILD:
             include_dirs=include_dirs,
         )
     )
-
 
 package_data = {
     "magi_attention": ["*.pyi", "**/*.pyi"],

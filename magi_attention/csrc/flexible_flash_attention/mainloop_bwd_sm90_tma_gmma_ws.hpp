@@ -484,9 +484,11 @@ struct CollectiveMainloopBwdSm90 {
     int m_block = m_block_min;
 
     int lane_predicate = cute::elect_one_sync();
+    // int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
 
     // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
-    cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+    // if (warp_idx_in_warpgroup == 0)
+    //    cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
 
     if (lane_predicate) {
       pipeline_q.producer_acquire(smem_pipe_write);

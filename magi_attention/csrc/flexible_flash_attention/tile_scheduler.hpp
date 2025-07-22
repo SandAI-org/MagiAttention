@@ -22,6 +22,7 @@ struct TileSchedulerArguments {
   int* const ranges = nullptr;
   int* const merge_ranges = nullptr;
   int* const range_map = nullptr;
+  int* const unique_count = nullptr;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -46,13 +47,14 @@ class DynamicPersistentTileScheduler {
     int* const ranges;
     int* const merge_ranges;
     int* const range_map;
+    int* const unique_count = nullptr;
   };
 
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
     assert(args.tile_count_semaphore != nullptr);
     assert(args.num_heads < (1 << 16));
     int* const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
-    return {args.num_heads, args.num_batches, args.tile_count_semaphore, ranges, args.merge_ranges, args.range_map};
+    return {args.num_heads, args.num_batches, args.tile_count_semaphore, ranges, args.merge_ranges, args.range_map, args.unique_count};
   }
 
   static dim3 get_grid_shape(Params const& params, int num_sm) {
@@ -66,7 +68,8 @@ class DynamicPersistentTileScheduler {
     bool is_valid(Params const& params) const {
       // if (blockIdx.x >= 0 && (threadIdx.x == 128 || threadIdx.x == 0)) { printf("blockIdx.x = %d, threadIdx.x = %d, checking valid, bidb = %d, params.num_batches =
       // %d\n", blockIdx.x, threadIdx.x, bidb, params.num_batches); }
-      return bidb < params.num_batches;
+      int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
+      return bidb < actual_num_batches;
     }
 
     CUTLASS_DEVICE
@@ -83,10 +86,11 @@ class DynamicPersistentTileScheduler {
     int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
 
     // Helper function to calculate how many blocks are needed to compute the current batch
+    int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
     auto get_num_m_blocks = [&](int bidb_start) {
       int batch_idx = lane + bidb_start;
-      int seqlen = batch_idx < params.num_batches ? params.ranges[2 * batch_idx + 1] - params.ranges[2 * batch_idx] : 0;
-      return batch_idx < params.num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen, kBlock) : 0;
+      int seqlen = batch_idx < actual_num_batches ? params.ranges[2 * batch_idx + 1] - params.ranges[2 * batch_idx] : 0;
+      return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen, kBlock) : 0;
     };
 
     int num_m_blocks = get_num_m_blocks(current_work.bidb); // Different for each lane
@@ -108,12 +112,12 @@ class DynamicPersistentTileScheduler {
     // current_work.tile_idx, group_end_tile, num_m_blocks_cumulative, m_blocks_in_group); }
     while (group_end_tile <= next_tile_idx) {
       bidb += cutlass::NumThreadsPerWarp - 1;
-      if (bidb >= params.num_batches) {
+      if (bidb >= actual_num_batches) {
         // if (blockIdx.x <= 9 && threadIdx.x == 0) {
         //     printf("Returning early, blockIdx.x = %d, threadIdx.x = %d, bidb = %d, num_m_blocks = %d, next_tile_idx = %d, group_end_tile = %d, m_blocks_in_group =
         //     %d\n", blockIdx.x, threadIdx.x, bidb, num_m_blocks, next_tile_idx, group_end_tile, m_blocks_in_group);
         // }
-        return {next_tile_idx, 0, 0, params.num_batches};
+        return {next_tile_idx, 0, 0, actual_num_batches};
       }
       num_m_blocks = get_num_m_blocks(bidb);
       num_m_blocks_cumulative = warp_prefix_sum(num_m_blocks);

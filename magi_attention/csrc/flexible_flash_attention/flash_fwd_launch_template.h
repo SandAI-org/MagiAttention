@@ -90,7 +90,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       /*ranges*/ params.q_ranges,
       /*merge_ranges*/ params.merge_q_ranges,
       /*range_map*/ params.qk_map,
-  };
+      /*unique_count*/ params.unique_count};
 
   int device;
   CHECK_CUDA(cudaGetDevice(&device));
