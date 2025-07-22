@@ -69,8 +69,10 @@ struct Flash_fwd_params : public Qkv_params {
   int* __restrict__ attn_type_map;
   int* __restrict__ merge_q_ranges;
   int* __restrict__ qk_map;
+  int* __restrict__ unique_count;
   int* __restrict__ merge_k_ranges;
   int* __restrict__ bwd_kq_map;
+  int* __restrict__ bwd_unique_count;
 
   at::ScalarType compute_type;
   at::ScalarType out_type;
@@ -149,3 +151,5 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
 
 template <typename T_out, uint32_t kHeadDim>
 void run_fast_zero_fill_(Flash_fwd_params& params, cudaStream_t stream);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs_ext(torch::Tensor sorted_input_tensor);

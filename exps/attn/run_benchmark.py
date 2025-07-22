@@ -659,7 +659,6 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
             }
         else:
             try:
-                # perf_dict = do_bench(
                 # disable mem test to only test flops for now
                 perf_dict = do_bench_flops(
                     fn,

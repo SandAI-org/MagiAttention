@@ -215,9 +215,13 @@ class FlashAttnBwdSm90 {
 
           bool tile_valid = false;
 
+          // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
+          cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+
           if constexpr (RangeMerge) {
-            int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-            int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
+            int bidb_start = params.scheduler.range_map[bidb_idx];
 
             for (int idx = 0; idx < loop_count; ++idx) {
               int bidb = bidb_start + idx;
@@ -245,8 +249,9 @@ class FlashAttnBwdSm90 {
           auto [n_block, bidh, bidb_idx] = block_coord;
 
           if constexpr (RangeMerge) {
-            int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-            int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
+            int bidb_start = params.scheduler.range_map[bidb_idx];
 
             for (int idx = 0; idx < loop_count; ++idx) {
               int bidb = bidb_start + idx;
@@ -295,8 +300,9 @@ class FlashAttnBwdSm90 {
 
         if constexpr (RangeMerge) {
           int bidb_idx = get<2>(block_coord);
-          int loop_count = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx] - params.scheduler.range_map[bidb_idx - 1] : params.scheduler.range_map[bidb_idx];
-          int bidb_start = bidb_idx > 0 ? params.scheduler.range_map[bidb_idx - 1] : 0;
+          int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+                                                                           : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
+          int bidb_start = params.scheduler.range_map[bidb_idx];
 
           for (int idx = 0; idx < loop_count; ++idx) {
             int bidb = bidb_start + idx;

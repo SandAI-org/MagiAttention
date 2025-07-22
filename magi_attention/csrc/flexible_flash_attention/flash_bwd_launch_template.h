@@ -160,7 +160,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*merge_ranges*/ params.merge_k_ranges,
       /*range_map*/ params.bwd_kq_map,
       /*determin_conflict_state*/ params.determin_conflict_state,
-  };
+      /*bwd_unique_count*/ params.bwd_unique_count};
 
   int device;
   cudaGetDevice(&device);
