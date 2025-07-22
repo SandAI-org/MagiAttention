@@ -48,6 +48,8 @@ def _flex_flash_attn_forward(
     q,
     k,
     v,
+    out,
+    lse,
     q_ranges,
     k_ranges,
     max_seqlen_q,
@@ -57,40 +59,35 @@ def _flex_flash_attn_forward(
     qk_map,
     softmax_scale,
     softcap,
+    disable_fwd_atomic_reduction,
+    out_type,
     deterministic,
     sm_margin,
-    return_dtype,
-    disable_fwd_atomic_reduction,
 ):
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
 
-    if q_ranges.shape[0] == 0:
-        # FIXME: This logic should be written in the cuda kernel, this is a temporary workaround
-        ttk, nh, hd = q.shape
-        out = torch.zeros_like(q)
-        softmax_lse = torch.empty(nh, ttk, dtype=torch.float32)
-        softmax_lse.fill_(-float("inf"))
-    else:
-        out, softmax_lse = flexible_flash_attention_cuda.fwd(
-            q,
-            k,
-            v,
-            q_ranges,
-            k_ranges,
-            max_seqlen_q,
-            max_seqlen_k,
-            attn_type_map,
-            merge_q_ranges,
-            qk_map,
-            softmax_scale,
-            softcap,
-            sm_margin,
-            disable_fwd_atomic_reduction,
-            return_dtype,
-            deterministic,
-        )
+    out, softmax_lse = flexible_flash_attention_cuda.fwd(
+        q,
+        k,
+        v,
+        out,
+        lse,
+        q_ranges,
+        k_ranges,
+        max_seqlen_q,
+        max_seqlen_k,
+        attn_type_map,
+        merge_q_ranges,
+        qk_map,
+        softmax_scale,
+        softcap,
+        disable_fwd_atomic_reduction,
+        out_type,
+        deterministic,
+        sm_margin,
+    )
 
     return out, softmax_lse
 
@@ -102,6 +99,9 @@ def _flex_flash_attn_backward(
     k,
     v,
     out,
+    dq,
+    dk,
+    dv,
     softmax_lse,
     q_ranges,
     k_ranges,
@@ -112,6 +112,10 @@ def _flex_flash_attn_backward(
     bwd_kq_map,
     softmax_scale,
     softcap,
+    disable_bwd_dkv_atomic_reduction,
+    dq_type,
+    dk_type,
+    dv_type,
     deterministic,
     sm_margin,
 ):
@@ -119,45 +123,40 @@ def _flex_flash_attn_backward(
         maybe_contiguous(x) for x in (dout, q, k, v, out, q_ranges, k_ranges)
     ]
 
-    if q_ranges.shape[0] == 0:
-        # FIXME: This logic should be written in the cuda kernel, this is a temporary workaround
-        ttk, nh, hd = q.shape
-        dq = torch.zeros_like(q, dtype=torch.float32)
-        dk = torch.zeros_like(k, dtype=torch.float32)
-        dv = torch.zeros_like(v, dtype=torch.float32)
-        softmax_d = torch.zeros(nh, ttk, dtype=torch.float32)
-    else:
-        (
-            dq,
-            dk,
-            dv,
-            softmax_d,
-            _,
-        ) = flexible_flash_attention_cuda.bwd(
-            dout,
-            q,
-            k,
-            v,
-            out,
-            None,
-            None,
-            None,
-            softmax_lse,
-            q_ranges,
-            k_ranges,
-            max_seqlen_q,
-            max_seqlen_k,
-            attn_type_map,
-            merge_k_ranges,
-            bwd_kq_map,
-            softmax_scale,
-            softcap,
-            torch.float32,
-            deterministic,
-            sm_margin,
-        )
+    (
+        dq,
+        dk,
+        dv,
+        softmax_d,
+        _,
+    ) = flexible_flash_attention_cuda.bwd(
+        dout,
+        q,
+        k,
+        v,
+        out,
+        dq,
+        dk,
+        dv,
+        softmax_lse,
+        q_ranges,
+        k_ranges,
+        max_seqlen_q,
+        max_seqlen_k,
+        attn_type_map,
+        merge_k_ranges,
+        bwd_kq_map,
+        softmax_scale,
+        softcap,
+        disable_bwd_dkv_atomic_reduction,
+        dq_type,
+        dk_type,
+        dv_type,
+        deterministic,
+        sm_margin,
+    )
 
-    return dq.to(q.dtype), dk.to(q.dtype), dv.to(q.dtype), softmax_d
+    return dq, dk, dv, softmax_d
 
 
 class FlexFlashAttnFunc(torch.autograd.Function):
@@ -176,7 +175,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         softcap=0.0,
         deterministic=False,
         sm_margin=0,
-        return_dtype=None,
         disable_fwd_atomic_reduction=False,
         auto_range_merge=False,
     ):
@@ -211,6 +209,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q,
             k,
             v,
+            None,  # out
+            None,  # lse
             fwd_q_ranges,
             fwd_k_ranges,
             max_seqlen_q,
@@ -220,11 +220,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_qk_map,
             softmax_scale,
             softcap,
+            disable_fwd_atomic_reduction,
+            None,  # out_type
             deterministic,
             sm_margin,
-            return_dtype,
-            disable_fwd_atomic_reduction,
         )
+
+        # Cast output to the same dtype as q
+        out = out.to(q.dtype)
 
         if auto_range_merge:
             ctx.save_for_backward(
@@ -289,6 +292,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             k,
             v,
             out,
+            None,  # dq
+            None,  # dk
+            None,  # dv
             softmax_lse,
             bwd_q_ranges,
             bwd_k_ranges,
@@ -299,9 +305,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_kq_map,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
+            disable_bwd_dkv_atomic_reduction=False,
+            dq_type=torch.float32,
+            dk_type=torch.float32,
+            dv_type=torch.float32,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
         )
+
+        dq = dq.to(q.dtype)
+        dk = dk.to(k.dtype)
+        dv = dv.to(v.dtype)
 
         return (
             dq,
@@ -335,7 +349,6 @@ def flex_flash_attn_func(
     softcap=0.0,
     deterministic=False,
     sm_margin=0,
-    return_dtype=None,
     disable_fwd_atomic_reduction=False,
     auto_range_merge=False,
 ):
@@ -363,7 +376,6 @@ def flex_flash_attn_func(
         softcap (float): Softcap.
         deterministic (bool): Whether to use deterministic attention.
         sm_margin (int): the amount of SMs(streaming multiprocessors) reserved for communication.
-        return_dtype (torch.dtype): Return dtype.
         disable_fwd_atomic_reduction (bool): Whether to disable forward atomic reduction.
             If you can ensure q_ranges has no overlap, you can set this to True for better performance.
             Overlap in q_ranges is defined as: if any two q_ranges have non-empty intersection, then there is overlap.
@@ -494,7 +506,6 @@ def flex_flash_attn_func(
         softcap,
         deterministic,
         sm_margin,
-        return_dtype,
         disable_fwd_atomic_reduction,
         auto_range_merge,
     )
