@@ -385,7 +385,6 @@ def magi_attn_flex_key(
 
     # Apply padding at seq_dim(dim 0）
     if pad_size > 0:
-        # x = pad_at_dim(x, 0, pad_size)
         q_ranges, k_ranges, attn_mask_type = apply_padding(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
