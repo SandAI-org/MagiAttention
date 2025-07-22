@@ -121,6 +121,14 @@ html_theme_options = {
         ),
         "version_match": "1.0.3",
     },
+    "icon_links": [
+        {
+            "name": "blog",
+            "url": "https://sandai-org.github.io/MagiAttention/blog/",
+            "icon": "fas fa-book-bookmark",
+            "type": "fontawesome",
+        },
+    ],
 }
 
 
