@@ -201,6 +201,7 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
   num_heads_kv = 8           # number of key/value heads (GQA)
   head_dim = 128             # dimension of each attention head
   dtype = torch.bfloat16     # attention activation / computation dtype (while the reduction dtype for partial attention outputs is always fp32 for magi_attention right now)
+  chunk_size = 512           # chunk size to chunk the input tensor x along the seqlen dim for dispatch to control the granularity of computation load-balance.
 
   # --- Initialize token embedding tensor --- #
 
@@ -248,10 +249,11 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
   )
   attn_mask_type = [AttnMaskType.FULL] * len(q_ranges)
   total_seqlen_q = total_seqlen_k = total_seqlen
-  pad_size, _ = compute_pad_size( # pad embeds along seqlen dim for better performance
+  pad_size = compute_pad_size( # pad embeds along seqlen dim for better performance
     total_seqlen_q=total_seqlen_q,
     cp_size=world_size, # assuming we only have 1-dim context parallelism (cp)
     head_dim=head_dim,
+    chunk_size=chunk_size,
   )
 
   # --- Dispatch token embedding tensor along seqlen dim to multiple ranks --- #
@@ -271,6 +273,7 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
       total_seqlen_k=total_seqlen_k,
       head_dim=head_dim,
       pad_size=pad_size,
+      chunk_size=chunk_size,
       cp_group=world_group, # assuming we only have 1-dim context parallelism (cp)
   )
 

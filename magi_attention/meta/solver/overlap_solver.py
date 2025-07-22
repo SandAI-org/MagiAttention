@@ -15,6 +15,7 @@
 import random
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
+from typing import Any
 
 import torch.nn as nn
 
@@ -403,3 +404,13 @@ class OverlapSolver(nn.Module):
         )
 
         return overall_cost
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, OverlapSolver):
+            return False
+
+        return (self.alg, self.best_solution, self.solution_dict) == (
+            other.alg,
+            other.best_solution,
+            other.solution_dict,
+        )
