@@ -130,7 +130,7 @@ void set_params_fprop(
   params.attn_type_map = static_cast<int*>(attn_type_map_d);
   params.merge_q_ranges = static_cast<int*>(merge_q_ranges_d);
   params.qk_map = static_cast<int*>(qk_map_d);
-  params.unique_count = static_cast<int *>(unique_count_d);
+  params.unique_count = static_cast<int*>(unique_count_d);
 
   // Set kernel utility pointers
   params.range_locks = static_cast<int*>(range_locks_d);
