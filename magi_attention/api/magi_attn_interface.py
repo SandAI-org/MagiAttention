@@ -190,7 +190,7 @@ def magi_attn_varlen_dispatch(
             - DistAttnRuntimeKey (DistAttnRuntimeKey): DistAttbRuntimeKey.
 
     Example:
-        >>> padded_x, dist_attn_runtime_key = magi_attn_varlen_dispatch(
+        >>> local_x, dist_attn_runtime_key = magi_attn_varlen_dispatch(
         ...     x=torch.randn(
         ...         4096,  # seqlen
         ...         2048,  # hidden_size
@@ -270,7 +270,7 @@ def magi_attn_flex_key(
         q_ranges (AttnRanges): global query ranges in the ref attn mask
         k_ranges (AttnRanges): global key ranges in the ref attn mask
         attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]): attn mask type (list)
-            represented by str or enum `AttnMaskType` or their mixed combination
+            represented by str or enum ``AttnMaskType`` or their mixed combination
 
         total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
         total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
@@ -296,16 +296,19 @@ def magi_attn_flex_key(
 
     NOTE:
         1. For decoder-only transformers (e.g., GPT), it applies 'self-attn' as follows:
-            a. `is_same_source` is True.
-            b. Both `q` and `k` are permutable, as long as they are permuted in the same way.
+
+            a. ``is_same_source`` is True.
+            b. Both ``q`` and ``k`` are permutable, as long as they are permuted in the same way.
 
         2. For encoder-decoder transformers (e.g., T5), it applies 'cross-attn' as follows:
-            a. `is_same_source` is False.
-            b. `q` is permutable but `k` is not.
+
+            a. ``is_same_source`` is False.
+            b. ``q`` is permutable but ``k`` is not.
 
         3. For multi-modal transformers with external encoders, it applies 'cross-attn' as follows:
-            a. `is_same_source` is False.
-            b. `q` is unpermutable due to self-attn, but `k` is permutable even in a different way.
+
+            a. ``is_same_source`` is False.
+            b. ``q`` is unpermutable due to self-attn, but ``k`` is permutable even in a different way.
 
     Example:
         >>> dist_attn_runtime_key = magi_attn_flex_key(
@@ -497,7 +500,7 @@ def magi_attn_flex_dispatch(
         q_ranges (AttnRanges): global query ranges in the ref attn mask
         k_ranges (AttnRanges): global key ranges in the ref attn mask
         attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]): attn mask type (list)
-            represented by str or enum `AttnMaskType` or their mixed combination
+            represented by str or enum ``AttnMaskType`` or their mixed combination
 
         total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
         total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
@@ -524,16 +527,19 @@ def magi_attn_flex_dispatch(
 
     NOTE:
         1. For decoder-only transformers (e.g., GPT), it applies 'self-attn' as follows:
-            a. `is_same_source` is True.
-            b. Both `q` and `k` are permutable, as long as they are permuted in the same way.
+
+            a. ``is_same_source`` is True.
+            b. Both ``q`` and ``k`` are permutable, as long as they are permuted in the same way.
 
         2. For encoder-decoder transformers (e.g., T5), it applies 'cross-attn' as follows:
-            a. `is_same_source` is False.
-            b. `q` is permutable but `k` is not.
+
+            a. ``is_same_source`` is False.
+            b. ``q`` is permutable but ``k`` is not.
 
         3. For multi-modal transformers with external encoders, it applies 'cross-attn' as follows:
-            a. `is_same_source` is False.
-            b. `q` is unpermutable due to self-attn, but `k` is permutable even in a different way.
+
+            a. ``is_same_source`` is False.
+            b. ``q`` is unpermutable due to self-attn, but ``k`` is permutable even in a different way.
 
     Example:
         >>> local_x, dist_attn_runtime_key = magi_attn_flex_dispatch(
@@ -614,7 +620,7 @@ def dispatch(
         local_x (torch.Tensor): the dispatched local tensor.
 
     Raises:
-        ValueError: If the provided `key` does not exist in `DistAttnRuntimeDict`.
+        ValueError: If the provided ``key`` does not exist in ``DistAttnRuntimeDict``.
     """
     mgr = DistAttnRuntimeDict.get(key)
     if mgr is None:
@@ -642,7 +648,7 @@ def undispatch(
         torch.Tensor: the undispatched and unpadded tensor.
 
     Raises:
-        ValueError: If the provided `key` does not exist in `DistAttnRuntimeDict`.
+        ValueError: If the provided ``key`` does not exist in ``DistAttnRuntimeDict``.
     """
     mgr = DistAttnRuntimeDict.get(key)
     if mgr is None:
@@ -665,9 +671,9 @@ def calc_attn(
     Do attention computation.
 
     Args:
-        q (torch.Tensor): Query tensor of shape `(num_tokens_q, num_heads, head_dim)`.
-        k (torch.Tensor): Key tensor of shape `(num_tokens_k, num_heads, head_dim)`.
-        v (torch.Tensor): Value tensor of shape `(num_tokens_v, num_heads, head_dim)`.
+        q (torch.Tensor): Query tensor of shape ``(num_tokens_q, num_heads, head_dim)``.
+        k (torch.Tensor): Key tensor of shape ``(num_tokens_k, num_heads, head_dim)``.
+        v (torch.Tensor): Value tensor of shape ``(num_tokens_v, num_heads, head_dim)``.
         key (DistAttnRuntimeKey): the object that holds some inner meta data
             as one argument for many other magi_attention APIs, about which the users may have no bother to care.
 
@@ -677,7 +683,7 @@ def calc_attn(
             - lse (torch.Tensor): Log-sum-exp values for numerical stability.
 
     Raises:
-        ValueError: If the provided `key` does not exist in `DistAttnRuntimeDict`.
+        ValueError: If the provided ``key`` does not exist in ``DistAttnRuntimeDict``.
     """
     mgr = DistAttnRuntimeDict.get(key)
     if mgr is None:
