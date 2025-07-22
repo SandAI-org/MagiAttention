@@ -23,8 +23,7 @@ from magi_attention.common.range import AttnRange
 from magi_attention.meta._calc_dispatch_meta import _calc_self_attn_areas
 from magi_attention.meta.container import AttnBucket, AttnChunk, AttnSlice
 from magi_attention.testing import parameterize
-from magi_attention.testing.utils import add_range_to_array
-from magi_attention.utils._utils import argsort
+from magi_attention.utils import add_range_to_array, argsort
 
 
 class TestCalcSelfAttnAreas(TestCase):

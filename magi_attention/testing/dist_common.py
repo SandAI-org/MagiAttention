@@ -40,7 +40,6 @@ if os.environ.get("MAGI_ATTENTION_UNITEST_PROFILE_MODE", "0") != "1":
     os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "1"
 
 
-# TODO: add process group initialization and property
 class DistTestBase(MultiProcessTestCase):
     @property
     def seed(self) -> int:

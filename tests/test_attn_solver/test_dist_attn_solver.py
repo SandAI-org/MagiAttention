@@ -35,17 +35,93 @@ from magi_attention.meta.solver.overlap_solver import (
 )
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
-from magi_attention.testing.utils import (
-    add_range_to_array,
-    determine_ith_range_masktype,
-    make_range_global,
-)
+from magi_attention.utils import add_range_to_array
 
 WORLD_SIZE = 4
 SEED = 42
 
 
-# TODO: add more unitest for dist-attn solver
+def make_range_global(
+    global_ranges: AttnRanges,
+    local_range: AttnRange,
+) -> AttnRanges:
+    """convert local_range to global_ranges with base global_ranges
+
+    Args:
+        global_ranges (AttnRanges): the actual base global ranges
+        local_range (AttnRange): range need to convert
+
+    Returns:
+        AttnRanges: converted multiple ranges since local range may
+            be converted to multiple segments of ranges
+    """
+    assert local_range.seqlen <= global_ranges.total_seqlen
+
+    ranges_ = AttnRanges()
+
+    local_start, local_length = local_range.start, local_range.seqlen
+
+    global_index = 0
+    current_global_length = 0
+    start_length = local_start
+
+    while global_index < len(global_ranges):
+        if global_ranges[global_index].seqlen <= start_length:
+            start_length -= global_ranges[global_index].seqlen
+            global_index += 1
+        else:
+            current_global_length = start_length
+            break
+
+    while global_index < len(global_ranges):
+        if global_ranges[global_index].seqlen - current_global_length < local_length:
+            range_ = AttnRange(
+                start=global_ranges[global_index].start + current_global_length,
+                end=global_ranges[global_index].end,
+            )
+            local_length = (
+                local_length
+                - global_ranges[global_index].seqlen
+                + current_global_length
+            )
+            global_index += 1
+            current_global_length = 0
+            ranges_.append(range_)
+        else:
+            range_ = AttnRange(
+                start=global_ranges[global_index].start + current_global_length,
+                end=global_ranges[global_index].start
+                + current_global_length
+                + local_length,
+            )
+            ranges_.append(range_)
+            break
+
+    return ranges_
+
+
+def determine_ith_range_masktype(
+    i: int,
+    length: int,
+    masktype: AttnMaskType = AttnMaskType.FULL,
+):
+    """
+    determine mask type in tests for Slice,
+    when convert local range with one single masktype to global range with multi masktypes
+    """
+    if length == 1 and masktype is AttnMaskType.BICAUSAL:
+        return AttnMaskType.BICAUSAL
+    if i == 0 and masktype is AttnMaskType.BICAUSAL:
+        return AttnMaskType.INVCAUSAL
+    if i == length - 1 and masktype is AttnMaskType.BICAUSAL:
+        return AttnMaskType.CAUSAL
+    if i == 0 and masktype is AttnMaskType.INVCAUSAL:
+        return AttnMaskType.INVCAUSAL
+    if i == length - 1 and masktype is AttnMaskType.CAUSAL:
+        return AttnMaskType.CAUSAL
+    return AttnMaskType.FULL
+
+
 class TestDistAttnSolver(DistTestBase):
     @property
     def process_group(self):
