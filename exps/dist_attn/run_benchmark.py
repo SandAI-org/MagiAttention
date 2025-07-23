@@ -18,9 +18,7 @@ from enum import Enum
 
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import init_device_mesh
 
-import magi_attention
 from exps.dist_attn.baselines.loongtrain import LoongTrain
 from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
 from exps.dist_attn.baselines.shard import (
@@ -158,36 +156,9 @@ def init_dist_environment(
         )
         local_rank = rank % 8
         torch.cuda.set_device(local_rank)
-        if magi_attention.comm.is_hierarchical_comm_enable():
-            cp_group = None
-        else:
-            cp_group = dist.new_group(list(range(world_size)), backend="nccl")
+        cp_group = dist.new_group(list(range(world_size)), backend="nccl")
 
     return cp_group
-
-
-def init_hierarchical_mesh(world_size: int):
-    if magi_attention.comm.is_hierarchical_comm_enable() and world_size in (
-        8,
-        16,
-        32,
-        64,
-    ):
-        world_size_inter_node, world_size_intra_node = {
-            8: (1, 8),
-            16: (2, 8),
-            32: (4, 8),
-            64: (8, 8),
-        }[world_size]
-        device_mesh = init_device_mesh(
-            device_type="cuda",
-            mesh_shape=(world_size_inter_node, world_size_intra_node),
-            mesh_dim_names=("inter", "intra"),
-        )
-    else:
-        device_mesh = None
-
-    return device_mesh
 
 
 def run_dist_attn(
@@ -377,7 +348,7 @@ def run_magi_attn(
         high_bandwith_domain_size=1,
     )
 
-    cp_mesh = init_hierarchical_mesh(world_size)
+    cp_mesh = None
 
     # -----    dispatch   ---- #
 

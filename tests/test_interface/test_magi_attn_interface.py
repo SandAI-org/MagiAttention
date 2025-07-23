@@ -15,26 +15,27 @@
 import os
 from typing import Any
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from einops import rearrange
+from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
-import magi_attention.testing
 from magi_attention.api.functools import (
+    apply_padding,
     compute_pad_size,
     full_attention_to_varlen_attention,
-    squash_batch_dim,
+    pad_at_dim,
 )
 from magi_attention.api.magi_attn_interface import (
     DistAttnRuntimeDict,
-    calc_attn,
+    get_position_ids,
     magi_attn_flex_dispatch,
     magi_attn_varlen_dispatch,
-    undispatch,
 )
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.ranges import AttnRanges
@@ -45,10 +46,13 @@ from magi_attention.config import (
     OverlapConfig,
     UniformOverlapAlg,
 )
+from magi_attention.dist_attn_runtime_mgr import (
+    DistAttnRuntimeMgr,
+    init_dist_attn_runtime_mgr,
+)
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
-from magi_attention.testing.precision import EPSILON, torch_attn_ref
-from magi_attention.utils import get_attn_mask_from_ranges
+from magi_attention.utils._utils import is_list_value_all
 
 NAME = "name"
 SKIP_WORLD_SIZE = "skip_world_size"
@@ -124,7 +128,7 @@ class MultiHeadAttention(nn.Module):
         return q, k, v
 
 
-class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
+class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
@@ -140,6 +144,24 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # NOTE: test using sdpa backend with fp64 dtype support
         os.environ["MAGI_ATTENTION_SDPA_BACKEND"] = "1"
+
+        # -----    set up for hier comm   ---- #
+
+        world_size_inter_node, world_size_intra_node = {
+            1: (1, 1),
+            2: (1, 2),
+            3: (3, 1),
+            4: (2, 2),
+            5: (1, 5),
+            6: (3, 2),
+            7: (1, 7),
+            8: (2, 4),
+        }[self.world_size]
+        self.device_mesh = init_device_mesh(
+            device_type="cuda",
+            mesh_shape=(world_size_inter_node, world_size_intra_node),
+            mesh_dim_names=("inter", "intra"),
+        )
 
     @property
     def process_group(self):
@@ -184,9 +206,10 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
                         [1024, 2048],
                     ]
                 ),
-                "is_causal_mapping": True,
+                "attn_type_mapping": 1,
                 "total_seqlen_q": 2048,
                 "total_seqlen_k": 2048,
+                "chunk_size": 1024,
             },
             # full attn with seqlen 2k and batchsize 3
             {
@@ -208,9 +231,10 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
                         [4096, 6144],
                     ]
                 ),
-                "is_causal_mapping": [False, False, False],
+                "attn_type_mapping": [0, 0, 0],
                 "total_seqlen_q": 6144,
                 "total_seqlen_k": 6144,
+                "chunk_size": 1536,
             },
             # varlen full attn with total seqlen 1050
             {
@@ -239,9 +263,11 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
                         [768, 1050],
                     ]
                 ),
-                "is_causal_mapping": False,
+                "attn_type_mapping": 0,
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
+                "chunk_size": 257,
+                "use_str_masktype": False,
             },
             {
                 NAME: "varlen_full_attn_1050",
@@ -275,9 +301,10 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
                         [768, 1050],
                     ]
                 ),
-                "is_causal_mapping": [False] * 7,
+                "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
+                "chunk_size": 568,
             },
             # varlen block causal with total seqlen 960
             {
@@ -306,40 +333,36 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
                         [768, 960],
                     ]
                 ),
-                "is_causal_mapping": [False] * 7,
+                "attn_type_mapping": [0, 1, 2, 3, 1, 2, 3],
                 "total_seqlen_q": 960,
                 "total_seqlen_k": 960,
+                "chunk_size": 568,
+                "use_str_masktype": True,
             },
-            # varlen block causal with total seqlen 840
+            # cp_mesh and cp_group are both set, raise ValueError
             {
-                NAME: "varlen_block_causal_840",
-                SKIP_WORLD_SIZE: [4, 8],
-                INTERFACE: "magi_attn_flex",
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [128, 256],
-                        [256, 384],
-                        [384, 512],
-                        [512, 640],
-                        [640, 768],
-                        [768, 840],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 128],
-                        [0, 256],
-                        [0, 384],
-                        [0, 512],
-                        [512, 640],
-                        [512, 768],
-                        [768, 840],
-                    ]
-                ),
-                "is_causal_mapping": [False] * 7,
-                "total_seqlen_q": 840,
-                "total_seqlen_k": 840,
+                NAME: "cp_mesh and cp_group testcase",
+                SKIP_WORLD_SIZE: [1, 2, 3, 5, 7],
+                INTERFACE: "set_mesh_and_group",
+                "q_ranges": AttnRanges.from_ranges([[0, 960]]),
+                "k_ranges": AttnRanges.from_ranges([[0, 960]]),
+                "attn_type_mapping": [0],
+                "total_seqlen_q": 960,
+                "total_seqlen_k": 960,
+                "chunk_size": 568,
+            },
+            # test for invalid masktype
+            {
+                NAME: "cp_mesh and cp_group testcase",
+                SKIP_WORLD_SIZE: [3, 5, 7],
+                INTERFACE: "test_for_invalid_mask",
+                "q_ranges": AttnRanges.from_ranges([[0, 960]]),
+                "k_ranges": AttnRanges.from_ranges([[0, 960]]),
+                "attn_type_mapping": [0],
+                "attn_mask_type": ["casual"],
+                "total_seqlen_q": 960,
+                "total_seqlen_k": 960,
+                "chunk_size": 324,
             },
         ],
     )
@@ -353,36 +376,6 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
             {
                 NAME: "disable_mso",
                 "enable": False,
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
-            },
-            # static, overlap degree = 1, min chunk size = 15
-            {
-                NAME: "static_od1_cz15",
-                "enable": True,
-                "mode": AttnOverlapMode.STATIC,
-                "degree": 1,
-                "min_chunk_size": 15,
-                "max_num_chunks": 60,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
-            },
-            # static, overlap degree = 2, min chunk size = 27
-            {
-                NAME: "static_od2_cz27",
-                "enable": True,
-                "mode": AttnOverlapMode.STATIC,
-                "degree": 2,
-                "min_chunk_size": 14,
-                "max_num_chunks": 44,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
                 "calc_cost_factor": CALC_COST_FACTOR,
                 "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
@@ -433,9 +426,9 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
     )
     @parameterize(
         "high_bandwith_domain_size",
-        [1, 2, 4, 8],
+        [1],  # TODO: this feature'll probably be deprecated soon
     )
-    def test_pipeline_sdpa(
+    def test_interface_sdpa(
         self,
         attn_config: dict[str, Any],
         overlap_config: dict[str, Any],
@@ -458,9 +451,12 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
             # skip for invalid high_bandwith_domain_size
             return
 
-        # NOTE: test pipeline using sdpa does not need profile mode
-        # thus we always enable sanity check mode
         assert magi_attention.is_sanity_check_enable()
+
+        # -----    skip for hier comm   ---- #
+
+        if high_bandwith_domain_size > 1:
+            return
 
         # -----    construct test case name   ---- #
 
@@ -473,17 +469,16 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})]"
         )
+
         # -----    contruct config from test cases   ---- #
-        from copy import deepcopy
 
-        attn_config_ = deepcopy(attn_config)
-
-        q_ranges: AttnRanges = attn_config_["q_ranges"]
-        k_ranges: AttnRanges = attn_config_["k_ranges"]
-        interface: str = attn_config_[INTERFACE]
-        is_causal_mapping: bool | list[bool] = attn_config_["is_causal_mapping"]
-        total_seqlen_q: int = attn_config_["total_seqlen_q"]
-        total_seqlen_k: int = attn_config_["total_seqlen_k"]
+        q_ranges: AttnRanges = attn_config["q_ranges"]
+        k_ranges: AttnRanges = attn_config["k_ranges"]
+        interface: str = attn_config["interface"]
+        attn_type_mapping: int | list[int] = attn_config["attn_type_mapping"]
+        total_seqlen_q: int = attn_config["total_seqlen_q"]
+        total_seqlen_k: int = attn_config["total_seqlen_k"]
+        chunk_size: int = attn_config["chunk_size"]
 
         device = torch.cuda.current_device()
 
@@ -495,280 +490,261 @@ class TestInterfacePipelineSDPABaseWithWorldSize1(DistTestBase):
             high_bandwith_domain_size=high_bandwith_domain_size,
             deterministic=False,
         )
-        print(f"{attn_config_[NAME]=}")
-        # -----    run pipeline test   ---- #
 
-        # ----- init input data and module---- #
+        # ----- init input data and module ----- #
+
         x = torch.randn(
             total_seqlen_q, head_dim, device=device, dtype=dtype, requires_grad=True
         )
-        MHA = MultiHeadAttention(head_dim, head_dim, num_heads).to(device)
 
-        # calculate pad size;
-        cp_size = dist.get_world_size(self.nccl_group)
-        pad_size, _ = compute_pad_size(total_seqlen_q, cp_size, head_dim)
+        # --------- calculate pad size --------- #
+
+        pad_size = compute_pad_size(total_seqlen_q, self.world_size, chunk_size)
+
+        # ------ calculate attn_mask_type ------ #
+
+        if isinstance(attn_type_mapping, list):
+            attn_mask_type = [
+                [
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.INVCAUSAL,
+                    AttnMaskType.BICAUSAL,
+                ][attn_type]
+                for attn_type in attn_type_mapping
+            ]
+        else:
+            attn_mask_type = [
+                [  # type: ignore[assignment]
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.INVCAUSAL,
+                    AttnMaskType.BICAUSAL,
+                ][attn_type_mapping]
+            ] * len(q_ranges)
 
         if interface == "magi_attn":
-            batch_size = attn_config_["batch_size"]
-            x_with_batch = torch.randn(
-                batch_size,
-                attn_config_["total_seqlen_q"] // batch_size,
-                head_dim,
-                device=device,
-                dtype=dtype,
-                requires_grad=True,
-            )
+            assert is_list_value_all(
+                attn_mask_type, AttnMaskType.FULL
+            ) or is_list_value_all(
+                attn_mask_type, AttnMaskType.CAUSAL
+            ), "we need to check varlen interface, which supports full or causal now"
+            is_causal = attn_mask_type[0] == AttnMaskType.CAUSAL
 
-            x = squash_batch_dim(x_with_batch)
+            batch_size = attn_config["batch_size"]
             cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
-                batch_size, attn_config_["total_seqlen_q"] // batch_size
+                batch_size, attn_config["total_seqlen_q"] // batch_size
             )
 
-            x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
+            _, dist_attn_runtime_key = magi_attn_varlen_dispatch(
                 x,
                 cu_seqlens_q,
                 cu_seqlens_k,
-                head_dim=head_dim,
                 pad_size=pad_size,
+                chunk_size=chunk_size,
                 cp_group=self.nccl_group,
-                causal=is_causal_mapping[0]
-                if isinstance(is_causal_mapping, list)
-                else is_causal_mapping,
+                cp_mesh=None,
+                causal=is_causal,
                 dist_attn_config=dist_attn_config,
             )
 
         if interface == "magi_attn_varlen":
-            cu_seqlens_q = attn_config_["cu_seqlens_q"]
-            cu_seqlens_k = attn_config_["cu_seqlens_k"]
-            x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
+            assert is_list_value_all(
+                attn_mask_type, AttnMaskType.FULL
+            ) or is_list_value_all(
+                attn_mask_type, AttnMaskType.CAUSAL
+            ), "we need to check varlen interface, which supports full or causal now"
+            is_causal = attn_mask_type[0] == AttnMaskType.CAUSAL
+
+            cu_seqlens_q = attn_config["cu_seqlens_q"]
+            cu_seqlens_k = attn_config["cu_seqlens_k"]
+            _, dist_attn_runtime_key = magi_attn_varlen_dispatch(
                 x,
                 cu_seqlens_q,
                 cu_seqlens_k,
-                head_dim=head_dim,
                 pad_size=pad_size,
+                chunk_size=chunk_size,
                 cp_group=self.nccl_group,
-                causal=is_causal_mapping[0]
-                if isinstance(is_causal_mapping, list)
-                else is_causal_mapping,
+                cp_mesh=None,
+                causal=is_causal,
                 dist_attn_config=dist_attn_config,
             )
 
         if interface == "magi_attn_flex":
-            attn_mask_type: AttnMaskType | list[AttnMaskType]
-            if isinstance(is_causal_mapping, list):
-                attn_mask_type = [
-                    AttnMaskType.CAUSAL if is_causal else AttnMaskType.FULL
-                    for is_causal in is_causal_mapping
-                ]
-            else:
-                attn_mask_type = (
-                    AttnMaskType.CAUSAL if is_causal_mapping else AttnMaskType.FULL
-                )
-
-            x_padded, dist_attn_runtime_key = magi_attn_flex_dispatch(
+            use_str_masktype: bool = attn_config["use_str_masktype"]
+            local_x_padded, dist_attn_runtime_key = magi_attn_flex_dispatch(
                 x,
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,
-                attn_mask_type=attn_mask_type,
+                attn_mask_type=[masktype.value for masktype in attn_mask_type]
+                if use_str_masktype
+                else attn_mask_type,
                 total_seqlen_q=total_seqlen_q,
                 total_seqlen_k=total_seqlen_k,
-                head_dim=head_dim,
                 pad_size=pad_size,
+                chunk_size=chunk_size,
                 cp_group=self.nccl_group,
-                is_same_source=True,
-                is_q_permutable=True,
-                is_k_permutable=True,
+                cp_mesh=None,
                 dist_attn_config=dist_attn_config,
             )
 
-        # -----    init dist attn runtime key   ---- #
-        dist_attn_runtime_mgr = DistAttnRuntimeDict[dist_attn_runtime_key]
+        if interface == "set_mesh_and_group":
+            with pytest.raises(ValueError):
+                _, dist_attn_runtime_key = magi_attn_flex_dispatch(
+                    x,
+                    q_ranges=q_ranges,
+                    k_ranges=k_ranges,
+                    attn_mask_type=attn_mask_type,
+                    total_seqlen_q=total_seqlen_q,
+                    total_seqlen_k=total_seqlen_k,
+                    pad_size=pad_size,
+                    chunk_size=chunk_size,
+                    cp_group=self.nccl_group,
+                    cp_mesh=self.device_mesh,
+                    dist_attn_config=dist_attn_config,
+                )
+            return
 
-        # HACK: double cp group for kv/dkv
-        dist_attn_runtime_mgr.dist_attn_runtime.cp_group_dkv = self.nccl_groups[1]
+        if interface == "test_for_invalid_mask":
+            invalid_mask_type = attn_config["attn_mask_type"]
+            with pytest.raises(ValueError):
+                _, dist_attn_runtime_key = magi_attn_flex_dispatch(
+                    x,
+                    q_ranges=q_ranges,
+                    k_ranges=k_ranges,
+                    attn_mask_type=invalid_mask_type,
+                    total_seqlen_q=total_seqlen_q,
+                    total_seqlen_k=total_seqlen_k,
+                    pad_size=pad_size,
+                    chunk_size=chunk_size,
+                    cp_group=self.nccl_group,
+                    cp_mesh=None,
+                    dist_attn_config=dist_attn_config,
+                )
+            return
 
-        # -----   get local qkv   ---- #
-        local_q, local_k, local_v = MHA.forward(x_padded)
+        # -----    compute dist attn runtime mgr   ---- #
+        dist_attn_runtime_mgr: DistAttnRuntimeMgr = DistAttnRuntimeDict[
+            dist_attn_runtime_key
+        ]
 
-        # -----   run dist attn forward on local qkv for local o   ---- #
-        local_out, _ = calc_attn(local_q, local_k, local_v, dist_attn_runtime_key)
+        # -------   calc ref_attn_runtime_mgr -------- #
 
-        # -----   undispatch local o to global o   ---- #
-        total_out = undispatch(local_out, dist_attn_runtime_key)
+        if pad_size > 0:
+            q_ranges, k_ranges, attn_mask_type = apply_padding(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_mask_type=attn_mask_type,
+                total_seqlen=total_seqlen_q,
+                pad_size=pad_size,
+            )
 
-        # -----   run backward   ---- #
-        grad_total_out = torch.randn_like(total_out).detach()
-        dist.all_reduce(grad_total_out.data, group=self.nccl_group)
-        total_out.backward(grad_total_out)
-
-        # -----   assert close to torch ref   ---- #
-        self.assert_close_to_torch_ref(
-            x=x,
-            mha=MHA,
-            x_grad=x.grad,
+        ref_attn_runtime_mgr: DistAttnRuntimeMgr = init_dist_attn_runtime_mgr(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
-            is_causal_mapping=is_causal_mapping,
-            total_seqlen_q=total_seqlen_q,
-            total_seqlen_k=total_seqlen_k,
-            total_out=total_out,
-            grad_total_out=grad_total_out,
-            test_case=test_case,
+            attn_mask_type=attn_mask_type,
+            total_seqlen_q=total_seqlen_q + pad_size,
+            total_seqlen_k=total_seqlen_k + pad_size,
+            chunk_size=chunk_size,
+            cp_group=self.nccl_group,
+            is_same_source=True,
+            is_q_permutable=True,
+            is_k_permutable=True,
+            dist_attn_config=dist_attn_config,
         )
 
-    def assert_close_to_torch_ref(
-        self,
-        x: torch.Tensor,
-        mha: MultiHeadAttention,
-        x_grad: torch.Tensor,
-        q_ranges: AttnRanges,
-        k_ranges: AttnRanges,
-        is_causal_mapping: bool | list[bool],
-        total_seqlen_q: int,
-        total_seqlen_k: int,
-        total_out: torch.Tensor,
-        grad_total_out: torch.Tensor,
-        test_case: str = "",
-    ) -> None:
-        # -----   customize tolerance threshold  ---- #
+        assert (
+            dist_attn_runtime_mgr == ref_attn_runtime_mgr
+        ), f"the answer is not correct when {test_case=}"
 
-        o_atol = EPSILON
-        o_rtol = EPSILON
+        # -------   test position ids -------- #
 
-        dq_atol = EPSILON
-        dq_rtol = EPSILON
-        # -----   build attn mask   ---- #
+        if interface == "magi_attn_flex":
+            global_x_padded = pad_at_dim(x, 0, pad_size)
 
-        mask = get_attn_mask_from_ranges(
-            q_ranges=q_ranges.to_naive_ranges(),
-            k_ranges=k_ranges.to_naive_ranges(),
-            is_causal_mapping=is_causal_mapping,
-            total_seqlen_q=total_seqlen_q,
-            total_seqlen_k=total_seqlen_k,
-        )
+            #  -----  get position_ids and check  -----  #
 
-        # -----   get total qkv   ---- #
+            position_ids = get_position_ids(dist_attn_runtime_key)
+            position_ids = position_ids[
+                position_ids < total_seqlen_q - 1
+            ]  # remove padded id
+            valid_length = position_ids.size(0)
 
-        x.grad = None
-        total_q, total_k, total_v = mha.forward(x)
-
-        # -----   ref1. torch ref with high precision (fp32)   ---- #
-
-        total_q.grad, total_k.grad, total_v.grad = None, None, None
-        total_out_ref_high_precision = torch_attn_ref(
-            q=total_q,
-            k=total_k,
-            v=total_v,
-            mask=mask,
-            layout="thd",
-            high_precision=True,
-        )
-
-        total_out_ref_high_precision.backward(grad_total_out)
-
-        # -----   assert close for fwd out   ---- #
-
-        magi_attention.testing.assert_close(
-            total_out,
-            total_out_ref_high_precision,
-            atol=o_atol,
-            rtol=o_rtol,
-            test_case=f"{test_case} => o",
-        )
-
-        # -----   assert close for bwd dx   ---- #
-
-        magi_attention.testing.assert_close(
-            x_grad,
-            x.grad,
-            atol=dq_atol,
-            rtol=dq_rtol,
-            test_case=f"{test_case} => dq",
-        )
+            self.assertTrue(
+                torch.equal(
+                    local_x_padded[:valid_length], global_x_padded[position_ids]
+                )
+            )
 
 
-class TestInterfacePipelineSDPAWithWorldSize2(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize2(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 2
 
     @skip_if_lt_x_gpu(2)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize3(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize3(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 3
 
     @skip_if_lt_x_gpu(3)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize4(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize4(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 4
 
     @skip_if_lt_x_gpu(4)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize5(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize5(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 5
 
     @skip_if_lt_x_gpu(5)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize6(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize6(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 6
 
     @skip_if_lt_x_gpu(6)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize7(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize7(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 7
 
     @skip_if_lt_x_gpu(7)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
-class TestInterfacePipelineSDPAWithWorldSize8(
-    TestInterfacePipelineSDPABaseWithWorldSize1
-):
+class TestInterfaceSDPAWithWorldSize8(TestInterfaceSDPABaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 8
 
     @skip_if_lt_x_gpu(8)
-    def test_pipeline_sdpa(self, *args, **kwargs):
-        super().test_pipeline_sdpa(*args, **kwargs)
+    def test_interface_sdpa(self, *args, **kwargs):
+        super().test_interface_sdpa(*args, **kwargs)
 
 
 if __name__ == "__main__":
