@@ -106,7 +106,6 @@ html_theme_options = {
     "navigation_depth": 4,
     "collapse_navigation": False,
     "show_version_warning_banner": True,
-    "github_url": "https://github.com/SandAI-org/MagiAttention",
     "logo": {
         "image_light": "_static/sand-logos/magi-black.png",
         "image_dark": "_static/sand-logos/magi-black.png",
@@ -122,6 +121,11 @@ html_theme_options = {
         "version_match": "1.0.3",
     },
     "icon_links": [
+        {
+            "name": "Github",
+            "url": "https://github.com/SandAI-org/MagiAttention",
+            "icon": "fa-brands fa-github",
+        },
         {
             "name": "Blog",
             "url": "https://sandai-org.github.io/MagiAttention/blog/",
