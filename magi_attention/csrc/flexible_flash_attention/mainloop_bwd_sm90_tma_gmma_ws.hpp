@@ -670,10 +670,10 @@ struct CollectiveMainloopBwdSm90 {
             if (lane_predicate) {
                 cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
                 tma_store_arrive();
+                tma_store_wait<0>();
             }
             // Note, the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
             for_each(make_int_sequence<NumMmaWarpGroups>{}, [&] (auto warpgroup_idx) {
-                if (lane_predicate) { tma_store_wait<NumMmaWarpGroups - 1 - CUTE_STATIC_V(warpgroup_idx)>(); }
                 cutlass::arch::NamedBarrier::arrive(cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warpgroup_idx /*id*/);  // sdQ empty, ready to be written to
             });
             if constexpr (Deterministic) {
