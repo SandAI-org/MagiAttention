@@ -59,7 +59,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       ClusterShape,
       ElementOut,
       ArchTag,
-      Scheduler::BlockCoordType,
+      typename Scheduler::BlockCoordType,
       CollectiveMainloop::NumMmaThreads,
       DisableFwdAtomicReduction,
       Deterministic>;
