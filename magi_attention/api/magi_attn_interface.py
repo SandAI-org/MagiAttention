@@ -46,8 +46,7 @@ def magi_attn_varlen_key(
     cu_seqlens_k: torch.Tensor,
     pad_size: int,
     chunk_size: int,
-    cp_group: dist.ProcessGroup | None = None,
-    cp_mesh: DeviceMesh | None = None,
+    cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     causal: bool = False,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ) -> DistAttnRuntimeKey:
@@ -63,9 +62,9 @@ def magi_attn_varlen_key(
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
-        cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
-        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
-            **NOTE**: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
+        cp_group_or_mesh (dist.ProcessGroup | DeviceMesh): process group or device mesh.
+            **NOTE**: for process group, we only support nccl backend for now,
+            and for device mesh, we only support 1D or 2D mesh for now.
 
         causal (bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
         dist_attn_config (DistAttnConfig): dist attn config.
@@ -83,8 +82,7 @@ def magi_attn_varlen_key(
                 ),
         ...     pad_size=compute_pad_size(4096, 4, 512), # seqlne, cp_size, chunk_size
         ...     chunk_size=512,
-        ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
-        ...     cp_mesh=None,
+        ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     causal=False,
         ...     dist_attn_config=DistAttnConfig(
         ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
@@ -126,7 +124,8 @@ def magi_attn_varlen_key(
     )
 
     # call magi_attn_flex_key
-    # for flash_attn_varlen: is_same_source, is_q_permute and is_k_permute are all set to true.
+    # NOTE: for flash_attn_varlen:
+    #   is_same_source, is_q_permutable and is_k_permutable are all set to true.
     return magi_attn_flex_key(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -135,8 +134,7 @@ def magi_attn_varlen_key(
         total_seqlen_k=total_seqlen_k,
         pad_size=pad_size,
         chunk_size=chunk_size,
-        cp_group=cp_group,
-        cp_mesh=cp_mesh,
+        cp_group_or_mesh=cp_group_or_mesh,
         is_same_source=True,
         is_q_permutable=True,
         is_k_permutable=True,
@@ -150,8 +148,7 @@ def magi_attn_varlen_dispatch(
     cu_seqlens_k: torch.Tensor,
     pad_size: int,
     chunk_size: int,
-    cp_group: dist.ProcessGroup | None = None,
-    cp_mesh: DeviceMesh | None = None,
+    cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     causal: bool = False,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ):
@@ -170,9 +167,9 @@ def magi_attn_varlen_dispatch(
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
-        cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
-        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
-            **NOTE**: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
+        cp_group_or_mesh (dist.ProcessGroup | DeviceMesh): process group or device mesh.
+            **NOTE**: for process group, we only support nccl backend for now,
+            and for device mesh, we only support 1D or 2D mesh for now.
 
         causal (bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
         dist_attn_config (DistAttnConfig): dist attn config.
@@ -199,8 +196,7 @@ def magi_attn_varlen_dispatch(
         ...     ),
         ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chunk_size
         ...     chunk_size=512,
-        ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
-        ...     cp_mesh=None,
+        ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     causal=False,
         ...     dist_attn_config=DistAttnConfig(
         ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
@@ -225,8 +221,7 @@ def magi_attn_varlen_dispatch(
         cu_seqlens_k=cu_seqlens_k,
         pad_size=pad_size,
         chunk_size=chunk_size,
-        cp_group=cp_group,
-        cp_mesh=cp_mesh,
+        cp_group_or_mesh=cp_group_or_mesh,
         causal=causal,
         dist_attn_config=dist_attn_config,
     )
@@ -244,8 +239,7 @@ def magi_attn_flex_key(
     total_seqlen_k: int,
     pad_size: int,
     chunk_size: int,
-    cp_group: dist.ProcessGroup | None = None,
-    cp_mesh: DeviceMesh | None = None,
+    cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
     is_same_source: bool = True,
     is_q_permutable: bool = True,
@@ -269,9 +263,9 @@ def magi_attn_flex_key(
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
-        cp_group (dist.ProcessGroup): process group, only support nccl backend for now.
-        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
-            **NOTE**: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
+        cp_group_or_mesh (dist.ProcessGroup | DeviceMesh): process group or device mesh.
+            **NOTE**: for process group, we only support nccl backend for now,
+            and for device mesh, we only support 1D or 2D mesh for now.
 
         dist_attn_config (DistAttnConfig): dist attn config
 
@@ -307,8 +301,7 @@ def magi_attn_flex_key(
         ...     total_seqlen_k=4096,
         ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chunk_size
         ...     chunk_size=512,
-        ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
-        ...     cp_mesh=None,
+        ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     is_same_source=True,
         ...     is_q_permutable=True,
         ...     is_k_permutable=True,
@@ -350,11 +343,15 @@ def magi_attn_flex_key(
     )
 
     # Validate process group (or device mesh)
-    if cp_group is None and cp_mesh is None:
-        raise ValueError("Either cp_group or cp_mesh must be provided")
-    if cp_group is not None and cp_mesh is not None:
-        raise ValueError("Only one of cp_group or cp_mesh can be provided")
-    if cp_mesh is not None:
+    if isinstance(cp_group_or_mesh, dist.ProcessGroup):
+        assert not magi_attention.comm.is_hierarchical_comm_enable(), (
+            "A 2D cp_mesh must be provided when hierarchical comm is enabled, "
+            "instead of a single cp_group"
+        )
+        cp_group = cp_group_or_mesh
+        cp_mesh = None
+    elif isinstance(cp_group_or_mesh, DeviceMesh):
+        cp_mesh = cp_group_or_mesh
         assert cp_mesh.ndim <= 2, "cp_mesh must be 1D or 2D"
         if magi_attention.comm.is_hierarchical_comm_enable():
             assert (
@@ -362,9 +359,9 @@ def magi_attn_flex_key(
             ), "cp_mesh must be 2D when hierarchical comm is enabled"
         cp_group = cp_mesh._flatten().get_group()
     else:
-        assert not magi_attention.comm.is_hierarchical_comm_enable(), (
-            "A 2D cp_mesh must be provided when hierarchical comm is enabled, "
-            "instead of a single cp_group"
+        raise ValueError(
+            f"cp_group_or_mesh must be a dist.ProcessGroup or dist.DistMesh, "
+            f"but got {type(cp_group_or_mesh)=}"
         )
 
     # Apply padding at seq_dim(dim 0）
@@ -381,15 +378,16 @@ def magi_attn_flex_key(
         total_seqlen_k += pad_size
 
     key = DistAttnRuntimeKey(
-        cp_group,  # FIXME: ignore cp_mesh to be part of key for now
-        chunk_size,
-        pad_size,
-        q_ranges,
-        k_ranges,
-        attn_mask_type,
-        total_seqlen_q,
-        total_seqlen_k,
-        dist_attn_config,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        total_seqlen_q=total_seqlen_q,
+        total_seqlen_k=total_seqlen_k,
+        pad_size=pad_size,
+        chunk_size=chunk_size,
+        cp_group=cp_group,
+        cp_mesh=cp_mesh,
+        dist_attn_config=dist_attn_config,
     )
 
     # Validate sequence length
@@ -462,8 +460,7 @@ def magi_attn_flex_dispatch(
     total_seqlen_k: int,
     pad_size: int,
     chunk_size: int,
-    cp_group: dist.ProcessGroup | None = None,
-    cp_mesh: DeviceMesh | None = None,
+    cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
     is_same_source: bool = True,
     is_q_permutable: bool = True,
@@ -488,9 +485,9 @@ def magi_attn_flex_dispatch(
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
-        cp_group (dist.ProcessGroup): process group, only support nccl backend for now
-        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
-            **NOTE**: cp_group and cp_mesh are mutually exclusive, one and only one of them needs be provided.
+        cp_group_or_mesh (dist.ProcessGroup | DeviceMesh): process group or device mesh.
+            **NOTE**: for process group, we only support nccl backend for now,
+            and for device mesh, we only support 1D or 2D mesh for now.
 
         dist_attn_config (DistAttnConfig): dist attn config
 
@@ -535,8 +532,7 @@ def magi_attn_flex_dispatch(
         ...     total_seqlen_k=4096,
         ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chun_size
         ...     chunk_size=512,
-        ...     cp_group=dist.new_group(list(range(4)), backend="nccl"),
-        ...     cp_mesh=None,
+        ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     dist_attn_config=DistAttnConfig(
         ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
@@ -566,8 +562,7 @@ def magi_attn_flex_dispatch(
         total_seqlen_k=total_seqlen_k,
         pad_size=pad_size,
         chunk_size=chunk_size,
-        cp_group=cp_group,
-        cp_mesh=cp_mesh,
+        cp_group_or_mesh=cp_group_or_mesh,
         dist_attn_config=dist_attn_config,
         # TODO: think through other scnearios besides self-attn and cross-attn
         # and find a better way to represent these flags
