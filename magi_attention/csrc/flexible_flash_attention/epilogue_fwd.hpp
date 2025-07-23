@@ -24,6 +24,7 @@ template <
     class ClusterShape_,
     class Element_,
     class ArchTag_,
+    class BlockCoordType_,
     int NumEpilogueThreads_,
     bool DisableFwdAtomicReduction_,
     bool Deterministic_ = false>
@@ -34,6 +35,7 @@ struct CollectiveEpilogueFwd {
   using Element = Element_;
   using ElementPartial = float;
   using ArchTag = ArchTag_;
+  using BlockCoordType = BlockCoordType_;
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool DisableFwdAtomicReduction = DisableFwdAtomicReduction_;
   static constexpr bool Deterministic = Deterministic_;
@@ -98,8 +100,6 @@ struct CollectiveEpilogueFwd {
       // cute::SM90_U32x4_STSM_N if Element size is 2 bytes (fp16, bf16)
       decltype(cutlass::epilogue::collective::detail::sm90_get_smem_store_op_for_accumulator<StrideO, ElementPartial>()),
       AutoVectorizingCopyWithAssumedAlignment<128>>;
-
-  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
   // static constexpr size_t SmemAlignmentO = cutlass::detail::alignment_for_swizzle(SmemLayoutO{});
   // static_assert(SmemAlignmentO >= 128, "Require at least 128B alignment");

@@ -74,7 +74,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
 
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
   using ClusterShape = cute::Shape<_1, Int<1>, _1>; // Currently doesn't not support cluster
-  // Stages_dS_or_QSm80 is Stages_dS if Sm90 and Stages if Sm80
+
+  // Get Mainloop, TileScheduler, Epilogue and AttnKernel
   using CollectiveMainloop = flash::CollectiveMainloopBwdSm90<
       Stages,
       Stages_dO,
@@ -94,20 +95,19 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       AtomLayoutNdKV,
       AtomLayoutMdQ,
       V_in_regs>;
+  using Scheduler = flash::
+      DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
       ElementDkv,
       ElementAccum,
       ArchTag,
+      Scheduler::BlockCoordType,
       CollectiveMainloop::NumMmaThreads,
       dKV_swapAB,
       NumMmaWarpGroups*(Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV,
       DisableBwdDkvAtomicReduction,
       Deterministic>;
-  // uncomment the following line to resume to non-persistent kernel
-  // using Scheduler = flash::SingleTileScheduler<Varlen, false /*Split*/, false /*PackGQA*/, kBlockN>;
-  using Scheduler = flash::
-      DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{

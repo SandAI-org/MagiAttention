@@ -42,6 +42,7 @@ class DynamicPersistentTileScheduler {
 
  public:
   using SharedStorage = std::conditional_t<Deterministic, thrust::pair<int4, int2>, int4>;
+  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
  protected:
   SharedStorage* const work_info_smem;
@@ -79,8 +80,6 @@ class DynamicPersistentTileScheduler {
         cute::tuple<int32_t, int32_t>,
         cute::tuple<> // no memory use
         >;
-
-    using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
     extra_vars_type conflict_batch_msg;
 

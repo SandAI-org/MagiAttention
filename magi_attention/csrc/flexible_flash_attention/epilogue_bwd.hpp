@@ -23,6 +23,7 @@ template <
     class Element_,
     class ElementAccum_,
     class ArchTag_,
+    class BlockCoordType_,
     int NumEpilogueThreads_,
     bool dKV_swapAB_,
     int AtomLayoutKdKV = 1,
@@ -32,17 +33,18 @@ struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
   using Element = Element_;
   using ElementAccum = ElementAccum_;
+  using ArchTag = ArchTag_;
+  using BlockCoordType = BlockCoordType_;
+
+  static_assert(ArchTag::kMinComputeCapability >= 90);
 
   static constexpr bool IsSameType = cute::is_same_v<Element, ElementAccum>;
   static constexpr bool DisableBwdDkvAtomicReduction = DisableBwdDkvAtomicReduction_;
 
-  using ArchTag = ArchTag_;
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool dKV_swapAB = dKV_swapAB_;
   static constexpr bool Use_TMA = ArchTag::kMinComputeCapability >= 90;
   static constexpr bool Deterministic = Deterministic_;
-
-  static_assert(ArchTag::kMinComputeCapability >= 80);
 
   // Select the appropriate TMA copy type based on DisableBwdDkvAtomicReduction
   using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
@@ -98,8 +100,6 @@ struct CollectiveEpilogueBwd {
           select<1, 2>(TileShape_MNK{}),
           _1{})), // no mcast for dKV
       std::nullptr_t>;
-
-  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
   // Host side kernel arguments
   struct Arguments {
