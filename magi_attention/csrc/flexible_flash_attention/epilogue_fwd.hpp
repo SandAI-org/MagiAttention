@@ -374,9 +374,6 @@ struct CollectiveEpilogueFwd {
         }
         flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
 
-        // A workaround to ensure that all threads get the correct lse_final, low performance
-        __threadfence();
-
         auto lse_prev = make_fragment_like(lse);
         auto lse_final = make_fragment_like(lse);
         #pragma unroll
@@ -427,6 +424,8 @@ struct CollectiveEpilogueFwd {
         Tensor tOgO = gr_thr_copy_O.partition_D(gO);
         cute::copy_if(tOpO, tOrCurrO_copy_view, tOgO);
 
+        // Make sure all writes to global memory before this point are completed
+        __threadfence();
         flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
         if (thread_idx == 0) {
             release_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
