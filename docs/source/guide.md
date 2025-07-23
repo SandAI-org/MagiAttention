@@ -5,7 +5,7 @@
 :maxdepth: 2
 
 install.md
-magi_api.md
 tutorial.md
+magi_api.md
 
 ```
