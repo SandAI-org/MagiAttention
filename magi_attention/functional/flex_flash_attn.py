@@ -96,7 +96,7 @@ def merge_ranges(
         Unique Count:
          tensor(2, dtype=torch.int32)
     """
-    assert is_ffa_installed
+    assert is_ffa_installed, "FFA is not installed."
 
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
@@ -138,7 +138,7 @@ def _flex_flash_attn_forward(
     deterministic,
     sm_margin,
 ):
-    assert is_ffa_installed
+    assert is_ffa_installed, "FFA is not installed."
 
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
@@ -197,7 +197,7 @@ def _flex_flash_attn_backward(
     deterministic,
     sm_margin,
 ):
-    assert is_ffa_installed
+    assert is_ffa_installed, "FFA is not installed."
 
     dout, q, k, v, out, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (dout, q, k, v, out, q_ranges, k_ranges)
