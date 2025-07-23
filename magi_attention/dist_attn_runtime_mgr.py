@@ -37,8 +37,8 @@ class DistAttnRuntimeKey:
     def __init__(
         self,
         cp_group: dist.ProcessGroup,
+        chunk_size: int,
         pad_size: int,
-        head_dim: int,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
         attn_mask_type: list[AttnMaskType],
@@ -47,8 +47,8 @@ class DistAttnRuntimeKey:
         dist_attn_config: DistAttnConfig,
     ):
         self.cp_group = cp_group
+        self.chunk_size = chunk_size
         self.pad_size = pad_size
-        self.head_dim = head_dim
         self.q_ranges = q_ranges
         self.k_ranges = k_ranges
         self.attn_mask_type = attn_mask_type
@@ -62,8 +62,8 @@ class DistAttnRuntimeKey:
         return hash(
             (
                 self.cp_group,
+                self.chunk_size,
                 self.pad_size,
-                self.head_dim,
                 self.q_ranges,
                 self.k_ranges,
                 mask_tuple,
