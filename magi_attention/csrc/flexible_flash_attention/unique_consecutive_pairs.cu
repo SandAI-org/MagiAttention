@@ -17,8 +17,8 @@
 #include <cub/device/device_scan.cuh>
 #include <vector>
 
-#include "flash.h"
 #include "cuda_check.h"
+#include "flash.h"
 
 // ===================================================================
 // Data Structure for (int, int) Pairs

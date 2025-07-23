@@ -319,6 +319,8 @@ struct CollectiveMainloopBwdSm90 {
     float const softcap_val;
     int const* const q_ranges;
     int const* const k_ranges;
+    int* dq_determin_conflict_state;
+    int* dq_determin_range_locks;
     int const* const attn_type_map = nullptr;
   };
 
@@ -343,6 +345,9 @@ struct CollectiveMainloopBwdSm90 {
     float const softcap_val;
     int const* const q_ranges;
     int const* const k_ranges;
+    int* dq_determin_conflict_state;
+    int* dq_determin_range_locks;
+    int const n_block_max_num;
     int const* const attn_type_map = nullptr;
   };
 
@@ -363,6 +368,11 @@ struct CollectiveMainloopBwdSm90 {
         SmemLayoutdQaccumTMA{},
         TileShape_dQaccum{},
         _1{}); // no mcast for dQ
+
+    if constexpr (Deterministic) {
+      assert(args.dq_determin_conflict_state != nullptr);
+      assert(args.dq_determin_range_locks != nullptr);
+    }
 
     // If there's tanh softcapping, we do tanh(scores * softmax_scale / softcap_val) * softcap_val.
     // Right after this, we multiply by log2(e) before applying exp2.
@@ -395,6 +405,9 @@ struct CollectiveMainloopBwdSm90 {
         !Has_softcap ? 0.f : args.softmax_scale / args.softcap_val,
         args.q_ranges,
         args.k_ranges,
+        args.dq_determin_conflict_state,
+        args.dq_determin_range_locks,
+        cute::ceil_div(get<0>(args.shape_K), kBlockN),
         args.attn_type_map};
   }
 
@@ -586,18 +599,155 @@ struct CollectiveMainloopBwdSm90 {
     }
   }
 
+  CUTLASS_DEVICE
+  void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
+    if (left_range_sync_num == 0 && right_range_sync_num == 0)
+      return;
+
+    // Calculate lock index
+    int left_range_block_idx = offset / q_block_size;
+    int left_range_index = left_range_block_idx * num_heads + bidh;
+    int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+
+// Acquire the first lock
+#pragma unroll 1
+    while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
+    }
+
+    // If we need a second lock
+    if (left_range_block_idx != right_range_block_idx) {
+      int right_range_index = right_range_block_idx * num_heads + bidh;
+
+// Try to acquire the second lock
+#pragma unroll 1
+      while (atomicCAS(&range_lock[right_range_index * 2], right_range_sync_num, right_range_sync_num) != right_range_sync_num) {
+      }
+    }
+  }
+
+  CUTLASS_DEVICE
+  void deterministic_arrive(
+      int* range_lock,
+      int bidh,
+      int offset,
+      int q_block_size,
+      int num_heads,
+      int arrive_num,
+      bool left_range_arrive_twice,
+      bool right_range_arrive_twice) {
+    // Calculate lock indices
+    int left_range_block_idx = offset / q_block_size;
+    int left_range_index = left_range_block_idx * num_heads + bidh;
+    int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+    int right_range_index = right_range_block_idx * num_heads + bidh;
+
+    // Release the second lock
+    int add_cnt = right_range_arrive_twice ? 2 : 1;
+    int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
+    // each range_lock needs to arrive twice to make sure conflict batch has been completed
+    if (tmp + add_cnt == 2) {
+      atomicExch(&range_lock[right_range_index * 2 + 1], 0);
+      atomicExch(&range_lock[right_range_index * 2], arrive_num);
+    }
+
+    // Release the first lock
+    add_cnt = left_range_arrive_twice ? 2 : 1;
+    tmp = atomicAdd(&range_lock[left_range_index * 2 + 1], add_cnt);
+    if (tmp + add_cnt == 2) {
+      atomicExch(&range_lock[left_range_index * 2 + 1], 0);
+      atomicExch(&range_lock[left_range_index * 2], arrive_num);
+    }
+  }
+
   template <typename SharedStorage>
-  CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord) {
+  CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord, int bidb_last = 0) {
     if constexpr (!dQacc_use_TMA) {
       return;
     }
 
-    auto [n_block, bidh, bidb] = block_coord;
+    static constexpr int kBlockM = get<0>(TileShape_MNK{});
+    static constexpr int kBlockN = get<1>(TileShape_MNK{});
+
+    int n_block = get<0>(block_coord);
+    int bidh = get<1>(block_coord);
+    int bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
+
+    if constexpr (Deterministic) {
+      // update conflict state of batches
+      // bidb_last is the previous bidb, need to update conflict state of bidb_last ~ bidb
+      // block_now is the block id of bidb, block_size = kBlock
+      // params.q_ranges[2 * bidb] ~ params.q_ranges[2 * bidb + 1] is the range of bidb
+      int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
+      uint32_t smid = blockIdx.x;
+      uint32_t sm_stride = gridDim.x;
+      int* conflict_state = params.dq_determin_conflict_state;
+      // update missed batch's conflict state, loop for bidb_last ~ bidb
+      while (bidb_last < bidb) {
+        // bidb_last_l ~ bidb_last_r is the range of bidb_last
+        int bidb_last_l = params.q_ranges[2 * bidb_last], bidb_last_r = params.q_ranges[2 * bidb_last + 1];
+        int l = bidb_last_l / kBlockM + lane; // bidb_last_l / kBlock is first block id
+        int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM); // calc total block num of bidb_last
+        int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM; // calc last block id
+        // each threads of warp update conflict block id left ~ right
+        // each batch's range will conflict with previous batch, which cover the same block id
+        while (l <= r) {
+          // conflict state[block id * sm_stride + smid] save the conflict info of this sm
+          // conflict info is the previous conflict batch id + 1 (make it different to inital value 0)
+          // conflict state == 0 means that there is no conflict batch, this batch is the first batch to add
+          conflict_state[l * sm_stride + smid] = bidb_last + 1;
+          l += cutlass::NumThreadsPerWarp;
+        }
+        bidb_last++;
+      }
+      __syncwarp();
+    }
+
+    int const last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
+    int const m_block_num = cute::ceil_div(seqlen_info.seqlen_q, kBlockM);
+    bool const lane_predicate = cute::elect_one_sync();
+    int const num_heads = get<2>(params.shape_Q);
+    // batch i use [i * n_block_max_num + 1 , i * n_block_max_num + n_block_size - 1] for add rank of same qhead
+    // except for the last n_block_id, the last is always (i + 1) * n_block_max_num
+    auto m_block_sync = [&](int m_block_id) {
+      uint32_t smid = blockIdx.x;
+      uint32_t sm_stride = gridDim.x;
+      // calc dq conflict range lock index
+      int left_dq_conflict_index = seqlen_info.offset_q / kBlockM + m_block_id;
+      int right_dq_conflict_index = (seqlen_info.offset_q + kBlockM - 1) / kBlockM + m_block_id;
+      // the first n_block should wait for conflict batches
+      // the others n_block should wait for previous n_block
+      int sync_num1 = n_block == 0 ? params.dq_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
+                                   : bidb * params.n_block_max_num + n_block;
+      int sync_num2 = n_block == 0 ? params.dq_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
+                                   : bidb * params.n_block_max_num + n_block;
+      deterministic_sync(params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, sync_num1, sync_num2);
+    };
+
+    auto m_block_arrive = [&](int m_block_id) {
+      // calc arrive message: l_arrive_twice & r_arrive_twice
+      // each range_lock needs to arrive twice to make sure conflict batch has been completed
+      // because range_lock block and batch's block may start from a different offset
+      bool l_arrive_twice = (m_block_id == 0) && (seqlen_info.offset_q % kBlockM != 0);
+      bool r_arrive_twice = (m_block_id == m_block_num - 1) && (seqlen_info.offset_q % kBlockM != 0);
+      // the last n_block arrive num is always (batch id + 1) * n_block_max_num
+      int arrive_num = n_block == last_n_block ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + n_block + 1;
+      deterministic_arrive(
+          params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);
+    };
+
     // It's possible to have m_block_max <= m_block_min. Exit early
     if (m_block_max <= m_block_min) {
+      if constexpr (Deterministic) {
+        if (lane_predicate) {
+          for (int m_block = 0; m_block < m_block_num; ++m_block) {
+            m_block_sync(m_block);
+            m_block_arrive(m_block);
+          }
+        }
+      }
       return;
     }
 
@@ -609,9 +759,15 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
-    using Barrier = cutlass::GenericBarrier<cutlass::detail::SyncwarpSync>;
-    bool const lane_predicate = cute::elect_one_sync();
     int m_block = m_block_min;
+    if constexpr (Deterministic) {
+      if (lane_predicate) {
+        for (int m_block = 0; m_block < m_block_min; ++m_block) {
+          m_block_sync(m_block);
+          m_block_arrive(m_block);
+        }
+      }
+    }
 #pragma unroll 2
     for (; m_block < m_block_max; ++m_block) {
 #pragma unroll
@@ -620,10 +776,17 @@ struct CollectiveMainloopBwdSm90 {
             cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
             static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warpgroup_idx /*id*/); // sdQ full, to be written to gmem
       }
+
       if (lane_predicate) {
+        if constexpr (Deterministic) {
+          m_block_sync(m_block);
+        }
         cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
         tma_store_arrive();
         tma_store_wait<0>();
+        if constexpr (Deterministic) {
+          m_block_arrive(m_block);
+        }
       }
       // Note, the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
       for_each(make_int_sequence<NumMmaWarpGroups>{}, [&](auto warpgroup_idx) {
@@ -631,6 +794,14 @@ struct CollectiveMainloopBwdSm90 {
             cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
             static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warpgroup_idx /*id*/); // sdQ empty, ready to be written to
       });
+    }
+    if constexpr (Deterministic) {
+      if (lane_predicate) {
+        for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
+          m_block_sync(m_block);
+          m_block_arrive(m_block);
+        }
+      }
     }
   }
 

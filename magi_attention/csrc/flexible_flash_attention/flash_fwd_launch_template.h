@@ -22,7 +22,16 @@
 
 using namespace cute;
 
-template <int Arch, int kHeadDim, int ClusterM, typename Element, typename ElementOut, bool Has_softcap, bool DisableFwdAtomicReduction, bool MergeRange>
+template <
+    int Arch,
+    int kHeadDim,
+    int ClusterM,
+    typename Element,
+    typename ElementOut,
+    bool Has_softcap,
+    bool DisableFwdAtomicReduction,
+    bool Deterministic,
+    bool MergeRange>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
@@ -39,15 +48,21 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using TileShape_MNK_PV = cute::Shape<Int<kBlockM>, Int<kHeadDim>, Int<kBlockN>>;
   // get cluster shape
   using ClusterShape = cute::Shape<Int<ClusterM>, _1, _1>;
-  // get mainloop and epilogue
+
+  // Get Mainloop, TileScheduler, Epilogue and AttnKernel
   using CollectiveMainloop =
       flash::CollectiveMainloopFwdSm90<kStages, ClusterShape, TileShape_MNK, Element, float, cutlass::arch::Sm90, Has_softcap, MmaPV_is_RS, IntraWGOverlap>;
-  using CollectiveEpilogue =
-      flash::CollectiveEpilogueFwd<TileShape_MNK_PV, ClusterShape, ElementOut, ArchTag, CollectiveMainloop::NumMmaThreads, DisableFwdAtomicReduction>;
-
-  static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
-  using SchedulerPersistent = flash::DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, NumProducerThreads, Arch >= 90 /*WarpSpecialized*/>;
-  using Scheduler = SchedulerPersistent;
+  using Scheduler =
+      flash::DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
+  using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
+      TileShape_MNK_PV,
+      ClusterShape,
+      ElementOut,
+      ArchTag,
+      typename Scheduler::BlockCoordType,
+      CollectiveMainloop::NumMmaThreads,
+      DisableFwdAtomicReduction,
+      Deterministic>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
@@ -78,11 +93,9 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       params.range_locks,
       params.q_ranges,
       params.k_ranges,
+      params.determin_range_locks,
   };
 
-  int qhead_per_khead = 1;
-  int num_blocks_m = cutlass::ceil_div(params.total_q * qhead_per_khead, get<0>(TileShape_MNK{}));
-  num_blocks_m = cutlass::round_up(num_blocks_m, size<0>(ClusterShape{}));
   typename flash::TileSchedulerArguments scheduler_args{
       /*num_heads*/ params.h_qo,
       /*num_batches*/ params.merge_batch_size,
@@ -90,6 +103,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       /*ranges*/ params.q_ranges,
       /*merge_ranges*/ params.merge_q_ranges,
       /*range_map*/ params.qk_map,
+      /*determin_conflict_state*/ params.determin_conflict_state,
       /*unique_count*/ params.unique_count};
 
   int device;
@@ -128,12 +142,14 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // Only needed here to decide if we should use cluster
   static constexpr int kBlockM = std::get<0>(tile_size_fwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
-  // 有varlen，所以不能用cluster
+  // TODO: support cluster launch
   static constexpr bool Enable_cluster = false;
   CLUSTER_SWITCH(cutlass::ceil_div(params.total_q, kBlockM) % 2 == 0, Use_cluster, [&] {
     static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
     BOOL_SWITCH(params.merge_q_ranges != nullptr, MergeRange, [&] {
-      run_flash_fwd<Arch, kHeadDim, ClusterM, T, T_out, Has_softcap, DisableFwdAtomicReduction, MergeRange>(params, stream);
+      BOOL_SWITCH(params.deterministic, Deterministic, [&] {
+        run_flash_fwd<Arch, kHeadDim, ClusterM, T, T_out, Has_softcap, DisableFwdAtomicReduction, Deterministic, MergeRange>(params, stream);
+      });
     });
   });
 }

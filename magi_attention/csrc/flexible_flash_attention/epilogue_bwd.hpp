@@ -23,24 +23,28 @@ template <
     class Element_,
     class ElementAccum_,
     class ArchTag_,
+    class BlockCoordType_,
     int NumEpilogueThreads_,
     bool dKV_swapAB_,
     int AtomLayoutKdKV = 1,
-    bool DisableBwdDkvAtomicReduction_ = false>
+    bool DisableBwdDkvAtomicReduction_ = false,
+    bool Deterministic_ = false>
 struct CollectiveEpilogueBwd {
   using TileShape_MNK = TileShape_MNK_;
   using Element = Element_;
   using ElementAccum = ElementAccum_;
+  using ArchTag = ArchTag_;
+  using BlockCoordType = BlockCoordType_;
+
+  static_assert(ArchTag::kMinComputeCapability >= 90);
 
   static constexpr bool IsSameType = cute::is_same_v<Element, ElementAccum>;
   static constexpr bool DisableBwdDkvAtomicReduction = DisableBwdDkvAtomicReduction_;
 
-  using ArchTag = ArchTag_;
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool dKV_swapAB = dKV_swapAB_;
   static constexpr bool Use_TMA = ArchTag::kMinComputeCapability >= 90;
-
-  static_assert(ArchTag::kMinComputeCapability >= 80);
+  static constexpr bool Deterministic = Deterministic_;
 
   // Select the appropriate TMA copy type based on DisableBwdDkvAtomicReduction
   using GmemTiledCopydKVTMA = std::conditional_t<DisableBwdDkvAtomicReduction, cute::SM90_TMA_STORE, cute::SM90_TMA_REDUCE_ADD>;
@@ -105,8 +109,10 @@ struct CollectiveEpilogueBwd {
     Element* ptr_dV;
     StridedKV const stride_dV;
     int const num_heads_q;
+    int const num_heads_kv;
     int const* q_ranges;
     int const* k_ranges;
+    int* determin_range_locks = nullptr;
   };
 
   // Device side kernel params
@@ -120,6 +126,8 @@ struct CollectiveEpilogueBwd {
     int const* q_ranges;
     int const* k_ranges;
     cutlass::FastDivmod qhead_per_khead_divmod;
+    int const nheads;
+    int* determin_range_locks = nullptr;
   };
 
   static Params to_underlying_arguments(Arguments const& args) {
@@ -149,7 +157,9 @@ struct CollectiveEpilogueBwd {
         tma_store_dV,
         args.q_ranges,
         args.k_ranges,
-        cutlass::FastDivmod(cute::ceil_div(args.num_heads_q, get<2>(args.shape_dK)))};
+        cutlass::FastDivmod(cute::ceil_div(args.num_heads_q, get<2>(args.shape_dK))),
+        args.num_heads_kv,
+        args.determin_range_locks};
   }
 
   /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -161,6 +171,66 @@ struct CollectiveEpilogueBwd {
     }
   }
 
+  CUTLASS_DEVICE
+  void deterministic_sync(int* range_lock, int bidh, int offset, int q_block_size, int num_heads, int left_range_sync_num, int right_range_sync_num) {
+    if (left_range_sync_num == 0 && right_range_sync_num == 0)
+      return;
+
+    // Calculate lock index
+    int left_range_block_idx = offset / q_block_size;
+    int left_range_index = left_range_block_idx * num_heads + bidh;
+    int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+
+// Acquire the first lock
+#pragma unroll 1
+    while (atomicCAS(&range_lock[left_range_index * 2], left_range_sync_num, left_range_sync_num) != left_range_sync_num) {
+    }
+
+    // If we need a second lock
+    if (left_range_block_idx != right_range_block_idx) {
+      int right_range_index = right_range_block_idx * num_heads + bidh;
+
+// Try to acquire the second lock
+#pragma unroll 1
+      while (atomicCAS(&range_lock[right_range_index * 2], right_range_sync_num, right_range_sync_num) != right_range_sync_num) {
+      }
+    }
+  }
+
+  CUTLASS_DEVICE
+  void deterministic_arrive(
+      int* range_lock,
+      int bidh,
+      int offset,
+      int q_block_size,
+      int num_heads,
+      int arrive_num,
+      bool left_range_arrive_twice,
+      bool right_range_arrive_twice) {
+    // Calculate lock indices
+    int left_range_block_idx = offset / q_block_size;
+    int left_range_index = left_range_block_idx * num_heads + bidh;
+    int right_range_block_idx = (offset + q_block_size - 1) / q_block_size;
+    int right_range_index = right_range_block_idx * num_heads + bidh;
+
+    // Release the second lock
+    int add_cnt = right_range_arrive_twice ? 2 : 1;
+    int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
+    // each range_lock needs to arrive twice to make sure conflict batch has been completed
+    if (tmp + add_cnt == 2) {
+      atomicExch(&range_lock[right_range_index * 2 + 1], 0);
+      atomicExch(&range_lock[right_range_index * 2], arrive_num);
+    }
+
+    // Release the first lock
+    add_cnt = left_range_arrive_twice ? 2 : 1;
+    tmp = atomicAdd(&range_lock[left_range_index * 2 + 1], add_cnt);
+    if (tmp + add_cnt == 2) {
+      atomicExch(&range_lock[left_range_index * 2 + 1], 0);
+      atomicExch(&range_lock[left_range_index * 2], arrive_num);
+    }
+  }
+
   template <typename SharedStorage, typename FrgTensorO, typename TiledMma>
   CUTLASS_DEVICE void store(
       Params const& params,
@@ -169,8 +239,16 @@ struct CollectiveEpilogueBwd {
       SharedStorage& shared_storage,
       TiledMma tiled_mma,
       int thread_idx,
-      cute::tuple<int32_t, int32_t, int32_t> const& block_coord) {
-    auto [n_block, bidh, bidb] = block_coord;
+      BlockCoordType const& block_coord) {
+    // Get block coordinates for current job(tile)
+    int n_block = get<0>(block_coord);
+    int bidh = get<1>(block_coord);
+    int bidb = get<2>(block_coord);
+    int left_range_conflict_msg = 0, right_range_conflict_msg = 0;
+    if constexpr (Deterministic) {
+      left_range_conflict_msg = get<3>(block_coord);
+      right_range_conflict_msg = get<4>(block_coord);
+    }
     int bidh_idx_in_group;
     int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
     Tensor sdK = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKV{}));
@@ -228,8 +306,23 @@ struct CollectiveEpilogueBwd {
     Tensor tdVgdV = block_tma_dV.partition_D(gdV); // (TMA, TMA_M, TMA_K)
     Tensor tdVsdV = block_tma_dV.partition_S(sdV); // (TMA, TMA_M, TMA_K)
 
+    int offset_k = seqlen_info.offset_k;
+
     int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
     if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
+      if constexpr (Deterministic) {
+        if (cute::elect_one_sync()) {
+          int qheads_per_kheads = params.qhead_per_khead_divmod;
+          // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
+          // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
+          // if not conflict, conflict_msg >> 1 is 0
+          // the first gqa headq should wait for conflict batches
+          // the others gqa headq should wait for previous gqa headq
+          int sync_num1 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
+          int sync_num2 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
+          deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
+        }
+      }
       cutlass::arch::NamedBarrier::sync(NumEpilogueThreads + cutlass::NumThreadsPerWarp, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
       if (cute::elect_one_sync()) {
         cute::copy(params.tma_store_dV, tdVsdV, tdVgdV);
@@ -238,6 +331,21 @@ struct CollectiveEpilogueBwd {
       }
     }
     tma_store_wait<0>();
+    if constexpr (Deterministic) {
+      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+        int qheads_per_kheads = params.qhead_per_khead_divmod;
+        int arrive_num = bidb * qheads_per_kheads + bidh_idx_in_group + 1;
+        deterministic_arrive(
+            params.determin_range_locks,
+            bidh_kv,
+            offset_k + n_block * kBlockN,
+            kBlockN,
+            params.nheads,
+            arrive_num,
+            left_range_conflict_msg & 1,
+            right_range_conflict_msg & 1);
+      }
+    }
     // // Tell warp 0 that smem_k and smem_v are ready
     // cutlass::arch::NamedBarrier::arrive(NumEpilogueThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
   }

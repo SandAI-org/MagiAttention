@@ -74,7 +74,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
 
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
   using ClusterShape = cute::Shape<_1, Int<1>, _1>; // Currently doesn't not support cluster
-  // Stages_dS_or_QSm80 is Stages_dS if Sm90 and Stages if Sm80
+
+  // Get Mainloop, TileScheduler, Epilogue and AttnKernel
   using CollectiveMainloop = flash::CollectiveMainloopBwdSm90<
       Stages,
       Stages_dO,
@@ -94,19 +95,19 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       AtomLayoutNdKV,
       AtomLayoutMdQ,
       V_in_regs>;
+  using Scheduler = flash::
+      DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
       ElementDkv,
       ElementAccum,
       ArchTag,
+      typename Scheduler::BlockCoordType,
       CollectiveMainloop::NumMmaThreads,
       dKV_swapAB,
       NumMmaWarpGroups*(Arch >= 90 ? 1 : cutlass::NumWarpsPerWarpGroup) / AtomLayoutNdKV,
-      DisableBwdDkvAtomicReduction>;
-  // uncomment the following line to resume to non-persistent kernel
-  // using Scheduler = flash::SingleTileScheduler<Varlen, false /*Split*/, false /*PackGQA*/, kBlockN>;
-  using Scheduler =
-      flash::DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/>;
+      DisableBwdDkvAtomicReduction,
+      Deterministic>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnBwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, RangeMerge>>;
 
   typename CollectiveMainloop::Arguments mainloop_args{
@@ -132,8 +133,9 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.softcap,
       params.q_ranges,
       params.k_ranges,
+      params.dq_determin_conflict_state,
+      params.dq_determin_range_locks,
       params.attn_type_map};
-
   // The case work with GQA is ugly but idk how to fix it.
   typename CollectiveEpilogue::Arguments epilogue_args{
       static_cast<typename CollectiveEpilogue::Element*>(params.dk_ptr),
@@ -142,8 +144,11 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       static_cast<typename CollectiveEpilogue::Element*>(params.dv_ptr),
       {params.dv_row_stride, _1{}, params.dv_head_stride}, // stride_dV
       params.h_qo,
+      params.h_kv,
       params.q_ranges,
-      params.k_ranges};
+      params.k_ranges,
+      params.determin_range_locks,
+  };
 
   int num_blocks_n = cutlass::ceil_div(params.max_seqlen_k, get<1>(TileShape_MNK{}));
   num_blocks_n = cutlass::round_up(num_blocks_n, size<1>(ClusterShape{}));
@@ -154,6 +159,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*ranges*/ params.k_ranges,
       /*merge_ranges*/ params.merge_k_ranges,
       /*range_map*/ params.bwd_kq_map,
+      /*determin_conflict_state*/ params.determin_conflict_state,
       /*bwd_unique_count*/ params.bwd_unique_count};
 
   int device;

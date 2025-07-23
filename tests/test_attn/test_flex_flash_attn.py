@@ -22,9 +22,16 @@ import torch
 import magi_attention.testing
 from magi_attention.common import AttnRanges
 from magi_attention.functional import flex_flash_attn_func
+from magi_attention.functional.dist_attn import result_correction
+from magi_attention.functional.flex_flash_attn import (
+    _flex_flash_attn_backward,
+    _flex_flash_attn_forward,
+    merge_ranges,
+)
 from magi_attention.testing import parameterize
 from magi_attention.testing.precision import (
     EPSILON,
+    assert_close,
     calc_inf_norm,
     extract_mismatch_threshold,
     torch_attn_ref,
@@ -251,6 +258,17 @@ class TestFlexFlashAttn(TestCase):
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             },
             {
+                "name": "deterministic_sample",
+                "seqlen": 2500,
+                "q_ranges": AttnRanges.from_ranges(
+                    [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [[i * 50, (i + 1) * 50] for i in range(50)] * 50
+                ),
+                "attn_type_map": [0, 1] * 1250,
+            },
+            {
                 "name": "sparse_attn_2k_with_same_k_ranges",
                 "seqlen": 2048,
                 "q_ranges": AttnRanges.from_ranges(
@@ -322,14 +340,18 @@ class TestFlexFlashAttn(TestCase):
     )
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
-    @parameterize("auto_range_merge", [False, True])
+    @parameterize("auto_range_merge", [False])
+    @parameterize("deterministic", [False, True])
+    @parameterize("test_accumulation_inplace", [False, True])
     def test_flex_attn(
         self,
         attn_mask_config: dict[str, Any],
         model_config: dict[str, Any],
         dtype: torch.dtype,
         random_attn_type_map: bool,
-        auto_range_merge: bool = False,
+        auto_range_merge: bool,
+        deterministic: bool,
+        test_accumulation_inplace: bool,
     ):
         # FIXME: fix sparse attn with random attn type map
         if "sparse_attn" in attn_mask_config["name"] and random_attn_type_map:
@@ -364,6 +386,7 @@ class TestFlexFlashAttn(TestCase):
             f"[dtype={dtype}]"
             f"[random_attn_type_map={random_attn_type_map}]"
             f"[auto_range_merge={auto_range_merge}]"
+            f"[deterministic={deterministic}]"
         )
 
         # construct data
@@ -396,8 +419,25 @@ class TestFlexFlashAttn(TestCase):
             attn_type_map, dtype=torch.int32, device=self.device
         )
 
+        if test_accumulation_inplace:
+            # If test_accumulation_inplace is True, we will test the accumulation and return
+            self.check_flex_flash_attn_forward_accumulation(
+                q=q,
+                k=k,
+                v=v,
+                do=do,
+                q_ranges_tensor=q_ranges_tensor,
+                k_ranges_tensor=k_ranges_tensor,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                attn_type_map_tensor=attn_type_map_tensor,
+                auto_range_merge=auto_range_merge,
+                test_case=test_case,
+            )
+            return
+
         # run ffa forward
-        o, _ = flex_flash_attn_func(
+        o, lse = flex_flash_attn_func(
             q,
             k,
             v,
@@ -407,8 +447,30 @@ class TestFlexFlashAttn(TestCase):
             max_seqlen_k,
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
+            deterministic=deterministic,
         )
         o.backward(do)
+
+        if deterministic:
+            # If deterministic is True, check deterministic behavior and return
+            self.check_deterministic(
+                q=q,
+                k=k,
+                v=v,
+                do=do,
+                q_ranges_tensor=q_ranges_tensor,
+                k_ranges_tensor=k_ranges_tensor,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                attn_type_map_tensor=attn_type_map_tensor,
+                auto_range_merge=auto_range_merge,
+                test_case=test_case,
+                o_ref=o,
+                dq_ref=q.grad,
+                dk_ref=k.grad,
+                dv_ref=v.grad,
+            )
+            return
 
         # compare with reference
         self.assert_close_to_torch_ref(
@@ -429,6 +491,265 @@ class TestFlexFlashAttn(TestCase):
             test_case=test_case,
         )
 
+    def check_deterministic(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        do: torch.Tensor,
+        q_ranges_tensor,
+        k_ranges_tensor,
+        max_seqlen_q,
+        max_seqlen_k,
+        attn_type_map_tensor,
+        auto_range_merge,
+        test_case,
+        o_ref: torch.Tensor,
+        dq_ref: torch.Tensor,
+        dk_ref: torch.Tensor,
+        dv_ref: torch.Tensor,
+    ):
+        # Check deterministic behavior
+        # If deterministic is True, we will compare the output and gradients with a second run
+        # If any of them is not equal, we will collect the error messages
+        err_msg_list: list[str] = []
+        q = q.clone().detach().requires_grad_(True)
+        k = k.clone().detach().requires_grad_(True)
+        v = v.clone().detach().requires_grad_(True)
+        do = do.clone()
+        o, _ = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges_tensor,
+            k_ranges_tensor,
+            max_seqlen_q,
+            max_seqlen_k,
+            attn_type_map_tensor,
+            auto_range_merge=auto_range_merge,
+            deterministic=True,
+        )
+        o.backward(do)
+
+        assert torch.equal(
+            o, o_ref
+        ), f"For {test_case=}: forward output not deterministic"
+
+        assert torch.equal(
+            q.grad, dq_ref
+        ), f"For {test_case=}: backward dq not deterministic"
+
+        assert torch.equal(
+            k.grad, dk_ref
+        ), f"For {test_case=}: backward dk not deterministic"
+
+        assert torch.equal(
+            v.grad, dv_ref
+        ), f"For {test_case=}: backward dv not deterministic"
+
+        return err_msg_list
+
+    def check_flex_flash_attn_forward_accumulation(
+        self,
+        q,
+        k,
+        v,
+        do,
+        q_ranges_tensor,
+        k_ranges_tensor,
+        max_seqlen_q,
+        max_seqlen_k,
+        attn_type_map_tensor,
+        auto_range_merge,
+        test_case,
+    ):
+        t, h, d = q.shape
+        o_acc = torch.randn_like(q, dtype=torch.float32)
+        lse_acc = torch.randn([h, t], device=q.device, dtype=torch.float32)
+
+        softmax_scale = 1.0 / (d**0.5)
+
+        if auto_range_merge:
+            (
+                merge_q_ranges,
+                fwd_q_ranges,
+                fwd_k_ranges,
+                fwd_qk_map,
+                fwd_unique_count,
+            ) = merge_ranges(q_ranges_tensor, k_ranges_tensor)
+            (
+                merge_k_ranges,
+                bwd_k_ranges,
+                bwd_q_ranges,
+                bwd_kq_map,
+                bwd_unique_count,
+            ) = merge_ranges(k_ranges_tensor, q_ranges_tensor)
+        else:
+            fwd_q_ranges = q_ranges_tensor
+            fwd_k_ranges = k_ranges_tensor
+            bwd_q_ranges = q_ranges_tensor
+            bwd_k_ranges = k_ranges_tensor
+            merge_q_ranges = None
+            merge_k_ranges = None
+            fwd_qk_map = None
+            bwd_kq_map = None
+            fwd_unique_count = None
+            bwd_unique_count = None
+
+        o, lse = _flex_flash_attn_forward(
+            q=q,
+            k=k,
+            v=v,
+            out=None,
+            lse=None,
+            q_ranges=fwd_q_ranges,
+            k_ranges=fwd_k_ranges,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            attn_type_map=attn_type_map_tensor,
+            merge_q_ranges=merge_q_ranges,
+            qk_map=fwd_qk_map,
+            fwd_unique_count=fwd_unique_count,
+            softmax_scale=softmax_scale,
+            softcap=0.0,
+            disable_fwd_atomic_reduction=False,
+            out_type=torch.float32,
+            deterministic=True,
+            sm_margin=0,
+        )
+
+        o_ref, lse_ref = result_correction(out_list=[o, o_acc], lse_list=[lse, lse_acc])
+
+        # NOTE: The auto accumulation call must follow the non-auto accumulation call,
+        # as the latter modifies the input tensors, and the former relies on these modified tensors.
+        o_auto_acc, lse_auto_acc = _flex_flash_attn_forward(
+            q=q,
+            k=k,
+            v=v,
+            out=o_acc,
+            lse=lse_acc,
+            q_ranges=q_ranges_tensor,
+            k_ranges=k_ranges_tensor,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            attn_type_map=attn_type_map_tensor,
+            merge_q_ranges=merge_q_ranges,
+            qk_map=fwd_qk_map,
+            fwd_unique_count=fwd_unique_count,
+            softmax_scale=softmax_scale,
+            softcap=0.0,
+            disable_fwd_atomic_reduction=False,
+            out_type=None,
+            deterministic=True,
+            sm_margin=0,
+        )
+
+        assert_close(
+            o_auto_acc,
+            o_ref,
+            atol=1e-5,
+            rtol=1e-4,
+            mismatch_threshold=0.005,
+            test_case=f"{test_case} => o",
+        )
+        assert_close(
+            lse_auto_acc,
+            lse_ref,
+            atol=1e-5,
+            rtol=1e-4,
+            mismatch_threshold=0.005,
+            test_case=f"{test_case} => lse",
+        )
+
+        dq_acc = torch.randn_like(q, dtype=torch.float32)
+        dk_acc = torch.randn_like(k, dtype=torch.float32)
+        dv_acc = torch.randn_like(v, dtype=torch.float32)
+
+        dq_ref, dk_ref, dv_ref, _ = _flex_flash_attn_backward(
+            do,
+            q,
+            k,
+            v,
+            o_ref.to(q.dtype),
+            None,  # dq
+            None,  # dk
+            None,  # dv
+            lse_ref,
+            bwd_q_ranges,
+            bwd_k_ranges,
+            max_seqlen_q,
+            max_seqlen_k,
+            attn_type_map_tensor,
+            merge_k_ranges,
+            bwd_kq_map,
+            bwd_unique_count,
+            softmax_scale=softmax_scale,
+            softcap=0.0,
+            disable_bwd_dkv_atomic_reduction=False,
+            dq_type=torch.float32,
+            dk_type=torch.float32,
+            dv_type=torch.float32,
+            deterministic=True,
+            sm_margin=0,
+        )
+
+        dq_ref += dq_acc
+        dk_ref += dk_acc
+        dv_ref += dv_acc
+
+        dq_acc, dk_acc, dv_acc, _ = _flex_flash_attn_backward(
+            do,
+            q,
+            k,
+            v,
+            o_ref.to(q.dtype),
+            dq_acc,  # dq
+            dk_acc,  # dk
+            dv_acc,  # dv
+            lse_ref,
+            bwd_q_ranges,
+            bwd_k_ranges,
+            max_seqlen_q,
+            max_seqlen_k,
+            attn_type_map_tensor,
+            merge_k_ranges,
+            bwd_kq_map,
+            bwd_unique_count,
+            softmax_scale=softmax_scale,
+            softcap=0.0,
+            disable_bwd_dkv_atomic_reduction=False,
+            dq_type=torch.float32,
+            dk_type=torch.float32,
+            dv_type=torch.float32,
+            deterministic=True,
+            sm_margin=0,
+        )
+
+        assert_close(
+            dq_acc,
+            dq_ref,
+            atol=1e-5,
+            rtol=1e-4,
+            mismatch_threshold=0.005,
+            test_case=f"{test_case} => dq",
+        )
+        assert_close(
+            dk_acc,
+            dk_ref,
+            atol=1e-5,
+            rtol=1e-4,
+            mismatch_threshold=0.005,
+            test_case=f"{test_case} => dk",
+        )
+        assert_close(
+            dv_acc,
+            dv_ref,
+            atol=1e-5,
+            rtol=1e-4,
+            mismatch_threshold=0.005,
+            test_case=f"{test_case} => dv",
+        )
+
     def assert_close_to_torch_ref(
         self,
         q_ranges: AttnRanges,
@@ -446,6 +767,7 @@ class TestFlexFlashAttn(TestCase):
         grad_total_out: torch.Tensor,
         dtype: torch.dtype,
         test_case: str = "",
+        err_msg_list: list[str] = [],
     ) -> None:
         # -----   customize tolerance threshold  ---- #
 
@@ -522,10 +844,6 @@ class TestFlexFlashAttn(TestCase):
             total_k.grad,
             total_v.grad,
         )
-
-        # -----   init error message list   ---- #
-
-        err_msg_list: list[str] = []
 
         # -----   assert close for fwd out   ---- #
 

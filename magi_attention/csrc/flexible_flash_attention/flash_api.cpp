@@ -82,6 +82,9 @@ void set_params_fprop(
     void* q_ranges_d,
     void* k_ranges_d,
     void* range_locks_d,
+    bool deterministic,
+    void* determin_range_locks_d,
+    void* determin_conflict_state_d,
     void* attn_type_map_d,
     int merge_batch_size,
     void* merge_q_ranges_d,
@@ -136,6 +139,10 @@ void set_params_fprop(
   params.range_locks = static_cast<int*>(range_locks_d);
   params.tile_count_semaphore = static_cast<int*>(tile_count_semaphore_d);
 
+  // Set deterministic and it's pointers
+  params.deterministic = deterministic;
+  params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
+  params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
   // Softmax sum
   params.softmax_lse_ptr = softmax_lse_d;
 
@@ -198,6 +205,10 @@ void set_params_dgrad(
     void* tile_count_semaphore_d,
     const float softcap = 0.f,
     bool const deterministic = false,
+    void* determin_range_locks_d = nullptr,
+    void* determin_conflict_state_d = nullptr,
+    void* dq_determin_conflict_state_d = nullptr,
+    void* dq_determin_range_locks_d = nullptr,
     int const sm_margin = 0,
     bool const disable_bwd_dkv_atomic_reduction = false) {
   set_params_fprop(
@@ -220,6 +231,9 @@ void set_params_dgrad(
       /*q_ranges_d*/ q_ranges_d,
       /*k_ranges_d*/ k_ranges_d,
       /*range_locks_d*/ nullptr,
+      /*deterministic*/ deterministic,
+      /*determin_range_locks_d*/ determin_range_locks_d,
+      /*determin_conflict_state_d*/ determin_conflict_state_d,
       /*attn_type_map_d*/ attn_type_map_d,
       /*merge_batch_size*/ merge_batch_size,
       /*merge_q_ranges_d*/ nullptr,
@@ -259,7 +273,8 @@ void set_params_dgrad(
   params.dsoftmax_sum = dsoftmax_sum_d;
 
   // Set the deterministic flag
-  params.deterministic = deterministic;
+  params.dq_determin_conflict_state = static_cast<int*>(dq_determin_conflict_state_d);
+  params.dq_determin_range_locks = static_cast<int*>(dq_determin_range_locks_d);
 }
 
 void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
@@ -374,7 +389,6 @@ void run_mha_fwd(Flash_fwd_params& params, cudaStream_t stream) {
 }
 
 // b: batch_size
-// b_k: batch_size_k
 // s_q: seqlen_q
 // s_k: seqlen_k
 // h_q: num_heads_qo
@@ -461,9 +475,14 @@ std::vector<at::Tensor> mha_fwd(
     CHECK_CONTIGUOUS(attn_type_map);
   }
 
+  // Check merge_q_ranges, fwd_qk_map (dtype, device, layout) if given
   int merge_batch_size = batch_size;
   at::Tensor merge_q_ranges;
+  at::Tensor qk_map;
+  at::Tensor unique_count;
   bool const has_merge_q_ranges = merge_q_ranges_.has_value();
+  bool const has_qk_map = qk_map_.has_value();
+  bool const has_unique_count = unique_count_.has_value();
   if (has_merge_q_ranges) {
     merge_q_ranges = merge_q_ranges_.value();
     // Check merge_q_ranges (dtype, device, layout)
@@ -472,9 +491,6 @@ std::vector<at::Tensor> mha_fwd(
     merge_batch_size = merge_q_ranges.size(0);
     CHECK_CONTIGUOUS(merge_q_ranges);
   }
-
-  at::Tensor qk_map;
-  bool const has_qk_map = qk_map_.has_value();
   if (has_qk_map) {
     qk_map = qk_map_.value();
     // Check qk_map (dtype, device, layout)
@@ -483,9 +499,6 @@ std::vector<at::Tensor> mha_fwd(
     CHECK_SHAPE(qk_map, merge_batch_size);
     CHECK_CONTIGUOUS(qk_map);
   }
-
-  at::Tensor unique_count;
-  bool const has_unique_count = unique_count_.has_value();
   if (has_unique_count) {
     unique_count = unique_count_.value();
     // Check unique_count (dtype, device, layout)
@@ -494,6 +507,8 @@ std::vector<at::Tensor> mha_fwd(
     CHECK_SHAPE(unique_count);
     CHECK_CONTIGUOUS(unique_count);
   }
+  TORCH_CHECK(
+      (has_merge_q_ranges == has_qk_map && has_qk_map == has_unique_count), "merge_q_ranges, qk_map, and unique_count must all be provided together or all be omitted")
 
   // Check head_size is within the supported range
   int const max_headdim = get_max_headdim();
@@ -583,6 +598,18 @@ std::vector<at::Tensor> mha_fwd(
     range_locks.zero_();
   }
 
+  // Initialize determin_range_locks tensor, the shape is same as range_locks
+  at::Tensor determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
+  // Initialize determin_conflict_state, num_sm rows, ceil_div(total_q, kBlockM) + 1 columns
+  int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
+  at::Tensor determin_conflict_state = torch::empty({num_sm, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+
+  // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
+  if (deterministic) {
+    determin_range_locks.zero_();
+    determin_conflict_state.zero_();
+  }
+
   Flash_fwd_params params;
   set_params_fprop(
       params,
@@ -604,6 +631,9 @@ std::vector<at::Tensor> mha_fwd(
       /*q_ranges*/ q_ranges.data_ptr(),
       /*k_ranges*/ k_ranges.data_ptr(),
       /*range_locks*/ range_locks.data_ptr(),
+      /*deterministic*/ deterministic,
+      /*determin_range_locks*/ deterministic ? determin_range_locks.data_ptr() : nullptr,
+      /*determin_conflict_state*/ deterministic ? determin_conflict_state.data_ptr() : nullptr,
       /*attn_type_map*/ has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
       /*merge_batch_size*/ merge_batch_size,
       /*merge_q_ranges*/
@@ -768,14 +798,14 @@ std::vector<at::Tensor> mha_bwd(
     CHECK_CONTIGUOUS(attn_type_map);
   }
 
-  // check merge_k_ranges, bwd_kq_map (dtype, device, layout) if given
+  // Check merge_k_ranges, bwd_kq_map (dtype, device, layout) if given
+  int merge_batch_size = batch_size;
   at::Tensor merge_k_ranges;
   at::Tensor bwd_kq_map;
   at::Tensor bwd_unique_count;
   bool const has_merge_k_ranges = merge_k_ranges_.has_value();
   bool const has_bwd_kq_map = bwd_kq_map_.has_value();
   bool const has_bwd_unique_count = bwd_unique_count_.has_value();
-  int merge_batch_size = batch_size;
   if (has_merge_k_ranges) {
     merge_k_ranges = merge_k_ranges_.value();
     // HACK
@@ -801,6 +831,9 @@ std::vector<at::Tensor> mha_bwd(
     CHECK_DEVICE(bwd_unique_count);
     CHECK_SHAPE(bwd_unique_count);
   }
+  TORCH_CHECK(
+      (has_merge_k_ranges == has_bwd_kq_map && has_bwd_kq_map == has_bwd_unique_count),
+      "merge_k_ranges, bwd_kq_map, and bwd_unique_count must all be provided together or all be omitted");
 
   // Check head_size
   int const max_headdim = get_max_headdim();
@@ -831,6 +864,9 @@ std::vector<at::Tensor> mha_bwd(
     dq_type = at::ScalarType::Float;
   }
   TORCH_CHECK(dq_type == at::ScalarType::Float, "Flexible Flash Attention only supports float for dq");
+  if (dq_.has_value()) {
+    TORCH_CHECK(dq_.value().scalar_type() == dq_type, "dq must have the same dtype as dq_type (if given)");
+  }
 
   // Determine output dtype for dk
   at::ScalarType dk_type;
@@ -844,6 +880,9 @@ std::vector<at::Tensor> mha_bwd(
   TORCH_CHECK(
       dk_type == at::ScalarType::Float || dk_type == at::ScalarType::BFloat16 || dk_type == at::ScalarType::Half,
       "Flexible Flash Attention only supports float, bf16 and fp16 for dk");
+  if (dk_.has_value()) {
+    TORCH_CHECK(dk_.value().scalar_type() == dk_type, "dk must have the same dtype as dk_type (if given)");
+  }
 
   // Determine output dtype for dv
   at::ScalarType dv_type;
@@ -857,6 +896,9 @@ std::vector<at::Tensor> mha_bwd(
   TORCH_CHECK(
       dv_type == at::ScalarType::Float || dv_type == at::ScalarType::BFloat16 || dv_type == at::ScalarType::Half,
       "Flexible Flash Attention only supports float, bf16 and fp16 for dv");
+  if (dv_.has_value()) {
+    TORCH_CHECK(dv_.value().scalar_type() == dv_type, "dv must have the same dtype as dv_type (if given)");
+  }
 
   // Check dk_type is same as dv_type
   TORCH_CHECK(dk_type == dv_type, "dk and dv must have the same dtype");
@@ -909,6 +951,22 @@ std::vector<at::Tensor> mha_bwd(
   at::Tensor tile_count_semaphore;
   tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
 
+  // Initialize determin_range_locks tensor, the shape is same as range_locks
+  at::Tensor determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));
+  at::Tensor dq_determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
+  // Initialize determin_conflict_state, num_sm rows, ceil_div(total_k, kBlockN) + 1 columns
+  int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
+  at::Tensor determin_conflict_state = torch::empty({num_sm, (total_k + kBlockN - 1) / kBlockN + 1}, opts.dtype(torch::kInt32));
+  at::Tensor dq_determin_conflict_state = torch::empty({num_sm, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+
+  // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
+  if (deterministic) {
+    determin_range_locks.zero_();
+    determin_conflict_state.zero_();
+    dq_determin_range_locks.zero_();
+    dq_determin_conflict_state.zero_();
+  }
+
   Flash_bwd_params params;
   set_params_dgrad(
       params,
@@ -945,6 +1003,10 @@ std::vector<at::Tensor> mha_bwd(
       tile_count_semaphore.data_ptr(),
       softcap,
       deterministic,
+      deterministic ? determin_range_locks.data_ptr() : nullptr,
+      deterministic ? determin_conflict_state.data_ptr() : nullptr,
+      deterministic ? dq_determin_conflict_state.data_ptr() : nullptr,
+      deterministic ? dq_determin_range_locks.data_ptr() : nullptr,
       sm_margin,
       disable_bwd_dkv_atomic_reduction);
 

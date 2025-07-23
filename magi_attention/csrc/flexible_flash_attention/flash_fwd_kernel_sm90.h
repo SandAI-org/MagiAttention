@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <thrust/pair.h>
+
 #include "cute/tensor.hpp"
 
 #include <cutlass/arch/reg_reconfig.h>
@@ -38,6 +40,7 @@ class FlashAttnFwdSm90 {
   static constexpr bool Use_TMA_KV = CollectiveMainloop::Use_TMA_KV;
   static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
   static constexpr int NumMmaThreadsQK = CollectiveMainloop::NumMmaThreadsQK;
+  static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
 
   using SeqlenInfo_t = typename CollectiveMainloop::SeqlenInfo_t;
 
@@ -53,6 +56,7 @@ class FlashAttnFwdSm90 {
   // Epilogue derived types
   using EpilogueArguments = typename CollectiveEpilogue::Arguments;
   using EpilogueParams = typename CollectiveEpilogue::Params;
+  using BlockCoordType = typename CollectiveEpilogue::BlockCoordType;
 
   static_assert(ArchTag::kMinComputeCapability >= 90);
 
@@ -280,7 +284,9 @@ class FlashAttnFwdSm90 {
            work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0
                ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
                : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-        auto block_coord = work_tile_info.get_block_coord(params.scheduler);
+        BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
+        // get block_coord without deterministic message
+        auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
         auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
         bool tile_valid = false;
@@ -351,7 +357,9 @@ class FlashAttnFwdSm90 {
         Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_MNK_PV{}));
         clear(tOrO);
         bool tile_valid = false;
-        auto block_coord = work_tile_info.get_block_coord(params.scheduler);
+        BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
+        // get block_coord without deterministic message
+        auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
 
         if constexpr (MergeRange) {
           int bidb_idx = get<2>(block_coord);
@@ -423,7 +431,11 @@ class FlashAttnFwdSm90 {
           // if (threadIdx.x == 128) { printf("Before epilogue, bid.x = %d,
           // bid.y = %d, bid.z = %d, m_block = %d, bidb = %d, split_idx = %d\n",
           // blockIdx.x, blockIdx.y, blockIdx.z, m_block, bidb, split_idx); }
-          epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord);
+          if constexpr (!Deterministic) {
+            epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord);
+          } else {
+            epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw);
+          }
         } else {
           // Write 0 to gO and -inf to gLSE.
           epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord);

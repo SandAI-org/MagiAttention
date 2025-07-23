@@ -596,7 +596,6 @@ def flex_flash_attn_func(
                 0 0 0 1 0
                 0 0 0 0 1
     """
-    assert not deterministic, "deterministic is not supported yet."
 
     return FlexFlashAttnFunc.apply(
         q,

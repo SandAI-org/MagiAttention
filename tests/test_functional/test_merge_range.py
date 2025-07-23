@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
 from unittest import TestCase
 
 import torch
 
-from magi_attention.functional.merge_range import unique_consecutive_pairs
+# isort: off
+# We need to import the CUDA kernels after importing torch
+import flexible_flash_attention_cuda
+
+# isort: on
 
 
 class TestMergeRange(TestCase):
@@ -44,9 +49,11 @@ class TestMergeRange(TestCase):
         sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
         sorted_outer_ranges = outer_ranges[sorted_idx]
         sorted_inner_ranges = inner_ranges[sorted_idx]
-        merge_outer_ranges, range_map, unique_count = unique_consecutive_pairs(
-            sorted_outer_ranges
-        )
+        (
+            merge_outer_ranges,
+            range_map,
+            unique_count,
+        ) = flexible_flash_attention_cuda.unique_consecutive_pairs(sorted_outer_ranges)
 
         left_shifted_part = range_map[1 : unique_count.item()]
         n_tensor = torch.tensor(
@@ -156,3 +163,7 @@ class TestMergeRange(TestCase):
         self.assertTrue(torch.equal(sorted_outer_ranges, sorted_outer_ranges_ref))
         self.assertTrue(torch.equal(sorted_inner_ranges, sorted_inner_ranges_ref))
         self.assertTrue(torch.equal(range_map, range_map_ref))
+
+
+if __name__ == "__main__":
+    unittest.main()
