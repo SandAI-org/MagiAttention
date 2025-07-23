@@ -597,7 +597,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
 
         if interface == "set_mesh_and_group":
             if magi_attention.comm.is_hierarchical_comm_enable():
-                with pytest.raises(ValueError):
+                with pytest.raises(AssertionError):
                     _, dist_attn_runtime_key = magi_attn_flex_dispatch(
                         x,
                         q_ranges=q_ranges,
@@ -608,6 +608,20 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                         pad_size=pad_size,
                         chunk_size=chunk_size,
                         cp_group_or_mesh=self.nccl_group,
+                        dist_attn_config=dist_attn_config,
+                    )
+            else:
+                with pytest.raises(ValueError):
+                    _, dist_attn_runtime_key = magi_attn_flex_dispatch(
+                        x,
+                        q_ranges=q_ranges,
+                        k_ranges=k_ranges,
+                        attn_mask_type=attn_mask_type,
+                        total_seqlen_q=total_seqlen_q,
+                        total_seqlen_k=total_seqlen_k,
+                        pad_size=pad_size,
+                        chunk_size=chunk_size,
+                        cp_group_or_mesh=self.device_mesh,
                         dist_attn_config=dist_attn_config,
                     )
             return
