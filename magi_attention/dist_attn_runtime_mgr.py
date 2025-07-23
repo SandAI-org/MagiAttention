@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -34,49 +35,22 @@ from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
 from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_to_list
 
 
-# @dataclass(frozen=True)
+@dataclass(frozen=True)
 class DistAttnRuntimeKey:
-    def __init__(
-        self,
-        q_ranges: AttnRanges,
-        k_ranges: AttnRanges,
-        attn_mask_type: list[AttnMaskType],
-        total_seqlen_q: int,
-        total_seqlen_k: int,
-        pad_size: int,
-        chunk_size: int,
-        cp_group: dist.ProcessGroup,
-        cp_mesh: DeviceMesh | None,
-        dist_attn_config: DistAttnConfig,
-    ):
-        self.q_ranges = q_ranges
-        self.k_ranges = k_ranges
-        self.attn_mask_type = attn_mask_type
-        self.total_seqlen_q = total_seqlen_q
-        self.total_seqlen_k = total_seqlen_k
-        self.pad_size = pad_size
-        self.chunk_size = chunk_size
-        self.cp_group = cp_group
-        self.cp_mesh = cp_mesh
-        self.dist_attn_config = dist_attn_config
+    q_ranges: AttnRanges
+    k_ranges: AttnRanges
+    attn_mask_type: list[AttnMaskType]
+    total_seqlen_q: int
+    total_seqlen_k: int
+    pad_size: int
+    chunk_size: int
+    cp_group: dist.ProcessGroup
+    cp_mesh: DeviceMesh | None
+    dist_attn_config: DistAttnConfig
 
-    def __hash__(self):
-        mask_tuple = tuple(self.attn_mask_type)
-
-        return hash(
-            (
-                self.q_ranges,
-                self.k_ranges,
-                mask_tuple,
-                self.total_seqlen_q,
-                self.total_seqlen_k,
-                self.pad_size,
-                self.chunk_size,
-                self.cp_group,
-                self.cp_mesh,
-                self.dist_attn_config,
-            )
-        )
+    def __post_init__(self):
+        # make attn_mask_type a tuple to be hashable
+        object.__setattr__(self, "attn_mask_type", tuple(self.attn_mask_type))
 
 
 class DistAttnRuntimeMgr:
