@@ -309,7 +309,7 @@ class MagiTrainer(Trainer):
             cu_seqlens_k,
             chunk_size=512,
             pad_size=pad_size,
-            cp_group=cp_group,
+            cp_group_or_mesh=cp_group,
             causal=True,
             dist_attn_config=dist_attn_config,
         )

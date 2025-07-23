@@ -171,7 +171,7 @@ def prepare_magi_attention(input, cu_seqlens_q, cu_seqlens_k, pad_size, cp_group
         cu_seqlens_k,
         pad_size=pad_size,
         chunk_size=CHUNK_SIZE,
-        cp_group=cp_group,
+        cp_group_or_mesh=cp_group,
         causal=LlamaConfig().is_causal,
         dist_attn_config=dist_attn_config,
     )
