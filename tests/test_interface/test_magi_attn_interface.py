@@ -546,10 +546,9 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 cu_seqlens_k,
                 pad_size=pad_size,
                 chunk_size=chunk_size,
-                cp_group=None
+                cp_group_or_mesh=self.device_mesh
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
-                cp_mesh=self.device_mesh,
                 causal=is_causal,
                 dist_attn_config=dist_attn_config,
             )
@@ -570,10 +569,9 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 cu_seqlens_k,
                 pad_size=pad_size,
                 chunk_size=chunk_size,
-                cp_group=None
+                cp_group_or_mesh=self.device_mesh
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
-                cp_mesh=self.device_mesh,
                 causal=is_causal,
                 dist_attn_config=dist_attn_config,
             )
@@ -591,10 +589,9 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 total_seqlen_k=total_seqlen_k,
                 pad_size=pad_size,
                 chunk_size=chunk_size,
-                cp_group=None
+                cp_group_or_mesh=self.device_mesh
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
-                cp_mesh=self.device_mesh,
                 dist_attn_config=dist_attn_config,
             )
 
@@ -610,8 +607,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                         total_seqlen_k=total_seqlen_k,
                         pad_size=pad_size,
                         chunk_size=chunk_size,
-                        cp_group=self.nccl_group,
-                        cp_mesh=self.device_mesh,
+                        cp_group_or_mesh=self.nccl_group,
                         dist_attn_config=dist_attn_config,
                     )
             return
@@ -628,10 +624,9 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                     total_seqlen_k=total_seqlen_k,
                     pad_size=pad_size,
                     chunk_size=chunk_size,
-                    cp_group=None
+                    cp_group_or_mesh=self.device_mesh
                     if magi_attention.comm.is_hierarchical_comm_enable()
                     else self.nccl_group,
-                    cp_mesh=self.device_mesh,
                     dist_attn_config=dist_attn_config,
                 )
             return

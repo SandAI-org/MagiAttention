@@ -38,24 +38,26 @@ from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_
 class DistAttnRuntimeKey:
     def __init__(
         self,
-        cp_group: dist.ProcessGroup,
-        chunk_size: int,
-        pad_size: int,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
         attn_mask_type: list[AttnMaskType],
         total_seqlen_q: int,
         total_seqlen_k: int,
+        pad_size: int,
+        chunk_size: int,
+        cp_group: dist.ProcessGroup,
+        cp_mesh: DeviceMesh | None,
         dist_attn_config: DistAttnConfig,
     ):
-        self.cp_group = cp_group
-        self.chunk_size = chunk_size
-        self.pad_size = pad_size
         self.q_ranges = q_ranges
         self.k_ranges = k_ranges
         self.attn_mask_type = attn_mask_type
         self.total_seqlen_q = total_seqlen_q
         self.total_seqlen_k = total_seqlen_k
+        self.pad_size = pad_size
+        self.chunk_size = chunk_size
+        self.cp_group = cp_group
+        self.cp_mesh = cp_mesh
         self.dist_attn_config = dist_attn_config
 
     def __hash__(self):
@@ -63,14 +65,15 @@ class DistAttnRuntimeKey:
 
         return hash(
             (
-                self.cp_group,
-                self.chunk_size,
-                self.pad_size,
                 self.q_ranges,
                 self.k_ranges,
                 mask_tuple,
                 self.total_seqlen_q,
                 self.total_seqlen_k,
+                self.pad_size,
+                self.chunk_size,
+                self.cp_group,
+                self.cp_mesh,
                 self.dist_attn_config,
             )
         )
