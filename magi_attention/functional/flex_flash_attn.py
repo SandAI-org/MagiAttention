@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
 
 import torch
 
@@ -20,7 +19,13 @@ from magi_attention.utils import nvtx
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
-import flexible_flash_attention_cuda
+is_ffa_installed = False
+try:
+    import flexible_flash_attention_cuda
+
+    is_ffa_installed = True
+except ImportError:
+    pass
 
 # isort: on
 
@@ -91,6 +96,8 @@ def merge_ranges(
         Unique Count:
          tensor(2, dtype=torch.int32)
     """
+    assert is_ffa_installed, "FFA is not installed."
+
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
     sorted_inner_ranges = inner_ranges[sorted_idx]
@@ -123,7 +130,7 @@ def _flex_flash_attn_forward(
     attn_type_map,
     merge_q_ranges,
     qk_map,
-    unique_count,
+    fwd_unique_count,
     softmax_scale,
     softcap,
     disable_fwd_atomic_reduction,
@@ -131,6 +138,8 @@ def _flex_flash_attn_forward(
     deterministic,
     sm_margin,
 ):
+    assert is_ffa_installed, "FFA is not installed."
+
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
@@ -148,7 +157,7 @@ def _flex_flash_attn_forward(
         attn_type_map,
         merge_q_ranges,
         qk_map,
-        unique_count,
+        fwd_unique_count,
         softmax_scale,
         softcap,
         disable_fwd_atomic_reduction,
@@ -188,6 +197,8 @@ def _flex_flash_attn_backward(
     deterministic,
     sm_margin,
 ):
+    assert is_ffa_installed, "FFA is not installed."
+
     dout, q, k, v, out, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (dout, q, k, v, out, q_ranges, k_ranges)
     ]
@@ -429,13 +440,13 @@ def flex_flash_attn_func(
     k_ranges: torch.Tensor,
     max_seqlen_q: int,
     max_seqlen_k: int,
-    attn_type_map: Optional[torch.Tensor] = None,
-    softmax_scale=None,
-    softcap=0.0,
-    deterministic=False,
-    sm_margin=0,
-    disable_fwd_atomic_reduction=False,
-    auto_range_merge=False,
+    attn_type_map: torch.Tensor | None = None,
+    softmax_scale: float | None = None,
+    softcap: float = 0.0,
+    deterministic: bool = False,
+    sm_margin: int = 0,
+    disable_fwd_atomic_reduction: bool = False,
+    auto_range_merge: bool = False,
 ):
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
@@ -445,27 +456,35 @@ def flex_flash_attn_func(
         q (torch.Tensor): Query tensor.
         k (torch.Tensor): Key tensor.
         v (torch.Tensor): Value tensor.
-        q_ranges (torch.Tensor): query ranges in the ref attn mask.
-        k_ranges (torch.Tensor): key ranges in the ref attn mask.
+        q_ranges (torch.Tensor): query ranges tensor to represent the attn mask.
+        k_ranges (torch.Tensor): key ranges tensor to represent the attn mask.
         max_seqlen_q (int): Maximum sequence length of q_ranges.
         max_seqlen_k (int): Maximum sequence length of k_ranges.
-        attn_type_map (torch.Tensor): Attention type map with dtype=torch.int32. The values specify
-            the attention type for each token:
+        attn_type_map (torch.Tensor): Attention type map tenspr with dtype=torch.int32.
+            The values specify the attention type for each token:
 
                 - 0: full attention
                 - 1: causal attention
                 - 2: inverse causal attention
                 - 3: bidirectional causal attention
 
-        softmax_scale (float): Softmax scale.
-        softcap (float): Softcap.
-        deterministic (bool): Whether to use deterministic attention.
-        sm_margin (int): the amount of SMs(streaming multiprocessors) reserved for communication.
-        disable_fwd_atomic_reduction (bool): Whether to disable forward atomic reduction.
-            If you can ensure q_ranges has no overlap, you can set this to True for better performance.
-            Overlap in q_ranges is defined as: if any two q_ranges have non-empty intersection, then there is overlap.
-            For example, q_ranges = `[[0, 15], [10, 20], [20, 30]]` has overlap because `[0, 15]` and `[10, 20]` intersect.
-            While q_ranges = `[[0, 15], [15, 20], [20, 30]]` has no overlap.
+            More information about the attention type map can be found in the ``Note`` below.
+
+        softmax_scale (float, optional): Softmax scale, defaults to 1/sqrt(head_dim).
+        softcap (float, optional): Softcap value, defaults to 0.
+        deterministic (bool, optional): Whether to use deterministic attention, defaults to False.
+        sm_margin (int, optional): the amount of SMs(streaming multiprocessors) reserved for communication.
+        disable_fwd_atomic_reduction (bool):
+            Whether to disable forward atomic reduction:
+
+                If you can ensure q_ranges has no overlap, you can set this to True for better performance.
+                Overlap in q_ranges is defined as: if any two q_ranges have non-empty intersection, then there is overlap.
+                For example, q_ranges = ``[[0, 15], [10, 20], [20, 30]]`` has overlap because
+                ``[0, 15]`` and ``[10, 20]`` intersect. While q_ranges = ``[[0, 15], [15, 20], [20, 30]]`` has no overlap.
+
+        auto_range_merge (bool, optional): Whether to automatically merge k_ranges for the same q_range, defaults to False.
+
+            **Note:** This flag is usually used in sparse attention cases but still under development.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
@@ -488,7 +507,7 @@ def flex_flash_attn_func(
         https://sandai-org.github.io/MagiAttention/blog/#flex-flash-attn
 
         1. Full attention:
-            - If seqlen_q = 5 and seqlen_k = 2::
+            If seqlen_q = 5 and seqlen_k = 2::
 
                 1 1
                 1 1
@@ -496,12 +515,12 @@ def flex_flash_attn_func(
                 1 1
                 1 1
 
-            - If seqlen_q = 2 and seqlen_k = 5::
+            If seqlen_q = 2 and seqlen_k = 5::
 
                 1 1 1 1 1
                 1 1 1 1 1
 
-            - If seqlen_q = 5 and seqlen_k = 5::
+            If seqlen_q = 5 and seqlen_k = 5::
 
                 1 1 1 1 1
                 1 1 1 1 1
@@ -510,7 +529,7 @@ def flex_flash_attn_func(
                 1 1 1 1 1
 
         2. Causal attention (bottom-right aligned):
-            - If seqlen_q = 5 and seqlen_k = 2::
+            If seqlen_q = 5 and seqlen_k = 2::
 
                 0 0
                 0 0
@@ -518,12 +537,12 @@ def flex_flash_attn_func(
                 1 0
                 1 1
 
-            - If seqlen_q = 2 and seqlen_k = 5::
+            If seqlen_q = 2 and seqlen_k = 5::
 
                 1 1 1 1 0
                 1 1 1 1 1
 
-            - If seqlen_q = 5 and seqlen_k = 5::
+            If seqlen_q = 5 and seqlen_k = 5::
 
                 1 0 0 0 0
                 1 1 0 0 0
@@ -532,7 +551,7 @@ def flex_flash_attn_func(
                 1 1 1 1 1
 
         3. Inverse causal attention (top-left aligned):
-            - If seqlen_q = 5 and seqlen_k = 2::
+            If seqlen_q = 5 and seqlen_k = 2::
 
                 1 1
                 0 1
@@ -540,12 +559,12 @@ def flex_flash_attn_func(
                 0 0
                 0 0
 
-            - If seqlen_q = 2 and seqlen_k = 5::
+            If seqlen_q = 2 and seqlen_k = 5::
 
                 1 1 1 1 1
                 0 1 1 1 1
 
-            - If seqlen_q = 5 and seqlen_k = 5::
+            If seqlen_q = 5 and seqlen_k = 5::
 
                 1 1 1 1 1
                 0 1 1 1 1
@@ -556,7 +575,7 @@ def flex_flash_attn_func(
         4. Bidirectional causal attention (intersection of causal and inverse causal):
             This is the element-wise AND of causal and inverse causal masks.
 
-            - If seqlen_q = 5 and seqlen_k = 2::
+            If seqlen_q = 5 and seqlen_k = 2::
 
                 0 0
                 0 0
@@ -564,12 +583,12 @@ def flex_flash_attn_func(
                 0 0
                 0 0
 
-            - If seqlen_q = 2 and seqlen_k = 5::
+            If seqlen_q = 2 and seqlen_k = 5::
 
                 1 1 1 1 0
                 0 1 1 1 1
 
-            - If seqlen_q = 5 and seqlen_k = 5::
+            If seqlen_q = 5 and seqlen_k = 5::
 
                 1 0 0 0 0
                 0 1 0 0 0

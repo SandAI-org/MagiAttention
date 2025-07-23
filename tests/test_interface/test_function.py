@@ -29,7 +29,6 @@ class TestApiFunction(TestCase):
                 "name": "testcase1",
                 "total_seqlen": 1024,
                 "cp_size": 6,
-                "head_dim": 128,
                 "chunk_size": 208,
                 "answer": 224,
             },
@@ -37,7 +36,6 @@ class TestApiFunction(TestCase):
                 "name": "testcase2",
                 "total_seqlen": 10244,
                 "cp_size": 8,
-                "head_dim": 128,
                 "chunk_size": 451,
                 "answer": 580,
             },
@@ -45,7 +43,6 @@ class TestApiFunction(TestCase):
                 "name": "testcase3",
                 "total_seqlen": 3840,
                 "cp_size": 10,
-                "head_dim": 128,
                 "chunk_size": 128,
                 "answer": 0,
             },
@@ -53,7 +50,6 @@ class TestApiFunction(TestCase):
                 "name": "testcase4",
                 "total_seqlen": 42817,
                 "cp_size": 12,
-                "head_dim": 128,
                 "chunk_size": 892,
                 "answer": 10703,
             },
@@ -61,7 +57,6 @@ class TestApiFunction(TestCase):
                 "name": "testcase5",
                 "total_seqlen": 13000,
                 "cp_size": 17,
-                "head_dim": 128,
                 "chunk_size": 369,
                 "answer": 5819,
             },
@@ -69,7 +64,6 @@ class TestApiFunction(TestCase):
                 "name": "testcase6",
                 "total_seqlen": 1789,
                 "cp_size": 2,
-                "head_dim": 128,
                 "chunk_size": 900,
                 "answer": 11,
             },
@@ -82,14 +76,12 @@ class TestApiFunction(TestCase):
         name: str = testcase["name"]
         total_seqlen: int = testcase["total_seqlen"]
         cp_size: int = testcase["cp_size"]
-        head_dim: int = testcase["head_dim"]
         chunk_size: int = testcase["chunk_size"]
         answer: int = testcase["answer"]
 
         result = compute_pad_size(
             total_seqlen_q=total_seqlen,
             cp_size=cp_size,
-            head_dim=head_dim,
             chunk_size=chunk_size,
         )
 

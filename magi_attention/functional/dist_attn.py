@@ -319,9 +319,12 @@ class DistFlashAttnRuntime:
                         q=q,
                         k=k,
                         v=v,
+                        out=None,
+                        lse=None,
                         **attn_arg.to_ffa_args(is_bwd=False),
                         merge_q_ranges=None,
                         qk_map=None,
+                        fwd_unique_count=None,
                         softmax_scale=q.shape[-1] ** -0.5,
                         deterministic=deterministic,
                         softcap=0.0,
@@ -383,15 +386,23 @@ class DistFlashAttnRuntime:
                     v=v,
                     out=o,
                     softmax_lse=lse,
+                    dq=None,
+                    dk=None,
+                    dv=None,
+                    dq_type=torch.float32,
+                    dk_type=torch.float32,
+                    dv_type=torch.float32,
                     **attn_arg.to_ffa_args(is_bwd=True),
                     merge_k_ranges=None,
                     bwd_kq_map=None,
+                    bwd_unique_count=None,
                     softmax_scale=q.shape[-1] ** -0.5,
                     deterministic=deterministic,
                     softcap=0.0,
+                    disable_bwd_dkv_atomic_reduction=False,  # FIXME: set dynamically
                     sm_margin=magi_attention.comm.ffa_bwd_sm_margin_save_for_comm(),
                 )
-            partial_dkv = torch.cat([partial_dk, partial_dv], dim=0)
+            partial_dkv = torch.cat([partial_dk, partial_dv], dim=0).to(kv.dtype)
 
         return partial_dq, partial_dkv, skip_attn
 

@@ -1,10 +1,11 @@
-# API Reference
+# User Guide
 
 ```{toctree}
-:caption: How to use MagiAttention
+:caption: User Guide
 :maxdepth: 2
 
 install.md
+tutorial.md
 magi_api.md
 
 ```

@@ -2,8 +2,9 @@
 
 <p align="center">
     <a href="https://static.magi.world/static/files/MAGI_1.pdf"><img alt="paper" src="https://img.shields.io/badge/Paper-Magi_1-red"></a>
+    <a href="https://SandAI-org.github.io/MagiAttention/docs/"><img alt="docs" src="https://img.shields.io/badge/Docs-MagiAttention-green"></a>
     <a href="https://SandAI-org.github.io/MagiAttention/blog/"><img alt="blog" src="https://img.shields.io/badge/Blog-MagiAttention-purple"></a>
-    <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="license" src="https://img.shields.io/badge/Release-v1.0.0-blue"></a>
+    <a href="https://github.com/SandAI-org/MagiAttention/releases"><img alt="license" src="https://img.shields.io/badge/Release-v1.0.3-blue"></a>
 </p>
 
 <p align="center">
@@ -192,7 +193,7 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
 
   # --- Set up distributed environment --- #
 
-  rank, local_rank, world_size, wolrd_group, device, seed = setup_dist_env()
+  rank, local_rank, world_size, world_group, device, seed = setup_dist_env()
 
   # --- Define attention config --- #
 
@@ -252,7 +253,6 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
   pad_size = compute_pad_size( # pad embeds along seqlen dim for better performance
     total_seqlen_q=total_seqlen_q,
     cp_size=world_size, # assuming we only have 1-dim context parallelism (cp)
-    head_dim=head_dim,
     chunk_size=chunk_size,
   )
 
@@ -271,7 +271,6 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
       attn_mask_type=attn_mask_type,
       total_seqlen_q=total_seqlen_q,
       total_seqlen_k=total_seqlen_k,
-      head_dim=head_dim,
       pad_size=pad_size,
       chunk_size=chunk_size,
       cp_group=world_group, # assuming we only have 1-dim context parallelism (cp)
@@ -339,7 +338,7 @@ For more information, you can refer to `example/transformers/README.md`.
 
 ## Documentation
 
-Coming soon ...
+Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
 
 
 ## Performance Benchmarks 📊

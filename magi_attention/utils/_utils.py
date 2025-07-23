@@ -103,7 +103,7 @@ def setup_dist_env(
         seed_bias (Callable, optional): the seed bias func for each rank. Defaults to lambda rank: 0, i.e., no bias.
 
     Returns:
-        rank, local_rank, world_size, wolrd_group, device, seed
+        rank, local_rank, world_size, world_group, device, seed
     """
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
