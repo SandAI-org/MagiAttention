@@ -58,8 +58,6 @@ class DispatchMeta:
     global_bucket: AttnBucket
     buckets_per_rank: list[AttnBucket]
 
-    high_bandwith_domain_size: int
-
     @property
     def host_ranges_per_rank(self) -> list[AttnRanges]:
         # NOTE: since we discard the q_ranges which are belonging to
@@ -80,19 +78,6 @@ class DispatchMeta:
         ]
 
     @property
-    def host_ranges_this_domain(self) -> AttnRanges:
-        attn_ranges = AttnRanges()
-        domain_rank = self.cp_rank // self.high_bandwith_domain_size
-        for host_ranges_ith_rank in self.host_ranges_per_rank[
-            self.high_bandwith_domain_size
-            * domain_rank : self.high_bandwith_domain_size
-            * (domain_rank + 1)
-        ]:
-            attn_ranges.extend(host_ranges_ith_rank)
-
-        return attn_ranges
-
-    @property
     def position_ids(self) -> torch.Tensor:
         chunk_size = self.chunk_size
         local_partition = self.partitions[self.cp_rank]
@@ -109,6 +94,22 @@ class DispatchMeta:
         position_ids = position_ids.clamp(max=self.max_valid_ids - 1)
 
         return position_ids
+
+    # HACK remove high_bandwith_domain_size function
+    def get_host_ranges_this_domain(
+        self,
+        high_bandwith_domain_size: int,
+    ) -> AttnRanges:
+        attn_ranges = AttnRanges()
+        domain_rank = self.cp_rank // high_bandwith_domain_size
+        for host_ranges_ith_rank in self.host_ranges_per_rank[
+            high_bandwith_domain_size
+            * domain_rank : high_bandwith_domain_size
+            * (domain_rank + 1)
+        ]:
+            attn_ranges.extend(host_ranges_ith_rank)
+
+        return attn_ranges
 
     def __post_init__(self) -> None:
         assert len(self.partitions) == self.cp_size

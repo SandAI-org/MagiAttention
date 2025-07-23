@@ -178,11 +178,6 @@ class TestDistAttnSolver(DistTestBase):
     def seed(self) -> int:
         return SEED
 
-    @property
-    def high_bandwith_domain_size(self) -> int:
-        # TODO: add test when high_bandwith_domain_size > 1
-        return 1
-
     @skip_if_lt_x_gpu(WORLD_SIZE)
     @with_comms
     @parameterize(
@@ -515,7 +510,6 @@ class TestDistAttnSolver(DistTestBase):
 
         test_solver_class = SimpleNamespace()
         test_solver_class.cp_rank = rank
-        test_solver_class.high_bandwith_domain_size = self.high_bandwith_domain_size
         test_solver_class._init_host_remote_ranges_global_this_rank = types.MethodType(
             DistAttnSolver._init_host_remote_ranges_global_this_rank, test_solver_class
         )
@@ -550,7 +544,6 @@ class TestDistAttnSolver(DistTestBase):
             is_same_source=is_same_source,
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
-            high_bandwith_domain_size=self.high_bandwith_domain_size,
         )
 
         # ----------- compute host and remote ranges ------------ #
@@ -1366,7 +1359,6 @@ class TestDistAttnSolver(DistTestBase):
 
         test_solver_class = SimpleNamespace()
         test_solver_class.cp_rank = rank
-        test_solver_class.high_bandwith_domain_size = self.high_bandwith_domain_size
         _init_host_remote_ranges_global_this_rank = types.MethodType(
             DistAttnSolver._init_host_remote_ranges_global_this_rank, test_solver_class
         )
@@ -1420,7 +1412,6 @@ class TestDistAttnSolver(DistTestBase):
             is_same_source=is_same_source,
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
-            high_bandwith_domain_size=self.high_bandwith_domain_size,
         )
 
         # ----------- compute host and remote ranges ------------ #
@@ -2413,7 +2404,6 @@ class TestDistAttnSolver(DistTestBase):
             min_chunk_size=8, max_num_chunks=16, degree=2
         )
         test_solver_class.cp_rank = rank
-        test_solver_class.high_bandwith_domain_size = self.high_bandwith_domain_size
 
         # --------------      compute meta       -------------- #
 
@@ -2457,7 +2447,6 @@ class TestDistAttnSolver(DistTestBase):
             is_same_source=is_same_source,
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
-            high_bandwith_domain_size=self.high_bandwith_domain_size,
         )
 
         # ----------- compute host and remote ranges ------------ #
@@ -2706,7 +2695,6 @@ class TestDistAttnSolver(DistTestBase):
             min_chunk_size=8, max_num_chunks=16, degree=2
         )
         test_solver_class.cp_rank = rank
-        test_solver_class.high_bandwith_domain_size = self.high_bandwith_domain_size
 
         # --------------      compute meta       -------------- #
 
@@ -2741,7 +2729,6 @@ class TestDistAttnSolver(DistTestBase):
             is_same_source=is_same_source,
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
-            high_bandwith_domain_size=self.high_bandwith_domain_size,
         )
 
         # ----------- compute host and remote ranges ------------ #

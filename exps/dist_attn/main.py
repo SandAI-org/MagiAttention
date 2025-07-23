@@ -169,12 +169,10 @@ if __name__ == "__main__":
             random_seed=42,
         ),
     )
-    hb_domain_size = 1
 
     dist_attn_config = DistAttnConfig(
         dispatch_config=dispatch_config,
         overlap_config=overlap_config,
-        high_bandwith_domain_size=hb_domain_size,
         deterministic=False,
     )
 

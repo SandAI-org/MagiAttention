@@ -62,7 +62,6 @@ class DistAttnSolver:
         dispatch_meta_q: DispatchMeta,
         dispatch_meta_k: DispatchMeta,
         cp_group: dist.ProcessGroup,
-        high_bandwith_domain_size: int,
         overlap_config: OverlapConfig,
         cp_mesh: DeviceMesh | None = None,
     ):
@@ -72,7 +71,6 @@ class DistAttnSolver:
         self.cp_mesh = cp_mesh
         self.shard_seqlen_q = dispatch_meta_q.shard_seqlen
         self.shard_seqlen_k = dispatch_meta_k.shard_seqlen
-        self.high_bandwith_domain_size = high_bandwith_domain_size
 
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
@@ -128,24 +126,6 @@ class DistAttnSolver:
             )
         )
 
-        # init for hb domain remote stage if available
-        if self.high_bandwith_domain_size > 1:
-            # init remote rank entry for high-bandwidth domain stage this rank
-            remote_rank_entry_for_this_domain = (
-                self._init_remote_rank_entry_this_domain(
-                    host_rank_entry_this_rank=self.host_rank_entry_this_rank,
-                )
-            )
-            # HACK: prepend remote rank entry for high-bandwidth domain as the first stage
-            # and the overlap degree need plus 1, since hb remote rank entry is unaware by the overlap solver
-            # FIXME: therefore, the overlap solver will wrongly use the remote comm in first lb domain stage
-            # to overlap with the host calc, instead of the remote comm in hb domain
-            self.remote_rank_entry_per_stage_this_rank.insert(
-                0,
-                remote_rank_entry_for_this_domain,
-            )
-            self.overlap_degree += 1
-
         # init remote rank entry for each rank for each stage
         self.remote_rank_entry_per_rank_per_stage = (
             self._init_remote_rank_entry_per_rank_per_stage(
@@ -185,9 +165,9 @@ class DistAttnSolver:
         )
 
         # split remote k_ranges global into high-bandwidth / low-bandwidth domain
-        host_k_ranges_global_this_domain = (
-            dispatch_meta_k.host_ranges_this_domain.merge()
-        )
+        host_k_ranges_global_this_domain = dispatch_meta_k.get_host_ranges_this_domain(
+            1
+        ).merge()
         remote_k_ranges_global_hb_domain = (
             remote_k_ranges_global_this_rank.find_overlap_ranges(
                 host_k_ranges_global_this_domain,
@@ -228,17 +208,12 @@ class DistAttnSolver:
             )
             assert intersect_ranges_between_hb_lb.is_empty()  # they are orthogonal
 
-            if self.high_bandwith_domain_size == 1:
-                # in such case, host k ranges in this hb domain are exactly the host k ranges for this rank
-                # then there'll be no remote k ranges in this hb domain, and
-                # the remote k ranges in lb domain are exactly the remote k ranges for this rank
-                assert (
-                    host_k_ranges_global_this_rank == host_k_ranges_global_this_domain
-                )
-                assert remote_k_ranges_global_hb_domain.is_empty()
-                assert (
-                    remote_k_ranges_global_lb_domain == remote_k_ranges_global_this_rank
-                )
+            # in such case, host k ranges in this hb domain are exactly the host k ranges for this rank
+            # then there'll be no remote k ranges in this hb domain, and
+            # the remote k ranges in lb domain are exactly the remote k ranges for this rank
+            assert host_k_ranges_global_this_rank == host_k_ranges_global_this_domain
+            assert remote_k_ranges_global_hb_domain.is_empty()
+            assert remote_k_ranges_global_lb_domain == remote_k_ranges_global_this_rank
 
         return (
             host_q_ranges_global_this_rank,
