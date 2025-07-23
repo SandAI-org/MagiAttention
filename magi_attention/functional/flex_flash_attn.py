@@ -18,7 +18,13 @@ import torch
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
-import flexible_flash_attention_cuda
+is_ffa_installed = False
+try:
+    import flexible_flash_attention_cuda
+
+    is_ffa_installed = True
+except ImportError:
+    pass
 
 # isort: on
 
@@ -43,6 +49,8 @@ def _flex_flash_attn_forward(
     return_dtype,
     disable_fwd_atomic_reduction,
 ):
+    assert is_ffa_installed, "FFA is not installed."
+
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
@@ -125,6 +133,8 @@ def _flex_flash_attn_backward(
     deterministic,
     sm_margin,
 ):
+    assert is_ffa_installed, "FFA is not installed."
+
     dout, q, k, v, out, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (dout, q, k, v, out, q_ranges, k_ranges)
     ]
