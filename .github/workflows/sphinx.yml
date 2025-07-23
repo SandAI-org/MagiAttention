@@ -2,7 +2,7 @@ name: sphinx deploy
 on:
   push:
     branches:
-      - dev
+      - fix_sphinx
 permissions:
   contents: write
 jobs:
@@ -20,7 +20,7 @@ jobs:
           pip install pydata-sphinx-theme myst_parser sphinx-copybutton
           git config --global --add safe.directory /__w/MagiAttention/MagiAttention
           git submodule update --init --recursive
-          pip install -e . -v --no-build-isolation
+          MAX_JOBS=4 pip install -e . -v --no-build-isolation
       - name: Build docs
         run: |
           cd docs
