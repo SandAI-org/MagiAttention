@@ -670,7 +670,7 @@ class TestFlexFlashAttn(TestCase):
             q,
             k,
             v,
-            o_ref,
+            o_ref.to(q.dtype),
             None,  # dq
             None,  # dk
             None,  # dv
@@ -702,7 +702,7 @@ class TestFlexFlashAttn(TestCase):
             q,
             k,
             v,
-            o_ref,
+            o_ref.to(q.dtype),
             dq_acc,  # dq
             dk_acc,  # dk
             dv_acc,  # dv
