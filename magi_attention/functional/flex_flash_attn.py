@@ -19,7 +19,13 @@ from magi_attention.utils import nvtx
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
-import flexible_flash_attention_cuda
+is_ffa_installed = False
+try:
+    import flexible_flash_attention_cuda
+
+    is_ffa_installed = True
+except ImportError:
+    pass
 
 # isort: on
 
@@ -90,6 +96,8 @@ def merge_ranges(
         Unique Count:
          tensor(2, dtype=torch.int32)
     """
+    assert is_ffa_installed, "FFA is not installed."
+
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
     sorted_inner_ranges = inner_ranges[sorted_idx]
@@ -130,6 +138,8 @@ def _flex_flash_attn_forward(
     deterministic,
     sm_margin,
 ):
+    assert is_ffa_installed, "FFA is not installed."
+
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
@@ -187,6 +197,8 @@ def _flex_flash_attn_backward(
     deterministic,
     sm_margin,
 ):
+    assert is_ffa_installed, "FFA is not installed."
+
     dout, q, k, v, out, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (dout, q, k, v, out, q_ranges, k_ranges)
     ]

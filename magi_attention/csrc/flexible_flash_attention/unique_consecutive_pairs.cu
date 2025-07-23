@@ -18,7 +18,7 @@
 #include <vector>
 
 #include "flash.h"
-#include "common/cuda_check.h"
+#include "cuda_check.h"
 
 // ===================================================================
 // Data Structure for (int, int) Pairs
