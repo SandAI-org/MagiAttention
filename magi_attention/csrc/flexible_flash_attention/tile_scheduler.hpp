@@ -82,7 +82,7 @@ class DynamicPersistentTileScheduler {
 
     using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
-    extra_vars_type conflict_bidb;
+    extra_vars_type conflict_batch_msg;
 
     CUTLASS_DEVICE
     bool is_valid(Params const& params) const {
@@ -97,7 +97,7 @@ class DynamicPersistentTileScheduler {
       if constexpr (!Deterministic) {
         return {block, bidh, bidb};
       } else {
-        return {block, bidh, bidb, cute::get<0>(conflict_bidb), cute::get<1>(conflict_bidb)};
+        return {block, bidh, bidb, cute::get<0>(conflict_batch_msg), cute::get<1>(conflict_batch_msg)};
       }
     }
   };
@@ -173,26 +173,43 @@ class DynamicPersistentTileScheduler {
     if constexpr (!Deterministic) {
       return {next_tile_idx, block, bidh, bidb};
     } else {
-      auto get_conflict_bidb = [&](int bidb_last, int bidb_now, int block_now) {
-        // l_output_offset = params.ranges[2 * bidb]
-        // r_output_offset = params.ranges[2 * bidb + 1]
-        // [l, r) is the range of bidb, r is not include
-        // block_size = kBlock
+      auto get_conflict_batch_msg = [&](int bidb_last, int bidb_now, int block_now) {
+        // bidb_last is the previous bidb, need to update conflict state of bidb_last ~ bidb_now
+        // block_now is the block id of bidb_now, block_size = kBlock
+        // params.ranges[2 * bidb] ~ params.ranges[2 * bidb + 1] is the range of bidb
         uint32_t smid = blockIdx.x;
         uint32_t sm_stride = gridDim.x;
         int* conflict_state = params.determin_conflict_state;
-        // update conflict state
+        // update missed batch's conflict state, loop for bidb_last ~ bidb_now
         while (bidb_last < bidb_now) {
-          int q_l_index = params.ranges[2 * bidb_last], q_r_index = params.ranges[2 * bidb_last + 1];
-          int l = q_l_index / kBlock + lane;
-          int block_num = cute::ceil_div(q_r_index - q_l_index, kBlock);
-          int r = (q_l_index + block_num * kBlock - 1) / kBlock;
+          // bidb_last_l ~ bidb_last_r is the range of bidb_last
+          int bidb_last_l = params.ranges[2 * bidb_last], bidb_last_r = params.ranges[2 * bidb_last + 1];
+          int l = bidb_last_l / kBlock + lane; // bidb_last_l / kBlock is first block id
+          int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlock); // calc total block num of bidb_last
+          int r = (bidb_last_l + block_num * kBlock - 1) / kBlock; // calc last block id
+          // each threads of warp update conflict block id left ~ right
+          // each batch's range will conflict with previous batch, which cover the same block id
           while (l <= r) {
-            conflict_state[l * sm_stride + smid] = bidb_last + 1; // batch id + 1 (make it different to inital value 0)
+            // conflict state[block id * sm_stride + smid] save the conflict info of this sm
+            // conflict info is the previous conflict batch id + 1 (make it different to inital value 0)
+            // conflict state == 0 means that there is no conflict batch, this batch is the first batch to add
+            conflict_state[l * sm_stride + smid] = bidb_last + 1;
             l += cutlass::NumThreadsPerWarp;
           }
           bidb_last++;
         }
+        // calc arrive message: l_arrive_twice & r_arrive_twice
+        // each range_lock needs to arrive twice to make sure conflict batch has been completed
+        // because range_lock block and batch's block may start from a different offset
+        // eg. kBlock=10, range_lock is 0~10 10~20 20~30, batch's block is 5~15 15~20
+        //     so the 0～10 wait 5~15, 10~20 wait 5~15 and 15~20, 20~30 wait 15~20
+        //     there is two kind range_lock A, B
+        //     range_lock A (as 10~20) may need to wait two block of same batch arrive
+        //     range_lock B (as 0~10, 20~30) only need to wait one batch block arrive
+        //     as for range_lock B, the batch block should arrive twice
+        //     so that the arrive time can equal range_lock A
+        //     batch block 5~15 should arrive left range_lock 0~10 twice, but right range_lock 10~20 once (l_arrive_twice == true)
+        //     batch block 15~20 should arrive left range_lock 10~20 once, but right range_lock 20~30 twice (r_arrive_twice == true)
         int l = params.ranges[2 * bidb_now];
         int r = params.ranges[2 * bidb_now + 1];
         bool l_arrive_twice = (l % kBlock != 0) && (block_now == 0);
@@ -200,13 +217,14 @@ class DynamicPersistentTileScheduler {
         int left_conflict_index = l / kBlock + block_now;
         int right_conflict_index = (l + kBlock - 1) / kBlock + block_now;
         __syncwarp();
+        // conflict message is (conflict info << 1) | arrive_twice message
         return cute::make_tuple(
             (conflict_state[left_conflict_index * sm_stride + smid] << 1) | l_arrive_twice,
             (conflict_state[right_conflict_index * sm_stride + smid] << 1) | r_arrive_twice);
       };
 
-      auto conflict_bidb = get_conflict_bidb(current_work.bidb, bidb, block);
-      return {next_tile_idx, block, bidh, bidb, conflict_bidb};
+      auto conflict_batch_msg = get_conflict_batch_msg(current_work.bidb, bidb, block);
+      return {next_tile_idx, block, bidh, bidb, conflict_batch_msg};
     }
   }
 
@@ -220,7 +238,7 @@ class DynamicPersistentTileScheduler {
         } else {
           *work_info_smem = thrust::make_pair<int4, int2>(
               make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
-              make_int2(cute::get<0>(work_info.conflict_bidb), cute::get<1>(work_info.conflict_bidb)));
+              make_int2(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg)));
         }
       }
       flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
@@ -264,7 +282,7 @@ class DynamicPersistentTileScheduler {
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
           *work_info_smem = thrust::make_pair(
               make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
-              make_int2(cute::get<0>(work_info.conflict_bidb), cute::get<1>(work_info.conflict_bidb)));
+              make_int2(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg)));
         }
         flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
         return work_info;

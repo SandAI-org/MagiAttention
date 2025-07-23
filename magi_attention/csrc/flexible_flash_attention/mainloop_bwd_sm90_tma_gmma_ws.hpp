@@ -644,6 +644,7 @@ struct CollectiveMainloopBwdSm90 {
     // Release the second lock
     int add_cnt = right_range_arrive_twice ? 2 : 1;
     int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
+    // each range_lock needs to arrive twice to make sure conflict batch has been completed
     if (tmp + add_cnt == 2) {
       atomicExch(&range_lock[right_range_index * 2 + 1], 0);
       atomicExch(&range_lock[right_range_index * 2], arrive_num);
@@ -676,18 +677,27 @@ struct CollectiveMainloopBwdSm90 {
 
     if constexpr (Deterministic) {
       // update conflict state of batches
-      // [l, r) is the range of bidb, r is not include
+      // bidb_last is the previous bidb, need to update conflict state of bidb_last ~ bidb
+      // block_now is the block id of bidb, block_size = kBlock
+      // params.q_ranges[2 * bidb] ~ params.q_ranges[2 * bidb + 1] is the range of bidb
       int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
       uint32_t smid = blockIdx.x;
       uint32_t sm_stride = gridDim.x;
       int* conflict_state = params.dq_determin_conflict_state;
+      // update missed batch's conflict state, loop for bidb_last ~ bidb
       while (bidb_last < bidb) {
-        int q_l_index = params.q_ranges[2 * bidb_last], q_r_index = params.q_ranges[2 * bidb_last + 1];
-        int l = q_l_index / kBlockM + lane;
-        int block_num = cute::ceil_div(q_r_index - q_l_index, kBlockM);
-        int r = (q_l_index + block_num * kBlockM - 1) / kBlockM;
+        // bidb_last_l ~ bidb_last_r is the range of bidb_last
+        int bidb_last_l = params.q_ranges[2 * bidb_last], bidb_last_r = params.q_ranges[2 * bidb_last + 1];
+        int l = bidb_last_l / kBlockM + lane; // bidb_last_l / kBlock is first block id
+        int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM); // calc total block num of bidb_last
+        int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM; // calc last block id
+        // each threads of warp update conflict block id left ~ right
+        // each batch's range will conflict with previous batch, which cover the same block id
         while (l <= r) {
-          conflict_state[l * sm_stride + smid] = bidb_last + 1; // batch id + 1 (make it different to inital value 0)
+          // conflict state[block id * sm_stride + smid] save the conflict info of this sm
+          // conflict info is the previous conflict batch id + 1 (make it different to inital value 0)
+          // conflict state == 0 means that there is no conflict batch, this batch is the first batch to add
+          conflict_state[l * sm_stride + smid] = bidb_last + 1;
           l += cutlass::NumThreadsPerWarp;
         }
         bidb_last++;
@@ -704,8 +714,11 @@ struct CollectiveMainloopBwdSm90 {
     auto m_block_sync = [&](int m_block_id) {
       uint32_t smid = blockIdx.x;
       uint32_t sm_stride = gridDim.x;
+      // calc dq conflict range lock index
       int left_dq_conflict_index = seqlen_info.offset_q / kBlockM + m_block_id;
       int right_dq_conflict_index = (seqlen_info.offset_q + kBlockM - 1) / kBlockM + m_block_id;
+      // the first n_block should wait for conflict batches
+      // the others n_block should wait for previous n_block
       int sync_num1 = n_block == 0 ? params.dq_determin_conflict_state[left_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
                                    : bidb * params.n_block_max_num + n_block;
       int sync_num2 = n_block == 0 ? params.dq_determin_conflict_state[right_dq_conflict_index * sm_stride + smid] * params.n_block_max_num
@@ -714,8 +727,12 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     auto m_block_arrive = [&](int m_block_id) {
+      // calc arrive message: l_arrive_twice & r_arrive_twice
+      // each range_lock needs to arrive twice to make sure conflict batch has been completed
+      // because range_lock block and batch's block may start from a different offset
       bool l_arrive_twice = (m_block_id == 0) && (seqlen_info.offset_q % kBlockM != 0);
       bool r_arrive_twice = (m_block_id == m_block_num - 1) && (seqlen_info.offset_q % kBlockM != 0);
+      // the last n_block arrive num is always (batch id + 1) * n_block_max_num
       int arrive_num = n_block == last_n_block ? (bidb + 1) * params.n_block_max_num : bidb * params.n_block_max_num + n_block + 1;
       deterministic_arrive(
           params.dq_determin_range_locks, bidh, seqlen_info.offset_q + m_block_id * kBlockM, kBlockM, num_heads, arrive_num, l_arrive_twice, r_arrive_twice);

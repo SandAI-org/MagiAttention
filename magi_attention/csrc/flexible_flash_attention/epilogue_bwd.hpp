@@ -216,6 +216,7 @@ struct CollectiveEpilogueBwd {
     // Release the second lock
     int add_cnt = right_range_arrive_twice ? 2 : 1;
     int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
+    // each range_lock needs to arrive twice to make sure conflict batch has been completed
     if (tmp + add_cnt == 2) {
       atomicExch(&range_lock[right_range_index * 2 + 1], 0);
       atomicExch(&range_lock[right_range_index * 2], arrive_num);
@@ -314,7 +315,9 @@ struct CollectiveEpilogueBwd {
           int qheads_per_kheads = params.qhead_per_khead_divmod;
           // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
           // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
-          // if not conflict, conflict_bidb is 0
+          // if not conflict, conflict_msg >> 1 is 0
+          // the first gqa headq should wait for conflict batches
+          // the others gqa headq should wait for previous gqa headq
           int sync_num1 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
           int sync_num2 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
           deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);

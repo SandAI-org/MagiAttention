@@ -288,6 +288,7 @@ struct CollectiveEpilogueFwd {
     // Release the second lock
     int add_cnt = right_range_arrive_twice ? 2 : 1;
     int tmp = atomicAdd(&range_lock[right_range_index * 2 + 1], add_cnt);
+    // each range_lock needs to arrive twice to make sure conflict batch has been completed
     if (tmp + add_cnt == 2) {
       atomicExch(&range_lock[right_range_index * 2 + 1], 0);
       atomicExch(&range_lock[right_range_index * 2], arrive_num);
