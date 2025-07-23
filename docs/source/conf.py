@@ -117,7 +117,7 @@ html_theme_options = {
     "switcher": {
         "json_url": (
             "https://raw.githubusercontent.com/SandAI-org/MagiAttention/"
-            "refs/heads/dev/docs/source/_static/versions.json"
+            "refs/heads/gh-pages/docs/versions.json"
         ),
         "version_match": "1.0.3",
     },
