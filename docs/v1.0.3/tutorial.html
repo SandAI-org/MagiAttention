@@ -555,7 +555,7 @@
     <span class="n">total_seqlen_k</span><span class="o">=</span><span class="n">total_seqlen_k</span><span class="p">,</span>
     <span class="n">pad_size</span><span class="o">=</span><span class="n">pad_size</span><span class="p">,</span>
     <span class="n">chunk_size</span><span class="o">=</span><span class="n">chunk_size</span><span class="p">,</span>
-    <span class="n">cp_group</span><span class="o">=</span><span class="n">world_group</span><span class="p">,</span> <span class="c1"># assuming we only have 1-dim context parallelism (cp)</span>
+    <span class="n">cp_group_or_mesh</span><span class="o">=</span><span class="n">world_group</span><span class="p">,</span> <span class="c1"># assuming we only have 1-dim context parallelism (cp)</span>
 <span class="p">)</span>
 
 <span class="c1"># --- Simulate QKV projection --- #</span>
