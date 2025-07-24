@@ -59,18 +59,6 @@ def is_sdpa_backend_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_SDPA_BACKEND", "0") == "1"
 
 
-# NOTE: this feature might be deprecated soon
-def is_refactor_bwd_args_enable() -> bool:
-    """
-    Toggling this env variable to 1 to enable
-    using the refactored ffa args for backward dkv load-store efficiency
-
-    NOTE: this flag is only for the experimental stage,
-    if it works, we should always enable it and remote this env variable
-    """
-    return os.environ.get("MAGI_ATTENTION_REFACTOR_BWD_ARGS", "0") == "1"
-
-
 def is_cuda_device_max_connections_one() -> bool:
     """
     Toggle this env variable to 1 to allow cuda device to have only one connection
