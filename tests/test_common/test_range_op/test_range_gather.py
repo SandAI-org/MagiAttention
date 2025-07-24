@@ -266,7 +266,9 @@ class TestRangeGather(TestCase):
         try:
             torch.equal(result, expected)
         except AssertionError as e:
-            raise AssertionError(f"Test case: {test_case} failed with error: {e}")
+            raise AssertionError(
+                f"Test case: {test_case} failed with error: {e}\nwhere {result=}\n{expected=}\n"
+            )
 
 
 if __name__ == "__main__":
