@@ -18,6 +18,7 @@ from unittest import TestCase
 import torch
 
 from magi_attention.common.range_op import range_reduce
+from magi_attention.testing import parameterize
 
 
 def range_reduce_ref(
@@ -58,7 +59,8 @@ class TestRangeReduce(TestCase):
     def device(self) -> int:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def test_range_reduce(self):
+    @parameterize("deterministic", [False, True])
+    def test_range_reduce(self, deterministic):
         """Test range_reduce function by comparing with reference implementation"""
 
         # --- Test case 1: Basic functionality --- #
@@ -75,18 +77,13 @@ class TestRangeReduce(TestCase):
             dtype=torch.int32,
             device=self.device,
         )
-        cu_range_sizes = torch.tensor(
-            [0, 2, 3, 6, 7], dtype=torch.int32, device=self.device
-        )
-        total_size = 8
 
         self.compare_implementations(
             input_tensor,
             output_tensor,
             input_ranges,
             output_ranges,
-            cu_range_sizes,
-            total_size,
+            deterministic=deterministic,
             test_case="Basic functionality",
         )
 
@@ -95,15 +92,13 @@ class TestRangeReduce(TestCase):
         empty_input = torch.empty(0, 5, device=self.device)
         empty_output = torch.empty(0, 5, device=self.device)
         empty_ranges = torch.empty(0, 2, dtype=torch.int32, device=self.device)
-        empty_cu_sizes = torch.empty(0, dtype=torch.int32, device=self.device)
 
         self.compare_implementations(
             empty_input,
             empty_output,
             empty_ranges,
             empty_ranges,
-            empty_cu_sizes,
-            total_size=0,
+            deterministic=deterministic,
             test_case="Empty tensor handling",
         )
 
@@ -117,17 +112,14 @@ class TestRangeReduce(TestCase):
         output_ranges = torch.tensor(
             [[0, 3], [4, 7]], dtype=torch.int32, device=self.device
         )
-        cu_range_sizes = torch.tensor([0, 3], dtype=torch.int32, device=self.device)
-        total_size = 6
 
         self.compare_implementations(
             input_tensor,
             output_tensor,
             input_ranges,
             output_ranges,
-            cu_range_sizes,
-            total_size,
             dim=1,
+            deterministic=deterministic,
             test_case="Different dimension (dim=1)",
         )
 
@@ -141,16 +133,13 @@ class TestRangeReduce(TestCase):
         large_output_ranges = torch.tensor(
             [[0, 30], [30, 70]], dtype=torch.int32, device=self.device
         )
-        large_cu_sizes = torch.tensor([0, 30], dtype=torch.int32, device=self.device)
-        large_total_size = 70
 
         self.compare_implementations(
             large_input,
             large_output,
             large_input_ranges,
             large_output_ranges,
-            large_cu_sizes,
-            large_total_size,
+            deterministic=deterministic,
             test_case="Large tensors",
         )
 
@@ -164,15 +153,13 @@ class TestRangeReduce(TestCase):
         single_output_range = torch.tensor(
             [[0, 4]], dtype=torch.int32, device=self.device
         )
-        single_cu_size = torch.tensor([0], dtype=torch.int32, device=self.device)
 
         self.compare_implementations(
             single_range_input,
             single_range_output,
             single_input_range,
             single_output_range,
-            single_cu_size,
-            total_size=4,
+            deterministic=deterministic,
             test_case="Edge case - single range",
         )
 
@@ -186,9 +173,8 @@ class TestRangeReduce(TestCase):
             multi_dim_output,
             input_ranges,
             output_ranges,
-            cu_range_sizes,
-            total_size,
             dim=0,
+            deterministic=deterministic,
             test_case="Multi-dimensional tensors (dim=0)",
         )
 
@@ -198,9 +184,8 @@ class TestRangeReduce(TestCase):
             multi_dim_output2,
             input_ranges,
             output_ranges,
-            cu_range_sizes,
-            total_size,
             dim=2,
+            deterministic=deterministic,
             test_case="Multi-dimensional tensors (dim=2)",
         )
 
@@ -215,9 +200,8 @@ class TestRangeReduce(TestCase):
             non_contiguous_output,
             input_ranges,
             output_ranges,
-            cu_range_sizes,
-            total_size,
             dim=1,
+            deterministic=deterministic,
             test_case="Non-contiguous memory layout",
         )
 
@@ -232,8 +216,7 @@ class TestRangeReduce(TestCase):
                     typed_output,
                     input_ranges,
                     output_ranges,
-                    cu_range_sizes,
-                    total_size,
+                    deterministic=deterministic,
                     test_case=f"Various data types ({dtype=})",
                 )
 
@@ -243,9 +226,8 @@ class TestRangeReduce(TestCase):
         output_tensor,
         input_ranges,
         output_ranges,
-        cu_range_sizes,
-        total_size,
         dim=0,
+        deterministic=False,
         test_case: str = "",
     ):
         # Copy output tensors for comparison
@@ -258,9 +240,8 @@ class TestRangeReduce(TestCase):
             output=output_copy1,
             input_ranges=input_ranges,
             output_ranges=output_ranges,
-            cu_range_sizes=cu_range_sizes,
-            total_size=total_size,
             dim=dim,
+            deterministic=deterministic,
         )
 
         # Call the reference implementation
@@ -273,7 +254,13 @@ class TestRangeReduce(TestCase):
         )
 
         # Verify results match
-        torch.testing.assert_close(result, expected)
+        try:
+            torch.testing.assert_close(result, expected)
+        except AssertionError as e:
+            deter_str = "deterministic" if deterministic else "non-deterministic"
+            raise AssertionError(
+                f"Test case: {test_case} failed with error in {deter_str} mode: {e}\nwhere {result=}\n{expected=}\n"
+            )
 
 
 if __name__ == "__main__":

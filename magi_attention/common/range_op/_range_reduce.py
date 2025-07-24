@@ -19,19 +19,64 @@ import triton.language as tl
 
 from magi_attention.utils import nvtx
 
+from ..ranges import NaiveRanges
+from ._range_gather import _calc_ranges_row_map
+
 __all__ = ["range_reduce"]
 
 
-def _calc_range_reduce_row_map(
-    input_ranges: torch.Tensor, total_size: int
-) -> torch.Tensor:
-    row_map = torch.arange(0, input_ranges.shape[0], device=input_ranges.device)
-    range_sizes = input_ranges[:, 1] - input_ranges[:, 0]
-    row_map = torch.repeat_interleave(
-        row_map, range_sizes, dim=0, output_size=total_size
+def _calc_cu_range_sizes(
+    ranges: torch.Tensor | NaiveRanges,
+    device: int,
+) -> tuple[torch.Tensor, int]:
+    if isinstance(ranges, torch.Tensor):
+        ranges = ranges.tolist()
+
+    cu_range_sizes = []
+    total_size = 0
+    for start, end in ranges:
+        cu_range_sizes.append(total_size)
+        total_size += end - start
+
+    return torch.tensor(cu_range_sizes, dtype=torch.int32, device=device), total_size
+
+
+def _calc_out2inp_range_map(
+    output_ranges: torch.Tensor | NaiveRanges,
+    device: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    if isinstance(output_ranges, torch.Tensor):
+        output_ranges = output_ranges.tolist()
+
+    # convert to list of tuple to be hashable
+    output_ranges = list(map(tuple, output_ranges))
+
+    unique_ordered_out_ranges = sorted(set(output_ranges))
+
+    out_range2inp_indices_map: dict[tuple[int, int], list[int]] = {}
+    for inp_idx, out_range in enumerate(list(output_ranges)):
+        out_range2inp_indices_map.setdefault(out_range, []).append(inp_idx)
+
+    max_inp_indices_size = max(
+        [len(inp_indices) for inp_indices in out_range2inp_indices_map.values()]
     )
 
-    return row_map
+    out2inp_range_map = []
+    for out_range in unique_ordered_out_ranges:
+        inp_range_list = out_range2inp_indices_map[out_range]
+        inp_range_list = inp_range_list + [-1] * (
+            max_inp_indices_size - len(inp_range_list)
+        )
+        out2inp_range_map.append(inp_range_list)
+
+    out2inp_range_map = torch.tensor(
+        out2inp_range_map, dtype=torch.int32, device=device
+    )
+    unique_ordered_out_ranges = torch.tensor(
+        unique_ordered_out_ranges, dtype=torch.int32, device=device
+    )
+
+    return out2inp_range_map, unique_ordered_out_ranges, max_inp_indices_size
 
 
 @triton.jit
@@ -80,23 +125,67 @@ def range_reduce_kernel(
 
 
 @triton.jit
-def range_reduce_kernel_deterministic(
+def range_reduce_deter_kernel(
     input_ptr,
     output_ptr,
     input_ranges_ptr,
     output_ranges_ptr,
     cu_range_sizes_ptr,
     row_map_ptr,
-    n_ranges,
+    out2inp_range_map_ptr,
     input_stride,
     output_stride,
-    M,
+    out2inp_range_map_stride,
     N: tl.constexpr,
     N_BLOCK: tl.constexpr,
     ELEM_PER_BLOCK: tl.constexpr,
 ):
-    # TODO: finish deterministic range reduction kernel
-    pass
+    row_idx = tl.program_id(0)
+    block_idx_in_row = tl.program_id(1)
+
+    range_idx = tl.load(row_map_ptr + row_idx)
+    cu_range_size = tl.load(cu_range_sizes_ptr + range_idx)
+    row_idx_in_range = row_idx - cu_range_size
+    is_last_block = block_idx_in_row == N_BLOCK - 1
+    elem_in_last_block = N - block_idx_in_row * ELEM_PER_BLOCK
+    cols = tl.arange(0, ELEM_PER_BLOCK)
+
+    output_range_start = tl.load(output_ranges_ptr + range_idx * 2)
+    out_idx = (
+        output_range_start + row_idx_in_range
+    ) * output_stride + block_idx_in_row * ELEM_PER_BLOCK
+    curr_out_ptr = output_ptr + out_idx
+
+    if not is_last_block:
+        out = tl.load(curr_out_ptr + cols)
+    else:
+        out = tl.load(curr_out_ptr + cols, mask=cols < elem_in_last_block)
+
+    out2inp_range_map_start = (
+        out2inp_range_map_ptr + range_idx * out2inp_range_map_stride
+    )
+    for idx in tl.range(0, out2inp_range_map_stride):
+        inp_range_idx = tl.load(out2inp_range_map_start + idx)
+        if inp_range_idx == -1:
+            pass
+        else:
+            input_range_start = tl.load(input_ranges_ptr + inp_range_idx * 2)
+            inp_idx = (
+                input_range_start + row_idx_in_range
+            ) * input_stride + block_idx_in_row * ELEM_PER_BLOCK
+            curr_inp_ptr = input_ptr + inp_idx
+
+            if not is_last_block:
+                inp = tl.load(curr_inp_ptr + cols)
+            else:
+                inp = tl.load(curr_inp_ptr + cols, mask=cols < elem_in_last_block)
+
+            out += inp
+
+    if not is_last_block:
+        tl.store(curr_out_ptr + cols, out)
+    else:
+        tl.store(curr_out_ptr + cols, out, mask=cols < elem_in_last_block)
 
 
 @nvtx.instrument_nvtx
@@ -105,26 +194,34 @@ def range_reduce(
     output: torch.Tensor,
     input_ranges: torch.Tensor,
     output_ranges: torch.Tensor,
-    cu_range_sizes: torch.Tensor,
-    total_size: int,
     dim: int = 0,
-    row_map: torch.Tensor | None = None,
     deterministic: bool = False,
-    range_split_sizes: torch.Tensor | None = None,
+    **kwargs,
 ) -> torch.Tensor:
     """
     Reduce values from input tensor to output tensor based on specified ranges.
 
     Args:
-        input: Source tensor to reduce from
-        output: Destination tensor to reduce into
-        input_ranges: Tensor of [start, end] ranges in the input
-        output_ranges: Tensor of [start, end] ranges in the output
-        cu_range_sizes: Cumulative sizes of ranges
-        total_size: Total number of rows of the input to process
-        dim: Dimension along which to perform the reduction
-        row_map(Optional):  mapping from row indices to range indices
-        # TODO(littsk): finish deterministic reduction docstring
+        input (torch.Tensor): Source tensor to reduce from
+        output (torch.Tensor): Destination tensor to reduce into
+        input_ranges (torch.Tensor): Tensor of [start, end] ranges in the input
+        output_ranges (torch.Tensor): Tensor of [start, end] ranges in the output
+        dim (int, optional): Dimension along which to perform the reduction. Default is 0.
+        deterministic(bool, optional): Whether to enable deterministic mode
+
+        kwargs:
+            - cu_range_sizes (torch.Tensor) : Cumulative sizes of input ranges,
+                or cumulative sizes of output ranges in deterministic mode
+            - total_size (int): Total number of rows of the input to process,
+                or total number of rows of the output to be reduced in deterministic mode
+
+            - row_map (torch.Tensor):  mapping from row indices to input range indices,
+                or mapping from row indices to output range indices in deterministic mode
+            - out2inp_range_map (torch.Tensor): mapping from each output range index to the list of input range indices
+                that need to be reduced, e.g. [(2, -1), (1, 3)] means that:
+                    1. input_range[2] will reduce to output_range[0] (-1 is just the placeholder to be equal shape)
+                    2. input_ranges[1] and input_ranges[3] will reduce to output_range[1]
+                **NOTE**: this is only used in deterministic mode
 
     Returns:
         The output tensor after reduction
@@ -132,10 +229,6 @@ def range_reduce(
     assert (
         input_ranges.shape == output_ranges.shape
     ), f"{input_ranges=} and {output_ranges=} must have the same shape"
-
-    if deterministic:
-        assert range_split_sizes is not None
-        raise NotImplementedError("Deterministic range reduction is not implemented")
 
     # Return directly if empty tensor
     if input_ranges.shape[0] == 0 or input.numel() == 0:
@@ -154,19 +247,53 @@ def range_reduce(
         input = input.contiguous()
         output_ = output_.contiguous()
 
-    if output.dtype == torch.bfloat16:
-        # NOTE: triton atomic op does not support bfloat16, see issue:
+    if not deterministic and output.dtype == torch.bfloat16:
+        # NOTE: in non-deterministic mode, we will use triton atomic op
+        # which does not support bfloat16, w.r.t. the issue:
         # https://github.com/pytorch/pytorch/issues/97016
         output_ = output_.to(torch.float32)
         need_to_copy = True
 
+    # Make input_ranges and output_ranges contiguous
     input_ranges = input_ranges.contiguous()
     output_ranges = output_ranges.contiguous()
-    cu_range_sizes = cu_range_sizes.contiguous()
+
+    if deterministic:
+        # Calculate out2inp_range_map and unique_ordered_out_ranges if not provided for deterministic mode
+        out2inp_range_map = kwargs.pop("out2inp_range_map", None)
+        unique_ordered_out_ranges = kwargs.pop("unique_ordered_out_ranges", None)
+
+        if out2inp_range_map is None or unique_ordered_out_ranges is None:
+            (
+                out2inp_range_map,
+                unique_ordered_out_ranges,
+                out2inp_range_map_stride,
+            ) = _calc_out2inp_range_map(
+                output_ranges,
+                device=input.device,
+            )
+        else:
+            out2inp_range_map = out2inp_range_map.contiguous()
+            out2inp_range_map_stride = out2inp_range_map.shape[1]
+
+    # Calculate cu_range_sizes and total_size if not provided
+    cu_range_sizes = kwargs.pop("cu_range_sizes", None)
+    total_size = kwargs.pop("total_size", None)
+    if cu_range_sizes is None or total_size is None:
+        cu_range_sizes, total_size = _calc_cu_range_sizes(
+            unique_ordered_out_ranges if deterministic else input_ranges,
+            device=input.device,
+        )
+    else:
+        cu_range_sizes = cu_range_sizes.contiguous()
 
     # Calculate row_map if not provided
+    row_map = kwargs.pop("row_map", None)
     if row_map is None:
-        row_map = _calc_range_reduce_row_map(input_ranges, total_size)
+        row_map = _calc_ranges_row_map(
+            unique_ordered_out_ranges if deterministic else input_ranges,
+            total_size,
+        )
     else:
         row_map = row_map.contiguous()
 
@@ -184,19 +311,36 @@ def range_reduce(
     grid = (M, N_BLOCK)
 
     # Launch kernel
-    range_reduce_kernel[grid](
-        input,
-        output_,
-        input_ranges,
-        output_ranges,
-        cu_range_sizes,
-        row_map,
-        input_stride,
-        output_stride,
-        N,
-        N_BLOCK,
-        ELEM_PER_BLOCK,
-    )
+    if deterministic:
+        range_reduce_deter_kernel[grid](
+            input,
+            output_,
+            input_ranges,
+            unique_ordered_out_ranges,
+            cu_range_sizes,
+            row_map,
+            out2inp_range_map,
+            input_stride,
+            output_stride,
+            out2inp_range_map_stride,
+            N,
+            N_BLOCK,
+            ELEM_PER_BLOCK,
+        )
+    else:
+        range_reduce_kernel[grid](
+            input,
+            output_,
+            input_ranges,
+            output_ranges,
+            cu_range_sizes,
+            row_map,
+            input_stride,
+            output_stride,
+            N,
+            N_BLOCK,
+            ELEM_PER_BLOCK,
+        )
 
     # If transposed earlier, transpose back
     if dim != 0:
