@@ -354,7 +354,11 @@ class FlashAttnBwdSm90 {
           }
           cutlass::arch::NamedBarrier::arrive(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
         } else {
-          epilogue.store_zero(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
+          if constexpr (!Deterministic) {
+            epilogue.store_zero(params.epilogue, threadIdx.x - NumCopyThreads, block_coord);
+          } else {
+            epilogue.store_zero(params.epilogue, threadIdx.x - NumCopyThreads, block_coord_);
+          }
         }
       }
       epilogue.store_tail();
