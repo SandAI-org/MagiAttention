@@ -19,40 +19,9 @@ import triton.language as tl
 
 from magi_attention.utils import nvtx
 
-from ..ranges import NaiveRanges
+from .utils import _calc_cu_range_sizes, _calc_ranges_row_map
 
 __all__ = ["range_gather"]
-
-
-def _calc_cu_range_sizes(
-    ranges: torch.Tensor | NaiveRanges,
-    device: int,
-) -> tuple[torch.Tensor, int]:
-    if isinstance(ranges, torch.Tensor):
-        ranges = ranges.tolist()
-
-    cu_range_sizes = []
-    total_size = 0
-    for start, end in ranges:
-        cu_range_sizes.append(total_size)
-        total_size += end - start
-
-    cu_range_sizes = torch.tensor(cu_range_sizes, dtype=torch.int32, device=device)
-
-    return cu_range_sizes, total_size
-
-
-def _calc_ranges_row_map(
-    ranges: torch.Tensor,
-    total_size: int,
-) -> torch.Tensor:
-    row_map = torch.arange(0, ranges.shape[0], device=ranges.device)
-    range_sizes = ranges[:, 1] - ranges[:, 0]
-    row_map = torch.repeat_interleave(
-        row_map, range_sizes, dim=0, output_size=total_size
-    )
-
-    return row_map
 
 
 @triton.jit
@@ -119,7 +88,7 @@ def range_gather(
         kwargs:
             - cu_range_sizes: Cumulative sizes of ranges
             - total_size: Total number of rows in the output tensor
-            - row_map: Optional mapping from row indices to range indices
+            - row_map: mapping from row indices to range indices
 
     Returns:
         A new tensor containing the gathered values, put into output if provided.

@@ -19,48 +19,9 @@ import triton.language as tl
 
 from magi_attention.utils import nvtx
 
-from ..ranges import NaiveRanges
-from ._range_gather import _calc_cu_range_sizes, _calc_ranges_row_map
+from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
 
 __all__ = ["range_reduce"]
-
-
-def _calc_out2inp_range_map(
-    output_ranges: torch.Tensor | NaiveRanges,
-    device: int,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
-    if isinstance(output_ranges, torch.Tensor):
-        output_ranges = output_ranges.tolist()
-
-    # convert to list of tuple to be hashable
-    output_ranges = list(map(tuple, output_ranges))
-
-    unique_ordered_out_ranges = sorted(set(output_ranges))
-
-    out_range2inp_indices_map: dict[tuple[int, int], list[int]] = {}
-    for inp_idx, out_range in enumerate(list(output_ranges)):
-        out_range2inp_indices_map.setdefault(out_range, []).append(inp_idx)
-
-    max_inp_indices_size = max(
-        [len(inp_indices) for inp_indices in out_range2inp_indices_map.values()]
-    )
-
-    out2inp_range_map = []
-    for out_range in unique_ordered_out_ranges:
-        inp_range_list = out_range2inp_indices_map[out_range]
-        inp_range_list = inp_range_list + [-1] * (
-            max_inp_indices_size - len(inp_range_list)
-        )
-        out2inp_range_map.append(inp_range_list)
-
-    out2inp_range_map = torch.tensor(
-        out2inp_range_map, dtype=torch.int32, device=device
-    )
-    unique_ordered_out_ranges = torch.tensor(
-        unique_ordered_out_ranges, dtype=torch.int32, device=device
-    )
-
-    return out2inp_range_map, unique_ordered_out_ranges, max_inp_indices_size
 
 
 @triton.jit
@@ -199,7 +160,7 @@ def range_reduce(
             - total_size (int): Total number of rows of the input to process,
                 or total number of rows of the output to be reduced in deterministic mode
 
-            - row_map (torch.Tensor):  mapping from row indices to input range indices,
+            - row_map (torch.Tensor): mapping from row indices to input range indices,
                 or mapping from row indices to output range indices in deterministic mode
             - out2inp_range_map (torch.Tensor): mapping from each output range index to the list of input range indices
                 that need to be reduced, e.g. [(2, -1), (1, 3)] means that:
@@ -218,32 +179,15 @@ def range_reduce(
     if input_ranges.shape[0] == 0 or input.numel() == 0:
         return output
 
-    output_ = output
-    need_to_copy = False
-
-    # Handle the case when dim is not 0
-    if dim != 0:
-        input = input.transpose(0, dim).contiguous()
-        output_ = output_.transpose(0, dim).contiguous()
-        need_to_copy = True
-    else:
-        need_to_copy |= not output.is_contiguous()
-        input = input.contiguous()
-        output_ = output_.contiguous()
-
-    if not deterministic and output.dtype == torch.bfloat16:
-        # NOTE: in non-deterministic mode, we will use triton atomic op
-        # which does not support bfloat16, w.r.t. the issue:
-        # https://github.com/pytorch/pytorch/issues/97016
-        output_ = output_.to(torch.float32)
-        need_to_copy = True
+    # ---   calculate meta   --- #
 
     # Make input_ranges and output_ranges contiguous
     input_ranges = input_ranges.contiguous()
     output_ranges = output_ranges.contiguous()
 
     if deterministic:
-        # Calculate out2inp_range_map and unique_ordered_out_ranges if not provided for deterministic mode
+        # Calculate out2inp_range_map and unique_ordered_out_ranges
+        # if not provided for deterministic mode
         out2inp_range_map = kwargs.pop("out2inp_range_map", None)
         unique_ordered_out_ranges = kwargs.pop("unique_ordered_out_ranges", None)
 
@@ -281,9 +225,33 @@ def range_reduce(
     else:
         row_map = row_map.contiguous()
 
+    # ---   pre-process input/output   --- #
+
+    output_ = output
+    need_to_copy = False
+
+    # Handle the case when dim is not 0
+    if dim != 0:
+        input = input.transpose(0, dim).contiguous()
+        output_ = output_.transpose(0, dim).contiguous()
+        need_to_copy = True
+    else:
+        need_to_copy |= not output.is_contiguous()
+        input = input.contiguous()
+        output_ = output_.contiguous()
+
+    if not deterministic and output.dtype == torch.bfloat16:
+        # NOTE: in non-deterministic mode, we will use triton atomic op
+        # which does not support bfloat16, w.r.t. the issue:
+        # https://github.com/pytorch/pytorch/issues/97016
+        output_ = output_.to(torch.float32)
+        need_to_copy = True
+
     # Calculate stride (considering memory step size of elements)
     input_stride = input.stride(0)
     output_stride = output_.stride(0)
+
+    # ---   calculate grid size   --- #
 
     # Calculate grid size
     M = total_size
@@ -293,6 +261,8 @@ def range_reduce(
     N_BLOCK = triton.cdiv(N, ELEM_PER_BLOCK)
 
     grid = (M, N_BLOCK)
+
+    # ---   launch kernel   --- #
 
     # Launch kernel
     if deterministic:
@@ -325,6 +295,8 @@ def range_reduce(
             N_BLOCK,
             ELEM_PER_BLOCK,
         )
+
+    # ---   post-process output   --- #
 
     # If transposed earlier, transpose back
     if dim != 0:

@@ -63,15 +63,11 @@ class TestRangeFill(TestCase):
 
         input_tensor = torch.zeros(10, 5, device=self.device)
         ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int32, device=self.device)
-        cu_range_sizes = torch.tensor([0, 3], dtype=torch.int32, device=self.device)
-        total_size = 6
         val = 1.0
 
         self.compare_implementations(
             input_tensor,
             ranges,
-            cu_range_sizes,
-            total_size,
             val,
             test_case="Basic functionality",
         )
@@ -80,13 +76,10 @@ class TestRangeFill(TestCase):
 
         empty_input = torch.empty(0, 5, device=self.device)
         empty_ranges = torch.empty(0, 2, dtype=torch.int32, device=self.device)
-        empty_cu_sizes = torch.empty(0, dtype=torch.int32, device=self.device)
 
         self.compare_implementations(
             empty_input,
             empty_ranges,
-            empty_cu_sizes,
-            0,
             val,
             0,
             test_case="Empty tensor handling",
@@ -96,14 +89,10 @@ class TestRangeFill(TestCase):
 
         input_tensor = torch.zeros(5, 10, 3, device=self.device)
         ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int32, device=self.device)
-        cu_range_sizes = torch.tensor([0, 3], dtype=torch.int32, device=self.device)
-        total_size = 6
 
         self.compare_implementations(
             input_tensor,
             ranges,
-            cu_range_sizes,
-            total_size,
             val,
             dim=1,
             test_case="Different dimension (dim=1)",
@@ -115,14 +104,10 @@ class TestRangeFill(TestCase):
         large_ranges = torch.tensor(
             [[0, 30], [40, 80]], dtype=torch.int32, device=self.device
         )
-        large_cu_sizes = torch.tensor([0, 30], dtype=torch.int32, device=self.device)
-        large_total_size = 70
 
         self.compare_implementations(
             large_input,
             large_ranges,
-            large_cu_sizes,
-            large_total_size,
             val,
             test_case="Large tensors",
         )
@@ -131,13 +116,10 @@ class TestRangeFill(TestCase):
 
         single_range_input = torch.zeros(10, 5, device=self.device)
         single_range = torch.tensor([[3, 7]], dtype=torch.int32, device=self.device)
-        single_cu_size = torch.tensor([0], dtype=torch.int32, device=self.device)
 
         self.compare_implementations(
             single_range_input,
             single_range,
-            single_cu_size,
-            4,
             val,
             test_case="Edge case - single range",
         )
@@ -149,8 +131,6 @@ class TestRangeFill(TestCase):
         self.compare_implementations(
             multi_dim_input,
             ranges,
-            cu_range_sizes,
-            total_size,
             val,
             dim=0,
             test_case="Multi-dimensional tensors (dim=0)",
@@ -158,8 +138,6 @@ class TestRangeFill(TestCase):
         self.compare_implementations(
             multi_dim_input,
             ranges,
-            cu_range_sizes,
-            total_size,
             val,
             dim=2,
             test_case="Multi-dimensional tensors (dim=2)",
@@ -173,8 +151,6 @@ class TestRangeFill(TestCase):
         self.compare_implementations(
             non_contiguous_input,
             ranges,
-            cu_range_sizes,
-            total_size,
             val,
             dim=1,
             test_case="Non-contiguous memory layout",
@@ -188,8 +164,6 @@ class TestRangeFill(TestCase):
                 self.compare_implementations(
                     typed_input,
                     ranges,
-                    cu_range_sizes,
-                    total_size,
                     val,
                     test_case=f"Various data types ({dtype=})",
                 )
@@ -217,18 +191,12 @@ class TestRangeFill(TestCase):
                 sizes_list.append(sizes_list[-1] + (end - start))
 
             ranges = torch.tensor(ranges_list, dtype=torch.int32, device=self.device)
-            cu_range_sizes = torch.tensor(
-                sizes_list[:-1], dtype=torch.int32, device=self.device
-            )
-            total_size = sizes_list[-1]
 
             # Test different fill values
             for val in [0.0, 1.0, -1.0, 3.14, 42.0]:
                 self.compare_implementations(
                     input_tensor.clone(),
                     ranges,
-                    cu_range_sizes,
-                    total_size,
                     val,
                     test_case=f"Random data large-scale testing ({idx=})",
                 )
@@ -237,8 +205,6 @@ class TestRangeFill(TestCase):
     def compare_implementations(
         input_tensor,
         ranges,
-        cu_range_sizes,
-        total_size,
         val,
         dim=0,
         test_case: str = "",
@@ -251,8 +217,6 @@ class TestRangeFill(TestCase):
         result = range_fill_(
             input=input_copy1,
             ranges=ranges,
-            cu_range_sizes=cu_range_sizes,
-            total_size=total_size,
             val=val,
             dim=dim,
         )
