@@ -42,7 +42,7 @@ from . import nvtx
 if TYPE_CHECKING:
     from magi_attention.common.enum import AttnMaskType
     from magi_attention.common.range import AttnRange
-    from magi_attention.common.ranges import AttnRanges, NaiveRanges
+    from magi_attention.common.ranges import AttnRanges
 
 
 def deprecated(func: Callable) -> Callable:
@@ -335,71 +335,6 @@ def vis_attn_mask(
     )
 
 
-@deprecated
-def make_causal_mask(
-    seqlen_q: int,
-    seqlen_k: int,
-    align: str = "bottom-right",
-    dtype=torch.int32,
-    device: str = "cpu",
-) -> torch.Tensor:
-    max_seqlen = max(seqlen_q, seqlen_k)
-    causal_mask = torch.tril(torch.ones((max_seqlen, max_seqlen))).to(
-        dtype=dtype, device=device
-    )
-
-    if align == "bottom-right":
-        causal_mask = causal_mask[-seqlen_q:, -seqlen_k:]
-    elif align == "top-left":
-        causal_mask = causal_mask[:seqlen_q, :seqlen_k]
-    else:
-        raise ValueError(f"Invalid alignment mode: {align}")
-
-    return causal_mask
-
-
-@deprecated
-def get_attn_mask_from_ranges(
-    q_ranges: "NaiveRanges",
-    k_ranges: "NaiveRanges",
-    is_causal_mapping: bool | list[bool],
-    total_seqlen_q: int,
-    total_seqlen_k: int,
-) -> torch.Tensor:
-    if isinstance(is_causal_mapping, list):
-        assert len(q_ranges) == len(k_ranges) == len(is_causal_mapping)
-    else:
-        is_causal_mapping = wrap_to_list(
-            is_causal_mapping, broadcast_to_length=len(q_ranges)
-        )
-
-    mask = torch.zeros(
-        (total_seqlen_q, total_seqlen_k),
-        dtype=torch.bool,
-        device=torch.cuda.current_device(),
-    )
-
-    for q_range, k_range, is_causal in zip(q_ranges, k_ranges, is_causal_mapping):
-        if is_causal:
-            causal_mask = make_causal_mask(
-                seqlen_q=q_range[1] - q_range[0],
-                seqlen_k=k_range[1] - k_range[0],
-                dtype=torch.bool,
-                device=torch.cuda.current_device(),
-            )
-            mask[
-                q_range[0] : q_range[1],
-                k_range[0] : k_range[1],
-            ] = causal_mask
-        else:
-            mask[
-                q_range[0] : q_range[1],
-                k_range[0] : k_range[1],
-            ] = True
-
-    return mask
-
-
 def make_ffa_causal_mask(
     seqlen_q: int,
     seqlen_k: int,
@@ -585,7 +520,7 @@ def is_same_device_mesh(
     )
 
 
-# FIXME fix bugs and move to magi_attention/api/functools
+# FIXME: fix bugs and move to magi_attention/api/functools
 def infer_attn_mask_from_window_size(
     q_ranges: "AttnRanges",
     k_ranges: "AttnRanges",
@@ -639,6 +574,7 @@ def infer_attn_mask_from_window_size(
     return processed_q_ranges, processed_k_ranges, attn_mask_type
 
 
+# FIXME: fix bugs and move to magi_attention/api/functools
 def infer_attn_mask_from_sliding_window(
     q_range: "AttnRange",
     k_range: "AttnRange",
