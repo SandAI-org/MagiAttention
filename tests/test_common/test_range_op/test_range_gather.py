@@ -81,7 +81,13 @@ class TestRangeGather(TestCase):
         )
         total_size = 9
 
-        self.compare_implementations(input_tensor, ranges, cu_range_sizes, total_size)
+        self.compare_implementations(
+            input_tensor,
+            ranges,
+            cu_range_sizes,
+            total_size,
+            test_case="Basic functionality",
+        )
 
         # --- Test case 2: Empty tensor handling --- #
 
@@ -89,7 +95,14 @@ class TestRangeGather(TestCase):
         empty_ranges = torch.empty(0, 2, dtype=torch.int32, device=self.device)
         empty_cu_sizes = torch.empty(0, dtype=torch.int32, device=self.device)
 
-        self.compare_implementations(empty_input, empty_ranges, empty_cu_sizes, 0, 0)
+        self.compare_implementations(
+            empty_input,
+            empty_ranges,
+            empty_cu_sizes,
+            0,
+            0,
+            test_case="Empty tensor handling",
+        )
 
         # --- Test case 3: Different dimensions --- #
 
@@ -99,7 +112,12 @@ class TestRangeGather(TestCase):
         total_size = 6
 
         self.compare_implementations(
-            input_tensor, ranges, cu_range_sizes, total_size, dim=1
+            input_tensor,
+            ranges,
+            cu_range_sizes,
+            total_size,
+            dim=1,
+            test_case="Different dimensions",
         )
 
         # --- Test case 4: Large tensors --- #
@@ -112,7 +130,11 @@ class TestRangeGather(TestCase):
         large_total_size = 70
 
         self.compare_implementations(
-            large_input, large_ranges, large_cu_sizes, large_total_size
+            large_input,
+            large_ranges,
+            large_cu_sizes,
+            large_total_size,
+            test_case="Large tensors",
         )
 
         # --- Test case 5: Edge case - single range --- #
@@ -122,7 +144,11 @@ class TestRangeGather(TestCase):
         single_cu_size = torch.tensor([0], dtype=torch.int32, device=self.device)
 
         self.compare_implementations(
-            single_range_input, single_range, single_cu_size, 4
+            single_range_input,
+            single_range,
+            single_cu_size,
+            4,
+            test_case="Edge case - single range",
         )
 
         # --- Test case 6: Multi-dimensional tensors --- #
@@ -130,10 +156,20 @@ class TestRangeGather(TestCase):
         multi_dim_input = torch.randn(10, 5, 8, 4, device=self.device)
 
         self.compare_implementations(
-            multi_dim_input, ranges, cu_range_sizes, total_size, dim=0
+            multi_dim_input,
+            ranges,
+            cu_range_sizes,
+            total_size,
+            dim=0,
+            test_case="Multi-dimensional tensors (dim=0)",
         )
         self.compare_implementations(
-            multi_dim_input, ranges, cu_range_sizes, total_size, dim=2
+            multi_dim_input,
+            ranges,
+            cu_range_sizes,
+            total_size,
+            dim=2,
+            test_case="Multi-dimensional tensors (dim=2)",
         )
 
         # --- Test case 7: Non-contiguous memory layout --- #
@@ -147,6 +183,7 @@ class TestRangeGather(TestCase):
             cu_range_sizes,
             total_size,
             dim=1,
+            test_case="Non-contiguous memory layout",
         )
 
         # --- Test case 8: Various data types --- #
@@ -155,13 +192,17 @@ class TestRangeGather(TestCase):
             typed_input = torch.randn(10, 5, device=self.device).to(dtype)
             if dtype.is_floating_point:
                 self.compare_implementations(
-                    typed_input, ranges, cu_range_sizes, total_size
+                    typed_input,
+                    ranges,
+                    cu_range_sizes,
+                    total_size,
+                    test_case=f"Various data types ({dtype=})",
                 )
 
         # --- Test case 9: Random data large-scale testing --- #
 
         torch.manual_seed(self.seed)
-        for _ in range(5):
+        for idx in range(5):
             # Randomly generate input
             input_size = torch.randint(20, 50, (1,)).item()
             feature_size = torch.randint(5, 15, (1,)).item()
@@ -187,7 +228,11 @@ class TestRangeGather(TestCase):
             total_size = sizes_list[-1]
 
             self.compare_implementations(
-                input_tensor, ranges, cu_range_sizes, total_size
+                input_tensor,
+                ranges,
+                cu_range_sizes,
+                total_size,
+                test_case=f"Random data large-scale testing ({idx=})",
             )
 
     @staticmethod
@@ -218,7 +263,10 @@ class TestRangeGather(TestCase):
         )
 
         # Verify results match
-        torch.testing.assert_close(result, expected)
+        try:
+            torch.equal(result, expected)
+        except AssertionError as e:
+            raise AssertionError(f"Test case: {test_case} failed with error: {e}")
 
 
 if __name__ == "__main__":

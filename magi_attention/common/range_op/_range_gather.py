@@ -22,7 +22,7 @@ from magi_attention.utils import nvtx
 __all__ = ["range_gather"]
 
 
-def _calc_range_gather_row_map(
+def _calc_ranges_row_map(
     ranges: torch.Tensor,
     total_size: int,
 ) -> torch.Tensor:
@@ -129,7 +129,7 @@ def range_gather(
     cu_range_sizes = cu_range_sizes.contiguous()
     # Calculate row_map if not provided
     if row_map is None:
-        row_map = _calc_range_gather_row_map(ranges, total_size)
+        row_map = _calc_ranges_row_map(ranges, total_size)
     else:
         row_map = row_map.contiguous()
 
