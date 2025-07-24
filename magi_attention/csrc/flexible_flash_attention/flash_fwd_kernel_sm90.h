@@ -437,8 +437,12 @@ class FlashAttnFwdSm90 {
             epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw);
           }
         } else {
-          // Write 0 to gO and -inf to gLSE.
-          epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord);
+          if constexpr (!Deterministic) {
+            // Write 0 to gO and -inf to gLSE.
+            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord);
+          } else {
+            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw);
+          }
         }
       }
       epilogue.store_tail();

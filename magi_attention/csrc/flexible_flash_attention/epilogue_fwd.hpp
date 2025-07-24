@@ -613,13 +613,38 @@ struct CollectiveEpilogueFwd {
   }
 
   // Write 0 to output and -inf to LSE
-  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, cute::tuple<int32_t, int32_t, int32_t> const& block_coord) {
+  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
     static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
-    auto [m_block, bidh, bidb] = block_coord;
+    // Get block coordinates for current job(tile)
+    int m_block = get<0>(block_coord);
+    int bidh = get<1>(block_coord);
+    int bidb = get<2>(block_coord);
+    int left_range_conflict_msg = 0, right_range_conflict_msg = 0;
+    if constexpr (Deterministic) {
+      left_range_conflict_msg = get<3>(block_coord);
+      right_range_conflict_msg = get<4>(block_coord);
+    }
     flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
     int offset_o = seqlen_info.offset_q;
     int seqlen_o = seqlen_info.seqlen_q;
+
+    if constexpr (Deterministic) {
+      if (thread_idx == 0) {
+        deterministic_sync(
+          params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
+        deterministic_arrive(
+          params.determin_range_locks,
+          bidh,
+          offset_o + m_block * kBlockM,
+          kBlockM,
+          params.nheads,
+          bidb + 1,
+          left_range_conflict_msg & 1,
+          right_range_conflict_msg & 1);
+      }
+    }
+
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE + offset_o * get<0>(params.stride_LSE)), params.shape_LSE, params.stride_LSE)(_, bidh);
     Tensor gLSE = local_tile(mLSE, Shape<Int<kBlockM>>{}, make_coord(m_block));
 
