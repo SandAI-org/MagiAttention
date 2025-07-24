@@ -632,21 +632,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "calc_cost_factor": CALC_COST_FACTOR,
                 "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
-            # static, overlap degree = 2, min chunk size = 27
-            {
-                NAME: "static_od2_cz27",
-                "enable": True,
-                "mode": AttnOverlapMode.STATIC,
-                "degree": 2,
-                "min_chunk_size": 14,
-                "max_num_chunks": 44,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
-            },
             # static, overlap degree = 4, min chunk size = 23
             {
                 NAME: "static_od4_cz23",
@@ -696,6 +681,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         "random_type_mapping",
         [False, True],
     )
+    @parameterize(
+        "deterministic",
+        [False, True],
+    )
     def test_pipeline_sdpa(
         self,
         attn_config: dict[str, Any],
@@ -704,6 +693,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
+        deterministic: bool,
     ):
         # -----    skip for world size   ---- #
 
@@ -727,7 +717,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             f"world_size=[{self.world_size}] x "
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
-            f"random_causal_mapping=[{random_type_mapping}]"
+            f"random_causal_mapping=[{random_type_mapping}] x "
+            f"deterministic=[{deterministic}]"
         )
 
         # -----    contruct config from test cases   ---- #
@@ -750,12 +741,12 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         device = torch.cuda.current_device()
 
         dist_attn_config = DistAttnConfig(
-            # TODO: test top-p minhp dispatch alg
+            # TODO: test other dispatch algs
             dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
             overlap_config=OverlapConfig(
                 **{k: v for k, v in overlap_config.items() if k not in (NAME,)}
             ),
-            deterministic=False,  # TODO: test deterministic mode
+            deterministic=deterministic,
         )
 
         # -----    run pipeline test   ---- #

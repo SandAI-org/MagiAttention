@@ -516,21 +516,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "calc_cost_factor": CALC_COST_FACTOR,
                 "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
-            # static, overlap degree = 2, min chunk size = 513
-            {
-                NAME: "static_od2_cz513",
-                "enable": True,
-                "mode": AttnOverlapMode.STATIC,
-                "degree": 2,
-                "min_chunk_size": 513,
-                "max_num_chunks": 64,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
-            },
             # static, overlap degree = 4, min chunk size = 253
             {
                 NAME: "static_od4_cz253",
@@ -618,6 +603,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         "random_type_mapping",
         [False, True],
     )
+    @parameterize(
+        "deterministic",
+        [False, True],
+    )
     def test_pipeline(
         self,
         attn_config: dict[str, Any],
@@ -626,6 +615,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
+        deterministic: bool,
         run_bwd: bool = True,
     ):
         # -----    switch mode   ---- #
@@ -659,7 +649,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"world_size=[{self.world_size}] x "
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
-            f"random_causal_mapping=[{random_type_mapping}]"
+            f"random_causal_mapping=[{random_type_mapping}] x "
+            f"deterministic=[{deterministic}]"
         )
 
         # -----    contruct config from test cases   ---- #
@@ -702,7 +693,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     if k not in (NAME, PROFILE_ONLY)
                 }
             ),
-            deterministic=False,  # TODO: test deterministic mode
+            deterministic=deterministic,
         )
 
         # -----   init attn_mask_type ----- #

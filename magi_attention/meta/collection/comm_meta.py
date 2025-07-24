@@ -123,12 +123,6 @@ class GroupCollectiveArg:
                 world_size=self.world_size,
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
-                sym_hier_group_cast_meta_solver=(
-                    self.group_cast_args_dict_kv_packed.get(
-                        "hier_group_cast_meta_solver", None
-                    )
-                ),
-                deterministic=self.deterministic,
             )
         )
 
@@ -137,6 +131,12 @@ class GroupCollectiveArg:
             self.group_reduce_args_dict_kv_packed["hier_group_reduce_meta_solver"]
         ) = init_hier_group_reduce_meta_solver(
             **self.group_reduce_args_dict_kv_packed,
+            sym_hier_group_cast_meta_solver=(
+                self.group_cast_args_dict_kv_packed.get(
+                    "hier_group_cast_meta_solver", None
+                )
+            ),
+            deterministic=self.deterministic,
         )
 
     def _init_a2a_meta_kwargs_for_group_cast(self):
