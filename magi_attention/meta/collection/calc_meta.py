@@ -40,20 +40,15 @@ class AttnArg:
     # q_ranges_tensor: torch.Tensor
     # k_ranges_tensor: torch.Tensor
     # attn_type_map_tensor: torch.Tensor
-    # out_zero_fill_ranges: list[tuple[int, int]]
 
     def __post_init__(self):
         # shape check
         assert (
             len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
         ), f"{len(self.q_ranges)=}, {len(self.k_ranges)=}, {len(self.attn_type_map)=}"
-        # assert len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
-
-        # init out zero-fill ranges for fwd out correction
-        # TODO: put this logic into kernel
-        self._init_out_zero_fill_ranges()
 
         # filter empty, and overwrite the original inputs
+        # REVIEW: whether this is still necessary
         self._filter_out_empty_slice()
 
         # init fwd ffa args dict
