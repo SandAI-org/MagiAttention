@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+from itertools import accumulate
 from unittest import TestCase
 
 import torch
@@ -23,10 +24,17 @@ from magi_attention.common.range_op import range_gather
 def range_gather_ref(
     input: torch.Tensor,
     ranges: torch.Tensor,
-    cu_range_sizes: torch.Tensor,
-    total_size: int,
     dim: int = 0,
 ):
+    # Calculate cumulative range sizes and total size
+    ranges_sizes = [0] + (ranges[:, 1] - ranges[:, 0]).tolist()
+    cu_range_sizes = list(accumulate(ranges_sizes))
+    total_size = cu_range_sizes[-1]
+    cu_range_sizes = torch.tensor(
+        cu_range_sizes[:-1], dtype=torch.int32, device=input.device
+    )
+
+    # Create output tensor buffer
     output_shape = list(input.shape)
     output_shape[dim] = total_size
     output = torch.empty(output_shape, device=input.device, dtype=input.dtype)
@@ -76,16 +84,10 @@ class TestRangeGather(TestCase):
             dtype=torch.int32,
             device=self.device,
         )
-        cu_range_sizes = torch.tensor(
-            [0, 3, 4, 5, 8], dtype=torch.int32, device=self.device
-        )
-        total_size = 9
 
         self.compare_implementations(
             input_tensor,
             ranges,
-            cu_range_sizes,
-            total_size,
             test_case="Basic functionality",
         )
 
@@ -93,13 +95,10 @@ class TestRangeGather(TestCase):
 
         empty_input = torch.empty(0, 5, device=self.device)
         empty_ranges = torch.empty(0, 2, dtype=torch.int32, device=self.device)
-        empty_cu_sizes = torch.empty(0, dtype=torch.int32, device=self.device)
 
         self.compare_implementations(
             empty_input,
             empty_ranges,
-            empty_cu_sizes,
-            0,
             0,
             test_case="Empty tensor handling",
         )
@@ -108,14 +107,10 @@ class TestRangeGather(TestCase):
 
         input_tensor = torch.randn(5, 10, 3, device=self.device)
         ranges = torch.tensor([[0, 3], [5, 8]], dtype=torch.int32, device=self.device)
-        cu_range_sizes = torch.tensor([0, 3], dtype=torch.int32, device=self.device)
-        total_size = 6
 
         self.compare_implementations(
             input_tensor,
             ranges,
-            cu_range_sizes,
-            total_size,
             dim=1,
             test_case="Different dimensions",
         )
@@ -126,14 +121,10 @@ class TestRangeGather(TestCase):
         large_ranges = torch.tensor(
             [[0, 30], [40, 80]], dtype=torch.int32, device=self.device
         )
-        large_cu_sizes = torch.tensor([0, 30], dtype=torch.int32, device=self.device)
-        large_total_size = 70
 
         self.compare_implementations(
             large_input,
             large_ranges,
-            large_cu_sizes,
-            large_total_size,
             test_case="Large tensors",
         )
 
@@ -141,13 +132,10 @@ class TestRangeGather(TestCase):
 
         single_range_input = torch.randn(10, 5, device=self.device)
         single_range = torch.tensor([[3, 7]], dtype=torch.int32, device=self.device)
-        single_cu_size = torch.tensor([0], dtype=torch.int32, device=self.device)
 
         self.compare_implementations(
             single_range_input,
             single_range,
-            single_cu_size,
-            4,
             test_case="Edge case - single range",
         )
 
@@ -158,16 +146,12 @@ class TestRangeGather(TestCase):
         self.compare_implementations(
             multi_dim_input,
             ranges,
-            cu_range_sizes,
-            total_size,
             dim=0,
             test_case="Multi-dimensional tensors (dim=0)",
         )
         self.compare_implementations(
             multi_dim_input,
             ranges,
-            cu_range_sizes,
-            total_size,
             dim=2,
             test_case="Multi-dimensional tensors (dim=2)",
         )
@@ -180,8 +164,6 @@ class TestRangeGather(TestCase):
         self.compare_implementations(
             non_contiguous_input,
             ranges,
-            cu_range_sizes,
-            total_size,
             dim=1,
             test_case="Non-contiguous memory layout",
         )
@@ -194,8 +176,6 @@ class TestRangeGather(TestCase):
                 self.compare_implementations(
                     typed_input,
                     ranges,
-                    cu_range_sizes,
-                    total_size,
                     test_case=f"Various data types ({dtype=})",
                 )
 
@@ -222,16 +202,10 @@ class TestRangeGather(TestCase):
                 sizes_list.append(sizes_list[-1] + (end - start))
 
             ranges = torch.tensor(ranges_list, dtype=torch.int32, device=self.device)
-            cu_range_sizes = torch.tensor(
-                sizes_list[:-1], dtype=torch.int32, device=self.device
-            )
-            total_size = sizes_list[-1]
 
             self.compare_implementations(
                 input_tensor,
                 ranges,
-                cu_range_sizes,
-                total_size,
                 test_case=f"Random data large-scale testing ({idx=})",
             )
 
@@ -239,8 +213,6 @@ class TestRangeGather(TestCase):
     def compare_implementations(
         input_tensor,
         ranges,
-        cu_range_sizes,
-        total_size,
         dim=0,
         test_case: str = "",
     ):
@@ -248,8 +220,6 @@ class TestRangeGather(TestCase):
         result = range_gather(
             input=input_tensor,
             ranges=ranges,
-            cu_range_sizes=cu_range_sizes,
-            total_size=total_size,
             dim=dim,
         )
 
@@ -257,8 +227,6 @@ class TestRangeGather(TestCase):
         expected = range_gather_ref(
             input=input_tensor,
             ranges=ranges,
-            cu_range_sizes=cu_range_sizes,
-            total_size=total_size,
             dim=dim,
         )
 

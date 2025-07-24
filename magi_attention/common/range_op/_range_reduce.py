@@ -20,25 +20,9 @@ import triton.language as tl
 from magi_attention.utils import nvtx
 
 from ..ranges import NaiveRanges
-from ._range_gather import _calc_ranges_row_map
+from ._range_gather import _calc_cu_range_sizes, _calc_ranges_row_map
 
 __all__ = ["range_reduce"]
-
-
-def _calc_cu_range_sizes(
-    ranges: torch.Tensor | NaiveRanges,
-    device: int,
-) -> tuple[torch.Tensor, int]:
-    if isinstance(ranges, torch.Tensor):
-        ranges = ranges.tolist()
-
-    cu_range_sizes = []
-    total_size = 0
-    for start, end in ranges:
-        cu_range_sizes.append(total_size)
-        total_size += end - start
-
-    return torch.tensor(cu_range_sizes, dtype=torch.int32, device=device), total_size
 
 
 def _calc_out2inp_range_map(
