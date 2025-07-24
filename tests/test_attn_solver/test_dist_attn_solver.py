@@ -553,9 +553,6 @@ class TestDistAttnSolver(DistTestBase):
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
             remote_k_ranges_global_this_rank,
-            # TODO: test hb domain and lb domain
-            remote_k_ranges_global_hb_domain,
-            remote_k_ranges_global_lb_domain,
         ) = test_solver_class._init_host_remote_ranges_global_this_rank(
             dispatch_meta_q=meta_q,
             dispatch_meta_k=meta_k,
@@ -1421,8 +1418,6 @@ class TestDistAttnSolver(DistTestBase):
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
             remote_k_ranges_global_this_rank,
-            remote_k_ranges_global_hb_domain,
-            remote_k_ranges_global_lb_domain,
         ) = _init_host_remote_ranges_global_this_rank(
             dispatch_meta_q=meta_q,
             dispatch_meta_k=meta_k,
@@ -1434,8 +1429,7 @@ class TestDistAttnSolver(DistTestBase):
         host_rank_entry_this_rank = _init_host_rank_entry_this_rank(
             host_q_ranges_global=host_q_ranges_global_this_rank,
             host_k_ranges_global=host_k_ranges_global_this_rank,
-            remote_k_ranges_global_hb_domain=remote_k_ranges_global_hb_domain,
-            remote_k_ranges_global_lb_domain=remote_k_ranges_global_lb_domain,
+            remote_k_ranges_global=remote_k_ranges_global_this_rank,
             attn_calc_slice_global_list=bucket_this_rank.attn_slices,
         )
 
@@ -2456,8 +2450,6 @@ class TestDistAttnSolver(DistTestBase):
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
             remote_k_ranges_global_this_rank,
-            remote_k_ranges_global_hb_domain,
-            remote_k_ranges_global_lb_domain,
         ) = test_solver_class._init_host_remote_ranges_global_this_rank(
             dispatch_meta_q=meta_q,
             dispatch_meta_k=meta_k,
@@ -2470,8 +2462,7 @@ class TestDistAttnSolver(DistTestBase):
             test_solver_class._init_host_rank_entry_this_rank(
                 host_q_ranges_global=host_q_ranges_global_this_rank,
                 host_k_ranges_global=host_k_ranges_global_this_rank,
-                remote_k_ranges_global_hb_domain=remote_k_ranges_global_hb_domain,
-                remote_k_ranges_global_lb_domain=remote_k_ranges_global_lb_domain,
+                remote_k_ranges_global=remote_k_ranges_global_this_rank,
                 attn_calc_slice_global_list=bucket_this_rank.attn_slices,
             )
         )
@@ -2738,8 +2729,6 @@ class TestDistAttnSolver(DistTestBase):
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
             remote_k_ranges_global_this_rank,
-            remote_k_ranges_global_hb_domain,
-            remote_k_ranges_global_lb_domain,
         ) = test_solver_class._init_host_remote_ranges_global_this_rank(
             dispatch_meta_q=meta_q,
             dispatch_meta_k=meta_k,
@@ -2752,8 +2741,7 @@ class TestDistAttnSolver(DistTestBase):
             test_solver_class._init_host_rank_entry_this_rank(
                 host_q_ranges_global=host_q_ranges_global_this_rank,
                 host_k_ranges_global=host_k_ranges_global_this_rank,
-                remote_k_ranges_global_hb_domain=remote_k_ranges_global_hb_domain,
-                remote_k_ranges_global_lb_domain=remote_k_ranges_global_lb_domain,
+                remote_k_ranges_global=remote_k_ranges_global_this_rank,
                 attn_calc_slice_global_list=bucket_this_rank.attn_slices,
             )
         )

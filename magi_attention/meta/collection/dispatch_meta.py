@@ -95,22 +95,6 @@ class DispatchMeta:
 
         return position_ids
 
-    # HACK remove high_bandwith_domain_size function
-    def get_host_ranges_this_domain(
-        self,
-        high_bandwith_domain_size: int,
-    ) -> AttnRanges:
-        attn_ranges = AttnRanges()
-        domain_rank = self.cp_rank // high_bandwith_domain_size
-        for host_ranges_ith_rank in self.host_ranges_per_rank[
-            high_bandwith_domain_size
-            * domain_rank : high_bandwith_domain_size
-            * (domain_rank + 1)
-        ]:
-            attn_ranges.extend(host_ranges_ith_rank)
-
-        return attn_ranges
-
     def __post_init__(self) -> None:
         assert len(self.partitions) == self.cp_size
         assert (
