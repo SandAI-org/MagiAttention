@@ -55,8 +55,3 @@ class DistAttnConfig:
         OverlapConfig()
     )  # TODO: add distinct overlap config for fwd/bwd in the future
     deterministic: bool = False
-
-    def __post_init__(self):
-        assert (
-            not self.deterministic
-        ), "For now, deterministic mode is not supported by ffa."
