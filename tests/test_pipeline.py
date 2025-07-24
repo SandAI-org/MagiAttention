@@ -693,7 +693,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         device = torch.cuda.current_device()
 
         dist_attn_config = DistAttnConfig(
-            # TODO: test top-p minhp dispatch alg
+            # TODO: test other dispatch algs
             dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
             overlap_config=OverlapConfig(
                 **{
@@ -702,7 +702,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     if k not in (NAME, PROFILE_ONLY)
                 }
             ),
-            deterministic=False,  # TODO: use deterministic mode for ut as long as supported
+            deterministic=False,  # TODO: test deterministic mode
         )
 
         # -----   init attn_mask_type ----- #

@@ -230,11 +230,6 @@ class DistFlashAttnRuntime:
             device=device,
         )
 
-        # DE-BUG
-        logger.debug(
-            f"RANK: {dist.get_rank()}, {remote_kv_buffer.shape=}, {local_kv.shape=}"
-        )
-
         remote_kv_work = group_cast_collective(
             input=local_kv,
             output=remote_kv_buffer,
@@ -280,13 +275,6 @@ class DistFlashAttnRuntime:
             attn_arg = self.calc_meta.remote_attn_args_list[overlap_stage]
 
         skip_attn = attn_arg.can_skip(is_bwd=False)
-
-        # DE-BUG
-        logger.debug(
-            f"RANK: {dist.get_rank()}, {q.shape=}, {kv.shape=}, "
-            f"{q.device=}, {kv.device=}, "
-            f"{attn_arg=}"
-        )
 
         # Calculate attention
         if skip_attn:

@@ -19,7 +19,7 @@ from ..ranges import NaiveRanges
 
 def _calc_cu_range_sizes(
     ranges: torch.Tensor | NaiveRanges,
-    device: int,
+    device: torch.device,
 ) -> tuple[torch.Tensor, int]:
     if isinstance(ranges, torch.Tensor):
         ranges = ranges.tolist()
@@ -39,6 +39,9 @@ def _calc_ranges_row_map(
     ranges: torch.Tensor,
     total_size: int,
 ) -> torch.Tensor:
+    if ranges.shape[0] == 0:
+        return torch.empty(0, dtype=torch.int32, device=ranges.device)
+
     row_map = torch.arange(0, ranges.shape[0], device=ranges.device)
     range_sizes = ranges[:, 1] - ranges[:, 0]
     row_map = torch.repeat_interleave(
@@ -50,7 +53,7 @@ def _calc_ranges_row_map(
 
 def _calc_out2inp_range_map(
     output_ranges: torch.Tensor | NaiveRanges,
-    device: int,
+    device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     if isinstance(output_ranges, torch.Tensor):
         output_ranges = output_ranges.tolist()
@@ -64,8 +67,10 @@ def _calc_out2inp_range_map(
     for inp_idx, out_range in enumerate(list(output_ranges)):
         out_range2inp_indices_map.setdefault(out_range, []).append(inp_idx)
 
-    max_inp_indices_size = max(
-        [len(inp_indices) for inp_indices in out_range2inp_indices_map.values()]
+    max_inp_indices_size = (
+        max([len(inp_indices) for inp_indices in out_range2inp_indices_map.values()])
+        if out_range2inp_indices_map
+        else 0
     )
 
     out2inp_range_map = []

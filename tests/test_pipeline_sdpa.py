@@ -755,7 +755,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             overlap_config=OverlapConfig(
                 **{k: v for k, v in overlap_config.items() if k not in (NAME,)}
             ),
-            deterministic=False,  # TODO: use deterministic mode for ut as long as supported
+            deterministic=False,  # TODO: test deterministic mode
         )
 
         # -----    run pipeline test   ---- #

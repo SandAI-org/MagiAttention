@@ -16,7 +16,7 @@ from collections import defaultdict
 from functools import partial
 from itertools import accumulate, chain, pairwise
 from logging import getLogger
-from typing import Callable, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -25,6 +25,11 @@ import magi_attention
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.common.range import NaiveRange
 from magi_attention.common.range_op import range_gather, range_reduce
+from magi_attention.common.range_op.utils import (
+    _calc_cu_range_sizes,
+    _calc_out2inp_range_map,
+    _calc_ranges_row_map,
+)
 from magi_attention.common.ranges import NaiveRanges
 from magi_attention.utils import nvtx
 
@@ -162,6 +167,7 @@ def _calc_range_reduce_kwargs_from_ranges(
     cu_ranges: NaiveRanges,
     reduce_ranges_list: list[NaiveRanges],
     device: torch.device,
+    deterministic: bool = False,
 ) -> dict:
     input_ranges = []
     output_ranges = []
@@ -174,24 +180,50 @@ def _calc_range_reduce_kwargs_from_ranges(
             range_sizes.append(reduce_end - reduce_start)
             total_size += reduce_end - reduce_start
 
+    range_reduce_kwargs: dict[str, Any] = {"deterministic": deterministic}
     input_ranges = torch.tensor(input_ranges, dtype=torch.int32, device=device)
-    output_ranges = torch.tensor(output_ranges, dtype=torch.int32, device=device)
-    range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int32, device=device)
-    cu_range_sizes = torch.cumsum(range_sizes, dim=0)
-    row_map = torch.repeat_interleave(
-        torch.arange(0, input_ranges.shape[0], device=device),
-        range_sizes[1:],
-        dim=0,
-        output_size=total_size,
-    )
+    range_reduce_kwargs["input_ranges"] = input_ranges
 
-    range_reduce_kwargs = {
-        "input_ranges": input_ranges,
-        "output_ranges": output_ranges,
-        "cu_range_sizes": cu_range_sizes,
-        "row_map": row_map,
-        "total_size": total_size,
-    }
+    if deterministic:
+        (out2inp_range_map, unique_ordered_out_ranges, _) = _calc_out2inp_range_map(
+            output_ranges,
+            # first put to cpu to avoid d2h in `_calc_cu_range_sizes` below
+            device=torch.device("cpu"),
+        )
+
+        cu_range_sizes, total_size = _calc_cu_range_sizes(
+            unique_ordered_out_ranges,
+            device=device,
+        )
+
+        # put back to device before `_calc_ranges_row_map`
+        # to make row_map a device tensor
+        out2inp_range_map = out2inp_range_map.to(device)
+        unique_ordered_out_ranges = unique_ordered_out_ranges.to(device)
+
+        row_map = _calc_ranges_row_map(
+            unique_ordered_out_ranges,
+            total_size,
+        )
+
+        range_reduce_kwargs["out2inp_range_map"] = out2inp_range_map
+        range_reduce_kwargs["unique_ordered_out_ranges"] = unique_ordered_out_ranges
+    else:
+        range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int32, device=device)
+        cu_range_sizes = torch.cumsum(range_sizes, dim=0)
+        row_map = torch.repeat_interleave(
+            torch.arange(0, input_ranges.shape[0], device=device),
+            range_sizes[1:],
+            dim=0,
+            output_size=total_size,
+        )
+
+    range_reduce_kwargs["cu_range_sizes"] = cu_range_sizes
+    range_reduce_kwargs["total_size"] = total_size
+    range_reduce_kwargs["row_map"] = row_map
+
+    output_ranges = torch.tensor(output_ranges, dtype=torch.int32, device=device)
+    range_reduce_kwargs["output_ranges"] = output_ranges
 
     return range_reduce_kwargs
 
@@ -551,13 +583,6 @@ def _calc_group_cast_a2a_args(
         unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
     )
 
-    # DE-BUG
-    logger.debug(
-        f"RANK {dist.get_rank()}:: args for group_cast_collective: {input.shape=}, {output.shape=}, "
-        f"{input_split_size_list=}, {output_split_size_list=}, {dst_indices_list=}, {src_index_list=}, "
-        f"args: {a2a_input.shape=}, {a2a_output.shape=}, {a2a_output_split_size=}, {a2a_input_split_size=}, "
-    )
-
     return (
         a2a_output,
         a2a_input,
@@ -721,6 +746,7 @@ def _calc_group_reduce_a2a_output_meta_args(
     src_indices_list: list[list[int]],
     world_size: int,
     device: torch.device,
+    deterministic: bool = False,
 ) -> tuple[list[int], dict]:
     # phase1 meta
     a2a_output_split_size = [0 for _ in range(world_size)]
@@ -758,6 +784,7 @@ def _calc_group_reduce_a2a_output_meta_args(
         cu_ranges=output_size_ranges,
         reduce_ranges_list=a2a_output_reduce_ranges_list,
         device=device,
+        deterministic=deterministic,
     )
 
     return (
@@ -788,6 +815,7 @@ def _calc_group_reduce_a2a_output_args(
             src_indices_list=src_indices_list,
             world_size=world_size,
             device=output.device,
+            deterministic=kwargs.get("deterministic", False),
         )
 
     # -----     group_reduce_a2a_output tensor args     ----- #
@@ -853,13 +881,6 @@ def _calc_group_reduce_a2a_args(
         _reduce_to_tensor,
         a2a_output=a2a_output,
         range_reduce_kwargs=range_reduce_kwargs,
-    )
-
-    # DE-BUG
-    logger.debug(
-        f"RANK {dist.get_rank()}:: args for group_reduce_collective: {input.shape=}, {output.shape=}, "
-        f"{input_split_size_list=}, {output_split_size_list=}, {dst_index_list=}, {src_indices_list=}. "
-        f"args: {a2a_input.shape=}, {a2a_output.shape=}, {a2a_output_split_size=}, {a2a_input_split_size=}, "
     )
 
     return (

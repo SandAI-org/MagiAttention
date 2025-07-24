@@ -378,6 +378,7 @@ def init_dist_attn_runtime_mgr(
         cp_group=cp_group,
         overlap_config=dist_attn_config.overlap_config,
         cp_mesh=cp_mesh,
+        deterministic=dist_attn_config.deterministic,
     )
 
     dist_attn_runtime = DistFlashAttnRuntime(

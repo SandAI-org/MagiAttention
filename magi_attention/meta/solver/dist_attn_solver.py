@@ -64,6 +64,7 @@ class DistAttnSolver:
         cp_group: dist.ProcessGroup,
         overlap_config: OverlapConfig,
         cp_mesh: DeviceMesh | None = None,
+        deterministic: bool = False,
     ):
         self.cp_rank = dist.get_rank(cp_group)
         self.cp_size = dist.get_world_size(cp_group)
@@ -71,6 +72,7 @@ class DistAttnSolver:
         self.cp_mesh = cp_mesh
         self.shard_seqlen_q = dispatch_meta_q.shard_seqlen
         self.shard_seqlen_k = dispatch_meta_k.shard_seqlen
+        self.deterministic = deterministic
 
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
@@ -251,10 +253,6 @@ class DistAttnSolver:
             remote_k_ranges_global_per_chunk=remote_k_ranges_global_per_chunk,
             attn_calc_remote_slice_list_per_chunk=attn_calc_remote_slice_list_per_chunk,
         )
-
-        # DE-BUG: log host_rank_entry_this_rank
-        # from magi_attention.utils import write_rank
-        # write_rank(repr(host_rank_entry_this_rank), "host_rank_entry_this_rank.log")
 
         return host_rank_entry_this_rank
 
@@ -609,19 +607,6 @@ class DistAttnSolver:
                 len(cost_partitions) == self.overlap_degree
             ), f"{len(cost_partitions)=}, {self.overlap_degree=}"
 
-        # DE-BUG: log vars related to overlap solver I/O
-        # from magi_attention.utils import write_rank
-        # write_rank(
-        #     msg=(
-        #         f"{best_overlap_degree_this_rank=} | {self.overlap_degree=} | \n\n"
-        #         f"{self.overlap_config=} | \n\n"
-        #         f"{len(chunk_costs)=} | {chunk_costs=} | \n\n"
-        #         f"{len(cost_partitions)=} | {cost_partitions=} | \n\n"
-        #         f"{len(solution_dict)=} | {solution_dict=} | \n\n"
-        #     ),
-        #     path="overlap_solver_io.log",
-        # )
-
         return cost_partitions
 
     @nvtx.instrument_nvtx
@@ -643,13 +628,6 @@ class DistAttnSolver:
                     host_rank_entry_this_rank=host_rank_entry_this_rank,
                 )
             )
-
-        # DE-BUG: log remote_rank_entry_per_stage_this_rank
-        # from magi_attention.utils import write_rank
-        # write_rank(
-        #     repr(remote_rank_entry_per_stage_this_rank),
-        #     "remote_rank_entry_per_stage_this_rank.log",
-        # )
 
         return remote_rank_entry_per_stage_this_rank
 
@@ -1391,6 +1369,7 @@ class DistAttnSolver:
             rank=self.cp_rank,
             world_size=self.cp_size,
             device_mesh=self.cp_mesh,
+            deterministic=self.deterministic,
         )
 
         # sanity check for group-cast arg per rank
