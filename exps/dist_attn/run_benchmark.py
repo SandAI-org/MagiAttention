@@ -374,7 +374,6 @@ def run_magi_attn(
                 random_seed=42,
             ),
         ),
-        high_bandwith_domain_size=1,
     )
 
     cp_mesh = init_hierarchical_mesh(world_size)

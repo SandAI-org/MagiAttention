@@ -618,10 +618,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         "random_type_mapping",
         [False, True],
     )
-    @parameterize(
-        "high_bandwith_domain_size",
-        [1],  # TODO: this feature'll probably be deprecated soon
-    )
     def test_pipeline(
         self,
         attn_config: dict[str, Any],
@@ -630,7 +626,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
-        high_bandwith_domain_size: int,
         run_bwd: bool = True,
     ):
         # -----    switch mode   ---- #
@@ -653,18 +648,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             and self.world_size in attn_config[SKIP_WORLD_SIZE]
         ):
             return
-        if (
-            self.world_size % high_bandwith_domain_size != 0
-            or high_bandwith_domain_size > self.world_size
-        ):
-            # skip for invalid high_bandwith_domain_size
-            return
-
-        # -----    skip for hier comm   ---- #
-
-        if magi_attention.comm.is_hierarchical_comm_enable():
-            if high_bandwith_domain_size > 1:
-                return
 
         # -----    construct test case name   ---- #
 
@@ -673,7 +656,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         ), f"{attn_config=} | \n\n{overlap_config=}"
 
         test_case = (
-            f"world_size=[{self.world_size}] x high_bandwith_domain_size=[{high_bandwith_domain_size}] x "
+            f"world_size=[{self.world_size}] x "
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}]"
@@ -719,7 +702,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     if k not in (NAME, PROFILE_ONLY)
                 }
             ),
-            high_bandwith_domain_size=high_bandwith_domain_size,
             deterministic=False,  # TODO: use deterministic mode for ut as long as supported
         )
 

@@ -369,7 +369,6 @@ def init_dist_attn_runtime_mgr(
         is_same_source=is_same_source,
         is_q_permutable=is_q_permutable,
         is_k_permutable=is_k_permutable,
-        high_bandwith_domain_size=dist_attn_config.high_bandwith_domain_size,
     )
 
     comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
@@ -377,7 +376,6 @@ def init_dist_attn_runtime_mgr(
         dispatch_meta_k=k_dispatch_meta,
         bucket_per_rank=attn_buckets,
         cp_group=cp_group,
-        high_bandwith_domain_size=dist_attn_config.high_bandwith_domain_size,
         overlap_config=dist_attn_config.overlap_config,
         cp_mesh=cp_mesh,
     )

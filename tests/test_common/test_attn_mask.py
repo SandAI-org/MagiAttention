@@ -23,7 +23,6 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.mask import AttnMask
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.utils import make_causal_mask
 
 
 class TestAttnMask(TestCase):
@@ -482,14 +481,14 @@ class TestAttnMask(TestCase):
             device="cpu",
         )
 
-        mask_tl = make_causal_mask(
+        mask_tl = AttnMask.make_causal_mask(
             seqlen_q=4,
             seqlen_k=4,
             align="top-left",
             dtype=torch.int32,
             device="cpu",
         )
-        mask_br = make_causal_mask(
+        mask_br = AttnMask.make_causal_mask(
             seqlen_q=4,
             seqlen_k=4,
             align="bottom-right",
@@ -515,7 +514,7 @@ class TestAttnMask(TestCase):
             device="cpu",
         )
 
-        mask_tl = make_causal_mask(
+        mask_tl = AttnMask.make_causal_mask(
             seqlen_q=7,
             seqlen_k=4,
             align="top-left",
@@ -539,7 +538,7 @@ class TestAttnMask(TestCase):
             device="cpu",
         )
 
-        mask_br = make_causal_mask(
+        mask_br = AttnMask.make_causal_mask(
             seqlen_q=7,
             seqlen_k=4,
             align="bottom-right",
@@ -562,7 +561,7 @@ class TestAttnMask(TestCase):
             device="cpu",
         )
 
-        mask_tl = make_causal_mask(
+        mask_tl = AttnMask.make_causal_mask(
             seqlen_q=4,
             seqlen_k=7,
             align="top-left",
@@ -583,7 +582,7 @@ class TestAttnMask(TestCase):
             device="cpu",
         )
 
-        mask_br = make_causal_mask(
+        mask_br = AttnMask.make_causal_mask(
             seqlen_q=4,
             seqlen_k=7,
             align="bottom-right",

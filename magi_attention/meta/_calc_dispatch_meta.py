@@ -55,7 +55,6 @@ def calc_dispatch_meta_from_qk_ranges(
     is_same_source: bool,
     is_q_permutable: bool,
     is_k_permutable: bool,
-    high_bandwith_domain_size: int,
 ) -> tuple[DispatchMeta, DispatchMeta, list[AttnBucket]]:
     """Calculate dispatch meta from query and key ranges
 
@@ -87,8 +86,6 @@ def calc_dispatch_meta_from_qk_ranges(
                 3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
                     a) is_same_source is False
                     b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
-
-        high_bandwith_domain_size (int): The high bandwith domain size
 
     Returns:
         tuple[DispatchMeta, DispatchMeta]: dispatch_meta_q and dispatch_meta_k
@@ -165,7 +162,6 @@ def calc_dispatch_meta_from_qk_ranges(
                 chunk_size=chunk_size,
                 cp_size=cp_size,
                 cp_rank=cp_rank,
-                high_bandwith_domain_size=high_bandwith_domain_size,
                 dispatch_config=dispatch_config,
             )
         case True, False, True | True, True, False:
@@ -210,7 +206,6 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
     chunk_size: int,
     cp_size: int,
     cp_rank: int,
-    high_bandwith_domain_size: int,
     dispatch_config: DispatchConfig,
 ) -> tuple[DispatchMeta, DispatchMeta, list[AttnBucket]]:
     """Calculate dispatch meta from query and key ranges for self-attn settings
@@ -232,8 +227,6 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
 
         cp_size (int): context-parallel world size
         cp_rank (int): context-parallel local rank, ranging in [0,  cp_size)
-
-        high_bandwith_domain_size (int): The high bandwith domain size
 
         dispatch_config (DispatchConfig): dispatch config
 
@@ -342,7 +335,6 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
         partitions_unperm_idxs=partitions_unperm_idxs,
         global_bucket=global_bucket,
         buckets_per_rank=buckets_per_rank,
-        high_bandwith_domain_size=high_bandwith_domain_size,
     )
 
     meta_q = DispatchMeta(

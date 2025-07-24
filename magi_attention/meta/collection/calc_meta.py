@@ -12,15 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from bisect import bisect_left
-from collections import defaultdict
 from dataclasses import dataclass
 
 import torch
 
 import magi_attention
-from magi_attention.common import AttnRange, AttnRanges
-from magi_attention.utils import is_list_value_all
+from magi_attention.common import AttnRanges
 
 
 @dataclass(repr=False)
@@ -43,20 +40,15 @@ class AttnArg:
     # q_ranges_tensor: torch.Tensor
     # k_ranges_tensor: torch.Tensor
     # attn_type_map_tensor: torch.Tensor
-    # out_zero_fill_ranges: list[tuple[int, int]]
 
     def __post_init__(self):
         # shape check
         assert (
             len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
         ), f"{len(self.q_ranges)=}, {len(self.k_ranges)=}, {len(self.attn_type_map)=}"
-        # assert len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
-
-        # init out zero-fill ranges for fwd out correction
-        # TODO: put this logic into kernel
-        self._init_out_zero_fill_ranges()
 
         # filter empty, and overwrite the original inputs
+        # REVIEW: whether this is still necessary
         self._filter_out_empty_slice()
 
         # init fwd ffa args dict
@@ -98,40 +90,6 @@ class AttnArg:
             # check non-empty k ranges
             for k_range in self.k_ranges:
                 assert not k_range.is_empty()
-
-    def _init_out_zero_fill_ranges(self) -> None:
-        device = torch.cuda.current_device()
-        shard_q_ranges = AttnRanges.from_ranges([[0, self.shard_seqlen_q]])
-        self.out_zero_fill_ranges = AttnRanges.find_hole_ranges(
-            shard_q_ranges,
-            self.q_ranges,
-            is_self_merged=True,
-        ).to_naive_ranges()
-
-        # calculate range sizes
-        range_sizes = [end - start for start, end in self.out_zero_fill_ranges]
-
-        # calculate the output size
-        total_size = sum(range_sizes)
-
-        # calculate row_map from row idx to range idx
-        range_sizes = torch.tensor([0] + range_sizes, dtype=torch.int32, device=device)
-        row_map = torch.repeat_interleave(
-            torch.arange(0, len(self.out_zero_fill_ranges), device=device),
-            range_sizes[1:],
-            dim=0,
-            output_size=total_size,
-        )
-
-        # calculate cu_range_sizes
-        cu_range_sizes = torch.cumsum(range_sizes, dim=0)
-
-        self.out_zero_range_fill_kwargs = {
-            "ranges": torch.tensor(self.out_zero_fill_ranges, device=device),
-            "cu_range_sizes": cu_range_sizes,
-            "row_map": row_map,
-            "total_size": total_size,
-        }
 
     def _init_ffa_fwd_args_dict(self) -> None:
         # init `skip_attn_fwd` flag
@@ -179,157 +137,13 @@ class AttnArg:
         )
 
     def _init_ffa_bwd_args_dict(self) -> None:
-        # NOTE: the feature `refactor_bwd_args` now is only experimental
-        # so here's an env variable switch to turn it on/off
-        if magi_attention.is_refactor_bwd_args_enable():
-            # refactor ranges and types for bwd dkv load-store efficiency
-            (
-                self.q_ranges_bwd,
-                self.k_ranges_bwd,
-                self.attn_type_map_bwd,
-            ) = self._refactor_bwd_ranges_and_types()
+        # just copy args from fwd
+        self.skip_attn_bwd = self.skip_attn_fwd
+        self.q_ranges_bwd = self.q_ranges
+        self.k_ranges_bwd = self.k_ranges
+        self.attn_type_map_bwd = self.attn_type_map
 
-            # init skip attn flag
-            batch_size_bwd = len(self.q_ranges_bwd)
-            self.skip_attn_bwd = batch_size_bwd == 0
-
-            # init tensors
-            q_ranges_tensor_bwd = self.q_ranges_bwd.to_tensor(
-                device=torch.cuda.current_device()
-            )
-            k_ranges_tensor_bwd = self.k_ranges_bwd.to_tensor(
-                device=torch.cuda.current_device()
-            )
-            mask_type_tensor_bwd = torch.tensor(
-                self.attn_type_map_bwd,
-                dtype=torch.int32,
-                device=torch.cuda.current_device(),
-            )
-
-            # sanity check
-            if magi_attention.is_sanity_check_enable():
-                # check tensor shape
-                if batch_size_bwd > 0:
-                    assert q_ranges_tensor_bwd.shape == torch.Size([batch_size_bwd, 2])
-                    assert k_ranges_tensor_bwd.shape == torch.Size([batch_size_bwd, 2])
-                    assert mask_type_tensor_bwd.shape == torch.Size([batch_size_bwd])
-
-            # init max seqlen of fwd and bwd
-            if self.skip_attn_bwd:  # no calc needed
-                max_seqlen_q_bwd = 0
-                max_seqlen_k_bwd = 0
-            else:
-                max_seqlen_q_bwd = self.q_ranges_bwd.max_seqlen
-                max_seqlen_k_bwd = self.k_ranges_bwd.max_seqlen
-
-            self.ffa_bwd_args_dict = dict(
-                q_ranges=q_ranges_tensor_bwd,
-                k_ranges=k_ranges_tensor_bwd,
-                attn_type_map=mask_type_tensor_bwd,
-                max_seqlen_q=max_seqlen_q_bwd,
-                max_seqlen_k=max_seqlen_k_bwd,
-            )
-        else:
-            # just copy args from fwd
-            self.skip_attn_bwd = self.skip_attn_fwd
-            self.q_ranges_bwd = self.q_ranges
-            self.k_ranges_bwd = self.k_ranges
-            self.attn_type_map_bwd = self.attn_type_map
-
-            self.ffa_bwd_args_dict = self.ffa_fwd_args_dict
-
-    def _refactor_bwd_ranges_and_types(
-        self,
-    ) -> tuple[AttnRanges, AttnRanges, list[int]]:
-        """Refactor bwd ffa args including q,k ranges and mask types
-        from fwd ffa args (i.e. original ffa args) for bwd dkv load-store efficiency
-        TODO:
-            1. consider restricting the "refactor degree"
-                to avoid insufficient number of blocks in grid to be parallelized
-            2. support causal mask
-            3. test the actual performance together with
-                the top-p minhp dispatcher with IOU affinity considered
-        """
-        # get fwd ranges and mask type
-        q_ranges_fwd, k_ranges_fwd, attn_type_map_fwd = (
-            self.q_ranges,
-            self.k_ranges,
-            self.attn_type_map,
-        )
-
-        # TODO: support causal mask
-        assert is_list_value_all(
-            attn_type_map_fwd,
-            0,
-            allow_empty=True,
-        ), f"Only support all full masks for now, but got {attn_type_map_fwd=}"
-
-        # init two map q_range->k_ranges and k_range->q_ranges
-        map_slice_q_range_to_k_ranges: defaultdict[AttnRange, AttnRanges] = defaultdict(
-            AttnRanges
-        )
-        map_slice_k_range_to_q_ranges: defaultdict[AttnRange, AttnRanges] = defaultdict(
-            AttnRanges
-        )
-
-        # get boundary list from fwd k_ranges
-        k_ranges_boundary: list[int] = k_ranges_fwd.points
-
-        for q_range_fwd, k_range_fwd in zip(q_ranges_fwd, k_ranges_fwd):
-            # get start and end of k_range of current slice
-            slice_k_range_start, slice_k_range_end = (
-                k_range_fwd.start,
-                k_range_fwd.end,
-            )
-
-            # find start and end index in the boundary list
-            boundary_left_index = bisect_left(k_ranges_boundary, slice_k_range_start)
-            boundary_right_index = bisect_left(k_ranges_boundary, slice_k_range_end)
-
-            # split slice in k_range dimention with boundary list
-            for boundary_index in range(boundary_left_index, boundary_right_index):
-                boundary_start, boundary_end = (
-                    k_ranges_boundary[boundary_index],
-                    k_ranges_boundary[boundary_index + 1],
-                )
-
-                # add split_k_range->q_range to map
-                k_range_this_slice = AttnRange(start=boundary_start, end=boundary_end)
-                map_slice_k_range_to_q_ranges[k_range_this_slice].append(q_range_fwd)
-
-        # sort k_range->q_ranges map with k_range.start
-        k_range_q_ranges_tuples: list[tuple[AttnRange, AttnRanges]] = sorted(
-            map_slice_k_range_to_q_ranges.items(), key=lambda t: t[0].start
-        )
-
-        # Convert the content in the k_range->q_ranges map to the q_range->k_ranges map.
-        for k_range, q_ranges in k_range_q_ranges_tuples:
-            q_ranges = q_ranges.merge()
-            for q_range in q_ranges:
-                map_slice_q_range_to_k_ranges[q_range].append(k_range)
-
-        # sort q_range->k_ranges map with q_range.start
-        q_range_k_ranges_tuples: list[tuple[AttnRange, AttnRanges]] = sorted(
-            map_slice_q_range_to_k_ranges.items(), key=lambda t: t[0].start
-        )
-
-        # initial ranges of bwd
-        q_ranges_bwd, k_ranges_bwd = AttnRanges(), AttnRanges()
-
-        # merge k_ranges in the map and append to ranges of bwd
-        for q_range, k_ranges in q_range_k_ranges_tuples:
-            k_ranges = k_ranges.merge()
-            for k_range in k_ranges:
-                q_ranges_bwd.append(q_range)
-                k_ranges_bwd.append(k_range)
-
-        attn_type_map_bwd = [0] * len(q_ranges_bwd)
-
-        return (
-            q_ranges_bwd,
-            k_ranges_bwd,
-            attn_type_map_bwd,
-        )
+        self.ffa_bwd_args_dict = self.ffa_fwd_args_dict
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         return self.ffa_bwd_args_dict if is_bwd else self.ffa_fwd_args_dict

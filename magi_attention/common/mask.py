@@ -19,12 +19,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from magi_attention.utils import (
-    is_list_value_all,
-    make_causal_mask,
-    repr_matrix,
-    vis_matrix,
-)
+from magi_attention.utils import is_list_value_all, repr_matrix, vis_matrix
 
 from .enum import AttnMaskType
 from .range import AttnRange
@@ -139,7 +134,7 @@ class AttnMask(nn.Module):
                         cls.mask_flag_dim_idx,
                     ] = cls.unmasked_flag
                 elif mask_type is AttnMaskType.CAUSAL:
-                    causal_mask = make_causal_mask(
+                    causal_mask = cls.make_causal_mask(
                         q_range.seqlen,
                         k_range.seqlen,
                         dtype=torch.int32,
@@ -363,7 +358,7 @@ class AttnMask(nn.Module):
 
     def is_pure_causal(self) -> bool:
         if self._is_pure_causal is None:
-            pure_causal_mask = make_causal_mask(
+            pure_causal_mask = self.make_causal_mask(
                 seqlen_q=self.total_seqlen_q,
                 seqlen_k=self.total_seqlen_k,
                 dtype=torch.int32,
@@ -393,6 +388,28 @@ class AttnMask(nn.Module):
             self._is_empty = self.area == 0  # type: ignore
 
         return self._is_empty  # type: ignore
+
+    @staticmethod
+    def make_causal_mask(
+        seqlen_q: int,
+        seqlen_k: int,
+        align: str = "bottom-right",
+        dtype=torch.int32,
+        device: str = "cpu",
+    ) -> torch.Tensor:
+        max_seqlen = max(seqlen_q, seqlen_k)
+        causal_mask = torch.tril(torch.ones((max_seqlen, max_seqlen))).to(
+            dtype=dtype, device=device
+        )
+
+        if align == "bottom-right":
+            causal_mask = causal_mask[-seqlen_q:, -seqlen_k:]
+        elif align == "top-left":
+            causal_mask = causal_mask[:seqlen_q, :seqlen_k]
+        else:
+            raise ValueError(f"Invalid alignment mode: {align}")
+
+        return causal_mask
 
     def visualize(self, save_path: str | None = None) -> None:
         """Visualize the attention mask as a boolean matrix."""

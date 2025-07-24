@@ -407,7 +407,6 @@ def magi_attn_flex_key(
         is_same_source=is_same_source,
         is_q_permutable=is_q_permutable,
         is_k_permutable=is_k_permutable,
-        high_bandwith_domain_size=dist_attn_config.high_bandwith_domain_size,
     )
 
     if key not in DistAttnRuntimeDict.keys():
@@ -418,7 +417,6 @@ def magi_attn_flex_key(
             bucket_per_rank=attn_buckets,
             cp_group=cp_group,
             cp_mesh=cp_mesh,
-            high_bandwith_domain_size=dist_attn_config.high_bandwith_domain_size,
             overlap_config=dist_attn_config.overlap_config,
         )
 
