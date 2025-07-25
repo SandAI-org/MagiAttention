@@ -64,7 +64,6 @@ class DistAttnSolver:
         cp_group: dist.ProcessGroup,
         overlap_config: OverlapConfig,
         cp_mesh: DeviceMesh | None = None,
-        deterministic: bool = False,
     ):
         self.cp_rank = dist.get_rank(cp_group)
         self.cp_size = dist.get_world_size(cp_group)
@@ -72,7 +71,7 @@ class DistAttnSolver:
         self.cp_mesh = cp_mesh
         self.shard_seqlen_q = dispatch_meta_q.shard_seqlen
         self.shard_seqlen_k = dispatch_meta_k.shard_seqlen
-        self.deterministic = deterministic
+        self.deterministic = magi_attention.is_deterministic_mode_enable()
 
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)

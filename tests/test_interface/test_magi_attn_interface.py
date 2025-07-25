@@ -363,10 +363,6 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         "dtype",
         [torch.bfloat16],
     )
-    @parameterize(
-        "deterministic",
-        [False],
-    )
     def test_interface(
         self,
         attn_config: dict[str, Any],
@@ -374,7 +370,6 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         num_heads: tuple[int, int],  # (nhq, nhkv)
         head_dim: int,
         dtype: torch.dtype,
-        deterministic: bool,
     ):
         # -----    skip for world size   ---- #
 
@@ -425,7 +420,6 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     corr_factor=get_a2a_corr_factor(self.world_size),
                 ),
             ),
-            deterministic=deterministic,
         )
 
         # ----- init input data and module ----- #

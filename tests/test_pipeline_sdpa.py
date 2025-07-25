@@ -650,10 +650,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         "random_type_mapping",
         [False, True],
     )
-    @parameterize(
-        "deterministic",
-        [False],
-    )
     def test_pipeline_sdpa(
         self,
         attn_config: dict[str, Any],
@@ -662,7 +658,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
-        deterministic: bool,
     ):
         # -----    skip for world size   ---- #
 
@@ -687,7 +682,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}] x "
-            f"deterministic=[{deterministic}]"
         )
 
         # -----    contruct config from test cases   ---- #
@@ -727,7 +721,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                     corr_factor=get_a2a_corr_factor(self.world_size),
                 ),
             ),
-            deterministic=deterministic,
         )
 
         # -----    run pipeline test   ---- #

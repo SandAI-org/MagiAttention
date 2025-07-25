@@ -177,13 +177,12 @@ class DistFlashAttnRuntime:
         calc_meta: AttnCalcMeta,
         cp_group_kv: dist.ProcessGroup,
         cp_group_dkv: dist.ProcessGroup,
-        deterministic: bool,
     ):
         self.comm_meta = comm_meta
         self.calc_meta = calc_meta
         self.cp_group_kv = cp_group_kv
         self.cp_group_dkv = cp_group_dkv
-        self.deterministic = deterministic
+        self.deterministic = magi_attention.is_deterministic_mode_enable()
 
         # NOTE: get the real overlap degree from comm meta
         # instead of the initial one from overlap config

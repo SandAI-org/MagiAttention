@@ -459,10 +459,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         "random_type_mapping",
         [False, True],
     )
-    @parameterize(
-        "deterministic",
-        [False, True],
-    )
     def test_pipeline(
         self,
         attn_config: dict[str, Any],
@@ -471,7 +467,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
-        deterministic: bool,
         run_bwd: bool = True,
     ):
         # -----    switch mode   ---- #
@@ -505,8 +500,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"world_size=[{self.world_size}] x "
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
-            f"random_causal_mapping=[{random_type_mapping}] x "
-            f"deterministic=[{deterministic}]"
+            f"random_causal_mapping=[{random_type_mapping}]"
         )
 
         # -----    contruct config from test cases   ---- #
@@ -562,7 +556,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     corr_factor=get_a2a_corr_factor(self.world_size),
                 ),
             ),
-            deterministic=deterministic,
         )
 
         # -----   init attn_mask_type ----- #

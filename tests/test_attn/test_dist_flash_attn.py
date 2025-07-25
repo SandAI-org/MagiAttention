@@ -125,7 +125,6 @@ class TestDistFlashAttn(DistTestBase):
             calc_meta=attn_calc_meta,
             cp_group_kv=self.nccl_groups[0],
             cp_group_dkv=self.nccl_groups[1],
-            deterministic=False,
         )
 
         local_q = torch.randn(

@@ -54,4 +54,3 @@ class DistAttnConfig:
     overlap_config: OverlapConfig = (
         OverlapConfig()
     )  # TODO: add distinct overlap config for fwd/bwd in the future
-    deterministic: bool = False

@@ -30,7 +30,6 @@ def calc_attn_meta_from_dispatch_meta(
     cp_group: dist.ProcessGroup,
     overlap_config: OverlapConfig,
     cp_mesh: DeviceMesh | None = None,
-    deterministic: bool = False,
 ) -> tuple[CommMeta, AttnCalcMeta, DistAttnSolver]:
     """Calculate the communication and calculation meta from the dispatch meta
 
@@ -41,7 +40,6 @@ def calc_attn_meta_from_dispatch_meta(
         cp_group (dist.ProcessGroup): The NCCL process group
         overlap_config (OverlapConfig): The overlap config, including the overlap mode, overlap degree, overlap chunk size, etc
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
-        deterministic (bool): whether to enable deterministic mode
 
     Returns:
         tuple[CommMeta, AttnCalcMeta]: The communication and calculation meta
@@ -54,7 +52,6 @@ def calc_attn_meta_from_dispatch_meta(
         cp_group=cp_group,
         overlap_config=overlap_config,
         cp_mesh=cp_mesh,
-        deterministic=deterministic,
     )
 
     comm_meta = attn_solver.calc_comm_meta()
