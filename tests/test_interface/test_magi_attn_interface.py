@@ -561,7 +561,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                             cp_group_or_mesh=self.device_mesh,
                             dist_attn_config=dist_attn_config,
                         )
-                    return
+                return
             case "test_for_invalid_mask":
                 invalid_mask_type = attn_config["attn_mask_type"]
                 with pytest.raises(ValueError):
@@ -646,7 +646,7 @@ class TestInterfaceWithWorldSize2(TestInterfaceBaseWithWorldSize1):
 
     @skip_if_lt_x_gpu(2)
     def test_interface(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+        super().test_interface(*args, **kwargs)
 
 
 class TestInterfaceWithWorldSize3(TestInterfaceBaseWithWorldSize1):
@@ -656,7 +656,7 @@ class TestInterfaceWithWorldSize3(TestInterfaceBaseWithWorldSize1):
 
     @skip_if_lt_x_gpu(3)
     def test_interface(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+        super().test_interface(*args, **kwargs)
 
 
 class TestInterfaceWithWorldSize4(TestInterfaceBaseWithWorldSize1):
@@ -666,7 +666,7 @@ class TestInterfaceWithWorldSize4(TestInterfaceBaseWithWorldSize1):
 
     @skip_if_lt_x_gpu(4)
     def test_interface(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+        super().test_interface(*args, **kwargs)
 
 
 class TestInterfaceWithWorldSize5(TestInterfaceBaseWithWorldSize1):
@@ -676,7 +676,7 @@ class TestInterfaceWithWorldSize5(TestInterfaceBaseWithWorldSize1):
 
     @skip_if_lt_x_gpu(5)
     def test_interface(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+        super().test_interface(*args, **kwargs)
 
 
 class TestInterfaceWithWorldSize6(TestInterfaceBaseWithWorldSize1):
@@ -686,7 +686,7 @@ class TestInterfaceWithWorldSize6(TestInterfaceBaseWithWorldSize1):
 
     @skip_if_lt_x_gpu(6)
     def test_interface(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+        super().test_interface(*args, **kwargs)
 
 
 class TestInterfaceWithWorldSize7(TestInterfaceBaseWithWorldSize1):
@@ -696,7 +696,7 @@ class TestInterfaceWithWorldSize7(TestInterfaceBaseWithWorldSize1):
 
     @skip_if_lt_x_gpu(7)
     def test_interface(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+        super().test_interface(*args, **kwargs)
 
 
 class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
@@ -706,7 +706,7 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
 
     @skip_if_lt_x_gpu(8)
     def test_interface(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+        super().test_interface(*args, **kwargs)
 
 
 if __name__ == "__main__":
