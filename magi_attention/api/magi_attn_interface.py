@@ -425,7 +425,6 @@ def magi_attn_flex_key(
             calc_meta=attn_calc_meta,
             cp_group_kv=cp_group,
             cp_group_dkv=cp_group,  # TODO: support interface to set distinct cp group for dkv
-            deterministic=dist_attn_config.deterministic,
         )
 
         # generate DistAttnRuntimeMgr

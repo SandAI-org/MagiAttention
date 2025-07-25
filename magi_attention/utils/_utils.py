@@ -520,6 +520,51 @@ def is_same_device_mesh(
     )
 
 
+def get_calc_cost_factor(
+    num_heads_q: int,
+    head_dim: int,
+    tflops: float,
+    mfu: float,
+    sec_ratio: float = 1e6,  # default μs, 1s = 1e6 μs
+    is_fwd: bool = True,
+) -> float:
+    """
+    calc cost factor = 2 * 2 * nhq * hd / TFLOPS / mfu * sec_ratio *
+        (1 if is_fwd else 2.5)
+    """
+
+    return (
+        (1 if is_fwd else 2.5)  # 5 matmul for bwd
+        * 2  # 2 matmul
+        * 2  # 2 flops per matmul
+        * num_heads_q
+        * head_dim
+        / tflops
+        / mfu
+        * sec_ratio
+    )
+
+
+def get_comm_cost_factor(
+    num_heads_kv: int,
+    head_dim: int,
+    bandwidth: float,
+    bwu: float,
+    corr_factor: float,
+    sec_ratio: float = 1e6,  # default μs, 1s = 1e6 μs
+) -> float:
+    """
+    comm cost factor = 2 * nhkv * hd / bandwidth / corr_factor / bwu * sec_ratio
+    """
+    return (
+        2 * num_heads_kv * head_dim / bandwidth / corr_factor / bwu * sec_ratio  # k + v
+    )
+
+
+def get_a2a_corr_factor(world_size: int) -> float:
+    return (world_size - 1) / world_size if world_size > 1 else 1.0
+
+
 # FIXME: fix bugs and move to magi_attention/api/functools
 def infer_attn_mask_from_window_size(
     q_ranges: "AttnRanges",

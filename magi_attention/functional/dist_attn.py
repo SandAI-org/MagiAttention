@@ -177,13 +177,12 @@ class DistFlashAttnRuntime:
         calc_meta: AttnCalcMeta,
         cp_group_kv: dist.ProcessGroup,
         cp_group_dkv: dist.ProcessGroup,
-        deterministic: bool,
     ):
         self.comm_meta = comm_meta
         self.calc_meta = calc_meta
         self.cp_group_kv = cp_group_kv
         self.cp_group_dkv = cp_group_dkv
-        self.deterministic = deterministic
+        self.deterministic = magi_attention.is_deterministic_mode_enable()
 
         # NOTE: get the real overlap degree from comm meta
         # instead of the initial one from overlap config
@@ -228,11 +227,6 @@ class DistFlashAttnRuntime:
             ],
             dtype=dtype,
             device=device,
-        )
-
-        # DE-BUG
-        logger.debug(
-            f"RANK: {dist.get_rank()}, {remote_kv_buffer.shape=}, {local_kv.shape=}"
         )
 
         remote_kv_work = group_cast_collective(
@@ -280,13 +274,6 @@ class DistFlashAttnRuntime:
             attn_arg = self.calc_meta.remote_attn_args_list[overlap_stage]
 
         skip_attn = attn_arg.can_skip(is_bwd=False)
-
-        # DE-BUG
-        logger.debug(
-            f"RANK: {dist.get_rank()}, {q.shape=}, {kv.shape=}, "
-            f"{q.device=}, {kv.device=}, "
-            f"{attn_arg=}"
-        )
 
         # Calculate attention
         if skip_attn:

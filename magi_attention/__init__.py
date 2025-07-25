@@ -64,3 +64,11 @@ def is_cuda_device_max_connections_one() -> bool:
     Toggle this env variable to 1 to allow cuda device to have only one connection
     """
     return os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8") == "1"
+
+
+def is_deterministic_mode_enable() -> bool:
+    """
+    Toggle this env variable to 1 to enable deterministic mode
+    to use deterministic algorithms for all magi_attention kernels
+    """
+    return os.environ.get("MAGI_ATTENTION_DETERMINISTIC_MODE", "0") == "1"

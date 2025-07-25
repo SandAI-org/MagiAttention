@@ -7,5 +7,6 @@
 install.md
 tutorial.md
 magi_api.md
+env_variables.md
 
 ```

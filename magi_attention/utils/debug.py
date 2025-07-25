@@ -19,7 +19,9 @@ import torch.distributed as dist
 
 
 def debugpy_listen():  # pragma: no cover
-    ENABLE_REMOTE_DEBUG = os.environ.get("ENABLE_REMOTE_DEBUG", "false").lower()
+    ENABLE_REMOTE_DEBUG = os.environ.get(
+        "MAGI_ATTENTION_ENABLE_REMOTE_DEBUG", "false"
+    ).lower()
     if ENABLE_REMOTE_DEBUG != "false":
         rank = dist.get_rank()
         world_size = dist.get_world_size()

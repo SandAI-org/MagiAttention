@@ -1,0 +1,31 @@
+# Environment Variables
+
+In **MagiAttention**, many features need to be configured through environment variables. Below are some environment variables that can be set, along with their descriptions.
+
+**MAGI_ATTENTION_SANITY_CHECK**
+
+Toggling `MAGI_ATTENTION_SANITY_CHECK` env variable to `1` can enable many sanity check codes inside magi_attention which is only supposed to be used for testing or debugging, since these codes involve performance overhead.
+
+**MAGI_ATTENTION_SDPA_BACKEND**
+
+Toggling `MAGI_ATTENTION_SDPA_BACKEND` env variable to `1` can switch the attn kernel backend from ffa to sdpa-math, to support higher precision like `fp32`, `fp64`, which is only supposed to be used for testing or debugging, since the performance is not acceptable.
+
+**MAGI_ATTENTION_DETERMINISTIC_MODE**
+
+Toggle `MAGI_ATTENTION_DETERMINISTIC_MODE` env variable to `1` to enable deterministic mode to use deterministic algorithms for all magi_attention kernels.
+
+**MAGI_ATTENTION_HIERARCHICAL_COMM**
+
+Toggling `MAGI_ATTENTION_HIERARCHICAL_COMM` env variable to `1` to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group).
+
+```{note}
+This is for now a temporary solution to reduce the redundant inter-node communication and might be removed or updated in the future.
+```
+
+**MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**
+
+The sm margin number of ffa forward kernel saved for comm.
+
+**MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**
+
+The sm margin number of ffa backward kernel saved for comm.

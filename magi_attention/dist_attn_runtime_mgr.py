@@ -385,7 +385,6 @@ def init_dist_attn_runtime_mgr(
         calc_meta=attn_calc_meta,
         cp_group_kv=cp_group,
         cp_group_dkv=cp_group,  # TODO: support interface to set distinct cp group for dkv
-        deterministic=dist_attn_config.deterministic,
     )
 
     return DistAttnRuntimeMgr(

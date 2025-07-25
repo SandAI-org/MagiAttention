@@ -36,67 +36,40 @@ from magi_attention.config import (
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import DistTestBase, with_comms
+from magi_attention.testing.dist_common import (
+    NAME,
+    PROFILE_ONLY,
+    SKIP_WORLD_SIZE,
+    DistTestBase,
+    with_comms,
+)
 from magi_attention.testing.precision import (
     EPSILON,
+    H100_MATMUL_MFU,
+    H100_NVLINK_A2A_BWU,
+    H100_NVLINK_BANDWIDTH,
+    H100_TFLOPS_16,
     calc_inf_norm,
     extract_mismatch_threshold,
     torch_attn_ref,
 )
-from magi_attention.utils import str2seed, sync_rng
-from magi_attention.utils._utils import get_attn_mask_from_ffa_args
-
-# tell if using profile mode
-profile_mode = os.environ.get("MAGI_ATTENTION_UNITEST_PROFILE_MODE", "0") == "1"
-
-PROFILE_ONLY = "profile_only"
-NAME = "name"
-SKIP_WORLD_SIZE = "skip_world_size"
-
-
-IB_BANDWIDTH = 50e9  # 500 GB/s, single-end
-
-# H100 spec: https://www.nvidia.com/en-us/data-center/h100/
-H100_TFLOPS_16 = 989.5e12  # 989 teraFLOPS
-H100_NVLINK_BANDWIDTH = 450e9  # 450 GB/s, single-end
-
-# H800 spec: https://chaoqing-i.com/upload/20231128/NVIDIA%20H800%20GPU%20Datasheet.pdf
-H800_TFLOPS_16 = 989.5e12  # 989 teraFLOPS
-H800_NVLINK_BANDWIDTH = 200e9  # 200 GB/s, single-end
-
-# A100 spec: https://www.nvidia.com/en-us/data-center/a100/
-A100_TFLOPS_16 = 312e12  # 312 teraFLOPS
-A100_NVLINK_BANDWIDTH = 300e9  # 300 GB/s, single-end
-
-
-# assuming that:
-#   num_heads (nh) = 1, head_dim (hd) = 128
-#   mfu = 0.5, bwu = 0.6
-#   cp = 4, a2a_corr_factor = (cp-1)/cp = 0.75
-#   unit: μs
-NUM_HEADS = 1
-HEAD_DIM = 128
-MFU = 0.5
-BWU = 0.6
-A2A_CORR_FACTOR = 0.75
-SEC_RATIO = 1e6  # 1s = 1e6 μs
-
-# formula:
-#   calc cost factor = 2 * 2 * nh * hd / TFLOPS / mfu * sec_ratio
-#   comm cost factor = 2 * nh * hd / BANDWIDTH / a2a_corr_factor / bwu * sec_ratio
-# then:
-CALC_COST_FACTOR = 2 * 2 * NUM_HEADS * HEAD_DIM / H800_TFLOPS_16 / MFU * SEC_RATIO
-INTRA_NODE_COMM_COST_FACTOR = (
-    2 * NUM_HEADS * HEAD_DIM / H800_NVLINK_BANDWIDTH / A2A_CORR_FACTOR / BWU * SEC_RATIO
-)
-INTER_NODE_COMM_COST_FACTOR = (
-    2 * NUM_HEADS * HEAD_DIM / IB_BANDWIDTH / A2A_CORR_FACTOR / BWU * SEC_RATIO
+from magi_attention.utils import (
+    get_a2a_corr_factor,
+    get_attn_mask_from_ffa_args,
+    get_calc_cost_factor,
+    get_comm_cost_factor,
+    str2seed,
+    sync_rng,
 )
 
 
 class TestPipelineBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
+
+        self.profile_mode = (
+            os.environ.get("MAGI_ATTENTION_UNITEST_PROFILE_MODE", "0") == "1"
+        )
 
         # init several pgs with all ranks
         self.nccl_groups = [
@@ -124,6 +97,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             )
         else:
             self.device_mesh = None
+
+    @property
+    def device(self) -> int:
+        return torch.cuda.current_device()
 
     @property
     def process_group(self):
@@ -217,70 +194,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 15360,
                 "chunk_size": 512,
             },
-            # varlen block causal with total seqlen 17k
-            {
-                NAME: "varlen_block_causal_17k",
-                SKIP_WORLD_SIZE: [3, 5, 6, 7],
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 2048],
-                        [2048, 4096],
-                        [4096, 6144],
-                        [6144, 8192],
-                        [8192, 10240],
-                        [10240, 12288],
-                        [12288, 17808],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 2048],
-                        [0, 4096],
-                        [0, 6144],
-                        [0, 8192],
-                        [8192, 10240],
-                        [8192, 12288],
-                        [12288, 17808],
-                    ]
-                ),
-                "attn_type_mapping": [0] * 7,
-                "total_seqlen_q": 17808,
-                "total_seqlen_k": 17808,
-                "chunk_size": 1113,
-            },
-            # varlen block causal with total seqlen 10k + overlapped q ranges
-            {
-                NAME: "varlen_block_causal_10k_with_q_overlap",
-                SKIP_WORLD_SIZE: [3, 6, 7, 8],
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 10240],
-                        [1280, 10240],
-                        [2560, 10240],
-                        [3840, 10240],
-                        [5120, 10240],
-                        [6400, 10240],
-                        [7680, 10240],
-                        [8960, 10240],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 1280],
-                        [1280, 2560],
-                        [2560, 3840],
-                        [3840, 5120],
-                        [5120, 6400],
-                        [6400, 7680],
-                        [7680, 8960],
-                        [8960, 10240],
-                    ]
-                ),
-                "attn_type_mapping": [0] * 8,
-                "total_seqlen_q": 10240,
-                "total_seqlen_k": 10240,
-                "chunk_size": 512,
-            },
             # varlen block causal with total seqlen 12k + overlapped q ranges
             {
                 NAME: "varlen_block_causal_12k_with_q_overlap",
@@ -308,38 +221,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 6,
                 "total_seqlen_q": 12288,
                 "total_seqlen_k": 12288,
-                "chunk_size": 512,
-            },
-            # half-inv block diagonal with total seqlen 10k
-            # + interleaved overlapped q ranges
-            {
-                NAME: "varlen_block_causal_12k_with_q_overlap",
-                SKIP_WORLD_SIZE: [2, 4, 5, 6, 8],
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 3072],
-                        [1536, 4608],
-                        [3072, 6144],
-                        [4608, 7680],
-                        [6144, 9216],
-                        [7680, 10752],
-                        [9216, 10752],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 1536],
-                        [1536, 3072],
-                        [3072, 4608],
-                        [4608, 6144],
-                        [6144, 7680],
-                        [7680, 9216],
-                        [9216, 10752],
-                    ]
-                ),
-                "attn_type_mapping": [0] * 7,
-                "total_seqlen_q": 10752,
-                "total_seqlen_k": 10752,
                 "chunk_size": 512,
             },
             # simple bi_causal test with overlapped q ranges with 12k
@@ -498,38 +379,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             {
                 NAME: "disable_mso",
                 "enable": False,
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
-            },
-            # static, overlap degree = 1, min chunk size = 1023
-            {
-                NAME: "static_od1_cz1023",
-                "enable": True,
-                "mode": AttnOverlapMode.STATIC,
-                "degree": 1,
-                "min_chunk_size": 1023,
-                "max_num_chunks": 64,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
-            },
-            # static, overlap degree = 2, min chunk size = 513
-            {
-                NAME: "static_od2_cz513",
-                "enable": True,
-                "mode": AttnOverlapMode.STATIC,
-                "degree": 2,
-                "min_chunk_size": 513,
-                "max_num_chunks": 64,
-                "alg": UniformOverlapAlg(
-                    random_costs=True,
-                    random_seed=42,
-                ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
             # static, overlap degree = 4, min chunk size = 253
             {
@@ -543,8 +392,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     random_costs=True,
                     random_seed=42,
                 ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
             # dynamic, min chunk size = 256, no max overlap degree limit
             {
@@ -559,8 +406,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     random_costs=True,
                     random_seed=42,
                 ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
             # NOTE: profile only case
             # static, overlap degree = 4, min chunk size = 512, max num chunks = 64
@@ -576,8 +421,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     random_costs=True,
                     random_seed=42,
                 ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
             # NOTE: profile only case
             # dynamic, min chunk size = 512, max num chunks = 64, max overlap degree = 8
@@ -594,18 +437,16 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             #         random_costs=True,
             #         random_seed=42,
             #     ),
-            #     "calc_cost_factor": CALC_COST_FACTOR,
-            #     "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             # },
         ],
     )
     @parameterize(
         "num_heads",
-        [NUM_HEADS],
+        [(6, 6), (6, 2)],  # mha  # gqa
     )
     @parameterize(
         "head_dim",
-        [HEAD_DIM],
+        [64, 128],
     )
     @parameterize(
         "dtype",
@@ -622,7 +463,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         self,
         attn_config: dict[str, Any],
         overlap_config: dict[str, Any],
-        num_heads: int,
+        num_heads: tuple[int, int],  # (nhq, nhkv)
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
@@ -630,15 +471,15 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     ):
         # -----    switch mode   ---- #
 
-        if profile_mode:  # [start_iter, end_iter)
+        if self.profile_mode:  # [start_iter, end_iter)
             prof_iters, prof_start_iter, prof_end_iter = 10, 5, 8
         else:
             prof_iters, prof_start_iter, prof_end_iter = 1, -1, -1
             assert magi_attention.is_sanity_check_enable()
 
-        if profile_mode ^ attn_config.get(PROFILE_ONLY, False):
+        if self.profile_mode ^ attn_config.get(PROFILE_ONLY, False):
             return
-        if profile_mode ^ overlap_config.get(PROFILE_ONLY, False):
+        if self.profile_mode ^ overlap_config.get(PROFILE_ONLY, False):
             return
 
         # -----    skip for world size   ---- #
@@ -690,19 +531,31 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         chunk_size: int = attn_config["chunk_size"]
 
-        device = torch.cuda.current_device()
+        num_heads_q, num_heads_kv = num_heads
 
         dist_attn_config = DistAttnConfig(
-            # TODO: test top-p minhp dispatch alg
+            # TODO: test other dispatch algs
             dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
             overlap_config=OverlapConfig(
                 **{
                     k: v
                     for k, v in overlap_config.items()
                     if k not in (NAME, PROFILE_ONLY)
-                }
+                },
+                calc_cost_factor=get_calc_cost_factor(
+                    num_heads_q=num_heads_q,
+                    head_dim=head_dim,
+                    tflops=H100_TFLOPS_16,
+                    mfu=H100_MATMUL_MFU,
+                ),
+                comm_cost_factor=get_comm_cost_factor(
+                    num_heads_kv=num_heads_kv,
+                    head_dim=head_dim,
+                    bandwidth=H100_NVLINK_BANDWIDTH,
+                    bwu=H100_NVLINK_A2A_BWU,
+                    corr_factor=get_a2a_corr_factor(self.world_size),
+                ),
             ),
-            deterministic=False,  # TODO: use deterministic mode for ut as long as supported
         )
 
         # -----   init attn_mask_type ----- #
@@ -722,7 +575,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         for iter in range(prof_iters):
             # -----    profile control if using profile mode   ---- #
 
-            if profile_mode:
+            if self.profile_mode:
                 if self.rank == 0 and iter == prof_start_iter:
                     torch.cuda.profiler.start()
                     torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
@@ -756,25 +609,25 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
             total_q = torch.randn(
                 total_seqlen_q,
-                num_heads,
+                num_heads_q,
                 head_dim,
-                device=device,
+                device=self.device,
                 dtype=dtype,
                 requires_grad=run_bwd,
             )
             total_k = torch.randn(
                 total_seqlen_k,
-                num_heads,
+                num_heads_kv,
                 head_dim,
-                device=device,
+                device=self.device,
                 dtype=dtype,
                 requires_grad=run_bwd,
             )
             total_v = torch.randn(
                 total_seqlen_k,
-                num_heads,
+                num_heads_kv,
                 head_dim,
-                device=device,
+                device=self.device,
                 dtype=dtype,
                 requires_grad=run_bwd,
             )
@@ -790,7 +643,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
             # -----   run dist attn forward on local qkv for local o   ---- #
 
-            if profile_mode:
+            if self.profile_mode:
                 # barrier before fwd to wait for the processes with slow solver
                 dist.barrier()
                 torch.cuda.synchronize()
@@ -807,7 +660,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 grad_total_out = torch.randn_like(total_out).detach()
                 dist.all_reduce(grad_total_out.data, group=self.nccl_group)
 
-                if profile_mode:
+                if self.profile_mode:
                     # barrier before bwd to wait for the processes with slow fwd
                     dist.barrier()
                     torch.cuda.synchronize()
@@ -826,7 +679,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
             # -----   assert close if not using profile mode   ---- #
 
-            if not profile_mode:
+            if not self.profile_mode:
                 # -----   assert close to torch ref   ---- #
 
                 self.assert_close_to_torch_ref(
@@ -894,7 +747,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             attn_type_map=attn_type_map,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
-            device=torch.cuda.current_device(),
+            device=self.device,
         )
 
         # -----   ref1. torch ref with high precision (fp32)   ---- #

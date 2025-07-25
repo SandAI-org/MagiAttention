@@ -260,7 +260,6 @@ def prepare_magi_attention(input, cu_seqlens_q, cu_seqlens_k, pad_size, cp_group
                 random_seed=42,
             ),
         ),
-        deterministic=False,
     )
 
     # you can also use fa_varlen-like varlen dispatch interface directly
