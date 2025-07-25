@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import random
+import os
+import numpy as np
 from functools import partial
 from itertools import accumulate, pairwise
 
@@ -23,6 +25,12 @@ from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta._calc_dispatch_meta import _calc_self_attn_areas
 
+def seed_everything(seed=1234):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
 
 def calculate_attn_flops(
     q_ranges: AttnRanges,
@@ -738,3 +746,25 @@ def get_vsa_mask_from_block_sparse_score(
                         q_indices, dtype=torch.int32, device=device)
                 
     return q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num
+
+def get_flashinfer_uniform_block_index(
+    num_q_blocks: int,
+    num_kv_blocks: int,
+    seq_len_q: int,
+    seq_len_k: int,
+    num_kv_heads: int
+):
+    # synthesize uniform block sizes
+    block_row_sz = torch.ones(num_q_blocks, dtype=torch.int32) * (
+        seq_len_q // num_q_blocks
+    )
+    block_row_sz[-1] = seq_len_q - (seq_len_q // num_q_blocks) * (num_q_blocks - 1)
+    block_row_sz = block_row_sz.unsqueeze(0).repeat(num_kv_heads, 1)
+
+    block_col_sz = torch.ones(num_kv_blocks, dtype=torch.int32) * (
+        seq_len_k // num_kv_blocks
+    )
+    block_col_sz[-1] = seq_len_k - (seq_len_k // num_kv_blocks) * (num_kv_blocks - 1)
+    block_col_sz = block_col_sz.unsqueeze(0).repeat(num_kv_heads, 1)
+
+    return block_row_sz, block_col_sz

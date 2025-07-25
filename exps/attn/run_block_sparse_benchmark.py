@@ -24,12 +24,14 @@ from baselines.utils import (
     generate_ranges_from_mask,
     get_sdpa_mask_from_block_sparse_mask,
     get_vsa_mask_from_block_sparse_score,
+    get_flashinfer_uniform_block_index,
+    seed_everything,
 )
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
-impls = ["ffa", "vsa"]
+impls = ["ffa", "flashinfer", "vsa"]
 
 # actual seqlen
 seqlen = 49152
@@ -37,7 +39,11 @@ seqlen = 49152
 sparsity_ratio = [0.1, 0.2, 0.5, 0.8, 1.0]
 # ss = [k * 1024 for k in [4, 96, 128]]
 ds = [128]
-wds = ["fwd", "bwd"]
+if "flashinfer" in impls:
+    # flashinfer doesn't support backward
+    wds = ["fwd"]
+else:
+    wds = ["fwd", "bwd"]
 if "vsa" in impls:
     # currently vsa only supports block size == 64
     block_sizes = [64]
@@ -45,9 +51,10 @@ else:
     block_sizes = [64, 128]
 
 b = 1
-nhq = 48
-if "vsa" in impls:
+nhq = 32
+if "vsa" in impls or "flashinfer" in impls:
     # currently vsa doesn't support gqa
+    # currently flashinfer doesn't support query-specific sparsity
     nhk = nhq
 else:
     nhk = 8
@@ -92,6 +99,7 @@ attn_flops_configs = [
     for block_size in block_sizes
 ]
 
+seed_everything()
 
 @perf_report(attn_flops_configs)
 def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
@@ -137,7 +145,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         k = k.view(b * orig_seq_len_k * nhk, 1, hd)
         v = v.view(b * orig_seq_len_k * nhk, 1, hd)
 
-    if attn_impl in ("sdpa", "vsa"):
+    if attn_impl in ("sdpa", "vsa", "flashinfer"):
         q = rearrange(q, "b s h d -> b h s d")
         k = rearrange(k, "b s h d -> b h s d")
         v = rearrange(v, "b s h d -> b h s d")
@@ -232,6 +240,46 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
             
             def fn():
                 block_sparse_bwd(q, k, v, o, l_vec, do, k2q_block_sparse_index, k2q_block_sparse_num)
+    
+    elif attn_impl == "flashinfer":
+        try:
+            import flashinfer
+        except ImportError:
+            raise ImportError("Please install FlashInfer first.")
+
+        q = q.view(b * nhq, orig_seq_len_q, hd).contiguous()
+        k = k.view(b * nhk, orig_seq_len_k, hd).contiguous()
+        v = v.view(b * nhk, orig_seq_len_k, hd).contiguous()
+        # BUG: using original block mask will cause illegal access sometimes
+        # block_mask_cpu = block_mask.detach().cpu()
+        block_mask_cpu = (
+            torch.rand(nhk, num_q_blocks_orig, num_kv_blocks_orig) < sparsity_ratio
+        )
+
+        block_row_sz, block_col_sz = get_flashinfer_uniform_block_index(
+            num_q_blocks_orig, num_kv_blocks_orig, orig_seq_len_q, orig_seq_len_k, nhk
+        )
+        print(f"Sparsity = {sparsity_ratio} of elements to compute")
+
+        # allocate 128MB workspace buffer
+        workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=block_mask.device)
+        wrapper = flashinfer.sparse.VariableBlockSparseAttentionWrapper(
+            workspace_buffer, backend="fa3")
+
+        wrapper.plan(
+            block_mask_map=block_mask_cpu,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
+            num_qo_heads=nhq,
+            num_kv_heads=nhk,
+            head_dim=hd,
+            q_data_type=q.dtype
+        )
+
+        def fn():
+            return wrapper.run(
+                q, k, v
+            )
 
     elif attn_impl == "sdpa":
         sdpa_mask = get_sdpa_mask_from_block_sparse_mask(
