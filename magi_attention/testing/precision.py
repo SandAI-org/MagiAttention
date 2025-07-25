@@ -30,6 +30,19 @@ if version.parse(torch.__version__) > version.parse("2.4"):
 # usage: to avoid division by zero in numerical calculation and assert-close testing
 EPSILON = 1e-8
 
+IB_BANDWIDTH = 50e9  # 500 GB/s, single-end
+
+# H100 spec: https://www.nvidia.com/en-us/data-center/h100/
+H100_TFLOPS_16 = 989.5e12  # 989 teraFLOPS
+H100_MATMUL_MFU = 0.7
+H100_NVLINK_BANDWIDTH = 450e9  # 450 GB/s, single-end
+H100_NVLINK_A2A_BWU = 0.6
+
+# H800 spec: https://chaoqing-i.com/upload/20231128/NVIDIA%20H800%20GPU%20Datasheet.pdf
+H800_TFLOPS_16 = 989.5e12  # 989 teraFLOPS
+H800_NVLINK_BANDWIDTH = 200e9  # 200 GB/s, single-end
+H800_NVLINK_A2A_BWU = 0.6
+
 
 def extract_mismatch_info(error_msg: str) -> tuple[int, int, float]:
     match = re.search(r"Mismatched elements: (\d+) / (\d+)", error_msg)

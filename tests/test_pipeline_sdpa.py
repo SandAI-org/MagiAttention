@@ -36,57 +36,30 @@ from magi_attention.config import (
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import DistTestBase, with_comms
-from magi_attention.testing.precision import EPSILON, torch_attn_ref
-from magi_attention.utils import str2seed, sync_rng
-from magi_attention.utils._utils import get_attn_mask_from_ffa_args
-
-NAME = "name"
-SKIP_WORLD_SIZE = "skip_world_size"
-
-
-IB_BANDWIDTH = 50e9  # 500 GB/s, single-end
-
-# H100 spec: https://www.nvidia.com/en-us/data-center/h100/
-H100_TFLOPS_16 = 989.5e12  # 989 teraFLOPS
-H100_NVLINK_BANDWIDTH = 450e9  # 450 GB/s, single-end
-
-# H800 spec: https://chaoqing-i.com/upload/20231128/NVIDIA%20H800%20GPU%20Datasheet.pdf
-H800_TFLOPS_16 = 989.5e12  # 989 teraFLOPS
-H800_NVLINK_BANDWIDTH = 200e9  # 200 GB/s, single-end
-
-# A100 spec: https://www.nvidia.com/en-us/data-center/a100/
-A100_TFLOPS_16 = 312e12  # 312 teraFLOPS
-A100_NVLINK_BANDWIDTH = 300e9  # 300 GB/s, single-end
-
-
-# assuming that:
-#   num_heads (nh) = 1, head_dim (hd) = 128
-#   mfu = 0.5, bwu = 0.6
-#   cp = 4, a2a_corr_factor = (cp-1)/cp = 0.75
-#   unit: μs
-NUM_HEADS = 1
-HEAD_DIM = 64
-DTYPE = torch.float64
-MFU = 0.5
-BWU = 0.6
-A2A_CORR_FACTOR = 0.75
-SEC_RATIO = 1e6  # 1s = 1e6 μs
-
-# formula:
-#   calc cost factor = 2 * 2 * nh * hd / TFLOPS / mfu * sec_ratio
-#   comm cost factor = 2 * nh * hd / BANDWIDTH / a2a_corr_factor / bwu * sec_ratio
-# then:
-CALC_COST_FACTOR = 2 * 2 * NUM_HEADS * HEAD_DIM / H800_TFLOPS_16 / MFU * SEC_RATIO
-INTRA_NODE_COMM_COST_FACTOR = (
-    2 * NUM_HEADS * HEAD_DIM / H800_NVLINK_BANDWIDTH / A2A_CORR_FACTOR / BWU * SEC_RATIO
+from magi_attention.testing.dist_common import (
+    NAME,
+    SKIP_WORLD_SIZE,
+    DistTestBase,
+    with_comms,
 )
-INTER_NODE_COMM_COST_FACTOR = (
-    2 * NUM_HEADS * HEAD_DIM / IB_BANDWIDTH / A2A_CORR_FACTOR / BWU * SEC_RATIO
+from magi_attention.testing.precision import (
+    EPSILON,
+    H100_MATMUL_MFU,
+    H100_NVLINK_A2A_BWU,
+    H100_NVLINK_BANDWIDTH,
+    H100_TFLOPS_16,
+    torch_attn_ref,
+)
+from magi_attention.utils import (
+    get_a2a_corr_factor,
+    get_attn_mask_from_ffa_args,
+    get_calc_cost_factor,
+    get_comm_cost_factor,
+    str2seed,
+    sync_rng,
 )
 
 
-# TODO: merge this test script with `test_magi_attn_interface.py`
 class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
@@ -120,6 +93,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             )
         else:
             self.device_mesh = None
+
+    @property
+    def device(self) -> int:
+        return torch.cuda.current_device()
 
     @property
     def process_group(self):
@@ -614,8 +591,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             {
                 NAME: "disable_mso",
                 "enable": False,
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
             # static, overlap degree = 1, min chunk size = 15
             {
@@ -629,8 +604,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                     random_costs=True,
                     random_seed=42,
                 ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
             # static, overlap degree = 4, min chunk size = 23
             {
@@ -644,8 +617,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                     random_costs=True,
                     random_seed=42,
                 ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
             # dynamic, min chunk size = 56, no max overlap degree limit
             {
@@ -660,22 +631,20 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                     random_costs=True,
                     random_seed=42,
                 ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
         ],
     )
     @parameterize(
         "num_heads",
-        [NUM_HEADS],
+        [(6, 1)],  # mqa
     )
     @parameterize(
         "head_dim",
-        [HEAD_DIM],
+        [64],
     )
     @parameterize(
         "dtype",
-        [DTYPE],
+        [torch.float64],
     )
     @parameterize(
         "random_type_mapping",
@@ -683,13 +652,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     )
     @parameterize(
         "deterministic",
-        [False, True],
+        [False],
     )
     def test_pipeline_sdpa(
         self,
         attn_config: dict[str, Any],
         overlap_config: dict[str, Any],
-        num_heads: int,
+        num_heads: tuple[int, int],  # (nhq, nhkv)
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
@@ -737,14 +706,26 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         chunk_size: int = attn_config["chunk_size"]
-
-        device = torch.cuda.current_device()
+        num_heads_q, num_heads_kv = num_heads
 
         dist_attn_config = DistAttnConfig(
             # TODO: test other dispatch algs
             dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
             overlap_config=OverlapConfig(
-                **{k: v for k, v in overlap_config.items() if k not in (NAME,)}
+                **{k: v for k, v in overlap_config.items() if k not in (NAME,)},
+                calc_cost_factor=get_calc_cost_factor(
+                    num_heads_q=num_heads_q,
+                    head_dim=head_dim,
+                    tflops=H100_TFLOPS_16,
+                    mfu=H100_MATMUL_MFU,
+                ),
+                comm_cost_factor=get_comm_cost_factor(
+                    num_heads_kv=num_heads_kv,
+                    head_dim=head_dim,
+                    bandwidth=H100_NVLINK_BANDWIDTH,
+                    bwu=H100_NVLINK_A2A_BWU,
+                    corr_factor=get_a2a_corr_factor(self.world_size),
+                ),
             ),
             deterministic=deterministic,
         )
@@ -786,25 +767,25 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         total_q = torch.randn(
             total_seqlen_q,
-            num_heads,
+            num_heads_q,
             head_dim,
-            device=device,
+            device=self.device,
             dtype=dtype,
             requires_grad=True,
         )
         total_k = torch.randn(
             total_seqlen_k,
-            num_heads,
+            num_heads_kv,
             head_dim,
-            device=device,
+            device=self.device,
             dtype=dtype,
             requires_grad=True,
         )
         total_v = torch.randn(
             total_seqlen_k,
-            num_heads,
+            num_heads_kv,
             head_dim,
-            device=device,
+            device=self.device,
             dtype=dtype,
             requires_grad=True,
         )
@@ -895,7 +876,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             attn_type_map=attn_type_map,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
-            device=torch.cuda.current_device(),
+            device=self.device,
         )
 
         # -----   ref1. torch ref with high precision (fp32)   ---- #

@@ -21,6 +21,14 @@ import torch
 import torch.distributed as dist
 from torch.testing._internal.common_distributed import MultiProcessTestCase
 
+NAME = "name"
+
+SKIP_WORLD_SIZE = "skip_world_size"
+
+PROFILE_ONLY = "profile_only"
+
+INTERFACE = "interface"
+
 DEVICE_TYPE = (
     "cuda" if torch.cuda.is_available() and torch.cuda.device_count() > 1 else "cpu"
 )
