@@ -31,7 +31,7 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
-impls = ["ffa", "flashinfer", "vsa"]
+impls = ["ffa", "vsa", "vsa_triton"]
 
 # actual seqlen
 seqlen = 49152
@@ -44,7 +44,7 @@ if "flashinfer" in impls:
     wds = ["fwd"]
 else:
     wds = ["fwd", "bwd"]
-if "vsa" in impls:
+if "vsa" or "vsa_triton" in impls:
     # currently vsa only supports block size == 64
     block_sizes = [64]
 else:
@@ -86,7 +86,7 @@ attn_flops_configs = [
             "flops": "Throughout (TFLOPs/s)",
             "mem": "Peak Memory (GB)",
         },
-        plot_name=f"block sparse attn-{wd} block_size-{block_size}",
+        plot_name=f"block sparse attn-{wd} block_size-{block_size} seq_len {seqlen}",
         # Name for the plot. Used also as a file name for saving the plot.
         args={  # Values for function arguments not in `x_names` and `y_name`.
             "hd": hd,
@@ -145,7 +145,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         k = k.view(b * orig_seq_len_k * nhk, 1, hd)
         v = v.view(b * orig_seq_len_k * nhk, 1, hd)
 
-    if attn_impl in ("sdpa", "vsa", "flashinfer"):
+    if attn_impl in ("sdpa", "vsa", "vsa_triton", "flashinfer"):
         q = rearrange(q, "b s h d -> b h s d")
         k = rearrange(k, "b s h d -> b h s d")
         v = rearrange(v, "b s h d -> b h s d")
@@ -241,6 +241,39 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
             def fn():
                 block_sparse_bwd(q, k, v, o, l_vec, do, k2q_block_sparse_index, k2q_block_sparse_num)
     
+    elif attn_impl == "vsa_triton":
+        from baselines.block_sparse_attn_triton import block_sparse_fwd, block_sparse_bwd
+        topk = int(sparsity_ratio * num_kv_blocks_orig)
+        q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num = get_vsa_mask_from_block_sparse_score(
+            scores, 
+            k=topk, 
+        )
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+        def fn():
+            return block_sparse_fwd(
+                q, k, v, q2k_block_sparse_index, q2k_block_sparse_num
+            )
+
+        if wd == "bwd":
+            do = do.contiguous()
+            try:
+                o, l_vec = fn()
+            except Exception as e:
+                if "CUDA out of memory" not in str(e):
+                    print(
+                        f"Error occured before running {attn_impl} with {block_size} mask "
+                        f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                    )
+                    raise e
+                already_known_oom_before_run = True
+
+            def fn():
+                block_sparse_bwd(q, k, v, o, l_vec, do, q2k_block_sparse_index, q2k_block_sparse_num,
+                                  k2q_block_sparse_index, k2q_block_sparse_num)
+
     elif attn_impl == "flashinfer":
         try:
             import flashinfer
