@@ -24,7 +24,7 @@ The sm margin number of ffa backward kernel saved for comm kernels.
 
 **MAGI_ATTENTION_FFA_FORWARD_INPLACE_CORRECT**
 
-Toggling this env variable to 1 can enable inplace-correct for out and lse in ffa forward to avoid the storage of partial results and the memory-bound `result_correction` as a forward post process.
+Toggling this env variable to `1` can enable inplace-correct for out and lse in ffa forward to avoid the storage of partial results and the memory-bound `result_correction` as a forward post process.
 
 ```{note}
 This feature will be enabled by default as long as it's stable (i.e. no effect on accuracy or performance).

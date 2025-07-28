@@ -29,9 +29,9 @@ __all__ = [
 ]
 
 
-def is_ffa_fwd_inplace_correct_enable():
+def is_ffa_fwd_inplace_correct_enable() -> bool:
     """
-    Toggling this env variable to 1 can enable inplace-correct for out and lse in ffa forward
+    Toggling this env variable to `1` can enable inplace-correct for out and lse in ffa forward
     to avoid the storage of partial results and the memory-bound `result_correction` as a forward post process
 
     NOTE: this feature will be enabled by default as long as it's stable (i.e. no effect on accuracy or performance)

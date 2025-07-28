@@ -335,13 +335,11 @@ class DistFlashAttnRuntime:
         lse: torch.Tensor,
         overlap_stage: int | None = None,
         deterministic: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Apply ffa bwd kernel to get partial dqkv.
         Returns:
             partial_dq(torch.Tensor): partial dq
             partial_dkv(torch.Tensor): partial dkv
-            skip_attn(bool): Whether to skip attention computation,
-                NOTE: if True, the partial_dq and partial_dkv will be random initialized
         """
 
         if overlap_stage is None:
@@ -349,10 +347,8 @@ class DistFlashAttnRuntime:
         else:
             attn_arg = self.calc_meta.remote_attn_args_list[overlap_stage]
 
-        skip_attn = attn_arg.can_skip(is_bwd=True)
-
-        if skip_attn:
-            partial_dq, partial_dkv = torch.empty_like(q), torch.empty_like(kv)
+        if attn_arg.can_skip(is_bwd=True):
+            partial_dq, partial_dkv = None, None
         else:
             k, v = self.chunk_kv(kv)
             if magi_attention.is_sdpa_backend_enable():
@@ -392,7 +388,7 @@ class DistFlashAttnRuntime:
                 )
             partial_dkv = torch.cat([partial_dk, partial_dv], dim=0).to(kv.dtype)
 
-        return partial_dq, partial_dkv, skip_attn
+        return partial_dq, partial_dkv
 
     @nvtx.instrument_nvtx
     def reduce_partial_dkv(
@@ -601,7 +597,6 @@ class DistFlashAttnFunc(torch.autograd.Function):
         (
             partial_local_dq,
             partial_local_dkv,
-            skip_attn,
         ) = dist_attn_runtime.attn_bwd_partial(
             do=grad_output,
             q=local_q,
@@ -612,8 +607,9 @@ class DistFlashAttnFunc(torch.autograd.Function):
             deterministic=dist_attn_runtime.deterministic,
         )
 
-        if skip_attn:
-            # NOTE: if local_dq and local_dkv calculation are skipped, we need to zeros initialize them.
+        if partial_local_dq is None:
+            # NOTE: if local_dq and local_dkv calculation are skipped,
+            # we need to zeros initialize them since they might be reduced later
             partial_local_dq = torch.zeros_like(local_q)
             partial_local_dkv = torch.zeros_like(local_kv)
 
@@ -644,7 +640,6 @@ class DistFlashAttnFunc(torch.autograd.Function):
             (
                 partial_remote_dq,
                 partial_remote_dkv,
-                skip_attn,
             ) = dist_attn_runtime.attn_bwd_partial(
                 do=grad_output,
                 q=local_q,
@@ -656,20 +651,23 @@ class DistFlashAttnFunc(torch.autograd.Function):
             )
 
             # reduce ith partial dkv
-            # NOTE: even if skip_attn is True, we still need to launch the group_reduce_collective,
-            # because not all ranks are skipped.
             partial_local_dkv_work = dist_attn_runtime.reduce_partial_dkv(
-                partial_remote_dkv=partial_remote_dkv,
+                # NOTE: even if this stage is skipped, we still need to launch group reduce,
+                # since not all ranks are skipped for this stage
+                partial_remote_dkv=(
+                    partial_remote_dkv
+                    if partial_remote_dkv is not None
+                    else torch.empty_like(curr_remote_kv)
+                ),
                 partial_local_dkv=partial_local_dkv,
                 overlap_stage=ith_overlap_stage,
             )
 
             partial_local_dkv_works.append(partial_local_dkv_work)
 
-            # NOTE: since dq reduce is doing on local rank, if skip_attn is True,
-            # we just skip the reduce operation.
-            if not skip_attn:
-                # reduce ith partial dq, overlapped with ith remote dkv comm
+            # reduce ith partial dq if not skipped,
+            # overlapped with ith remote dkv comm
+            if partial_remote_dq is not None:
                 partial_local_dq = dist_attn_runtime.reduce_partial_dq(
                     partial_remote_dq=partial_remote_dq,
                     partial_local_dq=partial_local_dq,
