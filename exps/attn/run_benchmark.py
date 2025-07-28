@@ -58,7 +58,7 @@ from magi_attention.utils._utils import get_attn_mask_from_ffa_args
 # impls = ["fa2", "fa3", "ffa"]  # compare to fa family
 # impls = ["cudnn", "fa3", "ffa"]  # compare to performance top-3 sota
 # impls = ["ffa", "fa3", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
-impls = ["ffa", "fa3", "sdpa"]
+impls = ["ffa", "fa3"]
 
 
 mask_types = ["full"]
@@ -85,7 +85,7 @@ varlen_seqlen_distribution = {
 }
 
 
-ss = [k * 1024 for k in [4, 8, 16, 24, 32, 48, 64, 96, 128]]
+ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32]]
 # ss = [k * 1024 for k in [4, 96, 128]]
 ds = [128]
 wds = ["fwd", "bwd"]
@@ -545,7 +545,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
 
         if wd == "bwd":
             try:
-                o, *rest = fn()
+                o = fn()
             except Exception as e:
                 if "CUDA out of memory" not in str(e):
                     print(

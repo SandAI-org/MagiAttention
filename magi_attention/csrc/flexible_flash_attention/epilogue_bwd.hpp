@@ -356,7 +356,7 @@ struct CollectiveEpilogueBwd {
 
   // Write 0 to dK and dV
   CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
-    if constexpr(Deterministic) {
+    if constexpr (Deterministic) {
       int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
         // Get block coordinates for current job(tile)

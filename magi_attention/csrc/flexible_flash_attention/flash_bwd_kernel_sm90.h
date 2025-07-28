@@ -204,6 +204,10 @@ class FlashAttnBwdSm90 {
       if (warp_idx_in_warpgroup == 0) { // Load K, V, and do TMA on Q and dO
         PipelineState smem_pipe_write = cutlass::make_producer_start_state<MainloopPipeline>();
         PipelineState_dO smem_pipe_write_do = cutlass::make_producer_start_state<MainloopPipeline_dO>();
+
+        // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
+        cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
+
         for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler); work_tile_info.is_valid(params.scheduler);
              work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
           auto block_coord_ = work_tile_info.get_block_coord(params.scheduler);
@@ -215,9 +219,6 @@ class FlashAttnBwdSm90 {
 
           bool tile_valid = false;
 
-          // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
-          cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
-
           if constexpr (RangeMerge) {
             int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
                                                                              : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
@@ -225,8 +226,7 @@ class FlashAttnBwdSm90 {
 
             for (int idx = 0; idx < loop_count; ++idx) {
               int bidb = bidb_start + idx;
-              cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
-
+              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
               bool tile_valid_tmp =
                   mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
 
@@ -234,6 +234,11 @@ class FlashAttnBwdSm90 {
             }
           } else {
             tile_valid = mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
+          }
+
+          if (tile_valid) {
+            // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
+            cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
           }
 
           scheduler_prefetch();
@@ -255,7 +260,7 @@ class FlashAttnBwdSm90 {
 
             for (int idx = 0; idx < loop_count; ++idx) {
               int bidb = bidb_start + idx;
-              cute::tuple<int32_t, int32_t, int32_t> block_coord = {n_block, bidh, bidb};
+              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
               if constexpr (!Deterministic) {
                 mainloop.store_dq(params.mainloop, shared_storage, block_coord);
               } else {

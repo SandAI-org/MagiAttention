@@ -359,7 +359,6 @@ struct CollectiveEpilogueFwd {
 
     // (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
     Tensor taccOcO_rowcol = make_tensor(taccOcO.data(), flash::convert_layout_acc_rowcol(taccOcO.layout()));
-    //
     Tensor taccOcO_row = taccOcO_rowcol(_, _0{});
 
     // MMA_M
@@ -383,9 +382,9 @@ struct CollectiveEpilogueFwd {
       }
       flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
 
-// Load lse_prev from gmem -> smem, and calculate lse_final
 #pragma unroll
       for (int mi = 0; mi < size(lse_prev); ++mi) {
+        // Load lse_prev from gmem -> smem, and calculate lse_final
         int const row = m_block * kBlockM + get<0>(taccOcO_row(mi));
         if (row >= seqlen_o) {
           lse(mi) = -INFINITY;
@@ -615,64 +614,48 @@ struct CollectiveEpilogueFwd {
   // Write 0 to output and -inf to LSE
   CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
     static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
+    static_assert(kBlockM <= NumEpilogueThreads);
+
     // Get block coordinates for current job(tile)
     int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
-    int left_range_conflict_msg = 0, right_range_conflict_msg = 0;
-    if constexpr (Deterministic) {
-      left_range_conflict_msg = get<3>(block_coord);
-      right_range_conflict_msg = get<4>(block_coord);
-    }
+    // Get seqlen info for batch that current tile belongs to
     flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
-
+    // Get offset and seqlen for batch that current tile belongs to
     int offset_o = seqlen_info.offset_q;
-    int seqlen_o = seqlen_info.seqlen_q;
 
-    if constexpr (Deterministic) {
+    if constexpr (!DisableFwdAtomicReduction) {
+      // Acquire range lock to prevent multiple threads from writing to gmem simultaneously
       if (thread_idx == 0) {
-        deterministic_sync(
-          params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
-        deterministic_arrive(
-          params.determin_range_locks,
-          bidh,
-          offset_o + m_block * kBlockM,
-          kBlockM,
-          params.nheads,
-          bidb + 1,
-          left_range_conflict_msg & 1,
-          right_range_conflict_msg & 1);
+        if constexpr (Deterministic) {
+          int left_range_conflict_msg = get<3>(block_coord);
+          int right_range_conflict_msg = get<4>(block_coord);
+          deterministic_sync(
+              params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
+        }
       }
     }
 
-    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE + offset_o * get<0>(params.stride_LSE)), params.shape_LSE, params.stride_LSE)(_, bidh);
-    Tensor gLSE = local_tile(mLSE, Shape<Int<kBlockM>>{}, make_coord(m_block));
-
-    static_assert(kBlockM <= NumEpilogueThreads);
-    if (thread_idx < kBlockM) {
-      const int row = m_block * kBlockM + thread_idx;
-      if (row < seqlen_o) {
-        mLSE(row) = -INFINITY;
+    if constexpr (!DisableFwdAtomicReduction) {
+      // Make sure all writes to global memory before this point are completed
+      if (thread_idx == 0) {
+        if constexpr (Deterministic) {
+          int left_range_conflict_msg = get<3>(block_coord);
+          int right_range_conflict_msg = get<4>(block_coord);
+          deterministic_arrive(
+              params.determin_range_locks,
+              bidh,
+              offset_o + m_block * kBlockM,
+              kBlockM,
+              params.nheads,
+              bidb + 1,
+              left_range_conflict_msg & 1,
+              right_range_conflict_msg & 1);
+        }
       }
     }
-
-    // TODO: Use TMA to copy O
-    Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O + offset_o * get<0>(params.stride_O)), params.shape_O, params.stride_O)(_, _, bidh);
-    GmemTiledCopyO gmem_tiled_copy_O;
-    auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
-    Tensor tOcO = gmem_thr_copy_O.partition_D(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})));
-    Tensor tOpO = make_tensor<bool>(make_shape(size<2>(tOcO)));
-#pragma unroll
-    for (int k = 0; k < size(tOpO); ++k) {
-      tOpO(k) = get<1>(tOcO(_0{}, _0{}, k)) < get<1>(params.shape_O);
-    }
-    Tensor gO = local_tile(mO, select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{})); // (M, K)
-    Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
-    Tensor tOrO = make_fragment_like(tOgO);
-    cute::clear(tOrO);
-    // Clear_OOB_K must be false since we don't want to write zeros to gmem
-    flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
-        gmem_tiled_copy_O, tOrO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
+    flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
   }
 };
 
