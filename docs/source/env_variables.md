@@ -30,6 +30,15 @@ Toggling this env variable to `1` can enable inplace-correct for out and lse in 
 This feature will be enabled by default as long as it's stable (i.e. no effect on accuracy or performance).
 ```
 
+**MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE**
+
+Toggling this env variable to `1` can enable high-precision (fp32) reduce for dkv among ranks in ffa backward to increase the precision at the cost of double comm overhead。
+
+```{note}
+Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dkv.
+However, by default we will downcast it to kv dtype before reducing among ranks to decrease comm overhead.
+```
+
 
 ## For Debug
 
