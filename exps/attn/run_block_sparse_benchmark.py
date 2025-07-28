@@ -19,8 +19,7 @@ import torch
 from baselines.attn_impl import ffa_func, sdpa_func
 from baselines.utils import (
     flatten_head_mask,
-    generate_global_block_sparse_pattern,
-    generate_gqa_ranges_from_3d_mask,
+    generate_headwise_4D_block_sparse_pattern,
     generate_ranges_from_mask,
     get_sdpa_mask_from_block_sparse_mask,
 )
@@ -28,10 +27,10 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
-impls = ["ffa"]
+impls = ["ffa", "sdpa"]
 
 # actual seqlen
-seqlen = 49152
+seqlen = 8192
 
 sparsity_ratio = [0.1, 0.2, 0.5, 0.8, 1.0]
 # ss = [k * 1024 for k in [4, 96, 128]]
@@ -105,9 +104,13 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
     # prepare q, k ranges and caculate attn_flops
     # for now, we only do bench for block sparse mask.
-    block_mask = generate_global_block_sparse_pattern(
+    # block_mask = generate_global_block_sparse_pattern(
+    #    orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
+    # )
+    block_mask = generate_headwise_4D_block_sparse_pattern(
         orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
     )
+
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
 
     # --------- prepare data --------- #
@@ -124,9 +127,17 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
     # ffa style shape: (t,h,d)
     if attn_impl in ("ffa"):
-        q = q.view(b * orig_seq_len_q * nhq, 1, hd)
-        k = k.view(b * orig_seq_len_k * nhk, 1, hd)
-        v = v.view(b * orig_seq_len_k * nhk, 1, hd)
+        q = rearrange(q, "b s h d -> (b h s) 1 d")
+        repeats = nhq // nhk
+        k = torch.repeat_interleave(
+            k, repeats=repeats, dim=2
+        )  # we need to flatten k, v along head dimension for GQA setting.
+        v = torch.repeat_interleave(v, repeats=repeats, dim=2)
+        k = rearrange(k, "b s h d -> (b h s) 1 d")
+        v = rearrange(v, "b s h d -> (b h s) 1 d")
+        # q = q.view(b * orig_seq_len_q * nhq, 1, hd)
+        # k = k.view(b * orig_seq_len_k * nhk, 1, hd)
+        # v = v.view(b * orig_seq_len_k * nhk, 1, hd)
 
     if attn_impl in ("sdpa"):
         q = rearrange(q, "b s h d -> b h s d")
@@ -144,21 +155,12 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
     # --------- prepare func --------- #
     if attn_impl == "ffa":
         # flatten headdim for ffa cause
-        flat_global_sparse_mask = flatten_head_mask(block_mask)
+        flat_block_sparse_mask = flatten_head_mask(block_mask)
         # 3. Generate ranges from the flattened 2D mask
         q_ranges, k_ranges = generate_ranges_from_mask(
-            flat_global_sparse_mask, block_m, block_n
+            flat_block_sparse_mask, block_m, block_n
         )
         attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
-
-        q_ranges, k_ranges = generate_gqa_ranges_from_3d_mask(
-            mask_3d=block_mask,
-            block_m=block_m,
-            block_n=block_n,
-            num_q_heads=orig_head,  # 您的代码中使用 nheads
-            num_k_heads=orig_head,  # 您的代码中Q/K头数量相同
-            seq_len=orig_seq_len_q,
-        )
 
         def fn():
             return ffa_func(
