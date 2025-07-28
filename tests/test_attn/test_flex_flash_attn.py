@@ -13,8 +13,9 @@
 # limitations under the License.
 
 
+import random
 import unittest
-from typing import Any
+from typing import Any, List, Tuple
 from unittest import TestCase
 
 import torch
@@ -51,445 +52,119 @@ class TestFlexFlashAttn(TestCase):
     def setUp(self):
         torch.manual_seed(self.seed)
 
-    @parameterize(
-        "attn_mask_config",
-        [
-            {
-                "name": "full_4k",
-                "seqlen": 4096,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 4096],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 4096],
-                    ]
-                ),
-                "attn_type_map": [0],
-            },
-            {
-                "name": "varlen_full_4k",
-                "seqlen": 4096,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                        [2048, 4096],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                        [2048, 4096],
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "block_causal_2k",
-                "seqlen": 2048,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 512],
-                        [0, 1024],
-                        [0, 1280],
-                        [0, 1536],
-                        [0, 1792],
-                        [0, 2048],
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "varlen_block_causal_2k",
-                "seqlen": 2048,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 512],
-                        [0, 1024],
-                        [1024, 1280],
-                        [1024, 1536],
-                        [1024, 1792],
-                        [1024, 2048],
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "sparse_attn_2k",
-                "seqlen": 2048,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 256],
-                        [0, 256],
-                        [256, 512],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],  # [0, 256]
-                        [512, 768],
-                        [1011, 1123],
-                        [0, 512],  # [256, 512]
-                        [777, 888],
-                        [0, 1024],  # [512, 1024]
-                        [1024, 1280],  # [1024, 1280]
-                        [0, 128],  # [1280, 1536],
-                        [555, 556],
-                        [777, 982],
-                        [1024, 1536],
-                        [1689, 1898],
-                        [1024, 1792],  # [1536, 1792],
-                        [1024, 2048],  # [1792, 2048]
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "varlen_block_causal_2k_with_disjoint_ranges",
-                "seqlen": 2048,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [256, 512],
-                        [512, 1024],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 512],
-                        [0, 1024],
-                        [1024, 1280],
-                        [1024, 1536],
-                        [1024, 2048],
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "sparse_attn_2k_with_disjoint_ranges",
-                "seqlen": 2048,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 256],
-                        [0, 256],
-                        [256, 512],
-                        [256, 512],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],  # [0, 256]
-                        [512, 768],
-                        [1011, 1123],
-                        [0, 512],  # [256, 512]
-                        [777, 888],
-                        [1024, 1280],  # [1024, 1280]
-                        [0, 128],  # [1280, 1536],
-                        [555, 556],
-                        [777, 982],
-                        [1024, 1536],
-                        [1689, 1898],
-                        [1024, 1792],  # [1536, 1792],
-                        [1024, 2048],  # [1792, 2048]
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            },
-            {
-                "name": "deterministic_sample",
-                "seqlen": 2500,
-                "q_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(50)] * 50
-                ),
-                "attn_type_map": [0, 1] * 1250,
-            },
-            {
-                "name": "sparse_attn_2k_with_same_k_ranges",
-                "seqlen": 2048,
-                "q_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],
-                        [0, 256],
-                        [0, 256],
-                        [256, 512],
-                        [256, 512],
-                        [1024, 1280],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1280, 1536],
-                        [1536, 1792],
-                        [1792, 2048],
-                    ]
-                ),
-                "k_ranges": AttnRanges.from_ranges(
-                    [
-                        [0, 256],  # [0, 256]
-                        [512, 768],
-                        [1011, 1123],
-                        [0, 256],  # [256, 512]
-                        [777, 888],
-                        [1024, 1536],  # [1024, 1280]
-                        [0, 128],  # [1280, 1536],
-                        [555, 556],
-                        [777, 982],
-                        [1024, 1536],
-                        [1689, 1898],
-                        [1024, 1792],  # [1536, 1792],
-                        [1024, 2048],  # [1792, 2048]
-                    ],
-                ),
-                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            },
-        ],
-    )
-    @parameterize(
-        "model_config",
-        [
-            {
-                "name": "mha_nh8_hd128",
-                "num_heads_q": 8,
-                "num_heads_kv": 8,
-                "head_dim": 128,
-            },
-            {
-                "name": "gqa_nhq16_nhkv4_hd128",
-                "num_heads_q": 16,
-                "num_heads_kv": 4,
-                "head_dim": 128,
-            },
-            {
-                "name": "mha_nh1_hd64",
-                "num_heads_q": 1,
-                "num_heads_kv": 1,
-                "head_dim": 64,
-            },
-            {
-                "name": "gqa_nhq4_nhkv2_hd64",
-                "num_heads_q": 4,
-                "num_heads_kv": 2,
-                "head_dim": 64,
-            },
-        ],
-    )
-    @parameterize("dtype", [torch.float16, torch.bfloat16])
-    @parameterize("random_attn_type_map", [False, True])
-    @parameterize("auto_range_merge", [False])
-    @parameterize("deterministic", [False, True])
-    @parameterize("test_accumulation_inplace", [False, True])
-    def test_flex_attn(
+    def generate_non_overlapping_qk_pairs(
         self,
-        attn_mask_config: dict[str, Any],
-        model_config: dict[str, Any],
-        dtype: torch.dtype,
-        random_attn_type_map: bool,
-        auto_range_merge: bool,
-        deterministic: bool,
-        test_accumulation_inplace: bool,
-    ):
-        # FIXME: fix sparse attn with random attn type map
-        if "sparse_attn" in attn_mask_config["name"] and random_attn_type_map:
-            return
+        total_seqlen_q: int,
+        total_seqlen_k: int,
+        num_pairs: int,
+        min_len_q: int = 16,
+        max_len_q: int = 128,
+        min_len_k: int = 16,
+        max_len_k: int = 128,
+        max_consecutive_failures: int = 500,
+    ) -> Tuple[List[List[int]], List[List[int]]]:
+        """
+        Generates non-overlapping q_ranges and k_ranges on a potentially non-square attention area.
 
-        # extract config
-        seqlen = attn_mask_config["seqlen"]
-        q_ranges: AttnRanges = attn_mask_config["q_ranges"]
-        k_ranges: AttnRanges = attn_mask_config["k_ranges"]
-        attn_type_map: list[int] = attn_mask_config["attn_type_map"]
-        assert len(q_ranges) == len(k_ranges) == len(attn_type_map), (
-            "q_ranges, k_ranges and attn_type_map should have the same length"
-            f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
-        )
+        The function attempts to generate a specified number of attention pairs, defined by `num_pairs`.
+        It has two termination conditions:
+        1. Success: When the number of generated pairs reaches `num_pairs`.
+        2. Saturation: When it fails to find a new, non-overlapping (q,k) pair for a number of
+        consecutive attempts (controlled by `max_consecutive_failures`), it terminates even if
+        `num_pairs` has not been reached.
 
-        if random_attn_type_map:
-            # we now support attn type idx in {0, 1, 2, 3}
-            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+        Core Constraint (No Area Overlap):
+        Imagine each (q_range, k_range) pair as a rectangle on a 2D plane. This function ensures
+        that no two such generated rectangles have overlapping areas.
 
-        # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
-        # ffa bwd kernel encounters with some precision issue with dq/dk,
-        # thus we skip here and will fix it asap
-        if is_list_value_any(attn_type_map, 3):
-            return
+        Args:
+            total_seqlen_q (int): The total sequence length of the Query vector.
+            total_seqlen_k (int): The total sequence length of the Key vector.
+            num_pairs (int): The target number of (q_range, k_range) pairs to generate.
+            min_len_q (int): The minimum length for a q_range.
+            max_len_q (int): The maximum length for a q_range.
+            min_len_k (int): The minimum length for a k_range.
+            max_len_k (int): The maximum length for a k_range.
+            max_consecutive_failures (int):
+                The upper limit for consecutive failed attempts, used to determine if the space is saturated.
 
-        num_heads_q = model_config["num_heads_q"]
-        num_heads_kv = model_config["num_heads_kv"]
-        head_dim = model_config["head_dim"]
-        test_case = (
-            f"[{attn_mask_config['name']}]"
-            f"[{model_config['name']}]"
-            f"[dtype={dtype}]"
-            f"[random_attn_type_map={random_attn_type_map}]"
-            f"[auto_range_merge={auto_range_merge}]"
-            f"[deterministic={deterministic}]"
-        )
+        Returns:
+            Tuple[List[List[int]], List[List[int]]]:
+            A tuple containing two lists: q_ranges and k_ranges.
+        """
+        q_ranges: list = []
+        k_ranges: list = []
 
-        # construct data
-        q = torch.randn(
-            (seqlen, num_heads_q, head_dim),
-            dtype=dtype,
-            device=self.device,
-            requires_grad=True,
-        )
-        k = torch.randn(
-            (seqlen, num_heads_kv, head_dim),
-            dtype=dtype,
-            device=self.device,
-            requires_grad=True,
-        )
-        v = torch.randn(
-            (seqlen, num_heads_kv, head_dim),
-            dtype=dtype,
-            device=self.device,
-            requires_grad=True,
-        )
-        do = torch.randn_like(q)
+        consecutive_failures = 0
 
-        # construct meta args
-        max_seqlen_q = q_ranges.max_seqlen
-        max_seqlen_k = k_ranges.max_seqlen
-        q_ranges_tensor = q_ranges.to_tensor(device=self.device)
-        k_ranges_tensor = k_ranges.to_tensor(device=self.device)
-        attn_type_map_tensor = torch.tensor(
-            attn_type_map, dtype=torch.int32, device=self.device
-        )
+        def _create_one_random_q_range() -> List[int]:
+            """Generates a random range [start, end] for the Query axis."""
+            effective_max = min(max_len_q, total_seqlen_q)
+            if min_len_q > effective_max:
+                raise ValueError(
+                    f"min_len_q ({min_len_q}) cannot be greater than its effective max ({effective_max})"
+                )
 
-        if test_accumulation_inplace:
-            # If test_accumulation_inplace is True, we will test the accumulation and return
-            self.check_flex_flash_attn_forward_accumulation(
-                q=q,
-                k=k,
-                v=v,
-                do=do,
-                q_ranges_tensor=q_ranges_tensor,
-                k_ranges_tensor=k_ranges_tensor,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                attn_type_map_tensor=attn_type_map_tensor,
-                auto_range_merge=auto_range_merge,
-                test_case=test_case,
+            length = random.randint(min_len_q, effective_max)
+            start = random.randint(0, total_seqlen_q - length)
+            return [start, start + length]
+
+        def _create_one_random_k_range() -> List[int]:
+            """Generates a random range [start, end] for the Key axis."""
+            effective_max = min(max_len_k, total_seqlen_k)
+            if min_len_k > effective_max:
+                raise ValueError(
+                    f"min_len_k ({min_len_k}) cannot be greater than its effective max ({effective_max})"
+                )
+
+            length = random.randint(min_len_k, effective_max)
+            start = random.randint(0, total_seqlen_k - length)
+            return [start, start + length]
+
+        # Main loop, continues until one of the termination conditions is met:
+        # the target number of pairs is reached, or the consecutive failure threshold is exceeded.
+        while (
+            len(q_ranges) < num_pairs
+            and consecutive_failures < max_consecutive_failures
+        ):
+            candidate_q_range = _create_one_random_q_range()
+            candidate_k_range = _create_one_random_k_range()
+
+            is_valid_placement = True
+
+            for i in range(len(q_ranges)):
+                q_axis_overlaps = (
+                    candidate_q_range[0] < q_ranges[i][1]
+                    and candidate_q_range[1] > q_ranges[i][0]
+                )
+                k_axis_overlaps = (
+                    candidate_k_range[0] < k_ranges[i][1]
+                    and candidate_k_range[1] > k_ranges[i][0]
+                )
+
+                if q_axis_overlaps and k_axis_overlaps:
+                    is_valid_placement = False
+                    break
+
+            if is_valid_placement:
+                q_ranges.append(candidate_q_range)
+                k_ranges.append(candidate_k_range)
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+
+        # Provide an informative printout at the end of the function.
+        if len(q_ranges) == num_pairs:
+            print(
+                f"Successfully reached the target, generating {num_pairs} non-overlapping qk-ranges."
             )
-            return
-
-        # run ffa forward
-        o, lse = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            q_ranges_tensor,
-            k_ranges_tensor,
-            max_seqlen_q,
-            max_seqlen_k,
-            attn_type_map_tensor,
-            auto_range_merge=auto_range_merge,
-            deterministic=deterministic,
-        )
-        o.backward(do)
-
-        if deterministic:
-            # If deterministic is True, check deterministic behavior and return
-            self.check_deterministic(
-                q=q,
-                k=k,
-                v=v,
-                do=do,
-                q_ranges_tensor=q_ranges_tensor,
-                k_ranges_tensor=k_ranges_tensor,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                attn_type_map_tensor=attn_type_map_tensor,
-                auto_range_merge=auto_range_merge,
-                test_case=test_case,
-                o_ref=o,
-                dq_ref=q.grad,
-                dk_ref=k.grad,
-                dv_ref=v.grad,
+        else:
+            print(
+                f"Terminated after {max_consecutive_failures} consecutive failures. "
+                f"Target was {num_pairs} pairs, actually generated {len(q_ranges)} pairs."
             )
-            return
 
-        # compare with reference
-        self.assert_close_to_torch_ref(
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            attn_type_map=attn_type_map,
-            total_seqlen_q=seqlen,
-            total_seqlen_k=seqlen,
-            total_q=q,
-            total_k=k,
-            total_v=v,
-            total_out=o,
-            grad_total_q=q.grad,
-            grad_total_k=k.grad,
-            grad_total_v=v.grad,
-            grad_total_out=do,
-            dtype=dtype,
-            test_case=test_case,
-        )
+        return q_ranges, k_ranges
 
     def check_deterministic(
         self,
@@ -993,6 +668,710 @@ class TestFlexFlashAttn(TestCase):
 
         if err_msg_list:
             raise AssertionError("\n\n".join(err_msg_list))
+
+    @parameterize(
+        "attn_mask_config",
+        [
+            {
+                "name": "full_4k",
+                "seqlen": 4096,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 4096],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 4096],
+                    ]
+                ),
+                "attn_type_map": [0],
+            },
+            {
+                "name": "varlen_full_4k",
+                "seqlen": 4096,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [256, 512],
+                        [512, 1024],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1536, 1792],
+                        [1792, 2048],
+                        [2048, 4096],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [256, 512],
+                        [512, 1024],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1536, 1792],
+                        [1792, 2048],
+                        [2048, 4096],
+                    ],
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0],
+            },
+            {
+                "name": "block_causal_2k",
+                "seqlen": 2048,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [256, 512],
+                        [512, 1024],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1536, 1792],
+                        [1792, 2048],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [0, 512],
+                        [0, 1024],
+                        [0, 1280],
+                        [0, 1536],
+                        [0, 1792],
+                        [0, 2048],
+                    ],
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0, 0],
+            },
+            {
+                "name": "varlen_block_causal_2k",
+                "seqlen": 2048,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [256, 512],
+                        [512, 1024],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1536, 1792],
+                        [1792, 2048],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [0, 512],
+                        [0, 1024],
+                        [1024, 1280],
+                        [1024, 1536],
+                        [1024, 1792],
+                        [1024, 2048],
+                    ],
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0, 0],
+            },
+            {
+                "name": "sparse_attn_2k",
+                "seqlen": 2048,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [0, 256],
+                        [0, 256],
+                        [256, 512],
+                        [256, 512],
+                        [512, 1024],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1536, 1792],
+                        [1792, 2048],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],  # [0, 256]
+                        [512, 768],
+                        [1011, 1123],
+                        [0, 512],  # [256, 512]
+                        [777, 888],
+                        [0, 1024],  # [512, 1024]
+                        [1024, 1280],  # [1024, 1280]
+                        [0, 128],  # [1280, 1536],
+                        [555, 556],
+                        [777, 982],
+                        [1024, 1536],
+                        [1689, 1898],
+                        [1024, 1792],  # [1536, 1792],
+                        [1024, 2048],  # [1792, 2048]
+                    ],
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            },
+            {
+                "name": "varlen_block_causal_2k_with_disjoint_ranges",
+                "seqlen": 2048,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [256, 512],
+                        [512, 1024],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1792, 2048],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [0, 512],
+                        [0, 1024],
+                        [1024, 1280],
+                        [1024, 1536],
+                        [1024, 2048],
+                    ],
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0],
+            },
+            {
+                "name": "sparse_attn_2k_with_disjoint_ranges",
+                "seqlen": 2048,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [0, 256],
+                        [0, 256],
+                        [256, 512],
+                        [256, 512],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1536, 1792],
+                        [1792, 2048],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],  # [0, 256]
+                        [512, 768],
+                        [1011, 1123],
+                        [0, 512],  # [256, 512]
+                        [777, 888],
+                        [1024, 1280],  # [1024, 1280]
+                        [0, 128],  # [1280, 1536],
+                        [555, 556],
+                        [777, 982],
+                        [1024, 1536],
+                        [1689, 1898],
+                        [1024, 1792],  # [1536, 1792],
+                        [1024, 2048],  # [1792, 2048]
+                    ],
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            },
+            {
+                "name": "deterministic_sample",
+                "seqlen": 2500,
+                "q_ranges": AttnRanges.from_ranges(
+                    [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [[i * 50, (i + 1) * 50] for i in range(50)] * 50
+                ),
+                "attn_type_map": [0, 1] * 1250,
+            },
+            {
+                "name": "sparse_attn_2k_with_same_k_ranges",
+                "seqlen": 2048,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [0, 256],
+                        [0, 256],
+                        [256, 512],
+                        [256, 512],
+                        [1024, 1280],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1280, 1536],
+                        [1536, 1792],
+                        [1792, 2048],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],  # [0, 256]
+                        [512, 768],
+                        [1011, 1123],
+                        [0, 256],  # [256, 512]
+                        [777, 888],
+                        [1024, 1536],  # [1024, 1280]
+                        [0, 128],  # [1280, 1536],
+                        [555, 556],
+                        [777, 982],
+                        [1024, 1536],
+                        [1689, 1898],
+                        [1024, 1792],  # [1536, 1792],
+                        [1024, 2048],  # [1792, 2048]
+                    ],
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            },
+        ],
+    )
+    @parameterize(
+        "model_config",
+        [
+            {
+                "name": "mha_nh8_hd128",
+                "num_heads_q": 8,
+                "num_heads_kv": 8,
+                "head_dim": 128,
+            },
+            {
+                "name": "gqa_nhq16_nhkv4_hd128",
+                "num_heads_q": 16,
+                "num_heads_kv": 4,
+                "head_dim": 128,
+            },
+            {
+                "name": "mha_nh1_hd64",
+                "num_heads_q": 1,
+                "num_heads_kv": 1,
+                "head_dim": 64,
+            },
+            {
+                "name": "gqa_nhq4_nhkv2_hd64",
+                "num_heads_q": 4,
+                "num_heads_kv": 2,
+                "head_dim": 64,
+            },
+        ],
+    )
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize("random_attn_type_map", [False, True])
+    @parameterize("auto_range_merge", [False])
+    @parameterize("deterministic", [False, True])
+    @parameterize("test_accumulation_inplace", [False, True])
+    def test_flex_attn(
+        self,
+        attn_mask_config: dict[str, Any],
+        model_config: dict[str, Any],
+        dtype: torch.dtype,
+        random_attn_type_map: bool,
+        auto_range_merge: bool,
+        deterministic: bool,
+        test_accumulation_inplace: bool,
+    ):
+        # FIXME: fix sparse attn with random attn type map
+        if "sparse_attn" in attn_mask_config["name"] and random_attn_type_map:
+            return
+
+        # extract config
+        seqlen = attn_mask_config["seqlen"]
+        q_ranges: AttnRanges = attn_mask_config["q_ranges"]
+        k_ranges: AttnRanges = attn_mask_config["k_ranges"]
+        attn_type_map: list[int] = attn_mask_config["attn_type_map"]
+        assert len(q_ranges) == len(k_ranges) == len(attn_type_map), (
+            "q_ranges, k_ranges and attn_type_map should have the same length"
+            f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
+        )
+
+        if random_attn_type_map:
+            # we now support attn type idx in {0, 1, 2, 3}
+            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+
+        # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
+        # ffa bwd kernel encounters with some precision issue with dq/dk,
+        # thus we skip here and will fix it asap
+        if is_list_value_any(attn_type_map, 3):
+            return
+
+        num_heads_q = model_config["num_heads_q"]
+        num_heads_kv = model_config["num_heads_kv"]
+        head_dim = model_config["head_dim"]
+        test_case = (
+            f"[{attn_mask_config['name']}]"
+            f"[{model_config['name']}]"
+            f"[dtype={dtype}]"
+            f"[random_attn_type_map={random_attn_type_map}]"
+            f"[auto_range_merge={auto_range_merge}]"
+            f"[deterministic={deterministic}]"
+            f"[test_accumulation_inplace={test_accumulation_inplace}"
+        )
+
+        # construct data
+        q = torch.randn(
+            (seqlen, num_heads_q, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            (seqlen, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            (seqlen, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        do = torch.randn_like(q)
+
+        # construct meta args
+        max_seqlen_q = q_ranges.max_seqlen
+        max_seqlen_k = k_ranges.max_seqlen
+        q_ranges_tensor = q_ranges.to_tensor(device=self.device)
+        k_ranges_tensor = k_ranges.to_tensor(device=self.device)
+        attn_type_map_tensor = torch.tensor(
+            attn_type_map, dtype=torch.int32, device=self.device
+        )
+
+        if test_accumulation_inplace:
+            # If test_accumulation_inplace is True, we will test the accumulation and return
+            self.check_flex_flash_attn_forward_accumulation(
+                q=q,
+                k=k,
+                v=v,
+                do=do,
+                q_ranges_tensor=q_ranges_tensor,
+                k_ranges_tensor=k_ranges_tensor,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                attn_type_map_tensor=attn_type_map_tensor,
+                auto_range_merge=auto_range_merge,
+                test_case=test_case,
+            )
+            return
+
+        # run ffa forward
+        o, lse = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges_tensor,
+            k_ranges_tensor,
+            max_seqlen_q,
+            max_seqlen_k,
+            attn_type_map_tensor,
+            auto_range_merge=auto_range_merge,
+            deterministic=deterministic,
+        )
+        o.backward(do)
+
+        if deterministic:
+            # If deterministic is True, check deterministic behavior and return
+            self.check_deterministic(
+                q=q,
+                k=k,
+                v=v,
+                do=do,
+                q_ranges_tensor=q_ranges_tensor,
+                k_ranges_tensor=k_ranges_tensor,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                attn_type_map_tensor=attn_type_map_tensor,
+                auto_range_merge=auto_range_merge,
+                test_case=test_case,
+                o_ref=o,
+                dq_ref=q.grad,
+                dk_ref=k.grad,
+                dv_ref=v.grad,
+            )
+            return
+
+        # compare with reference
+        self.assert_close_to_torch_ref(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            total_seqlen_q=seqlen,
+            total_seqlen_k=seqlen,
+            total_q=q,
+            total_k=k,
+            total_v=v,
+            total_out=o,
+            grad_total_q=q.grad,
+            grad_total_k=k.grad,
+            grad_total_v=v.grad,
+            grad_total_out=do,
+            dtype=dtype,
+            test_case=test_case,
+        )
+
+    @parameterize(
+        "model_config",
+        [
+            {
+                "name": "mha_nh8_hd128",
+                "num_heads_q": 8,
+                "num_heads_kv": 8,
+                "head_dim": 128,
+            },
+            {
+                "name": "gqa_nhq16_nhkv4_hd128",
+                "num_heads_q": 16,
+                "num_heads_kv": 4,
+                "head_dim": 128,
+            },
+            {
+                "name": "mha_nh1_hd64",
+                "num_heads_q": 1,
+                "num_heads_kv": 1,
+                "head_dim": 64,
+            },
+            {
+                "name": "gqa_nhq4_nhkv2_hd64",
+                "num_heads_q": 4,
+                "num_heads_kv": 2,
+                "head_dim": 64,
+            },
+        ],
+    )
+    @parameterize(
+        "generate_config",
+        [
+            {
+                "name": "dense_test_q_1024_k_1024",
+                "total_seqlen_q": 1024,
+                "total_seqlen_k": 1024,
+                "min_len_q": 16,
+                "max_len_q": 128,
+                "min_len_k": 16,
+                "max_len_k": 128,
+            },
+            {
+                "name": "dense_test_q_4096_k_4096",
+                "total_seqlen_q": 4096,
+                "total_seqlen_k": 4096,
+                "min_len_q": 32,
+                "max_len_q": 512,
+                "min_len_k": 32,
+                "max_len_k": 512,
+            },
+            {
+                "name": "dense_test_q_2048_k_8192",
+                "total_seqlen_q": 2048,
+                "total_seqlen_k": 8192,
+                "min_len_q": 16,
+                "max_len_q": 256,
+                "min_len_k": 64,
+                "max_len_k": 1024,
+            },
+            {
+                "name": "sparse_test_q_8192_k_2048",
+                "total_seqlen_q": 8192,
+                "total_seqlen_k": 2048,
+                "min_len_q": 64,
+                "max_len_q": 1024,
+                "min_len_k": 16,
+                "max_len_k": 256,
+            },
+            {
+                "name": "strange_test_1",
+                "total_seqlen_q": 513,
+                "total_seqlen_k": 123,
+                "min_len_q": 1,
+                "max_len_q": 513,
+                "min_len_k": 1,
+                "max_len_k": 123,
+            },
+            {
+                "name": "strange_test_2",
+                "total_seqlen_q": 1023,
+                "total_seqlen_k": 2077,
+                "min_len_q": 1,
+                "max_len_q": 1023,
+                "min_len_k": 1,
+                "max_len_k": 2077,
+            },
+        ],
+    )
+    @parameterize(
+        "num_pairs", [10, 50, 100, 500, 1000, 5000]
+    )  # the max qk range pairs to generate
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize(
+        "attn_type", [0, 1, 2, 3, 4]
+    )  # 0 - 3 means attn type are all 0/1/2/3, 4 means random attn type.
+    @parameterize("auto_range_merge", [False, True])
+    @parameterize("deterministic", [False, True])
+    @parameterize("test_accumulation_inplace", [False, True])
+    def test_flex_attn_random(
+        self,
+        model_config: dict[str, Any],
+        generate_config: dict[str, Any],
+        num_pairs: int,
+        dtype: torch.dtype,
+        attn_type: int,
+        auto_range_merge: bool,
+        deterministic: bool,
+        test_accumulation_inplace: bool,
+    ):
+        """in this test, we generate q,k range randomly and as complicate as possible"""
+        # extract config
+        total_seqlen_q = generate_config["total_seqlen_q"]
+        total_seqlen_k = generate_config["total_seqlen_k"]
+        min_len_q = generate_config["min_len_q"]
+        min_len_k = generate_config["min_len_k"]
+        max_len_q = generate_config["max_len_q"]
+        max_len_k = generate_config["min_len_k"]
+
+        q_list, k_list = self.generate_non_overlapping_qk_pairs(
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            num_pairs=num_pairs,
+            min_len_q=min_len_q,
+            max_len_q=max_len_q,
+            min_len_k=min_len_k,
+            max_len_k=max_len_k,
+            max_consecutive_failures=2000,
+        )
+        q_ranges: AttnRanges = AttnRanges.from_ranges(q_list)
+        k_ranges: AttnRanges = AttnRanges.from_ranges(k_list)
+
+        attn_type_map = [attn_type] * q_ranges.size
+        if attn_type == 4:
+            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+
+        assert len(q_ranges) == len(k_ranges) == len(attn_type_map), (
+            "q_ranges, k_ranges and attn_type_map should have the same length"
+            f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
+        )
+
+        num_heads_q = model_config["num_heads_q"]
+        num_heads_kv = model_config["num_heads_kv"]
+        head_dim = model_config["head_dim"]
+
+        test_case = (
+            f"[{model_config['name']}]"
+            f"[{generate_config['name']}]"
+            f"[num_pairs={num_pairs}]"
+            f"[dtype={dtype}]"
+            f"[attn_type_map={attn_type_map}]"
+            f"[auto_range_merge={auto_range_merge}]"
+            f"[deterministic={deterministic}]"
+            f"[test_accumulation_inplace={test_accumulation_inplace}"
+        )
+
+        # construct data
+        q = torch.randn(
+            (total_seqlen_q, num_heads_q, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            (total_seqlen_k, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            (total_seqlen_k, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        do = torch.randn_like(q)
+
+        # construct meta args
+        max_seqlen_q = q_ranges.max_seqlen
+        max_seqlen_k = k_ranges.max_seqlen
+        q_ranges_tensor = q_ranges.to_tensor(device=self.device)
+        k_ranges_tensor = k_ranges.to_tensor(device=self.device)
+        attn_type_map_tensor = torch.tensor(
+            attn_type_map, dtype=torch.int32, device=self.device
+        )
+
+        # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
+        # ffa bwd kernel encounters with some precision issue with dq/dk,
+        # thus we skip here and will fix it asap
+        if is_list_value_any(attn_type_map, 3):
+            return
+
+        if test_accumulation_inplace:
+            # If test_accumulation_inplace is True, we will test the accumulation and return
+            self.check_flex_flash_attn_forward_accumulation(
+                q=q,
+                k=k,
+                v=v,
+                do=do,
+                q_ranges_tensor=q_ranges_tensor,
+                k_ranges_tensor=k_ranges_tensor,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                attn_type_map_tensor=attn_type_map_tensor,
+                auto_range_merge=auto_range_merge,
+                test_case=test_case,
+            )
+            return
+
+        # run ffa forward
+        o, lse = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges_tensor,
+            k_ranges_tensor,
+            max_seqlen_q,
+            max_seqlen_k,
+            attn_type_map_tensor,
+            auto_range_merge=auto_range_merge,
+            deterministic=deterministic,
+        )
+        o.backward(do)
+
+        if deterministic:
+            # If deterministic is True, check deterministic behavior and return
+            self.check_deterministic(
+                q=q,
+                k=k,
+                v=v,
+                do=do,
+                q_ranges_tensor=q_ranges_tensor,
+                k_ranges_tensor=k_ranges_tensor,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                attn_type_map_tensor=attn_type_map_tensor,
+                auto_range_merge=auto_range_merge,
+                test_case=test_case,
+                o_ref=o,
+                dq_ref=q.grad,
+                dk_ref=k.grad,
+                dv_ref=v.grad,
+            )
+            return
+
+        # compare with reference
+        self.assert_close_to_torch_ref(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            total_q=q,
+            total_k=k,
+            total_v=v,
+            total_out=o,
+            grad_total_q=q.grad,
+            grad_total_k=k.grad,
+            grad_total_v=v.grad,
+            grad_total_out=do,
+            dtype=dtype,
+            test_case=test_case,
+        )
 
 
 if __name__ == "__main__":
