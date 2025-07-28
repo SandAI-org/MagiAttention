@@ -187,7 +187,7 @@ class DistFlashAttnRuntime:
         # instead of the initial one from overlap config
         self.overlap_degree = comm_meta.overlap_degree
 
-        assert self.overlap_degree >= 1, f"{self.overlap_degree} must be >= 1"
+        assert self.overlap_degree >= 1, f"{self.overlap_degree=} must be >= 1"
 
         # when enabling FFA fwd inplace correct and not using sdpa backend
         # we will use accumulative buffer for forward out and lse
@@ -255,7 +255,7 @@ class DistFlashAttnRuntime:
         deterministic: bool = False,
         out_acc: torch.Tensor | None = None,
         lse_acc: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Compute a part of the attention result
 
@@ -269,10 +269,8 @@ class DistFlashAttnRuntime:
             lse_acc (torch.Tensor, optional): accumulative buffer for lse
 
         Returns:
-            out(torch.Tensor): partial out
-            lse(torch.Tensor): partial log-sum-exp
-            skip_attn(bool): Whether to skip attention computation,
-                NOTE: if True, the out and lse will be random initialized
+            out(torch.Tensor | None): partial out, or None if skipped
+            lse(torch.Tensor | None): partial log-sum-exp, or None if skipped
         Shape:
             - q: [num_tokens_q, num_heads, head_dim]
             - kv: [num_tokens_kv, num_heads, head_dim]
@@ -284,24 +282,9 @@ class DistFlashAttnRuntime:
         else:
             attn_arg = self.calc_meta.remote_attn_args_list[overlap_stage]
 
-        skip_attn = attn_arg.can_skip(is_bwd=False)
-
         # Calculate attention
-        if skip_attn:
-            if self.fwd_use_acc:
-                return out_acc, lse_acc, skip_attn
-
-            out = torch.empty_like(q)
-            num_tokens_q, num_heads, _ = q.shape
-
-            lse = to_higher_fp_dtype(
-                torch.empty(
-                    [num_heads, num_tokens_q],
-                    dtype=torch.float32,
-                    device=q.device,
-                ),
-                q.dtype,
-            )
+        if attn_arg.can_skip(is_bwd=False):
+            out, lse = (out_acc, lse_acc) if self.fwd_use_acc else (None, None)
         else:
             k, v = self.chunk_kv(kv)
             if magi_attention.is_sdpa_backend_enable():
@@ -334,13 +317,13 @@ class DistFlashAttnRuntime:
                         # to reduce the error caused by the out correction
                         out_type=max_fp_dtype(q.dtype, torch.float32),
                         # NOTE: when using accumulative buffer, we need to always enable atomic reduction
-                        # unless it is the first call when accumulative buffer is None
+                        # unless it is the first call when accumulative buffer is still None
                         disable_fwd_atomic_reduction=(
                             attn_arg.disable_fwd_atomic_reduction and out_acc is None
                         ),
                     )
 
-        return out, lse, skip_attn
+        return out, lse
 
     @nvtx.instrument_nvtx
     def attn_bwd_partial(
@@ -523,14 +506,14 @@ class DistFlashAttnFunc(torch.autograd.Function):
 
         # do attn fwd with local kv
         # overlapped with 0th remote kv comm
-        out, lse, skip_attn = dist_attn_runtime.attn_fwd_partial(
+        out, lse = dist_attn_runtime.attn_fwd_partial(
             q=local_q,
             kv=local_kv,
             overlap_stage=None,
             deterministic=dist_attn_runtime.deterministic,
         )
 
-        if not dist_attn_runtime.fwd_use_acc and not skip_attn:
+        if not dist_attn_runtime.fwd_use_acc and out is not None:
             out_list.append(out)
             lse_list.append(lse)
 
@@ -556,7 +539,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
 
             # do attn fwd with ith remote kv
             # overlapped with (i+1)th remote kv comm
-            out, lse, skip_attn = dist_attn_runtime.attn_fwd_partial(
+            out, lse = dist_attn_runtime.attn_fwd_partial(
                 q=local_q,
                 kv=curr_remote_kv,
                 overlap_stage=ith_overlap_stage,
@@ -565,7 +548,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 lse_acc=lse if dist_attn_runtime.fwd_use_acc else None,
             )
 
-            if not dist_attn_runtime.fwd_use_acc and not skip_attn:
+            if not dist_attn_runtime.fwd_use_acc and out is not None:
                 out_list.append(out)
                 lse_list.append(lse)
 
