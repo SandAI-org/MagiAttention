@@ -427,8 +427,46 @@ def generate_global_block_sparse_pattern(
     return block_sparse_mask
 
 
+def generate_headwise_4D_block_sparse_pattern(
+    h, num_q_blocks, num_kv_blocks, sparsity, device="cuda"
+):
+    """
+    Generates a head-wise block sparse pattern. Each head gets its own random mask.
+
+    Args:
+        h (int): Number of attention heads.
+        num_q_blocks (int): Number of query blocks per head.
+        num_kv_blocks (int): Number of key-value blocks per head.
+        k (int): Number of key-value blocks each query block attends to.
+        device (str): The device to create tensors on.
+
+    Returns:
+        torch.Tensor: A boolean tensor mask of shape [b, h, num_q_blocks, num_kv_blocks] where b = 1.
+    """
+    k = max(1, int((sparsity) * num_kv_blocks))
+    k = min(k, num_kv_blocks)
+
+    # Create random scores for each query block for each head
+    scores = torch.rand(h, num_q_blocks, num_kv_blocks, device=device)
+
+    # Get the indices of the top-k scoring key-value blocks for each query block per head per batch
+    _, topk_indices = torch.topk(scores, k, dim=-1)
+
+    # Create a boolean mask initialized to all False
+    block_sparse_mask = torch.zeros(
+        h, num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device
+    )
+
+    # Use scatter_ to efficiently set the corresponding positions to True based on indices
+    block_sparse_mask.scatter_(2, topk_indices, True)
+
+    block_sparse_mask = block_sparse_mask.unsqueeze(0)
+
+    return block_sparse_mask
+
+
 def generate_headwise_block_sparse_pattern(
-    h, num_q_blocks, num_kv_blocks, k, device="cuda"
+    h, num_q_blocks, num_kv_blocks, sparsity, device="cuda"
 ):
     """
     Generates a head-wise block sparse pattern. Each head gets its own random mask.
@@ -443,6 +481,7 @@ def generate_headwise_block_sparse_pattern(
     Returns:
         torch.Tensor: A boolean tensor mask of shape [h, num_q_blocks, num_kv_blocks].
     """
+    k = max(1, int((sparsity) * num_kv_blocks))
     k = min(k, num_kv_blocks)
 
     # Create random scores for each query block for each head
@@ -462,7 +501,7 @@ def generate_headwise_block_sparse_pattern(
     return block_sparse_mask
 
 
-def flatten_head_mask(mask_3d: torch.Tensor) -> torch.Tensor:
+def flatten_head_mask(mask_4d: torch.Tensor) -> torch.Tensor:
     """
     Flattens a head-wise 3D block mask into a single 2D block mask.
     This creates a block-diagonal mask for the flattened Q, K, V tensors.
@@ -473,12 +512,12 @@ def flatten_head_mask(mask_3d: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: The output 2D mask of shape [h * num_q_blocks, h * num_k_blocks].
     """
-    h, num_q, num_k = mask_3d.shape
+    b, h, num_q, num_k = mask_4d.shape
     num_q_flat = h * num_q
     num_k_flat = h * num_k
 
     # Find the coordinates of all True elements in the 3D mask (h_idx, q_idx, k_idx)
-    h_indices, q_indices, k_indices = torch.nonzero(mask_3d, as_tuple=True)
+    b_indices, h_indices, q_indices, k_indices = torch.nonzero(mask_4d, as_tuple=True)
 
     # Map the 3D coordinates to the flattened 2D coordinates
     # q_flat_idx = q_idx + h_idx * num_q
@@ -488,7 +527,7 @@ def flatten_head_mask(mask_3d: torch.Tensor) -> torch.Tensor:
 
     # Create an empty 2D mask and populate it
     mask_flat = torch.zeros(
-        num_q_flat, num_k_flat, dtype=torch.bool, device=mask_3d.device
+        num_q_flat, num_k_flat, dtype=torch.bool, device=mask_4d.device
     )
     mask_flat[q_indices_flat, k_indices_flat] = True
 
@@ -627,7 +666,7 @@ def get_sdpa_mask_from_block_sparse_mask(
     Returns:
         torch.Tensor: An SDPA-compatible mask of shape [B, H, S_q, S_k].
     """
-    num_heads = block_mask.shape[0]
+    num_heads = block_mask.shape[1]
     device = block_mask.device
 
     # 1. Create a large 4D mask of the target shape, filled with False.
@@ -637,7 +676,7 @@ def get_sdpa_mask_from_block_sparse_mask(
     )
 
     # 2. Efficiently find the coordinates (h, q_block, k_block) of all blocks to be activated.
-    h_indices, qb_indices, kb_indices = torch.nonzero(block_mask, as_tuple=True)
+    _, h_indices, qb_indices, kb_indices = torch.nonzero(block_mask, as_tuple=True)
 
     # 3. Iterate through all activated blocks.
     for h, qb, kb in zip(h_indices, qb_indices, kb_indices):
