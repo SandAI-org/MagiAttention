@@ -374,7 +374,6 @@ def run_magi_attn(
                 random_seed=42,
             ),
         ),
-        high_bandwith_domain_size=1,
     )
 
     cp_mesh = init_hierarchical_mesh(world_size)
@@ -393,8 +392,9 @@ def run_magi_attn(
         total_seqlen_k=total_seqlen,
         pad_size=pad_size,
         chunk_size=chunk_size,
-        cp_group=cp_group,
-        cp_mesh=cp_mesh,
+        cp_group_or_mesh=cp_mesh
+        if magi_attention.comm.is_hierarchical_comm_enable()
+        else cp_group,
         dist_attn_config=dist_attn_config,
     )
 

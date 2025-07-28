@@ -273,7 +273,7 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
       total_seqlen_k=total_seqlen_k,
       pad_size=pad_size,
       chunk_size=chunk_size,
-      cp_group=world_group, # assuming we only have 1-dim context parallelism (cp)
+      cp_group_or_mesh=world_group, # assuming we only have 1-dim context parallelism (cp)
   )
 
   # --- Simulate QKV projection --- #

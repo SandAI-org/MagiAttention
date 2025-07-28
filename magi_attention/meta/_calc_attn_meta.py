@@ -28,7 +28,6 @@ def calc_attn_meta_from_dispatch_meta(
     dispatch_meta_k: DispatchMeta,
     bucket_per_rank: list[AttnBucket],
     cp_group: dist.ProcessGroup,
-    high_bandwith_domain_size: int,
     overlap_config: OverlapConfig,
     cp_mesh: DeviceMesh | None = None,
 ) -> tuple[CommMeta, AttnCalcMeta, DistAttnSolver]:
@@ -39,7 +38,6 @@ def calc_attn_meta_from_dispatch_meta(
         dispatch_meta_k (DispatchMeta): The dispatch meta for key
         bucket_per_rank (list[AttnBucket]): The bucket per rank
         cp_group (dist.ProcessGroup): The NCCL process group
-        high_bandwith_domain_size (int): The high bandwith domain size
         overlap_config (OverlapConfig): The overlap config, including the overlap mode, overlap degree, overlap chunk size, etc
 
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
@@ -53,7 +51,6 @@ def calc_attn_meta_from_dispatch_meta(
         dispatch_meta_q=dispatch_meta_q,
         dispatch_meta_k=dispatch_meta_k,
         cp_group=cp_group,
-        high_bandwith_domain_size=high_bandwith_domain_size,
         overlap_config=overlap_config,
         cp_mesh=cp_mesh,
     )

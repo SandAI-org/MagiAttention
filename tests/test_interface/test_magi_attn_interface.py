@@ -427,10 +427,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
         "dtype",
         [DTYPE],
     )
-    @parameterize(
-        "high_bandwith_domain_size",
-        [1],  # TODO: this feature'll probably be deprecated soon
-    )
     def test_interface_sdpa(
         self,
         attn_config: dict[str, Any],
@@ -438,7 +434,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
         num_heads: int,
         head_dim: int,
         dtype: torch.dtype,
-        high_bandwith_domain_size: int,
     ):
         # -----    skip for world size   ---- #
 
@@ -447,20 +442,8 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             and self.world_size in attn_config[SKIP_WORLD_SIZE]
         ):
             return
-        if (
-            self.world_size % high_bandwith_domain_size != 0
-            or high_bandwith_domain_size > self.world_size
-        ):
-            # skip for invalid high_bandwith_domain_size
-            return
 
         assert magi_attention.is_sanity_check_enable()
-
-        # -----    skip for hier comm   ---- #
-
-        if magi_attention.comm.is_hierarchical_comm_enable():
-            if high_bandwith_domain_size > 1:
-                return
 
         # -----    construct test case name   ---- #
 
@@ -469,7 +452,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
         ), f"{attn_config=} | \n\n{overlap_config=}"
 
         test_case = (
-            f"world_size=[{self.world_size}] x high_bandwith_domain_size=[{high_bandwith_domain_size}] x "
+            f"world_size=[{self.world_size}] x "
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})]"
         )
@@ -491,7 +474,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             overlap_config=OverlapConfig(
                 **{k: v for k, v in overlap_config.items() if k not in (NAME,)}
             ),
-            high_bandwith_domain_size=high_bandwith_domain_size,
             deterministic=False,
         )
 
@@ -546,10 +528,9 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 cu_seqlens_k,
                 pad_size=pad_size,
                 chunk_size=chunk_size,
-                cp_group=None
+                cp_group_or_mesh=self.device_mesh
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
-                cp_mesh=self.device_mesh,
                 causal=is_causal,
                 dist_attn_config=dist_attn_config,
             )
@@ -570,10 +551,9 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 cu_seqlens_k,
                 pad_size=pad_size,
                 chunk_size=chunk_size,
-                cp_group=None
+                cp_group_or_mesh=self.device_mesh
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
-                cp_mesh=self.device_mesh,
                 causal=is_causal,
                 dist_attn_config=dist_attn_config,
             )
@@ -591,15 +571,28 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 total_seqlen_k=total_seqlen_k,
                 pad_size=pad_size,
                 chunk_size=chunk_size,
-                cp_group=None
+                cp_group_or_mesh=self.device_mesh
                 if magi_attention.comm.is_hierarchical_comm_enable()
                 else self.nccl_group,
-                cp_mesh=self.device_mesh,
                 dist_attn_config=dist_attn_config,
             )
 
         if interface == "set_mesh_and_group":
             if magi_attention.comm.is_hierarchical_comm_enable():
+                with pytest.raises(AssertionError):
+                    _, dist_attn_runtime_key = magi_attn_flex_dispatch(
+                        x,
+                        q_ranges=q_ranges,
+                        k_ranges=k_ranges,
+                        attn_mask_type=attn_mask_type,
+                        total_seqlen_q=total_seqlen_q,
+                        total_seqlen_k=total_seqlen_k,
+                        pad_size=pad_size,
+                        chunk_size=chunk_size,
+                        cp_group_or_mesh=self.nccl_group,
+                        dist_attn_config=dist_attn_config,
+                    )
+            else:
                 with pytest.raises(ValueError):
                     _, dist_attn_runtime_key = magi_attn_flex_dispatch(
                         x,
@@ -610,8 +603,7 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                         total_seqlen_k=total_seqlen_k,
                         pad_size=pad_size,
                         chunk_size=chunk_size,
-                        cp_group=self.nccl_group,
-                        cp_mesh=self.device_mesh,
+                        cp_group_or_mesh=self.device_mesh,
                         dist_attn_config=dist_attn_config,
                     )
             return
@@ -628,10 +620,9 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                     total_seqlen_k=total_seqlen_k,
                     pad_size=pad_size,
                     chunk_size=chunk_size,
-                    cp_group=None
+                    cp_group_or_mesh=self.device_mesh
                     if magi_attention.comm.is_hierarchical_comm_enable()
                     else self.nccl_group,
-                    cp_mesh=self.device_mesh,
                     dist_attn_config=dist_attn_config,
                 )
             return

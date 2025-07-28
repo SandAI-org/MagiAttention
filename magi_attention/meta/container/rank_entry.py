@@ -33,15 +33,11 @@ class HostRankEntry:
             including all slices from both host_stage and remote_stage
         attn_calc_host_slice_local_list: slices that need to be calculated in the host_stage
 
-        remote_k_ranges_global_hb_domain: global k ranges for the high-bandwidth domain, merged
-        attn_calc_remote_slice_list_hb_domain: contains all slices in the remote_stage located in the high-bandwidth domain
-
-        remote_k_ranges_global_lb_domain: global k ranges for the low-bandwidth domain, merged
-        remote_k_ranges_global_per_chunk: global k ranges for each chunk in the low-bandwidth domain,
+        remote_k_ranges_global: global remote k ranges for this rank, merged
+        remote_k_ranges_global_per_chunk: global remote k ranges for each chunk,
             these are the k ranges needed by the attn slices in this chunk.
             the remote_k_ranges_global for each chunk is merged
-        attn_calc_remote_slice_list_per_chunk: contains slices that need to be calculated
-            for each chunk in the low-bandwidth domain
+        attn_calc_remote_slice_list_per_chunk: contains slices that need to be calculated for each chunk
     """
 
     host_q_ranges_global: AttnRanges
@@ -49,15 +45,9 @@ class HostRankEntry:
     attn_calc_slice_global_list: list[AttnSlice]
     attn_calc_host_slice_local_list: list[AttnSlice]
 
-    # NOTE: Each element in this list is a MultiKAttnSlice, which contains
-    # one q_range_global and multiple k_ranges_global, where all k_ranges_global
-    # are located in the high-bandwidth domain
-    remote_k_ranges_global_hb_domain: AttnRanges
-    attn_calc_remote_slice_list_hb_domain: list[MultiKAttnSlice]
-
-    remote_k_ranges_global_lb_domain: AttnRanges
-    # NOTE: We only chunknize remote k_ranges located in the low-bandwidth domain,
-    # so attn_calc_remote_slice_list_per_chunk only contains remote k_ranges in the low-bandwidth domain
+    remote_k_ranges_global: AttnRanges
+    # NOTE: We only chunknize remote k_ranges,
+    # so attn_calc_remote_slice_list_per_chunk only contains remote k_ranges
     remote_k_ranges_global_per_chunk: list[AttnRanges]
     # NOTE: this is a special attr to support multi-stage overlap
     # each multik_slice of which contains a q_range_local and a k_ranges_global
