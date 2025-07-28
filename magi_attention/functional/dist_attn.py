@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from logging import getLogger
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -105,7 +105,6 @@ def correct_attn_output(
     return o.to(o1.dtype)
 
 
-# TODO: consolidate this process to ffa fwd kernel
 @nvtx.instrument_nvtx
 def result_correction(
     out_list: list[torch.Tensor],
@@ -190,6 +189,14 @@ class DistFlashAttnRuntime:
 
         assert self.overlap_degree >= 1, f"{self.overlap_degree} must be >= 1"
 
+        # when enabling FFA fwd inplace correct and not using sdpa backend
+        # we will use accumulative buffer for forward out and lse
+        # to avoid the storage of partial results and the memory-bound `result_correction`
+        self.fwd_use_acc = (
+            magi_attention.functional.is_ffa_fwd_inplace_correct_enable()
+            and not magi_attention.is_sdpa_backend_enable()
+        )
+
     @nvtx.instrument_nvtx
     def fetch_remote_kv(
         self,
@@ -244,22 +251,26 @@ class DistFlashAttnRuntime:
         self,
         q: torch.Tensor,
         kv: torch.Tensor,
-        overlap_stage: Optional[int] = None,
+        overlap_stage: int | None = None,
         deterministic: bool = False,
+        out_acc: torch.Tensor | None = None,
+        lse_acc: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, bool]:
         """
         Compute a part of the attention result
 
         Args:
-            q(torch.Tensor):
-            kv(torch.Tensor):
-            overlap_stage(Optional[int]): Current overlap stage,
+            q(torch.Tensor): local q
+            kv(torch.Tensor): current kv
+            overlap_stage(int, optional): Current overlap stage,
                 if None, it means local attention, otherwise it means remote attention
             deterministic(bool): Whether to use deterministic algorithm
+            out_acc (torch.Tensor, optional): accumulative buffer for out
+            lse_acc (torch.Tensor, optional): accumulative buffer for lse
 
         Returns:
-            out(torch.Tensor): attention result
-            lse(torch.Tensor): log sum exp
+            out(torch.Tensor): partial out
+            lse(torch.Tensor): partial log-sum-exp
             skip_attn(bool): Whether to skip attention computation,
                 NOTE: if True, the out and lse will be random initialized
         Shape:
@@ -277,6 +288,9 @@ class DistFlashAttnRuntime:
 
         # Calculate attention
         if skip_attn:
+            if self.fwd_use_acc:
+                return out_acc, lse_acc, skip_attn
+
             out = torch.empty_like(q)
             num_tokens_q, num_heads, _ = q.shape
 
@@ -306,8 +320,8 @@ class DistFlashAttnRuntime:
                         q=q,
                         k=k,
                         v=v,
-                        out=None,
-                        lse=None,
+                        out=out_acc,
+                        lse=lse_acc,
                         **attn_arg.to_ffa_args(is_bwd=False),
                         merge_q_ranges=None,
                         qk_map=None,
@@ -319,7 +333,11 @@ class DistFlashAttnRuntime:
                         # NOTE: increase the partial out precision temporarily,
                         # to reduce the error caused by the out correction
                         out_type=max_fp_dtype(q.dtype, torch.float32),
-                        disable_fwd_atomic_reduction=attn_arg.disable_fwd_atomic_reduction,
+                        # NOTE: when using accumulative buffer, we need to always enable atomic reduction
+                        # unless it is the first call when accumulative buffer is None
+                        disable_fwd_atomic_reduction=(
+                            attn_arg.disable_fwd_atomic_reduction and out_acc is None
+                        ),
                     )
 
         return out, lse, skip_attn
@@ -332,7 +350,7 @@ class DistFlashAttnRuntime:
         kv: torch.Tensor,
         o: torch.Tensor,
         lse: torch.Tensor,
-        overlap_stage: Optional[int] = None,
+        overlap_stage: int | None = None,
         deterministic: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, bool]:
         """Apply ffa bwd kernel to get partial dqkv.
@@ -478,8 +496,9 @@ class DistFlashAttnFunc(torch.autograd.Function):
             - local_v: [num_tokens_v_local, num_heads, head_dim]
         """
 
-        out_list = []
-        lse_list = []
+        if not dist_attn_runtime.fwd_use_acc:
+            out_list = []
+            lse_list = []
 
         # cat local k, v into a single coalesced kv
         local_kv = dist_attn_runtime.concat_kv(local_k, local_v)
@@ -511,7 +530,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
             deterministic=dist_attn_runtime.deterministic,
         )
 
-        if not skip_attn:
+        if not dist_attn_runtime.fwd_use_acc and not skip_attn:
             out_list.append(out)
             lse_list.append(lse)
 
@@ -542,17 +561,20 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 kv=curr_remote_kv,
                 overlap_stage=ith_overlap_stage,
                 deterministic=dist_attn_runtime.deterministic,
+                out_acc=out if dist_attn_runtime.fwd_use_acc else None,
+                lse_acc=lse if dist_attn_runtime.fwd_use_acc else None,
             )
 
-            if not skip_attn:
+            if not dist_attn_runtime.fwd_use_acc and not skip_attn:
                 out_list.append(out)
                 lse_list.append(lse)
 
         # do result correction to get final out and lse
-        out, lse = result_correction(
-            out_list=out_list,
-            lse_list=lse_list,
-        )
+        if not dist_attn_runtime.fwd_use_acc:
+            out, lse = result_correction(
+                out_list=out_list,
+                lse_list=lse_list,
+            )
 
         if out is None:  # attn computation are all skipped
             # NOTE: We cannot use torch.empty_like here, because empty_like may contain nan values,
