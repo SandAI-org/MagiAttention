@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import random
 import os
-import numpy as np
+import random
 from functools import partial
 from itertools import accumulate, pairwise
+from typing import List
 
+import numpy as np
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, create_mask
 
@@ -25,12 +26,14 @@ from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta._calc_dispatch_meta import _calc_self_attn_areas
 
+
 def seed_everything(seed=1234):
     random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+
 
 def calculate_attn_flops(
     q_ranges: AttnRanges,
@@ -701,9 +704,10 @@ def get_sdpa_mask_from_block_sparse_mask(
 
     return sdpa_mask
 
+
 def get_vsa_mask_from_block_sparse_score(
     scores: torch.Tensor,
-    k: int, 
+    k: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Converts a block-wise attention score into a block-sparse index format
@@ -726,9 +730,9 @@ def get_vsa_mask_from_block_sparse_score(
 
     device = scores.device
     # Ensure mask has batch dimension
-    if scores.dim() == 3: # Assuming [h, num_q_blocks, num_kv_blocks]
-        scores = scores.unsqueeze(0) # Add batch_size 1
-    
+    if scores.dim() == 3:  # Assuming [h, num_q_blocks, num_kv_blocks]
+        scores = scores.unsqueeze(0)  # Add batch_size 1
+
     bs, h, num_q_blocks, num_kv_blocks = scores.shape
     # Ensure k is not larger than num_kv_blocks
     k = min(k, num_kv_blocks)
@@ -736,23 +740,27 @@ def get_vsa_mask_from_block_sparse_score(
     # Get top-k indices for each q block
     _, q2k_block_sparse_index = torch.topk(scores, k, dim=-1)
     q2k_block_sparse_index = q2k_block_sparse_index.to(torch.int32)
-    
+
     # sort q2k_block_sparse_index
     q2k_block_sparse_index, _ = torch.sort(q2k_block_sparse_index, dim=-1)
 
     # All q blocks attend to exactly k kv blocks
-    q2k_block_sparse_num = torch.full((bs, h, num_q_blocks), k, dtype=torch.int32, device=device)
-    
+    q2k_block_sparse_num = torch.full(
+        (bs, h, num_q_blocks), k, dtype=torch.int32, device=device
+    )
+
     # Fill in the mask based on the indices
     for b in range(bs):
         for head in range(h):
             for q_idx in range(num_q_blocks):
                 kv_indices = q2k_block_sparse_index[b, head, q_idx]
-    
+
     # Create the reverse mapping (k2q)
     # First, initialize lists to collect q indices for each kv block
-    k2q_indices_list = [[[] for _ in range(num_kv_blocks)] for _ in range(bs * h)]
-    
+    k2q_indices_list: List[List[List[int]]] = [
+        [[] for _ in range(num_kv_blocks)] for _ in range(bs * h)
+    ]
+
     # Populate the lists based on q2k mapping
     for b in range(bs):
         for head in range(h):
@@ -761,19 +769,21 @@ def get_vsa_mask_from_block_sparse_score(
                 kv_indices = q2k_block_sparse_index[b, head, q_idx].tolist()
                 for kv_idx in kv_indices:
                     k2q_indices_list[flat_idx][kv_idx].append(q_idx)
-    
+
     # Find the maximum number of q blocks that attend to any kv block
     max_q_per_kv = 0
     for flat_idx in range(bs * h):
         for kv_idx in range(num_kv_blocks):
             max_q_per_kv = max(max_q_per_kv, len(k2q_indices_list[flat_idx][kv_idx]))
-    
+
     # Create tensors for k2q mapping
-    k2q_block_sparse_index = torch.full((bs, h, num_kv_blocks, max_q_per_kv), -1, 
-                                        dtype=torch.int32, device=device)
-    k2q_block_sparse_num = torch.zeros((bs, h, num_kv_blocks), 
-                                       dtype=torch.int32, device=device)
-    
+    k2q_block_sparse_index = torch.full(
+        (bs, h, num_kv_blocks, max_q_per_kv), -1, dtype=torch.int32, device=device
+    )
+    k2q_block_sparse_num = torch.zeros(
+        (bs, h, num_kv_blocks), dtype=torch.int32, device=device
+    )
+
     # Fill the tensors
     for b in range(bs):
         for head in range(h):
@@ -784,16 +794,23 @@ def get_vsa_mask_from_block_sparse_score(
                 k2q_block_sparse_num[b, head, kv_idx] = num_q
                 if num_q > 0:
                     k2q_block_sparse_index[b, head, kv_idx, :num_q] = torch.tensor(
-                        q_indices, dtype=torch.int32, device=device)
-                
-    return q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num
+                        q_indices, dtype=torch.int32, device=device
+                    )
+
+    return (
+        q2k_block_sparse_index,
+        q2k_block_sparse_num,
+        k2q_block_sparse_index,
+        k2q_block_sparse_num,
+    )
+
 
 def get_flashinfer_uniform_block_index(
     num_q_blocks: int,
     num_kv_blocks: int,
     seq_len_q: int,
     seq_len_k: int,
-    num_kv_heads: int
+    num_kv_heads: int,
 ):
     # synthesize uniform block sizes
     block_row_sz = torch.ones(num_q_blocks, dtype=torch.int32) * (

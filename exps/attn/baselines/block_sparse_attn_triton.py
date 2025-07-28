@@ -1,3 +1,23 @@
+# Copyright (c) 2025 SandAI. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import math  # small utility needed by the sparse wrapper
+
+import torch
+import triton
+import triton.language as tl
+
 """
 Adapted from https://github.com/hao-ai-lab/FastVideo/blob/main/csrc/attn/vsa/block_sparse_attn_triton.py
 """
@@ -12,24 +32,26 @@ This is a Triton implementation of the Flash Attention v2 algorithm from Tri Dao
 Credits: OpenAI kernel team
 """
 
-import pytest
-import torch
-import triton
-import triton.language as tl
-
-# ──────────────────────────── SPARSE ADDITION BEGIN ───────────────────────────
-import math  # small utility needed by the sparse wrapper
-# ──────────────────────────── SPARSE ADDITION END ─────────────────────────────
-
 
 @triton.jit
-def _attn_fwd_inner(acc, l_i, m_i, q,  #
-                    K_block_ptr, V_block_ptr,  #
-                    start_m, qk_scale,  #
-                    BLOCK_M: tl.constexpr, HEAD_DIM: tl.constexpr, BLOCK_N: tl.constexpr,  #
-                    STAGE: tl.constexpr, offs_m: tl.constexpr, offs_n: tl.constexpr,  #
-                    N_CTX: tl.constexpr, fp8_v: tl.constexpr):
-
+def _attn_fwd_inner(
+    acc,
+    l_i,
+    m_i,
+    q,  #
+    K_block_ptr,
+    V_block_ptr,  #
+    start_m,
+    qk_scale,  #
+    BLOCK_M: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_N: tl.constexpr,  #
+    STAGE: tl.constexpr,
+    offs_m: tl.constexpr,
+    offs_n: tl.constexpr,  #
+    N_CTX: tl.constexpr,
+    fp8_v: tl.constexpr,
+):
     # loop over k, v and update accumulator
     for start_n in range(0, N_CTX, BLOCK_N):
         # -- compute qk ----
@@ -63,71 +85,106 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
 # the code below and commenting out the equivalent parameters is convenient for
 # re-tuning.
 configs = [
-    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
-    for BM in [64]\
-    for BN in [64]\
-    for s in [3, 4, 7]\
-    for w in [4, 8]\
+    triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
+    for BM in [64]
+    for BN in [64]
+    for s in [3, 4, 7]
+    for w in [4, 8]
 ]
+
 
 # ──────────────────────────── SPARSE ADDITION BEGIN ───────────────────────────
 @triton.autotune(configs, key=["N_CTX", "HEAD_DIM"])
 @triton.jit
-def _attn_fwd_sparse(Q, K, V, sm_scale,                         #
-                     q2k_index, q2k_num, max_kv_blks,           #
-                     M, Out,                                    #
-                     stride_qz, stride_qh, stride_qm, stride_qk,
-                     stride_kz, stride_kh, stride_kn, stride_kk,
-                     stride_vz, stride_vh, stride_vk, stride_vn,
-                     stride_oz, stride_oh, stride_om, stride_on,
-                     Z, H, N_CTX,                               #
-                     HEAD_DIM: tl.constexpr,                    #
-                     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-                     STAGE: tl.constexpr):
+def _attn_fwd_sparse(
+    Q,
+    K,
+    V,
+    sm_scale,  #
+    q2k_index,
+    q2k_num,
+    max_kv_blks,  #
+    M,
+    Out,  #
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vk,
+    stride_vn,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_on,
+    Z,
+    H,
+    N_CTX,  #
+    HEAD_DIM: tl.constexpr,  #
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    STAGE: tl.constexpr,
+):
     """
     64×64 **block-sparse** forward kernel. Back-prop kernels remain dense
     (32×64 and 64×32) – memory footprint unchanged.
     """
 
     # ----- program-id mapping -----
-    q_blk   = tl.program_id(0)          # Q-tile index
-    off_hz  = tl.program_id(1)          # fused (batch, head)
-    b       = off_hz // H
-    h       = off_hz %  H
+    q_blk = tl.program_id(0)  # Q-tile index
+    off_hz = tl.program_id(1)  # fused (batch, head)
+    b = off_hz // H
+    h = off_hz % H
     q_tiles = N_CTX // BLOCK_M
-    meta_base = ((b * H + h) * q_tiles + q_blk)
+    meta_base = (b * H + h) * q_tiles + q_blk
 
-    kv_blocks = tl.load(q2k_num  + meta_base)                 # int32
-    kv_ptr    = q2k_index + meta_base * max_kv_blks           # ptr to list
+    kv_blocks = tl.load(q2k_num + meta_base)  # int32
+    kv_ptr = q2k_index + meta_base * max_kv_blks  # ptr to list
 
     # ----- base pointers -----
-    qvk_off = (b.to(tl.int64) * stride_qz +
-               h.to(tl.int64) * stride_qh)
+    qvk_off = b.to(tl.int64) * stride_qz + h.to(tl.int64) * stride_qh
 
     Q_ptr = tl.make_block_ptr(
-        base=Q + qvk_off, shape=(N_CTX, HEAD_DIM),
+        base=Q + qvk_off,
+        shape=(N_CTX, HEAD_DIM),
         strides=(stride_qm, stride_qk),
         offsets=(q_blk * BLOCK_M, 0),
-        block_shape=(BLOCK_M, HEAD_DIM), order=(1, 0))
+        block_shape=(BLOCK_M, HEAD_DIM),
+        order=(1, 0),
+    )
 
     K_base = tl.make_block_ptr(
-        base=K + qvk_off, shape=(HEAD_DIM, N_CTX),
+        base=K + qvk_off,
+        shape=(HEAD_DIM, N_CTX),
         strides=(stride_kk, stride_kn),
         offsets=(0, 0),
-        block_shape=(HEAD_DIM, BLOCK_N), order=(0, 1))
+        block_shape=(HEAD_DIM, BLOCK_N),
+        order=(0, 1),
+    )
 
     v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
     V_base = tl.make_block_ptr(
-        base=V + qvk_off, shape=(N_CTX, HEAD_DIM),
+        base=V + qvk_off,
+        shape=(N_CTX, HEAD_DIM),
         strides=(stride_vk, stride_vn),
         offsets=(0, 0),
-        block_shape=(BLOCK_N, HEAD_DIM), order=v_order)
+        block_shape=(BLOCK_N, HEAD_DIM),
+        order=v_order,
+    )
 
     O_ptr = tl.make_block_ptr(
-        base=Out + qvk_off, shape=(N_CTX, HEAD_DIM),
+        base=Out + qvk_off,
+        shape=(N_CTX, HEAD_DIM),
         strides=(stride_om, stride_on),
         offsets=(q_blk * BLOCK_M, 0),
-        block_shape=(BLOCK_M, HEAD_DIM), order=(1, 0))
+        block_shape=(BLOCK_M, HEAD_DIM),
+        order=(1, 0),
+    )
 
     # ----- accumulators -----
     offs_m = q_blk * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -164,22 +221,44 @@ def _attn_fwd_sparse(Q, K, V, sm_scale,                         #
     acc = acc / l_i[:, None]
     tl.store(M + off_hz * N_CTX + offs_m, m_i)
     tl.store(O_ptr, acc.to(Out.type.element_ty))
+
+
 # ──────────────────────────── SPARSE ADDITION END ─────────────────────────────
 
 
 @triton.autotune(configs, key=["N_CTX", "HEAD_DIM"])
 @triton.jit
-def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
-              stride_qz, stride_qh, stride_qm, stride_qk,  #
-              stride_kz, stride_kh, stride_kn, stride_kk,  #
-              stride_vz, stride_vh, stride_vk, stride_vn,  #
-              stride_oz, stride_oh, stride_om, stride_on,  #
-              Z, H, N_CTX,  #
-              HEAD_DIM: tl.constexpr,  #
-              BLOCK_M: tl.constexpr,  #
-              BLOCK_N: tl.constexpr,  #
-              STAGE: tl.constexpr  #
-              ):
+def _attn_fwd(
+    Q,
+    K,
+    V,
+    sm_scale,
+    M,
+    Out,  #
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,  #
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,  #
+    stride_vz,
+    stride_vh,
+    stride_vk,
+    stride_vn,  #
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_on,  #
+    Z,
+    H,
+    N_CTX,  #
+    HEAD_DIM: tl.constexpr,  #
+    BLOCK_M: tl.constexpr,  #
+    BLOCK_N: tl.constexpr,  #
+    STAGE: tl.constexpr,  #
+):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
@@ -233,11 +312,24 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
     qk_scale *= 1.44269504  # 1/log(2)
     # load q: it will stay in SRAM throughout
     q = tl.load(Q_block_ptr)
-    acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, K_block_ptr, V_block_ptr,  #
-                                    start_m, qk_scale,  #
-                                    BLOCK_M, HEAD_DIM, BLOCK_N,  #
-                                    3, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5  #
-                                    )
+    acc, l_i, m_i = _attn_fwd_inner(
+        acc,
+        l_i,
+        m_i,
+        q,
+        K_block_ptr,
+        V_block_ptr,  #
+        start_m,
+        qk_scale,  #
+        BLOCK_M,
+        HEAD_DIM,
+        BLOCK_N,  #
+        3,
+        offs_m,
+        offs_n,
+        N_CTX,
+        V.dtype.element_ty == tl.float8e5,  #
+    )
 
     # epilogue
     m_i += tl.math.log2(l_i)
@@ -248,17 +340,19 @@ def _attn_fwd(Q, K, V, sm_scale, M, Out,  #
 
 
 @triton.jit
-def _attn_bwd_preprocess(O, DO,  #
-                         Delta,  #
-                         Z, H, N_CTX,  #
-                         BLOCK_M: tl.constexpr, HEAD_DIM: tl.constexpr  #
-                         ):
+def _attn_bwd_preprocess(
+    O_ptr, DO, Delta, Z, H, N_CTX, BLOCK_M: tl.constexpr, HEAD_DIM: tl.constexpr
+):
     off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     off_hz = tl.program_id(1)
     off_n = tl.arange(0, HEAD_DIM)
     # load
-    o = tl.load(O + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :])
-    do = tl.load(DO + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]).to(tl.float32)
+    o = tl.load(
+        O_ptr + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]
+    )
+    do = tl.load(
+        DO + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]
+    ).to(tl.float32)
     delta = tl.sum(o * do, axis=1)
     # write-back
     tl.store(Delta + off_hz * N_CTX + off_m, delta)
@@ -266,39 +360,53 @@ def _attn_bwd_preprocess(O, DO,  #
 
 # The main inner-loop logic for computing dK and dV.
 @triton.jit
-def _attn_bwd_dkdv(dk, dv,  #
-                   Q, k, v, sm_scale,  #
-                   DO,  #
-                   M, D,  #
-                   k2q_index, k2q_num, max_q_blks,
-                   # shared by Q/K/V/DO.
-                   stride_tok, stride_d,  #
-                   H, N_CTX, BLOCK_M1: tl.constexpr,  #
-                   BLOCK_N1: tl.constexpr,  #
-                   HEAD_DIM: tl.constexpr,  #
-                   # Filled in by the wrapper.
-                   start_n, start_m, num_steps):
+def _attn_bwd_dkdv(
+    dk,
+    dv,  #
+    Q,
+    k,
+    v,
+    sm_scale,  #
+    DO,  #
+    M,
+    D,  #
+    k2q_index,
+    k2q_num,
+    max_q_blks,
+    # shared by Q/K/V/DO.
+    stride_tok,
+    stride_d,  #
+    H,
+    N_CTX,
+    BLOCK_M1: tl.constexpr,  #
+    BLOCK_N1: tl.constexpr,  #
+    HEAD_DIM: tl.constexpr,  #
+    # Filled in by the wrapper.
+    start_n,
+    start_m,
+    num_steps,
+):
     offs_m = start_m + tl.arange(0, BLOCK_M1)
-    offs_n = start_n + tl.arange(0, BLOCK_N1)
     offs_k = tl.arange(0, HEAD_DIM)
     qT_ptrs = Q + offs_m[None, :] * stride_tok + offs_k[:, None] * stride_d
     do_ptrs = DO + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d
     # BLOCK_N1 must be a multiple of BLOCK_M1, otherwise the code wouldn't work.
     tl.static_assert(BLOCK_N1 % BLOCK_M1 == 0)
     step_m = BLOCK_M1
-    kv_blk   = tl.program_id(0)          # Q-tile index
-    off_hz  = tl.program_id(2)          # fused (batch, head)
-    b       = off_hz // H
-    h       = off_hz %  H
+    kv_blk = tl.program_id(0)  # Q-tile index
+    off_hz = tl.program_id(2)  # fused (batch, head)
+    b = off_hz // H
+    h = off_hz % H
     q_tiles = N_CTX // BLOCK_N1
-    meta_base = ((b * H + h) * q_tiles + kv_blk)
+    meta_base = (b * H + h) * q_tiles + kv_blk
 
-    q_blocks = tl.load(k2q_num  + meta_base)                 # int32
-    q_ptr    = k2q_index + meta_base * max_q_blks           # ptr to list
-    
-        
-    for blk_idx in range(q_blocks*2):
-        block_sparse_offset = (tl.load(q_ptr + blk_idx//2).to(tl.int32)*2 + blk_idx%2) *step_m
+    q_blocks = tl.load(k2q_num + meta_base)  # int32
+    q_ptr = k2q_index + meta_base * max_q_blks  # ptr to list
+
+    for blk_idx in range(q_blocks * 2):
+        block_sparse_offset = (
+            tl.load(q_ptr + blk_idx // 2).to(tl.int32) * 2 + blk_idx % 2
+        ) * step_m
         qT = tl.load(qT_ptrs + block_sparse_offset * stride_tok)
         # Load m before computing qk to reduce pipeline stall.
         offs_m = start_m + block_sparse_offset + tl.arange(0, BLOCK_M1)
@@ -321,20 +429,32 @@ def _attn_bwd_dkdv(dk, dv,  #
     return dk, dv
 
 
-
 # the main inner-loop logic for computing dQ
 @triton.jit
-def _attn_bwd_dq(dq, q, K, V,  #
-                 do, m, D,
-                 # shared by Q/K/V/DO.
-                 q2k_index, q2k_num, max_kv_blks,
-                 stride_tok, stride_d,  #
-                 H, N_CTX,  #
-                 BLOCK_M2: tl.constexpr,  #
-                 BLOCK_N2: tl.constexpr,  #
-                 HEAD_DIM: tl.constexpr,
-                 # Filled in by the wrapper.
-                 start_m, start_n, num_steps):
+def _attn_bwd_dq(
+    dq,
+    q,
+    K,
+    V,  #
+    do,
+    m,
+    D,
+    # shared by Q/K/V/DO.
+    q2k_index,
+    q2k_num,
+    max_kv_blks,
+    stride_tok,
+    stride_d,  #
+    H,
+    N_CTX,  #
+    BLOCK_M2: tl.constexpr,  #
+    BLOCK_N2: tl.constexpr,  #
+    HEAD_DIM: tl.constexpr,
+    # Filled in by the wrapper.
+    start_m,
+    start_n,
+    num_steps,
+):
     offs_m = start_m + tl.arange(0, BLOCK_M2)
     offs_n = start_n + tl.arange(0, BLOCK_N2)
     offs_k = tl.arange(0, HEAD_DIM)
@@ -345,20 +465,23 @@ def _attn_bwd_dq(dq, q, K, V,  #
     # BLOCK_M2 must be a multiple of BLOCK_N2, otherwise the code wouldn't work.
     tl.static_assert(BLOCK_M2 % BLOCK_N2 == 0)
     step_n = BLOCK_N2
-    
-    q_blk   = tl.program_id(0)          # Q-tile index
-    off_hz  = tl.program_id(2)          # fused (batch, head)
-    b       = off_hz // H
-    h       = off_hz %  H
-    q_tiles = N_CTX // BLOCK_M2
-    meta_base = ((b * H + h) * q_tiles + q_blk)
 
-    kv_blocks = tl.load(q2k_num  + meta_base)                 # int32
-    kv_ptr    = q2k_index + meta_base * max_kv_blks           # ptr to list
-    
-    
-    for blk_idx in range(kv_blocks*2):
-        block_sparse_offset = (tl.load(kv_ptr + blk_idx//2).to(tl.int32)*2 + blk_idx%2) *step_n * stride_tok
+    q_blk = tl.program_id(0)  # Q-tile index
+    off_hz = tl.program_id(2)  # fused (batch, head)
+    b = off_hz // H
+    h = off_hz % H
+    q_tiles = N_CTX // BLOCK_M2
+    meta_base = (b * H + h) * q_tiles + q_blk
+
+    kv_blocks = tl.load(q2k_num + meta_base)  # int32
+    kv_ptr = q2k_index + meta_base * max_kv_blks  # ptr to list
+
+    for blk_idx in range(kv_blocks * 2):
+        block_sparse_offset = (
+            (tl.load(kv_ptr + blk_idx // 2).to(tl.int32) * 2 + blk_idx % 2)
+            * step_n
+            * stride_tok
+        )
         kT = tl.load(kT_ptrs + block_sparse_offset)
         vT = tl.load(vT_ptrs + block_sparse_offset)
         qk = tl.dot(q, kT)
@@ -374,22 +497,37 @@ def _attn_bwd_dq(dq, q, K, V,  #
     return dq
 
 
-
 @triton.jit
-def _attn_bwd(Q, K, V, sm_scale,  #
-              DO,  #
-              DQ, DK, DV,  #
-              M, D,
-              q2k_index, q2k_num, max_kv_blks,
-              k2q_index, k2q_num, max_q_blks,
-              # shared by Q/K/V/DO.
-              stride_z, stride_h, stride_tok, stride_d,  #
-              H, N_CTX,  #
-              BLOCK_M1: tl.constexpr,  #
-              BLOCK_N1: tl.constexpr,  #
-              BLOCK_M2: tl.constexpr,  #
-              BLOCK_N2: tl.constexpr,  #
-              HEAD_DIM: tl.constexpr):
+def _attn_bwd(
+    Q,
+    K,
+    V,
+    sm_scale,  #
+    DO,  #
+    DQ,
+    DK,
+    DV,  #
+    M,
+    D,
+    q2k_index,
+    q2k_num,
+    max_kv_blks,
+    k2q_index,
+    k2q_num,
+    max_q_blks,
+    # shared by Q/K/V/DO.
+    stride_z,
+    stride_h,
+    stride_tok,
+    stride_d,  #
+    H,
+    N_CTX,  #
+    BLOCK_M1: tl.constexpr,  #
+    BLOCK_N1: tl.constexpr,  #
+    BLOCK_M2: tl.constexpr,  #
+    BLOCK_N2: tl.constexpr,  #
+    HEAD_DIM: tl.constexpr,
+):
     LN2 = 0.6931471824645996  # = ln(2)
 
     bhid = tl.program_id(2)
@@ -423,19 +561,31 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     k = tl.load(K + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d)
     v = tl.load(V + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d)
 
-
     num_steps = N_CTX // BLOCK_M1
 
     dk, dv = _attn_bwd_dkdv(  #
-        dk, dv,  #
-        Q, k, v, sm_scale,  #
+        dk,
+        dv,  #
+        Q,
+        k,
+        v,
+        sm_scale,  #
         DO,  #
-        M, D,  #
-        k2q_index, k2q_num, max_q_blks,
-        stride_tok, stride_d,  #
-        H, N_CTX,  #
-        BLOCK_M1, BLOCK_N1, HEAD_DIM,  #
-        start_n, start_m, num_steps  #
+        M,
+        D,  #
+        k2q_index,
+        k2q_num,
+        max_q_blks,
+        stride_tok,
+        stride_d,  #
+        H,
+        N_CTX,  #
+        BLOCK_M1,
+        BLOCK_N1,
+        HEAD_DIM,  #
+        start_n,
+        start_m,
+        num_steps,  #
     )
 
     dv_ptrs = DV + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d
@@ -460,23 +610,35 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     m = m[:, None]
 
     num_steps = N_CTX // BLOCK_N2
-    dq = _attn_bwd_dq(dq, q, K, V,  #
-                      do, m, D,  #
-                      q2k_index, q2k_num, max_kv_blks,
-                      stride_tok, stride_d,  #
-                      H, N_CTX,  #
-                      BLOCK_M2, BLOCK_N2, HEAD_DIM,  #
-                      start_m, end_n, num_steps  #
-                      )
+    dq = _attn_bwd_dq(
+        dq,
+        q,
+        K,
+        V,  #
+        do,
+        m,
+        D,  #
+        q2k_index,
+        q2k_num,
+        max_kv_blks,
+        stride_tok,
+        stride_d,  #
+        H,
+        N_CTX,  #
+        BLOCK_M2,
+        BLOCK_N2,
+        HEAD_DIM,  #
+        start_m,
+        end_n,
+        num_steps,  #
+    )
     # Write back dQ.
     dq_ptrs = DQ + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d
     dq *= LN2
     tl.store(dq_ptrs, dq)
-    
-    
+
 
 class _attention(torch.autograd.Function):
-
     @staticmethod
     def forward(ctx, q, k, v):
         # shape constraints
@@ -490,20 +652,47 @@ class _attention(torch.autograd.Function):
         stage = 1
         extra_kern_args = {}
 
+        def create_grid(args):
+            return (
+                triton.cdiv(q.shape[2], args["BLOCK_M"]),
+                q.shape[0] * q.shape[1],
+                1,
+            )
 
-        grid = lambda args: (triton.cdiv(q.shape[2], args["BLOCK_M"]), q.shape[0] * q.shape[1], 1)
-        M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
+        grid = create_grid
+        M = torch.empty(
+            (q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32
+        )
         _attn_fwd[grid](
-            q, k, v, sm_scale, M, o,  #
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),  #
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3),  #
-            o.stride(0), o.stride(1), o.stride(2), o.stride(3),  #
-            q.shape[0], q.shape[1],  #
+            q,
+            k,
+            v,
+            sm_scale,
+            M,
+            o,  #
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),  #
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            k.stride(3),  #
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            v.stride(3),  #
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            o.stride(3),  #
+            q.shape[0],
+            q.shape[1],  #
             N_CTX=q.shape[2],  #
             HEAD_DIM=HEAD_DIM_K,  #
             STAGE=stage,  #
-            **extra_kern_args)
+            **extra_kern_args,
+        )
 
         ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
@@ -530,20 +719,38 @@ class _attention(torch.autograd.Function):
         pre_grid = (N_CTX // PRE_BLOCK, BATCH * N_HEAD)
         delta = torch.empty_like(M)
         _attn_bwd_preprocess[pre_grid](
-            o, do,  #
+            o,
+            do,  #
             delta,  #
-            BATCH, N_HEAD, N_CTX,  #
-            BLOCK_M=PRE_BLOCK, HEAD_DIM=ctx.HEAD_DIM  #
+            BATCH,
+            N_HEAD,
+            N_CTX,  #
+            BLOCK_M=PRE_BLOCK,
+            HEAD_DIM=ctx.HEAD_DIM,  #
         )
         grid = (N_CTX // BLOCK_N1, 1, BATCH * N_HEAD)
         _attn_bwd[grid](
-            q, arg_k, v, ctx.sm_scale, do, dq, dk, dv,  #
-            M, delta,  #
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-            N_HEAD, N_CTX,  #
-            BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1,  #
-            BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,  #
-            HEAD_DIM=ctx.HEAD_DIM  #
+            q,
+            arg_k,
+            v,
+            ctx.sm_scale,
+            do,
+            dq,
+            dk,
+            dv,  #
+            M,
+            delta,  #
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),  #
+            N_HEAD,
+            N_CTX,  #
+            BLOCK_M1=BLOCK_M1,
+            BLOCK_N1=BLOCK_N1,  #
+            BLOCK_M2=BLOCK_M2,
+            BLOCK_N2=BLOCK_N2,  #
+            HEAD_DIM=ctx.HEAD_DIM,  #
         )
 
         return dq, dk, dv, None, None
@@ -551,36 +758,60 @@ class _attention(torch.autograd.Function):
 
 attention = _attention.apply
 
+
 # ────────────────────────────  Simple Sparse Interface ───────────────────────────
-def block_sparse_fwd(
-    q, k, v, q2k_index, q2k_num
-):
+def block_sparse_fwd(q, k, v, q2k_index, q2k_num):
     B, H, T, D = q.shape
     sm_scale = 1.0 / math.sqrt(D)
     max_kv_blks = q2k_index.shape[-1]
     assert T % 64 == 0, f"T must be a multiple of 64, but got {T}"
-    assert T // 64 == q2k_num.shape[-1], f"shape mismatch, T // 64 = {T // 64}, q2k_num.shape[-2] = {q2k_num.shape[-2]}"
+    assert (
+        T // 64 == q2k_num.shape[-1]
+    ), f"shape mismatch, T // 64 = {T // 64}, q2k_num.shape[-2] = {q2k_num.shape[-2]}"
     o = torch.empty_like(q)
-    M = torch.empty((B, H, T), dtype=torch.float32, device=q.device) # LSE
+    M = torch.empty((B, H, T), dtype=torch.float32, device=q.device)  # LSE
 
-    grid = lambda _: (triton.cdiv(T, 64), B * H, 1)
+    def create_grid(args):
+        return (triton.cdiv(T, 64), B * H, 1)
+
+    grid = create_grid
     _attn_fwd_sparse[grid](
-        q, k, v, sm_scale,
-        q2k_index, q2k_num, max_kv_blks,
-        M, o,
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        B, H, T,
-        HEAD_DIM=D, STAGE=3
+        q,
+        k,
+        v,
+        sm_scale,
+        q2k_index,
+        q2k_num,
+        max_kv_blks,
+        M,
+        o,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        k.stride(3),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        v.stride(3),
+        o.stride(0),
+        o.stride(1),
+        o.stride(2),
+        o.stride(3),
+        B,
+        H,
+        T,
+        HEAD_DIM=D,
+        STAGE=3,
     )
 
     return o, M
 
-def block_sparse_bwd(
-    q, k, v, o, M, do, q2k_index, q2k_num, k2q_index, k2q_num
-):
+
+def block_sparse_bwd(q, k, v, o, M, do, q2k_index, q2k_num, k2q_index, k2q_num):
     assert do.is_contiguous()
     assert q.stride() == k.stride() == v.stride() == o.stride() == do.stride()
     dq = torch.empty_like(q)
@@ -597,32 +828,44 @@ def block_sparse_bwd(
     pre_grid = (N_CTX // PRE_BLOCK, BATCH * N_HEAD)
     delta = torch.empty_like(M)
     _attn_bwd_preprocess[pre_grid](
-        o, do,  #
-        delta,  #
-        BATCH, N_HEAD, N_CTX,  #
-        BLOCK_M=PRE_BLOCK, HEAD_DIM=D  #
+        o, do, delta, BATCH, N_HEAD, N_CTX, BLOCK_M=PRE_BLOCK, HEAD_DIM=D
     )
 
-    
     max_q_blks = k2q_index.shape[-1]
     max_kv_blks = q2k_index.shape[-1]
 
-
     grid = (N_CTX // BLOCK_N1, 1, BATCH * N_HEAD)
     _attn_bwd[grid](
-        q, arg_k, v, sm_scale, do, dq, dk, dv,
-        M, delta,
-        q2k_index, q2k_num, max_kv_blks,
-        k2q_index, k2q_num, max_q_blks,
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        N_HEAD, N_CTX,
-        BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1,
-        BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,
-        HEAD_DIM=D
+        q,
+        arg_k,
+        v,
+        sm_scale,
+        do,
+        dq,
+        dk,
+        dv,
+        M,
+        delta,
+        q2k_index,
+        q2k_num,
+        max_kv_blks,
+        k2q_index,
+        k2q_num,
+        max_q_blks,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        N_HEAD,
+        N_CTX,
+        BLOCK_M1=BLOCK_M1,
+        BLOCK_N1=BLOCK_N1,
+        BLOCK_M2=BLOCK_M2,
+        BLOCK_N2=BLOCK_N2,
+        HEAD_DIM=D,
     )
-    
-    return dq, dk, dv, None, None, None, None
 
+    return dq, dk, dv, None, None, None, None
 
 
 # ──────────────────────────── SPARSE ADDITION BEGIN ───────────────────────────
@@ -638,21 +881,47 @@ class _attention_sparse(torch.autograd.Function):
         sm_scale = 1.0 / math.sqrt(D)
         max_kv_blks = q2k_index.shape[-1]
         assert T % 64 == 0, f"T must be a multiple of 64, but got {T}"
-        assert T // 64 == q2k_num.shape[-1], f"shape mismatch, T // 64 = {T // 64}, q2k_num.shape[-2] = {q2k_num.shape[-2]}"
+        assert (
+            T // 64 == q2k_num.shape[-1]
+        ), f"shape mismatch, T // 64 = {T // 64}, q2k_num.shape[-2] = {q2k_num.shape[-2]}"
         o = torch.empty_like(q)
         M = torch.empty((B, H, T), dtype=torch.float32, device=q.device)
 
-        grid = lambda _: (triton.cdiv(T, 64), B * H, 1)
+        def create_grid(args):
+            return (triton.cdiv(T, 64), B * H, 1)
+
+        grid = create_grid
         _attn_fwd_sparse[grid](
-            q, k, v, sm_scale,
-            q2k_index, q2k_num, max_kv_blks,
-            M, o,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-            o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-            B, H, T,
-            HEAD_DIM=D, STAGE=3
+            q,
+            k,
+            v,
+            sm_scale,
+            q2k_index,
+            q2k_num,
+            max_kv_blks,
+            M,
+            o,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),
+            k.stride(0),
+            k.stride(1),
+            k.stride(2),
+            k.stride(3),
+            v.stride(0),
+            v.stride(1),
+            v.stride(2),
+            v.stride(3),
+            o.stride(0),
+            o.stride(1),
+            o.stride(2),
+            o.stride(3),
+            B,
+            H,
+            T,
+            HEAD_DIM=D,
+            STAGE=3,
         )
 
         ctx.save_for_backward(q, k, v, o, M, q2k_index, q2k_num, k2q_index, k2q_num)
@@ -680,67 +949,93 @@ class _attention_sparse(torch.autograd.Function):
         pre_grid = (N_CTX // PRE_BLOCK, BATCH * N_HEAD)
         delta = torch.empty_like(M)
         _attn_bwd_preprocess[pre_grid](
-            o, do,  #
+            o,
+            do,  #
             delta,  #
-            BATCH, N_HEAD, N_CTX,  #
-            BLOCK_M=PRE_BLOCK, HEAD_DIM=ctx.HEAD_DIM  #
+            BATCH,
+            N_HEAD,
+            N_CTX,  #
+            BLOCK_M=PRE_BLOCK,
+            HEAD_DIM=ctx.HEAD_DIM,  #
         )
-        
-        
+
         max_q_blks = k2q_index.shape[-1]
         max_kv_blks = q2k_index.shape[-1]
-        
-        
+
         grid = (N_CTX // BLOCK_N1, 1, BATCH * N_HEAD)
         _attn_bwd[grid](
-            q, arg_k, v, ctx.sm_scale, do, dq, dk, dv,  #
-            M, delta,  #
-            q2k_index, q2k_num, max_kv_blks,
-            k2q_index, k2q_num, max_q_blks,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),  #
-            N_HEAD, N_CTX,  #
-            BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1,  #
-            BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2,  #
-            HEAD_DIM=ctx.HEAD_DIM  #
+            q,
+            arg_k,
+            v,
+            ctx.sm_scale,
+            do,
+            dq,
+            dk,
+            dv,  #
+            M,
+            delta,  #
+            q2k_index,
+            q2k_num,
+            max_kv_blks,
+            k2q_index,
+            k2q_num,
+            max_q_blks,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            q.stride(3),  #
+            N_HEAD,
+            N_CTX,  #
+            BLOCK_M1=BLOCK_M1,
+            BLOCK_N1=BLOCK_N1,  #
+            BLOCK_M2=BLOCK_M2,
+            BLOCK_N2=BLOCK_N2,  #
+            HEAD_DIM=ctx.HEAD_DIM,  #
         )
 
         return dq, dk, dv, None, None, None, None
+
 
 attention_sparse = _attention_sparse.apply
 # ──────────────────────────── SPARSE ADDITION END ─────────────────────────────
 
 
 try:
-    from flash_attn.flash_attn_interface import \
-        flash_attn_qkvpacked_func as flash_attn_func
+    from flash_attn.flash_attn_interface import (
+        flash_attn_qkvpacked_func as flash_attn_func,
+    )
+
     HAS_FLASH = True
 except BaseException:
     HAS_FLASH = False
 
-TORCH_HAS_FP8 = hasattr(torch, 'float8_e5m2')
+TORCH_HAS_FP8 = hasattr(torch, "float8_e5m2")
 BATCH, N_HEADS, HEAD_DIM = 4, 32, 128
 # vary seq length for fixed head and batch=4
 configs = []
 for mode in ["fwd", "bwd"]:
-        configs.append(
-            triton.testing.Benchmark(
-                x_names=["N_CTX"],
-                x_vals=[2**i for i in range(10, 15)],
-                line_arg="provider",
-                line_vals=["triton-fp16"] + (["triton-fp8"] if TORCH_HAS_FP8 else []) +
-                (["flash"] if HAS_FLASH else []),
-                line_names=["Triton [FP16]"] + (["Triton [FP8]"] if TORCH_HAS_FP8 else []) +
-                (["Flash-2"] if HAS_FLASH else []),
-                styles=[("red", "-"), ("blue", "-"), ("green", "-")],
-                ylabel="ms",
-                plot_name=f"fused-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}",
-                args={
-                    "H": N_HEADS,
-                    "BATCH": BATCH,
-                    "HEAD_DIM": HEAD_DIM,
-                    "mode": mode,
-                },
-            ))
+    configs.append(
+        triton.testing.Benchmark(
+            x_names=["N_CTX"],
+            x_vals=[2**i for i in range(10, 15)],
+            line_arg="provider",
+            line_vals=["triton-fp16"]
+            + (["triton-fp8"] if TORCH_HAS_FP8 else [])
+            + (["flash"] if HAS_FLASH else []),
+            line_names=["Triton [FP16]"]
+            + (["Triton [FP8]"] if TORCH_HAS_FP8 else [])
+            + (["Flash-2"] if HAS_FLASH else []),
+            styles=[("red", "-"), ("blue", "-"), ("green", "-")],
+            ylabel="ms",
+            plot_name=f"fused-attention-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}-{mode}",
+            args={
+                "H": N_HEADS,
+                "BATCH": BATCH,
+                "HEAD_DIM": HEAD_DIM,
+                "mode": mode,
+            },
+        )
+    )
 
 
 @triton.testing.perf_report(configs)
@@ -750,28 +1045,51 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, mode, provider, device="cud
     rep = 100
     dtype = torch.bfloat16
     if "triton" in provider:
-        q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
+        q = torch.randn(
+            (BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True
+        )
+        k = torch.randn(
+            (BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True
+        )
+        v = torch.randn(
+            (BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True
+        )
         if mode == "fwd" and "fp8" in provider:
             q = q.to(torch.float8_e5m2)
             k = k.to(torch.float8_e5m2)
             v = v.permute(0, 1, 3, 2).contiguous()
             v = v.permute(0, 1, 3, 2)
             v = v.to(torch.float8_e5m2)
-        fn = lambda: attention(q, k, v)
+
+        def fn():
+            return attention(q, k, v)
+
         if mode == "bwd":
             o = fn()
             do = torch.randn_like(o)
-            fn = lambda: o.backward(do, retain_graph=True)
+
+            def fn():
+                return o.backward(do, retain_graph=True)
+
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     if provider == "flash":
-        qkv = torch.randn((BATCH, N_CTX, 3, H, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        fn = lambda: flash_attn_func(qkv, causal=False)
+        qkv = torch.randn(
+            (BATCH, N_CTX, 3, H, HEAD_DIM),
+            dtype=dtype,
+            device=device,
+            requires_grad=True,
+        )
+
+        def fn():
+            return flash_attn_func(qkv, causal=False)
+
         if mode == "bwd":
             o = fn()
             do = torch.randn_like(o)
-            fn = lambda: o.backward(do, retain_graph=True)
+
+            def fn():
+                return o.backward(do, retain_graph=True)
+
         ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
     flops_per_matmul = 2.0 * BATCH * H * N_CTX * N_CTX * HEAD_DIM
     total_flops = 2 * flops_per_matmul

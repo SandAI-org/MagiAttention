@@ -21,9 +21,9 @@ from baselines.utils import (
     flatten_head_mask,
     generate_headwise_4D_block_sparse_pattern,
     generate_ranges_from_mask,
+    get_flashinfer_uniform_block_index,
     get_sdpa_mask_from_block_sparse_mask,
     get_vsa_mask_from_block_sparse_score,
-    get_flashinfer_uniform_block_index,
     seed_everything,
 )
 from einops import rearrange
@@ -99,6 +99,7 @@ attn_flops_configs = [
 ]
 
 seed_everything()
+
 
 @perf_report(attn_flops_configs)
 def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
@@ -206,17 +207,24 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
             def fn():
                 o.backward(do, retain_graph=True)
-    
+
     elif attn_impl == "vsa":
         try:
-            from vsa import block_sparse_fwd, block_sparse_bwd
+            from vsa import block_sparse_bwd, block_sparse_fwd
         except ImportError:
-            raise ImportError("Please install FastVideo VSA following https://github.com/hao-ai-lab/FastVideo/tree/main/csrc/attn.")
+            raise ImportError(
+                "Please install FastVideo VSA following https://github.com/hao-ai-lab/FastVideo/tree/main/csrc/attn."
+            )
 
         topk = int(sparsity_ratio * num_kv_blocks_orig)
-        q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num = get_vsa_mask_from_block_sparse_score(
-            scores, 
-            k=topk, 
+        (
+            q2k_block_sparse_index,
+            q2k_block_sparse_num,
+            k2q_block_sparse_index,
+            k2q_block_sparse_num,
+        ) = get_vsa_mask_from_block_sparse_score(
+            scores,
+            k=topk,
         )
         q = q.contiguous()
         k = k.contiguous()
@@ -226,7 +234,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
             return block_sparse_fwd(
                 q, k, v, q2k_block_sparse_index, q2k_block_sparse_num
             )
-        
+
         if wd == "bwd":
             do = do.contiguous()
             try:
@@ -239,16 +247,27 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
                     )
                     raise e
                 already_known_oom_before_run = True
-            
+
             def fn():
-                block_sparse_bwd(q, k, v, o, l_vec, do, k2q_block_sparse_index, k2q_block_sparse_num)
-    
+                block_sparse_bwd(
+                    q, k, v, o, l_vec, do, k2q_block_sparse_index, k2q_block_sparse_num
+                )
+
     elif attn_impl == "vsa_triton":
-        from baselines.block_sparse_attn_triton import block_sparse_fwd, block_sparse_bwd
+        from baselines.block_sparse_attn_triton import (
+            block_sparse_bwd,
+            block_sparse_fwd,
+        )
+
         topk = int(sparsity_ratio * num_kv_blocks_orig)
-        q2k_block_sparse_index, q2k_block_sparse_num, k2q_block_sparse_index, k2q_block_sparse_num = get_vsa_mask_from_block_sparse_score(
-            scores, 
-            k=topk, 
+        (
+            q2k_block_sparse_index,
+            q2k_block_sparse_num,
+            k2q_block_sparse_index,
+            k2q_block_sparse_num,
+        ) = get_vsa_mask_from_block_sparse_score(
+            scores,
+            k=topk,
         )
         q = q.contiguous()
         k = k.contiguous()
@@ -273,8 +292,18 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
                 already_known_oom_before_run = True
 
             def fn():
-                block_sparse_bwd(q, k, v, o, l_vec, do, q2k_block_sparse_index, q2k_block_sparse_num,
-                                  k2q_block_sparse_index, k2q_block_sparse_num)
+                block_sparse_bwd(
+                    q,
+                    k,
+                    v,
+                    o,
+                    l_vec,
+                    do,
+                    q2k_block_sparse_index,
+                    q2k_block_sparse_num,
+                    k2q_block_sparse_index,
+                    k2q_block_sparse_num,
+                )
 
     elif attn_impl == "flashinfer":
         try:
@@ -297,9 +326,12 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         print(f"Sparsity = {sparsity_ratio} of elements to compute")
 
         # allocate 128MB workspace buffer
-        workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=block_mask.device)
+        workspace_buffer = torch.empty(
+            128 * 1024 * 1024, dtype=torch.uint8, device=block_mask.device
+        )
         wrapper = flashinfer.sparse.VariableBlockSparseAttentionWrapper(
-            workspace_buffer, backend="fa3")
+            workspace_buffer, backend="fa3"
+        )
 
         wrapper.plan(
             block_mask_map=block_mask_cpu,
@@ -308,13 +340,11 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
             num_qo_heads=nhq,
             num_kv_heads=nhk,
             head_dim=hd,
-            q_data_type=q.dtype
+            q_data_type=q.dtype,
         )
 
         def fn():
-            return wrapper.run(
-                q, k, v
-            )
+            return wrapper.run(q, k, v)
 
     elif attn_impl == "sdpa":
         sdpa_mask = get_sdpa_mask_from_block_sparse_mask(
