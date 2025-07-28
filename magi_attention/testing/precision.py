@@ -87,6 +87,12 @@ def assert_close(
     ), f"{mismatch_threshold=} must be between 0 and 1"
     try:
         torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
+        no_mismatch_info = f"[{test_case}]: has no mismatch"
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(no_mismatch_info)
+        else:
+            print(no_mismatch_info)
     except AssertionError as e:
         if mismatch_threshold > 0:
             error_msg = str(e)

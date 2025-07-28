@@ -658,6 +658,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
+        run_bwd: bool = True,
     ):
         # -----    skip for world size   ---- #
 
@@ -764,7 +765,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             head_dim,
             device=self.device,
             dtype=dtype,
-            requires_grad=True,
+            requires_grad=run_bwd,
         )
         total_k = torch.randn(
             total_seqlen_k,
@@ -772,7 +773,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             head_dim,
             device=self.device,
             dtype=dtype,
-            requires_grad=True,
+            requires_grad=run_bwd,
         )
         total_v = torch.randn(
             total_seqlen_k,
@@ -780,7 +781,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             head_dim,
             device=self.device,
             dtype=dtype,
-            requires_grad=True,
+            requires_grad=run_bwd,
         )
         dist.all_reduce(total_q.data, group=self.nccl_group)
         dist.all_reduce(total_k.data, group=self.nccl_group)
@@ -802,14 +803,18 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----   run backward   ---- #
 
-        grad_total_out = torch.randn_like(total_out).detach()
-        dist.all_reduce(grad_total_out.data, group=self.nccl_group)
-        total_out.backward(grad_total_out)
-        grad_total_q, grad_total_k, grad_total_v = (
-            total_q.grad,
-            total_k.grad,
-            total_v.grad,
-        )
+        if run_bwd:
+            grad_total_out = torch.randn_like(total_out).detach()
+            dist.all_reduce(grad_total_out.data, group=self.nccl_group)
+            total_out.backward(grad_total_out)
+            grad_total_q, grad_total_k, grad_total_v = (
+                total_q.grad,
+                total_k.grad,
+                total_v.grad,
+            )
+        else:
+            grad_total_out = None
+            grad_total_q, grad_total_k, grad_total_v = None, None, None
 
         # -----   assert close to torch ref   ---- #
 
@@ -827,6 +832,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             grad_total_k=grad_total_k,
             grad_total_v=grad_total_v,
             grad_total_out=grad_total_out,
+            run_bwd=run_bwd,
             test_case=test_case,
         )
 
@@ -841,10 +847,11 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         total_k: torch.Tensor,
         total_v: torch.Tensor,
         total_out: torch.Tensor,
-        grad_total_q: torch.Tensor,
-        grad_total_k: torch.Tensor,
-        grad_total_v: torch.Tensor,
-        grad_total_out: torch.Tensor,
+        grad_total_q: torch.Tensor | None,
+        grad_total_k: torch.Tensor | None,
+        grad_total_v: torch.Tensor | None,
+        grad_total_out: torch.Tensor | None,
+        run_bwd: bool,
         test_case: str = "",
     ) -> None:
         # -----   customize tolerance threshold  ---- #
@@ -884,16 +891,18 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             layout="thd",
             high_precision=True,
         )
-        total_out_ref_high_precision.backward(grad_total_out)
-        (
-            grad_total_q_ref_high_precision,
-            grad_total_k_ref_high_precision,
-            grad_total_v_ref_high_precision,
-        ) = (
-            total_q.grad,
-            total_k.grad,
-            total_v.grad,
-        )
+
+        if run_bwd:
+            total_out_ref_high_precision.backward(grad_total_out)
+            (
+                grad_total_q_ref_high_precision,
+                grad_total_k_ref_high_precision,
+                grad_total_v_ref_high_precision,
+            ) = (
+                total_q.grad,
+                total_k.grad,
+                total_v.grad,
+            )
 
         # -----   init error message list   ---- #
 
@@ -912,44 +921,45 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         except Exception as e:
             err_msg_list.append(str(e))
 
-        # -----   assert close for bwd dq   ---- #
+        if run_bwd:
+            # -----   assert close for bwd dq   ---- #
 
-        try:
-            magi_attention.testing.assert_close(
-                grad_total_q,
-                grad_total_q_ref_high_precision,
-                atol=dq_atol,
-                rtol=dq_rtol,
-                test_case=f"{test_case} => dq",
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
+            try:
+                magi_attention.testing.assert_close(
+                    grad_total_q,
+                    grad_total_q_ref_high_precision,
+                    atol=dq_atol,
+                    rtol=dq_rtol,
+                    test_case=f"{test_case} => dq",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
 
-        # -----   assert close for bwd dk   ---- #
+            # -----   assert close for bwd dk   ---- #
 
-        try:
-            magi_attention.testing.assert_close(
-                grad_total_k,
-                grad_total_k_ref_high_precision,
-                atol=dk_atol,
-                rtol=dk_rtol,
-                test_case=f"{test_case} => dk",
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
+            try:
+                magi_attention.testing.assert_close(
+                    grad_total_k,
+                    grad_total_k_ref_high_precision,
+                    atol=dk_atol,
+                    rtol=dk_rtol,
+                    test_case=f"{test_case} => dk",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
 
-        # -----   assert close for bwd dv   ---- #
+            # -----   assert close for bwd dv   ---- #
 
-        try:
-            magi_attention.testing.assert_close(
-                grad_total_v,
-                grad_total_v_ref_high_precision,
-                atol=dv_atol,
-                rtol=dv_rtol,
-                test_case=f"{test_case} => dv",
-            )
-        except Exception as e:
-            err_msg_list.append(str(e))
+            try:
+                magi_attention.testing.assert_close(
+                    grad_total_v,
+                    grad_total_v_ref_high_precision,
+                    atol=dv_atol,
+                    rtol=dv_rtol,
+                    test_case=f"{test_case} => dv",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
 
         # -----   raise error if any error occurs   ---- #
 
