@@ -579,6 +579,7 @@ def build_ffa_ext_module(
     sources = [f"{ffa_dir_rel}/flash_api.cpp"] + sources_fwd_sm90 + sources_bwd_sm90
     sources += [f"{ffa_dir_rel}/fast_zero_fill.cu"]
     sources += [f"{ffa_dir_rel}/unique_consecutive_pairs.cu"]
+    sources += [f"{ffa_dir_rel}/work_tile_divider.cu"]
 
     # init nvcc flags
     nvcc_flags = [

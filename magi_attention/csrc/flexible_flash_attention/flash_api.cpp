@@ -1041,4 +1041,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fwd", &mha_fwd, "Forward pass");
   m.def("bwd", &mha_bwd, "Backward pass");
   m.def("unique_consecutive_pairs", &unique_consecutive_pairs_ext, "Finds unique (int, int) pairs from a pre-sorted tensor (CUDA extension)");
+  m.def("work_tile_divider", &work_tile_divider_ext, "Output tiled jobs from q k ranges (CUDA extension)");
 }
