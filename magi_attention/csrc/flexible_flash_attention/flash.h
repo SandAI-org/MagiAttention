@@ -163,3 +163,10 @@ template <typename T_out, uint32_t kHeadDim>
 void run_fast_zero_fill_(Flash_fwd_params& params, cudaStream_t stream);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs_ext(torch::Tensor sorted_input_tensor);
+
+std::tuple<torch::Tensor> work_tile_divider_ext(
+  torch::Tensor q,
+  torch::Tensor k,
+  torch::Tensor q_ranges,
+  torch::Tensor k_ranges
+);
