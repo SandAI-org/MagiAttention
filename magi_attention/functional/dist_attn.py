@@ -348,6 +348,9 @@ class DistFlashAttnRuntime:
             o(torch.Tensor): partial o
             lse(torch.Tensor): partial lse
             dq_acc(torch.Tensor, optional): accumulative buffer for dq
+            overlap_stage(int, optional): Current overlap stage,
+                if None, it means local attention, otherwise it means remote attention
+            deterministic(bool): Whether to use deterministic algorithm
 
         Returns:
             partial_dq(torch.Tensor): partial dq, or None if skipped
@@ -667,6 +670,8 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 if dist_attn_runtime.bwd_dkv_hp_reduce
                 else local_kv.dtype,
             )
+        elif not dist_attn_runtime.bwd_dkv_hp_reduce:
+            partial_local_dkv = partial_local_dkv.to(local_kv.dtype)
 
         partial_dkv_reduce_work = WorkWithPostProcessFn()
         partial_dkv_reduce_works = []
@@ -725,7 +730,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
                     partial_local_dq=partial_local_dq,
                 )
 
-        # downcast partial local dq to q dtype
+        # downcast final local dq to q dtype
         partial_local_dq = partial_local_dq.to(local_q.dtype)
 
         # wait for all partial dkv reduced
@@ -734,10 +739,10 @@ class DistFlashAttnFunc(torch.autograd.Function):
                 partial_local_dkv
             )
 
-        # downcast partial local dkv to kv dtype
+        # downcast final local dkv to kv dtype
         partial_local_dkv = partial_local_dkv.to(local_kv.dtype)
 
-        # chunk final dkv into dk and dv
+        # chunk final local dkv into dk and dv
         partial_local_dk, partial_local_dv = dist_attn_runtime.chunk_kv(
             partial_local_dkv
         )
