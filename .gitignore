@@ -1,5 +1,7 @@
 # magi_attention
 magi_attention/_version.py
+*.nsys-rep
+*.ncu-rep
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
