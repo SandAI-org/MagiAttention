@@ -406,7 +406,7 @@ class DistFlashAttnRuntime:
                     softmax_scale=q.shape[-1] ** -0.5,
                     deterministic=deterministic,
                     softcap=0.0,
-                    disable_bwd_dkv_atomic_reduction=False,  # FIXME: set dynamically
+                    disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
                     sm_margin=magi_attention.comm.ffa_bwd_sm_margin_save_for_comm(),
                 )
 

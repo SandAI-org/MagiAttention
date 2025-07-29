@@ -145,6 +145,11 @@ class AttnArg:
 
         self.ffa_bwd_args_dict = self.ffa_fwd_args_dict
 
+        # init `disable_bwd_dkv_atomic_reduction` flag
+        # FIXME: some bug with this flag, thus set to False temporarily
+        # self.disable_bwd_dkv_atomic_reduction = self.k_ranges_bwd.is_non_overlap()
+        self.disable_bwd_dkv_atomic_reduction = False
+
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         return self.ffa_bwd_args_dict if is_bwd else self.ffa_fwd_args_dict
 
