@@ -32,9 +32,9 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 ## Latest News 🔥
 
 
-- [2025/7] 🚀 We release [MagiAttention-v1.0.3](https://github.com/SandAI-org/MagiAttention/tree/v1.0.3) with improvements including [documentation](https://SandAI-org.github.io/MagiAttention/docs/), support for all four mask types with arbitary overlapping, deterministic mode, API updates, performance enhancements, optimized dispatch solvers, hierarchical-comm support, and example code to train Llama-3 1B model with MagiAttention + FSDP/Transformers.
-- [2025/6] 🔧 We release [MagiAttention-v1.0.2](https://github.com/SandAI-org/MagiAttention/tree/v1.0.2) to provide the example code to **integrate Megatron with MagiAttention** with several training convergence experiments (*see [here](./example/megatron/README.md) for more details*), with some bug fixes and a simple roadmap.
-- [2025/5] 🔧 We release [MagiAttention-v1.0.1](https://github.com/SandAI-org/MagiAttention/tree/v1.0.1) to support overlapped q_ranges when all mask types are `FULL`, with some code cleanup and bug fixes.
+- [2025/7] 🚀 We release [MagiAttention-v1.0.3](https://github.com/SandAI-org/MagiAttention/tree/v1.0.3) with improvements including [documentation](https://SandAI-org.github.io/MagiAttention/docs/), support for all four mask types with arbitary overlapping, deterministic mode, API updates, FFA performance enhancements with bug fixes, optimized dispatch solvers, hierarchical-comm support, and example codes to train Llama-3 1B model with MagiAttention + FSDP / Transformers.
+- [2025/6] 📌 We release [MagiAttention-v1.0.2](https://github.com/SandAI-org/MagiAttention/tree/v1.0.2) to provide the example code to **integrate Megatron with MagiAttention** with several training convergence experiments (*see [here](./example/megatron/README.md) for more details*), with some bug fixes and a simple roadmap.
+- [2025/5] 📌 We release [MagiAttention-v1.0.1](https://github.com/SandAI-org/MagiAttention/tree/v1.0.1) to support overlapped q_ranges when all mask types are `FULL`, with some code cleanup and bug fixes.
 - [2025/4] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/tree/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/blog/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
 
 
