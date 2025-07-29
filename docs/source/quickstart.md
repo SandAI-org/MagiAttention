@@ -1,10 +1,10 @@
-# Tutorial
+# QuickStart
 
 ```{contents}
 :local: true
 ```
 
-## Basic Usage for Flexible Flash Attention
+## Basic Usage for Flex-Flash-Attention
 
 ```python
 import torch
