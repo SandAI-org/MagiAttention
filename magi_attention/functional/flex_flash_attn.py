@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 
 import torch
 
@@ -25,7 +26,7 @@ try:
 
     is_ffa_installed = True
 except ImportError:
-    pass
+    warnings.warn("FFA is not installed.")
 
 # isort: on
 

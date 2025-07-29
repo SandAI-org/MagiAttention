@@ -5,7 +5,8 @@
 :maxdepth: 2
 
 install.md
-tutorial.md
+quickstart.md
 magi_api.md
+env_variables.md
 
 ```

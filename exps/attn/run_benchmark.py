@@ -545,7 +545,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
 
         if wd == "bwd":
             try:
-                o, *rest = fn()
+                o = fn()
             except Exception as e:
                 if "CUDA out of memory" not in str(e):
                     print(

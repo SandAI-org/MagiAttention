@@ -39,7 +39,6 @@ def calc_attn_meta_from_dispatch_meta(
         bucket_per_rank (list[AttnBucket]): The bucket per rank
         cp_group (dist.ProcessGroup): The NCCL process group
         overlap_config (OverlapConfig): The overlap config, including the overlap mode, overlap degree, overlap chunk size, etc
-
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
 
     Returns:
@@ -62,11 +61,5 @@ def calc_attn_meta_from_dispatch_meta(
         "The overlap degree is inconsistent between "
         f"comm meta ({comm_meta.overlap_degree}) and calc meta ({calc_meta.overlap_degree})."
     )
-
-    # DE-BUG: log attn solver, comm meta and calc meta
-    # from magi_attention.utils import write_rank
-    # write_rank(repr(attn_solver), "attn_solver.log")
-    # write_rank(repr(comm_meta), "comm_meta.log")
-    # write_rank(repr(calc_meta), "calc_meta.log")
 
     return comm_meta, calc_meta, attn_solver

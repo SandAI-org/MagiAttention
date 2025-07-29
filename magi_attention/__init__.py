@@ -16,7 +16,7 @@ import importlib.util
 import os
 import warnings
 
-from . import comm, config
+from . import comm, config, functional
 from .dist_attn_runtime_mgr import init_dist_attn_runtime_mgr
 
 if importlib.util.find_spec("magi_attention._version") is None:
@@ -37,14 +37,16 @@ __all__ = [
     "is_cuda_device_max_connections_one",
     "config",
     "comm",
+    "functional",
 ]
 
 
 def is_sanity_check_enable() -> bool:
     """
     Toggling this env variable to 1 can enable many sanity check codes inside magi_attention
-    which is only supposed to be used for testing or debugging,
-    since these codes involve performance overhead
+
+    NOTE: this is only supposed to be used for testing or debugging,
+    since the extra sanity-check overhead might be non-negligible
     """
     return os.environ.get("MAGI_ATTENTION_SANITY_CHECK", "0") == "1"
 
@@ -53,7 +55,8 @@ def is_sdpa_backend_enable() -> bool:
     """
     Toggling this env variable to 1 can switch the attn kernel backend
     from ffa to sdpa-math, to support higher precision like fp32, fp64,
-    which is only supposed to be used for testing or debugging,
+
+    NOTE: this is only supposed to be used for testing or debugging,
     since the performance is not acceptable
     """
     return os.environ.get("MAGI_ATTENTION_SDPA_BACKEND", "0") == "1"
@@ -61,6 +64,15 @@ def is_sdpa_backend_enable() -> bool:
 
 def is_cuda_device_max_connections_one() -> bool:
     """
-    Toggle this env variable to 1 to allow cuda device to have only one connection
+    Toggle this env variable to 1 to check if cuda device to have only one connection,
+    which will prevent the concurrency among multiple cuda streams
     """
     return os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8") == "1"
+
+
+def is_deterministic_mode_enable() -> bool:
+    """
+    Toggle this env variable to 1 to enable deterministic mode
+    to use deterministic algorithms for all magi_attention kernels
+    """
+    return os.environ.get("MAGI_ATTENTION_DETERMINISTIC_MODE", "0") == "1"

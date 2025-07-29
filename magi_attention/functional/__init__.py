@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 from . import dist_attn
 from .dispatch import dispatch_func, undispatch_func
 from .dist_attn import dist_attn_func, result_correction
@@ -25,3 +27,26 @@ __all__ = [
     "dispatch_func",
     "undispatch_func",
 ]
+
+
+def is_ffa_fwd_inplace_correct_enable() -> bool:
+    """
+    Toggling this env variable to `1` can enable inplace-correct for out and lse in ffa forward
+    to avoid the storage of partial results and the memory-bound `result_correction` as a forward post process
+
+    NOTE: this feature will be enabled by default as long as it's stable (i.e. no effect on accuracy or performance)
+    """
+    return os.environ.get("MAGI_ATTENTION_FFA_FORWARD_INPLACE_CORRECT", "0") == "1"
+
+
+def is_ffa_bwd_high_precision_reduce_enable() -> bool:
+    """
+    Toggling this env variable to `1` can enable high-precision (fp32) reduce for dkv among ranks in ffa backward
+    to increase the precision at the cost of double comm overhead
+
+    NOTE: inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dkv,
+    however, by default we will downcast it to kv dtype before reducing among ranks to decrease comm overhead
+    """
+    return (
+        os.environ.get("MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE", "0") == "1"
+    )

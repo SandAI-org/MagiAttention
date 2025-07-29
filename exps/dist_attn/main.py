@@ -173,7 +173,6 @@ if __name__ == "__main__":
     dist_attn_config = DistAttnConfig(
         dispatch_config=dispatch_config,
         overlap_config=overlap_config,
-        deterministic=False,
     )
 
     # magi_attention mgr

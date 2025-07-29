@@ -12,14 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from typing import Any
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.nn as nn
-from einops import rearrange
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
@@ -51,84 +48,28 @@ from magi_attention.dist_attn_runtime_mgr import (
     init_dist_attn_runtime_mgr,
 )
 from magi_attention.testing import parameterize
-from magi_attention.testing.dist_common import DistTestBase, with_comms
-from magi_attention.utils._utils import is_list_value_all
-
-NAME = "name"
-SKIP_WORLD_SIZE = "skip_world_size"
-INTERFACE = "interface"
-
-IB_BANDWIDTH = 50e9  # 500 GB/s, single-end
-
-# H100 spec: https://www.nvidia.com/en-us/data-center/h100/
-H100_TFLOPS_16 = 989.5e12  # 989 teraFLOPS
-H100_NVLINK_BANDWIDTH = 450e9  # 450 GB/s, single-end
-
-# H800 spec: https://chaoqing-i.com/upload/20231128/NVIDIA%20H800%20GPU%20Datasheet.pdf
-H800_TFLOPS_16 = 989.5e12  # 989 teraFLOPS
-H800_NVLINK_BANDWIDTH = 200e9  # 200 GB/s, single-end
-
-# A100 spec: https://www.nvidia.com/en-us/data-center/a100/
-A100_TFLOPS_16 = 312e12  # 312 teraFLOPS
-A100_NVLINK_BANDWIDTH = 300e9  # 300 GB/s, single-end
-
-
-# assuming that:
-#   num_heads (nh) = 1, head_dim (hd) = 128
-#   mfu = 0.5, bwu = 0.6
-#   cp = 4, a2a_corr_factor = (cp-1)/cp = 0.75
-#   unit: μs
-NUM_HEADS = 1
-HEAD_DIM = 64
-DTYPE = torch.float64
-MFU = 0.5
-BWU = 0.6
-A2A_CORR_FACTOR = 0.75
-SEC_RATIO = 1e6  # 1s = 1e6 μs
-
-# formula:
-#   calc cost factor = 2 * 2 * nh * hd / TFLOPS / mfu * sec_ratio
-#   comm cost factor = 2 * nh * hd / BANDWIDTH / a2a_corr_factor / bwu * sec_ratio
-# then:
-CALC_COST_FACTOR = 2 * 2 * NUM_HEADS * HEAD_DIM / H800_TFLOPS_16 / MFU * SEC_RATIO
-INTRA_NODE_COMM_COST_FACTOR = (
-    2 * NUM_HEADS * HEAD_DIM / H800_NVLINK_BANDWIDTH / A2A_CORR_FACTOR / BWU * SEC_RATIO
+from magi_attention.testing.dist_common import (
+    INTERFACE,
+    NAME,
+    SKIP_WORLD_SIZE,
+    DistTestBase,
+    with_comms,
 )
-INTER_NODE_COMM_COST_FACTOR = (
-    2 * NUM_HEADS * HEAD_DIM / IB_BANDWIDTH / A2A_CORR_FACTOR / BWU * SEC_RATIO
+from magi_attention.testing.precision import (
+    H100_MATMUL_MFU,
+    H100_NVLINK_A2A_BWU,
+    H100_NVLINK_BANDWIDTH,
+    H100_TFLOPS_16,
+)
+from magi_attention.utils import (
+    get_a2a_corr_factor,
+    get_calc_cost_factor,
+    get_comm_cost_factor,
+    is_list_value_all,
 )
 
 
-class MultiHeadAttention(nn.Module):
-    def __init__(self, hidden_dim, embed_dim, num_heads):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-
-        self.q_proj = nn.Linear(hidden_dim, embed_dim, bias=False, dtype=DTYPE)
-        self.k_proj = nn.Linear(hidden_dim, embed_dim, bias=False, dtype=DTYPE)
-        self.v_proj = nn.Linear(hidden_dim, embed_dim, bias=False, dtype=DTYPE)
-
-    def forward(self, x):
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
-
-        q, k, v = [
-            rearrange(
-                e,
-                "s (nh hd) -> s nh hd",
-                hd=self.head_dim,
-            )
-            for e in (q, k, v)
-        ]
-
-        return q, k, v
-
-
-class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
+class TestInterfaceBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
@@ -141,9 +82,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             dist.new_group(list(range(self.world_size)), backend="gloo")
             for _ in range(1)
         ]
-
-        # NOTE: test using sdpa backend with fp64 dtype support
-        os.environ["MAGI_ATTENTION_SDPA_BACKEND"] = "1"
 
         # -----    set up for hier comm   ---- #
 
@@ -165,6 +103,10 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             )
         else:
             self.device_mesh = None
+
+    @property
+    def device(self) -> int:
+        return torch.cuda.current_device()
 
     @property
     def process_group(self):
@@ -379,8 +321,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             {
                 NAME: "disable_mso",
                 "enable": False,
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
             # static, overlap degree = 4, min chunk size = 23
             {
@@ -394,8 +334,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                     random_costs=True,
                     random_seed=42,
                 ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
             # dynamic, min chunk size = 56, no max overlap degree limit
             {
@@ -410,28 +348,26 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                     random_costs=True,
                     random_seed=42,
                 ),
-                "calc_cost_factor": CALC_COST_FACTOR,
-                "comm_cost_factor": INTRA_NODE_COMM_COST_FACTOR,
             },
         ],
     )
     @parameterize(
         "num_heads",
-        [NUM_HEADS],
+        [(6, 2)],  # gqa
     )
     @parameterize(
         "head_dim",
-        [64, 80],
+        [128],
     )
     @parameterize(
         "dtype",
-        [DTYPE],
+        [torch.bfloat16],
     )
-    def test_interface_sdpa(
+    def test_interface(
         self,
         attn_config: dict[str, Any],
         overlap_config: dict[str, Any],
-        num_heads: int,
+        num_heads: tuple[int, int],  # (nhq, nhkv)
         head_dim: int,
         dtype: torch.dtype,
     ):
@@ -442,8 +378,6 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             and self.world_size in attn_config[SKIP_WORLD_SIZE]
         ):
             return
-
-        assert magi_attention.is_sanity_check_enable()
 
         # -----    construct test case name   ---- #
 
@@ -466,21 +400,36 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         chunk_size: int = attn_config["chunk_size"]
-
-        device = torch.cuda.current_device()
+        num_heads_q, num_heads_kv = num_heads
 
         dist_attn_config = DistAttnConfig(
             dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
             overlap_config=OverlapConfig(
-                **{k: v for k, v in overlap_config.items() if k not in (NAME,)}
+                **{k: v for k, v in overlap_config.items() if k not in (NAME,)},
+                calc_cost_factor=get_calc_cost_factor(
+                    num_heads_q=num_heads_q,
+                    head_dim=head_dim,
+                    tflops=H100_TFLOPS_16,
+                    mfu=H100_MATMUL_MFU,
+                ),
+                comm_cost_factor=get_comm_cost_factor(
+                    num_heads_kv=num_heads_kv,
+                    head_dim=head_dim,
+                    bandwidth=H100_NVLINK_BANDWIDTH,
+                    bwu=H100_NVLINK_A2A_BWU,
+                    corr_factor=get_a2a_corr_factor(self.world_size),
+                ),
             ),
-            deterministic=False,
         )
 
         # ----- init input data and module ----- #
 
         x = torch.randn(
-            total_seqlen_q, head_dim, device=device, dtype=dtype, requires_grad=True
+            total_seqlen_q,
+            head_dim,
+            device=self.device,
+            dtype=dtype,
+            requires_grad=True,
         )
 
         # --------- calculate pad size --------- #
@@ -509,113 +458,65 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                 ][attn_type_mapping]
             ] * len(q_ranges)
 
-        if interface == "magi_attn":
-            assert is_list_value_all(
-                attn_mask_type, AttnMaskType.FULL
-            ) or is_list_value_all(
-                attn_mask_type, AttnMaskType.CAUSAL
-            ), "we need to check varlen interface, which supports full or causal now"
-            is_causal = attn_mask_type[0] == AttnMaskType.CAUSAL
+        # ------ test interface ------ #
 
-            batch_size = attn_config["batch_size"]
-            cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
-                batch_size, attn_config["total_seqlen_q"] // batch_size
-            )
+        match interface:
+            case "magi_attn":
+                assert is_list_value_all(
+                    attn_mask_type, AttnMaskType.FULL
+                ) or is_list_value_all(
+                    attn_mask_type, AttnMaskType.CAUSAL
+                ), "we need to check varlen interface, which supports full or causal now"
+                is_causal = attn_mask_type[0] == AttnMaskType.CAUSAL
 
-            _, dist_attn_runtime_key = magi_attn_varlen_dispatch(
-                x,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                pad_size=pad_size,
-                chunk_size=chunk_size,
-                cp_group_or_mesh=self.device_mesh
-                if magi_attention.comm.is_hierarchical_comm_enable()
-                else self.nccl_group,
-                causal=is_causal,
-                dist_attn_config=dist_attn_config,
-            )
+                batch_size = attn_config["batch_size"]
+                cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
+                    batch_size, attn_config["total_seqlen_q"] // batch_size
+                )
 
-        if interface == "magi_attn_varlen":
-            assert is_list_value_all(
-                attn_mask_type, AttnMaskType.FULL
-            ) or is_list_value_all(
-                attn_mask_type, AttnMaskType.CAUSAL
-            ), "we need to check varlen interface, which supports full or causal now"
-            is_causal = attn_mask_type[0] == AttnMaskType.CAUSAL
+                _, dist_attn_runtime_key = magi_attn_varlen_dispatch(
+                    x,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    pad_size=pad_size,
+                    chunk_size=chunk_size,
+                    cp_group_or_mesh=self.device_mesh
+                    if magi_attention.comm.is_hierarchical_comm_enable()
+                    else self.nccl_group,
+                    causal=is_causal,
+                    dist_attn_config=dist_attn_config,
+                )
+            case "magi_attn_varlen":
+                assert is_list_value_all(
+                    attn_mask_type, AttnMaskType.FULL
+                ) or is_list_value_all(
+                    attn_mask_type, AttnMaskType.CAUSAL
+                ), "we need to check varlen interface, which supports full or causal now"
+                is_causal = attn_mask_type[0] == AttnMaskType.CAUSAL
 
-            cu_seqlens_q = attn_config["cu_seqlens_q"]
-            cu_seqlens_k = attn_config["cu_seqlens_k"]
-            _, dist_attn_runtime_key = magi_attn_varlen_dispatch(
-                x,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                pad_size=pad_size,
-                chunk_size=chunk_size,
-                cp_group_or_mesh=self.device_mesh
-                if magi_attention.comm.is_hierarchical_comm_enable()
-                else self.nccl_group,
-                causal=is_causal,
-                dist_attn_config=dist_attn_config,
-            )
-
-        if interface == "magi_attn_flex":
-            use_str_masktype: bool = attn_config["use_str_masktype"]
-            local_x_padded, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                x,
-                q_ranges=q_ranges,
-                k_ranges=k_ranges,
-                attn_mask_type=[masktype.value for masktype in attn_mask_type]
-                if use_str_masktype
-                else attn_mask_type,
-                total_seqlen_q=total_seqlen_q,
-                total_seqlen_k=total_seqlen_k,
-                pad_size=pad_size,
-                chunk_size=chunk_size,
-                cp_group_or_mesh=self.device_mesh
-                if magi_attention.comm.is_hierarchical_comm_enable()
-                else self.nccl_group,
-                dist_attn_config=dist_attn_config,
-            )
-
-        if interface == "set_mesh_and_group":
-            if magi_attention.comm.is_hierarchical_comm_enable():
-                with pytest.raises(AssertionError):
-                    _, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                        x,
-                        q_ranges=q_ranges,
-                        k_ranges=k_ranges,
-                        attn_mask_type=attn_mask_type,
-                        total_seqlen_q=total_seqlen_q,
-                        total_seqlen_k=total_seqlen_k,
-                        pad_size=pad_size,
-                        chunk_size=chunk_size,
-                        cp_group_or_mesh=self.nccl_group,
-                        dist_attn_config=dist_attn_config,
-                    )
-            else:
-                with pytest.raises(ValueError):
-                    _, dist_attn_runtime_key = magi_attn_flex_dispatch(
-                        x,
-                        q_ranges=q_ranges,
-                        k_ranges=k_ranges,
-                        attn_mask_type=attn_mask_type,
-                        total_seqlen_q=total_seqlen_q,
-                        total_seqlen_k=total_seqlen_k,
-                        pad_size=pad_size,
-                        chunk_size=chunk_size,
-                        cp_group_or_mesh=self.device_mesh,
-                        dist_attn_config=dist_attn_config,
-                    )
-            return
-
-        if interface == "test_for_invalid_mask":
-            invalid_mask_type = attn_config["attn_mask_type"]
-            with pytest.raises(ValueError):
-                _, dist_attn_runtime_key = magi_attn_flex_dispatch(
+                cu_seqlens_q = attn_config["cu_seqlens_q"]
+                cu_seqlens_k = attn_config["cu_seqlens_k"]
+                _, dist_attn_runtime_key = magi_attn_varlen_dispatch(
+                    x,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    pad_size=pad_size,
+                    chunk_size=chunk_size,
+                    cp_group_or_mesh=self.device_mesh
+                    if magi_attention.comm.is_hierarchical_comm_enable()
+                    else self.nccl_group,
+                    causal=is_causal,
+                    dist_attn_config=dist_attn_config,
+                )
+            case "magi_attn_flex":
+                use_str_masktype: bool = attn_config["use_str_masktype"]
+                local_x_padded, dist_attn_runtime_key = magi_attn_flex_dispatch(
                     x,
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
-                    attn_mask_type=invalid_mask_type,
+                    attn_mask_type=[masktype.value for masktype in attn_mask_type]
+                    if use_str_masktype
+                    else attn_mask_type,
                     total_seqlen_q=total_seqlen_q,
                     total_seqlen_k=total_seqlen_k,
                     pad_size=pad_size,
@@ -625,9 +526,57 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
                     else self.nccl_group,
                     dist_attn_config=dist_attn_config,
                 )
-            return
+            case "set_mesh_and_group":
+                if magi_attention.comm.is_hierarchical_comm_enable():
+                    with pytest.raises(AssertionError):
+                        _, dist_attn_runtime_key = magi_attn_flex_dispatch(
+                            x,
+                            q_ranges=q_ranges,
+                            k_ranges=k_ranges,
+                            attn_mask_type=attn_mask_type,
+                            total_seqlen_q=total_seqlen_q,
+                            total_seqlen_k=total_seqlen_k,
+                            pad_size=pad_size,
+                            chunk_size=chunk_size,
+                            cp_group_or_mesh=self.nccl_group,
+                            dist_attn_config=dist_attn_config,
+                        )
+                else:
+                    with pytest.raises(ValueError):
+                        _, dist_attn_runtime_key = magi_attn_flex_dispatch(
+                            x,
+                            q_ranges=q_ranges,
+                            k_ranges=k_ranges,
+                            attn_mask_type=attn_mask_type,
+                            total_seqlen_q=total_seqlen_q,
+                            total_seqlen_k=total_seqlen_k,
+                            pad_size=pad_size,
+                            chunk_size=chunk_size,
+                            cp_group_or_mesh=self.device_mesh,
+                            dist_attn_config=dist_attn_config,
+                        )
+                return
+            case "test_for_invalid_mask":
+                invalid_mask_type = attn_config["attn_mask_type"]
+                with pytest.raises(ValueError):
+                    _, dist_attn_runtime_key = magi_attn_flex_dispatch(
+                        x,
+                        q_ranges=q_ranges,
+                        k_ranges=k_ranges,
+                        attn_mask_type=invalid_mask_type,
+                        total_seqlen_q=total_seqlen_q,
+                        total_seqlen_k=total_seqlen_k,
+                        pad_size=pad_size,
+                        chunk_size=chunk_size,
+                        cp_group_or_mesh=self.device_mesh
+                        if magi_attention.comm.is_hierarchical_comm_enable()
+                        else self.nccl_group,
+                        dist_attn_config=dist_attn_config,
+                    )
+                return
 
         # -----    compute dist attn runtime mgr   ---- #
+
         dist_attn_runtime_mgr: DistAttnRuntimeMgr = DistAttnRuntimeDict[
             dist_attn_runtime_key
         ]
@@ -658,6 +607,8 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             cp_mesh=self.device_mesh,
         )
 
+        # -------   check mgr equality to ref -------- #
+
         assert (
             dist_attn_runtime_mgr == ref_attn_runtime_mgr
         ), f"the answer is not correct when {test_case=}"
@@ -682,74 +633,74 @@ class TestInterfaceSDPABaseWithWorldSize1(DistTestBase):
             )
 
 
-class TestInterfaceSDPAWithWorldSize2(TestInterfaceSDPABaseWithWorldSize1):
+class TestInterfaceWithWorldSize2(TestInterfaceBaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 2
 
     @skip_if_lt_x_gpu(2)
-    def test_interface_sdpa(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+    def test_interface(self, *args, **kwargs):
+        super().test_interface(*args, **kwargs)
 
 
-class TestInterfaceSDPAWithWorldSize3(TestInterfaceSDPABaseWithWorldSize1):
+class TestInterfaceWithWorldSize3(TestInterfaceBaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 3
 
     @skip_if_lt_x_gpu(3)
-    def test_interface_sdpa(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+    def test_interface(self, *args, **kwargs):
+        super().test_interface(*args, **kwargs)
 
 
-class TestInterfaceSDPAWithWorldSize4(TestInterfaceSDPABaseWithWorldSize1):
+class TestInterfaceWithWorldSize4(TestInterfaceBaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 4
 
     @skip_if_lt_x_gpu(4)
-    def test_interface_sdpa(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+    def test_interface(self, *args, **kwargs):
+        super().test_interface(*args, **kwargs)
 
 
-class TestInterfaceSDPAWithWorldSize5(TestInterfaceSDPABaseWithWorldSize1):
+class TestInterfaceWithWorldSize5(TestInterfaceBaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 5
 
     @skip_if_lt_x_gpu(5)
-    def test_interface_sdpa(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+    def test_interface(self, *args, **kwargs):
+        super().test_interface(*args, **kwargs)
 
 
-class TestInterfaceSDPAWithWorldSize6(TestInterfaceSDPABaseWithWorldSize1):
+class TestInterfaceWithWorldSize6(TestInterfaceBaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 6
 
     @skip_if_lt_x_gpu(6)
-    def test_interface_sdpa(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+    def test_interface(self, *args, **kwargs):
+        super().test_interface(*args, **kwargs)
 
 
-class TestInterfaceSDPAWithWorldSize7(TestInterfaceSDPABaseWithWorldSize1):
+class TestInterfaceWithWorldSize7(TestInterfaceBaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 7
 
     @skip_if_lt_x_gpu(7)
-    def test_interface_sdpa(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+    def test_interface(self, *args, **kwargs):
+        super().test_interface(*args, **kwargs)
 
 
-class TestInterfaceSDPAWithWorldSize8(TestInterfaceSDPABaseWithWorldSize1):
+class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
     @property
     def world_size(self) -> int:
         return 8
 
     @skip_if_lt_x_gpu(8)
-    def test_interface_sdpa(self, *args, **kwargs):
-        super().test_interface_sdpa(*args, **kwargs)
+    def test_interface(self, *args, **kwargs):
+        super().test_interface(*args, **kwargs)
 
 
 if __name__ == "__main__":

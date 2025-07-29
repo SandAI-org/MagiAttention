@@ -37,7 +37,7 @@ def is_hierarchical_comm_enable() -> bool:
 
 def ffa_fwd_sm_margin_save_for_comm() -> int:
     """
-    The sm margin number of ffa forward kernel saved for comm
+    The sm margin number of ffa forward kernel saved for comm kernels
     """
 
     sm_margin = os.environ.get("MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN", None)
@@ -50,7 +50,7 @@ def ffa_fwd_sm_margin_save_for_comm() -> int:
 
 def ffa_bwd_sm_margin_save_for_comm() -> int:
     """
-    The sm margin number of ffa backward kernel saved for comm
+    The sm margin number of ffa backward kernel saved for comm kernels
     """
 
     sm_margin = os.environ.get("MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN", None)

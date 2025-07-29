@@ -739,6 +739,7 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         intra_group: dist.ProcessGroup,
         inter_group: dist.ProcessGroup,
         use_a2av_impl: bool = True,
+        deterministic: bool = False,
     ):
         # --------   init the symmetric hier group-cast meta solver  -------- #
 
@@ -754,16 +755,17 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
             use_a2av_impl=use_a2av_impl,
         )
 
-        self._build()
+        self._build(deterministic)
 
     @classmethod
     def make_from_sym_hier_group_cast_meta_solver(
         cls,
         sym_hier_group_cast_meta_solver: HierGroupCastMetaSolver,
+        deterministic: bool = False,
     ) -> "HierGroupReduceMetaSolver":
         instance = cls.__new__(cls)
         instance.__dict__.update(sym_hier_group_cast_meta_solver.__dict__)
-        instance._build()
+        instance._build(deterministic)
         return instance
 
     def get_group_reduce_meta_pre_intra(self):
@@ -821,7 +823,9 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
 
         return post_process_fn_hier
 
-    def _build(self):
+    def _build(self, deterministic: bool = False):
+        self.deterministic = deterministic
+
         # ----   build group-reduce meta for pre-intra  ---- #
 
         self._build_group_reduce_meta_args_pre_intra()
@@ -884,6 +888,7 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
             src_indices_list=self.src_indices_list_pre_intra,
             world_size=self.world_size_intra_node,
             device=self.device,
+            deterministic=self.deterministic,
         )
 
         # get the pre-intra a2a input seqlen from the corr. a2a output seqlen for hier group-cast
@@ -926,6 +931,7 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
             src_indices_list=self.src_indices_list_post_intra,
             world_size=self.world_size_intra_node,
             device=self.device,
+            deterministic=self.deterministic,
         )
 
         # get the post-intra a2a input/output seqlen from the corr. a2a output/input seqlen for hier group-cast
@@ -975,6 +981,7 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
             src_indices_list=self.src_indices_list_inter,
             world_size=self.world_size_inter_node,
             device=self.device,
+            deterministic=self.deterministic,
         )
 
         # get the inter a2a input seqlen from the corr. a2a output seqlen for hier group-cast
@@ -1034,7 +1041,8 @@ def init_hier_group_reduce_meta_solver(
         return HierGroupReduceMetaSolver.make_from_sym_hier_group_cast_meta_solver(
             sym_hier_group_cast_meta_solver=kwargs.pop(
                 "sym_hier_group_cast_meta_solver"
-            )
+            ),
+            deterministic=kwargs.pop("deterministic", False),
         )
 
     return HierGroupReduceMetaSolver(
@@ -1047,6 +1055,7 @@ def init_hier_group_reduce_meta_solver(
         intra_group=intra_group,
         inter_group=inter_group,
         use_a2av_impl=use_a2av_impl,
+        deterministic=kwargs.pop("deterministic", False),
     )
 
 
