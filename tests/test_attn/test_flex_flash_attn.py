@@ -353,10 +353,6 @@ class TestFlexFlashAttn(TestCase):
         deterministic: bool,
         test_accumulation_inplace: bool,
     ):
-        if deterministic and auto_range_merge:
-            # TODO: support detetministic in auto_range_merge setting
-            return
-
         # extract config
         seqlen = attn_mask_config["seqlen"]
         q_ranges: AttnRanges = attn_mask_config["q_ranges"]

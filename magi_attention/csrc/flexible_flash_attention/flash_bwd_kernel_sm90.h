@@ -330,6 +330,9 @@ class FlashAttnBwdSm90 {
 
             tile_valid = tile_valid || tile_valid_tmp;
           }
+          if constexpr (Deterministic) {
+            cute::get<2>(block_coord_) = get<2>(block_coord);
+          }
         } else {
           tile_valid = mainloop.mma(
               params.mainloop,

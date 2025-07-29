@@ -316,11 +316,6 @@ struct CollectiveEpilogueFwd {
     int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
-    int left_range_conflict_msg = 0, right_range_conflict_msg = 0;
-    if constexpr (Deterministic) {
-      left_range_conflict_msg = get<3>(block_coord);
-      right_range_conflict_msg = get<4>(block_coord);
-    }
 
     // Get seqlen info for batch that current tile belongs to
     flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
@@ -375,6 +370,8 @@ struct CollectiveEpilogueFwd {
       // Acquire range lock to prevent multiple threads from writing to gmem simultaneously
       if (thread_idx == 0) {
         if constexpr (Deterministic) {
+          int left_range_conflict_msg = get<3>(block_coord);
+          int right_range_conflict_msg = get<4>(block_coord);
           deterministic_sync(
               params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
         }
@@ -544,13 +541,16 @@ struct CollectiveEpilogueFwd {
       flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
       if (thread_idx == 0) {
         if constexpr (Deterministic) {
+          int left_range_conflict_msg = get<3>(block_coord);
+          int right_range_conflict_msg = get<4>(block_coord);
+          int arrive_num = get<5>(block_coord) + 1;
           deterministic_arrive(
               params.determin_range_locks,
               bidh,
               offset_o + m_block * kBlockM,
               kBlockM,
               params.nheads,
-              bidb + 1,
+              arrive_num,
               left_range_conflict_msg & 1,
               right_range_conflict_msg & 1);
         }
@@ -643,13 +643,14 @@ struct CollectiveEpilogueFwd {
         if constexpr (Deterministic) {
           int left_range_conflict_msg = get<3>(block_coord);
           int right_range_conflict_msg = get<4>(block_coord);
+          int arrive_num = get<5>(block_coord) + 1;
           deterministic_arrive(
               params.determin_range_locks,
               bidh,
               offset_o + m_block * kBlockM,
               kBlockM,
               params.nheads,
-              bidb + 1,
+              arrive_num,
               left_range_conflict_msg & 1,
               right_range_conflict_msg & 1);
         }

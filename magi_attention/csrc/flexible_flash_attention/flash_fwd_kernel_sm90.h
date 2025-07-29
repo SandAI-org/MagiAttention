@@ -392,6 +392,9 @@ class FlashAttnFwdSm90 {
 
             tile_valid = tile_valid || current_tile_valid;
           }
+          if constexpr (Deterministic) {
+            cute::get<2>(block_coord_raw) = get<2>(block_coord);
+          }
         } else {
           SeqlenInfo_t seqlen_info{
               get<2>(block_coord),

@@ -41,8 +41,9 @@ class DynamicPersistentTileScheduler {
   static constexpr int NumThreads = WarpSpecialized ? NumMmaThreads + NumProducerThreads : NumMmaThreads;
 
  public:
-  using SharedStorage = std::conditional_t<Deterministic, thrust::pair<int4, int2>, int4>;
-  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
+  using SharedStorage = std::conditional_t<Deterministic, thrust::pair<int4, int3>, int4>;
+  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>,
+                                                           cute::tuple<int32_t, int32_t, int32_t>>;
 
  protected:
   SharedStorage* const work_info_smem;
@@ -77,7 +78,7 @@ class DynamicPersistentTileScheduler {
     // give extra memory when deterministic == true
     using extra_vars_type = std::conditional_t<
         Deterministic,
-        cute::tuple<int32_t, int32_t>,
+        cute::tuple<int32_t, int32_t, int32_t>,
         cute::tuple<> // no memory use
         >;
 
@@ -96,7 +97,7 @@ class DynamicPersistentTileScheduler {
       if constexpr (!Deterministic) {
         return {block, bidh, bidb};
       } else {
-        return {block, bidh, bidb, cute::get<0>(conflict_batch_msg), cute::get<1>(conflict_batch_msg)};
+        return {block, bidh, bidb, cute::get<0>(conflict_batch_msg), cute::get<1>(conflict_batch_msg), cute::get<2>(conflict_batch_msg)};
       }
     }
   };
@@ -217,9 +218,11 @@ class DynamicPersistentTileScheduler {
         int right_conflict_index = (l + kBlock - 1) / kBlock + block_now;
         __syncwarp();
         // conflict message is (conflict info << 1) | arrive_twice message
+        // [conflict msg left, conflict msg right, arrive num]
         return cute::make_tuple(
             (conflict_state[left_conflict_index * sm_stride + smid] << 1) | l_arrive_twice,
-            (conflict_state[right_conflict_index * sm_stride + smid] << 1) | r_arrive_twice);
+            (conflict_state[right_conflict_index * sm_stride + smid] << 1) | r_arrive_twice,
+            bidb_now);
       };
 
       auto conflict_batch_msg = get_conflict_batch_msg(current_work.bidb, bidb, block);
@@ -235,9 +238,12 @@ class DynamicPersistentTileScheduler {
         if constexpr (!Deterministic) {
           *work_info_smem = make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb);
         } else {
-          *work_info_smem = thrust::make_pair<int4, int2>(
+          *work_info_smem = thrust::make_pair<int4, int3>(
               make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
-              make_int2(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg)));
+              make_int3(cute::get<0>(work_info.conflict_batch_msg), 
+                        cute::get<1>(work_info.conflict_batch_msg),
+                        cute::get<2>(work_info.conflict_batch_msg))
+          );
         }
       }
       flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
@@ -275,13 +281,16 @@ class DynamicPersistentTileScheduler {
         return work_info;
       } else {
         WorkTileInfo work_info = {
-            __shfl_sync(0xffffffff, current_work.tile_idx, 1 /*lane*/), current_work.block, current_work.bidh, current_work.bidb, cute::make_tuple(0, 0)};
+            __shfl_sync(0xffffffff, current_work.tile_idx, 1 /*lane*/), current_work.block, current_work.bidh, current_work.bidb, cute::make_tuple(0, 0, 0)};
         work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
         flash::named_barrier_sync(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier0 /*id*/); // TileCountSmemEmpty
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
           *work_info_smem = thrust::make_pair(
               make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
-              make_int2(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg)));
+              make_int3(cute::get<0>(work_info.conflict_batch_msg),
+                        cute::get<1>(work_info.conflict_batch_msg),
+                        cute::get<2>(work_info.conflict_batch_msg))
+          );
         }
         flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
         return work_info;
@@ -295,9 +304,9 @@ class DynamicPersistentTileScheduler {
       } else {
         flash::named_barrier_sync(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
         int4 work_info = (*work_info_smem).first;
-        int2 conflict_info = (*work_info_smem).second;
+        int3 conflict_info = (*work_info_smem).second;
         flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier0 /*id*/); // TileCountSmemEmpty
-        return WorkTileInfo{work_info.x, work_info.y, work_info.z, work_info.w, cute::make_tuple(conflict_info.x, conflict_info.y)};
+        return WorkTileInfo{work_info.x, work_info.y, work_info.z, work_info.w, cute::make_tuple(conflict_info.x, conflict_info.y, conflict_info.z)};
       }
     }
   }
