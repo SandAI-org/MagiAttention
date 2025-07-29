@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>User Guide &#8212; MagiAttention v1.0.3 documentation</title>
+    <title>Environment Variables &#8212; MagiAttention v1.0.3 documentation</title>
   
   
   
@@ -45,7 +45,7 @@
     <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
     <script src="_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="_static/copybutton.js?v=fd10adb8"></script>
-    <script>DOCUMENTATION_OPTIONS.pagename = 'guide';</script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'env_variables';</script>
     <script>
         DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
         DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
@@ -53,11 +53,10 @@
         DOCUMENTATION_OPTIONS.show_version_warning_banner =
             true;
         </script>
-    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/guide.html" />
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/env_variables.html" />
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="next" title="Installation" href="install.html" />
-    <link rel="prev" title="MagiAttention documentation" href="index.html" />
+    <link rel="prev" title="API Reference" href="magi_api.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="" />
@@ -165,7 +164,7 @@
   <ul class="bd-navbar-elements navbar-nav">
     
 <li class="nav-item current active">
-  <a class="nav-link nav-internal" href="#">
+  <a class="nav-link nav-internal" href="guide.html">
     User Guide
   </a>
 </li>
@@ -241,6 +240,10 @@
   
 
   
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
 </div>
 
     </header>
@@ -268,7 +271,7 @@
   <ul class="bd-navbar-elements navbar-nav">
     
 <li class="nav-item current active">
-  <a class="nav-link nav-internal" href="#">
+  <a class="nav-link nav-internal" href="guide.html">
     User Guide
   </a>
 </li>
@@ -329,11 +332,11 @@
      aria-label="Section Navigation">
   <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
   <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">User Guide</span></p>
-<ul class="nav bd-sidenav">
+<ul class="current nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="install.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart.html">QuickStart</a></li>
 <li class="toctree-l1"><a class="reference internal" href="magi_api.html">API Reference</a></li>
-<li class="toctree-l1"><a class="reference internal" href="env_variables.html">Environment Variables</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">Environment Variables</a></li>
 </ul>
 </div>
 </nav></div>
@@ -374,7 +377,10 @@
         <i class="fa-solid fa-home"></i>
       </a>
     </li>
-    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">User Guide</span></li>
+    
+    <li class="breadcrumb-item"><a href="guide.html" class="nav-link">User Guide</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">Environment Variables</span></li>
   </ul>
 </nav>
 </div>
@@ -391,37 +397,52 @@
 <div id="searchbox"></div>
                 <article class="bd-article">
                   
-  <section id="user-guide">
-<h1>User Guide<a class="headerlink" href="#user-guide" title="Link to this heading">#</a></h1>
-<div class="toctree-wrapper compound">
-<p aria-level="2" class="caption" role="heading"><span class="caption-text">User Guide</span></p>
-<ul>
-<li class="toctree-l1"><a class="reference internal" href="install.html">Installation</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="install.html#step1-activate-an-ngc-pytorch-docker-container">Step1: Activate an NGC pytorch docker container</a></li>
-<li class="toctree-l2"><a class="reference internal" href="install.html#step2-install-required-packages">Step2: Install required packages</a></li>
-<li class="toctree-l2"><a class="reference internal" href="install.html#step3-install-magiattention-from-source">Step3: Install MagiAttention from source</a></li>
-</ul>
-</li>
-<li class="toctree-l1"><a class="reference internal" href="quickstart.html">QuickStart</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="quickstart.html#basic-usage-for-flex-flash-attention">Basic Usage for Flex-Flash-Attention</a></li>
-<li class="toctree-l2"><a class="reference internal" href="quickstart.html#basic-usage-for-magiattention">Basic Usage for MagiAttention</a></li>
-</ul>
-</li>
-<li class="toctree-l1"><a class="reference internal" href="magi_api.html">API Reference</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="magi_api.html#flexible-flash-attention">Flexible Flash Attention</a></li>
-<li class="toctree-l2"><a class="reference internal" href="magi_api.html#dispatch">Dispatch</a></li>
-<li class="toctree-l2"><a class="reference internal" href="magi_api.html#calculate-attention">Calculate Attention</a></li>
-<li class="toctree-l2"><a class="reference internal" href="magi_api.html#undispatch">Undispatch</a></li>
-<li class="toctree-l2"><a class="reference internal" href="magi_api.html#utility-functions">Utility Functions</a></li>
-</ul>
-</li>
-<li class="toctree-l1"><a class="reference internal" href="env_variables.html">Environment Variables</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="env_variables.html#for-performance">For Performance</a></li>
-<li class="toctree-l2"><a class="reference internal" href="env_variables.html#for-debug">For Debug</a></li>
-</ul>
-</li>
-</ul>
+  <section id="environment-variables">
+<h1>Environment Variables<a class="headerlink" href="#environment-variables" title="Link to this heading">#</a></h1>
+<p>In <strong>MagiAttention</strong>, many features need to be configured through environment variables. Below are some environment variables that can be set, along with their descriptions.</p>
+<section id="for-performance">
+<h2>For Performance<a class="headerlink" href="#for-performance" title="Link to this heading">#</a></h2>
+<p><strong>MAGI_ATTENTION_HIERARCHICAL_COMM</strong></p>
+<p>Toggling <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_HIERARCHICAL_COMM</span></code> env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group).</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This is for now a temporary solution to reduce the redundant inter-node communication and might be removed or updated in the future.</p>
 </div>
+<p><strong>MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN</strong></p>
+<p>The sm margin number of ffa forward kernel saved for comm kernels.</p>
+<p><strong>MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN</strong></p>
+<p>The sm margin number of ffa backward kernel saved for comm kernels.</p>
+<p><strong>MAGI_ATTENTION_FFA_FORWARD_INPLACE_CORRECT</strong></p>
+<p>Toggling this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable inplace-correct for out and lse in ffa forward to avoid the storage of partial results and the memory-bound <code class="docutils literal notranslate"><span class="pre">result_correction</span></code> as a forward post process.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This feature will be enabled by default as long as it’s stable (i.e. no effect on accuracy or performance).</p>
+</div>
+<p><strong>MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE</strong></p>
+<p>Toggling this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable high-precision (fp32) reduce for dkv among ranks in ffa backward to increase the precision at the cost of double comm overhead。</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dkv.
+However, by default we will downcast it to kv dtype before reducing among ranks to decrease comm overhead.</p>
+</div>
+</section>
+<section id="for-debug">
+<h2>For Debug<a class="headerlink" href="#for-debug" title="Link to this heading">#</a></h2>
+<p><strong>MAGI_ATTENTION_SANITY_CHECK</strong></p>
+<p>Toggling <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_SANITY_CHECK</span></code> env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable many sanity check codes inside magi_attention.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This is only supposed to be used for testing or debugging, since the extra sanity-check overhead might be non-negligible.</p>
+</div>
+<p><strong>MAGI_ATTENTION_SDPA_BACKEND</strong></p>
+<p>Toggling <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_SDPA_BACKEND</span></code> env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can switch the attn kernel backend from ffa to sdpa-math, to support higher precision like <code class="docutils literal notranslate"><span class="pre">fp32</span></code>, <code class="docutils literal notranslate"><span class="pre">fp64</span></code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This is only supposed to be used for testing or debugging, since the performance is not acceptable.</p>
+</div>
+<p><strong>MAGI_ATTENTION_DETERMINISTIC_MODE</strong></p>
+<p>Toggle <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_DETERMINISTIC_MODE</span></code> env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable deterministic mode to use deterministic algorithms for all magi_attention kernels.</p>
+</section>
 </section>
 
 
@@ -434,6 +455,25 @@
             </div>
             
             
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-performance">For Performance</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-debug">For Debug</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
               
             
           </div>
