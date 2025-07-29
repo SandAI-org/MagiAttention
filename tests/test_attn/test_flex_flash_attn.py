@@ -449,9 +449,11 @@ class TestFlexFlashAttn(TestCase):
         )
         o.backward(do)
 
+        err_msg_list = []
+
         if deterministic:
             # If deterministic is True, check deterministic behavior and return
-            self.check_deterministic(
+            err_msg_list = self.check_deterministic(
                 q=q,
                 k=k,
                 v=v,
@@ -468,7 +470,6 @@ class TestFlexFlashAttn(TestCase):
                 dk_ref=k.grad,
                 dv_ref=v.grad,
             )
-            return
 
         # compare with reference
         self.assert_close_to_torch_ref(
@@ -487,6 +488,7 @@ class TestFlexFlashAttn(TestCase):
             grad_total_out=do,
             dtype=dtype,
             test_case=test_case,
+            err_msg_list=err_msg_list,
         )
 
     def check_deterministic(
@@ -529,21 +531,24 @@ class TestFlexFlashAttn(TestCase):
         )
         o.backward(do)
 
-        assert torch.equal(
-            o, o_ref
-        ), f"For {test_case=}: forward output not deterministic"
+        try:
+            assert torch.equal(
+                o, o_ref
+            ), f"For {test_case=}: forward output not deterministic"
 
-        assert torch.equal(
-            q.grad, dq_ref
-        ), f"For {test_case=}: backward dq not deterministic"
+            assert torch.equal(
+                q.grad, dq_ref
+            ), f"For {test_case=}: backward dq not deterministic"
 
-        assert torch.equal(
-            k.grad, dk_ref
-        ), f"For {test_case=}: backward dk not deterministic"
+            assert torch.equal(
+                k.grad, dk_ref
+            ), f"For {test_case=}: backward dk not deterministic"
 
-        assert torch.equal(
-            v.grad, dv_ref
-        ), f"For {test_case=}: backward dv not deterministic"
+            assert torch.equal(
+                v.grad, dv_ref
+            ), f"For {test_case=}: backward dv not deterministic"
+        except Exception as e:
+            err_msg_list.append(str(e))
 
         return err_msg_list
 
