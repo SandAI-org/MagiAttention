@@ -392,6 +392,9 @@ class FlashAttnFwdSm90 {
 
             tile_valid = tile_valid || current_tile_valid;
           }
+          if constexpr (Deterministic) {
+            cute::get<2>(block_coord_raw) = get<2>(block_coord);
+          }
         } else {
           SeqlenInfo_t seqlen_info{
               get<2>(block_coord),
@@ -437,8 +440,12 @@ class FlashAttnFwdSm90 {
             epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw);
           }
         } else {
-          // Write 0 to gO and -inf to gLSE.
-          epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord);
+          if constexpr (!Deterministic) {
+            // Write 0 to gO and -inf to gLSE.
+            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord);
+          } else {
+            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw);
+          }
         }
       }
       epilogue.store_tail();

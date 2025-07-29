@@ -136,9 +136,9 @@ class FastZeroFillKernel {
     cute::clear(tOpOm);
     cute::clear(tOpOk);
 
-// Load LSE into tLSErLSE and set tOpOm to true if the LSE is -INFINITY
 #pragma unroll
     for (int32_t i = 0; i < size(tLSErLSE); ++i) {
+      // Load LSE into tLSErLSE and set tOpOm to true if the LSE is -INFINITY
       int32_t row = get<0>(tOcO((_0{}, _0{}), i, _0{})) + offset_o;
       if (row < seqlen_o) {
         tLSErLSE(i) = mLSE(row);
@@ -149,9 +149,9 @@ class FastZeroFillKernel {
       }
     }
 
-// Set tOpOk to true if the col is in the range of the output tensor
 #pragma unroll
     for (int32_t i = 0; i < size(tOpOk); ++i) {
+      // Set tOpOk to true if the col is in the range of the output tensor
       int32_t col = get<1>(tOcO((_0{}, _0{}), _0{}, i));
       tOpOk(i) = col < head_dim_o;
     }

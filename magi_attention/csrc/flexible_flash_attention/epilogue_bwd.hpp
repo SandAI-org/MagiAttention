@@ -244,11 +244,7 @@ struct CollectiveEpilogueBwd {
     int n_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
-    int left_range_conflict_msg = 0, right_range_conflict_msg = 0;
-    if constexpr (Deterministic) {
-      left_range_conflict_msg = get<3>(block_coord);
-      right_range_conflict_msg = get<4>(block_coord);
-    }
+
     int bidh_idx_in_group;
     int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
     Tensor sdK = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_dk.data()), SmemLayoutdKV{}));
@@ -312,14 +308,17 @@ struct CollectiveEpilogueBwd {
     if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1) {
       if constexpr (Deterministic) {
         if (cute::elect_one_sync()) {
+          int left_range_conflict_msg = get<3>(block_coord);
+          int right_range_conflict_msg = get<4>(block_coord);
+          int arrive_num = get<5>(block_coord);
           int qheads_per_kheads = params.qhead_per_khead_divmod;
           // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
           // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
           // if not conflict, conflict_msg >> 1 is 0
           // the first gqa headq should wait for conflict batches
           // the others gqa headq should wait for previous gqa headq
-          int sync_num1 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
-          int sync_num2 = bidh_idx_in_group ? bidb * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
+          int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
+          int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
           deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
         }
       }
@@ -333,8 +332,11 @@ struct CollectiveEpilogueBwd {
     tma_store_wait<0>();
     if constexpr (Deterministic) {
       if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+        int left_range_conflict_msg = get<3>(block_coord);
+        int right_range_conflict_msg = get<4>(block_coord);
         int qheads_per_kheads = params.qhead_per_khead_divmod;
-        int arrive_num = bidb * qheads_per_kheads + bidh_idx_in_group + 1;
+        int arrive_num = get<5>(block_coord);
+        arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
         deterministic_arrive(
             params.determin_range_locks,
             bidh_kv,
@@ -355,7 +357,44 @@ struct CollectiveEpilogueBwd {
   }
 
   // Write 0 to dK and dV
-  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, cute::tuple<int32_t, int32_t, int32_t> const& block_coord) {}
+  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
+    if constexpr (Deterministic) {
+      int warp_idx_sync = __shfl_sync(0xffffffff, thread_idx / cutlass::NumThreadsPerWarp, 0);
+      if (warp_idx_sync == NumEpilogueThreads / cutlass::NumThreadsPerWarp - 1 && cute::elect_one_sync()) {
+        // Get block coordinates for current job(tile)
+        int n_block = get<0>(block_coord);
+        int bidh = get<1>(block_coord);
+        int bidb = get<2>(block_coord);
+        int left_range_conflict_msg = get<3>(block_coord);
+        int right_range_conflict_msg = get<4>(block_coord);
+        int arrive_num = get<5>(block_coord);
+        int bidh_idx_in_group;
+        int bidh_kv = params.qhead_per_khead_divmod.divmod(bidh_idx_in_group, bidh);
+        static constexpr int kBlockN = get<1>(TileShape_MNK{});
+        flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
+        int offset_k = seqlen_info.offset_k;
+        int qheads_per_kheads = params.qhead_per_khead_divmod;
+        // batch i use [i * qheads_per_kheads + 1 , (i + 1) * qheads_per_kheads] for add rank of same khead
+        // conflict_msg >> 1 is bidb + 1 of conflict bidb when conflict with previous batch
+        // if not conflict, conflict_msg >> 1 is 0
+        // the first gqa headq should wait for conflict batches
+        // the others gqa headq should wait for previous gqa headq
+        int sync_num1 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (left_range_conflict_msg >> 1) * qheads_per_kheads;
+        int sync_num2 = bidh_idx_in_group ? arrive_num * qheads_per_kheads + bidh_idx_in_group : (right_range_conflict_msg >> 1) * qheads_per_kheads;
+        deterministic_sync(params.determin_range_locks, bidh_kv, offset_k + n_block * kBlockN, kBlockN, params.nheads, sync_num1, sync_num2);
+        arrive_num = arrive_num * qheads_per_kheads + bidh_idx_in_group + 1;
+        deterministic_arrive(
+            params.determin_range_locks,
+            bidh_kv,
+            offset_k + n_block * kBlockN,
+            kBlockN,
+            params.nheads,
+            arrive_num,
+            left_range_conflict_msg & 1,
+            right_range_conflict_msg & 1);
+      }
+    }
+  }
 };
 
 } // namespace flash

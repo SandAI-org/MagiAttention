@@ -430,7 +430,9 @@ struct CollectiveMainloopBwdSm90 {
       SharedStorage& shared_storage,
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       bool const has_valid_tile) {
-    auto [n_block, bidh, bidb] = block_coord;
+    int n_block = get<0>(block_coord);
+    int bidh = get<1>(block_coord);
+    int bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
@@ -843,8 +845,8 @@ struct CollectiveMainloopBwdSm90 {
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
     // if (bidh == 0 && thread_idx == 0) {
-    //     printf("[BWD] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d\n", bidb, kBlockM, kBlockN, n_block, m_block_min,
-    //     m_block_max);
+    //     printf("[BWD MMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n", bidb, kBlockM, kBlockN, n_block,
+    //     m_block_min, m_block_max, attn_type);
     // }
     // It's possible to have m_block_max <= m_block_min. Exit early
     if (m_block_max <= m_block_min) {
@@ -1017,6 +1019,20 @@ struct CollectiveMainloopBwdSm90 {
           return nullptr;
       }();
       mask_fn(tSrS, m_block);
+
+      // Start debug print
+      // Tensor scores_16 = make_tensor_like<Element>(tSrS);
+      // flash::convert_type_out(tSrS, scores_16);
+      // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
+      // cute::copy(smem_tiled_copy_PdS, scores_16_copy, tdSsdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index())));
+      // cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS));
+      // if (thread_idx == 0) {
+      //   print_tensor(
+      //     sdS(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()))
+      //   );
+      // }
+      // End debug print
+
 #pragma unroll
       for (int mi = 0; mi < size<0>(scores); ++mi) {
         float const lse_scaled = [&] {
@@ -1030,6 +1046,19 @@ struct CollectiveMainloopBwdSm90 {
           scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - lse_scaled);
         }
       }
+
+      // Start debug print
+      // Tensor scores_16 = make_tensor_like<Element>(tSrS);
+      // flash::convert_type_out(tSrS, scores_16);
+      // auto scores_16_copy = smem_thr_copy_PdS.retile_S(scores_16);
+      // cute::copy(smem_tiled_copy_PdS, scores_16_copy, tdSsdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index())));
+      // cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS));
+      // if (thread_idx == 0) {
+      //   print_tensor(
+      //     sP(_, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()))
+      //   );
+      // }
+      // End debug print
 
       Tensor tLSErdPsum = cute::conditional_return<!ShuffledPsum>(make_fragment_like(tLSEsdPsum(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
       if constexpr (!ShuffledPsum) {
