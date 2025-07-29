@@ -328,6 +328,13 @@ def magi_attn_flex_key(
         >>> # Gather local attention results to global result
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
+    # Validate total_seqlen
+    assert q_ranges.end <= total_seqlen_q and k_ranges.end <= total_seqlen_k, (
+        f"The maximum endpoint in ranges must be less than total_seqlen, "
+        f"but got {q_ranges.end=} when {total_seqlen_q=}, "
+        f"and got {k_ranges.end=} when {total_seqlen_k=}"
+    )
+
     # Validate and transform attn_mask_type
     attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
     assert is_list_type_all(attn_mask_type, (str, AttnMaskType)), (

@@ -1405,9 +1405,13 @@ class DispatchSolver(nn.Module):
         ), "class of affinity for sorted sequential select must be all SampleIDAffinity."
 
         sample_to_slice_map: defaultdict[int, list[int]] = defaultdict(list)
+        empty_chunk_idx: list[int] = []
 
-        # calculate samples are chunked to which chunk
+        # calculate samples are chunked to which chunk and empty chunk
         for chunk_idx, affinity in enumerate(affinities):
+            if len(affinity.sample_id_cnt_dict) == 0:
+                empty_chunk_idx.append(chunk_idx)
+                continue
             for sample_idx, _ in affinity.sample_id_cnt_dict.items():
                 sample_to_slice_map[sample_idx].append(chunk_idx)
 
@@ -1475,7 +1479,30 @@ class DispatchSolver(nn.Module):
             if len(heap) == 0:
                 break
 
-        assert len(heap) == 0
+        # assign empty chunks
+        empty_chunk_idx.sort()
+        empty_idx, empty_chunks_wait_to_assign = 0, len(empty_chunk_idx)
+        while len(heap) > 0:
+            cur_workload, bucket_idx, affinity = heapq.heappop(heap)
+            # calculate how many chunks need to be allocated
+            chunks_need_to_assign = bucket_num_limit - bucket_nums[bucket_idx]
+            # the remaining number of empty chunks must be less than the number to be allocated
+            assert chunks_need_to_assign <= empty_chunks_wait_to_assign
+            empty_chunks_wait_to_assign -= chunks_need_to_assign
+            # assign chunks
+            for _ in range(chunks_need_to_assign):
+                _assign_job_to_bucket(
+                    job_idx=empty_chunk_idx[empty_idx],
+                    bucket_idx=bucket_idx,
+                    new_workload=cur_workload,
+                )
+                empty_idx += 1
+
+        assert (
+            len(heap) == 0
+            and empty_chunks_wait_to_assign == 0
+            and empty_idx == len(empty_chunk_idx)
+        )
         for num in bucket_nums:
             assert num == bucket_num_limit
 
