@@ -1,6 +1,6 @@
 ## integrate MagiAttention with FSDP
 
-We provide a toy example in this direcotry to show you how to integrate MagiAttention with FSDP to train a llama-1b model on randomly generated input data.
+We provide a toy example in this direcotry to show you how to integrate MagiAttention with FSDP to train a Llama-3 1B model on randomly generated input data.
 
 ### modeling llama
 We provide an native inplementation of llama model in `modeling_llama.py`.
