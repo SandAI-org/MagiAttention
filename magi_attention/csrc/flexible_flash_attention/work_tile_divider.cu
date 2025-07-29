@@ -12,20 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
-#include <cub/device/device_scan.cuh>
-#include <vector>
+#include <cutlass/cluster_launch.hpp>
+#include <cutlass/cutlass.h>
+#include <cutlass/device_kernel.h> // For device_kernel
+#include <cutlass/kernel_hardware_info.h>
+#include <cutlass/kernel_launch.h>
 
 #include "cuda_check.h"
 #include "flash.h"
+#include "work_tile_divider.hpp"
 
-
-__global__ void tile_idx_to_work_tile(
-  
-) {
-    
-}
+using namespace cute;
 
 std::tuple<torch::Tensor> work_tile_divider_ext(
   torch::Tensor q,
@@ -39,42 +40,19 @@ std::tuple<torch::Tensor> work_tile_divider_ext(
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
   int const head_size = q.size(2);
+
+  using WorkTileDivider = flash::WorkTileDivider<cutlass::arch::Sm90, 64>;
+  typename WorkTileDivider::Arguments divider_args{
+    num_heads_qo,
+    batch_size,
+    static_cast<int*>(q_ranges.data_ptr()),
+  };
+  typename WorkTileDivider::Params divider_params = WorkTileDivider::to_underlying_arguments(divider_args);
   
-  // Check q, k, v (dtype, device, layout)
-  auto q_type = q.scalar_type();
-  TORCH_CHECK(q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16, "Flexible Flash Attention only supports fp16 and bf16 data type");
-  TORCH_CHECK(k.scalar_type() == q_type, "query and key must have the same dtype");
-  TORCH_CHECK(v.scalar_type() == q_type, "query and value must have the same dtype");
-  CHECK_DEVICE(q);
-  CHECK_DEVICE(k);
-  CHECK_DEVICE(v);
-  TORCH_CHECK(q.dim() == 3, "query tensor must be a 3D tensor(total_q, num_heads_qo, head_size)");
-  TORCH_CHECK(k.dim() == 3, "key tensor must be a 3D tensor(total_k, num_heads_kv, head_size)");
-  TORCH_CHECK(v.dim() == 3, "value tensor must be a 3D tensor(total_k, num_heads_kv, head_size)");
-  CHECK_SHAPE(q, total_q, num_heads_qo, head_size);
-  CHECK_SHAPE(k, total_k, num_heads_kv, head_size);
-  CHECK_SHAPE(v, total_k, num_heads_kv, head_size);
-  TORCH_CHECK(q.stride(-1) == 1, "query tensor must have contiguous last dimension");
-  TORCH_CHECK(k.stride(-1) == 1, "key tensor must have contiguous last dimension");
-  TORCH_CHECK(v.stride(-1) == 1, "value tensor must have contiguous last dimension");
-
-  // Check q_ranges (dtype, device, layout)
-  TORCH_CHECK(q_ranges.dtype() == torch::kInt32, "q_ranges must have dtype torch.int32");
-  CHECK_DEVICE(q_ranges);
-  TORCH_CHECK(q_ranges.dim() == 2, "q_ranges must be a 2D tensor");
-  TORCH_CHECK(q_ranges.size(1) == 2, "q_ranges must have 2 columns");
-  CHECK_SHAPE(q_ranges, batch_size, 2);
-  CHECK_CONTIGUOUS(q_ranges);
-
-  // Check k_ranges (dtype, device, layout)
-  CHECK_DEVICE(k_ranges);
-  TORCH_CHECK(k_ranges.dtype() == torch::kInt32, "k_ranges must have dtype torch.int32");
-  TORCH_CHECK(k_ranges.dim() == 2, "k_ranges must be a 2D tensor");
-  TORCH_CHECK(k_ranges.size(1) == 2, "k_ranges must have 2 columns");
-  CHECK_SHAPE(k_ranges, batch_size, 2);
-  CHECK_CONTIGUOUS(k_ranges);
-
-  
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  dim3 grid_dims = WorkTileDivider::get_grid_shape(divider_params);
+  dim3 block_dims = WorkTileDivider::get_block_shape();
+  cutlass::kernel_launch<WorkTileDivider>(grid_dims, block_dims, 0 /*smem_size*/, stream, divider_params, false /*launch_with_pdl*/);
 
   return {q_ranges};
 }
