@@ -19,6 +19,9 @@ from magi_attention.functional import flex_flash_attn_func
 from magi_attention.meta.solver.dispatch_solver import (
     DispatchConfig,
     MinHeapDispatchAlg,
+    SequentialDispatchAlg,
+    SortedSequentialSelectAlg,
+    ToppHeapDispatchAlg,
 )
 from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOverlapAlg
 
@@ -67,4 +70,7 @@ __all__ = [
     "init_hierarchical_mesh",
     "infer_attn_mask_from_window_size",
     "infer_attn_mask_from_sliding_window",
+    "SequentialDispatchAlg",
+    "SortedSequentialSelectAlg",
+    "ToppHeapDispatchAlg",
 ]
