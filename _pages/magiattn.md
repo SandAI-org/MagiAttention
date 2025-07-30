@@ -21,7 +21,7 @@ typograms: true
 
 external-links:
   github: https://github.com/SandAI-org/MagiAttention
-  arxiv: https://static.magi.world/static/files/MAGI_1.pdf
+  arxiv: https://arxiv.org/pdf/2505.13211
 
 authors:
   - name: Zewei Tao
@@ -33,7 +33,7 @@ authors:
     url: "https://github.com/Strivin0311"
     email: yunpenghuang@sand.ai
     affiliations:
-      name: SandAI, Nanjing University
+      name: SandAI
 
 bibliography: magiattn.bib
 
@@ -91,7 +91,7 @@ _styles: >
   </div>
 </div>
 
-Training large-scale models for video generation presents two major challenges: (1) The extremely long context length of video tokens, which reaching up to 4 million during training, results in prohibitive computational and memory overhead. (2) The combination of block-causal attention and Packing-and-Padding (PnP) introduces highly complex attention mask patterns. 
+Training large-scale models for video generation presents two major challenges: (1) The extremely long context length of video tokens, which reaching up to 4 million during training, results in prohibitive computational and memory overhead. (2) The combination of block-causal attention and Patch-and-Pack (PnP) introduces highly complex attention mask patterns. 
 
 To address these challenges, we propose [MagiAttention](https://github.com/SandAI-org/MagiAttention), which aims to support a wide variety of attention mask types with **kernel-level flexibility**, while achieving **linear scalability** with respect to context-parallel (CP) size across a broad range of scenarios, particularly suitable for training tasks involving <u><em>ultra-long, heterogeneous mask</em></u> training like video-generation for [Magi-1](https://github.com/SandAI-org/MAGI-1).
 
@@ -102,7 +102,7 @@ Training large-scale autoregressive diffusion models like \magi for video genera
 
 - The extremely long context length of video tokens, which reaching up to 4 million during training, results in prohibitive computational and memory overhead. Context-Parallelism (CP) is designed for dealing such long context challenge, but existing state-of-the-art CP methods<d-cite key="jacobs2023deepspeed,liu2023ringattentionblockwisetransformers,fang2024uspunifiedsequenceparallelism,gu2024loongtrainefficienttraininglongsequence,chen2024longvilascalinglongcontextvisual"></d-cite> face scalability limitations that face scalability limitations due to size constraints or the high communication overhead inherent in inefficient ring-style point-to-point (P2P) patterns. While recent efforts<d-cite key="wang2024datacentricheterogeneityadaptivesequenceparallelism,zhang2024dcp,ge2025bytescaleefficientscalingllm"></d-cite> dynamically adjust CP sizes to avoid unnecessary sharding and redundant communication for shorter sequences, they still incur extra memory overhead for NCCL buffers and involve complex scheduling to balance loads and synchronize across different subsets of ranks.
 
-- The combination of block-causal attention and Packing-and-Padding (PnP) introduces highly complex attention mask patterns with variable sequence lengths, which cannot be efficiently handled by existing attention implementations.
+- The combination of block-causal attention and Patch-and-Pack (PnP)<d-cite key="dehghani2023patchnpacknavit"></d-cite> introduces highly complex attention mask patterns with variable sequence lengths, which cannot be efficiently handled by existing attention implementations.
 
 
 To address the aforementioned challenges, we propose MagiAttention, which aims to support a wide variety of attention mask types (\emph{i.e.} kernel flexibility) while achieving linear scalability with respect to context-parallel (CP) size across a broad range of scenarios. Achieving this goal depends on meeting the following fundamental conditions:
@@ -389,29 +389,31 @@ comming soon ...
 
 ## Future Work
 
-comming soon ...
+For now, please check [RoadMap](https://github.com/SandAI-org/MagiAttention?tab=readme-ov-file#roadmap-%EF%B8%8F).
 
 ## FAQ
 
 comming soon ...
 
+
 ## Acknowledgement
 
 We are grateful to the contributors listed below for their valuable contributions during the early stages of MagiAttention.
 
-| Member   | Affiliations         | Email                        | GitHub Account    |
-|:-----------|:-------------|:----------------------------|:---------------|
-| Zewei Tao    | SandAI       | zeweitao@sand.ai            | littsk         |
-| Yunpeng Huang    | SandAI, Nanjing University       | yunpenghuang@sand.ai,hyp@smail.nju.edu.cn       | Strivin0311    |
-| Qiangang Wang    | Nanjing University | 522024330081@smail.nju.edu.cn | WT1W           |
-| Hanwen Sun   | SandAI, Peking University |  sunhanwen@stu.pku.edu.cn |  hanwen-sun  |
-| Tao Bu      | Nanjing University | 502024330002@smail.nju.edu.cn | Big-TRex       |
-| WenYang Fang    | Nanjing University | fwy@smail.nju.edu.cn        | kagami4243     |
-| Siyuang Yan    | Nanjing University | siyuanyan@smail.nju.edu.cn  | FibonaccciYan  |
-| Zixu Jiang     | Nanjing University | 522023330040@smail.nju.edu.cn | 191220042      |
-| Dingkun Xu    | Nanjing University | 211220090@smail.nju.edu.cn  | PureDimension  |
-| Mingyu Liang    | Nanjing University |   mingyuliang518@gmail.com     | gaomusiki      |
-| Jingwei Xu    | Nanjing University | jingweix@nju.edu.cn | paragonlight   |
+| Member        | Affiliations                | Email                           | GitHub Account |
+| :------------ | :-------------------------- | :------------------------------ | :------------- |
+| Zewei Tao     | SandAI                      | <zeweitao@sand.ai>              | littsk         |
+| Yunpeng Huang | SandAI                      | <yunpenghuang@sand.ai>          | Strivin0311    |
+| Qiangang Wang | SandAI, Nanjing University  | <522024330081@smail.nju.edu.cn> | WT1W           |
+| Hanwen Sun    | SandAI, Peking University   | <sunhanwen@stu.pku.edu.cn>      | hanwen-sun     |
+| Jin Li        | SandAI, Tsinghua University | <2609835176@qq.com>             | lijinnn        |
+| Tao Bu        | Nanjing University          | <502024330002@smail.nju.edu.cn> | Big-TRex       |
+| WenYang Fang  | Nanjing University          | <fwy@smail.nju.edu.cn>          | kagami4243     |
+| Siyuang Yan   | Nanjing University          | <siyuanyan@smail.nju.edu.cn>    | FibonaccciYan  |
+| Zixu Jiang    | Nanjing University          | <522023330040@smail.nju.edu.cn> | 191220042      |
+| Dingkun Xu    | Nanjing University          | <211220090@smail.nju.edu.cn>    | PureDimension  |
+| Mingyu Liang  | Nanjing University          | <mingyuliang518@gmail.com>      | gaomusiki      |
+| Jingwei Xu    | Nanjing University          | <jingweix@nju.edu.cn>           | paragonlight   |
 
 
 ## Citation
