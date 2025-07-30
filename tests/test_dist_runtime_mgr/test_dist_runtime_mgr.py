@@ -483,6 +483,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
         magi_attention.testing.assert_close(
             total_o,
             total_o_ref,
+            test_case="self-attn forward out",
         )
 
         total_xattn_attn_arg: AttnArg = dist_attn_runtime_mgr.get_xattn_args(
@@ -502,6 +503,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
         magi_attention.testing.assert_close(
             total_o,
             total_o_ref,
+            test_case="cross-attn forward out",
         )
 
 

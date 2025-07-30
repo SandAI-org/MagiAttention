@@ -112,8 +112,6 @@ class TestMergeRange(TestCase):
             sorted_inner_ranges,
             range_map,
         ) = self.merge_ranges(outer_ranges_small, inner_ranges_small)
-        print(f"{range_map=}")
-        print(f"{range_map_ref=}")
 
         self.assertTrue(torch.equal(merge_outer_ranges, merge_outer_ranges_ref))
         self.assertTrue(torch.equal(sorted_outer_ranges, sorted_outer_ranges_ref))
