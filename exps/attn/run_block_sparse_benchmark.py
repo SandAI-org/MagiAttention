@@ -21,26 +21,42 @@ from baselines.utils import (
     flatten_head_mask,
     generate_headwise_4D_block_sparse_pattern,
     generate_ranges_from_mask,
+    get_flashinfer_uniform_block_index,
     get_sdpa_mask_from_block_sparse_mask,
+    get_vsa_mask_from_block_sparse_score,
+    seed_everything,
 )
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
-impls = ["ffa", "sdpa"]
+impls = ["ffa", "vsa", "vsa_triton", "flashinfer"]
 
 # actual seqlen
-seqlen = 8192
+seqlen = 49152
 
 sparsity_ratio = [0.1, 0.2, 0.5, 0.8, 1.0]
 # ss = [k * 1024 for k in [4, 96, 128]]
 ds = [128]
-wds = ["fwd", "bwd"]
-block_sizes = [64, 128]
+if "flashinfer" in impls:
+    # flashinfer doesn't support backward
+    wds = ["fwd"]
+else:
+    wds = ["fwd", "bwd"]
+if "vsa" or "vsa_triton" in impls:
+    # currently vsa only supports block size == 64
+    block_sizes = [64]
+else:
+    block_sizes = [64, 128]
 
 b = 1
-nhq = 48
-nhk = 8
+nhq = 32
+if "vsa" in impls or "flashinfer" in impls:
+    # currently vsa doesn't support gqa
+    # currently flashinfer doesn't support query-specific sparsity
+    nhk = nhq
+else:
+    nhk = 8
 dtype = torch.bfloat16
 
 bias = None
@@ -69,7 +85,7 @@ attn_flops_configs = [
             "flops": "Throughout (TFLOPs/s)",
             "mem": "Peak Memory (GB)",
         },
-        plot_name=f"block sparse attn-{wd} block_size-{block_size}",
+        plot_name=f"block sparse attn-{wd} block_size-{block_size} seq_len {seqlen}",
         # Name for the plot. Used also as a file name for saving the plot.
         args={  # Values for function arguments not in `x_names` and `y_name`.
             "hd": hd,
@@ -81,6 +97,8 @@ attn_flops_configs = [
     for wd in wds
     for block_size in block_sizes
 ]
+
+seed_everything()
 
 
 @perf_report(attn_flops_configs)
@@ -104,10 +122,10 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
     # prepare q, k ranges and caculate attn_flops
     # for now, we only do bench for block sparse mask.
-    # block_mask = generate_global_block_sparse_pattern(
+    # block_mask, scores = generate_global_block_sparse_pattern(
     #    orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
     # )
-    block_mask = generate_headwise_4D_block_sparse_pattern(
+    block_mask, scores = generate_headwise_4D_block_sparse_pattern(
         orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
     )
 
@@ -139,7 +157,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         # k = k.view(b * orig_seq_len_k * nhk, 1, hd)
         # v = v.view(b * orig_seq_len_k * nhk, 1, hd)
 
-    if attn_impl in ("sdpa"):
+    if attn_impl in ("sdpa", "vsa", "vsa_triton", "flashinfer"):
         q = rearrange(q, "b s h d -> b h s d")
         k = rearrange(k, "b s h d -> b h s d")
         v = rearrange(v, "b s h d -> b h s d")
@@ -189,6 +207,144 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
             def fn():
                 o.backward(do, retain_graph=True)
+
+    elif attn_impl == "vsa":
+        try:
+            from vsa import block_sparse_bwd, block_sparse_fwd
+        except ImportError:
+            raise ImportError(
+                "Please install FastVideo VSA following https://github.com/hao-ai-lab/FastVideo/tree/main/csrc/attn."
+            )
+
+        topk = int(sparsity_ratio * num_kv_blocks_orig)
+        (
+            q2k_block_sparse_index,
+            q2k_block_sparse_num,
+            k2q_block_sparse_index,
+            k2q_block_sparse_num,
+        ) = get_vsa_mask_from_block_sparse_score(
+            scores,
+            k=topk,
+        )
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+        def fn():
+            return block_sparse_fwd(
+                q, k, v, q2k_block_sparse_index, q2k_block_sparse_num
+            )
+
+        if wd == "bwd":
+            do = do.contiguous()
+            try:
+                o, l_vec = fn()
+            except Exception as e:
+                if "CUDA out of memory" not in str(e):
+                    print(
+                        f"Error occured before running {attn_impl} with {block_size} mask "
+                        f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                    )
+                    raise e
+                already_known_oom_before_run = True
+
+            def fn():
+                block_sparse_bwd(
+                    q, k, v, o, l_vec, do, k2q_block_sparse_index, k2q_block_sparse_num
+                )
+
+    elif attn_impl == "vsa_triton":
+        from baselines.block_sparse_attn_triton import (
+            block_sparse_bwd,
+            block_sparse_fwd,
+        )
+
+        topk = int(sparsity_ratio * num_kv_blocks_orig)
+        (
+            q2k_block_sparse_index,
+            q2k_block_sparse_num,
+            k2q_block_sparse_index,
+            k2q_block_sparse_num,
+        ) = get_vsa_mask_from_block_sparse_score(
+            scores,
+            k=topk,
+        )
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+        def fn():
+            return block_sparse_fwd(
+                q, k, v, q2k_block_sparse_index, q2k_block_sparse_num
+            )
+
+        if wd == "bwd":
+            do = do.contiguous()
+            try:
+                o, l_vec = fn()
+            except Exception as e:
+                if "CUDA out of memory" not in str(e):
+                    print(
+                        f"Error occured before running {attn_impl} with {block_size} mask "
+                        f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                    )
+                    raise e
+                already_known_oom_before_run = True
+
+            def fn():
+                block_sparse_bwd(
+                    q,
+                    k,
+                    v,
+                    o,
+                    l_vec,
+                    do,
+                    q2k_block_sparse_index,
+                    q2k_block_sparse_num,
+                    k2q_block_sparse_index,
+                    k2q_block_sparse_num,
+                )
+
+    elif attn_impl == "flashinfer":
+        try:
+            import flashinfer
+        except ImportError:
+            raise ImportError("Please install FlashInfer first.")
+
+        q = q.view(b * nhq, orig_seq_len_q, hd).contiguous()
+        k = k.view(b * nhk, orig_seq_len_k, hd).contiguous()
+        v = v.view(b * nhk, orig_seq_len_k, hd).contiguous()
+        # BUG: using original block mask will cause illegal access sometimes
+        # block_mask_cpu = block_mask.detach().cpu()
+        block_mask_cpu = (
+            torch.rand(nhk, num_q_blocks_orig, num_kv_blocks_orig) < sparsity_ratio
+        )
+
+        block_row_sz, block_col_sz = get_flashinfer_uniform_block_index(
+            num_q_blocks_orig, num_kv_blocks_orig, orig_seq_len_q, orig_seq_len_k, nhk
+        )
+        print(f"Sparsity = {sparsity_ratio} of elements to compute")
+
+        # allocate 128MB workspace buffer
+        workspace_buffer = torch.empty(
+            128 * 1024 * 1024, dtype=torch.uint8, device=block_mask.device
+        )
+        wrapper = flashinfer.sparse.VariableBlockSparseAttentionWrapper(
+            workspace_buffer, backend="fa3"
+        )
+
+        wrapper.plan(
+            block_mask_map=block_mask_cpu,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
+            num_qo_heads=nhq,
+            num_kv_heads=nhk,
+            head_dim=hd,
+            q_data_type=q.dtype,
+        )
+
+        def fn():
+            return wrapper.run(q, k, v)
 
     elif attn_impl == "sdpa":
         sdpa_mask = get_sdpa_mask_from_block_sparse_mask(
