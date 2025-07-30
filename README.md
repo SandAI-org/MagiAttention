@@ -463,19 +463,20 @@ If you use MagiAttention in your research, please cite:
 
 We are grateful to the contributors listed below for their valuable contributions during the early stages of MagiAttention.
 
-| Member   | Affiliations         | Email                        | GitHub Account    |
-|:-----------|:-------------|:----------------------------|:---------------|
-| Zewei Tao    | SandAI       | zeweitao@sand.ai            | littsk         |
-| Yunpeng Huang    | SandAI, Nanjing University       | yunpenghuang@sand.ai,hyp@smail.nju.edu.cn       | Strivin0311    |
-| Qiangang Wang    | Nanjing University | 522024330081@smail.nju.edu.cn | WT1W           |
-| Hanwen Sun   | SandAI, Peking University |  sunhanwen@stu.pku.edu.cn |  hanwen-sun  |
-| Tao Bu      | Nanjing University | 502024330002@smail.nju.edu.cn | Big-TRex       |
-| WenYang Fang    | Nanjing University | fwy@smail.nju.edu.cn        | kagami4243     |
-| Siyuang Yan    | Nanjing University | siyuanyan@smail.nju.edu.cn  | FibonaccciYan  |
-| Zixu Jiang     | Nanjing University | 522023330040@smail.nju.edu.cn | 191220042      |
-| Dingkun Xu    | Nanjing University | 211220090@smail.nju.edu.cn  | PureDimension  |
-| Mingyu Liang    | Nanjing University |   mingyuliang518@gmail.com     | gaomusiki      |
-| Jingwei Xu    | Nanjing University | jingweix@nju.edu.cn | paragonlight   |
+| Member        | Affiliations                | Email                           | GitHub Account |
+| :------------ | :-------------------------- | :------------------------------ | :------------- |
+| Zewei Tao     | SandAI                      | <zeweitao@sand.ai>              | littsk         |
+| Yunpeng Huang | SandAI                      | <yunpenghuang@sand.ai>          | Strivin0311    |
+| Qiangang Wang | SandAI, Nanjing University  | <522024330081@smail.nju.edu.cn> | WT1W           |
+| Hanwen Sun    | SandAI, Peking University   | <sunhanwen@stu.pku.edu.cn>      | hanwen-sun     |
+| Jin Li        | SandAI, Tsinghua University | <2609835176@qq.com>             | lijinnn        |
+| Tao Bu        | Nanjing University          | <502024330002@smail.nju.edu.cn> | Big-TRex       |
+| WenYang Fang  | Nanjing University          | <fwy@smail.nju.edu.cn>          | kagami4243     |
+| Siyuang Yan   | Nanjing University          | <siyuanyan@smail.nju.edu.cn>    | FibonaccciYan  |
+| Zixu Jiang    | Nanjing University          | <522023330040@smail.nju.edu.cn> | 191220042      |
+| Dingkun Xu    | Nanjing University          | <211220090@smail.nju.edu.cn>    | PureDimension  |
+| Mingyu Liang  | Nanjing University          | <mingyuliang518@gmail.com>      | gaomusiki      |
+| Jingwei Xu    | Nanjing University          | <jingweix@nju.edu.cn>           | paragonlight   |
 
 
 ## Star History
