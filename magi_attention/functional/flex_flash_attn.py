@@ -611,6 +611,11 @@ def flex_flash_attn_func(
                 0 0 0 0 1
     """
 
+    assert not (auto_range_merge and deterministic), (
+        "auto_range_merge and deterministic can't be True at the same time, "
+        "due to some unresolved bug to be fixed as soon as possible."
+    )
+
     return FlexFlashAttnFunc.apply(
         q,
         k,
