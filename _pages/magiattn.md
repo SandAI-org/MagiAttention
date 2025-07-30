@@ -22,6 +22,7 @@ typograms: true
 external-links:
   github: https://github.com/SandAI-org/MagiAttention
   arxiv: https://arxiv.org/pdf/2505.13211
+  docs: https://sandai-org.github.io/MagiAttention/docs
 
 authors:
   - name: Zewei Tao
