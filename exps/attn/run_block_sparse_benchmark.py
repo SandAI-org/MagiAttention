@@ -43,7 +43,7 @@ if "flashinfer" in impls:
     wds = ["fwd"]
 else:
     wds = ["fwd", "bwd"]
-if "vsa" or "vsa_triton" in impls:
+if "vsa" in impls or "vsa_triton" in impls:
     # currently vsa only supports block size == 64
     block_sizes = [64]
 else:
