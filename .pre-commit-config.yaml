@@ -18,7 +18,7 @@ repos:
         language: system
         pass_filenames: true
         always_run: true
-        files: \.(c|cc|cxx|cpp|cu|h|hpp|hxx|proto|py|sh)$
+        files: \.(txt|md|c|cc|cxx|cpp|cu|h|hpp|hxx|proto|py|sh)$
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.4.0
     hooks:
