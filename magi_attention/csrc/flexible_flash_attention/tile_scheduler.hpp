@@ -240,7 +240,7 @@ class DynamicPersistentTileScheduler {
         } else {
           *work_info_smem = thrust::make_pair<int4, int3>(
               make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
-              make_int3(cute::get<0>(work_info.conflict_batch_msg), 
+              make_int3(cute::get<0>(work_info.conflict_batch_msg),
                         cute::get<1>(work_info.conflict_batch_msg),
                         cute::get<2>(work_info.conflict_batch_msg))
           );

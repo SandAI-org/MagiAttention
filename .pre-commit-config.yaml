@@ -1,7 +1,7 @@
 # Exclude all third-party libraries and patches files globally
 exclude: |
     (?x)^(
-        magi_attention/csrc/.+|
+        magi_attention/csrc/cutlass/.+|
     )$
 repos:
 # Common hooks

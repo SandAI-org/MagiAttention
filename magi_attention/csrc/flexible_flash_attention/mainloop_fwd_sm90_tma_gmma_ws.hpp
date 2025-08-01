@@ -97,19 +97,19 @@ struct CollectiveMainloopFwdSm90 {
           decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>())>{},
       AtomLayoutPV{}));
 
-  // REVIEW: 是否还需要TiledMmaPV_RS？
+  // REVIEW: do we still need TiledMmaPV_RS any more ?
   using TiledMmaPV_RS =
       decltype(cute::make_tiled_mma(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>(), AtomLayoutPV{}));
 
-  // pv一定比qk多嘛？？？？
+  // do pv must be larger than qk or not ?
   static constexpr int NumMmaThreadsQK = size(TiledMmaQK{});
   static constexpr int NumMmaThreads = size(TiledMmaPV{});
-  // 使用一个warp来生产Q和KV
+  // use one warp to produce Q and KV
   static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp;
   static_assert(NumMmaThreadsQK % cutlass::NumThreadsPerWarpGroup == 0);
   static_assert(NumMmaThreads % cutlass::NumThreadsPerWarpGroup == 0);
   static constexpr int NumMmaWarpGroups = NumMmaThreads / cutlass::NumThreadsPerWarpGroup;
-  // 什么情况下会使用3个warp group？
+  // in which case should we use 3 warp groups ?
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
   // Get the smem layout for Q
@@ -220,7 +220,7 @@ struct CollectiveMainloopFwdSm90 {
   static_assert(SmemAlignmentVt >= 128 and SmemAlignmentV >= 128, "Require at least 128B alignment");
 
   // These are tuned for speed. They don't affect correctness.
-  // UseSchedulerBarrier 可以让多个warpgroup之间顺序的launch tensor
+  // UseSchedulerBarrier can let multiple warp groups launch tensors in order
   static constexpr bool UseSchedulerBarrier = (IntraWGOverlap ? (NumMmaWarpGroups >= 2) && (kHeadDim <= 128) : NumMmaWarpGroups == 2);
   static constexpr bool RescaleOBeforeGemm = kHeadDim > 128 && IntraWGOverlap;
 
@@ -547,7 +547,7 @@ struct CollectiveMainloopFwdSm90 {
         NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
 
     if constexpr (UseSchedulerBarrier) {
-      // We have NamedBarrier for up to 3 WGs（但是为什么是3个）
+      // We have NamedBarrier for up to 3 WGs (why 3 WGs ?)
       static_assert(NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
       // WG1 is the smallest warp group used for mma, so it needs the very first signal to start
@@ -632,7 +632,7 @@ struct CollectiveMainloopFwdSm90 {
     Tensor tSrK = wg_mma_qk.partition_fragment_B(sK);
     Tensor tOrV = wg_mma_pv.partition_fragment_B(sV);
     Tensor tOsP = wg_mma_pv.partition_fragment_A(sP);
-    // 如果p在寄存器, 是否就不需要这一步
+    // if p is in registers, do we still need this step ?
     Tensor tPsP = smem_thr_copy_P.partition_D(cute::as_position_independent_swizzle_tensor(sP));
 
     auto consumer_wait = [](auto& pipeline, auto& smem_pipe_read) {
@@ -669,7 +669,7 @@ struct CollectiveMainloopFwdSm90 {
     }
 
     if constexpr (MmaQK_is_RS) {
-      // MmaQK_is_RS 始终是 false, 所以不进入这个分支
+      // MmaQK_is_RS is always false, so we never enter this branch
       using SmemCopyAtomQ = Copy_Atom<cute::SM75_U32x4_LDSM_N, Element>;
       auto smem_tiled_copy_Q = make_tiled_copy_A(SmemCopyAtomQ{}, tiled_mma_qk);
       auto smem_thr_copy_Q = smem_tiled_copy_Q.get_thread_slice(thread_idx);
@@ -744,7 +744,7 @@ struct CollectiveMainloopFwdSm90 {
         write_P_to_smem(tOrP);
       }
 
-      // 这里fence的目的是啥
+      // what's the purpose of this fence?
       if constexpr (!MmaPV_is_RS) {
         arrive_on_P_write_barrier();
       }
@@ -845,7 +845,7 @@ struct CollectiveMainloopFwdSm90 {
           softmax.rescale_o(tOrO, scores_scale);
         }
 
-        // 这里fence的目的是啥
+        // what's the purpose of this fence?
         if constexpr (!MmaPV_is_RS) {
           arrive_on_P_write_barrier();
         }

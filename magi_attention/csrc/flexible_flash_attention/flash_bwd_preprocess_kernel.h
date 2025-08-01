@@ -127,7 +127,7 @@ class FlashAttnBwdPreprocess {
   void operator()(Params const& params, [[maybe_unused]] char* smem_buf) {
     static constexpr int kBlockM = get<0>(TileShape_MK{});
 
-    // 1个thread处理一行，因此需要保证kBlockM <= MaxThreadsPerBlock
+    // one thread processes one row, thus we need kBlockM <= MaxThreadsPerBlock
     static_assert(kBlockM <= MaxThreadsPerBlock);
 
     // Get block coordinates
@@ -165,7 +165,7 @@ class FlashAttnBwdPreprocess {
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
-    // REVIEW(littsk): 为什么是infinity而不是-infinity？
+    // REVIEW(littsk): why use infinity here, instead of -infinity ?
     float lse = thread_idx < seqlen_o - m_block * kBlockM && thread_idx < kBlockM ? gLSE(thread_idx) : INFINITY;
 
     // Initialize the tiled copy for O and dO
