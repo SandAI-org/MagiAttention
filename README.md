@@ -59,18 +59,9 @@ For implementation details, more experimental results and future works, please v
 - **Adaptive Multi-Stage Overlap**. Leveraging the above enhancements, we further implement a multi-stage compute-communication overlap strategy that effectively hides communication latency and adaptively optimizes overlap through manual or automatic tuning.
 
 
-## Roadmap ⛏️
+## Documentation 📚
 
-- [ ] Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*)
-- [ ] Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*)
-- [ ] Optimize `Distributed Attention Solver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
-- [ ] Provide a more comprehensive documentation with tutorials, and a more detailed technical blog.
-- [ ] Provide more example codes and recipes for various training scenarios.
-- [ ] Upgrade MagiAttention to a distributed native Flex-Flash-Attention kernel (*as a major version update*).
-- [x] Refactor `Distributed Attention Solver` to support all mask types with all kinds of overlap.
-- [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*).
-- [x] Build a comprehensive `CP Benchmark` to better compare the performance of different context parallel strategies under various mask patterns and other training configurations.
-- [x] Provide `Documentation` including `Installation`, `QuickStart` and `API reference`.
+Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
 
 
 ## Installation ⚙️
@@ -344,9 +335,18 @@ We provide an example of how to integrate magi_attention with transformers in `e
 For more information, you can refer to `example/transformers/README.md`.
 
 
-## Documentation
+## Roadmap ⛏️
 
-Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
+- [ ] Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*)
+- [ ] Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*)
+- [ ] Optimize `Distributed Attention Solver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
+- [ ] Provide a more comprehensive documentation with tutorials, and a more detailed technical blog.
+- [ ] Provide more example codes and recipes for various training scenarios.
+- [ ] Upgrade MagiAttention to a distributed native Flex-Flash-Attention kernel (*as a major version update*).
+- [x] Refactor `Distributed Attention Solver` to support all mask types with all kinds of overlap.
+- [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*).
+- [x] Build a comprehensive `CP Benchmark` to better compare the performance of different context parallel strategies under various mask patterns and other training configurations.
+- [x] Provide `Documentation` including `Installation`, `QuickStart` and `API reference`.
 
 
 ## Performance Benchmarks 📊
