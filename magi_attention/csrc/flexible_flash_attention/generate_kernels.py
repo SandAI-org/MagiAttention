@@ -216,14 +216,7 @@ def batch_bwd(kernels_all) -> Generator[KERNEL_BATCH, None, None]:
 
 
 def write_kernel(kernel: Kernel | KERNEL_BATCH, autogen_dir: Path) -> None:
-    prelude = """/**********************************************************************************
- * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
- * Splitting the different template instantiations to different files to speed up compilation.
- * This file is auto-generated. See "generate_kernels.py"
- * you may not use this file except in compliance with the License.
- *********************************************************************************/\n
-"""
-    (autogen_dir / kernel.filename).write_text(prelude + kernel.template)
+    (autogen_dir / kernel.filename).write_text(kernel.template)
 
 
 def main(output_dir: Optional[str]) -> None:

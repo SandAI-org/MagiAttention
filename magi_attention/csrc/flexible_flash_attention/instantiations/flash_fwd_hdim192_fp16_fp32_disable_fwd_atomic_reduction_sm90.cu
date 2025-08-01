@@ -14,13 +14,6 @@
  * limitations under the License.
  *********************************************************************************/
 
-/**********************************************************************************
- * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
- * Splitting the different template instantiations to different files to speed up compilation.
- * This file is auto-generated. See "generate_kernels.py"
- * you may not use this file except in compliance with the License.
- *********************************************************************************/
-
 #include "flash_fwd_launch_template.h"
 
 #ifndef FLASHATTENTION_DISABLE_HDIM192
