@@ -11,14 +11,14 @@ repos:
         name: copyright_checker
         entry: python3 ./tools/codestyle/copyright.py
         language: system
-        files: \.(c|cc|cxx|cpp|cu|h|hpp|hxx|proto|py|sh)$
+        files: \.(c|cc|cxx|cpp|cu|h|hpp|hxx|proto|py|pyi|sh)$
     -   id: check-for-chinese
-        name: Check for Chinese characters
+        name: check for Chinese characters
         entry: python3 ./tools/codestyle/check_for_chinese.py
         language: system
         pass_filenames: true
         always_run: true
-        files: \.(txt|md|c|cc|cxx|cpp|cu|h|hpp|hxx|proto|py|sh)$
+        files: \.(txt|md|yaml|c|cc|cxx|cpp|cu|h|hpp|hxx|proto|py|pyi|sh)$
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.4.0
     hooks:

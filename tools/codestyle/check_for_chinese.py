@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 # Copyright (c) 2025 SandAI. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,20 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import re
 import sys
+
+RED = "\033[91m"
+RESET = "\033[0m"
 
 
 def contains_chinese(file_path):
     with open(file_path, "r", encoding="utf-8") as file:
-        content = file.read()
-        if re.search(r"[\u4e00-\u9fff]", content):
-            return True
-    return False
+        lines = file.readlines()
+    return lines
+
+
+def check_for_chinese(file_path):
+    lines = contains_chinese(file_path)
+    chinese_lines = []
+    for idx, line in enumerate(lines, start=1):
+        matches = list(re.finditer(r"[\u4e00-\u9fff]", line))
+        if matches:
+            start = matches[0].start() + 1  # +1 to make it 1-based
+            end = matches[-1].start() + 1  # +1 to make it 1-based
+            chinese_lines.append((idx, start, end))
+    return chinese_lines
 
 
 if __name__ == "__main__":
     for file_path in sys.argv[1:]:
-        if contains_chinese(file_path):
-            print(f"Error: File {file_path} contains Chinese characters.")
+        chinese_lines = check_for_chinese(file_path)
+        if chinese_lines:
+            for line_number, start, end in chinese_lines:
+                if start == end:
+                    print(
+                        f"{file_path}:{line_number}:{start}: {RED}error:{RESET} Contains Chinese characters"
+                    )
+                else:
+                    print(
+                        f"{file_path}:{line_number}:{start}-{end}: {RED}error:{RESET} Contains Chinese characters"
+                    )
             sys.exit(1)
