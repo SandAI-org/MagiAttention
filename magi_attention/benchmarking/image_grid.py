@@ -399,7 +399,7 @@ def make_img_grid(
     else:
         raise ValueError('layout must be either "wide" or "tall"')
 
-    # 将图片转换为 Tensor
+    # transfer image to tensor
     image_tensors = [ToTensor()(img) for img in image_files]
 
     grid_image = make_grid(image_tensors, nrow=num_per_row)

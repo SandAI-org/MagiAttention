@@ -48,7 +48,7 @@ class TestAttnRanges(TestCase):
     def test_make_range_local_raises(self):
         ranges = AttnRanges.from_ranges([(0, 10), (20, 30), (30, 35), (40, 50)])
 
-        # 测试完全在ranges外的情况
+        # test out-of-bounds range
         invalid_range = AttnRange(60, 70)
         with self.assertRaisesRegex(
             ValueError,
@@ -56,7 +56,7 @@ class TestAttnRanges(TestCase):
         ):
             ranges.make_range_local(invalid_range)
 
-        # 测试部分重叠但不完全包含的情况
+        # test partially overlapping range
         invalid_range = AttnRange(5, 25)
         with self.assertRaisesRegex(
             ValueError,
@@ -64,7 +64,7 @@ class TestAttnRanges(TestCase):
         ):
             ranges.make_range_local(invalid_range)
 
-        # 测试跨越多个ranges的情况
+        # test multiple overlapping ranges
         invalid_range = AttnRange(25, 45)
         with self.assertRaisesRegex(
             ValueError,
