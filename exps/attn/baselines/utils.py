@@ -27,7 +27,7 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta._calc_dispatch_meta import _calc_self_attn_areas
 
 
-def seed_everything(seed=1234):
+def seed_everything(seed=42):
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
@@ -440,7 +440,7 @@ def generate_global_block_sparse_pattern(
 
 
 def generate_headwise_4D_block_sparse_pattern(
-    h, num_q_blocks, num_kv_blocks, sparsity, device="cuda"
+    num_q_heads, num_q_blocks, num_kv_blocks, sparsity, device="cuda"
 ):
     """
     Generates a head-wise block sparse pattern. Each head gets its own random mask.
@@ -460,19 +460,61 @@ def generate_headwise_4D_block_sparse_pattern(
     k = min(k, num_kv_blocks)
 
     # Create random scores for each query block for each head
-    scores = torch.rand(h, num_q_blocks, num_kv_blocks, device=device)
+    scores = torch.rand(num_q_heads, num_q_blocks, num_kv_blocks, device=device)
 
     # Get the indices of the top-k scoring key-value blocks for each query block per head per batch
     _, topk_indices = torch.topk(scores, k, dim=-1)
 
     # Create a boolean mask initialized to all False
     block_sparse_mask = torch.zeros(
-        h, num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device
+        num_q_heads, num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device
     )
 
     # Use scatter_ to efficiently set the corresponding positions to True based on indices
     block_sparse_mask.scatter_(2, topk_indices, True)
 
+    block_sparse_mask = block_sparse_mask.unsqueeze(0)
+    scores = scores.unsqueeze(0)
+
+    return block_sparse_mask, scores
+
+
+def generate_kv_headwise_4D_block_sparse_pattern(
+    num_kv_heads, num_q_blocks, num_kv_blocks, sparsity, device="cuda"
+):
+    """
+    Generates a block sparse pattern based on the number of KV heads for GQA.
+    All query heads within a group share the same mask.
+
+    Args:
+        num_kv_heads (int): Number of Key-Value attention heads.
+        num_q_blocks (int): Number of query blocks per head.
+        num_kv_blocks (int): Number of key-value blocks per head.
+        sparsity (float): The density ratio of connections.
+        device (str): The device to create tensors on.
+
+    Returns:
+        torch.Tensor: A boolean tensor mask of shape [b, h, num_q_blocks, num_kv_blocks] where b = 1.
+        scores (torch.Tensor): A tensor of shape [b, h, num_q_blocks, num_kv_blocks] containing the random attention scores.
+    """
+    k = max(1, int(sparsity * num_kv_blocks))
+    k = min(k, num_kv_blocks)
+
+    # 1. Generate scores based on the number of KV heads, not Q heads
+    scores = torch.rand(num_kv_heads, num_q_blocks, num_kv_blocks, device=device)
+
+    # 2. Find top-k for each KV head
+    _, topk_indices = torch.topk(scores, k, dim=-1)
+
+    # 3. Create mask with the shape of KV heads
+    block_sparse_mask = torch.zeros(
+        num_kv_heads, num_q_blocks, num_kv_blocks, dtype=torch.bool, device=device
+    )
+
+    # 4. Scatter True values
+    block_sparse_mask.scatter_(2, topk_indices, True)
+
+    # 5. Add batch dimension
     block_sparse_mask = block_sparse_mask.unsqueeze(0)
     scores = scores.unsqueeze(0)
 
@@ -517,7 +559,7 @@ def generate_headwise_block_sparse_pattern(
 
 def flatten_head_mask(mask_4d: torch.Tensor) -> torch.Tensor:
     """
-    Flattens a head-wise 3D block mask into a single 2D block mask.
+    Flattens a q head-wise 4D block mask into a single 2D block mask.
     This creates a block-diagonal mask for the flattened Q, K, V tensors.
 
     Args:
@@ -542,6 +584,41 @@ def flatten_head_mask(mask_4d: torch.Tensor) -> torch.Tensor:
     # Create an empty 2D mask and populate it
     mask_flat = torch.zeros(
         num_q_flat, num_k_flat, dtype=torch.bool, device=mask_4d.device
+    )
+    mask_flat[q_indices_flat, k_indices_flat] = True
+
+    return mask_flat
+
+
+def flatten_kvhead_mask(
+    mask_4d: torch.Tensor, num_q_heads: int, num_kv_heads: int
+) -> torch.Tensor:
+    """
+    Flattens a kv head-wise 4D block mask into a single 2D block mask.
+    This creates a block-diagonal mask for the flattened Q, K, V tensors.
+
+    Args:
+        mask_3d (torch.Tensor): The input 3D mask of shape [h, num_q_blocks, num_k_blocks].
+
+    Returns:
+        torch.Tensor: The output 2D mask of shape [h * num_q_blocks, h * num_k_blocks].
+    """
+    b, h_q, num_q, num_k = mask_4d.shape
+    num_groups = num_q_heads // num_kv_heads
+
+    # Find the coordinates of all True elements in the 3D mask (h_idx, q_idx, k_idx)
+    b_indices, h_indices, q_indices, k_indices = torch.nonzero(mask_4d, as_tuple=True)
+
+    q_indices_flat = q_indices + h_indices * num_q
+    kv_head_indices = h_indices // num_groups
+    k_indices_flat = k_indices + kv_head_indices * num_k
+
+    # Create an empty 2D mask and populate it
+    mask_flat = torch.zeros(
+        num_q_heads * num_q,
+        num_kv_heads * num_k,
+        dtype=torch.bool,
+        device=mask_4d.device,
     )
     mask_flat[q_indices_flat, k_indices_flat] = True
 

@@ -16,7 +16,9 @@ import torch
 from baselines.attn_impl import sdpa_func
 from baselines.utils import (
     flatten_head_mask,
+    flatten_kvhead_mask,
     generate_headwise_4D_block_sparse_pattern,
+    generate_kv_headwise_4D_block_sparse_pattern,
     generate_ranges_from_mask,
     get_sdpa_mask_from_block_sparse_mask,
 )
@@ -48,7 +50,7 @@ def get_sdpa_attn_ref(q, k, v, grad_output, block_mask, high_precision=False):
     sdpa_mask_4d = get_sdpa_mask_from_block_sparse_mask(
         block_mask, SEQLEN, SEQLEN, BLOCK_M, BLOCK_N
     )
-
+    print(f"{sdpa_mask_4d.shape=}")
     if high_precision:
         o = sdpa_func(
             q.to(torch.float64),
@@ -75,7 +77,7 @@ def get_sdpa_attn_ref(q, k, v, grad_output, block_mask, high_precision=False):
     return o
 
 
-def get_ffa_result(q, k, v, grad_output, block_mask):
+def get_ffa_result(q, k, v, grad_output, block_mask, head_wise):
     s, h = q.size(1), q.size(2)
     q = rearrange(
         q, "b s h d -> (b h s) 1 d"
@@ -84,14 +86,22 @@ def get_ffa_result(q, k, v, grad_output, block_mask):
     assert NUM_HEADS_Q % NUM_HEADS_KV == 0
 
     repeats = NUM_HEADS_Q // NUM_HEADS_KV
-    k = torch.repeat_interleave(
-        k, repeats=repeats, dim=2
-    )  # we need to flatten k, v along head dimension for GQA setting.
-    v = torch.repeat_interleave(v, repeats=repeats, dim=2)
+    if head_wise == "q":
+        k = torch.repeat_interleave(
+            k, repeats=repeats, dim=2
+        )  # we need to flatten k, v along head dimension for GQA setting.
+        v = torch.repeat_interleave(v, repeats=repeats, dim=2)
+
     k = rearrange(k, "b s h d -> (b h s) 1 d")
     v = rearrange(v, "b s h d -> (b h s) 1 d")
 
-    flat_block_sparse_mask = flatten_head_mask(block_mask)
+    if head_wise == "q":
+        flat_block_sparse_mask = flatten_head_mask(block_mask)
+    else:
+        flat_block_sparse_mask = flatten_kvhead_mask(
+            block_mask, NUM_HEADS_Q, NUM_HEADS_KV
+        )
+
     q_ranges, k_ranges = generate_ranges_from_mask(
         flat_block_sparse_mask, BLOCK_M, BLOCK_N
     )
@@ -132,7 +142,7 @@ def assertLessEqual(a, b, msg=None):
         raise ValueError(msg)  # You can use ValueError, AssertionError, etc.
 
 
-def assert_close_to_torch_ref(q, k, v, grad_output, block_mask):
+def assert_close_to_torch_ref(q, k, v, grad_output, block_mask, head_wise):
     high_precision_torch_out_ref = get_sdpa_attn_ref(
         q, k, v, grad_output, block_mask, True
     )
@@ -151,7 +161,7 @@ def assert_close_to_torch_ref(q, k, v, grad_output, block_mask):
     )
     q.grad, k.grad, v.grad = None, None, None
 
-    ffa_out = get_ffa_result(q, k, v, grad_output, block_mask)
+    ffa_out = get_ffa_result(q, k, v, grad_output, block_mask, head_wise)
     ffa_dq, ffa_dk, ffa_dv = q.grad, k.grad, v.grad
 
     norm_rtol_ratio = 2.0
@@ -197,14 +207,14 @@ def assert_close_to_torch_ref(q, k, v, grad_output, block_mask):
     print("pass all!")
 
 
-def main():
+def test_q_headwise_sparse():
     orig_seqlen = SEQLEN
     orig_head = NUM_HEADS_Q
 
     num_q_blocks_orig = orig_seqlen // BLOCK_M
     num_kv_blocks_orig = orig_seqlen // BLOCK_N
 
-    block_mask = generate_headwise_4D_block_sparse_pattern(
+    block_mask, _ = generate_headwise_4D_block_sparse_pattern(
         orig_head, num_q_blocks_orig, num_kv_blocks_orig, SPARSITY_RATIO, device="cuda"
     )
 
@@ -238,7 +248,62 @@ def main():
     )
     grad_output = torch.rand_like(q)
 
-    assert_close_to_torch_ref(q, k, v, grad_output, block_mask)
+    assert_close_to_torch_ref(q, k, v, grad_output, block_mask, "q")
+
+
+def test_kv_headwise_sparse():
+    orig_seqlen = SEQLEN
+
+    num_q_blocks_orig = orig_seqlen // BLOCK_M
+    num_kv_blocks_orig = orig_seqlen // BLOCK_N
+
+    kv_block_mask, _ = generate_kv_headwise_4D_block_sparse_pattern(
+        NUM_HEADS_KV,
+        num_q_blocks_orig,
+        num_kv_blocks_orig,
+        SPARSITY_RATIO,
+        device="cuda",
+    )
+
+    num_groups = NUM_HEADS_Q // NUM_HEADS_KV
+    kv_block_mask_extended = kv_block_mask.repeat_interleave(num_groups, dim=1)
+
+    # --- prepare q, k, v data --- #
+    q = torch.randn(
+        1,
+        orig_seqlen,
+        NUM_HEADS_Q,
+        HEAD_DIM,
+        device="cuda",
+        dtype=DTYPE,
+        requires_grad=True,
+    )
+    k = torch.randn(
+        1,
+        orig_seqlen,
+        NUM_HEADS_KV,
+        HEAD_DIM,
+        device="cuda",
+        dtype=DTYPE,
+        requires_grad=True,
+    )
+    v = torch.randn(
+        1,
+        orig_seqlen,
+        NUM_HEADS_KV,
+        HEAD_DIM,
+        device="cuda",
+        dtype=DTYPE,
+        requires_grad=True,
+    )
+    grad_output = torch.rand_like(q)
+
+    assert_close_to_torch_ref(q, k, v, grad_output, kv_block_mask_extended, "kv")
+
+
+def main():
+    test_q_headwise_sparse()
+    test_kv_headwise_sparse()
 
 
 main()
