@@ -50,13 +50,13 @@ else:
     block_sizes = [64, 128]
 
 b = 1
-nhq = 32
+nhq = 48
 if "vsa" in impls or "flashinfer" in impls:
     # currently vsa doesn't support gqa
     # currently flashinfer doesn't support query-specific sparsity
     nhk = nhq
 else:
-    nhk = 8
+    nhk = nhq
 dtype = torch.bfloat16
 
 bias = None
@@ -323,6 +323,10 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         block_row_sz, block_col_sz = get_flashinfer_uniform_block_index(
             num_q_blocks_orig, num_kv_blocks_orig, orig_seq_len_q, orig_seq_len_k, nhk
         )
+
+        # print(f"{block_row_sz=}")
+        # print(f"{block_col_sz=}")
+
         print(f"Sparsity = {sparsity_ratio} of elements to compute")
 
         # allocate 128MB workspace buffer
