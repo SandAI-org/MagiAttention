@@ -35,8 +35,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License."""
 
+RE_ENCODE = re.compile(r"^[ \t\v]*#.*?coding[:=]", re.IGNORECASE)
+RE_COPYRIGHT = re.compile(r".*Copyright \(c\) 2025 SandAI", re.IGNORECASE)
+RE_SHEBANG = re.compile(r"^[ \t\v]*#[ \t]?\!")
+
 
 def _generate_copyright(comment_mark):
+    if isinstance(comment_mark, tuple):
+        start_mark, end_mark = comment_mark
+    else:
+        start_mark = comment_mark
+        end_mark = comment_mark
+
     copyright = COPYRIGHT.split(os.linesep)
     header = copyright[0].rstrip()
 
@@ -45,9 +55,24 @@ def _generate_copyright(comment_mark):
 
     header = header.replace(p, str(now.year))
 
-    ans = [comment_mark + " " + header + os.linesep]
+    ans = [
+        start_mark
+        + "/**********************************************************************************"
+        + os.linesep
+    ]
+    ans.append(start_mark + " * " + header + os.linesep)
     for idx, line in enumerate(copyright[1:]):
-        ans.append(comment_mark + " " + line.rstrip() + os.linesep)
+        if start_mark == "/*":
+            ans.append(" * " + line.rstrip() + os.linesep)
+        else:
+            ans.append(start_mark + " * " + line.rstrip() + os.linesep)
+    ans.append(
+        start_mark
+        + " *********************************************************************************/"
+        + os.linesep
+    )
+    if end_mark:
+        ans.append(end_mark + os.linesep)
 
     return ans
 
@@ -59,14 +84,9 @@ def _get_comment_mark(path):
 
     lang_type = re.compile(r"\.(h|c|hpp|cc|cpp|cu|go|cuh|proto)$")
     if lang_type.search(path) is not None:
-        return "//"
+        return "", ""
 
     return None
-
-
-RE_ENCODE = re.compile(r"^[ \t\v]*#.*?coding[:=]", re.IGNORECASE)
-RE_COPYRIGHT = re.compile(r".*Copyright \(c\) \d{4}", re.IGNORECASE)
-RE_SHEBANG = re.compile(r"^[ \t\v]*#[ \t]?\!")
 
 
 def _check_copyright(path):
