@@ -15,8 +15,7 @@
  *********************************************************************************/
 
 /******************************************************************************
- * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar,
- *Pradeep Ramani, Tri Dao.
+ * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
  ******************************************************************************/
 
 // Include these 2 headers instead of torch/extension.h since we don't need all

@@ -14,9 +14,12 @@
  * limitations under the License.
  *********************************************************************************/
 
-// Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
-// Splitting the different template instantiations to different files to speed up compilation.
-// This file is auto-generated. See "generate_kernels.py"
+/**********************************************************************************
+ * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
+ * Splitting the different template instantiations to different files to speed up compilation.
+ * This file is auto-generated. See "generate_kernels.py"
+ * you may not use this file except in compliance with the License.
+ *********************************************************************************/
 
 #include "flash_bwd_hdim128_bf16_bf16_softcap_disable_bwd_dkv_atomic_reduction_sm90.cu"
 #include "flash_bwd_hdim128_bf16_bf16_softcap_sm90.cu"
