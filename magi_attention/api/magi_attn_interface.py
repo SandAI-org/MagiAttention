@@ -387,7 +387,7 @@ def magi_attn_flex_key(
     key = DistAttnRuntimeKey(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
-        attn_mask_type=attn_mask_type,
+        attn_mask_type=tuple(attn_mask_type),
         total_seqlen_q=total_seqlen_q,
         total_seqlen_k=total_seqlen_k,
         pad_size=pad_size,
@@ -395,6 +395,8 @@ def magi_attn_flex_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
+        is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
     )
 
     # Validate sequence length

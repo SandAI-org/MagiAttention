@@ -39,7 +39,7 @@ from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_
 class DistAttnRuntimeKey:
     q_ranges: AttnRanges
     k_ranges: AttnRanges
-    attn_mask_type: list[AttnMaskType]
+    attn_mask_type: tuple[AttnMaskType, ...]
     total_seqlen_q: int
     total_seqlen_k: int
     pad_size: int
@@ -47,10 +47,8 @@ class DistAttnRuntimeKey:
     cp_group: dist.ProcessGroup
     cp_mesh: DeviceMesh | None
     dist_attn_config: DistAttnConfig
-
-    def __post_init__(self):
-        # make attn_mask_type a tuple to be hashable
-        object.__setattr__(self, "attn_mask_type", tuple(self.attn_mask_type))
+    is_deterministic_mode_enable: bool
+    is_hierarchical_comm_enable: bool
 
 
 class DistAttnRuntimeMgr:

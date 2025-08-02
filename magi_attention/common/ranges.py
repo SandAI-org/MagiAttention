@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import lru_cache
 from typing import Any, Iterator, Sequence, TypeAlias, Union
 
 import torch
@@ -132,6 +133,8 @@ class AttnRanges:
 
     def __init__(self) -> None:
         self._ranges: list[AttnRange] = []
+        self.local_range_cache: dict[int, int] = dict()
+        self.is_frozen = False
 
     def is_valid(
         self,
@@ -158,6 +161,9 @@ class AttnRanges:
         if check:
             attn_range.check_valid()
 
+        assert (
+            not self.is_frozen
+        ), "AttnRanges is frozen after calling make_ranges_local"
         self._ranges.append(attn_range)
 
     def insert(self, idx: int, attn_range: AttnRange, check: bool = False) -> None:
@@ -167,12 +173,18 @@ class AttnRanges:
         if check:
             attn_range.check_valid()
 
+        assert (
+            not self.is_frozen
+        ), "AttnRanges is frozen after calling make_ranges_local"
         self._ranges.insert(idx, attn_range)
 
     def extend(self, attn_ranges: "AttnRanges", check: bool = False) -> None:
         if check:
             attn_ranges.check_valid()
 
+        assert (
+            not self.is_frozen
+        ), "AttnRanges is frozen after calling make_ranges_local"
         self._ranges.extend(attn_ranges._ranges)
 
     def pop(self, idx: int = -1) -> AttnRange:
@@ -190,6 +202,9 @@ class AttnRanges:
         if self.is_empty():
             raise IndexError("pop from empty AttnRanges")
 
+        assert (
+            not self.is_frozen
+        ), "AttnRanges is frozen after calling make_ranges_local"
         return self._ranges.pop(idx)
 
     def clear_empty(self) -> "AttnRanges":
@@ -381,6 +396,7 @@ class AttnRanges:
             )
 
     @nvtx.instrument_nvtx
+    @lru_cache(maxsize=65536)
     def make_ranges_local(
         self,
         other_attn_ranges: "AttnRanges",
@@ -406,14 +422,44 @@ class AttnRanges:
 
         merged_ranges = self if is_self_merged else self.merge()
 
+        if len(self.local_range_cache) == 0 and len(self._ranges) > 0:
+            # make the class frozen to prohibit modifications to it.
+            self.is_frozen = True
+            local_index = 0
+            # init local_cache
+            for range in self._ranges:
+                self.local_range_cache[range.start] = local_index
+                local_index += range.seqlen
+                self.local_range_cache[range.end] = local_index
+
         prefix_offset = _calc_prefix_offset(merged_ranges)
 
         for attn_range in other_attn_ranges:
-            local_range = merged_ranges.make_range_local(
-                attn_range,
-                is_self_merged=True,
-                prefix_offset=prefix_offset,
-            )
+            if self.local_range_cache.get(attn_range.start, -1) != -1:
+                # hit the left endpoint and calculate the value of the right endpoint.
+                start = self.local_range_cache.get(attn_range.start, -1)
+                local_range = AttnRange(
+                    start=start,
+                    end=start + attn_range.seqlen,
+                )
+                self.local_range_cache[attn_range.end] = start + attn_range.seqlen
+            elif self.local_range_cache.get(attn_range.end, -1) != -1:
+                # hit the right endpoint and calculate the value of the left endpoint.
+                end = self.local_range_cache.get(attn_range.end, -1)
+                local_range = AttnRange(
+                    start=end - attn_range.seqlen,
+                    end=end,
+                )
+                self.local_range_cache[attn_range.start] = end - attn_range.seqlen
+            else:
+                # neither endpoint is hit, call make_range_local to calculate.
+                local_range = merged_ranges.make_range_local(
+                    attn_range,
+                    is_self_merged=True,
+                    prefix_offset=prefix_offset,
+                )
+                self.local_range_cache[attn_range.start] = local_range.start
+                self.local_range_cache[attn_range.end] = local_range.end
             local_ranges.append(local_range)
 
         return local_ranges
@@ -477,6 +523,7 @@ class AttnRanges:
         return hole_ranges
 
     @nvtx.instrument_nvtx
+    @lru_cache(maxsize=65536)
     def find_overlap_ranges(
         self: "AttnRanges",
         other_attn_ranges: "AttnRanges",
