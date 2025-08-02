@@ -34,3 +34,8 @@ default-version = "1.0.2"
 file = "magi_attention/_version.py"
 encoding = "utf-8"
 template = "__version__ = '{version}'"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow to run",
+]
