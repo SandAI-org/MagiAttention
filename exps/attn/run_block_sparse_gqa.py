@@ -37,7 +37,7 @@ seqlen = 49152
 sparsity_ratio = [0.1, 0.2, 0.5, 0.8, 1.0]
 
 wds = ["fwd"]
-block_sizes = [128]
+block_sizes = [64, 128]
 
 ds = [128]
 b = 1
@@ -203,7 +203,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         k = k.view(b * nhk, orig_seq_len_k, hd).contiguous()
         v = v.view(b * nhk, orig_seq_len_k, hd).contiguous()
         # BUG: using original block mask will cause illegal access sometimes
-        block_mask_cpu = kv_block_mask_extended.detach().cpu()
+        block_mask_cpu = kv_block_mask.detach().squeeze(0).cpu()
         # block_mask_cpu = (
         #    torch.rand(nhk, num_q_blocks_orig, num_kv_blocks_orig) < sparsity_ratio
         # )
@@ -215,7 +215,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
         # allocate 128MB workspace buffer
         workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.uint8, device=kv_block_mask_extended.device
+            128 * 1024 * 1024, dtype=torch.uint8, device=kv_block_mask.device
         )
         wrapper = flashinfer.sparse.VariableBlockSparseAttentionWrapper(
             workspace_buffer, backend="fa3"
