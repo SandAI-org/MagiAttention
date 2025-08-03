@@ -29,6 +29,7 @@ from .functools import (
     compute_pad_size,
     from_mask,
     full_attention_to_varlen_attention,
+    infer_attn_mask_from_sliding_window,
     init_hierarchical_mesh,
     squash_batch_dim,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "compute_pad_size",
     "squash_batch_dim",
     "full_attention_to_varlen_attention",
+    "infer_attn_mask_from_sliding_window",
     "from_mask",
     "AttnMaskType",
     "AttnOverlapMode",
