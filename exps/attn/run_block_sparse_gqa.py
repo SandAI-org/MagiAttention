@@ -202,11 +202,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         q = q.view(b * nhq, orig_seq_len_q, hd).contiguous()
         k = k.view(b * nhk, orig_seq_len_k, hd).contiguous()
         v = v.view(b * nhk, orig_seq_len_k, hd).contiguous()
-        # BUG: using original block mask will cause illegal access sometimes
         block_mask_cpu = kv_block_mask.detach().squeeze(0).cpu()
-        # block_mask_cpu = (
-        #    torch.rand(nhk, num_q_blocks_orig, num_kv_blocks_orig) < sparsity_ratio
-        # )
 
         block_row_sz, block_col_sz = get_flashinfer_uniform_block_index(
             num_q_blocks_orig, num_kv_blocks_orig, orig_seq_len_q, orig_seq_len_k, nhk
