@@ -597,7 +597,7 @@ def flatten_kvhead_mask(
     This creates a block-diagonal mask for the flattened Q, K, V tensors.
 
     Args:
-        mask_3d (torch.Tensor): The input 3D mask of shape [h, num_q_blocks, num_k_blocks].
+        mask_4d (torch.Tensor): The input 3D mask of shape [h, num_q_blocks, num_k_blocks].
 
     Returns:
         torch.Tensor: The output 2D mask of shape [h * num_q_blocks, h * num_k_blocks].
@@ -619,6 +619,7 @@ def flatten_kvhead_mask(
         dtype=torch.bool,
         device=mask_4d.device,
     )
+
     mask_flat[q_indices_flat, k_indices_flat] = True
 
     return mask_flat
