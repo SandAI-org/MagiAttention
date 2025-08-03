@@ -70,8 +70,6 @@ __all__ = [
     "OverlapConfig",
     "UniformOverlapAlg",
     "init_hierarchical_mesh",
-    "infer_attn_mask_from_window_size",
-    "infer_attn_mask_from_sliding_window",
     "SequentialDispatchAlg",
     "SortedSequentialSelectAlg",
     "ToppHeapDispatchAlg",
