@@ -15,10 +15,56 @@
 import unittest
 from unittest import TestCase
 
-from magi_attention.api.functools import apply_padding, compute_pad_size
+import numpy as np
+
+from magi_attention.api.functools import (
+    apply_padding,
+    compute_pad_size,
+    infer_attn_mask_from_sliding_window,
+)
 from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.testing import parameterize
+from tests.test_attn_solver.test_dist_attn_solver import add_range_to_array
+
+MODE = "mode"
+
+
+def generate_sliding_window_mask_with_numpy(
+    q_range: AttnRange,
+    k_range: AttnRange,
+    window_size: tuple[int, int],
+    array_size: int,
+) -> np.ndarray:
+    mask = np.zeros((array_size, array_size), dtype=np.int32)
+
+    def generate_sliding_window_mask(
+        q_seqlen: int,
+        k_seqlen: int,
+        window_size: tuple[int, int],
+    ) -> np.ndarray:
+        left_window_size = window_size[0] if window_size[0] != -1 else k_seqlen - 1
+        right_window_size = window_size[1] if window_size[1] != -1 else k_seqlen - 1
+        q_idxs = (np.arange(q_seqlen) + (k_seqlen - q_seqlen))[:, None]  # [q_len, 1]
+        k_idxs = np.arange(k_seqlen)[None, :]  # [1, k_len]
+        mask = (k_idxs >= q_idxs - left_window_size) & (
+            k_idxs <= q_idxs + right_window_size
+        )
+
+        return mask.astype(np.int32)  # [q_len, k_len]
+
+    q_seqlen, k_seqlen = min(q_range.seqlen, k_range.seqlen), k_range.seqlen
+
+    mask[
+        q_range.end - q_seqlen : q_range.end, k_range.end - k_seqlen : k_range.end
+    ] = generate_sliding_window_mask(
+        q_seqlen=q_seqlen,
+        k_seqlen=k_seqlen,
+        window_size=window_size,
+    )
+
+    return mask
 
 
 class TestApiFunction(TestCase):
@@ -218,6 +264,96 @@ class TestApiFunction(TestCase):
         assert (
             attn_mask_type_padded == ref_attn_mask_type
         ), f"in {name} case, {attn_mask_type_padded=} is not same as {ref_attn_mask_type=}"
+
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "testcase1",
+                "q_range": AttnRange.from_range([5, 25]),
+                "k_range": AttnRange.from_range([5, 25]),
+                "range_size": 30,
+                MODE: "ALL",
+            },
+            {
+                "name": "testcase2",
+                "q_range": AttnRange.from_range([5, 15]),
+                "k_range": AttnRange.from_range([7, 30]),
+                "range_size": 35,
+                MODE: "ALL",
+            },
+            {
+                "name": "testcase3",
+                "q_range": AttnRange.from_range([5, 30]),
+                "k_range": AttnRange.from_range([10, 20]),
+                "range_size": 30,
+                MODE: "ALL",
+            },
+            {
+                "name": "testcase4",
+                "q_range": AttnRange.from_range([10, 20]),
+                "k_range": AttnRange.from_range([5, 45]),
+                "range_size": 50,
+                MODE: "ALL",
+            },
+            {
+                "name": "testcase5",
+                "q_range": AttnRange.from_range([3, 25]),
+                "k_range": AttnRange.from_range([20, 24]),
+                "range_size": 40,
+                MODE: "ALL",
+            },
+        ],
+    )
+    def test_infer_attn_mask_from_sliding_window(
+        self,
+        testcase: dict,
+    ):
+        case_name: str = testcase["name"]
+        q_range: AttnRange = testcase["q_range"]
+        k_range: AttnRange = testcase["k_range"]
+        range_size: int = testcase["range_size"]
+        mode: str = testcase[MODE]
+
+        name = (
+            f"in {case_name}, when {q_range=} x {k_range=} x" f"{range_size=} x {mode=}"
+        )
+
+        if mode == "ALL":
+            seqlen = k_range.seqlen
+            for i in range(-1, seqlen):
+                for j in range(-1, seqlen):
+                    # calculate function answer
+                    mask = np.zeros((range_size, range_size))
+                    q_ranges, k_ranges, masktypes = infer_attn_mask_from_sliding_window(
+                        q_range=q_range,
+                        k_range=k_range,
+                        window_size=[i, j],
+                    )
+
+                    # Accumulate all results into an array and perform validation.
+                    for sw_q_range, sw_k_range, sw_mask_type in zip(
+                        q_ranges, k_ranges, masktypes
+                    ):
+                        add_range_to_array(
+                            array=mask,
+                            q_range=sw_q_range,
+                            k_range=sw_k_range,
+                            masktype=sw_mask_type,
+                            check=True,
+                        )
+
+                    # calculate ref answer
+                    ref_mask = generate_sliding_window_mask_with_numpy(
+                        q_range=q_range,
+                        k_range=k_range,
+                        window_size=(i, j),
+                        array_size=range_size,
+                    )
+
+                    assert np.array_equal(
+                        mask, ref_mask
+                    ), f"There's wrong when {name=} with window_size=[{i}, {j}], "
 
 
 if __name__ == "__main__":
