@@ -30,7 +30,7 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
-impls = ["ffa", "vsa", "vsa_triton", "flashinfer"]
+impls = ["ffa", "flashinfer"]
 
 # actual seqlen
 seqlen = 49152
@@ -50,7 +50,7 @@ else:
     block_sizes = [64, 128]
 
 b = 1
-nhq = 48
+nhq = 32
 if "vsa" in impls or "flashinfer" in impls:
     # currently vsa doesn't support gqa
     # currently flashinfer doesn't support query-specific sparsity
