@@ -422,12 +422,12 @@ class AttnRanges:
 
         merged_ranges = self if is_self_merged else self.merge()
 
-        if len(self.local_range_cache) == 0 and len(self._ranges) > 0:
+        if len(self.local_range_cache) == 0 and len(merged_ranges) > 0:
             # make the class frozen to prohibit modifications to it.
             self.is_frozen = True
             local_index = 0
             # init local_cache
-            for range in self._ranges:
+            for range in merged_ranges:
                 self.local_range_cache[range.start] = local_index
                 local_index += range.seqlen
                 self.local_range_cache[range.end] = local_index
