@@ -18,32 +18,39 @@ from datetime import datetime
 import torch
 from baselines.attn_impl import ffa_func, sdpa_func
 from baselines.utils import (
-    flatten_kvhead_mask,
-    generate_kv_headwise_4D_block_sparse_pattern,
-    generate_ranges_from_mask,
-    get_flashinfer_uniform_block_index,
-    get_sdpa_mask_from_block_sparse_mask,
+    flatten_head_mask,
+    generate_ranges_from_var_block_mask,
+    get_random_variable_block_mask,
+    get_sdpa_mask_from_var_block_mask,
     seed_everything,
 )
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
-impls = ["ffa", "flashinfer"]
+impls = ["ffa"]
 
 # actual seqlen
 seqlen = 49152
 
 sparsity_ratio = [0.1, 0.2, 0.5, 0.8, 1.0]
-
-wds = ["fwd"]
-block_sizes = [64, 128]
-
+# ss = [k * 1024 for k in [4, 96, 128]]
 ds = [128]
+if "flashinfer" in impls:
+    # flashinfer doesn't support backward
+    wds = ["fwd"]
+else:
+    wds = ["fwd"]
+block_sizes = [64, 128, 256]  # average block size for variable block sparse attention
+
 b = 1
 nhq = 32
-nhk = 8
-
+if "flashinfer" in impls:
+    # currently vsa doesn't support gqa
+    # currently flashinfer doesn't support query-specific sparsity
+    nhk = nhq
+else:
+    nhk = nhq
 dtype = torch.bfloat16
 
 bias = None
@@ -72,7 +79,7 @@ attn_flops_configs = [
             "flops": "Throughout (TFLOPs/s)",
             "mem": "Peak Memory (GB)",
         },
-        plot_name=f"block sparse attn-{wd} block_size-{block_size} seq_len {seqlen}",
+        plot_name=f"block sparse attn-{wd} average block_size-{block_size} seq_len {seqlen}",
         # Name for the plot. Used also as a file name for saving the plot.
         args={  # Values for function arguments not in `x_names` and `y_name`.
             "hd": hd,
@@ -102,19 +109,32 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
     num_q_blocks_orig = orig_seq_len_q // block_m
     num_kv_blocks_orig = orig_seq_len_k // block_n
+    orig_head = nhq
 
     max_seqlen_q = block_m
     max_seqlen_k = block_n
 
     # prepare q, k ranges and caculate attn_flops
     # for now, we only do bench for block sparse mask.
-    kv_block_mask, scores = generate_kv_headwise_4D_block_sparse_pattern(
-        nhk, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
+    # block_mask, scores = generate_global_block_sparse_pattern(
+    #    orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
+    # )
+    # TODO: remove with a unified variable block mask generation function
+    # block_mask, scores = generate_headwise_4D_block_sparse_pattern(
+    #     orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
+    # )
+    block_mask, block_row_sz, block_col_sz = get_random_variable_block_mask(
+        orig_seq_len_q,
+        orig_seq_len_k,
+        num_q_blocks_orig,
+        num_kv_blocks_orig,
+        nhk,
+        sparsity_ratio=sparsity_ratio,
+        bsz=b,
+        device=device,
     )
-    num_groups = nhq // nhk
-    kv_block_mask_extended = kv_block_mask.repeat_interleave(num_groups, dim=1)
 
-    attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * nhq * hd * sparsity_ratio
+    attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
 
     # --------- prepare data --------- #
     # flash style shape: (b,s,h,d)
@@ -131,11 +151,11 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
     # ffa style shape: (t,h,d)
     if attn_impl in ("ffa"):
         q = rearrange(q, "b s h d -> (b h s) 1 d")
-        # repeats = nhq // nhk
-        # k = torch.repeat_interleave(
-        #    k, repeats=repeats, dim=2
-        # )  # we need to flatten k, v along head dimension for GQA setting.
-        # v = torch.repeat_interleave(v, repeats=repeats, dim=2)
+        repeats = nhq // nhk
+        k = torch.repeat_interleave(
+            k, repeats=repeats, dim=2
+        )  # we need to flatten k, v along head dimension for GQA setting.
+        v = torch.repeat_interleave(v, repeats=repeats, dim=2)
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
         # q = q.view(b * orig_seq_len_q * nhq, 1, hd)
@@ -158,11 +178,13 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
     # --------- prepare func --------- #
     if attn_impl == "ffa":
         # flatten headdim for ffa cause
-        flat_block_sparse_mask = flatten_kvhead_mask(kv_block_mask_extended, nhq, nhk)
+        flat_block_sparse_mask = flatten_head_mask(block_mask)
         # 3. Generate ranges from the flattened 2D mask
-        q_ranges, k_ranges = generate_ranges_from_mask(
-            flat_block_sparse_mask, block_m, block_n
+        q_ranges, k_ranges = generate_ranges_from_var_block_mask(
+            flat_block_sparse_mask, block_row_sz, block_col_sz
         )
+        # print(f"Number of non-empty blocks: {block_mask.sum().item()}")
+        # print(q_ranges.shape, k_ranges.shape)
         attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
         def fn():
@@ -202,16 +224,22 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         q = q.view(b * nhq, orig_seq_len_q, hd).contiguous()
         k = k.view(b * nhk, orig_seq_len_k, hd).contiguous()
         v = v.view(b * nhk, orig_seq_len_k, hd).contiguous()
-        block_mask_cpu = kv_block_mask.squeeze(0).detach().cpu()
-
-        block_row_sz, block_col_sz = get_flashinfer_uniform_block_index(
-            num_q_blocks_orig, num_kv_blocks_orig, orig_seq_len_q, orig_seq_len_k, nhk
+        # BUG: using original block mask will cause illegal access sometimes
+        # block_mask_cpu = block_mask.detach().squeeze(0).cpu()
+        block_row_sz_cpu = block_row_sz.detach().cpu()
+        block_col_sz_cpu = block_col_sz.detach().cpu()
+        block_mask_cpu = (
+            torch.rand(nhk, num_q_blocks_orig, num_kv_blocks_orig) < sparsity_ratio
         )
+
+        # print(f"{block_row_sz=}")
+        # print(f"{block_col_sz=}")
+
         print(f"Sparsity = {sparsity_ratio} of elements to compute")
 
         # allocate 128MB workspace buffer
         workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.uint8, device=kv_block_mask.device
+            128 * 1024 * 1024, dtype=torch.uint8, device=block_mask.device
         )
         wrapper = flashinfer.sparse.VariableBlockSparseAttentionWrapper(
             workspace_buffer, backend="fa3"
@@ -219,8 +247,8 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
         wrapper.plan(
             block_mask_map=block_mask_cpu,
-            block_row_sz=block_row_sz,
-            block_col_sz=block_col_sz,
+            block_row_sz=block_row_sz_cpu,
+            block_col_sz=block_col_sz_cpu,
             num_qo_heads=nhq,
             num_kv_heads=nhk,
             head_dim=hd,
@@ -231,12 +259,8 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
             return wrapper.run(q, k, v)
 
     elif attn_impl == "sdpa":
-        sdpa_mask = get_sdpa_mask_from_block_sparse_mask(
-            kv_block_mask_extended,
-            seq_len_q=orig_seq_len_q,
-            seq_len_k=orig_seq_len_q,
-            block_size_q=block_m,
-            block_size_k=block_n,
+        sdpa_mask = get_sdpa_mask_from_var_block_mask(
+            block_mask, block_row_sz, block_col_sz, orig_seq_len_q, orig_seq_len_k, b
         )
 
         def fn():
