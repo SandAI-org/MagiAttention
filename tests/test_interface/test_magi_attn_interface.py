@@ -29,7 +29,7 @@ from magi_attention.api.functools import (
     pad_at_dim,
 )
 from magi_attention.api.magi_attn_interface import (
-    DistAttnRuntimeDict,
+    dist_attn_runtime_dict,
     get_position_ids,
     magi_attn_flex_dispatch,
     magi_attn_varlen_dispatch,
@@ -577,7 +577,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
 
         # -----    compute dist attn runtime mgr   ---- #
 
-        dist_attn_runtime_mgr: DistAttnRuntimeMgr = DistAttnRuntimeDict[
+        dist_attn_runtime_mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict[
             dist_attn_runtime_key
         ]
 

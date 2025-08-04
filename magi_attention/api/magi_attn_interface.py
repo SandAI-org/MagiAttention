@@ -22,7 +22,11 @@ import magi_attention
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DistAttnConfig
-from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeKey, DistAttnRuntimeMgr
+from magi_attention.dist_attn_runtime_mgr import (
+    DistAttnRuntimeDict,
+    DistAttnRuntimeKey,
+    DistAttnRuntimeMgr,
+)
 from magi_attention.functional.dist_attn import DistFlashAttnRuntime
 from magi_attention.meta import (
     calc_attn_meta_from_dispatch_meta,
@@ -31,10 +35,10 @@ from magi_attention.meta import (
 from magi_attention.utils import wrap_to_list
 from magi_attention.utils._utils import is_list_type_all
 
-from .functools import FixedLenDict, apply_padding, pad_at_dim, unpad_at_dim
+from .functools import apply_padding, pad_at_dim, unpad_at_dim
 
-DistAttnRuntimeDict = FixedLenDict(
-    max_size=100
+dist_attn_runtime_dict = DistAttnRuntimeDict(
+    max_size=magi_attention.get_dist_attn_runtime_dict_size()
 )  # [DistAttnRuntimeKey, DistAttnRuntimeMgr]
 
 
@@ -418,7 +422,7 @@ def magi_attn_flex_key(
         is_k_permutable=is_k_permutable,
     )
 
-    if key not in DistAttnRuntimeDict.keys():
+    if key not in dist_attn_runtime_dict.keys():
         # calculate dist attn runtime key
         comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
             dispatch_meta_q=q_dispatch_meta,
@@ -452,7 +456,7 @@ def magi_attn_flex_key(
             is_k_permutable=is_k_permutable,
         )
 
-        DistAttnRuntimeDict[key] = value
+        dist_attn_runtime_dict[key] = value
 
     return key
 
@@ -598,9 +602,9 @@ def dispatch(
         torch.Tensor: the padded and dispatched local tensor.
 
     Raises:
-        ValueError: If the provided ``key`` does not exist in ``DistAttnRuntimeDict``.
+        ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = DistAttnRuntimeDict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -626,9 +630,9 @@ def undispatch(
         torch.Tensor: the undispatched and unpadded tensor.
 
     Raises:
-        ValueError: If the provided ``key`` does not exist in ``DistAttnRuntimeDict``.
+        ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = DistAttnRuntimeDict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -661,9 +665,9 @@ def calc_attn(
             - lse (torch.Tensor): Log-sum-exp values for numerical stability.
 
     Raises:
-        ValueError: If the provided ``key`` does not exist in ``DistAttnRuntimeDict``.
+        ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = DistAttnRuntimeDict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -681,7 +685,7 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
     Returns:
         torch.Tensor: postion ids of local tensor w.r.t. global tensor.
     """
-    mgr: DistAttnRuntimeMgr = DistAttnRuntimeDict.get(key)
+    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -699,4 +703,4 @@ def get_most_recent_key() -> DistAttnRuntimeKey:
     Returns:
         DistAttnRuntimeKey: the most recent inserted key.
     """
-    return DistAttnRuntimeDict.get_most_recent_key()
+    return dist_attn_runtime_dict.get_most_recent_key()

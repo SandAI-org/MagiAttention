@@ -12,55 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import OrderedDict
 
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-import magi_attention
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.common.mask import AttnMask
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
-
-
-class FixedLenDict(OrderedDict):
-    """A fixed-length dictionary that evicts the least recently used item (LRU policy) when capacity is exceeded"""
-
-    def __init__(self, max_size: int, *args, **kwargs):
-        self.max_size = max_size
-        super().__init__(*args, **kwargs)
-
-    def __setitem__(self, key, value):
-        # If key exists, delete it first (to ensure it moves to end)
-        if key in self:
-            del self[key]
-        # If at max capacity, remove the oldest item
-        elif len(self) >= self.max_size:
-            self.popitem(last=False)
-        # Insert new key-value pair (automatically added to end)
-        super().__setitem__(key, value)
-
-    def get(self, key, default=None):
-        # Override get method to move accessed items to end (marking as recently used)
-        if key in self:
-            value = super().__getitem__(key)
-            del self[key]
-            super().__setitem__(key, value)
-            return value
-        return default
-
-    def get_most_recent_key(self):
-        """
-        Gets and returns the most recently added or accessed key.
-        If the dictionary is empty, returns None.
-        """
-        if not self:
-            return None
-
-        return next(reversed(self.keys()))
 
 
 def compute_pad_size(
@@ -90,49 +49,88 @@ def compute_pad_size(
     return tokens_to_pad
 
 
-def squash_batch_dim(x):
+def squash_batch_dim(x: torch.Tensor) -> torch.Tensor:
+    """Reshapes a tensor from shape ``[b, s, ...]`` to ``[b x s, ...]``, effectively flattening
+    the batch and sequence dimensions into a single leading dimension.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape ``[batch_size, seq_len, ...]`` to be merged.
+
+    Returns:
+        torch.Tensor: Reshaped tensor of shape ``[batch_size x seq_len, ...]``.
+    """
     x_merged = rearrange(x, "b s ... -> (b s) ...")
     return x_merged
 
 
-def full_attention_to_varlen_attention(batch_size, seq_len):
+def full_attention_to_varlen_attention(
+    batch_size: int,
+    seq_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Converts fixed-length full attention into varlen fulll attention format by generating
+    cumulative sequence lengths for queries and keys.
+
+    Args:
+        batch_size (int): The number of sequences in the batch.
+        seq_len (int): The fixed sequence length for each sequence in the batch.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]:
+            A pair of 1D tensors (cu_seqlens_q, cu_seqlens_k), each of shape (batch_size + 1,),
+            representing the cumulative sequence lengths for the queries and keys respectively.
+    """
     cu_seqlens_q = torch.arange(0, batch_size + 1) * seq_len
     cu_seqlens_k = cu_seqlens_q
 
     return cu_seqlens_q, cu_seqlens_k
 
 
-def pad_at_dim(x, dim, pad_size, value=0, side="right"):
+def pad_at_dim(
+    x: torch.Tensor,
+    dim: int,
+    pad_size: int,
+    value: float = 0.0,
+    side: str = "right",
+) -> torch.Tensor:
+    """
+    Pads a tensor along a specified dimension with a given value, either on the left or right side.
+
+    Args:
+        x (torch.Tensor): Input tensor to be padded.
+        dim (int): The dimension along which to apply padding.
+        pad_size (int): The number of values to pad.
+        value (float, optional): The padding value. Default is 0.
+        side (str, optional): Side on which to apply the padding, either "left" or "right".
+            Default is "right".
+
+    Returns:
+        torch.Tensor: The padded tensor with the same number of dimensions as the input.
+    """
     pad = [0] * (2 * x.dim())
     pad_idx = -(dim + 1) * 2 + (0 if side == "left" else 1)
     pad[pad_idx] = pad_size
     return F.pad(x, pad=tuple(pad), mode="constant", value=value)
 
 
-def unpad_at_dim(x, dim, pad_size):
+def unpad_at_dim(
+    x: torch.Tensor,
+    dim: int,
+    pad_size: int,
+) -> torch.Tensor:
+    """
+    Removes padding from a tensor along a specified dimension.
+
+    Args:
+        x (torch.Tensor): Input tensor from which padding will be removed.
+        dim (int): The dimension along which to remove padding.
+        pad_size (int): The number of elements to remove from the end of the specified dimension.
+
+    Returns:
+        torch.Tensor: The tensor with padding removed along the specified dimension.
+    """
     seq_len = x.size(dim)
     unpad_x = x.narrow(dim=0, start=0, length=seq_len - pad_size)
     return unpad_x
-
-
-def from_mask(
-    mask: list[list[int]] | torch.Tensor,
-) -> "AttnMask":
-    """
-    The (less common) factory method to construct a AttnMask instance,
-    with a 2d int32 mask tensor, where the nonzero cell indicates unmasked position,
-    while the zero cell indicates masked position
-
-    Args:
-        mask (list[list[int]] | torch.Tensor): the 2d int32 mask tensor
-
-    Returns:
-        AttnMask: the attn mask instance
-    """
-
-    return AttnMask.from_mask(
-        mask=mask,
-    )
 
 
 def apply_padding(
@@ -173,37 +171,6 @@ def apply_padding(
     return q_range, k_range, attn_mask_types
 
 
-def init_hierarchical_mesh(
-    world_size: int,
-    world_size_inter_node: int,
-    world_size_intra_node: int,
-) -> DeviceMesh | None:
-    """Generate device mesh for hierarchical comm
-
-    Args:
-        world_size (int): total world size for cp
-        world_size_inter_node (int): inter-machine world size
-        world_size_intra_node (int): in-machine world size
-
-    Returns:
-        Optional[DeviceMesh]: The device mesh object if using hierarchical
-    """
-    assert world_size == world_size_inter_node * world_size_intra_node, (
-        f"world_size must be equal to inter_node * intra_node, "
-        f"but got {world_size=}, {world_size_inter_node=} and {world_size_intra_node=}"
-    )
-    if magi_attention.comm.is_hierarchical_comm_enable():
-        device_mesh = init_device_mesh(
-            device_type="cuda",
-            mesh_shape=(world_size_inter_node, world_size_intra_node),
-            mesh_dim_names=("inter", "intra"),
-        )
-    else:
-        device_mesh = None
-
-    return device_mesh
-
-
 def infer_attn_mask_from_sliding_window(
     q_range: AttnRange,
     k_range: AttnRange,
@@ -218,8 +185,9 @@ def infer_attn_mask_from_sliding_window(
         window_size (list[int]): window_size of sliding window mask
 
     Returns:
-        tuple[AttnRanges, AttnRanges, list[AttnMaskType]]: processed (q_ranges, k_ranges, masktypes) triple,
-            sliding window mask have been cutted into triple representation.
+        tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
+            processed ``(q_ranges, k_ranges, masktypes)`` triple, sliding window mask have been cutted
+            into triple representation.
 
     Example:
         Here's an example of ``infer_attn_mask_from_sliding_window``::
@@ -231,7 +199,7 @@ def infer_attn_mask_from_sliding_window(
             ... )
 
         The code above represents the sliding window mask within the ``[5, 15] x [5, 15]`` region
-        with a window size of (2, 3).
+        with a window size of ``(2, 3)``.
     """
     assert len(window_size) == 2, "window size must be of 2 int"
     assert window_size[0] < k_range.seqlen and window_size[1] < k_range.seqlen, (

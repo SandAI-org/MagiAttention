@@ -27,10 +27,8 @@ from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOver
 
 from .functools import (
     compute_pad_size,
-    from_mask,
     full_attention_to_varlen_attention,
     infer_attn_mask_from_sliding_window,
-    init_hierarchical_mesh,
     squash_batch_dim,
 )
 from .magi_attn_interface import (
@@ -60,7 +58,6 @@ __all__ = [
     "squash_batch_dim",
     "full_attention_to_varlen_attention",
     "infer_attn_mask_from_sliding_window",
-    "from_mask",
     "AttnMaskType",
     "AttnOverlapMode",
     "AttnRanges",
@@ -69,7 +66,6 @@ __all__ = [
     "MinHeapDispatchAlg",
     "OverlapConfig",
     "UniformOverlapAlg",
-    "init_hierarchical_mesh",
     "SequentialDispatchAlg",
     "SortedSequentialSelectAlg",
     "ToppHeapDispatchAlg",
