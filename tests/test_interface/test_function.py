@@ -26,9 +26,50 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.testing import parameterize
-from tests.test_attn_solver.test_dist_attn_solver import add_range_to_array
 
-MODE = "mode"
+
+def add_range_to_array(
+    array: np.ndarray,
+    q_range: AttnRange,
+    k_range: AttnRange,
+    masktype: AttnMaskType = AttnMaskType.FULL,
+    check: bool = False,
+):
+    # get start and end of range
+    x_start, x_end = q_range.start, q_range.end
+    y_start, y_end = k_range.start, k_range.end
+
+    if check:
+        # check whether the current slice has been filled
+        assert np.all(array[x_start:x_end, y_start:y_end] == 0), (
+            f"Part of the area has been added," f"when {q_range=} and {k_range=}"
+        )
+
+    # fill the area according to the type of the mask.
+    for i in range(x_start, x_end):
+        for j in range(y_start, y_end):
+            if masktype == AttnMaskType.FULL:
+                array[i][j] = 1
+            elif masktype == AttnMaskType.CAUSAL:
+                b = y_end - x_end
+                fx = i + b
+                if j <= fx:
+                    array[i][j] = 1
+            elif masktype == AttnMaskType.INVCAUSAL:
+                b = y_start - x_start
+                fx = i + b
+                if j >= fx:
+                    array[i][j] = 1
+            elif masktype == AttnMaskType.BICAUSAL:
+                causal_b = y_end - x_end
+                f_causal = i + causal_b
+
+                inv_causal_b = y_start - x_start
+                f_inv_causal = i + inv_causal_b
+                if j <= f_causal and j >= f_inv_causal:
+                    array[i][j] = 1
+
+    return array
 
 
 def generate_sliding_window_mask_with_numpy(
@@ -273,35 +314,30 @@ class TestApiFunction(TestCase):
                 "q_range": AttnRange.from_range([5, 25]),
                 "k_range": AttnRange.from_range([5, 25]),
                 "range_size": 30,
-                MODE: "ALL",
             },
             {
                 "name": "testcase2",
                 "q_range": AttnRange.from_range([5, 15]),
                 "k_range": AttnRange.from_range([7, 30]),
                 "range_size": 35,
-                MODE: "ALL",
             },
             {
                 "name": "testcase3",
                 "q_range": AttnRange.from_range([5, 30]),
                 "k_range": AttnRange.from_range([10, 20]),
                 "range_size": 30,
-                MODE: "ALL",
             },
             {
                 "name": "testcase4",
                 "q_range": AttnRange.from_range([10, 20]),
                 "k_range": AttnRange.from_range([5, 45]),
                 "range_size": 50,
-                MODE: "ALL",
             },
             {
                 "name": "testcase5",
                 "q_range": AttnRange.from_range([3, 25]),
                 "k_range": AttnRange.from_range([20, 24]),
                 "range_size": 40,
-                MODE: "ALL",
             },
         ],
     )
@@ -313,47 +349,43 @@ class TestApiFunction(TestCase):
         q_range: AttnRange = testcase["q_range"]
         k_range: AttnRange = testcase["k_range"]
         range_size: int = testcase["range_size"]
-        mode: str = testcase[MODE]
 
-        name = (
-            f"in {case_name}, when {q_range=} x {k_range=} x" f"{range_size=} x {mode=}"
-        )
+        name = f"in {case_name}, when {q_range=} x {k_range=} x" f"{range_size=}"
 
-        if mode == "ALL":
-            seqlen = k_range.seqlen
-            for i in range(-1, seqlen):
-                for j in range(-1, seqlen):
-                    # calculate function answer
-                    mask = np.zeros((range_size, range_size))
-                    q_ranges, k_ranges, masktypes = infer_attn_mask_from_sliding_window(
-                        q_range=q_range,
-                        k_range=k_range,
-                        window_size=[i, j],
+        seqlen = k_range.seqlen
+        for i in range(-1, seqlen):
+            for j in range(-1, seqlen):
+                # calculate function answer
+                mask = np.zeros((range_size, range_size))
+                q_ranges, k_ranges, masktypes = infer_attn_mask_from_sliding_window(
+                    q_range=q_range,
+                    k_range=k_range,
+                    window_size=[i, j],
+                )
+
+                # Accumulate all results into an array and perform validation.
+                for sw_q_range, sw_k_range, sw_mask_type in zip(
+                    q_ranges, k_ranges, masktypes
+                ):
+                    add_range_to_array(
+                        array=mask,
+                        q_range=sw_q_range,
+                        k_range=sw_k_range,
+                        masktype=sw_mask_type,
+                        check=True,
                     )
 
-                    # Accumulate all results into an array and perform validation.
-                    for sw_q_range, sw_k_range, sw_mask_type in zip(
-                        q_ranges, k_ranges, masktypes
-                    ):
-                        add_range_to_array(
-                            array=mask,
-                            q_range=sw_q_range,
-                            k_range=sw_k_range,
-                            masktype=sw_mask_type,
-                            check=True,
-                        )
+                # calculate ref answer
+                ref_mask = generate_sliding_window_mask_with_numpy(
+                    q_range=q_range,
+                    k_range=k_range,
+                    window_size=(i, j),
+                    array_size=range_size,
+                )
 
-                    # calculate ref answer
-                    ref_mask = generate_sliding_window_mask_with_numpy(
-                        q_range=q_range,
-                        k_range=k_range,
-                        window_size=(i, j),
-                        array_size=range_size,
-                    )
-
-                    assert np.array_equal(
-                        mask, ref_mask
-                    ), f"There's wrong when {name=} with window_size=[{i}, {j}], "
+                assert np.array_equal(
+                    mask, ref_mask
+                ), f"There's wrong when {name=} with window_size=({i}, {j})"
 
 
 if __name__ == "__main__":

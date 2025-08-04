@@ -42,7 +42,7 @@ class TestAttnRanges(TestCase):
         # ---------    case1: w/o truncate     --------- #
         ranges = AttnRanges.from_ranges([(0, 10), (20, 30), (30, 35), (40, 50)])
         other_range = AttnRange(23, 32)
-        local_range = ranges.make_range_local(other_range)
+        local_range, _ = ranges.make_range_local(other_range)
         self.assertEqual(local_range, AttnRange(13, 22))
 
     def test_make_range_local_raises(self):
