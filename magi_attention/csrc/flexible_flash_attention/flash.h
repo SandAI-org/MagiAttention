@@ -167,6 +167,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
 std::tuple<torch::Tensor> work_tile_divider_ext(
   torch::Tensor q,
   torch::Tensor k,
-  torch::Tensor q_ranges,
-  torch::Tensor k_ranges
+  torch::Tensor tile_ranges,
+  torch::Tensor loop_ranges,
+  int max_seqlen_tile_ranges,
+  int max_seqlen_loop_ranges,
+  torch::Tensor arrangement
 );
