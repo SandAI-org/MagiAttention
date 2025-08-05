@@ -425,6 +425,8 @@
 <p>Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dkv.
 However, by default we will downcast it to kv dtype before reducing among ranks to decrease comm overhead.</p>
 </div>
+<p><strong>MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE</strong></p>
+<p>Modify the value of this env variable to change the size of <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">100</span></code>. See <code class="docutils literal notranslate"><span class="pre">magi_attention.api.magi_attn_interface.py</span></code> for more information.</p>
 </section>
 <section id="for-debug">
 <h2>For Debug<a class="headerlink" href="#for-debug" title="Link to this heading">#</a></h2>
