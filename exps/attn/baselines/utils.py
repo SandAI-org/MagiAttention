@@ -1078,7 +1078,7 @@ def get_sdpa_mask_from_var_block_mask(
 
     Args:
         block_mask (Tensor): A boolean or integer tensor of shape
-                             [num_heads, num_q_blocks, num_kv_blocks].
+                             [batch_size, num_heads, num_q_blocks, num_kv_blocks].
                              A value of 1 (True) indicates that the corresponding
                              block's attention should be computed.
         block_row_sz (Tensor): A tensor of shape [num_heads, num_q_blocks]
@@ -1093,8 +1093,11 @@ def get_sdpa_mask_from_var_block_mask(
         Tensor: A boolean mask of shape [bsz, num_heads, seq_len_q, seq_len_k].
                 A value of True allows attention computation, while False forbids it.
     """
-    num_heads = block_mask.shape[0]
+    num_heads = block_mask.shape[1]
     device = block_mask.device
+
+    # TODO: assume batch size is 1 for now
+    block_mask = block_mask.squeeze(0)
 
     # --- 1. Pre-calculate start and end offsets for each block ---
     # We use cumulative sum to find the boundaries of each block.
