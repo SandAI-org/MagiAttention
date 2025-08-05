@@ -78,9 +78,9 @@ def is_deterministic_mode_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_DETERMINISTIC_MODE", "0") == "1"
 
 
-def get_dist_attn_runtime_dict_size() -> int:
+def dist_attn_runtime_dict_size() -> int:
     """
     Modify the value of this env variable to change the size of ``dist_attn_runtime_dict``.
     The default value is ``100``.
     """
-    return int(os.environ.get("DIST_ATTN_RUNTIME_DICT_SIZE", "100"))
+    return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "100"))

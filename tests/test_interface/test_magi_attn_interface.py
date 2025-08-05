@@ -25,7 +25,7 @@ import magi_attention
 from magi_attention.api.functools import (
     apply_padding,
     compute_pad_size,
-    full_attention_to_varlen_attention,
+    infer_varlen_mask_from_batch,
     pad_at_dim,
 )
 from magi_attention.api.magi_attn_interface import (
@@ -470,7 +470,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 is_causal = attn_mask_type[0] == AttnMaskType.CAUSAL
 
                 batch_size = attn_config["batch_size"]
-                cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
+                cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(
                     batch_size, attn_config["total_seqlen_q"] // batch_size
                 )
 

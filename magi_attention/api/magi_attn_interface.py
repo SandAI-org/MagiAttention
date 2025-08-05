@@ -38,7 +38,7 @@ from magi_attention.utils._utils import is_list_type_all
 from .functools import apply_padding, pad_at_dim, unpad_at_dim
 
 dist_attn_runtime_dict = DistAttnRuntimeDict(
-    max_size=magi_attention.get_dist_attn_runtime_dict_size()
+    max_size=magi_attention.dist_attn_runtime_dict_size()
 )  # [DistAttnRuntimeKey, DistAttnRuntimeMgr]
 
 

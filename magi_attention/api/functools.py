@@ -63,7 +63,7 @@ def squash_batch_dim(x: torch.Tensor) -> torch.Tensor:
     return x_merged
 
 
-def full_attention_to_varlen_attention(
+def infer_varlen_mask_from_batch(
     batch_size: int,
     seq_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:

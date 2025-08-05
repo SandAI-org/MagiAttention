@@ -149,7 +149,7 @@ def prepare_data(device_mesh, train_iter):
 
     # pad seqlen of input data for better performance.
     pad_size = compute_pad_size(local_input.size(0), cp_size, CHUNK_SIZE)
-    cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
+    cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(
         batch_size // dp_size, seqlen
     )
 

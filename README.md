@@ -342,6 +342,9 @@ For more information, you can refer to `example/transformers/README.md`.
 - [ ] Optimize `Distributed Attention Solver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
 - [ ] Provide a more comprehensive documentation with tutorials, and a more detailed technical blog.
 - [ ] Provide more example codes and recipes for various training scenarios.
+- [ ] Support Blackwell as well as other GPU architectures.
+- [ ] Better support other attention patterns like cross-attention.
+- [ ] Support inference scenarios involving KV cache and paged attention.
 - [ ] Upgrade MagiAttention to a distributed native Flex-Flash-Attention kernel (*as a major version update*).
 - [x] Refactor `Distributed Attention Solver` to support all mask types with all kinds of overlap.
 - [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*).

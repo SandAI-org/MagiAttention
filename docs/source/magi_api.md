@@ -161,16 +161,26 @@ If you have trouble accessing the meta key, and meanwhile you need to get the mo
 ```
 
 
-### Get Cu_seqlens From Varlen Mask
+### Infer Varlen Masks
 
-If you want to use a varlen mask where each segment has the same length, we provide a `full_attention_to_varlen_attention` function that generates the corresponding cu_seqlens tensors for you.
+If you want to use a varlen mask where each segment has the same length, we provide a `infer_varlen_mask_from_batch` function that generates the corresponding cu_seqlens tensors for you.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.functools
 ```
 
 ```{eval-rst}
-.. autofunction:: full_attention_to_varlen_attention
+.. autofunction:: infer_varlen_mask_from_batch
+```
+
+During the use of varlen mask, it is often necessary to reshape a tensor of shape `[batch_size × seq_len, ...]` into `[batch_size × seq_len, ...]`. To facilitate the use of the above APIs, we provide the `squash_batch_dim` function to merge the tensor dimensions.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.functools
+```
+
+```{eval-rst}
+.. autofunction:: squash_batch_dim
 ```
 
 ### Infer Sliding Window Masks
@@ -183,16 +193,4 @@ In the design of `MagiAttention`, we use a (q_range, k_range, masktype) tuple to
 
 ```{eval-rst}
 .. autofunction:: infer_attn_mask_from_sliding_window
-```
-
-### Squash Batch Dim
-
-In certain attention mechanisms or kernel implementations, the input tensor is expected to have its batch and sequence dimensions flattened into a single leading dimension (e.g., `[batch_size × seq_len, ...]`). To facilitate this, we provide `squash_batch_dim` function, which reshapes a tensor from `[batch_size, seq_len, ...]` to `[batch_size × seq_len, ...]`.
-
-```{eval-rst}
-.. currentmodule:: magi_attention.api.functools
-```
-
-```{eval-rst}
-.. autofunction:: squash_batch_dim
 ```
