@@ -41,7 +41,12 @@ if "flashinfer" in impls:
     wds = ["fwd"]
 else:
     wds = ["fwd"]
-block_sizes = [64, 128, 256]  # average block size for variable block sparse attention
+block_sizes = [
+    64,
+    128,
+    256,
+    512,
+]  # average block size for variable block sparse attention
 
 b = 1
 nhq = 32
@@ -111,9 +116,6 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
     num_kv_blocks_orig = orig_seq_len_k // block_n
     orig_head = nhq
 
-    max_seqlen_q = block_m
-    max_seqlen_k = block_n
-
     # prepare q, k ranges and caculate attn_flops
     # for now, we only do bench for block sparse mask.
     # block_mask, scores = generate_global_block_sparse_pattern(
@@ -132,6 +134,23 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         sparsity_ratio=sparsity_ratio,
         bsz=b,
         device=device,
+    )
+
+    max_seqlen_q = block_row_sz.max().item()
+    max_seqlen_k = block_col_sz.max().item()
+    avg_seqlen_q = block_row_sz.float().mean().item()
+    avg_seqlen_k = block_col_sz.float().mean().item()
+    print(
+        "Max Sequence Length for Q ranges:",
+        max_seqlen_q,
+        "Avg Sequence Length for Q ranges:",
+        avg_seqlen_q,
+    )
+    print(
+        "Max Sequence Length for K ranges:",
+        max_seqlen_k,
+        "Avg Sequence Length for K ranges:",
+        avg_seqlen_k,
     )
 
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
@@ -225,12 +244,9 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         k = k.view(b * nhk, orig_seq_len_k, hd).contiguous()
         v = v.view(b * nhk, orig_seq_len_k, hd).contiguous()
         # BUG: using original block mask will cause illegal access sometimes
-        # block_mask_cpu = block_mask.detach().squeeze(0).cpu()
+        block_mask_cpu = block_mask.detach().squeeze(0).cpu()
         block_row_sz_cpu = block_row_sz.detach().cpu()
         block_col_sz_cpu = block_col_sz.detach().cpu()
-        block_mask_cpu = (
-            torch.rand(nhk, num_q_blocks_orig, num_kv_blocks_orig) < sparsity_ratio
-        )
 
         # print(f"{block_row_sz=}")
         # print(f"{block_col_sz=}")
