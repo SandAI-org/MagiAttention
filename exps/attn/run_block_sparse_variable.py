@@ -42,7 +42,7 @@ if "flashinfer" in impls:
 else:
     wds = ["fwd"]
 block_sizes = [
-    64,
+    # 64,
     128,
     256,
     512,
@@ -131,6 +131,8 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         num_q_blocks_orig,
         num_kv_blocks_orig,
         nhk,
+        min_q_block_size=128,
+        min_k_block_size=128,
         sparsity_ratio=sparsity_ratio,
         bsz=b,
         device=device,
@@ -138,20 +140,6 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
     max_seqlen_q = block_row_sz.max().item()
     max_seqlen_k = block_col_sz.max().item()
-    avg_seqlen_q = block_row_sz.float().mean().item()
-    avg_seqlen_k = block_col_sz.float().mean().item()
-    print(
-        "Max Sequence Length for Q ranges:",
-        max_seqlen_q,
-        "Avg Sequence Length for Q ranges:",
-        avg_seqlen_q,
-    )
-    print(
-        "Max Sequence Length for K ranges:",
-        max_seqlen_k,
-        "Avg Sequence Length for K ranges:",
-        avg_seqlen_k,
-    )
 
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
 
