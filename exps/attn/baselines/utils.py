@@ -516,6 +516,7 @@ def generate_kv_headwise_4D_block_sparse_pattern(
 
     # 5. Add batch dimension
     block_sparse_mask = block_sparse_mask.unsqueeze(0)
+    scores = scores.unsqueeze(0)
 
     return block_sparse_mask, scores
 
