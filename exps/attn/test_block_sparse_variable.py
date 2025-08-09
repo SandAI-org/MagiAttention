@@ -239,6 +239,8 @@ def test_q_headwise_sparse():
         num_q_blocks_orig,
         num_kv_blocks_orig,
         orig_head,
+        min_q_block_size=BLOCK_M,
+        min_kv_block_size=BLOCK_N,
         sparsity_ratio=SPARSITY_RATIO,
         bsz=BATCH_SIZE,
         device="cuda",
