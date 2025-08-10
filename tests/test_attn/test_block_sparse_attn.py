@@ -30,11 +30,9 @@ from magi_attention.functional.flex_flash_attn import (
 )
 from magi_attention.testing import parameterize
 from magi_attention.testing.precision import assert_close, calc_inf_norm
-from magi_attention.utils import (
-    flatten_head_mask,
-    flatten_kvhead_mask,
-    generate_headwise_4D_block_sparse_pattern,
-    generate_kv_headwise_4D_block_sparse_pattern,
+from magi_attention.utils import (  # flatten_head_mask,; flatten_kvhead_mask,
+    flatten_block_mask,
+    generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
     generate_ranges_from_var_block_mask,
     get_random_variable_block_mask,
@@ -359,10 +357,7 @@ class TestFlexFlashAttn(TestCase):
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
 
-        if head_wise == "q":
-            flat_block_sparse_mask = flatten_head_mask(block_mask)
-        else:
-            flat_block_sparse_mask = flatten_kvhead_mask(block_mask, nhq, nhk)
+        flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
 
         if uniform:
             q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
@@ -652,7 +647,7 @@ class TestFlexFlashAttn(TestCase):
     @parameterize("block_size", [64, 128])
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
     @parameterize(
-        "sparsity_granularity", ["per_query_head", "per_kv_head"]
+        "sparsity_granularity", ["per_q_head", "per_kv_head"]
     )  # generate sparse attn per query head or kv head.
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("attn_type", [0])  # for now, we only test full mask.
@@ -687,30 +682,24 @@ class TestFlexFlashAttn(TestCase):
         num_q_blocks = seqlen // block_size
         num_kv_blocks = seqlen // block_size
 
-        # --- generate block mask and q, k range --- #
-        if sparsity_granularity == "per_query_head":
-            block_mask, scores = generate_headwise_4D_block_sparse_pattern(
-                num_heads_q, num_q_blocks, num_kv_blocks, sparsity_ratio, device="cuda"
-            )
+        # NEW: A single call now handles both MHA and GQA mask generation correctly.
+        # The returned `block_mask` is always expanded to the shape [1, num_heads_q, ...].
+        block_mask, scores = generate_block_sparse_pattern(
+            num_q_heads=num_heads_q,
+            num_kv_heads=num_heads_kv,
+            num_q_blocks=num_q_blocks,
+            num_kv_blocks=num_kv_blocks,
+            sparsity=sparsity_ratio,
+            mode=sparsity_granularity,
+            device="cuda",
+        )
 
-            flat_block_sparse_mask = flatten_head_mask(block_mask)
-            q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
-                flat_block_sparse_mask, block_size, block_size
-            )
-
-        else:
-            block_mask, scores = generate_kv_headwise_4D_block_sparse_pattern(
-                num_heads_kv, num_q_blocks, num_kv_blocks, sparsity_ratio, device="cuda"
-            )
-            num_groups = num_heads_q // num_heads_kv
-            block_mask = block_mask.repeat_interleave(num_groups, dim=1)
-
-            flat_block_sparse_mask = flatten_kvhead_mask(
-                block_mask, num_heads_q, num_heads_kv
-            )
-            q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
-                flat_block_sparse_mask, block_size, block_size
-            )
+        flat_block_sparse_mask = flatten_block_mask(
+            block_mask, num_heads_q, num_heads_kv
+        )
+        q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
+            flat_block_sparse_mask, block_size, block_size
+        )
 
         attn_type_map = [attn_type] * len(q_ranges_tensor)
 
@@ -868,24 +857,28 @@ class TestFlexFlashAttn(TestCase):
                 device="cuda",
             )
 
-            flat_block_sparse_mask = flatten_head_mask(block_mask)
+            flat_block_sparse_mask = flatten_block_mask(
+                block_mask, num_heads_q, num_heads_kv
+            )
             q_ranges_tensor, k_ranges_tensor = generate_ranges_from_var_block_mask(
                 flat_block_sparse_mask, block_row_sz, block_col_sz
             )
 
         else:
+            """
             block_mask, scores = generate_kv_headwise_4D_block_sparse_pattern(
                 num_heads_kv, num_q_blocks, num_kv_blocks, sparsity_ratio, device="cuda"
             )
             num_groups = num_heads_q // num_heads_kv
             block_mask = block_mask.repeat_interleave(num_groups, dim=1)
 
-            flat_block_sparse_mask = flatten_kvhead_mask(
-                block_mask, num_heads_q, num_heads_kv
-            )
+            # flat_block_sparse_mask = flatten_kvhead_mask(
+            #    block_mask, num_heads_q, num_heads_kv
+            # )
             q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
                 flat_block_sparse_mask, average_block_size, average_block_size
             )
+            """
 
         attn_type_map = [attn_type] * len(q_ranges_tensor)
 
