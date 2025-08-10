@@ -36,7 +36,10 @@ from magi_attention.utils import (
     generate_headwise_4D_block_sparse_pattern,
     generate_kv_headwise_4D_block_sparse_pattern,
     generate_ranges_from_block_mask,
+    generate_ranges_from_var_block_mask,
+    get_random_variable_block_mask,
     get_sdpa_mask_from_block_sparse_mask,
+    get_sdpa_mask_from_var_block_mask,
     is_list_value_any,
 )
 
@@ -335,6 +338,9 @@ class TestFlexFlashAttn(TestCase):
         test_accumulation_inplace,
         test_case,
         err_msg_list,
+        uniform=True,
+        block_row_sz=None,
+        block_col_sz=None,
     ):
         s, h = q.size(1), q.size(2)
         q = rearrange(
@@ -358,9 +364,14 @@ class TestFlexFlashAttn(TestCase):
         else:
             flat_block_sparse_mask = flatten_kvhead_mask(block_mask, nhq, nhk)
 
-        q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
-            flat_block_sparse_mask, block_size, block_size
-        )
+        if uniform:
+            q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
+                flat_block_sparse_mask, block_size, block_size
+            )
+        else:
+            q_ranges_tensor, k_ranges_tensor = generate_ranges_from_var_block_mask(
+                flat_block_sparse_mask, block_row_sz, block_col_sz
+            )
 
         attn_type_map = torch.zeros(
             len(q_ranges_tensor), dtype=torch.int32, device="cuda"
@@ -408,15 +419,31 @@ class TestFlexFlashAttn(TestCase):
         return o
 
     def get_sdpa_attn_ref(
-        self, q, k, v, grad_output, seqlen, block_size, block_mask, high_precision=False
+        self,
+        q,
+        k,
+        v,
+        grad_output,
+        seqlen,
+        block_size,
+        block_mask,
+        uniform=True,
+        block_row_sz=None,
+        block_col_sz=None,
+        high_precision=False,
     ):
         q = rearrange(q, "b s h d -> b h s d")
         k = rearrange(k, "b s h d -> b h s d")
         v = rearrange(v, "b s h d -> b h s d")
 
-        sdpa_mask_4d = get_sdpa_mask_from_block_sparse_mask(
-            block_mask, seqlen, seqlen, block_size, block_size
-        )
+        if uniform:
+            sdpa_mask_4d = get_sdpa_mask_from_block_sparse_mask(
+                block_mask, seqlen, seqlen, block_size, block_size
+            )
+        else:
+            sdpa_mask_4d = get_sdpa_mask_from_var_block_mask(
+                block_mask, seqlen, seqlen, block_row_sz, block_col_sz
+            )
 
         if high_precision:
             o = sdpa_func(
@@ -458,9 +485,22 @@ class TestFlexFlashAttn(TestCase):
         deterministic,
         test_accumulation_inplace,
         test_case,
+        uniform=True,
+        block_row_sz=None,
+        block_col_sz=None,
     ):
         high_precision_torch_out_ref = self.get_sdpa_attn_ref(
-            q, k, v, grad_output, seqlen, block_size, block_mask, True
+            q,
+            k,
+            v,
+            grad_output,
+            seqlen,
+            block_size,
+            block_mask,
+            uniform=uniform,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
+            high_precision=True,
         )
         high_precision_dq_ref, high_precision_dk_ref, high_precision_dv_ref = (
             q.grad,
@@ -470,7 +510,17 @@ class TestFlexFlashAttn(TestCase):
         q.grad, k.grad, v.grad = None, None, None
 
         low_precision_torch_out_ref = self.get_sdpa_attn_ref(
-            q, k, v, grad_output, seqlen, block_size, block_mask
+            q,
+            k,
+            v,
+            grad_output,
+            seqlen,
+            block_size,
+            block_mask,
+            uniform=uniform,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
+            high_precision=False,
         )
         low_precision_dq_ref, low_precision_dk_ref, low_precision_dv_ref = (
             q.grad,
@@ -494,6 +544,9 @@ class TestFlexFlashAttn(TestCase):
             test_accumulation_inplace,
             test_case,
             err_msg_list,
+            uniform=uniform,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
         )
         ffa_dq, ffa_dk, ffa_dv = q.grad, k.grad, v.grad
 
@@ -504,9 +557,6 @@ class TestFlexFlashAttn(TestCase):
             low_precision_torch_out_ref, high_precision_torch_out_ref
         )
 
-        import pdb
-
-        pdb.set_trace()
         try:
             self.assertLessEqual(
                 out_norm,
@@ -720,6 +770,185 @@ class TestFlexFlashAttn(TestCase):
             deterministic,
             test_accumulation_inplace,
             test_case,
+        )
+
+    @parameterize(
+        "model_config",
+        [
+            {
+                "name": "mha_nh8_hd128",
+                "num_heads_q": 8,
+                "num_heads_kv": 8,
+                "head_dim": 128,
+            },
+            # {
+            #    "name": "gqa_nhq16_nhkv4_hd128",
+            #    "num_heads_q": 16,
+            #    "num_heads_kv": 4,
+            #    "head_dim": 128,
+            # },
+            {
+                "name": "mha_nh1_hd64",
+                "num_heads_q": 1,
+                "num_heads_kv": 1,
+                "head_dim": 64,
+            },
+            # {
+            #    "name": "gqa_nhq4_nhkv2_hd64",
+            #    "num_heads_q": 4,
+            #    "num_heads_kv": 2,
+            #    "head_dim": 64,
+            # },
+        ],
+    )
+    @parameterize("seqlen", [2048])
+    @parameterize("average_block_size", [64])
+    @parameterize("min_block_size", [32])
+    @parameterize("max_block_size", [128])
+    @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
+    @parameterize(
+        "sparsity_granularity", ["per_query_head", "per_kv_head"]
+    )  # generate sparse attn per query head or kv head.
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize("attn_type", [0])  # for now, we only test full mask.
+    @parameterize(
+        "auto_range_merge", [True]
+    )  # for sparse attn, we set auto_range_merge to True by default
+    @parameterize("deterministic", [False, True])
+    @parameterize("test_accumulation_inplace", [False, True])
+    def test_var_block_sparse_attn(
+        self,
+        model_config: dict[str, Any],
+        seqlen: int,
+        average_block_size: int,
+        min_block_size: int,
+        max_block_size: int,
+        sparsity_ratio: float,
+        sparsity_granularity: str,
+        dtype: torch.dtype,
+        attn_type: int,
+        auto_range_merge: bool,
+        deterministic: bool,
+        test_accumulation_inplace: bool,
+    ):
+        # FIXME: auto_range_merge and deterministic can't be True at the same time
+        # due to some unresolved bug to be fixed as soon as possible
+        if auto_range_merge and deterministic:
+            return
+
+        if sparsity_granularity == "per_kv_head":
+            return
+
+        # we test per query head and per kvhead both.
+        num_heads_q = model_config["num_heads_q"]
+        num_heads_kv = model_config["num_heads_kv"]
+        head_dim = model_config["head_dim"]
+
+        num_q_blocks = seqlen // average_block_size
+        num_kv_blocks = seqlen // average_block_size
+
+        # --- generate block mask and q, k range --- #
+        if sparsity_granularity == "per_query_head":
+            block_mask, block_row_sz, block_col_sz = get_random_variable_block_mask(
+                seqlen,
+                seqlen,
+                num_q_blocks,
+                num_kv_blocks,
+                num_heads_q,
+                min_q_block_size=min_block_size,
+                min_kv_block_size=min_block_size,
+                sparsity_ratio=sparsity_ratio,
+                bsz=1,
+                device="cuda",
+            )
+
+            flat_block_sparse_mask = flatten_head_mask(block_mask)
+            q_ranges_tensor, k_ranges_tensor = generate_ranges_from_var_block_mask(
+                flat_block_sparse_mask, block_row_sz, block_col_sz
+            )
+
+        else:
+            block_mask, scores = generate_kv_headwise_4D_block_sparse_pattern(
+                num_heads_kv, num_q_blocks, num_kv_blocks, sparsity_ratio, device="cuda"
+            )
+            num_groups = num_heads_q // num_heads_kv
+            block_mask = block_mask.repeat_interleave(num_groups, dim=1)
+
+            flat_block_sparse_mask = flatten_kvhead_mask(
+                block_mask, num_heads_q, num_heads_kv
+            )
+            q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
+                flat_block_sparse_mask, average_block_size, average_block_size
+            )
+
+        attn_type_map = [attn_type] * len(q_ranges_tensor)
+
+        assert len(q_ranges_tensor) == len(k_ranges_tensor) == len(attn_type_map), (
+            "q_ranges, k_ranges and attn_type_map should have the same length"
+            f", but got {len(q_ranges_tensor)=}, {len(k_ranges_tensor)=}, {len(attn_type_map)=}"
+        )
+
+        test_case = (
+            f"[{model_config['name']}]"
+            f"[average_block_size={average_block_size}]"
+            f"[q_range={q_ranges_tensor}]"
+            f"[k_range={k_ranges_tensor}]"
+            f"[sparsity_granularity={sparsity_granularity}]"
+            f"[dtype={dtype}]"
+            f"[attn_type_map={attn_type_map}]"
+            f"[auto_range_merge={auto_range_merge}]"
+            f"[deterministic={deterministic}]"
+            f"[test_accumulation_inplace={test_accumulation_inplace}"
+        )
+
+        print(f"{test_case=}")
+        # we assume q and k has the same seqlen.
+        total_seqlen_q = seqlen
+        total_seqlen_k = seqlen
+        # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
+        # ffa bwd kernel encounters with some precision issue with dq/dk,
+        # thus we skip here and will fix it asap
+        if is_list_value_any(attn_type_map, 3):
+            return
+
+        # construct data
+        q = torch.randn(
+            (1, total_seqlen_q, num_heads_q, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            (1, total_seqlen_k, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            (1, total_seqlen_k, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        do = torch.randn_like(q)
+
+        self.assert_close_to_torch_ref(
+            q,
+            k,
+            v,
+            do,
+            seqlen,
+            average_block_size,
+            block_mask,
+            sparsity_granularity,
+            num_heads_q,
+            num_heads_kv,
+            deterministic,
+            test_accumulation_inplace,
+            test_case,
+            uniform=False,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
         )
 
 

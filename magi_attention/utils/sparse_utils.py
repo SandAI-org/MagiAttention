@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Tuple
+
 import torch
+
+# ================ Utils for Block Sparse Attention ================
 
 
 def generate_headwise_4D_block_sparse_pattern(
@@ -249,6 +253,282 @@ def get_sdpa_mask_from_block_sparse_mask(
         k_start, k_end = kb * block_size_k, (kb + 1) * block_size_k
 
         # "Paint" the corresponding rectangular region on the canvas to True,
+        # indicating that attention is allowed for these positions.
+        sdpa_mask[:, h, q_start:q_end, k_start:k_end] = True
+
+    return sdpa_mask
+
+
+# ================ Utils for Variable Block Sparse Attention ================
+
+
+def get_random_variable_block_mask(
+    seq_len_q: int,
+    seq_len_k: int,
+    num_blocks_row: int,
+    num_blocks_col: int,
+    num_kv_heads: int,
+    min_q_block_size: int = 128,
+    min_kv_block_size: int = 128,
+    sparsity_ratio: float = 0.8,
+    bsz: int = 1,
+    device: torch.device | str = "cuda",
+):
+    """
+    Generates a random variable-size block sparse mask, ensuring minimum block sizes.
+
+    NOTE: Block sizes (block_row_sz, block_col_sz) are generated per head,
+          which is consistent with libraries like FlashInfer.
+    """
+
+    def random_partition_with_min_size(
+        seq_len: int,
+        num_blocks: int,
+        min_block_size: int,
+        batch_size: int,  # Represents num_heads or bsz
+        device: torch.device | str = "cuda",
+        dtype: torch.dtype = torch.int32,
+    ) -> torch.Tensor:
+        """
+        Partitions a sequence into random-sized blocks, with a guaranteed minimum size.
+        This implementation is fully vectorized.
+        """
+        # 1. Validate that the partitioning is possible
+        if seq_len < num_blocks * min_block_size:
+            raise ValueError(
+                f"Cannot partition seq_len {seq_len} into {num_blocks} blocks "
+                f"with min_block_size {min_block_size}. "
+                f"Required: {num_blocks * min_block_size}."
+            )
+
+        # 2. Distribute the "slack" length
+        # First, give each block its minimum required size.
+        # The remaining length is what we'll distribute randomly.
+        extra_len = seq_len - num_blocks * min_block_size
+
+        # 3. Generate random cut points for the extra length
+        # We need to partition extra_len into num_blocks parts.
+        # This is done by choosing num_blocks - 1 cut points from [0, extra_len].
+        cut_pts = torch.randint(
+            0, extra_len + 1, (batch_size, num_blocks - 1), device=device
+        )
+        cut_pts, _ = torch.sort(cut_pts, dim=-1)
+
+        # 4. Calculate sizes of the extra partitions using torch.diff
+        zeros = torch.zeros((batch_size, 1), dtype=cut_pts.dtype, device=device)
+        extras = torch.full(
+            (batch_size, 1), extra_len, dtype=cut_pts.dtype, device=device
+        )
+
+        boundaries = torch.cat([zeros, cut_pts, extras], dim=-1)
+        extra_sizes = torch.diff(boundaries, dim=-1)
+
+        # 5. Add the minimum size back to each block
+        final_sizes = extra_sizes + min_block_size
+
+        # Final assertions to ensure correctness
+        assert final_sizes.min() >= min_block_size
+        assert torch.all(final_sizes.sum(dim=-1) == seq_len)
+        return final_sizes.to(dtype)
+
+    # Generate block sizes for rows (queries) and columns (keys) for each head
+    block_row_sz = random_partition_with_min_size(
+        seq_len=seq_len_q,
+        num_blocks=num_blocks_row,
+        min_block_size=min_q_block_size,
+        batch_size=num_kv_heads,
+        device=device,
+    )
+
+    block_col_sz = random_partition_with_min_size(
+        seq_len=seq_len_k,
+        num_blocks=num_blocks_col,
+        min_block_size=min_kv_block_size,
+        batch_size=num_kv_heads,
+        device=device,
+    )
+
+    # TODO: modify to topk block selection
+    block_mask_map = (
+        torch.rand(num_kv_heads, num_blocks_row, num_blocks_col, device=device)
+        < sparsity_ratio
+    )
+    block_mask_map = block_mask_map.unsqueeze(0)  # add batch dimension
+
+    return block_mask_map, block_row_sz, block_col_sz
+
+
+def generate_ranges_from_var_block_mask(
+    block_mask: torch.Tensor,
+    block_row_sz: torch.Tensor,
+    block_col_sz: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Generates query and key sequence ranges from a 2D "flattened" variable-size block mask,
+    assuming a varlen-style sequence concatenation across heads.
+
+    This function interprets a 2D mask where heads are tiled, and their corresponding
+    sequences are concatenated. The ranges for head `h` are offset by the total
+    sequence length of all preceding heads.
+
+    Args:
+        block_mask (torch.Tensor): A 2D boolean tensor of shape
+                                   [num_heads * num_q_blocks, num_heads * num_k_blocks].
+        block_row_sz (torch.Tensor): A 2D tensor of shape [num_heads, num_q_blocks]
+                                     defining the height of each query block per head.
+        block_col_sz (torch.Tensor): A 2D tensor of shape [num_heads, num_k_blocks]
+                                     defining the width of each key block per head.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - q_range_tensor (torch.Tensor): Tensor of shape [num_true_blocks, 2]
+                                             listing the query ranges [start, end).
+            - k_range_tensor (torch.Tensor): Tensor of shape [num_true_blocks, 2]
+                                             listing the key ranges [start, end).
+    """
+    device = block_mask.device
+    num_heads, num_q_blocks = block_row_sz.shape
+    _, num_k_blocks = block_col_sz.shape
+
+    # --- 1. Calculate intra-head and inter-head offsets ---
+
+    # Intra-head offsets (offsets within each head's own sequence)
+    zeros_col = torch.zeros((num_heads, 1), dtype=block_row_sz.dtype, device=device)
+    row_offsets_intra = torch.cat([zeros_col, torch.cumsum(block_row_sz, dim=1)], dim=1)
+    col_offsets_intra = torch.cat([zeros_col, torch.cumsum(block_col_sz, dim=1)], dim=1)
+
+    # Inter-head offsets (the starting position of each head in the concatenated sequence)
+    zero = torch.tensor([0], dtype=torch.long, device=device)
+    q_len_per_head = torch.sum(block_row_sz, dim=1)
+    k_len_per_head = torch.sum(block_col_sz, dim=1)
+    q_head_start_offsets = torch.cat([zero, torch.cumsum(q_len_per_head, dim=0)[:-1]])
+    k_head_start_offsets = torch.cat([zero, torch.cumsum(k_len_per_head, dim=0)[:-1]])
+
+    # --- 2. Find the coordinates (flat_i, flat_j) from the 2D mask ---
+    flat_q_indices, flat_k_indices = torch.nonzero(block_mask, as_tuple=True)
+
+    # Handle case with no active blocks
+    if flat_q_indices.numel() == 0:
+        return torch.empty((0, 2), dtype=torch.int32, device=device), torch.empty(
+            (0, 2), dtype=torch.int32, device=device
+        )
+
+    # --- 3. Map flat indices back to head and block indices ---
+    h_indices_q = flat_q_indices // num_q_blocks
+    q_block_indices = flat_q_indices % num_q_blocks
+
+    h_indices_k = flat_k_indices // num_k_blocks
+    k_block_indices = flat_k_indices % num_k_blocks
+
+    # --- 4. Filter out cross-head attention blocks ---
+    intra_head_mask = h_indices_q == h_indices_k
+
+    h_indices = h_indices_q[intra_head_mask]
+    q_block_indices = q_block_indices[intra_head_mask]
+    k_block_indices = k_block_indices[intra_head_mask]
+
+    # --- 5. Gather ranges, applying both inter-head and intra-head offsets ---
+    q_starts = (
+        row_offsets_intra[h_indices, q_block_indices] + q_head_start_offsets[h_indices]
+    )
+    q_ends = (
+        row_offsets_intra[h_indices, q_block_indices + 1]
+        + q_head_start_offsets[h_indices]
+    )
+    q_range_tensor = torch.stack([q_starts, q_ends], dim=1)
+
+    k_starts = (
+        col_offsets_intra[h_indices, k_block_indices] + k_head_start_offsets[h_indices]
+    )
+    k_ends = (
+        col_offsets_intra[h_indices, k_block_indices + 1]
+        + k_head_start_offsets[h_indices]
+    )
+    k_range_tensor = torch.stack([k_starts, k_ends], dim=1)
+
+    return q_range_tensor.int(), k_range_tensor.int()
+
+
+def get_sdpa_mask_from_var_block_mask(
+    block_mask: torch.Tensor,
+    seq_len_q: int,
+    seq_len_k: int,
+    block_row_sz: torch.Tensor,
+    block_col_sz: torch.Tensor,
+    bsz: int = 1,
+) -> torch.Tensor:
+    """
+    Generates a standard SDPA (Scaled Dot Product Attention) mask from a
+    variable block sparse attention specification.
+
+    This function converts a block-level sparse definition into an element-level
+    dense boolean mask, which can be directly used with
+    `torch.nn.functional.scaled_dot_product_attention`.
+
+    Args:
+        block_mask (Tensor): A boolean or integer tensor of shape
+                             [batch_size, num_heads, num_q_blocks, num_kv_blocks].
+                             A value of 1 (True) indicates that the corresponding
+                             block's attention should be computed.
+        block_row_sz (Tensor): A tensor of shape [num_heads, num_q_blocks]
+                               that defines the height of each query block.
+        block_col_sz (Tensor): A tensor of shape [num_heads, num_kv_blocks]
+                               that defines the width of each key/value block.
+        seq_len_q (int): The total length of the query sequence.
+        seq_len_k (int): The total length of the key/value sequence.
+        bsz (int, optional): The batch size. Defaults to 1.
+
+    Returns:
+        Tensor: A boolean mask of shape [bsz, num_heads, seq_len_q, seq_len_k].
+                A value of True allows attention computation, while False forbids it.
+    """
+    num_heads = block_mask.shape[1]
+    device = block_mask.device
+
+    # TODO: assume batch size is 1 for now
+    block_mask = block_mask.squeeze(0)
+
+    # --- 1. Pre-calculate start and end offsets for each block ---
+    # We use cumulative sum to find the boundaries of each block.
+    # To easily get the start positions, we concatenate a zero column at the beginning
+    # of the cumulative sum result.
+    # e.g., cumsum([5, 4, 6]) -> [5, 9, 15]
+    # After concatenation -> [0, 5, 9, 15]. The range for block `i` is from
+    # offsets[i] to offsets[i+1].
+
+    # Create a column of zeros for concatenation
+    zeros_col_shape = (num_heads, 1)
+    zeros = torch.zeros(zeros_col_shape, dtype=block_row_sz.dtype, device=device)
+
+    # Calculate row (query) offsets
+    row_cumsum = torch.cumsum(block_row_sz, dim=1)
+    row_offsets = torch.cat([zeros, row_cumsum], dim=1)
+
+    # Calculate column (key/value) offsets
+    col_cumsum = torch.cumsum(block_col_sz, dim=1)
+    col_offsets = torch.cat([zeros, col_cumsum], dim=1)
+
+    # --- 2. Initialize the final SDPA mask ---
+    sdpa_mask = torch.zeros(
+        (bsz, num_heads, seq_len_q, seq_len_k), dtype=torch.bool, device=device
+    )
+
+    # --- 3. Efficiently find the coordinates (h, qb, kb) of all active blocks ---
+    h_indices, qb_indices, kb_indices = torch.nonzero(block_mask, as_tuple=True)
+
+    row_offsets_list = row_offsets.tolist()
+    col_offsets_list = col_offsets.tolist()
+
+    # --- 5. Iterate through all active blocks and populate the mask ---
+    for h, qb, kb in zip(h_indices, qb_indices, kb_indices):
+        # Use fast Python list indexing to get the block boundaries.
+        q_start = row_offsets_list[h][qb]
+        q_end = row_offsets_list[h][qb + 1]
+
+        k_start = col_offsets_list[h][kb]
+        k_end = col_offsets_list[h][kb + 1]
+
+        # "Paint" the corresponding rectangular region to True,
         # indicating that attention is allowed for these positions.
         sdpa_mask[:, h, q_start:q_end, k_start:k_end] = True
 
