@@ -401,6 +401,13 @@ class TestFlexFlashAttn(TestCase):
         v.grad = None
         """
 
+        if uniform:
+            max_seqlen_q = block_size
+            max_seqlen_k = block_size
+        else:
+            max_seqlen_q = block_row_sz.max().item()
+            max_seqlen_k = block_col_sz.max().item()
+
         o, _ = flex_flash_attn_func(
             q,
             k,
@@ -408,8 +415,8 @@ class TestFlexFlashAttn(TestCase):
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map,
-            max_seqlen_q=block_size,
-            max_seqlen_k=block_size,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
             auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
         )
 
@@ -725,7 +732,6 @@ class TestFlexFlashAttn(TestCase):
             f"[test_accumulation_inplace={test_accumulation_inplace}"
         )
 
-        print(f"{test_case=}")
         # we assume q and k has the same seqlen.
         total_seqlen_q = seqlen
         total_seqlen_k = seqlen
@@ -802,8 +808,8 @@ class TestFlexFlashAttn(TestCase):
         ],
     )
     @parameterize("seqlen", [2048])
-    @parameterize("average_block_size", [64])
-    @parameterize("min_block_size", [32])
+    @parameterize("average_block_size", [64, 128])
+    @parameterize("min_block_size", [16])
     @parameterize("max_block_size", [128])
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
     @parameterize(
@@ -901,7 +907,6 @@ class TestFlexFlashAttn(TestCase):
             f"[test_accumulation_inplace={test_accumulation_inplace}"
         )
 
-        print(f"{test_case=}")
         # we assume q and k has the same seqlen.
         total_seqlen_q = seqlen
         total_seqlen_k = seqlen
