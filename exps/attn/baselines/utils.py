@@ -916,7 +916,7 @@ def get_random_variable_block_mask(
     num_blocks_col: int,
     num_kv_heads: int,
     min_q_block_size: int = 128,
-    min_k_block_size: int = 128,
+    min_kv_block_size: int = 128,
     sparsity_ratio: float = 0.8,
     bsz: int = 1,
     device: torch.device | str = "cuda",
@@ -990,7 +990,7 @@ def get_random_variable_block_mask(
     block_col_sz = random_partition_with_min_size(
         seq_len=seq_len_k,
         num_blocks=num_blocks_col,
-        min_block_size=min_k_block_size,
+        min_block_size=min_kv_block_size,
         batch_size=num_kv_heads,
         device=device,
     )

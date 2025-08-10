@@ -30,13 +30,13 @@ from magi_attention.functional import flex_flash_attn_func
 BLOCK_M = 64
 BLOCK_N = 64
 
-SEQLEN = 5000
+SEQLEN = 8192
 BATCH_SIZE = 1
 
-NUM_HEADS_Q = 48
-NUM_HEADS_KV = 12
+NUM_HEADS_Q = 32
+NUM_HEADS_KV = 16
 
-HEAD_DIM = 8
+HEAD_DIM = 128
 SPARSITY_RATIO = 0.1
 DTYPE = torch.bfloat16
 

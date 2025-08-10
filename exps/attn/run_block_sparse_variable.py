@@ -28,7 +28,7 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
-impls = ["ffa"]
+impls = ["ffa", "flashinfer"]
 
 # actual seqlen
 seqlen = 49152
