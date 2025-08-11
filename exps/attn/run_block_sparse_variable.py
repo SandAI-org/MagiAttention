@@ -16,10 +16,11 @@ import os
 from datetime import datetime
 
 import torch
-from baselines.attn_impl import ffa_func, sdpa_func
+from baselines.attn_impl import ffa_func, flex_attn_func, sdpa_func
 from baselines.utils import (
     flatten_head_mask,
     generate_ranges_from_var_block_mask,
+    get_flex_mask_from_block_mask,
     get_random_variable_block_mask,
     get_sdpa_mask_from_var_block_mask,
     seed_everything,
@@ -28,28 +29,32 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 
-impls = ["ffa", "flashinfer"]
+impls = ["ffa", "flashinfer", "flex"]
 
 # actual seqlen
 seqlen = 49152
-
-sparsity_ratio = [0.1, 0.2, 0.5, 0.8, 1.0]
+# sparsity_ratio = 1.0 will cause illegal access sometimes
+sparsity_ratio = [0.1, 0.2, 0.5, 0.8, 0.9]
+# sparsity_ratio = [1.0]
 # ss = [k * 1024 for k in [4, 96, 128]]
 ds = [128]
 if "flashinfer" in impls:
     # flashinfer doesn't support backward
     wds = ["fwd"]
 else:
-    wds = ["fwd"]
+    wds = ["fwd", "bwd"]
 block_sizes = [
     # 64,
     128,
     256,
     512,
+    1024,
 ]  # average block size for variable block sparse attention
 
 b = 1
 nhq = 32
+if "flex" in impls:
+    nhq = 1  # otherwise flexattention will cause OOM!
 if "flashinfer" in impls:
     # currently vsa doesn't support gqa
     # currently flashinfer doesn't support query-specific sparsity
@@ -132,7 +137,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         num_kv_blocks_orig,
         nhk,
         min_q_block_size=128,
-        min_k_block_size=128,
+        min_kv_block_size=128,
         sparsity_ratio=sparsity_ratio,
         bsz=b,
         device=device,
@@ -169,7 +174,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         # k = k.view(b * orig_seq_len_k * nhk, 1, hd)
         # v = v.view(b * orig_seq_len_k * nhk, 1, hd)
 
-    if attn_impl in ("sdpa", "vsa", "vsa_triton", "flashinfer"):
+    if attn_impl in ("sdpa", "vsa", "vsa_triton", "flashinfer", "flex"):
         q = rearrange(q, "b s h d -> b h s d")
         k = rearrange(k, "b s h d -> b h s d")
         v = rearrange(v, "b s h d -> b h s d")
@@ -261,6 +266,41 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
         def fn():
             return wrapper.run(q, k, v)
+
+    elif attn_impl == "flex":
+        flex_mask = get_flex_mask_from_block_mask(
+            block_mask,
+            orig_seq_len_q,
+            orig_seq_len_k,
+            block_row_sz=block_row_sz,
+            block_col_sz=block_col_sz,
+            bsz=b,
+        )
+
+        def fn():
+            return flex_attn_func(
+                q,
+                k,
+                v,
+                block_mask=flex_mask,
+                scale=softmax_scale,
+                enable_gqa=True,
+            )
+
+        if wd == "bwd":
+            try:
+                o = fn()
+            except Exception as e:
+                if "CUDA out of memory" not in str(e):
+                    print(
+                        f"Error occured before running {attn_impl} with {block_size} block_size "
+                        f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                    )
+                    raise e
+                already_known_oom_before_run = True
+
+            def fn():
+                o.backward(do, retain_graph=True)
 
     elif attn_impl == "sdpa":
         sdpa_mask = get_sdpa_mask_from_var_block_mask(
