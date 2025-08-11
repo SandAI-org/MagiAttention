@@ -13,18 +13,22 @@
 # limitations under the License.
 
 import torch
-from baselines.attn_impl import sdpa_func
+import torch._dynamo
+from baselines.attn_impl import flex_attn_func, sdpa_func
 from baselines.utils import (
     flatten_head_mask,
     flatten_kvhead_mask,
     generate_headwise_4D_block_sparse_pattern,
     generate_kv_headwise_4D_block_sparse_pattern,
     generate_ranges_from_mask,
+    get_flex_mask_from_block_mask,
     get_sdpa_mask_from_block_sparse_mask,
 )
 from einops import rearrange
 
 from magi_attention.functional import flex_flash_attn_func
+
+torch._dynamo.config.suppress_errors = True
 
 BLOCK_M = 64
 BLOCK_N = 64
@@ -35,7 +39,7 @@ BATCH_SIZE = 1
 NUM_HEADS_Q = 48
 NUM_HEADS_KV = 12
 
-HEAD_DIM = 8
+HEAD_DIM = 128
 SPARSITY_RATIO = 0.1
 DTYPE = torch.bfloat16
 
@@ -126,6 +130,33 @@ def get_ffa_result(q, k, v, grad_output, block_mask, head_wise):
     return o
 
 
+def get_flex_result(
+    q, k, v, grad_output, block_mask, block_row_sz, block_col_sz, head_wise
+):
+    s = q.size(1)
+    q = rearrange(q, "b s h d -> b h s d")
+    k = rearrange(k, "b s h d -> b h s d")
+    v = rearrange(v, "b s h d -> b h s d")
+
+    flex_mask = get_flex_mask_from_block_mask(
+        block_mask, s, s, block_row_sz=block_row_sz, block_col_sz=block_col_sz, bsz=1
+    )
+
+    o = flex_attn_func(
+        q,
+        k,
+        v,
+        block_mask=flex_mask,
+        enable_gqa=True,
+    )
+
+    o = rearrange(o, "b h s d -> b s h d")
+    o = o.to(q.dtype)
+    o.backward(grad_output)
+
+    return o
+
+
 # assert attn_impl with sdpa
 
 
@@ -163,6 +194,7 @@ def assert_close_to_torch_ref(q, k, v, grad_output, block_mask, head_wise):
 
     ffa_out = get_ffa_result(q, k, v, grad_output, block_mask, head_wise)
     ffa_dq, ffa_dk, ffa_dv = q.grad, k.grad, v.grad
+    q.grad, k.grad, v.grad = None, None, None
 
     norm_rtol_ratio = 2.0
 
@@ -205,6 +237,52 @@ def assert_close_to_torch_ref(q, k, v, grad_output, block_mask, head_wise):
     )
 
     print("pass all!")
+
+    flex_out = get_flex_result(q, k, v, grad_output, block_mask, None, None, head_wise)
+
+    flex_dq, flex_dk, flex_dv = q.grad, k.grad, v.grad
+
+    norm_rtol_ratio = 2.0
+
+    out_norm = calc_inf_norm(flex_out, high_precision_torch_out_ref)
+    out_ref_norm = calc_inf_norm(
+        low_precision_torch_out_ref, high_precision_torch_out_ref
+    )
+
+    assertLessEqual(
+        out_norm,
+        norm_rtol_ratio * out_ref_norm,
+        msg=f"For {ATTN_IMPL=}: {out_norm=} should be no greater than {norm_rtol_ratio}x of {out_ref_norm=}",
+    )
+
+    dq_norm = calc_inf_norm(flex_dq, high_precision_dq_ref)
+    dq_ref_norm = calc_inf_norm(low_precision_dq_ref, high_precision_dq_ref)
+
+    assertLessEqual(
+        dq_norm,
+        norm_rtol_ratio * dq_ref_norm,
+        msg=f"For {ATTN_IMPL=}: {dq_norm=} should be no greater than {norm_rtol_ratio}x of {dq_ref_norm=}",
+    )
+
+    dk_norm = calc_inf_norm(flex_dk, high_precision_dk_ref)
+    dk_ref_norm = calc_inf_norm(low_precision_dk_ref, high_precision_dk_ref)
+
+    assertLessEqual(
+        dk_norm,
+        norm_rtol_ratio * dk_ref_norm,
+        msg=f"For {ATTN_IMPL=}: {dk_norm=} should be no greater than {norm_rtol_ratio}x of {dk_ref_norm=}",
+    )
+
+    dv_norm = calc_inf_norm(flex_dv, high_precision_dv_ref)
+    dv_ref_norm = calc_inf_norm(low_precision_dv_ref, high_precision_dv_ref)
+
+    assertLessEqual(
+        dv_norm,
+        norm_rtol_ratio * dv_ref_norm,
+        msg=f"For {ATTN_IMPL=}: {dv_norm=} should be no greater than {norm_rtol_ratio}x of {dv_ref_norm=}",
+    )
+
+    print("Flex pass all!")
 
 
 def test_q_headwise_sparse():

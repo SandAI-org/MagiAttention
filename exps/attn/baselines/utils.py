@@ -1197,6 +1197,14 @@ def flex_mask_mod(
     k_block_idx: torch.IntTensor,
     block_mask: torch.BoolTensor,
 ) -> torch.BoolTensor:
+    """
+    Block sparse mask for FlexAttention.
+    Get each query/key token's block id, and return the corresponding mask value.
+
+    q_block_idx: [num_heads, seq_len_q]
+    k_block_idx: [num_heads, seq_len_k]
+    block_mask: [num_heads, num_q_blocks, num_kv_blocks]
+    """
     q_block_id = q_block_idx[h_idx, q_idx]
     k_block_id = k_block_idx[h_idx, k_idx]
     return block_mask[h_idx, q_block_id, k_block_id]
@@ -1211,7 +1219,7 @@ def get_var_block_idx(
     bsz: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Helper function to get block indices for query and key blocks.
+    Helper function to get block indices for variable blocks.
     """
     bsz, num_heads, num_q_blocks, num_kv_blocks = block_mask.shape
     device = block_mask.device
@@ -1254,6 +1262,9 @@ def get_uniform_block_idx(
     seq_len_k: int,
     bsz: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Helper function to get block indices for uniform blocks.
+    """
     bsz, num_heads, num_q_blocks, num_kv_blocks = block_mask.shape
     device = block_mask.device
 
