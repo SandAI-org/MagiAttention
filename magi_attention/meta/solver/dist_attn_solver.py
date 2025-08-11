@@ -229,6 +229,12 @@ class DistAttnSolver:
         host_k_ranges_global_start: int = host_k_ranges_global.start
         host_k_ranges_global_end: int = host_k_ranges_global.end
 
+        # get start and end for each chunked remote_k_ranges_global
+        chunk_remote_k_ranges_global_boundary = [
+            (attn_range.start, attn_range.end)
+            for attn_range in remote_k_ranges_global_per_chunk
+        ]
+
         for ith_attn_slice_global, ith_attn_calc_host_q_range_local in zip(
             attn_calc_slice_global_list,
             attn_calc_host_q_ranges_local,
@@ -262,6 +268,7 @@ class DistAttnSolver:
                 ith_attn_calc_host_q_range_local=ith_attn_calc_host_q_range_local,
                 ith_attn_calc_k_ranges_global=ith_attn_calc_k_ranges_global,
                 ith_attn_slice_global_mask_type=ith_attn_slice_global_mask_type,
+                chunk_remote_k_ranges_global_boundary=chunk_remote_k_ranges_global_boundary,
             )
 
         # delete chunked_remote_k_ranges idx
@@ -377,6 +384,7 @@ class DistAttnSolver:
         ith_attn_calc_host_q_range_local: AttnRange,
         ith_attn_calc_k_ranges_global: AttnRanges,
         ith_attn_slice_global_mask_type: AttnMaskType,
+        chunk_remote_k_ranges_global_boundary: list[tuple[int, int]],
     ) -> None:
         """Make attn calc remote slice for the given remote k ranges global in each chunk,
             and append to 'attn_calc_remote_slice_list_per_chunk'
@@ -384,19 +392,18 @@ class DistAttnSolver:
         HACK: inplace operation for 'attn_calc_remote_slice_list_per_chunk' for the purpose of performance,
               need further refactor.
         """
-
         for j in range(
             self.chunk_remote_k_ranges_global_start_idx,
             len(remote_k_ranges_global_per_chunk),
         ):
             jth_chunk_remote_k_ranges_global = remote_k_ranges_global_per_chunk[j]
             if (
-                jth_chunk_remote_k_ranges_global.start
+                chunk_remote_k_ranges_global_boundary[j][0]
                 >= ith_attn_calc_k_ranges_global[0].end
             ):
                 break
             elif (
-                jth_chunk_remote_k_ranges_global.end
+                chunk_remote_k_ranges_global_boundary[j][1]
                 <= ith_attn_calc_k_ranges_global[0].start
             ):
                 self.chunk_remote_k_ranges_global_start_idx += 1
