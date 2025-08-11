@@ -227,8 +227,8 @@ def test_q_headwise_sparse():
     orig_seqlen = SEQLEN
     orig_head = NUM_HEADS_Q
 
-    num_q_blocks_orig = orig_seqlen // BLOCK_M
-    num_kv_blocks_orig = orig_seqlen // BLOCK_N
+    num_q_blocks_orig = orig_seqlen // BLOCK_M // 2  # ensure variable block size
+    num_kv_blocks_orig = orig_seqlen // BLOCK_N // 2
 
     # block_mask, _ = generate_headwise_4D_block_sparse_pattern(
     #     orig_head, num_q_blocks_orig, num_kv_blocks_orig, SPARSITY_RATIO, device="cuda"
