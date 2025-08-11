@@ -30,12 +30,12 @@ from magi_attention.functional.flex_flash_attn import (
 )
 from magi_attention.testing import parameterize
 from magi_attention.testing.precision import assert_close, calc_inf_norm
-from magi_attention.utils import (  # flatten_head_mask,; flatten_kvhead_mask,
+from magi_attention.utils import (  # flatten_head_mask,; flatten_kvhead_mask,; get_random_variable_block_mask,
     flatten_block_mask,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
     generate_ranges_from_var_block_mask,
-    get_random_variable_block_mask,
+    generate_variable_block_sparse_pattern,
     get_sdpa_mask_from_block_sparse_mask,
     get_sdpa_mask_from_var_block_mask,
     is_list_value_any,
@@ -365,7 +365,7 @@ class TestFlexFlashAttn(TestCase):
             )
         else:
             q_ranges_tensor, k_ranges_tensor = generate_ranges_from_var_block_mask(
-                flat_block_sparse_mask, block_row_sz, block_col_sz
+                flat_block_sparse_mask, block_row_sz, block_col_sz, nhq, nhk
             )
 
         attn_type_map = torch.zeros(
@@ -776,24 +776,24 @@ class TestFlexFlashAttn(TestCase):
                 "num_heads_kv": 8,
                 "head_dim": 128,
             },
-            # {
-            #    "name": "gqa_nhq16_nhkv4_hd128",
-            #    "num_heads_q": 16,
-            #    "num_heads_kv": 4,
-            #    "head_dim": 128,
-            # },
+            {
+                "name": "gqa_nhq16_nhkv4_hd128",
+                "num_heads_q": 16,
+                "num_heads_kv": 4,
+                "head_dim": 128,
+            },
             {
                 "name": "mha_nh1_hd64",
                 "num_heads_q": 1,
                 "num_heads_kv": 1,
                 "head_dim": 64,
             },
-            # {
-            #    "name": "gqa_nhq4_nhkv2_hd64",
-            #    "num_heads_q": 4,
-            #    "num_heads_kv": 2,
-            #    "head_dim": 64,
-            # },
+            {
+                "name": "gqa_nhq4_nhkv2_hd64",
+                "num_heads_q": 4,
+                "num_heads_kv": 2,
+                "head_dim": 64,
+            },
         ],
     )
     @parameterize("seqlen", [2048])
@@ -802,7 +802,7 @@ class TestFlexFlashAttn(TestCase):
     @parameterize("max_block_size", [128])
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
     @parameterize(
-        "sparsity_granularity", ["per_query_head", "per_kv_head"]
+        "sparsity_granularity", ["per_q_head", "per_kv_head"]
     )  # generate sparse attn per query head or kv head.
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("attn_type", [0])  # for now, we only test full mask.
@@ -831,8 +831,8 @@ class TestFlexFlashAttn(TestCase):
         if auto_range_merge and deterministic:
             return
 
-        if sparsity_granularity == "per_kv_head":
-            return
+        # if sparsity_granularity == "per_kv_head":
+        #    return
 
         # we test per query head and per kvhead both.
         num_heads_q = model_config["num_heads_q"]
@@ -842,43 +842,31 @@ class TestFlexFlashAttn(TestCase):
         num_q_blocks = seqlen // average_block_size
         num_kv_blocks = seqlen // average_block_size
 
+        block_mask, block_row_sz, block_col_sz = generate_variable_block_sparse_pattern(
+            num_heads_q,
+            num_heads_kv,
+            seqlen,
+            seqlen,
+            num_q_blocks,
+            num_kv_blocks,
+            min_q_block_size=min_block_size,
+            min_kv_block_size=min_block_size,
+            sparsity=sparsity_ratio,
+            mode=sparsity_granularity,
+            device="cuda",
+        )
+
         # --- generate block mask and q, k range --- #
-        if sparsity_granularity == "per_query_head":
-            block_mask, block_row_sz, block_col_sz = get_random_variable_block_mask(
-                seqlen,
-                seqlen,
-                num_q_blocks,
-                num_kv_blocks,
-                num_heads_q,
-                min_q_block_size=min_block_size,
-                min_kv_block_size=min_block_size,
-                sparsity_ratio=sparsity_ratio,
-                bsz=1,
-                device="cuda",
-            )
-
-            flat_block_sparse_mask = flatten_block_mask(
-                block_mask, num_heads_q, num_heads_kv
-            )
-            q_ranges_tensor, k_ranges_tensor = generate_ranges_from_var_block_mask(
-                flat_block_sparse_mask, block_row_sz, block_col_sz
-            )
-
-        else:
-            """
-            block_mask, scores = generate_kv_headwise_4D_block_sparse_pattern(
-                num_heads_kv, num_q_blocks, num_kv_blocks, sparsity_ratio, device="cuda"
-            )
-            num_groups = num_heads_q // num_heads_kv
-            block_mask = block_mask.repeat_interleave(num_groups, dim=1)
-
-            # flat_block_sparse_mask = flatten_kvhead_mask(
-            #    block_mask, num_heads_q, num_heads_kv
-            # )
-            q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
-                flat_block_sparse_mask, average_block_size, average_block_size
-            )
-            """
+        flat_block_sparse_mask = flatten_block_mask(
+            block_mask, num_heads_q, num_heads_kv
+        )
+        q_ranges_tensor, k_ranges_tensor = generate_ranges_from_var_block_mask(
+            flat_block_sparse_mask,
+            block_row_sz,
+            block_col_sz,
+            num_heads_q,
+            num_heads_kv,
+        )
 
         attn_type_map = [attn_type] * len(q_ranges_tensor)
 
