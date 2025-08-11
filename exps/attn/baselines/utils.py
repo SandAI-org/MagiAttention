@@ -650,9 +650,9 @@ def generate_ranges_from_mask(
     true_indices = torch.nonzero(block_mask, as_tuple=False)
 
     if true_indices.numel() == 0:
-        return torch.empty((0, 2), dtype=torch.int32), torch.empty(
-            (0, 2), dtype=torch.int32
-        )
+        return torch.empty(
+            (0, 2), dtype=torch.int32, device=block_mask.device
+        ), torch.empty((0, 2), dtype=torch.int32, device=block_mask.device)
 
     # 2. Separate the row indices (q_block_indices) and column indices (k_block_indices)
     q_block_indices = true_indices[:, 0]
