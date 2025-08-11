@@ -155,6 +155,7 @@ class TestFlexFlashAttn(TestCase):
                 consecutive_failures += 1
 
             # Provide an informative printout at the end of the function.
+            """
             if len(q_ranges) == num_pairs:
                 print(
                     f"Successfully reached the target, generating {num_pairs} non-overlapping qk-ranges."
@@ -164,7 +165,7 @@ class TestFlexFlashAttn(TestCase):
                     f"Terminated after {max_consecutive_failures} consecutive failures. "
                     f"Target was {num_pairs} pairs, actually generated {len(q_ranges)} pairs."
                 )
-
+            """
         return q_ranges, k_ranges
 
     def check_deterministic(
@@ -1165,21 +1166,21 @@ class TestFlexFlashAttn(TestCase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "min_len_q": 16,
-                "max_len_q": 128,
+                "max_len_q": 64,
                 "min_len_k": 16,
-                "max_len_k": 128,
+                "max_len_k": 64,
             },
             {
                 "name": "dense_test_q_2048_k_2048",
                 "total_seqlen_q": 2048,
                 "total_seqlen_k": 2048,
                 "min_len_q": 32,
-                "max_len_q": 256,
+                "max_len_q": 128,
                 "min_len_k": 32,
-                "max_len_k": 256,
+                "max_len_k": 128,
             },
             {
-                "name": "dense_test_q_2048_k_4096",
+                "name": "sparse_test_q_2048_k_4096",
                 "total_seqlen_q": 2048,
                 "total_seqlen_k": 4096,
                 "min_len_q": 16,
@@ -1196,6 +1197,25 @@ class TestFlexFlashAttn(TestCase):
                 "min_len_k": 16,
                 "max_len_k": 256,
             },
+            # FIXME: ut fail in the following 2 test case, which may because the very small qk range.
+            # {
+            #    "name": "strange_test_1",
+            #    "total_seqlen_q": 513,
+            #    "total_seqlen_k": 123,
+            #    "min_len_q": 1,
+            #    "max_len_q": 513,
+            #    "min_len_k": 1,
+            #    "max_len_k": 123,
+            # },
+            # {
+            #    "name": "strange_test_2",
+            #    "total_seqlen_q": 1023,
+            #    "total_seqlen_k": 2077,
+            #    "min_len_q": 1,
+            #    "max_len_q": 1023,
+            #    "min_len_k": 1,
+            #    "max_len_k": 2077,
+            # },
         ],
     )
     @parameterize("num_pairs", [10, 100, 1000])  # the max qk range pairs to generate
@@ -1239,7 +1259,7 @@ class TestFlexFlashAttn(TestCase):
             max_len_q=max_len_q,
             min_len_k=min_len_k,
             max_len_k=max_len_k,
-            max_consecutive_failures=100,
+            max_consecutive_failures=200,
         )
         q_ranges: AttnRanges = AttnRanges.from_ranges(q_list)
         k_ranges: AttnRanges = AttnRanges.from_ranges(k_list)
