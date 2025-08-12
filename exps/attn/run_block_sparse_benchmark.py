@@ -18,20 +18,22 @@ from datetime import datetime
 import torch
 from baselines.attn_impl import ffa_func, flex_attn_func, sdpa_func
 from baselines.utils import (
-    flatten_head_mask,
-    generate_headwise_4D_block_sparse_pattern,
-    generate_ranges_from_mask,
     get_flashinfer_uniform_block_index,
     get_flex_mask_from_block_mask,
-    get_sdpa_mask_from_block_sparse_mask,
     get_vsa_mask_from_block_sparse_score,
     seed_everything,
 )
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.utils import (
+    flatten_block_mask,
+    generate_block_sparse_pattern,
+    generate_ranges_from_block_mask,
+    get_sdpa_mask_from_block_sparse_mask,
+)
 
-impls = ["ffa", "flashinfer", "flex"]
+impls = ["ffa", "flashinfer", "vsa", "vsa_triton"]
 
 # actual seqlen
 seqlen = 49152
@@ -54,12 +56,13 @@ b = 1
 nhq = 32
 if "flex" in impls:
     nhq = 1  # otherwise flexattention will cause OOM!
-if "vsa" in impls or "flashinfer" in impls:
+if "vsa" in impls:
     # currently vsa doesn't support gqa
     # currently flashinfer doesn't support query-specific sparsity
     nhk = nhq
 else:
-    nhk = nhq
+    nhk = nhq // 4
+
 dtype = torch.bfloat16
 
 bias = None
@@ -128,8 +131,13 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
     # block_mask, scores = generate_global_block_sparse_pattern(
     #    orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
     # )
-    block_mask, scores = generate_headwise_4D_block_sparse_pattern(
-        orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
+    block_mask, scores = generate_block_sparse_pattern(
+        num_q_heads=nhq,
+        num_kv_heads=nhk,
+        num_q_blocks=num_q_blocks_orig,
+        num_kv_blocks=num_kv_blocks_orig,
+        sparsity=sparsity_ratio,
+        device="cuda",
     )
 
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
@@ -149,11 +157,11 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
     # ffa style shape: (t,h,d)
     if attn_impl in ("ffa"):
         q = rearrange(q, "b s h d -> (b h s) 1 d")
-        repeats = nhq // nhk
-        k = torch.repeat_interleave(
-            k, repeats=repeats, dim=2
-        )  # we need to flatten k, v along head dimension for GQA setting.
-        v = torch.repeat_interleave(v, repeats=repeats, dim=2)
+        # repeats = nhq // nhk
+        # k = torch.repeat_interleave(
+        #    k, repeats=repeats, dim=2
+        # )  # we need to flatten k, v along head dimension for GQA setting.
+        # v = torch.repeat_interleave(v, repeats=repeats, dim=2)
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
         # q = q.view(b * orig_seq_len_q * nhq, 1, hd)
@@ -176,10 +184,10 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
     # --------- prepare func --------- #
     if attn_impl == "ffa":
         # flatten headdim for ffa cause
-        flat_block_sparse_mask = flatten_head_mask(block_mask)
-        # 3. Generate ranges from the flattened 2D mask
-        q_ranges, k_ranges = generate_ranges_from_mask(
-            flat_block_sparse_mask, block_m, block_n
+        flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
+
+        q_ranges, k_ranges = generate_ranges_from_block_mask(
+            flat_block_sparse_mask, block_size, block_size
         )
         attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
@@ -326,11 +334,6 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         block_row_sz, block_col_sz = get_flashinfer_uniform_block_index(
             num_q_blocks_orig, num_kv_blocks_orig, orig_seq_len_q, orig_seq_len_k, nhk
         )
-
-        # print(f"{block_row_sz=}")
-        # print(f"{block_col_sz=}")
-
-        print(f"Sparsity = {sparsity_ratio} of elements to compute")
 
         # allocate 128MB workspace buffer
         workspace_buffer = torch.empty(
