@@ -160,15 +160,15 @@ def apply_padding(
             - Updated key ranges with a dummy range for padding.
             - Updated attention mask type list with a FULL mask for the padding block.
     """
-    q_range = AttnRanges.from_ranges(q_ranges.to_naive_ranges(), check=True)
-    k_range = AttnRanges.from_ranges(k_ranges.to_naive_ranges(), check=True)
-    attn_mask_types = [attn_mask_type[i] for i in range(len(attn_mask_type))]
+    q_ranges = AttnRanges.from_ranges(q_ranges.to_naive_ranges(), check=True)
+    k_ranges = AttnRanges.from_ranges(k_ranges.to_naive_ranges(), check=True)
+    attn_mask_type = [attn_mask_type[i] for i in range(len(attn_mask_type))]
 
-    q_range.append(AttnRange(start=total_seqlen, end=total_seqlen + pad_size))
-    k_range.append(AttnRange(start=0, end=0))
-    attn_mask_types.append(AttnMaskType.FULL)
+    q_ranges.append(AttnRange(start=total_seqlen, end=total_seqlen + pad_size))
+    k_ranges.append(AttnRange(start=0, end=0))
+    attn_mask_type.append(AttnMaskType.FULL)
 
-    return q_range, k_range, attn_mask_types
+    return q_ranges, k_ranges, attn_mask_type
 
 
 def infer_attn_mask_from_sliding_window(
