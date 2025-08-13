@@ -37,9 +37,9 @@ struct BlockMN {
     if (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::InvCausal) {
       // do nothing
     } else if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-      int m_idx_max = (m_block + 1) * kBlockM;
+      int m_idx_max = std::min(seqlen_q, (m_block + 1) * kBlockM);
       // TODO: check off-by-1 error
-      n_block_max = std::min(n_block_max, cute::ceil_div(m_idx_max + seqlen_k - seqlen_q, kBlockN));
+      n_block_max = std::min(n_block_max, cute::ceil_div(std::max(0, m_idx_max + seqlen_k - seqlen_q), kBlockN));
     }
     int n_block_min = 0;
     if (attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal) {
@@ -47,7 +47,7 @@ struct BlockMN {
     } else if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
       int m_idx_min = m_block * kBlockM;
       // TODO: Check if there's a better way to compute this
-      n_block_min = m_idx_min > seqlen_k ? n_block_max : m_idx_min / kBlockN;
+      n_block_min = m_idx_min >= seqlen_k ? n_block_max : m_idx_min / kBlockN;
     }
     return {n_block_min, n_block_max};
   }
@@ -60,7 +60,8 @@ struct BlockMN {
       // do nothing
     } else if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
       // TODO: Need better way to compute this
-      m_block_max = std::min(m_block_max, cute::ceil_div((n_block + 1) * kBlockN, kBlockM));
+      int m_idx_max = std::min(seqlen_k, (n_block + 1) * kBlockN);
+      m_block_max = std::min(m_block_max, cute::ceil_div(m_idx_max, kBlockM));
     }
     int m_block_min = 0;
     if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
