@@ -66,7 +66,7 @@ std::tuple<torch::Tensor> work_tile_divider_ext(
     static_cast<int*>(arrangement.data_ptr()),
   };
   typename WorkTileDivider::Params divider_params = WorkTileDivider::to_underlying_arguments(divider_args);
-  
+
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   dim3 grid_dims = WorkTileDivider::get_grid_shape(divider_params);
   dim3 block_dims = WorkTileDivider::get_block_shape();
