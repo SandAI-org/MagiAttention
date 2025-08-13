@@ -36,9 +36,10 @@ def get_n_block_min_max(
     elif (
         attn_mask_type == AttnMaskType.CAUSAL or attn_mask_type == AttnMaskType.BICAUSAL
     ):
-        # 如果行列相等，当前tile最后一行q对应的k的数量。
+        # if row == column, m_idx_max is the number of 1 in the last row of the tile
         m_idx_max = min(seqlen_q, (m_block + 1) * kBlockM)
-        # 如果行列不等需要额外加上k比q多的长度，可能为负数表示最后一行都为0。
+        # if row != column, need add seqlen_k - seqlen_q.
+        # Note: can be negative, which means the last row is all zero
         n_block_max = min(
             n_block_max, ceil_div(max(0, m_idx_max + seqlen_k - seqlen_q), kBlockN)
         )
@@ -46,7 +47,7 @@ def get_n_block_min_max(
     if attn_mask_type == AttnMaskType.FULL or attn_mask_type == AttnMaskType.CAUSAL:
         n_block_min = 0
     elif attn_mask_type == AttnMaskType.INVCAUSAL or AttnMaskType.BICAUSAL:
-        # 如果行列相等，当前tile第一行前缀0的数量
+        # if row == column, m_id_min is the number of 0 in the first row of the tile
         m_id_min = m_block * kBlockM
         n_block_min = n_block_max if m_id_min >= seqlen_k else m_id_min // kBlockN
     return n_block_min, n_block_max
@@ -67,14 +68,15 @@ def get_m_block_min_max(
         attn_mask_type == AttnMaskType.INVCAUSAL
         or attn_mask_type == AttnMaskType.BICAUSAL
     ):
-        # 如果行列相等，当前tile最后一列的k对应的q的数量
+        # if row == column, m_idx_max is the number of 1 in the last column of the tile
         m_idx_max = min(seqlen_k, (n_block + 1) * kBlockN)
         m_block_max = min(m_block_max, ceil_div(m_idx_max, kBlockM))
     m_block_min = 0
     if attn_mask_type == AttnMaskType.CAUSAL or attn_mask_type == AttnMaskType.BICAUSAL:
-        # 如果行列相等，当前tile第一列前缀0的数量
+        # if row == column, m_id_min is the number of 0 in the first column of the tile
         m_id_min = n_block * kBlockN
-        # 如果行列不等需要额外加上q比k多的长度，可能为负数，代表没有前缀0。不可能整个tile都为空。
+        # if row != column, need add seqlen_q - seqlen_k.
+        # Note: can be negative, which means the first column is all 1
         m_block_min = max(m_block_min, (m_id_min + seqlen_q - seqlen_k) // kBlockM)
     elif attn_mask_type == AttnMaskType.INVCAUSAL or AttnMaskType.FULL:
         pass
@@ -145,16 +147,12 @@ def calc_uncover_ranges_gaps(
         return []
     ranges.sort(key=lambda x: x[0])
     uncovered = []
-    # 记录上一个区间的终点
-    last_end = ranges[0][0]  # 从第一个区间的起点开始
+    last_end = ranges[0][0]
     for start, end in ranges:
-        # 如果当前区间的起点大于等于上一个区间的终点，说明存在间隙
         if start >= last_end:
             uncovered.append([last_end, start])
-        # 更新上一个区间的终点为当前区间终点和上一个终点中的较大值
-        # 处理区间重叠或包含的情况
         last_end = max(last_end, end)
-    # 如果你需要考虑最后一个区间之后的部分，可以取消下面这行注释
+    # if need last gaps
     # uncovered.append([last_end, float('inf')])
     return uncovered
 
@@ -175,19 +173,14 @@ def calc_merged_ranges_set(
         return []
     sorted_ranges = sorted(ranges, key=lambda x: x[0])
 
-    # 初始化结果列表，放入第一个区间
     merged = [sorted_ranges[0]]
 
     for current in sorted_ranges[1:]:
-        # 获取结果列表中最后一个区间
         last = merged[-1]
 
-        # 如果当前区间的起始点小于等于最后一个区间的终止点，说明有重叠
         if current[0] <= last[1]:
-            # 合并区间，取两个区间的起始点最小值和终止点最大值
             merged[-1] = [last[0], max(last[1], current[1])]
         else:
-            # 没有重叠，直接添加当前区间
             merged.append(current)
 
     return merged
@@ -202,16 +195,12 @@ def calc_overlap_ranges_set(
     i = j = 0
     intersections = []
     while i < len(rangesA) and j < len(rangesB):
-        # 取出当前两个区间
         a_start, a_end = rangesA[i]
         b_start, b_end = rangesB[j]
-        # 计算交集的起始点和结束点
         start = max(a_start, b_start)
         end = min(a_end, b_end)
-        # 如果有交集，添加到结果列表
         if start < end:
             intersections.append([start, end])
-        # 移动指针：将结束早的区间的指针向前移动
         if a_end < b_end:
             i += 1
         else:
@@ -221,8 +210,8 @@ def calc_overlap_ranges_set(
 
 def local_calc_remote_hold_ranges_comm_lens(
     local_ranges: list,
-    bucket: list,  # 每个rank所需的区间
-    cp_rank: int,  # 当前rank id
+    bucket: list,  # required range of all rank
+    cp_rank: int,  # rank id
 ) -> int:
     merge_ranges = calc_merged_ranges_set(bucket[cp_rank] + local_ranges)
     merge_ranges_sum_lens = calc_ranges_sum_lens(merge_ranges)
@@ -232,8 +221,8 @@ def local_calc_remote_hold_ranges_comm_lens(
 
 def local_hold_remote_calc_ranges_comm_lens(
     local_ranges: list,
-    bucket: list,  # 每个rank所需的区间
-    cp_rank: int,  # 当前rank id
+    bucket: list,  # required range of all rank
+    cp_rank: int,  # rank id
 ) -> int:
     send_lens = 0
     for i in range(len(bucket)):
@@ -254,18 +243,13 @@ def calc_full_comm_meta_from_qk_ranges(
     kBlockM: int,
     kBlockN: int,
 ):
-    # 检查输入是否有效
     if len(q_ranges) != len(k_ranges):
-        raise ValueError("q_ranges和k_ranges必须长度相同")
+        raise ValueError("q_ranges must equal k_ranges")
 
-    # 将两个列表组合成元组列表，便于排序
     rectangles = list(zip(q_ranges, k_ranges, attn_mask_type))
 
-    # 排序键为一个元组：(起点, 终点)
-    # 先按起点排序，起点相同则按终点排序
     rectangles.sort(key=lambda x: (x[1][0], x[1][1]))
 
-    # 拆分排序后的结果
     sorted_q, sorted_k, sorted_attn_mask_type = zip(*rectangles)
 
     for rec in rectangles:
@@ -279,7 +263,7 @@ def calc_full_comm_meta_from_qk_ranges(
 
 
 def calc_load_area_message(
-    bucket: list,  # 每个rank工作的q k range 以及mask type
+    bucket: list,  # q k range mask type of all rank
     kBlockM: int,
     kBlockN: int,
     tile_q: bool,
@@ -298,8 +282,8 @@ def calc_load_area_message(
 
 
 def calc_comm_message(
-    bucket: list,  # 每个rank工作的q k range 以及mask type
-    local_ranges: list,  # 每个rank持有的区间
+    bucket: list,  # q k range mask type of all rank
+    local_ranges: list,  # local q k range of all rank
 ) -> list:
     cp_size = len(bucket)
     comm_list = []
@@ -336,8 +320,8 @@ def calc_comm_message(
 
 
 def eval_solver_result(
-    bucket: list,  # 每个rank工作的q k range 以及mask type
-    local_ranges: list,  # 每个rank持有的区间
+    bucket: list,  # q k range mask type of all rank
+    local_ranges: list,  # local q k range of all rank
     kBlockM: int,
     kBlockN: int,
 ):
@@ -371,7 +355,6 @@ def eval_solver_result(
     print(f"max_bwd_comm_len:{max_bwd_comm_len}")
 
 
-# 示例用法
 if __name__ == "__main__":
     bucket = [
         [
