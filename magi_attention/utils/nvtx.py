@@ -113,6 +113,7 @@ def switch_profile(
     end: int,
     profile_ranks: list[int],
     event_name: str | None = None,
+    record_shape: bool = True,
 ) -> None:
     """
     Controls the profiler state based on the iteration number. Turns on profiling
@@ -124,12 +125,16 @@ def switch_profile(
         end (int): The iteration number to end profiling.
         profile_ranks (list[int]): List of ranks to be profiled.
         event_name (str, optional): Custom name for the profiling event. If None, defaults to 'iter{iter_id}'.
+        record_shape (bool, optional): Whether to record the operand shape of each operation
+            with `torch.autograd.profiler.emit_nvtx`,
+            NOTE: this might increase the CPU overhead for extra recording,
+            as well as much more recompilation when using torch.compile.
     """
 
     if not torch.distributed.is_initialized():
         assert profile_ranks == [
             0
-        ], "profile_ranks can only contains rank0 if torch.distributed is not initialized"
+        ], "profile_ranks can only contain rank0 if torch.distributed is not initialized"
     else:
         if torch.distributed.get_rank() not in profile_ranks:
             return
@@ -141,17 +146,19 @@ def switch_profile(
 
     # Start profiling
     if iter_id == start:
+        if record_shape:
+            emit_nvtx_ctx = torch.autograd.profiler.emit_nvtx(record_shapes=True)
+            _EMIT_NVTX_CTX = emit_nvtx_ctx.__enter__()
         torch.cuda.cudart().cudaProfilerStart()
-        emit_nvtx_ctx = torch.autograd.profiler.emit_nvtx(record_shapes=True)
-        _EMIT_NVTX_CTX = emit_nvtx_ctx.__enter__()
         torch.cuda.nvtx.range_push(event_name)
 
     # Stop profiling
     elif iter_id == end:
         torch.cuda.nvtx.range_pop()
         torch.cuda.cudart().cudaProfilerStop()
-        _EMIT_NVTX_CTX.__exit__(None, None, None)  # type: ignore[union-attr]
-        _EMIT_NVTX_CTX = None
+        if record_shape:
+            _EMIT_NVTX_CTX.__exit__(None, None, None)  # type: ignore[union-attr]
+            _EMIT_NVTX_CTX = None
 
     # Continue profiling
     elif iter_id > start and iter_id < end:
