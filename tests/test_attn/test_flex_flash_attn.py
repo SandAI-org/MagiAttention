@@ -524,6 +524,9 @@ class TestFlexFlashAttn(TestCase):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             attn_type_map=torch.tensor(attn_type_map, dtype=torch.int32, device="cuda"),
+            # FIXME: compiling does not support auto_range_merge
+            # due to custom unique_consecutive_pairs kernel with dynamic output shape
+            auto_range_merge=False,
         )
         o.backward(do)
         dq, dk, dv = q.grad, k.grad, v.grad

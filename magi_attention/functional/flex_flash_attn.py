@@ -268,7 +268,7 @@ def _flex_flash_attn_forward(
     sm_margin: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if torch.compiler.is_compiling():
-        out = out or torch.zeros_like(
+        out = out or torch.empty_like(
             q, dtype=out_type or torch.float32, device=q.device
         )
         lse = lse or torch.full(
