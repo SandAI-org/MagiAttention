@@ -55,7 +55,7 @@ class add_nvtx_event:
     Context manager to add an NVTX event around a code block.
 
     Args:
-        event_name: The name of the event to be recorded.
+        event_name (str): The name of the event to be recorded.
     """
 
     def __init__(self, event_name: str):
@@ -83,10 +83,10 @@ def instrument_nvtx(func: F) -> F:
     Decorator that records an NVTX range for the duration of the function call.
 
     Args:
-    - func: The function to be decorated.
+        func (Callable): The function to be decorated.
 
     Returns:
-    - Wrapped function that is now being profiled.
+        Callable: The wrapped function that is now being profiled.
     """
 
     @wraps(func)
@@ -119,11 +119,11 @@ def switch_profile(
     at the start iteration and turns it off at the end iteration.
 
     Args:
-        iter_id: The current iteration number.
-        start: The iteration number to start profiling.
-        end: The iteration number to end profiling.
-        profile_ranks: List of ranks to be profiled.
-        event_name: Custom name for the profiling event. If None, defaults to 'iter{iter_id}'.
+        iter_id (int): The current iteration number.
+        start (int): The iteration number to start profiling.
+        end (int): The iteration number to end profiling.
+        profile_ranks (list[int]): List of ranks to be profiled.
+        event_name (str, optional): Custom name for the profiling event. If None, defaults to 'iter{iter_id}'.
     """
 
     if not torch.distributed.is_initialized():
