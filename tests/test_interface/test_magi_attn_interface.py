@@ -714,9 +714,7 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
     def test_compiled_magiattn(self):
         # --- Define attention config --- #
 
-        total_seqlen = (
-            32 * 1024
-        )  # 32k tokens, if we dispatch it to 8 GPUs, then each GPU holds 4k tokens
+        total_seqlen = 32 * 1024  # 32k tokens
         num_heads_q = 48  # number of attention (query) heads
         num_heads_kv = 8  # number of key/value heads (GQA)
         head_dim = 128  # dimension of each attention head
