@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
 from functools import wraps
 from typing import Any, Callable, TypeVar, cast
 
@@ -24,17 +23,56 @@ import torch
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-@contextlib.contextmanager
-def add_nvtx_event(event_name):
+@torch.library.custom_op("magi_attn::nvtx_range_push", mutates_args=())
+def nvtx_range_push(event_name: str) -> None:
+    """torch.ops.magi_attn.nvtx_range_push"""
+    torch.cuda.nvtx.range_push(event_name)
+
+
+@nvtx_range_push.register_fake
+def _(event_name: str) -> None:
+    pass
+
+
+@torch.library.custom_op("magi_attn::nvtx_range_pop", mutates_args=())
+def nvtx_range_pop() -> None:
+    """torch.ops.magi_attn.nvtx_range_pop"""
+    torch.cuda.nvtx.range_pop()
+
+
+@nvtx_range_pop.register_fake
+def _() -> None:
+    pass
+
+
+# NOTE: since torch.compile does not support @contextlib.contextmanager,
+# we use the class-based context manager
+class add_nvtx_event:
     """
     Context manager to add an NVTX event around a code block.
 
     Args:
-    - event_name: The name of the event to be recorded.
+        event_name: The name of the event to be recorded.
     """
-    torch.cuda.nvtx.range_push(event_name)
-    yield
-    torch.cuda.nvtx.range_pop()
+
+    def __init__(self, event_name: str):
+        self.enter_name = event_name
+
+    def __enter__(self):
+        if torch.compiler.is_compiling():
+            # NOTE: torch.compile supports neither retrieving the attributes from "self"
+            # nor modifying a variable not in the current scope
+            # so we have no choice but assign a constant event name when compiling
+            nvtx_range_push("torch compile region")
+        else:
+            torch.cuda.nvtx.range_push(self.enter_name)
+        return self
+
+    def __exit__(self, *excinfo):
+        if torch.compiler.is_compiling():
+            nvtx_range_pop()
+        else:
+            torch.cuda.nvtx.range_pop()
 
 
 def instrument_nvtx(func: F) -> F:
@@ -50,13 +88,22 @@ def instrument_nvtx(func: F) -> F:
 
     @wraps(func)
     def wrapped_fn(*args, **kwargs):
-        with add_nvtx_event(func.__qualname__):
+        if torch.compiler.is_compiling():
+            # NOTE: we can not access func.__qualname__ when compiling
+            # thus use func.__name__ instead
+            func_name = func.__name__
+        else:
+            func_name = func.__qualname__
+
+        with add_nvtx_event(func_name):
             ret_val = func(*args, **kwargs)
         return ret_val
 
     return cast(F, wrapped_fn)
 
 
+# NOTE: since normally "switch_profile" is used in the training loop instead of inside the model,
+# we don't have to make it compatible with torch.compile
 def switch_profile(
     iter_id: int,
     start: int,
@@ -69,14 +116,20 @@ def switch_profile(
     at the start iteration and turns it off at the end iteration.
 
     Args:
-    - iter_id: The current iteration number.
-    - start: The iteration number to start profiling.
-    - end: The iteration number to end profiling.
-    - profile_ranks: List of ranks to be profiled.
-    - event_name: Custom name for the profiling event. If None, defaults to 'iter{iter_id}'.
+        iter_id: The current iteration number.
+        start: The iteration number to start profiling.
+        end: The iteration number to end profiling.
+        profile_ranks: List of ranks to be profiled.
+        event_name: Custom name for the profiling event. If None, defaults to 'iter{iter_id}'.
     """
-    if torch.distributed.get_rank() not in profile_ranks:
-        return
+
+    if not torch.distributed.is_initialized():
+        assert profile_ranks == [
+            0
+        ], "profile_ranks can only contains rank0 if torch.distributed is not initialized"
+    else:
+        if torch.distributed.get_rank() not in profile_ranks:
+            return
 
     if event_name is None:
         event_name = f"iter{iter_id}"
