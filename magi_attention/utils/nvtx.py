@@ -22,6 +22,9 @@ import torch
 # issue: https://stackoverflow.com/questions/65621789/mypy-untyped-decorator-makes-function-my-method-untyped
 F = TypeVar("F", bound=Callable[..., Any])
 
+# global var for torch.autograd.profiler.emit_nvtx
+_EMIT_NVTX_CTX: None | torch.autograd.profiler.emit_nvtx = None
+
 
 @torch.library.custom_op("magi_attn::nvtx_range_push", mutates_args=())
 def nvtx_range_push(event_name: str) -> None:
@@ -131,6 +134,8 @@ def switch_profile(
         if torch.distributed.get_rank() not in profile_ranks:
             return
 
+    global _EMIT_NVTX_CTX
+
     if event_name is None:
         event_name = f"iter{iter_id}"
 
@@ -138,13 +143,15 @@ def switch_profile(
     if iter_id == start:
         torch.cuda.cudart().cudaProfilerStart()
         emit_nvtx_ctx = torch.autograd.profiler.emit_nvtx(record_shapes=True)
-        emit_nvtx_ctx.__enter__()
+        _EMIT_NVTX_CTX = emit_nvtx_ctx.__enter__()
         torch.cuda.nvtx.range_push(event_name)
 
     # Stop profiling
     elif iter_id == end:
         torch.cuda.nvtx.range_pop()
         torch.cuda.cudart().cudaProfilerStop()
+        _EMIT_NVTX_CTX.__exit__(None, None, None)  # type: ignore[union-attr]
+        _EMIT_NVTX_CTX = None
 
     # Continue profiling
     elif iter_id > start and iter_id < end:
