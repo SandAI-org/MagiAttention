@@ -164,13 +164,16 @@ def merge_ranges(
 
 @_torch_custom_op_wrapper(
     "flex_flash_attn::_flex_flash_attn_forward_compilable",
-    mutates_args=(),
+    # NOTE: had better NOT use "out" in args since it is a reserved special arg for torch.compile
+    mutates_args=("out_", "lse"),
     device_types="cuda",
 )
 def _flex_flash_attn_forward_compilable(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    out_: torch.Tensor,
+    lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     max_seqlen_q: int,
@@ -185,7 +188,7 @@ def _flex_flash_attn_forward_compilable(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
 
     assert is_ffa_installed, "FFA is not installed."
@@ -194,12 +197,12 @@ def _flex_flash_attn_forward_compilable(
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
 
-    out, lse = flexible_flash_attention_cuda.fwd(
+    out_, lse = flexible_flash_attention_cuda.fwd(
         q,
         k,
         v,
-        None,  # out
-        None,  # lse
+        out_,
+        lse,
         q_ranges,
         k_ranges,
         max_seqlen_q,
@@ -216,14 +219,14 @@ def _flex_flash_attn_forward_compilable(
         sm_margin,
     )
 
-    return out, lse
-
 
 @_torch_register_fake_wrapper("flex_flash_attn::_flex_flash_attn_forward_compilable")
 def _flex_flash_attn_forward_compilable_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    out_: torch.Tensor,
+    lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     max_seqlen_q: int,
@@ -238,14 +241,8 @@ def _flex_flash_attn_forward_compilable_fake(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    sq, hq, _ = q.shape
-
-    # the returned out should have the same dtype as out_dtype
-    out = torch.empty_like(q, dtype=out_type or torch.float32)
-    lse = torch.empty((hq, sq), dtype=torch.float32, device=q.device)
-
-    return out, lse
+) -> None:
+    pass
 
 
 @nvtx.instrument_nvtx
@@ -271,16 +268,24 @@ def _flex_flash_attn_forward(
     sm_margin: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if torch.compiler.is_compiling():
-        assert (
-            out is None and lse is None
-        ), "out and lse buffer should be None when compiling with torch.compile"
+        out = out or torch.zeros_like(
+            q, dtype=out_type or torch.float32, device=q.device
+        )
+        lse = lse or torch.full(
+            (q.size(1), q.size(0)),
+            fill_value=float("-inf"),
+            dtype=torch.float32,
+            device=q.device,
+        )
 
         # NOTE: we can not directly compile `_flex_flash_attn_forward`
         # since torch.compile does not allow returning the mutated args (out, lse)
-        return _flex_flash_attn_forward_compilable(
+        _flex_flash_attn_forward_compilable(
             q=q,
             k=k,
             v=v,
+            out_=out,
+            lse=lse,
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             max_seqlen_q=max_seqlen_q,
@@ -296,6 +301,8 @@ def _flex_flash_attn_forward(
             deterministic=deterministic,
             sm_margin=sm_margin,
         )
+
+        return out, lse
 
     assert is_ffa_installed, "FFA is not installed."
 
@@ -333,7 +340,7 @@ def _flex_flash_attn_forward(
 
 @_torch_custom_op_wrapper(
     "flex_flash_attn::_flex_flash_attn_backward_compilable",
-    mutates_args=(),
+    mutates_args=("dq", "dk", "dv"),
     device_types="cuda",
 )
 def _flex_flash_attn_backward_compilable(
@@ -341,7 +348,10 @@ def _flex_flash_attn_backward_compilable(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    out_: torch.Tensor,  # NOTE: we can NOT use "out" since it is a reserved special argument for torch.compile
+    out_: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -359,7 +369,7 @@ def _flex_flash_attn_backward_compilable(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
 
     assert is_ffa_installed, "FFA is not installed."
@@ -382,9 +392,9 @@ def _flex_flash_attn_backward_compilable(
         k,
         v,
         out_,
-        None,  # dq
-        None,  # dk
-        None,  # dv
+        dq,
+        dk,
+        dv,
         lse,
         q_ranges,
         k_ranges,
@@ -404,7 +414,7 @@ def _flex_flash_attn_backward_compilable(
         sm_margin,
     )
 
-    return dq, dk, dv, softmax_d
+    return softmax_d
 
 
 @_torch_register_fake_wrapper("flex_flash_attn::_flex_flash_attn_backward_compilable")
@@ -413,7 +423,10 @@ def _flex_flash_attn_backward_compilable_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    out_: torch.Tensor,  # NOTE: we can NOT use "out" since it is a reserved special argument for torch.compile
+    out_: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -431,19 +444,14 @@ def _flex_flash_attn_backward_compilable_fake(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     _, hq, _ = q.shape
     b = q_ranges.shape[0]
-
-    # the returned dq, dk, dv should be in the same dtype as dq_type, dk_type, dv_type respectively
-    dq = torch.empty_like(q, dtype=dq_type or torch.float32)
-    dk = torch.empty_like(k, dtype=dq_type or torch.float32)
-    dv = torch.empty_like(v, dtype=dq_type or torch.float32)
 
     # FIXME: softmax_d should be in the shape of (hq, sq) to save memory
     softmax_d = torch.empty((b, hq, max_seqlen_q), dtype=torch.float32, device=q.device)
 
-    return dq, dk, dv, softmax_d
+    return softmax_d
 
 
 @nvtx.instrument_nvtx
@@ -475,18 +483,21 @@ def _flex_flash_attn_backward(
     sm_margin: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if torch.compiler.is_compiling():
-        assert (
-            dq is None and dk is None and dv is None
-        ), "dq, dk, dv buffer should be None when compiling with torch.compile"
+        dq = torch.zeros_like(q, dtype=dq_type or torch.float32)
+        dk = torch.zeros_like(k, dtype=dq_type or torch.float32)
+        dv = torch.zeros_like(v, dtype=dq_type or torch.float32)
 
         # NOTE: we can not directly compile `_flex_flash_attn_backward`
         # since torch.compile does not allow returning the mutated args (dq, dk, dv)
-        return _flex_flash_attn_backward_compilable(
+        softmax_d = _flex_flash_attn_backward_compilable(
             dout=dout,
             q=q,
             k=k,
             v=v,
             out_=out,
+            dq=dq,
+            dk=dk,
+            dv=dv,
             lse=lse,
             q_ranges=q_ranges,
             k_ranges=k_ranges,
@@ -505,6 +516,8 @@ def _flex_flash_attn_backward(
             deterministic=deterministic,
             sm_margin=sm_margin,
         )
+
+        return dq, dk, dv, softmax_d
 
     assert is_ffa_installed, "FFA is not installed."
 
