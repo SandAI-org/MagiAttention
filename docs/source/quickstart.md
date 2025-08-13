@@ -134,9 +134,9 @@ k_ranges = AttnRanges.from_ranges(
 attn_mask_type = [AttnMaskType.FULL] * len(q_ranges)
 total_seqlen_q = total_seqlen_k = total_seqlen
 pad_size = compute_pad_size( # pad embeds along seqlen dim for better performance
-total_seqlen_q=total_seqlen_q,
-cp_size=world_size, # assuming we only have 1-dim context parallelism (cp)
-chunk_size=chunk_size,
+    total_seqlen_q=total_seqlen_q,
+    cp_size=world_size, # assuming we only have 1-dim context parallelism (cp)
+    chunk_size=chunk_size,
 )
 
 # --- Dispatch token embedding tensor along seqlen dim to multiple ranks --- #
