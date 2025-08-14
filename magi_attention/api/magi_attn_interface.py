@@ -422,7 +422,7 @@ def magi_attn_flex_key(
         is_k_permutable=is_k_permutable,
     )
 
-    if key not in dist_attn_runtime_dict.keys():
+    if str(key) not in dist_attn_runtime_dict.keys():
         # calculate dist attn runtime key
         comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
             dispatch_meta_q=q_dispatch_meta,
@@ -456,7 +456,7 @@ def magi_attn_flex_key(
             is_k_permutable=is_k_permutable,
         )
 
-        dist_attn_runtime_dict[key] = value
+        dist_attn_runtime_dict[str(key)] = value
 
     return key
 
@@ -604,7 +604,7 @@ def dispatch(
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = dist_attn_runtime_dict.get(key)
+    mgr = dist_attn_runtime_dict.get(str(key))
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -632,7 +632,7 @@ def undispatch(
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = dist_attn_runtime_dict.get(key)
+    mgr = dist_attn_runtime_dict.get(str(key))
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -667,7 +667,7 @@ def calc_attn(
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = dist_attn_runtime_dict.get(key)
+    mgr = dist_attn_runtime_dict.get(str(key))
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -685,7 +685,7 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
     Returns:
         torch.Tensor: postion ids of local tensor w.r.t. global tensor.
     """
-    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
+    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(str(key))
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
