@@ -21,14 +21,14 @@ from baselines.utils import get_flex_mask_from_block_mask, seed_everything
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
-from magi_attention.utils import (
+from magi_attention.utils.sparse_utils import (
     flatten_block_mask,
     generate_ranges_from_var_block_mask,
     generate_variable_block_sparse_pattern,
     get_sdpa_mask_from_var_block_mask,
 )
 
-impls = ["ffa", "flashinfer", "flex"]
+impls = ["ffa"]
 
 # actual seqlen
 seqlen = 49152
