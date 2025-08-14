@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Tuple
-
 import torch
 
 # ================ Utils for Block Sparse Attention ================
@@ -27,7 +25,7 @@ def generate_block_sparse_pattern(
     sparsity: float,
     mode: str = "per_kv_head",
     device: str = "cuda",
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generates a head-wise block sparse pattern, supporting both MHA and GQA semantics.
 
@@ -262,7 +260,7 @@ def generate_variable_block_sparse_pattern(
     min_q_block_size: int = 64,
     min_kv_block_size: int = 64,
     device: str | torch.device = "cuda",
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Generates a variable-size block sparse pattern with top-k sparsity,
     supporting both MHA and GQA semantics.
@@ -357,7 +355,7 @@ def generate_ranges_from_var_block_mask(
     block_col_sz: torch.Tensor,
     num_q_heads: int,
     num_kv_heads: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generates query and key sequence ranges from a 2D "flattened" variable-size
     block mask, correctly handling both MHA and GQA scenarios.
@@ -376,7 +374,7 @@ def generate_ranges_from_var_block_mask(
         num_kv_heads (int): Total number of key-value heads.
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+        tuple[torch.Tensor, torch.Tensor]: A tuple containing:
             - q_range_tensor (torch.Tensor): Tensor of shape [num_active_blocks, 2]
                                              listing the query ranges [start, end).
             - k_range_tensor (torch.Tensor): Tensor of shape [num_active_blocks, 2]

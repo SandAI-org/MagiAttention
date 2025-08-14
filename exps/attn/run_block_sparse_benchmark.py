@@ -26,7 +26,7 @@ from baselines.utils import (
 from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
-from magi_attention.utils import (
+from magi_attention.utils.sparse_utils import (
     flatten_block_mask,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
