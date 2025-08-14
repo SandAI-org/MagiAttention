@@ -683,6 +683,166 @@ class TestFlexFlashAttn(TestCase):
         if err_msg_list:
             raise AssertionError("\n\n".join(err_msg_list))
 
+    def run_test_case(
+        self,
+        seqlen_q,
+        seqlen_kv,
+        model_config,
+        dtype,
+        q_ranges,
+        k_ranges,
+        attn_type_map,
+        auto_range_merge,
+        deterministic,
+        test_accumulation_inplace,
+        test_case,
+    ):
+        if auto_range_merge and deterministic:
+            return
+
+        # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
+        # ffa bwd kernel encounters with some precision issue with dq/dk,
+        # thus we skip here and will fix it asap
+        if is_list_value_any(attn_type_map, 3):
+            return
+
+        # 2. 从 model_config 字典内部解包参数
+        num_heads_q = model_config["num_heads_q"]
+        num_heads_kv = model_config["num_heads_kv"]
+        head_dim = model_config["head_dim"]
+
+        # construct data
+        q = torch.randn(
+            (seqlen_q, num_heads_q, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            (seqlen_kv, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            (seqlen_kv, num_heads_kv, head_dim),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        do = torch.randn_like(q)
+
+        # construct meta args
+        max_seqlen_q = q_ranges.max_seqlen
+        max_seqlen_k = k_ranges.max_seqlen
+        q_ranges_tensor = q_ranges.to_tensor(device=self.device)
+        k_ranges_tensor = k_ranges.to_tensor(device=self.device)
+        attn_type_map_tensor = torch.tensor(
+            attn_type_map, dtype=torch.int32, device=self.device
+        )
+
+        if test_accumulation_inplace:
+            # If test_accumulation_inplace is True, we will test the accumulation and return
+            self.check_flex_flash_attn_accumulation(
+                q=q,
+                k=k,
+                v=v,
+                do=do,
+                q_ranges_tensor=q_ranges_tensor,
+                k_ranges_tensor=k_ranges_tensor,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                attn_type_map_tensor=attn_type_map_tensor,
+                auto_range_merge=auto_range_merge,
+                deterministic=deterministic,
+                test_case=test_case,
+            )
+            return
+
+        # run ffa forward
+        o, lse = flex_flash_attn_func(
+            q,
+            k,
+            v,
+            q_ranges_tensor,
+            k_ranges_tensor,
+            max_seqlen_q,
+            max_seqlen_k,
+            attn_type_map_tensor,
+            auto_range_merge=auto_range_merge,
+            deterministic=deterministic,
+        )
+        o.backward(do)
+
+        err_msg_list = []
+
+        if deterministic:
+            # If deterministic is True, check deterministic behavior and return
+            err_msg_list = self.check_deterministic(
+                q=q,
+                k=k,
+                v=v,
+                do=do,
+                q_ranges_tensor=q_ranges_tensor,
+                k_ranges_tensor=k_ranges_tensor,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                attn_type_map_tensor=attn_type_map_tensor,
+                auto_range_merge=auto_range_merge,
+                test_case=test_case,
+                o_ref=o,
+                dq_ref=q.grad,
+                dk_ref=k.grad,
+                dv_ref=v.grad,
+            )
+
+        # compare with reference
+        self.assert_close_to_torch_ref(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            total_seqlen_q=seqlen_q,
+            total_seqlen_k=seqlen_kv,
+            total_q=q,
+            total_k=k,
+            total_v=v,
+            total_out=o,
+            grad_total_q=q.grad,
+            grad_total_k=k.grad,
+            grad_total_v=v.grad,
+            grad_total_out=do,
+            dtype=dtype,
+            test_case=test_case,
+            err_msg_list=err_msg_list,
+        )
+
+    MODEL_CONFIGS = [
+        {
+            "name": "mha_nh8_hd128",
+            "num_heads_q": 8,
+            "num_heads_kv": 8,
+            "head_dim": 128,
+        },
+        {
+            "name": "gqa_nhq16_nhkv4_hd128",
+            "num_heads_q": 16,
+            "num_heads_kv": 4,
+            "head_dim": 128,
+        },
+        {
+            "name": "mha_nh1_hd64",
+            "num_heads_q": 1,
+            "num_heads_kv": 1,
+            "head_dim": 64,
+        },
+        {
+            "name": "gqa_nhq4_nhkv2_hd64",
+            "num_heads_q": 4,
+            "num_heads_kv": 2,
+            "head_dim": 64,
+        },
+    ]
+
     @parameterize(
         "attn_mask_config",
         [
@@ -941,35 +1101,7 @@ class TestFlexFlashAttn(TestCase):
             },
         ],
     )
-    @parameterize(
-        "model_config",
-        [
-            {
-                "name": "mha_nh8_hd128",
-                "num_heads_q": 8,
-                "num_heads_kv": 8,
-                "head_dim": 128,
-            },
-            {
-                "name": "gqa_nhq16_nhkv4_hd128",
-                "num_heads_q": 16,
-                "num_heads_kv": 4,
-                "head_dim": 128,
-            },
-            {
-                "name": "mha_nh1_hd64",
-                "num_heads_q": 1,
-                "num_heads_kv": 1,
-                "head_dim": 64,
-            },
-            {
-                "name": "gqa_nhq4_nhkv2_hd64",
-                "num_heads_q": 4,
-                "num_heads_kv": 2,
-                "head_dim": 64,
-            },
-        ],
-    )
+    @parameterize("model_config", MODEL_CONFIGS)
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
     @parameterize("auto_range_merge", [False, True])
@@ -985,11 +1117,6 @@ class TestFlexFlashAttn(TestCase):
         deterministic: bool,
         test_accumulation_inplace: bool,
     ):
-        # FIXME: auto_range_merge and deterministic can't be True at the same time
-        # due to some unresolved bug to be fixed as soon as possible
-        if auto_range_merge and deterministic:
-            return
-
         # extract config
         seqlen = attn_mask_config["seqlen"]
         q_ranges: AttnRanges = attn_mask_config["q_ranges"]
@@ -1004,15 +1131,6 @@ class TestFlexFlashAttn(TestCase):
             # we now support attn type idx in {0, 1, 2, 3}
             attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
-        # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
-        # ffa bwd kernel encounters with some precision issue with dq/dk,
-        # thus we skip here and will fix it asap
-        if is_list_value_any(attn_type_map, 3):
-            return
-
-        num_heads_q = model_config["num_heads_q"]
-        num_heads_kv = model_config["num_heads_kv"]
-        head_dim = model_config["head_dim"]
         test_case = (
             f"[{attn_mask_config['name']}]"
             f"[{model_config['name']}]"
@@ -1023,141 +1141,22 @@ class TestFlexFlashAttn(TestCase):
             f"[test_accumulation_inplace={test_accumulation_inplace}]"
         )
 
-        # construct data
-        q = torch.randn(
-            (seqlen, num_heads_q, head_dim),
+        self.run_test_case(
+            seqlen_q=seqlen,
+            seqlen_kv=seqlen,
+            model_config=model_config,
             dtype=dtype,
-            device=self.device,
-            requires_grad=True,
-        )
-        k = torch.randn(
-            (seqlen, num_heads_kv, head_dim),
-            dtype=dtype,
-            device=self.device,
-            requires_grad=True,
-        )
-        v = torch.randn(
-            (seqlen, num_heads_kv, head_dim),
-            dtype=dtype,
-            device=self.device,
-            requires_grad=True,
-        )
-        do = torch.randn_like(q)
-
-        # construct meta args
-        max_seqlen_q = q_ranges.max_seqlen
-        max_seqlen_k = k_ranges.max_seqlen
-        q_ranges_tensor = q_ranges.to_tensor(device=self.device)
-        k_ranges_tensor = k_ranges.to_tensor(device=self.device)
-        attn_type_map_tensor = torch.tensor(
-            attn_type_map, dtype=torch.int32, device=self.device
-        )
-
-        if test_accumulation_inplace:
-            # If test_accumulation_inplace is True, we will test the accumulation and return
-            self.check_flex_flash_attn_accumulation(
-                q=q,
-                k=k,
-                v=v,
-                do=do,
-                q_ranges_tensor=q_ranges_tensor,
-                k_ranges_tensor=k_ranges_tensor,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                attn_type_map_tensor=attn_type_map_tensor,
-                auto_range_merge=auto_range_merge,
-                deterministic=deterministic,
-                test_case=test_case,
-            )
-            return
-
-        # run ffa forward
-        o, lse = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            q_ranges_tensor,
-            k_ranges_tensor,
-            max_seqlen_q,
-            max_seqlen_k,
-            attn_type_map_tensor,
-            auto_range_merge=auto_range_merge,
-            deterministic=deterministic,
-        )
-        o.backward(do)
-
-        err_msg_list = []
-
-        if deterministic:
-            # If deterministic is True, check deterministic behavior and return
-            err_msg_list = self.check_deterministic(
-                q=q,
-                k=k,
-                v=v,
-                do=do,
-                q_ranges_tensor=q_ranges_tensor,
-                k_ranges_tensor=k_ranges_tensor,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                attn_type_map_tensor=attn_type_map_tensor,
-                auto_range_merge=auto_range_merge,
-                test_case=test_case,
-                o_ref=o,
-                dq_ref=q.grad,
-                dk_ref=k.grad,
-                dv_ref=v.grad,
-            )
-
-        # compare with reference
-        self.assert_close_to_torch_ref(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
-            total_seqlen_q=seqlen,
-            total_seqlen_k=seqlen,
-            total_q=q,
-            total_k=k,
-            total_v=v,
-            total_out=o,
-            grad_total_q=q.grad,
-            grad_total_k=k.grad,
-            grad_total_v=v.grad,
-            grad_total_out=do,
-            dtype=dtype,
+            auto_range_merge=auto_range_merge,
+            deterministic=deterministic,
+            test_accumulation_inplace=test_accumulation_inplace,
             test_case=test_case,
-            err_msg_list=err_msg_list,
         )
 
     @pytest.mark.slow
-    @parameterize(
-        "model_config",
-        [
-            {
-                "name": "mha_nh8_hd128",
-                "num_heads_q": 8,
-                "num_heads_kv": 8,
-                "head_dim": 128,
-            },
-            {
-                "name": "gqa_nhq16_nhkv4_hd128",
-                "num_heads_q": 16,
-                "num_heads_kv": 4,
-                "head_dim": 128,
-            },
-            {
-                "name": "mha_nh1_hd64",
-                "num_heads_q": 1,
-                "num_heads_kv": 1,
-                "head_dim": 64,
-            },
-            {
-                "name": "gqa_nhq4_nhkv2_hd64",
-                "num_heads_q": 4,
-                "num_heads_kv": 2,
-                "head_dim": 64,
-            },
-        ],
-    )
+    @parameterize("model_config", MODEL_CONFIGS)
     @parameterize(
         "generate_config",
         [
@@ -1221,7 +1220,7 @@ class TestFlexFlashAttn(TestCase):
     @parameterize("num_pairs", [10, 100, 1000])  # the max qk range pairs to generate
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize(
-        "attn_type", [0, 1, 2, 3]
+        "attn_type", [0, 1, 2, 3, 4]
     )  # 0 - 3 means attn type are all 0/1/2/3, 4 means random attn type.
     @parameterize("auto_range_merge", [False, True])
     @parameterize("deterministic", [False, True])
@@ -1237,11 +1236,6 @@ class TestFlexFlashAttn(TestCase):
         deterministic: bool,
         test_accumulation_inplace: bool,
     ):
-        # FIXME: auto_range_merge and deterministic can't be True at the same time
-        # due to some unresolved bug to be fixed as soon as possible
-        if auto_range_merge and deterministic:
-            return
-
         """in this test, we generate q,k range randomly and as complicate as possible"""
         # extract config
         total_seqlen_q = generate_config["total_seqlen_q"]
@@ -1273,10 +1267,6 @@ class TestFlexFlashAttn(TestCase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
-        num_heads_q = model_config["num_heads_q"]
-        num_heads_kv = model_config["num_heads_kv"]
-        head_dim = model_config["head_dim"]
-
         test_case = (
             f"[{model_config['name']}]"
             f"[{generate_config['name']}]"
@@ -1288,116 +1278,18 @@ class TestFlexFlashAttn(TestCase):
             f"[test_accumulation_inplace={test_accumulation_inplace}"
         )
 
-        # construct data
-        q = torch.randn(
-            (total_seqlen_q, num_heads_q, head_dim),
+        self.run_test_case(
+            seqlen_q=total_seqlen_q,
+            seqlen_kv=total_seqlen_k,
+            model_config=model_config,
             dtype=dtype,
-            device=self.device,
-            requires_grad=True,
-        )
-        k = torch.randn(
-            (total_seqlen_k, num_heads_kv, head_dim),
-            dtype=dtype,
-            device=self.device,
-            requires_grad=True,
-        )
-        v = torch.randn(
-            (total_seqlen_k, num_heads_kv, head_dim),
-            dtype=dtype,
-            device=self.device,
-            requires_grad=True,
-        )
-        do = torch.randn_like(q)
-
-        # construct meta args
-        max_seqlen_q = q_ranges.max_seqlen
-        max_seqlen_k = k_ranges.max_seqlen
-        q_ranges_tensor = q_ranges.to_tensor(device=self.device)
-        k_ranges_tensor = k_ranges.to_tensor(device=self.device)
-        attn_type_map_tensor = torch.tensor(
-            attn_type_map, dtype=torch.int32, device=self.device
-        )
-
-        # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
-        # ffa bwd kernel encounters with some precision issue with dq/dk,
-        # thus we skip here and will fix it asap
-        if is_list_value_any(attn_type_map, 3):
-            return
-
-        if test_accumulation_inplace:
-            # If test_accumulation_inplace is True, we will test the accumulation and return
-            self.check_flex_flash_attn_accumulation(
-                q=q,
-                k=k,
-                v=v,
-                do=do,
-                q_ranges_tensor=q_ranges_tensor,
-                k_ranges_tensor=k_ranges_tensor,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                attn_type_map_tensor=attn_type_map_tensor,
-                auto_range_merge=auto_range_merge,
-                deterministic=deterministic,
-                test_case=test_case,
-            )
-
-            return
-
-        # run ffa forward
-        o, lse = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            q_ranges_tensor,
-            k_ranges_tensor,
-            max_seqlen_q,
-            max_seqlen_k,
-            attn_type_map_tensor,
-            auto_range_merge=auto_range_merge,
-            deterministic=deterministic,
-        )
-        o.backward(do)
-
-        err_msg_list = []
-        if deterministic:
-            # If deterministic is True, check deterministic behavior and return
-            err_msg_list = self.check_deterministic(
-                q=q,
-                k=k,
-                v=v,
-                do=do,
-                q_ranges_tensor=q_ranges_tensor,
-                k_ranges_tensor=k_ranges_tensor,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                attn_type_map_tensor=attn_type_map_tensor,
-                auto_range_merge=auto_range_merge,
-                test_case=test_case,
-                o_ref=o,
-                dq_ref=q.grad,
-                dk_ref=k.grad,
-                dv_ref=v.grad,
-            )
-            return
-
-        # compare with reference
-        self.assert_close_to_torch_ref(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
-            total_seqlen_q=total_seqlen_q,
-            total_seqlen_k=total_seqlen_k,
-            total_q=q,
-            total_k=k,
-            total_v=v,
-            total_out=o,
-            grad_total_q=q.grad,
-            grad_total_k=k.grad,
-            grad_total_v=v.grad,
-            grad_total_out=do,
-            dtype=dtype,
+            auto_range_merge=auto_range_merge,
+            deterministic=deterministic,
+            test_accumulation_inplace=test_accumulation_inplace,
             test_case=test_case,
-            err_msg_list=err_msg_list,
         )
 
 
