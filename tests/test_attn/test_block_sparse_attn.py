@@ -17,6 +17,7 @@ import unittest
 from typing import Any
 from unittest import TestCase
 
+import pytest
 import torch
 from einops import rearrange
 from torch.nn.functional import scaled_dot_product_attention as sdpa_func
@@ -42,7 +43,7 @@ from magi_attention.utils.sparse_utils import (
 )
 
 
-class TestFlexFlashAttn(TestCase):
+class TestBlockSparseAttn(TestCase):
     @property
     def seed(self):
         return 42
@@ -614,6 +615,7 @@ class TestFlexFlashAttn(TestCase):
     ) -> float:
         return (a.float() - b.float()).norm(p=float("inf")).item()
 
+    @pytest.mark.slow
     @parameterize(
         "model_config",
         [
@@ -767,6 +769,7 @@ class TestFlexFlashAttn(TestCase):
             test_case,
         )
 
+    @pytest.mark.slow
     @parameterize(
         "model_config",
         [
