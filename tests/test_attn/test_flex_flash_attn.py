@@ -15,7 +15,7 @@
 
 import random
 import unittest
-from typing import Any, List, Tuple
+from typing import Any
 from unittest import TestCase
 
 import pytest
@@ -63,7 +63,7 @@ class TestFlexFlashAttn(TestCase):
         min_len_k: int = 16,
         max_len_k: int = 128,
         max_consecutive_failures: int = 500,
-    ) -> Tuple[List[List[int]], List[List[int]]]:
+    ) -> tuple[list[list[int]], list[list[int]]]:
         """
         Generates non-overlapping q_ranges and k_ranges on a potentially non-square attention area.
 
@@ -90,7 +90,7 @@ class TestFlexFlashAttn(TestCase):
                 The upper limit for consecutive failed attempts, used to determine if the space is saturated.
 
         Returns:
-            Tuple[List[List[int]], List[List[int]]]:
+            tuple[list[list[int]], list[list[int]]]:
             A tuple containing two lists: q_ranges and k_ranges.
         """
         q_ranges: list = []
@@ -98,7 +98,7 @@ class TestFlexFlashAttn(TestCase):
 
         consecutive_failures = 0
 
-        def _create_one_random_q_range() -> List[int]:
+        def _create_one_random_q_range() -> list[int]:
             """Generates a random range [start, end] for the Query axis."""
             effective_max = min(max_len_q, total_seqlen_q)
             if min_len_q > effective_max:
@@ -110,7 +110,7 @@ class TestFlexFlashAttn(TestCase):
             start = random.randint(0, total_seqlen_q - length)
             return [start, start + length]
 
-        def _create_one_random_k_range() -> List[int]:
+        def _create_one_random_k_range() -> list[int]:
             """Generates a random range [start, end] for the Key axis."""
             effective_max = min(max_len_k, total_seqlen_k)
             if min_len_k > effective_max:

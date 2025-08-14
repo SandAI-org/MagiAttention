@@ -30,7 +30,8 @@ from magi_attention.functional.flex_flash_attn import (
 )
 from magi_attention.testing import parameterize
 from magi_attention.testing.precision import assert_close, calc_inf_norm
-from magi_attention.utils import (  # flatten_head_mask,; flatten_kvhead_mask,; get_random_variable_block_mask,
+from magi_attention.utils import is_list_value_any
+from magi_attention.utils.sparse_utils import (
     flatten_block_mask,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
@@ -38,7 +39,6 @@ from magi_attention.utils import (  # flatten_head_mask,; flatten_kvhead_mask,; 
     generate_variable_block_sparse_pattern,
     get_sdpa_mask_from_block_sparse_mask,
     get_sdpa_mask_from_var_block_mask,
-    is_list_value_any,
 )
 
 
