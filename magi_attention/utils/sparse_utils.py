@@ -201,8 +201,8 @@ def generate_ranges_from_block_mask(
 
 def get_sdpa_mask_from_block_sparse_mask(
     block_mask: torch.Tensor,
-    seq_len_q: int,
-    seq_len_k: int,
+    seqlen_q: int,
+    seqlen_k: int,
     block_size_q: int,
     block_size_k: int,
     batch_size: int = 1,
@@ -213,8 +213,8 @@ def get_sdpa_mask_from_block_sparse_mask(
 
     Args:
         block_mask (torch.Tensor): The block mask of shape [H, num_q_blocks, num_k_blocks].
-        seq_len_q (int): The full length of the query sequence.
-        seq_len_k (int): The full length of the key/value sequence.
+        seqlen_q (int): The full length of the query sequence.
+        seqlen_k (int): The full length of the key/value sequence.
         block_size_q (int): The size of a Q block.
         block_size_k (int): The size of a K block.
         batch_size (int): The batch size.
@@ -228,7 +228,7 @@ def get_sdpa_mask_from_block_sparse_mask(
     # 1. Create a large 4D mask of the target shape, filled with False.
     #    This is our "canvas", where False means all positions are masked out by default.
     sdpa_mask = torch.zeros(
-        (batch_size, num_heads, seq_len_q, seq_len_k), dtype=torch.bool, device=device
+        (batch_size, num_heads, seqlen_q, seqlen_k), dtype=torch.bool, device=device
     )
 
     # 2. Efficiently find the coordinates (h, q_block, k_block) of all blocks to be activated.
@@ -253,8 +253,8 @@ def get_sdpa_mask_from_block_sparse_mask(
 def generate_variable_block_sparse_pattern(
     num_q_heads: int,
     num_kv_heads: int,
-    seq_len_q: int,
-    seq_len_k: int,
+    seqlen_q: int,
+    seqlen_k: int,
     num_q_blocks: int,
     num_kv_blocks: int,
     sparsity: float,
@@ -274,18 +274,18 @@ def generate_variable_block_sparse_pattern(
 
     # --- 2. Generate random block size layouts ---
     def random_partition_with_min_size(
-        seq_len: int,
+        seqlen: int,
         num_blocks: int,
         min_block_size: int,
         batch_size: int,
         device: torch.device | str,
         dtype: torch.dtype = torch.int32,
     ) -> torch.Tensor:
-        if seq_len < num_blocks * min_block_size:
+        if seqlen < num_blocks * min_block_size:
             raise ValueError(
-                f"Cannot partition seq_len {seq_len} into {num_blocks} blocks with min_size {min_block_size}."
+                f"Cannot partition seqlen {seqlen} into {num_blocks} blocks with min_size {min_block_size}."
             )
-        extra_len = seq_len - num_blocks * min_block_size
+        extra_len = seqlen - num_blocks * min_block_size
         cut_pts = torch.randint(
             0, extra_len + 1, (batch_size, num_blocks - 1), device=device
         )
@@ -302,21 +302,21 @@ def generate_variable_block_sparse_pattern(
     # Generate row sizes. For GQA, we need to generate for each KV head and then expand.
     if mode == "per_kv_head":
         base_block_row_sz = random_partition_with_min_size(
-            seq_len_q, num_q_blocks, min_q_block_size, num_kv_heads, device
+            seqlen_q, num_q_blocks, min_q_block_size, num_kv_heads, device
         )
         final_block_row_sz = torch.repeat_interleave(
             base_block_row_sz, num_q_heads // num_kv_heads, dim=0
         )
     elif mode == "per_q_head":  # MHA mode
         final_block_row_sz = random_partition_with_min_size(
-            seq_len_q, num_q_blocks, min_q_block_size, num_q_heads, device
+            seqlen_q, num_q_blocks, min_q_block_size, num_q_heads, device
         )
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
     # Generate col sizes. This should ALWAYS be based on KV heads.
     final_block_col_sz = random_partition_with_min_size(
-        seq_len_k, num_kv_blocks, min_kv_block_size, num_kv_heads, device
+        seqlen_k, num_kv_blocks, min_kv_block_size, num_kv_heads, device
     )
 
     # --- 3. Generate block mask using top-k ---
@@ -468,8 +468,8 @@ def generate_ranges_from_var_block_mask(
 
 def get_sdpa_mask_from_var_block_mask(
     block_mask: torch.Tensor,
-    seq_len_q: int,
-    seq_len_k: int,
+    seqlen_q: int,
+    seqlen_k: int,
     block_row_sz: torch.Tensor,
     block_col_sz: torch.Tensor,
     bsz: int = 1,
@@ -507,7 +507,7 @@ def get_sdpa_mask_from_var_block_mask(
 
     # --- 2. Initialize the final SDPA mask ---
     sdpa_mask = torch.zeros(
-        (bsz, num_q_heads, seq_len_q, seq_len_k), dtype=torch.bool, device=device
+        (bsz, num_q_heads, seqlen_q, seqlen_k), dtype=torch.bool, device=device
     )
 
     # --- 3. Efficiently find the coordinates (h_q, qb, kb) of all active blocks ---
