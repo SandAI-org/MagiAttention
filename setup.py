@@ -49,17 +49,17 @@ with open("./README.md", "r", encoding="utf-8") as fh:
 
 # ninja build does not work unless include_dirs are abs path
 this_dir = os.path.dirname(os.path.abspath(__file__))
-
 PACKAGE_NAME = "magi_attention"
-
+NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
+exe_extension = sysconfig.get_config_var("EXE")
 
 # FORCE_BUILD: Force a fresh build locally, instead of attempting to find prebuilt wheels
 # SKIP_CUDA_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files,
 # without any cuda compilation
-FORCE_BUILD = os.getenv("MAGI_ATTENTION_FORCE_BUILD", "FALSE") == "TRUE"
-SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
+FORCE_BUILD = os.getenv("MAGI_ATTENTION_FORCE_BUILD", "0") == "1"
+SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
-FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "FALSE") == "TRUE"
+FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 
 
 # TODO: remove flags to compile with sm80
@@ -397,19 +397,8 @@ def nvcc_threads_args():
     return ["--threads", nvcc_threads]
 
 
-NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
-
-exe_extension = sysconfig.get_config_var("EXE")
-
-
-cmdclass = {}  # type: ignore[var-annotated]
-ext_modules = []
-
-
-if not SKIP_CUDA_BUILD:
+def init_ext_modules():
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
-    TORCH_MAJOR = int(torch.__version__.split(".")[0])
-    TORCH_MINOR = int(torch.__version__.split(".")[1])
 
     check_if_cuda_home_none(PACKAGE_NAME)
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
@@ -453,26 +442,28 @@ if not SKIP_CUDA_BUILD:
         # Make nvcc executable, sometimes after the copy it loses its permissions
         os.chmod(nvcc_path_new, os.stat(nvcc_path_new).st_mode | stat.S_IEXEC)
 
-    cc_flag = []
-    cc_flag.append("-gencode")
-    cc_flag.append("arch=compute_90a,code=sm_90a")
-
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
     # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
 
-    repo_dir = Path(this_dir)
 
-    cutlass_dir = repo_dir / "magi_attention" / "csrc" / "cutlass"
-
-    ffa_dir_abs = repo_dir / "magi_attention" / "csrc" / "flexible_flash_attention"
+def build_ffa_ext_module(
+    repo_dir: Path,
+    csrc_dir: Path,
+    common_dir: Path,
+    cutlass_dir: Path,
+) -> CUDAExtension:
+    ffa_dir_abs = csrc_dir / "flexible_flash_attention"
     ffa_dir_rel = ffa_dir_abs.relative_to(repo_dir)
 
-    common_dir = repo_dir / "magi_attention" / "csrc" / "common"
+    # init cc flags
+    cc_flags = []
+    cc_flags.append("-gencode")
+    cc_flags.append("arch=compute_90a,code=sm_90a")
 
-    # custom flags
+    # init custom flags
     DISABLE_HDIM64 = False
     DISABLE_HDIM96 = True
     DISABLE_HDIM128 = False
@@ -483,6 +474,7 @@ if not SKIP_CUDA_BUILD:
     DISABLE_SOFTCAP = False
     DISABLE_CLUSTER = False
 
+    # init feature flags
     feature_args = (
         []
         + (["-DFLASHATTENTION_DISABLE_BACKWARD"] if DISABLE_BACKWARD else [])
@@ -496,6 +488,7 @@ if not SKIP_CUDA_BUILD:
         + (["-DFLASHATTENTION_DISABLE_HDIM256"] if DISABLE_HDIM256 else [])
     )
 
+    # init sources
     DTYPE = ["bf16"] + (["fp16"] if not DISABLE_FP16 else [])
     HEAD_DIMENSIONS = ["all"]
     SOFTCAP = [""] + (["_softcap"] if not DISABLE_SOFTCAP else [])
@@ -512,6 +505,8 @@ if not SKIP_CUDA_BUILD:
     sources = [f"{ffa_dir_rel}/flash_api.cpp"] + sources_fwd_sm90 + sources_bwd_sm90
     sources += [f"{ffa_dir_rel}/fast_zero_fill.cu"]
     sources += [f"{ffa_dir_rel}/unique_consecutive_pairs.cu"]
+
+    # init nvcc flags
     nvcc_flags = [
         "-O3",
         "-Xptxas",
@@ -536,29 +531,51 @@ if not SKIP_CUDA_BUILD:
                 "-Xcompiler=/Zc:__cplusplus",  # sets __cplusplus correctly, CUTLASS_CONSTEXPR_IF_CXX17 needed for cutlass::gcd
             ]
         )
+
+    # init include dirs
     include_dirs = [
         common_dir,
-        ffa_dir_abs,
         cutlass_dir / "include",
+        ffa_dir_abs,
     ]
 
+    # init extra compile args
     extra_compile_args = {
         "cxx": ["-O3", "-std=c++17"] + feature_args,
-        "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag + feature_args,
+        "nvcc": nvcc_threads_args() + nvcc_flags + cc_flags + feature_args,
     }
 
-    ext_modules.append(
-        CUDAExtension(
-            name="flexible_flash_attention_cuda",
-            sources=sources,
-            extra_compile_args=extra_compile_args,
-            include_dirs=include_dirs,
-        )
+    return CUDAExtension(
+        name="flexible_flash_attention_cuda",
+        sources=sources,
+        extra_compile_args=extra_compile_args,
+        include_dirs=include_dirs,
     )
 
-package_data = {
-    "magi_attention": ["*.pyi", "**/*.pyi"],
-}
+
+cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension}
+package_data = {"magi_attention": ["*.pyi", "**/*.pyi"]}
+ext_modules = []
+
+
+if not SKIP_CUDA_BUILD:
+    # init before building any ext module
+    init_ext_modules()
+
+    # define some paths for the ext modules below
+    repo_dir = Path(this_dir)
+    csrc_dir = repo_dir / "magi_attention" / "csrc"
+    common_dir = csrc_dir / "common"
+    cutlass_dir = csrc_dir / "cutlass"
+
+    # build ffa ext module
+    ffa_ext_module = build_ffa_ext_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+        cutlass_dir=cutlass_dir,
+    )
+    ext_modules.append(ffa_ext_module)
 
 
 setup(
@@ -585,7 +602,7 @@ setup(
         "Operating System :: Unix",
     ],
     ext_modules=ext_modules,
-    cmdclass={"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension},
+    cmdclass=cmdclass,
     python_requires=">=3.10",
     install_requires=[
         "torch",
