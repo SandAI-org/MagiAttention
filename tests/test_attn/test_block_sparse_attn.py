@@ -29,7 +29,7 @@ from magi_attention.functional.flex_flash_attn import (
     merge_ranges,
 )
 from magi_attention.testing import parameterize
-from magi_attention.testing.precision import assert_close
+from magi_attention.testing.precision import assert_close, calc_inf_norm
 from magi_attention.utils.sparse_utils import (
     flatten_block_mask,
     generate_block_sparse_pattern,
@@ -39,8 +39,6 @@ from magi_attention.utils.sparse_utils import (
     get_sdpa_mask_from_block_sparse_mask,
     get_sdpa_mask_from_var_block_mask,
 )
-
-# --- Start of Refactored Code ---
 
 
 class TestBlockSparseAttn(TestCase):
@@ -327,13 +325,21 @@ class TestBlockSparseAttn(TestCase):
         s, h = q.size(1), q.size(2)
         q = rearrange(q, "b s h d -> (b h s) 1 d")
         assert nhq % nhk == 0
+
         repeats = nhq // nhk
         if head_wise == "q":
             k = torch.repeat_interleave(k, repeats=repeats, dim=2)
             v = torch.repeat_interleave(v, repeats=repeats, dim=2)
+
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
+        q.retain_grad()
+        k.retain_grad()
+        v.retain_grad()
+        q.grad, k.grad, v.grad = None, None, None
+
         flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
+
         if uniform:
             q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
                 flat_block_sparse_mask, block_size, block_size
@@ -342,7 +348,7 @@ class TestBlockSparseAttn(TestCase):
             q_ranges_tensor, k_ranges_tensor = generate_ranges_from_var_block_mask(
                 flat_block_sparse_mask, block_row_sz, block_col_sz, nhq, nhk
             )
-        attn_type_map = torch.zeros(
+        attn_type_map_tensor = torch.zeros(
             len(q_ranges_tensor), dtype=torch.int32, device="cuda"
         )
 
@@ -376,19 +382,43 @@ class TestBlockSparseAttn(TestCase):
         else:
             max_seqlen_q = block_row_sz.max().item()
             max_seqlen_k = block_col_sz.max().item()
+
         o, _ = flex_flash_attn_func(
             q,
             k,
             v,
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
-            attn_type_map=attn_type_map,
+            attn_type_map=attn_type_map_tensor,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             auto_range_merge=True,
         )
+
         o = rearrange(o, "(b h s) 1 d -> b s h d", b=1, s=s, h=h)
         o.backward(grad_output)
+
+        if deterministic:
+            err_msg_list.append(
+                self.check_deterministic(
+                    q=q,
+                    k=k,
+                    v=v,
+                    do=grad_output,
+                    q_ranges_tensor=q_ranges_tensor,
+                    k_ranges_tensor=k_ranges_tensor,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    attn_type_map_tensor=attn_type_map_tensor,
+                    auto_range_merge=True,
+                    test_case=test_case,
+                    o_ref=o,
+                    dq_ref=q.grad,
+                    dk_ref=k.grad,
+                    dv_ref=v.grad,
+                )
+            )
+
         return o
 
     def get_sdpa_attn_ref(
@@ -430,9 +460,11 @@ class TestBlockSparseAttn(TestCase):
             is_causal=False,
             enable_gqa=True,
         )
+
         o = rearrange(o, "b h s d -> b s h d")
         o = o.to(q.dtype)
         o.backward(grad_output)
+
         return o
 
     def assert_close_to_torch_ref(
@@ -473,6 +505,7 @@ class TestBlockSparseAttn(TestCase):
             k.grad,
             v.grad,
         )
+
         q.grad, k.grad, v.grad = None, None, None
         low_precision_torch_out_ref = self.get_sdpa_attn_ref(
             q,
@@ -492,8 +525,10 @@ class TestBlockSparseAttn(TestCase):
             k.grad,
             v.grad,
         )
+
         q.grad, k.grad, v.grad = None, None, None
         err_msg_list = []
+
         ffa_out = self.get_ffa_result(
             q,
             k,
@@ -513,11 +548,13 @@ class TestBlockSparseAttn(TestCase):
             block_col_sz=block_col_sz,
         )
         ffa_dq, ffa_dk, ffa_dv = q.grad, k.grad, v.grad
+
         norm_rtol_ratio = 2.0
-        out_norm = self.calc_inf_norm(ffa_out, high_precision_torch_out_ref)
-        out_ref_norm = self.calc_inf_norm(
+        out_norm = calc_inf_norm(ffa_out, high_precision_torch_out_ref)
+        out_ref_norm = calc_inf_norm(
             low_precision_torch_out_ref, high_precision_torch_out_ref
         )
+
         try:
             self.assertLessEqual(
                 out_norm,
@@ -526,8 +563,10 @@ class TestBlockSparseAttn(TestCase):
             )
         except Exception as e:
             err_msg_list.append(str(e))
-        dq_norm = self.calc_inf_norm(ffa_dq, high_precision_dq_ref)
-        dq_ref_norm = self.calc_inf_norm(low_precision_dq_ref, high_precision_dq_ref)
+
+        dq_norm = calc_inf_norm(ffa_dq, high_precision_dq_ref)
+        dq_ref_norm = calc_inf_norm(low_precision_dq_ref, high_precision_dq_ref)
+
         try:
             self.assertLessEqual(
                 dq_norm,
@@ -536,8 +575,10 @@ class TestBlockSparseAttn(TestCase):
             )
         except Exception as e:
             err_msg_list.append(str(e))
-        dk_norm = self.calc_inf_norm(ffa_dk, high_precision_dk_ref)
-        dk_ref_norm = self.calc_inf_norm(low_precision_dk_ref, high_precision_dk_ref)
+
+        dk_norm = calc_inf_norm(ffa_dk, high_precision_dk_ref)
+        dk_ref_norm = calc_inf_norm(low_precision_dk_ref, high_precision_dk_ref)
+
         try:
             self.assertLessEqual(
                 dk_norm,
@@ -546,8 +587,10 @@ class TestBlockSparseAttn(TestCase):
             )
         except Exception as e:
             err_msg_list.append(str(e))
-        dv_norm = self.calc_inf_norm(ffa_dv, high_precision_dv_ref)
-        dv_ref_norm = self.calc_inf_norm(low_precision_dv_ref, high_precision_dv_ref)
+
+        dv_norm = calc_inf_norm(ffa_dv, high_precision_dv_ref)
+        dv_ref_norm = calc_inf_norm(low_precision_dv_ref, high_precision_dv_ref)
+
         try:
             self.assertLessEqual(
                 dv_norm,
@@ -556,12 +599,9 @@ class TestBlockSparseAttn(TestCase):
             )
         except Exception as e:
             err_msg_list.append(str(e))
+
         if err_msg_list:
             raise AssertionError("\n\n".join(err_msg_list))
-
-    def calc_inf_norm(self, a: torch.Tensor, b: torch.Tensor) -> float:
-        # (Implementation is identical to the original)
-        return (a.float() - b.float()).norm(p=float("inf")).item()
 
     def _generate_sparse_pattern(
         self,
@@ -586,8 +626,6 @@ class TestBlockSparseAttn(TestCase):
             - block_col_sz (torch.Tensor or None): Column block sizes for variable patterns.
         """
         if test_type == "uniform":
-            # if block_size is None:
-            #    raise ValueError("`block_size` is required for 'uniform' test type.")
             assert (
                 block_size is not None
             ), "`block_size` is required for 'uniform' test type."
@@ -611,12 +649,7 @@ class TestBlockSparseAttn(TestCase):
             assert (
                 min_block_size is not None
             ), "`min_block_size` is required for 'variable' test type."
-            """
-            if any(p is None for p in [average_block_size, min_block_size]):
-                raise ValueError(
-                    "`average_block_size` and `min_block_size` are required for 'variable' test type."
-                )
-            """
+
             num_q_blocks = seqlen // average_block_size
             num_kv_blocks = seqlen // average_block_size
             (
@@ -684,10 +717,7 @@ class TestBlockSparseAttn(TestCase):
     @parameterize("sparsity_granularity", ["per_q_head", "per_kv_head"])
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("attn_type", [0])  # For now, we only test full mask.
-    @parameterize(
-        "auto_range_merge", [True]
-    )  # for block sparse, we only test auto_merge_range=True.
-    @parameterize("deterministic", [False])
+    @parameterize("deterministic", [True, False])
     @parameterize("test_accumulation_inplace", [False])
     def test_block_sparse_attn(
         self,
@@ -698,10 +728,10 @@ class TestBlockSparseAttn(TestCase):
         sparsity_granularity: str,
         dtype: torch.dtype,
         attn_type: int,
-        auto_range_merge: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
     ):
+        auto_range_merge = True
         # FIXME: auto_range_merge and deterministic can't be True at the same time
         if auto_range_merge and deterministic:
             return
