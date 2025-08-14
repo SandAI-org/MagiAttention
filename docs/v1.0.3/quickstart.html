@@ -534,9 +534,9 @@
 <span class="n">attn_mask_type</span> <span class="o">=</span> <span class="p">[</span><span class="n">AttnMaskType</span><span class="o">.</span><span class="n">FULL</span><span class="p">]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">q_ranges</span><span class="p">)</span>
 <span class="n">total_seqlen_q</span> <span class="o">=</span> <span class="n">total_seqlen_k</span> <span class="o">=</span> <span class="n">total_seqlen</span>
 <span class="n">pad_size</span> <span class="o">=</span> <span class="n">compute_pad_size</span><span class="p">(</span> <span class="c1"># pad embeds along seqlen dim for better performance</span>
-<span class="n">total_seqlen_q</span><span class="o">=</span><span class="n">total_seqlen_q</span><span class="p">,</span>
-<span class="n">cp_size</span><span class="o">=</span><span class="n">world_size</span><span class="p">,</span> <span class="c1"># assuming we only have 1-dim context parallelism (cp)</span>
-<span class="n">chunk_size</span><span class="o">=</span><span class="n">chunk_size</span><span class="p">,</span>
+    <span class="n">total_seqlen_q</span><span class="o">=</span><span class="n">total_seqlen_q</span><span class="p">,</span>
+    <span class="n">cp_size</span><span class="o">=</span><span class="n">world_size</span><span class="p">,</span> <span class="c1"># assuming we only have 1-dim context parallelism (cp)</span>
+    <span class="n">chunk_size</span><span class="o">=</span><span class="n">chunk_size</span><span class="p">,</span>
 <span class="p">)</span>
 
 <span class="c1"># --- Dispatch token embedding tensor along seqlen dim to multiple ranks --- #</span>
@@ -572,10 +572,10 @@
 <span class="c1"># --- Distributed attention computation --- #</span>
 
 <span class="n">local_out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span> <span class="c1"># the second return value is `local_lse` (log-sum-exp), known as the online-softmax correction factor</span>
-<span class="n">q</span><span class="o">=</span><span class="n">local_q</span><span class="p">,</span>
-<span class="n">k</span><span class="o">=</span><span class="n">local_k</span><span class="p">,</span>
-<span class="n">v</span><span class="o">=</span><span class="n">local_v</span><span class="p">,</span>
-<span class="n">key</span><span class="o">=</span><span class="n">magi_attn_runtime_key</span><span class="p">,</span>
+    <span class="n">q</span><span class="o">=</span><span class="n">local_q</span><span class="p">,</span>
+    <span class="n">k</span><span class="o">=</span><span class="n">local_k</span><span class="p">,</span>
+    <span class="n">v</span><span class="o">=</span><span class="n">local_v</span><span class="p">,</span>
+    <span class="n">key</span><span class="o">=</span><span class="n">magi_attn_runtime_key</span><span class="p">,</span>
 <span class="p">)</span>
 
 <span class="c1"># --- Undispatch the output tensor along seqlen dim from multiple ranks and unpad --- #</span>
@@ -583,8 +583,8 @@
 <span class="c1"># NOTE: the undispatch API may not be used until the moment you need the seqlen dimension to be compelete and ordered,</span>
 <span class="c1"># e.g. for either aforementioned sample-wise operations, or loss computation</span>
 <span class="n">total_out</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span>
-<span class="n">x</span><span class="o">=</span><span class="n">local_out</span><span class="p">,</span>
-<span class="n">key</span><span class="o">=</span><span class="n">magi_attn_runtime_key</span><span class="p">,</span>
+    <span class="n">x</span><span class="o">=</span><span class="n">local_out</span><span class="p">,</span>
+    <span class="n">key</span><span class="o">=</span><span class="n">magi_attn_runtime_key</span><span class="p">,</span>
 <span class="p">)</span>
 
 <span class="c1"># --- Clear up distributed environment --- #</span>
