@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from itertools import accumulate
 
 import torch
 import triton
@@ -22,6 +23,49 @@ from magi_attention.utils import nvtx
 from .utils import _calc_cu_range_sizes, _calc_ranges_row_map
 
 __all__ = ["range_gather"]
+
+
+def range_gather_ref(
+    input: torch.Tensor,
+    ranges: torch.Tensor,
+    dim: int = 0,
+):
+    # Calculate cumulative range sizes and total size
+    ranges_sizes = [0] + (ranges[:, 1] - ranges[:, 0]).tolist()
+    cu_range_sizes = list(accumulate(ranges_sizes))
+    total_size = cu_range_sizes[-1]
+    cu_range_sizes = torch.tensor(
+        cu_range_sizes[:-1], dtype=torch.int32, device=input.device
+    )
+
+    # Create output tensor buffer
+    output_shape = list(input.shape)
+    output_shape[dim] = total_size
+    output = torch.empty(output_shape, device=input.device, dtype=input.dtype)
+
+    # Return directly if empty tensor
+    if ranges.shape[0] == 0 or input.numel() == 0:
+        return output
+
+    # Handle the case when dim is not 0
+    if dim != 0:
+        input = input.transpose(0, dim).contiguous()
+        output = output.transpose(0, dim).contiguous()
+    else:
+        input = input.contiguous()
+        output = output.contiguous()
+
+    # Iterate through each range, copy input data to output
+    for i, (start, end) in enumerate(ranges):
+        out_start = cu_range_sizes[i].item()
+        range_size = end.item() - start.item()
+        output[out_start : out_start + range_size] = input[start:end]
+
+    # If transposed earlier, transpose back
+    if dim != 0:
+        output = output.transpose(0, dim)
+
+    return output
 
 
 @triton.jit
@@ -68,52 +112,6 @@ def range_gather_kernel(
         tl.store(curr_out_ptr + cols, inp, mask=cols < elem_in_last_block)
 
 
-from itertools import accumulate
-
-
-def range_gather_ref(
-    input: torch.Tensor,
-    ranges: torch.Tensor,
-    dim: int = 0,
-):
-    # Calculate cumulative range sizes and total size
-    ranges_sizes = [0] + (ranges[:, 1] - ranges[:, 0]).tolist()
-    cu_range_sizes = list(accumulate(ranges_sizes))
-    total_size = cu_range_sizes[-1]
-    cu_range_sizes = torch.tensor(
-        cu_range_sizes[:-1], dtype=torch.int32, device=input.device
-    )
-
-    # Create output tensor buffer
-    output_shape = list(input.shape)
-    output_shape[dim] = total_size
-    output = torch.empty(output_shape, device=input.device, dtype=input.dtype)
-
-    # Return directly if empty tensor
-    if ranges.shape[0] == 0 or input.numel() == 0:
-        return output
-
-    # Handle the case when dim is not 0
-    if dim != 0:
-        input = input.transpose(0, dim).contiguous()
-        output = output.transpose(0, dim).contiguous()
-    else:
-        input = input.contiguous()
-        output = output.contiguous()
-
-    # Iterate through each range, copy input data to output
-    for i, (start, end) in enumerate(ranges):
-        out_start = cu_range_sizes[i].item()
-        range_size = end.item() - start.item()
-        output[out_start : out_start + range_size] = input[start:end]
-
-    # If transposed earlier, transpose back
-    if dim != 0:
-        output = output.transpose(0, dim)
-
-    return output
-
-
 @nvtx.instrument_nvtx
 def range_gather(
     input: torch.Tensor,
@@ -139,12 +137,6 @@ def range_gather(
     Returns:
         A new tensor containing the gathered values, put into output if provided.
     """
-
-    return range_gather_ref(
-        input=input,
-        ranges=ranges,
-        dim=dim,
-    )
 
     # ---   calculate meta   --- #
 
@@ -192,8 +184,8 @@ def range_gather(
         output = output.contiguous()
 
     # Calculate stride (considering memory step size of elements)
-    input_stride = input.shape[1] * input.shape[2]
-    output_stride = output.shape[1] * output.shape[2]
+    input_stride = input.stride(0)
+    output_stride = output.stride(0)
 
     # ---   calculate grid size   --- #
 

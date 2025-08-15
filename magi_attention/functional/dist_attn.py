@@ -183,6 +183,9 @@ class DistFlashAttnRuntime:
         self.cp_group_dkv = cp_group_dkv
         self.deterministic = magi_attention.is_deterministic_mode_enable()
         self.overlap_degree = comm_meta.overlap_degree
+        self.world_size = dist.get_world_size(cp_group_kv)
+        if self.world_size == 1:
+            self.overlap_degree = 0
 
         # NOTE: when enabling FFA fwd inplace correct and not using sdpa backend
         # we will use accumulative buffer for forward out and lse
@@ -530,23 +533,26 @@ class DistFlashAttnFunc(torch.autograd.Function):
         # cat local k, v into a single coalesced kv
         local_kv = dist_attn_runtime.concat_kv(local_k, local_v)
 
-        if magi_attention.is_cuda_device_max_connections_one():
-            # pre-fetch 0th remote kv
-            (
-                remote_kv_work,
-                remote_kv_buffer,
-            ) = dist_attn_runtime.fetch_remote_kv(local_kv=local_kv, overlap_stage=0)
-        else:
-            # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
-            # we issue all fetch-remote-kv comms in advance of ffa fwd
-            # and ffa fwd can still overlap with these comms
-            # with the support of `sm_margin`, thx to persistent kernel design
-            remote_kv_works_with_buffers = [
-                dist_attn_runtime.fetch_remote_kv(
-                    local_kv=local_kv, overlap_stage=ith_overlap_stage
+        if dist_attn_runtime.world_size > 1:
+            if magi_attention.is_cuda_device_max_connections_one():
+                # pre-fetch 0th remote kv
+                (
+                    remote_kv_work,
+                    remote_kv_buffer,
+                ) = dist_attn_runtime.fetch_remote_kv(
+                    local_kv=local_kv, overlap_stage=0
                 )
-                for ith_overlap_stage in range(dist_attn_runtime.overlap_degree)
-            ]
+            else:
+                # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
+                # we issue all fetch-remote-kv comms in advance of ffa fwd
+                # and ffa fwd can still overlap with these comms
+                # with the support of `sm_margin`, thx to persistent kernel design
+                remote_kv_works_with_buffers = [
+                    dist_attn_runtime.fetch_remote_kv(
+                        local_kv=local_kv, overlap_stage=ith_overlap_stage
+                    )
+                    for ith_overlap_stage in range(dist_attn_runtime.overlap_degree)
+                ]
 
         # do attn fwd with local kv
         # overlapped with 0th remote kv comm
@@ -624,23 +630,26 @@ class DistFlashAttnFunc(torch.autograd.Function):
         local_kv: torch.Tensor
         dist_attn_runtime: DistFlashAttnRuntime = ctx.dist_attn_runtime
 
-        if magi_attention.is_cuda_device_max_connections_one():
-            # pre-fetch 0th remote kv
-            (
-                remote_kv_work,
-                remote_kv_buffer,
-            ) = dist_attn_runtime.fetch_remote_kv(local_kv=local_kv, overlap_stage=0)
-        else:
-            # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
-            # we issue all fetch-remote-kv comms in advance of ffa bwd
-            # and ffa bwd can still overlap with these comms
-            # with the support of `sm_margin`, thx to persistent kernel design
-            remote_kv_works_with_buffers = [
-                dist_attn_runtime.fetch_remote_kv(
-                    local_kv=local_kv, overlap_stage=ith_overlap_stage
+        if dist_attn_runtime.world_size > 1:
+            if magi_attention.is_cuda_device_max_connections_one():
+                # pre-fetch 0th remote kv
+                (
+                    remote_kv_work,
+                    remote_kv_buffer,
+                ) = dist_attn_runtime.fetch_remote_kv(
+                    local_kv=local_kv, overlap_stage=0
                 )
-                for ith_overlap_stage in range(dist_attn_runtime.overlap_degree)
-            ]
+            else:
+                # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
+                # we issue all fetch-remote-kv comms in advance of ffa bwd
+                # and ffa bwd can still overlap with these comms
+                # with the support of `sm_margin`, thx to persistent kernel design
+                remote_kv_works_with_buffers = [
+                    dist_attn_runtime.fetch_remote_kv(
+                        local_kv=local_kv, overlap_stage=ith_overlap_stage
+                    )
+                    for ith_overlap_stage in range(dist_attn_runtime.overlap_degree)
+                ]
 
         # do attn bwd with local kv
         # overlapped with 0th remote kv comm

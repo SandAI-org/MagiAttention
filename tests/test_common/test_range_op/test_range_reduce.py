@@ -17,37 +17,8 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.common.range_op import range_reduce
+from magi_attention.common.range_op._range_reduce import range_reduce, range_reduce_ref
 from magi_attention.testing import parameterize
-
-
-def range_reduce_ref(
-    input: torch.Tensor,
-    output: torch.Tensor,
-    input_ranges: torch.Tensor,
-    output_ranges: torch.Tensor,
-    dim: int = 0,
-) -> torch.Tensor:
-    """sum-reduce a2a output to output
-    as a post-processing func for group_reduce_collective
-    """
-
-    # Handle the case when dim is not 0
-    if dim != 0:
-        input = input.transpose(0, dim).contiguous()
-        output = output.transpose(0, dim).contiguous()
-    else:
-        input = input.contiguous()
-        output = output.contiguous()
-
-    for (out_start, out_end), (in_start, in_end) in zip(output_ranges, input_ranges):
-        output[out_start:out_end] += input[in_start:in_end]
-
-    # If transposed earlier, transpose back
-    if dim != 0:
-        output = output.transpose(0, dim)
-
-    return output
 
 
 class TestRangeReduce(TestCase):

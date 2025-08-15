@@ -24,6 +24,35 @@ from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_r
 __all__ = ["range_reduce"]
 
 
+def range_reduce_ref(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    input_ranges: torch.Tensor,
+    output_ranges: torch.Tensor,
+    dim: int = 0,
+) -> torch.Tensor:
+    """sum-reduce a2a output to output
+    as a post-processing func for group_reduce_collective
+    """
+
+    # Handle the case when dim is not 0
+    if dim != 0:
+        input = input.transpose(0, dim).contiguous()
+        output = output.transpose(0, dim).contiguous()
+    else:
+        input = input.contiguous()
+        output = output.contiguous()
+
+    for (out_start, out_end), (in_start, in_end) in zip(output_ranges, input_ranges):
+        output[out_start:out_end] += input[in_start:in_end]
+
+    # If transposed earlier, transpose back
+    if dim != 0:
+        output = output.transpose(0, dim)
+
+    return output
+
+
 @triton.jit
 def range_reduce_kernel(
     input_ptr,
@@ -133,35 +162,6 @@ def range_reduce_deter_kernel(
         tl.store(curr_out_ptr + cols, out, mask=cols < elem_in_last_block)
 
 
-def range_reduce_ref(
-    input: torch.Tensor,
-    output: torch.Tensor,
-    input_ranges: torch.Tensor,
-    output_ranges: torch.Tensor,
-    dim: int = 0,
-) -> torch.Tensor:
-    """sum-reduce a2a output to output
-    as a post-processing func for group_reduce_collective
-    """
-
-    # Handle the case when dim is not 0
-    if dim != 0:
-        input = input.transpose(0, dim).contiguous()
-        output = output.transpose(0, dim).contiguous()
-    else:
-        input = input.contiguous()
-        output = output.contiguous()
-
-    for (out_start, out_end), (in_start, in_end) in zip(output_ranges, input_ranges):
-        output[out_start:out_end] += input[in_start:in_end]
-
-    # If transposed earlier, transpose back
-    if dim != 0:
-        output = output.transpose(0, dim)
-
-    return output
-
-
 @nvtx.instrument_nvtx
 def range_reduce(
     input: torch.Tensor,
@@ -200,14 +200,6 @@ def range_reduce(
     Returns:
         The output tensor after reduction
     """
-
-    return range_reduce_ref(
-        input=input,
-        output=output,
-        input_ranges=input_ranges,
-        output_ranges=output_ranges,
-        dim=dim,
-    )
 
     assert (
         input_ranges.shape == output_ranges.shape
@@ -286,8 +278,8 @@ def range_reduce(
         need_to_copy = True
 
     # Calculate stride (considering memory step size of elements)
-    input_stride = input.shape[1] * input.shape[2]
-    output_stride = output_.shape[1] * output_.shape[2]
+    input_stride = input.stride(0)
+    output_stride = output_.stride(0)
 
     # ---   calculate grid size   --- #
 

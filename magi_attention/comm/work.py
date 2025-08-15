@@ -70,7 +70,6 @@ class WorkWithPostProcessFn:
         return ret
 
     def _wait_work(self) -> None:
-        return
         if self.work is not None:
             for work in self.work:
                 match work:
