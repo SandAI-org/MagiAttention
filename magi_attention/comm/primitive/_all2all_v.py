@@ -87,8 +87,7 @@ def all2all_v(
             output_split_sizes=output_split_size_list,
             input_split_sizes=input_split_size_list,
             group=group,
-            # async_op=async_op,
-            async_op=False,
+            async_op=async_op,
         )
 
     return work
