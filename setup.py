@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import glob
 import itertools
 import os
 import platform
@@ -58,6 +59,10 @@ exe_extension = sysconfig.get_config_var("EXE")
 # without any cuda compilation
 FORCE_BUILD = os.getenv("MAGI_ATTENTION_FORCE_BUILD", "0") == "1"
 SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
+SKIP_FFA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_BUILD", "0") == "1"
+SKIP_MAGI_ATTN_EXT_BUILD = (
+    os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
+)
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 
@@ -454,7 +459,10 @@ def build_ffa_ext_module(
     csrc_dir: Path,
     common_dir: Path,
     cutlass_dir: Path,
-) -> CUDAExtension:
+) -> CUDAExtension | None:
+    if SKIP_FFA_BUILD:
+        return None
+
     ffa_dir_abs = csrc_dir / "flexible_flash_attention"
     ffa_dir_rel = ffa_dir_abs.relative_to(repo_dir)
 
@@ -553,6 +561,34 @@ def build_ffa_ext_module(
     )
 
 
+def build_magi_attn_ext_module(
+    repo_dir: Path,
+    csrc_dir: Path,
+    common_dir: Path,
+) -> CUDAExtension | None:
+    if SKIP_MAGI_ATTN_EXT_BUILD:
+        return None
+
+    magi_attn_ext_dir_abs = csrc_dir / "extensions"
+
+    # init sources
+    cpp_files = glob.glob(str(magi_attn_ext_dir_abs / "*.cpp"))
+    sources = [str(Path(f).relative_to(repo_dir)) for f in cpp_files]
+
+    # init include dirs
+    include_dirs = [common_dir, magi_attn_ext_dir_abs]
+
+    # init extra compile args
+    extra_compile_args = {"cxx": ["-O3", "-std=c++17"]}
+
+    return CUDAExtension(
+        name="magi_attn_ext",
+        sources=sources,
+        extra_compile_args=extra_compile_args,
+        include_dirs=include_dirs,
+    )
+
+
 cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension}
 package_data = {"magi_attention": ["*.pyi", "**/*.pyi"]}
 ext_modules = []
@@ -575,7 +611,17 @@ if not SKIP_CUDA_BUILD:
         common_dir=common_dir,
         cutlass_dir=cutlass_dir,
     )
-    ext_modules.append(ffa_ext_module)
+    if ffa_ext_module is not None:
+        ext_modules.append(ffa_ext_module)
+
+    # build magi attn ext module
+    magi_attn_ext_module = build_magi_attn_ext_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+    )
+    if magi_attn_ext_module is not None:
+        ext_modules.append(magi_attn_ext_module)
 
 
 setup(
