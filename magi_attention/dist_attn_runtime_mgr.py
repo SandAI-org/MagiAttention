@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import itertools
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,7 +40,7 @@ from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_
 class DistAttnRuntimeKey:
     q_ranges: AttnRanges
     k_ranges: AttnRanges
-    attn_mask_type: list[AttnMaskType]
+    attn_mask_type: tuple[AttnMaskType, ...]
     total_seqlen_q: int
     total_seqlen_k: int
     pad_size: int
@@ -47,10 +48,8 @@ class DistAttnRuntimeKey:
     cp_group: dist.ProcessGroup
     cp_mesh: DeviceMesh | None
     dist_attn_config: DistAttnConfig
-
-    def __post_init__(self):
-        # make attn_mask_type a tuple to be hashable
-        object.__setattr__(self, "attn_mask_type", tuple(self.attn_mask_type))
+    is_deterministic_mode_enable: bool
+    is_hierarchical_comm_enable: bool
 
 
 class DistAttnRuntimeMgr:
@@ -266,6 +265,43 @@ class DistAttnRuntimeMgr:
         ) and is_same_process_group(
             self.cp_group, other.cp_group
         )
+
+
+class DistAttnRuntimeDict(OrderedDict):
+    """A fixed-length dictionary that evicts the least recently used item (LRU policy) when capacity is exceeded"""
+
+    def __init__(self, max_size: int, *args, **kwargs):
+        self.max_size = max_size
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        # If key exists, delete it first (to ensure it moves to end)
+        if key in self:
+            del self[key]
+        # If at max capacity, remove the oldest item
+        elif len(self) >= self.max_size:
+            self.popitem(last=False)
+        # Insert new key-value pair (automatically added to end)
+        super().__setitem__(key, value)
+
+    def get(self, key, default=None):
+        # Override get method to move accessed items to end (marking as recently used)
+        if key in self:
+            value = super().__getitem__(key)
+            del self[key]
+            super().__setitem__(key, value)
+            return value
+        return default
+
+    def get_most_recent_key(self):
+        """
+        Gets and returns the most recently added or accessed key.
+        If the dictionary is empty, returns None.
+        """
+        if not self:
+            return None
+
+        return next(reversed(self.keys()))
 
 
 def init_dist_attn_runtime_mgr(

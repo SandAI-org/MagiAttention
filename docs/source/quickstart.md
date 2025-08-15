@@ -134,9 +134,9 @@ k_ranges = AttnRanges.from_ranges(
 attn_mask_type = [AttnMaskType.FULL] * len(q_ranges)
 total_seqlen_q = total_seqlen_k = total_seqlen
 pad_size = compute_pad_size( # pad embeds along seqlen dim for better performance
-total_seqlen_q=total_seqlen_q,
-cp_size=world_size, # assuming we only have 1-dim context parallelism (cp)
-chunk_size=chunk_size,
+    total_seqlen_q=total_seqlen_q,
+    cp_size=world_size, # assuming we only have 1-dim context parallelism (cp)
+    chunk_size=chunk_size,
 )
 
 # --- Dispatch token embedding tensor along seqlen dim to multiple ranks --- #
@@ -172,10 +172,10 @@ local_v = v_proj(local_x).view(-1, num_heads_kv, head_dim)
 # --- Distributed attention computation --- #
 
 local_out, _ = calc_attn( # the second return value is `local_lse` (log-sum-exp), known as the online-softmax correction factor
-q=local_q,
-k=local_k,
-v=local_v,
-key=magi_attn_runtime_key,
+    q=local_q,
+    k=local_k,
+    v=local_v,
+    key=magi_attn_runtime_key,
 )
 
 # --- Undispatch the output tensor along seqlen dim from multiple ranks and unpad --- #
@@ -183,8 +183,8 @@ key=magi_attn_runtime_key,
 # NOTE: the undispatch API may not be used until the moment you need the seqlen dimension to be compelete and ordered,
 # e.g. for either aforementioned sample-wise operations, or loss computation
 total_out = undispatch(
-x=local_out,
-key=magi_attn_runtime_key,
+    x=local_out,
+    key=magi_attn_runtime_key,
 )
 
 # --- Clear up distributed environment --- #

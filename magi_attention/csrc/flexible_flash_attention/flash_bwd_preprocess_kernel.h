@@ -1,3 +1,19 @@
+/**********************************************************************************
+ * Copyright (c) 2025 SandAI. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *********************************************************************************/
+
 /******************************************************************************
  * Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, Tri Dao.
  ******************************************************************************/
@@ -127,7 +143,7 @@ class FlashAttnBwdPreprocess {
   void operator()(Params const& params, [[maybe_unused]] char* smem_buf) {
     static constexpr int kBlockM = get<0>(TileShape_MK{});
 
-    // 1个thread处理一行，因此需要保证kBlockM <= MaxThreadsPerBlock
+    // one thread processes one row, thus we need kBlockM <= MaxThreadsPerBlock
     static_assert(kBlockM <= MaxThreadsPerBlock);
 
     // Get block coordinates
@@ -165,7 +181,7 @@ class FlashAttnBwdPreprocess {
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
-    // REVIEW(littsk): 为什么是infinity而不是-infinity？
+    // REVIEW(littsk): why use infinity here, instead of -infinity ?
     float lse = thread_idx < seqlen_o - m_block * kBlockM && thread_idx < kBlockM ? gLSE(thread_idx) : INFINITY;
 
     // Initialize the tiled copy for O and dO

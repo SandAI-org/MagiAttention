@@ -22,7 +22,11 @@ import magi_attention
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DistAttnConfig
-from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeKey, DistAttnRuntimeMgr
+from magi_attention.dist_attn_runtime_mgr import (
+    DistAttnRuntimeDict,
+    DistAttnRuntimeKey,
+    DistAttnRuntimeMgr,
+)
 from magi_attention.functional.dist_attn import DistFlashAttnRuntime
 from magi_attention.meta import (
     calc_attn_meta_from_dispatch_meta,
@@ -31,11 +35,11 @@ from magi_attention.meta import (
 from magi_attention.utils import wrap_to_list
 from magi_attention.utils._utils import is_list_type_all
 
-from .functools import FixedLenDict, apply_padding, pad_at_dim, unpad_at_dim
+from .functools import apply_padding, pad_at_dim, unpad_at_dim
 
-DistAttnRuntimeDict = FixedLenDict(
-    max_size=100
-)  # [DistAttnRuntimeKey, DistAttnRuntimeMgr]
+dist_attn_runtime_dict = DistAttnRuntimeDict(
+    max_size=magi_attention.dist_attn_runtime_dict_size()
+)  # dict[DistAttnRuntimeKey, DistAttnRuntimeMgr]
 
 
 GeneralAttnMaskType: TypeAlias = str | AttnMaskType | Sequence[str | AttnMaskType]
@@ -387,7 +391,7 @@ def magi_attn_flex_key(
     key = DistAttnRuntimeKey(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
-        attn_mask_type=attn_mask_type,
+        attn_mask_type=tuple(attn_mask_type),
         total_seqlen_q=total_seqlen_q,
         total_seqlen_k=total_seqlen_k,
         pad_size=pad_size,
@@ -395,6 +399,8 @@ def magi_attn_flex_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
+        is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
     )
 
     # Validate sequence length
@@ -416,7 +422,7 @@ def magi_attn_flex_key(
         is_k_permutable=is_k_permutable,
     )
 
-    if key not in DistAttnRuntimeDict.keys():
+    if key not in dist_attn_runtime_dict.keys():
         # calculate dist attn runtime key
         comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
             dispatch_meta_q=q_dispatch_meta,
@@ -450,7 +456,7 @@ def magi_attn_flex_key(
             is_k_permutable=is_k_permutable,
         )
 
-        DistAttnRuntimeDict[key] = value
+        dist_attn_runtime_dict[key] = value
 
     return key
 
@@ -596,9 +602,9 @@ def dispatch(
         torch.Tensor: the padded and dispatched local tensor.
 
     Raises:
-        ValueError: If the provided ``key`` does not exist in ``DistAttnRuntimeDict``.
+        ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = DistAttnRuntimeDict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -624,9 +630,9 @@ def undispatch(
         torch.Tensor: the undispatched and unpadded tensor.
 
     Raises:
-        ValueError: If the provided ``key`` does not exist in ``DistAttnRuntimeDict``.
+        ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = DistAttnRuntimeDict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -659,9 +665,9 @@ def calc_attn(
             - lse (torch.Tensor): Log-sum-exp values for numerical stability.
 
     Raises:
-        ValueError: If the provided ``key`` does not exist in ``DistAttnRuntimeDict``.
+        ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = DistAttnRuntimeDict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -679,7 +685,7 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
     Returns:
         torch.Tensor: postion ids of local tensor w.r.t. global tensor.
     """
-    mgr: DistAttnRuntimeMgr = DistAttnRuntimeDict.get(key)
+    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
@@ -697,4 +703,4 @@ def get_most_recent_key() -> DistAttnRuntimeKey:
     Returns:
         DistAttnRuntimeKey: the most recent inserted key.
     """
-    return DistAttnRuntimeDict.get_most_recent_key()
+    return dist_attn_runtime_dict.get_most_recent_key()

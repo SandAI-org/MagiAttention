@@ -39,6 +39,10 @@ Inside the ffa backward kernel, we always use high-precision (fp32) accumulation
 However, by default we will downcast it to kv dtype before reducing among ranks to decrease comm overhead.
 ```
 
+**MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
+
+Modify the value of this env variable to change the size of `dist_attn_runtime_dict`. The default value is `100`. See `magi_attention.api.magi_attn_interface.py` for more information.
+
 
 ## For Debug
 

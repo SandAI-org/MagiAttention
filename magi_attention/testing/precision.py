@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+import os
 import re
+from functools import wraps
 
 import torch
 import torch.nn.functional as F
@@ -170,3 +173,28 @@ def torch_attn_ref(
         return out.to(q.dtype)
     else:
         return out
+
+
+@contextlib.contextmanager
+def switch_deterministic_mode_context(enable: bool = True):
+    old_value = os.environ.get("MAGI_ATTENTION_DETERMINISTIC_MODE", None)
+    os.environ["MAGI_ATTENTION_DETERMINISTIC_MODE"] = "1" if enable else "0"
+
+    yield
+
+    if old_value is not None:
+        os.environ["MAGI_ATTENTION_DETERMINISTIC_MODE"] = old_value
+    else:
+        del os.environ["MAGI_ATTENTION_DETERMINISTIC_MODE"]
+
+
+def switch_deterministic_mode_decorator(enable: bool = True):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            with switch_deterministic_mode_context(enable):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator

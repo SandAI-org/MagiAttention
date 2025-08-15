@@ -101,7 +101,7 @@ When you need to recover the complete global tensor from the local tensor like c
 
 ## Utility Functions
 
-### Compute Pad Size
+### Compute Pad Size and Padding
 
 During the use of MagiAttention, we divide the `total_seqlen` into multiple chunks of size `chunk_size` and evenly distribute them across multiple GPUs. To ensure that `total_seqlen` is divisible by `chunk_size` and that each GPU receives the same number of chunks, we need to pad the original input. You can call `compute_pad_size` to calculate the required padding length, and use this value as a parameter in subsequent functions.
 
@@ -111,6 +111,26 @@ During the use of MagiAttention, we divide the `total_seqlen` into multiple chun
 
 ```{eval-rst}
 .. autofunction:: compute_pad_size
+```
+
+After obtaining `pad_size`, you can use `pad_at_dim` and `unpad_at_dim` function to pad and unpad the tensor.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.functools
+```
+
+```{eval-rst}
+.. autofunction:: pad_at_dim
+```
+
+```{eval-rst}
+.. autofunction:: unpad_at_dim
+```
+
+Similarly, you can use `pad_size` along with `total_seqlen` and other related information to apply padding to a (q_ranges, k_ranges, masktypes) tuple using `apply_padding` function. This function fills the padding region with invalid slices.
+
+```{eval-rst}
+.. autofunction:: apply_padding
 ```
 
 
@@ -130,8 +150,7 @@ Since MagiAttention needs to permute the input tensor along the seqlen dim, some
 
 ### Get Most Recent Key
 
-If you have trouble accessing the meta key, and meanwhile you need to get the most recent key, then you can call `get_most_recent_key` to get it. However, we strongly recommend you to access the key passed through the arguments,
-in case of unexpected inconsistency.
+If you have trouble accessing the meta key, and meanwhile you need to get the most recent key, then you can call `get_most_recent_key` to get it. However, we strongly recommend you to access the key passed through the arguments, in case of unexpected inconsistency.
 
 ```{eval-rst}
 .. currentmodule:: magi_attention.api.magi_attn_interface
@@ -139,4 +158,39 @@ in case of unexpected inconsistency.
 
 ```{eval-rst}
 .. autofunction:: get_most_recent_key
+```
+
+
+### Infer Varlen Masks
+
+If you want to use a varlen mask where each segment has the same length, we provide a `infer_varlen_mask_from_batch` function that generates the corresponding cu_seqlens tensors for you.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.functools
+```
+
+```{eval-rst}
+.. autofunction:: infer_varlen_mask_from_batch
+```
+
+During the use of varlen mask, it is often necessary to reshape a tensor of shape `[batch_size × seq_len, ...]` into `[batch_size × seq_len, ...]`. To facilitate the use of the above APIs, we provide the `squash_batch_dim` function to merge the tensor dimensions.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.functools
+```
+
+```{eval-rst}
+.. autofunction:: squash_batch_dim
+```
+
+### Infer Sliding Window Masks
+
+In the design of `MagiAttention`, we use a (q_range, k_range, masktype) tuple to represent a slice. For sliding window masks, we do not provide a dedicated masktype to represent them directly. However, a sliding window mask can be decomposed into a combination of existing masktypes such as `full`, `causal`, `inv_causal`, and `bi_causal`. If you're unsure how to perform this decomposition, we provide `infer_attn_mask_from_sliding_window` function to handle this process for you.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.functools
+```
+
+```{eval-rst}
+.. autofunction:: infer_attn_mask_from_sliding_window
 ```

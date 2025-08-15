@@ -1009,15 +1009,17 @@ class TERingAttnFunc(torch.autograd.Function):
             if i == (cp_size - 1):
                 send_tensor = send_tensor[1]
                 recv_tensor = recv_tensor[1]
-            send_recv_reqs = attn_p2p_communicate(
-                cp_rank,
-                send_tensor,
-                send_dst,
-                recv_tensor,
-                recv_src,
-                ctx.cp_group,
-                batch_p2p_comm,
-            )
+
+            if cp_size > 1:
+                send_recv_reqs = attn_p2p_communicate(
+                    cp_rank,
+                    send_tensor,
+                    send_dst,
+                    recv_tensor,
+                    recv_src,
+                    ctx.cp_group,
+                    batch_p2p_comm,
+                )
 
             kv = p2p_comm_buffers[i % 2][0]
             dq_, dk_, dv_ = None, None, None
@@ -1403,15 +1405,17 @@ class FA3RingAttnFunc(torch.autograd.Function):
             if i == (cp_size - 1):
                 send_tensor = send_tensor[1]
                 recv_tensor = recv_tensor[1]
-            send_recv_reqs = attn_p2p_communicate(
-                cp_rank,
-                send_tensor,
-                send_dst,
-                recv_tensor,
-                recv_src,
-                ctx.cp_group,
-                batch_p2p_comm,
-            )
+
+            if cp_size > 1:
+                send_recv_reqs = attn_p2p_communicate(
+                    cp_rank,
+                    send_tensor,
+                    send_dst,
+                    recv_tensor,
+                    recv_src,
+                    ctx.cp_group,
+                    batch_p2p_comm,
+                )
 
             kv = p2p_comm_buffers[i % 2][0]
             q_, kv_, out_, dout_ = None, None, None, None
