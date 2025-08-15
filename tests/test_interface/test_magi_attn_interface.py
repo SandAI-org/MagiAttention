@@ -65,8 +65,8 @@ from magi_attention.testing.precision import (
     H100_NVLINK_A2A_BWU,
     H100_NVLINK_BANDWIDTH,
     H100_TFLOPS_16,
-    switch_deterministic_mode_decorator,
 )
+from magi_attention.testing.utils import switch_deterministic_mode_decorator
 from magi_attention.utils import (
     get_a2a_corr_factor,
     get_calc_cost_factor,

@@ -14,14 +14,21 @@
 
 import functools
 import itertools
+import os
 from typing import Any, Callable
 
-from . import dist_common
+import torch.distributed as dist
+
+from magi_attention.utils import str2seed
+
+from . import dist_common, utils
+from .dist_common import RUN_IN_MP
 from .gt_dispatcher import GroundTruthDispatcher
 from .precision import EPSILON, assert_close, torch_attn_ref
 
 __all__ = [
     "dist_common",
+    "utils",
     "GroundTruthDispatcher",
     "assert_close",
     "torch_attn_ref",
@@ -32,23 +39,22 @@ __all__ = [
 
 def parameterize(argument: str, values: list[Any]) -> Callable:
     """
-    This function simulates the behavior of pytest.mark.parameterize.
+    This function simulates pytest.mark.parameterize with multi-process support.
 
-    When multiple decorators are stacked, parameter information is collected and
-    passed upwards. The outermost decorator becomes the sole executor, responsible
-    for creating a Cartesian product of all parameters and running the tests.
+    Default Behavior (Replication Mode):
+    In a distributed environment, every rank will execute every single test case.
+    This is necessary for tests that require collective communication.
 
-    This version implements a "fail-fast" behavior: the test run stops
-    immediately on the first failure, raising an exception with the full
-    parameter context of the failing test case. The error message is clean
-    and not nested.
+    Optional Behavior (Distribution Mode):
+    If the test function is decorated with `@distribute_parameterized_test_cases`,
+    the test cases will be split among the available ranks. This is ideal for
+    speeding up tests where each case is independent.
 
-    If a function is wrapped with this wrapper, non-parametrized arguments must be
-    keyword arguments; positional arguments are not allowed.
+    This version implements "fail-fast": the run stops on the first failure.
 
     Args:
         argument (str): The name of the argument to parameterize.
-        values (list[Any]): A list of values to iterate for this argument.
+        values (list[Any]): A list of values for this argument.
     """
 
     def _wrapper(func: Callable):
@@ -56,8 +62,6 @@ def parameterize(argument: str, values: list[Any]) -> Callable:
         # wrapped function (func) already has an _param_info attribute. If so, it
         # means it has been processed by an inner parameterize decorator.
         inner_params = getattr(func, "_param_info", [])
-
-        # Prepend the current decorator's parameter info to the list.
         all_params = [(argument, values)] + inner_params
 
         # Trace back to find the original, unwrapped test function.
@@ -70,17 +74,44 @@ def parameterize(argument: str, values: list[Any]) -> Callable:
             # from inner decorators is never called directly; it only serves as a carrier
             # for parameter info.
 
+            # --- Distributed Setup --- #
+
+            if dist.is_available() and dist.is_initialized():
+                rank = dist.get_rank()
+                world_size = dist.get_world_size()
+                is_dist_setup = True
+            else:
+                rank = 0
+                world_size = 1
+                is_dist_setup = False
+
+            # --- BEHAVIOR CONTROL --- #
+
+            # Check the environment variable to decide the execution mode.
+            # Defaults to '0' (replication mode) if the var is not set.
+            is_run_in_mp = is_dist_setup and os.environ.get(RUN_IN_MP, "0") == "1"
+
+            # --- Test Case Generation and Execution --- #
             arg_names = [name for name, _ in all_params]
             value_lists = [vals for _, vals in all_params]
-
-            # Create the Cartesian product of all parameter values.
             all_combinations = itertools.product(*value_lists)
 
-            for combination in all_combinations:
+            for test_case_id, combination in enumerate(all_combinations):
+                # --- Work Distribution/Replication Logic --- #
+
+                # Only apply the distribution logic if the mode is enabled AND we are in a multi-rank setting.
+                if is_run_in_mp:
+                    # since we might jump some combinations inside the test function,
+                    # thus using test_case_id as the assign_id might encounter work imbalance among ranks
+                    # assign_id = test_case_id
+                    assign_id = str2seed(str(combination))
+                    if assign_id % world_size != rank:
+                        continue
+
+                # In replication mode (default), this block is skipped, and every rank runs the code below.
                 current_params_kwargs = dict(zip(arg_names, combination))
                 final_kwargs = {**kwargs, **current_params_kwargs}
 
-                # The try...except block is now INSIDE the loop.
                 try:
                     # Directly call the original function with the current set of parameters.
                     original_func(*args, **final_kwargs)
@@ -88,8 +119,6 @@ def parameterize(argument: str, values: list[Any]) -> Callable:
                     # If an exception occurs, we format a comprehensive error message
                     # and re-raise immediately, which stops the execution.
                     param_str_list = []
-                    # Reverse the parameter order to match the visual decorator stacking
-                    # order in the code (top-down).
                     for name, value_list in all_params:
                         current_val = current_params_kwargs[name]
                         try:
@@ -101,9 +130,13 @@ def parameterize(argument: str, values: list[Any]) -> Callable:
                             param_str_list.append(f"{name}={current_val}")
 
                     error_header = " x ".join(param_str_list)
-                    error_msg = (
-                        f"\n--> Test case failed with parameters: {error_header}\n"
-                        f"    {type(e).__name__}: {e}"
+                    error_msg = "".join(
+                        [
+                            "\n-->",
+                            f" [Rank {rank}] " if is_dist_setup else " ",
+                            f"Test case failed with parameters: {error_header}\n",
+                            f"    {type(e).__name__}: {e}",
+                        ]
                     )
 
                     # Re-raise the original exception type with the new, clean message.

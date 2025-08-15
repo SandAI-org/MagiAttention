@@ -21,6 +21,8 @@ import torch
 import torch.distributed as dist
 from torch.testing._internal.common_distributed import MultiProcessTestCase
 
+from .utils import switch_envvar_decorator
+
 NAME = "name"
 
 SKIP_WORLD_SIZE = "skip_world_size"
@@ -36,6 +38,9 @@ DEVICE_TYPE = (
 PG_DEFAULT_BACKEND = "nccl" if DEVICE_TYPE == "cuda" else "gloo"
 
 NUM_DEVICES = 4
+
+RUN_IN_MP = "MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP"
+
 
 # We use this as a proxy for "multiple GPUs exist"
 if torch.cuda.is_available() and torch.cuda.device_count() > 1:
@@ -127,3 +132,7 @@ def with_comms(func: TestFunc) -> TestFunc:
         self.destroy_pg()
 
     return wrapper
+
+
+def with_run_in_mp(func: TestFunc) -> TestFunc:
+    return switch_envvar_decorator(envvar_name=RUN_IN_MP, enable=True)(with_comms(func))

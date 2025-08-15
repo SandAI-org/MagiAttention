@@ -14,9 +14,7 @@
 
 import unittest
 from typing import Any, Optional, Tuple
-from unittest import TestCase
 
-import pytest
 import torch
 from einops import rearrange
 from torch.nn.functional import scaled_dot_product_attention as sdpa_func
@@ -29,6 +27,7 @@ from magi_attention.functional.flex_flash_attn import (
     merge_ranges,
 )
 from magi_attention.testing import parameterize
+from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import assert_close, calc_inf_norm
 from magi_attention.utils.sparse_utils import (
     flatten_block_mask,
@@ -41,7 +40,7 @@ from magi_attention.utils.sparse_utils import (
 )
 
 
-class TestBlockSparseAttn(TestCase):
+class TestBlockSparseAttn(DistTestBase):
     @property
     def seed(self):
         return 42
@@ -50,8 +49,9 @@ class TestBlockSparseAttn(TestCase):
     def device(self):
         return torch.cuda.current_device()
 
-    def setUp(self):
-        torch.manual_seed(self.seed)
+    @property
+    def world_size(self) -> int:
+        return 8
 
     def check_deterministic(
         self,
@@ -673,7 +673,7 @@ class TestBlockSparseAttn(TestCase):
         else:
             raise ValueError(f"Unknown test_type: {test_type}")
 
-    @pytest.mark.slow
+    @with_run_in_mp
     @parameterize(
         "model_config",
         [
@@ -778,9 +778,9 @@ class TestBlockSparseAttn(TestCase):
             f"[attn_type={attn_type}]"
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
-            f"[test_accumulation_inplace={test_accumulation_inplace}"
+            f"[test_accumulation_inplace={test_accumulation_inplace}]"
         )
-        print(f"{test_case=}")
+        print(f"[RANK {self.rank}]: {test_case=}")
         # ----- Construct q, k, vdata ----- #
         q = torch.randn(
             (1, seqlen, num_heads_q, head_dim),
