@@ -136,7 +136,6 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
 
     @with_comms
     @parameterize(
-        # TODO: test more diverse and complicated attn mask
         "attn_config",
         [
             # full attn with seqlen 1k and batchsize 2

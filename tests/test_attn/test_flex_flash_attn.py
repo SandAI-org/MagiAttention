@@ -16,9 +16,7 @@
 import random
 import unittest
 from typing import Any
-from unittest import TestCase
 
-import pytest
 import torch
 
 import magi_attention.testing
@@ -31,6 +29,7 @@ from magi_attention.functional.flex_flash_attn import (
     merge_ranges,
 )
 from magi_attention.testing import parameterize
+from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import (
     EPSILON,
     assert_close,
@@ -41,7 +40,7 @@ from magi_attention.testing.precision import (
 from magi_attention.utils import get_attn_mask_from_ffa_args, is_list_value_any
 
 
-class TestFlexFlashAttn(TestCase):
+class TestFlexFlashAttn(DistTestBase):
     @property
     def seed(self):
         return 42
@@ -50,8 +49,9 @@ class TestFlexFlashAttn(TestCase):
     def device(self):
         return torch.cuda.current_device()
 
-    def setUp(self):
-        torch.manual_seed(self.seed)
+    @property
+    def world_size(self) -> int:
+        return 8
 
     def generate_non_overlapping_qk_pairs(
         self,
@@ -842,6 +842,7 @@ class TestFlexFlashAttn(TestCase):
         },
     ]
 
+    @with_run_in_mp
     @parameterize(
         "attn_mask_config",
         [
@@ -1154,60 +1155,7 @@ class TestFlexFlashAttn(TestCase):
             test_case=test_case,
         )
 
-    def test_compiled_flex_flash_attn(self):
-        s, h, d = 2048, 6, 128
-        hk = 3
-
-        q = torch.randn(s, h, d, dtype=torch.bfloat16, device="cuda")
-        k = torch.randn(s, hk, d, dtype=torch.bfloat16, device="cuda")
-        v = torch.randn_like(k)
-        do = torch.randn_like(q)
-
-        [x.requires_grad_(True) for x in (q, k, v)]
-
-        q_ranges = AttnRanges.from_ranges([[0, s // 2], [s // 2, s]])
-        k_ranges = AttnRanges.from_ranges([[0, s // 2], [s // 2, s]])
-        attn_type_map = [0, 1]
-        max_seqlen_q = s // 2
-        max_seqlen_k = s // 2
-
-        compiled_ffa_func = torch.compile(fullgraph=True)(flex_flash_attn_func)
-
-        o, lse = compiled_ffa_func(
-            q=q,
-            k=k,
-            v=v,
-            q_ranges=q_ranges.to_tensor("cuda"),
-            k_ranges=k_ranges.to_tensor("cuda"),
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            attn_type_map=torch.tensor(attn_type_map, dtype=torch.int32, device="cuda"),
-            # FIXME: compiling does not support auto_range_merge
-            # due to custom unique_consecutive_pairs kernel with dynamic output shape
-            auto_range_merge=False,
-        )
-        o.backward(do)
-        dq, dk, dv = q.grad, k.grad, v.grad
-
-        self.assert_close_to_torch_ref(
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            attn_type_map=attn_type_map,
-            total_seqlen_q=s,
-            total_seqlen_k=s,
-            total_q=q,
-            total_k=k,
-            total_v=v,
-            total_out=o,
-            grad_total_q=dq,
-            grad_total_k=dk,
-            grad_total_v=dv,
-            grad_total_out=do,
-            dtype=torch.bfloat16,
-            test_case="test_compiled_flex_flash_attn",
-        )
-
-    @pytest.mark.slow
+    @with_run_in_mp
     @parameterize("model_config", MODEL_CONFIGS)
     @parameterize(
         "generate_config",
@@ -1342,6 +1290,59 @@ class TestFlexFlashAttn(TestCase):
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             test_case=test_case,
+        )
+
+    def test_compiled_flex_flash_attn(self):
+        s, h, d = 2048, 6, 128
+        hk = 3
+
+        q = torch.randn(s, h, d, dtype=torch.bfloat16, device="cuda")
+        k = torch.randn(s, hk, d, dtype=torch.bfloat16, device="cuda")
+        v = torch.randn_like(k)
+        do = torch.randn_like(q)
+
+        [x.requires_grad_(True) for x in (q, k, v)]
+
+        q_ranges = AttnRanges.from_ranges([[0, s // 2], [s // 2, s]])
+        k_ranges = AttnRanges.from_ranges([[0, s // 2], [s // 2, s]])
+        attn_type_map = [0, 1]
+        max_seqlen_q = s // 2
+        max_seqlen_k = s // 2
+
+        compiled_ffa_func = torch.compile(fullgraph=True)(flex_flash_attn_func)
+
+        o, lse = compiled_ffa_func(
+            q=q,
+            k=k,
+            v=v,
+            q_ranges=q_ranges.to_tensor("cuda"),
+            k_ranges=k_ranges.to_tensor("cuda"),
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            attn_type_map=torch.tensor(attn_type_map, dtype=torch.int32, device="cuda"),
+            # FIXME: compiling does not support auto_range_merge
+            # due to custom unique_consecutive_pairs kernel with dynamic output shape
+            auto_range_merge=False,
+        )
+        o.backward(do)
+        dq, dk, dv = q.grad, k.grad, v.grad
+
+        self.assert_close_to_torch_ref(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            total_seqlen_q=s,
+            total_seqlen_k=s,
+            total_q=q,
+            total_k=k,
+            total_v=v,
+            total_out=o,
+            grad_total_q=dq,
+            grad_total_k=dk,
+            grad_total_v=dv,
+            grad_total_out=do,
+            dtype=torch.bfloat16,
+            test_case="test_compiled_flex_flash_attn",
         )
 
 

@@ -120,7 +120,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
     @with_comms
     @parameterize(
-        # TODO: test more diverse and complicated attn mask
         "attn_config",
         [
             # full attn with total seqlen 14k
