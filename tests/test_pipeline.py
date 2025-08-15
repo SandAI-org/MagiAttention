@@ -71,6 +71,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             os.environ.get("MAGI_ATTENTION_UNITEST_PROFILE_MODE", "0") == "1"
         )
 
+        if self.profile_mode:
+            # disable sanity check when profiling
+            os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "0"
+
         # init several pgs with all ranks
         self.nccl_groups = [
             dist.new_group(list(range(self.world_size)), backend=self.backend)
@@ -472,6 +476,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         if self.profile_mode:  # [start_iter, end_iter)
             prof_iters, prof_start_iter, prof_end_iter = 10, 5, 8
+            assert not magi_attention.is_sanity_check_enable()
         else:
             prof_iters, prof_start_iter, prof_end_iter = 1, -1, -1
             assert magi_attention.is_sanity_check_enable()

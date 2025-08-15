@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import datetime
-import os
 from functools import wraps
 from typing import Any, Callable
 
@@ -46,11 +45,6 @@ RUN_IN_MP = "MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP"
 if torch.cuda.is_available() and torch.cuda.device_count() > 1:
     # when we actually have multiple GPUs, relax the requirement to smaller counts.
     NUM_DEVICES = min(NUM_DEVICES, torch.cuda.device_count())
-
-
-# HACK: enable unitest sanity check if not using profile mode
-if os.environ.get("MAGI_ATTENTION_UNITEST_PROFILE_MODE", "0") != "1":
-    os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "1"
 
 
 class DistTestBase(MultiProcessTestCase):

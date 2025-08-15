@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-from contextlib import contextmanager
+from functools import partial
 from typing import Any
 
 import torch
@@ -30,6 +29,7 @@ from magi_attention.comm.primitive.utils import (
 )
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
+from magi_attention.testing.utils import switch_envvar_context
 
 
 class TestGroupCollectiveWithWorldSize4(DistTestBase):
@@ -38,7 +38,9 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        self.hier_comm_env_variable = "MAGI_ATTENTION_HIERARCHICAL_COMM"
+        self._switch_hier_comm_context = partial(
+            switch_envvar_context, envvar_name="MAGI_ATTENTION_HIERARCHICAL_COMM"
+        )
 
         world_size_inter_node, world_size_intra_node = {
             1: (1, 1),
@@ -298,7 +300,10 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
         )
 
         # run group-cast comm kernel
-        with self._switch_hier_comm(enable=use_hier_comm):
+        with self._switch_hier_comm_context(enable=use_hier_comm):
+            assert (
+                not use_hier_comm or magi_attention.comm.is_hierarchical_comm_enable()
+            )
             work = group_cast_collective(
                 input=send_buffer,
                 output=recv_buffer,
@@ -477,7 +482,10 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
         )
 
         # run group-reduce comm kernel
-        with self._switch_hier_comm(enable=use_hier_comm):
+        with self._switch_hier_comm_context(enable=use_hier_comm):
+            assert (
+                not use_hier_comm or magi_attention.comm.is_hierarchical_comm_enable()
+            )
             work = group_reduce_collective(
                 input=send_buffer,
                 output=recv_buffer_before_reduce,
@@ -503,15 +511,6 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                 f"{recv_buffer_after_reduce=} != {expected_recv_buffer=}",
             ),
         )
-
-    @contextmanager
-    def _switch_hier_comm(self, enable: bool = False):
-        old_value = os.environ.get(self.hier_comm_env_variable, "0")
-        os.environ[self.hier_comm_env_variable] = "1" if enable else "0"
-        if enable:  # sanity check
-            assert magi_attention.comm.is_hierarchical_comm_enable()
-        yield
-        os.environ[self.hier_comm_env_variable] = old_value
 
 
 class TestGroupCollectiveWithWorldSize6(TestGroupCollectiveWithWorldSize4):
