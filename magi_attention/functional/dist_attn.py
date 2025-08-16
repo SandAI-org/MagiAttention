@@ -286,7 +286,7 @@ class DistAttnRuntime:
         ]
         remote_q_seqlen = self.comm_meta.num_remote_qo_tokens_per_stage[overlap_stage]
 
-        # init remote kv buffer
+        # init remote q buffer
         remote_q_buffer = torch.empty(
             remote_q_seqlen,
             num_heads,
@@ -751,36 +751,36 @@ class DistAttnFunc(torch.autograd.Function):
         # do result correction to get final out and lse
         if dist_attn_runtime.fwd_use_acc:
             # the final out, lse has already been reduced into acc buffer by ffa fwd
-            out = partial_remote_out
-            lse = partial_remote_lse
+            local_out = partial_remote_out
+            local_lse = partial_remote_lse
         elif magi_attention.comm.is_qo_comm_enable():
             # the final out, lse has already been reduced into local buffer by group reduce
-            out = partial_local_out
-            lse = partial_local_lse
+            local_out = partial_local_out
+            local_lse = partial_local_lse
         else:  # the final out, lse need to be reduced manually from all partial out, lse
-            out, lse = result_correction(
+            local_out, local_lse = result_correction(
                 out_list=partial_out_list,
                 lse_list=partial_lse_list,
             )
 
-        if out is None:  # attn computation are all skipped
+        if local_out is None:  # attn computation are all skipped
             # NOTE: We cannot use torch.empty_like here, because empty_like may contain nan values,
             #       and once gradients between different tokens need to be reduced, the nan values
             #       from pad tokens would interfere with the gradients of other tokens
-            out = torch.zeros_like(local_q)
+            local_out = torch.zeros_like(local_q)
         else:
             # NOTE: since we've increased the precision of partial out for correction
             # here we need to downcast to q dtype to both return and save for backward
-            out = out.to(local_q.dtype)
+            local_out = local_out.to(local_q.dtype)
 
-        ctx.save_for_backward(local_q, local_kv, out, lse)
+        ctx.save_for_backward(local_q, local_kv, local_out, local_lse)
         ctx.dist_attn_runtime = dist_attn_runtime
 
-        return out, lse
+        return local_out, local_lse
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
-        local_q, local_kv, out, lse = ctx.saved_tensors
+        local_q, local_kv, local_out, local_lse = ctx.saved_tensors
         local_q: torch.Tensor
         local_kv: torch.Tensor
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
@@ -812,8 +812,8 @@ class DistAttnFunc(torch.autograd.Function):
             do=grad_output,
             q=local_q,
             kv=local_kv,
-            o=out,
-            lse=lse,
+            o=local_out,
+            lse=local_lse,
             overlap_stage=None,
             deterministic=dist_attn_runtime.deterministic,
         )
@@ -864,8 +864,8 @@ class DistAttnFunc(torch.autograd.Function):
                 do=grad_output,
                 q=local_q,
                 kv=curr_remote_kv,
-                o=out,
-                lse=lse,
+                o=local_out,
+                lse=local_lse,
                 dq_acc=partial_local_dq,
                 overlap_stage=ith_overlap_stage,
                 deterministic=dist_attn_runtime.deterministic,
@@ -891,7 +891,7 @@ class DistAttnFunc(torch.autograd.Function):
                 )
 
         # downcast final local dq to q dtype
-        partial_local_dq = partial_local_dq.to(local_q.dtype)
+        local_dq = partial_local_dq.to(local_q.dtype)
 
         # wait for all partial dkv reduced
         for partial_dkv_reduce_work in partial_dkv_reduce_works:
@@ -900,14 +900,12 @@ class DistAttnFunc(torch.autograd.Function):
             )
 
         # downcast final local dkv to kv dtype
-        partial_local_dkv = partial_local_dkv.to(local_kv.dtype)
+        local_dkv = partial_local_dkv.to(local_kv.dtype)
 
         # chunk final local dkv into dk and dv
-        partial_local_dk, partial_local_dv = dist_attn_runtime.chunk_kv(
-            partial_local_dkv
-        )
+        local_dk, local_dv = dist_attn_runtime.chunk_kv(local_dkv)
 
-        return partial_local_dq, partial_local_dk, partial_local_dv, None, None
+        return local_dq, local_dk, local_dv, None, None
 
 
 def dist_attn_func(
