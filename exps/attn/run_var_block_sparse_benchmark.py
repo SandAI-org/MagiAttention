@@ -245,13 +245,9 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         block_mask_cpu = (
             torch.rand(nhk, num_q_blocks_orig, num_kv_blocks_orig) < sparsity_ratio
         )
+        # flashinfer requires the row_sz to be of shape [num_q_heads, num_kv_block].
         block_row_sz_cpu = block_row_sz[..., kv_head_indices, :].detach().cpu()
         block_col_sz_cpu = block_col_sz.detach().cpu()
-
-        # print(f"{block_row_sz=}")
-        # print(f"{block_col_sz=}")
-
-        # print(f"Sparsity = {sparsity_ratio} of elements to compute")
 
         # allocate 128MB workspace buffer
         workspace_buffer = torch.empty(

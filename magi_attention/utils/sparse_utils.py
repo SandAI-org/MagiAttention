@@ -37,7 +37,7 @@ def generate_block_sparse_pattern(
         num_q_blocks (int): Number of query blocks per head.
         num_kv_blocks (int): Number of key-value blocks per head.
         sparsity (float): The density ratio of connections.
-        mode (Literal["per_q_head", "per_kv_head"]):
+        mode (str("per_q_head", "per_kv_head")):
             - "per_q_head": Each query head gets a unique random mask (for MHA).
             - "per_kv_head": Query heads in the same group share a mask (for GQA).
         device (str): The device to create tensors on.
@@ -265,7 +265,47 @@ def generate_variable_block_sparse_pattern(
     Generates a variable-size block sparse pattern with top-k sparsity,
     supporting both MHA and GQA semantics.
 
-    Returns tensors formatted for the `flatten -> generate_ranges` workflow.
+    Args:
+        num_q_heads (int): The total number of query heads.
+        num_kv_heads (int): The total number of key/value heads. For GQA, this is
+            less than num_q_heads. For MHA, this must be equal to num_q_heads.
+        seqlen_q (int): The sequence length of the query tensor.
+        seqlen_k (int): The sequence length of the key/value tensor.
+        num_q_blocks (int): The number of blocks to partition the query sequence into.
+        num_kv_blocks (int): The number of blocks to partition the key/value sequence into.
+        sparsity (float): The target sparsity level, between 0.0 and 1.0. This
+            determines the number of KV blocks to keep for each row of Q blocks.
+            Specifically, k = int(sparsity * num_kv_blocks).
+        mode (str, optional): The mask generation mode. Defaults to "per_kv_head".
+            - "per_kv_head": Generates one sparsity mask per KV head and repeats
+              it for all associated Q heads. This is the standard and efficient
+              approach for GQA.
+            - "per_q_head": Generates a unique sparsity mask for each Q head. This
+              is functionally equivalent to MHA.
+        min_q_block_size (int, optional): The minimum size of each block along the
+            query sequence. Defaults to 64.
+        min_kv_block_size (int, optional): The minimum size of each block along the
+            key/value sequence. Defaults to 64.
+        device (str | torch.device, optional): The device on which to create
+            the tensors. Defaults to "cuda".
+
+    Raises:
+        ValueError: If `num_q_heads` is not divisible by `num_kv_heads`.
+        ValueError: If a sequence length cannot be partitioned into the specified
+            number of blocks with the given minimum block size.
+        ValueError: If an unknown `mode` is provided.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple containing:
+        - final_mask (torch.Tensor): A boolean block-sparse attention mask of
+          shape `(1, num_q_heads, num_q_blocks, num_kv_blocks)`. `True` indicates
+          that a block should be computed.
+        - final_block_row_sz (torch.Tensor): A tensor of shape
+          `(num_q_heads, num_q_blocks)` containing the variable sizes of each
+          query block for each query head.
+        - final_block_col_sz (torch.Tensor): A tensor of shape
+          `(num_kv_heads, num_kv_blocks)` containing the variable sizes of each
+          key/value block for each key/value head.
     """
     if num_q_heads % num_kv_heads != 0:
         raise ValueError("num_q_heads must be divisible by num_kv_heads")
