@@ -190,7 +190,7 @@ if __name__ == "__main__":
         dist_attn_config=dist_attn_config,
     )
     # HACK: seperate cp group for dkv group-reduce
-    dist_attn_runtime_mgr.dist_attn_runtime.cp_group_dkv = nccl_groups[1]
+    dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = nccl_groups[1]
 
     # -------------------       run   ------------------- #
 

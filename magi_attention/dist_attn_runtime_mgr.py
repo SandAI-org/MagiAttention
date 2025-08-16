@@ -50,6 +50,7 @@ class DistAttnRuntimeKey:
     dist_attn_config: DistAttnConfig
     is_deterministic_mode_enable: bool
     is_hierarchical_comm_enable: bool
+    is_qo_comm_enable: bool
 
 
 class DistAttnRuntimeMgr:
@@ -419,8 +420,8 @@ def init_dist_attn_runtime_mgr(
     dist_attn_runtime = DistFlashAttnRuntime(
         comm_meta=comm_meta,
         calc_meta=attn_calc_meta,
-        cp_group_kv=cp_group,
-        cp_group_dkv=cp_group,  # TODO: support interface to set distinct cp group for dkv
+        cp_group_gc=cp_group,
+        cp_group_gr=cp_group,  # TODO: support interface to set distinct cp group for dkv
     )
 
     return DistAttnRuntimeMgr(

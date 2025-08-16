@@ -102,8 +102,8 @@ class TestDistFlashAttn(DistTestBase):
         )
 
         comm_meta = CommMeta(
-            num_remote_tokens_per_stage=[128 * 3],
-            group_collective_args_list=[
+            num_remote_kv_tokens_per_stage=[128 * 3],
+            kv_group_collective_args_list=[
                 GroupCollectiveArg(
                     input_split_size_list=[128],
                     output_split_size_list=[128, 128, 128],
@@ -123,8 +123,8 @@ class TestDistFlashAttn(DistTestBase):
         dist_attn_runtime = DistFlashAttnRuntime(
             comm_meta=comm_meta,
             calc_meta=attn_calc_meta,
-            cp_group_kv=self.nccl_groups[0],
-            cp_group_dkv=self.nccl_groups[1],
+            cp_group_gc=self.nccl_groups[0],
+            cp_group_gr=self.nccl_groups[1],
         )
 
         local_q = torch.randn(
