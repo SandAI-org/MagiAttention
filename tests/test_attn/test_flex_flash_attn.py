@@ -14,10 +14,10 @@
 
 
 import random
-import unittest
 from typing import Any
 
 import torch
+from torch.testing._internal.common_utils import run_tests
 
 import magi_attention.testing
 from magi_attention.common import AttnRanges
@@ -1196,7 +1196,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "min_len_k": 16,
                 "max_len_k": 256,
             },
-            # FIXME: ut fail in the following 2 test case, which may because the very small qk range.
+            # FIXME: ut failed for the following 2 test case, maybe due to very small qk ranges.
             # {
             #    "name": "strange_test_1",
             #    "total_seqlen_q": 513,
@@ -1347,4 +1347,4 @@ class TestFlexFlashAttn(DistTestBase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    run_tests()

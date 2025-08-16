@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import unittest
 from typing import Any, Optional, Tuple
 
 import torch
 from einops import rearrange
 from torch.nn.functional import scaled_dot_product_attention as sdpa_func
+from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.functional.dist_attn import result_correction
@@ -824,4 +824,4 @@ class TestBlockSparseAttn(DistTestBase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    run_tests()
