@@ -191,7 +191,6 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
     if attn_impl == "ffa":
         # flatten headdim for ffa cause
         # flat_block_sparse_mask = flatten_head_mask(block_mask)
-        print(f"{block_mask.shape=}")
         flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
 
         # 3. Generate ranges from the flattened 2D mask

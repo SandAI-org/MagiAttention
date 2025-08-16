@@ -134,6 +134,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
     # block_mask, scores = generate_global_block_sparse_pattern(
     #    orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"
     # )
+
     block_mask, scores = generate_block_sparse_pattern(
         num_q_heads=nhq,
         num_kv_heads=nhk,
@@ -142,6 +143,15 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         sparsity=sparsity_ratio,
         device="cuda",
     )
+    # generate block mask totally random.
+    """
+    block_mask  = (
+            torch.rand(1, nhk, num_q_blocks_orig, num_kv_blocks_orig, device='cuda') < sparsity_ratio
+        )
+
+    repeats = nhq // nhk
+    block_mask = torch.repeat_interleave(block_mask, repeats=repeats, dim=1)
+    """
 
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
 
@@ -329,7 +339,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         k = k.view(b * nhk, orig_seq_len_k, hd).contiguous()
         v = v.view(b * nhk, orig_seq_len_k, hd).contiguous()
         # BUG: using original block mask will cause illegal access sometimes
-        # block_mask_cpu = block_mask.detach().cpu()
+        # block_mask_cpu = block_mask.squeeze(0).detach().cpu()
         block_mask_cpu = (
             torch.rand(nhk, num_q_blocks_orig, num_kv_blocks_orig) < sparsity_ratio
         )
