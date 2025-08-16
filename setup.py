@@ -66,6 +66,12 @@ SKIP_MAGI_ATTN_EXT_BUILD = (
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 
+# init cmdclass
+cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension}
+
+# init package_data
+package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
+
 
 # TODO: remove flags to compile with sm80
 # which we do not support for now
@@ -452,13 +458,40 @@ def init_ext_modules():
         torch._C._GLIBCXX_USE_CXX11_ABI = True
 
 
+def to_full_ext_module_name(ext_module_name: str) -> str:
+    return f"{PACKAGE_NAME}.{ext_module_name}"
+
+
+def find_prebuilt_lib(repo_dir: Path, ext_module_name: str) -> str | None:
+    """Search for a prebuilt library: ${ext_name}.so)"""
+    search_path = repo_dir / PACKAGE_NAME / f"{ext_module_name}.*.so"
+    found_libs = glob.glob(str(search_path))
+    if found_libs:
+        prebuilt_path = found_libs[0]
+        print(
+            f"\nSkipping build for {ext_module_name}, found prebuilt library: {prebuilt_path}, "
+            "thus we automatically add it to package_data\n"
+        )
+        lib_filename = os.path.basename(prebuilt_path)
+        package_data.setdefault(PACKAGE_NAME, []).append(lib_filename)
+    else:
+        print(
+            f"\nSkipping build for {ext_module_name}, no prebuilt library found, "
+            "thus this ext module will not be found after installation.\n"
+        )
+    return None
+
+
 def build_ffa_ext_module(
     repo_dir: Path,
     csrc_dir: Path,
     common_dir: Path,
     cutlass_dir: Path,
 ) -> CUDAExtension | None:
+    ext_module_name = "flexible_flash_attention_cuda"
+
     if SKIP_FFA_BUILD:
+        find_prebuilt_lib(repo_dir, ext_module_name)
         return None
 
     print(
@@ -556,7 +589,7 @@ def build_ffa_ext_module(
     }
 
     return CUDAExtension(
-        name="flexible_flash_attention_cuda",
+        name=to_full_ext_module_name(ext_module_name),
         sources=sources,
         extra_compile_args=extra_compile_args,
         include_dirs=include_dirs,
@@ -568,7 +601,10 @@ def build_magi_attn_ext_module(
     csrc_dir: Path,
     common_dir: Path,
 ) -> CUDAExtension | None:
+    ext_module_name = "magi_attn_ext"
+
     if SKIP_MAGI_ATTN_EXT_BUILD:
+        find_prebuilt_lib(repo_dir, ext_module_name)
         return None
 
     print(
@@ -588,18 +624,15 @@ def build_magi_attn_ext_module(
     extra_compile_args = {"cxx": ["-O3", "-std=c++17"]}
 
     return CUDAExtension(
-        name="magi_attn_ext",
+        name=to_full_ext_module_name(ext_module_name),
         sources=sources,
         extra_compile_args=extra_compile_args,
         include_dirs=include_dirs,
     )
 
 
-cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension}
-package_data = {"magi_attention": ["*.pyi", "**/*.pyi"]}
+# build ext modules
 ext_modules = []
-
-
 if not SKIP_CUDA_BUILD:
     # init before building any ext module
     init_ext_modules()

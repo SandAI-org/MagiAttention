@@ -23,7 +23,7 @@ from magi_attention.utils import nvtx
 # We need to import the CUDA kernels after importing torch
 is_ffa_installed = False
 try:
-    import flexible_flash_attention_cuda
+    from magi_attention import flexible_flash_attention_cuda  # type: ignore[attr-defined]
 
     is_ffa_installed = True
 except ImportError:

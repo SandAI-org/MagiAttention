@@ -641,10 +641,11 @@ class DistAttnRuntime:
                 group=self.cp_group_gr,
                 async_op=True,
             )
-        elif partial_remote_dq is not None:
-            # the local dq is reduced by neither ffa bwd nor group-reduce
-            # thus we need to reduce manually from current partial_remote_dq
-            partial_local_dq.add_(partial_remote_dq)
+        else:
+            if partial_remote_dq is not None:
+                # the local dq is reduced by neither ffa bwd nor group-reduce
+                # thus we need to reduce manually from current partial_remote_dq
+                partial_local_dq.add_(partial_remote_dq)
             partial_dq_reduce_work = WorkWithPostProcessFn(post_process_fn=lambda x: x)
 
         return partial_dq_reduce_work
