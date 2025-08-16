@@ -19,7 +19,7 @@ import torch
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
-import flexible_flash_attention_cuda
+from magi_attention import flexible_flash_attention_cuda  # type: ignore[attr-defined]
 
 # isort: on
 

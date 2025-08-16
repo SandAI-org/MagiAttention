@@ -1301,10 +1301,10 @@ class DistAttnSolver:
 
     @nvtx.instrument_nvtx
     def calc_comm_meta(self) -> CommMeta:
-        """Calculate communication meta for kv group collective"""
+        """Calculate communication meta for kv and qo group collective"""
 
-        num_remote_tokens_list: list[int] = []
-        group_collective_args_list: list[GroupCollectiveArg] = []
+        num_remote_kv_tokens_per_stage: list[int] = []
+        kv_group_collective_args_list: list[GroupCollectiveArg] = []
 
         for transfer_table_this_stage, remote_rank_entry_per_rank_this_stage in zip(
             self.transfer_table_per_stage,
@@ -1314,28 +1314,31 @@ class DistAttnSolver:
                 self.cp_rank
             ].host_k_ranges_global.total_seqlen
 
-            num_remote_tokens = remote_rank_entry_per_rank_this_stage[
+            num_remote_kv_tokens = remote_rank_entry_per_rank_this_stage[
                 self.cp_rank
             ].remote_k_ranges_global.total_seqlen
 
-            group_collective_arg = self._calc_group_collective_arg(
+            kv_group_collective_arg = self._calc_kv_group_collective_arg(
                 transfer_table_this_stage,
                 total_seqlen_host_k,
             )
 
-            num_remote_tokens_list.append(num_remote_tokens)
-            group_collective_args_list.append(group_collective_arg)
+            num_remote_kv_tokens_per_stage.append(num_remote_kv_tokens)
+            kv_group_collective_args_list.append(kv_group_collective_arg)
 
         # build comm meta
         comm_meta = CommMeta(
-            num_remote_tokens_per_stage=num_remote_tokens_list,
-            group_collective_args_list=group_collective_args_list,
+            num_remote_kv_tokens_per_stage=num_remote_kv_tokens_per_stage,
+            kv_group_collective_args_list=kv_group_collective_args_list,
+            # TODO: support qo comm meta calculation
+            num_remote_qo_tokens_per_stage=[0] * self.overlap_degree,
+            qo_group_collective_args_list=[None] * self.overlap_degree,  # type: ignore[list-item]
         )
 
         return comm_meta
 
     @nvtx.instrument_nvtx
-    def _calc_group_collective_arg(
+    def _calc_kv_group_collective_arg(
         self,
         transfer_table: TransferTable,
         total_seqlen_host_k: int,

@@ -10,11 +10,11 @@ For more details on data preparation, checkpoint setup, integration, and experim
 We compared the loss convergence curves of TE Ring Attention and MagiAttention by training the LLaMA-1B model from scratch.
 
 ### Training Environment
-| **Env**                 | **version**                                                                                |
-| ----------------------------- | -------------------------------------------------------------------------------------------- |
-|  docker             |  ngc25.02-py3  |
-|  MagiAttention      |  commit-id: 4a10ea3
-|  Megatron           |  Tags: core_v0.11.0
+| **Env**              | **version**                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------------- |
+| docker               | ngc25.02-py3                                                                                   |
+| MagiAttention        | commit-id: 4a10ea3                                                                             |
+| Megatron             | Tags: core_v0.11.0                                                                             |
 
 ### Training Settings
 

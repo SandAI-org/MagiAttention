@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import glob
 import itertools
 import os
 import platform
@@ -49,17 +50,27 @@ with open("./README.md", "r", encoding="utf-8") as fh:
 
 # ninja build does not work unless include_dirs are abs path
 this_dir = os.path.dirname(os.path.abspath(__file__))
-
 PACKAGE_NAME = "magi_attention"
-
+NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
+exe_extension = sysconfig.get_config_var("EXE")
 
 # FORCE_BUILD: Force a fresh build locally, instead of attempting to find prebuilt wheels
 # SKIP_CUDA_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files,
 # without any cuda compilation
-FORCE_BUILD = os.getenv("MAGI_ATTENTION_FORCE_BUILD", "FALSE") == "TRUE"
-SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
+FORCE_BUILD = os.getenv("MAGI_ATTENTION_FORCE_BUILD", "0") == "1"
+SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
+SKIP_FFA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_BUILD", "0") == "1"
+SKIP_MAGI_ATTN_EXT_BUILD = (
+    os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
+)
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
-FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "FALSE") == "TRUE"
+FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
+
+# init cmdclass
+cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension}
+
+# init package_data
+package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
 
 
 # TODO: remove flags to compile with sm80
@@ -223,14 +234,12 @@ def _write_ninja_file(
     for source_file, object_file in zip(sources, objects):
         is_cuda_source = _is_cuda_file(source_file) and with_cuda
         if is_cuda_source:
-            if source_file.endswith("_sm90.cu"):
-                rule = "cuda_compile"
-            elif source_file.endswith("_sm80.cu"):
+            if source_file.endswith("_sm80.cu"):
                 rule = "cuda_compile_sm80"
             elif source_file.endswith("_sm100.cu"):
                 rule = "cuda_compile_sm100"
-            else:
-                rule = "cuda_compile_sm80_sm90"
+            else:  # only sm90
+                rule = "cuda_compile"
         else:
             rule = "compile"
         if IS_WINDOWS:
@@ -397,19 +406,8 @@ def nvcc_threads_args():
     return ["--threads", nvcc_threads]
 
 
-NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
-
-exe_extension = sysconfig.get_config_var("EXE")
-
-
-cmdclass = {}  # type: ignore[var-annotated]
-ext_modules = []
-
-
-if not SKIP_CUDA_BUILD:
+def init_ext_modules():
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
-    TORCH_MAJOR = int(torch.__version__.split(".")[0])
-    TORCH_MINOR = int(torch.__version__.split(".")[1])
 
     check_if_cuda_home_none(PACKAGE_NAME)
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
@@ -453,26 +451,62 @@ if not SKIP_CUDA_BUILD:
         # Make nvcc executable, sometimes after the copy it loses its permissions
         os.chmod(nvcc_path_new, os.stat(nvcc_path_new).st_mode | stat.S_IEXEC)
 
-    cc_flag = []
-    cc_flag.append("-gencode")
-    cc_flag.append("arch=compute_90a,code=sm_90a")
-
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
     # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
 
-    repo_dir = Path(this_dir)
 
-    cutlass_dir = repo_dir / "magi_attention" / "csrc" / "cutlass"
+def to_full_ext_module_name(ext_module_name: str) -> str:
+    return f"{PACKAGE_NAME}.{ext_module_name}"
 
-    ffa_dir_abs = repo_dir / "magi_attention" / "csrc" / "flexible_flash_attention"
+
+def find_prebuilt_lib(repo_dir: Path, ext_module_name: str) -> str | None:
+    """Search for a prebuilt library: ${ext_name}.so)"""
+    search_path = repo_dir / PACKAGE_NAME / f"{ext_module_name}.*.so"
+    found_libs = glob.glob(str(search_path))
+    if found_libs:
+        prebuilt_path = found_libs[0]
+        print(
+            f"\nSkipping build for {ext_module_name}, found prebuilt library: {prebuilt_path}, "
+            "thus we automatically add it to package_data\n"
+        )
+        lib_filename = os.path.basename(prebuilt_path)
+        package_data.setdefault(PACKAGE_NAME, []).append(lib_filename)
+    else:
+        print(
+            f"\nSkipping build for {ext_module_name}, no prebuilt library found, "
+            "thus this ext module will not be found after installation.\n"
+        )
+    return None
+
+
+def build_ffa_ext_module(
+    repo_dir: Path,
+    csrc_dir: Path,
+    common_dir: Path,
+    cutlass_dir: Path,
+) -> CUDAExtension | None:
+    ext_module_name = "flexible_flash_attention_cuda"
+
+    if SKIP_FFA_BUILD:
+        find_prebuilt_lib(repo_dir, ext_module_name)
+        return None
+
+    print(
+        "\n# -------------------     Building flexible_flash_attention_cuda     ------------------- #\n"
+    )
+
+    ffa_dir_abs = csrc_dir / "flexible_flash_attention"
     ffa_dir_rel = ffa_dir_abs.relative_to(repo_dir)
 
-    common_dir = repo_dir / "magi_attention" / "csrc" / "common"
+    # init cc flags
+    cc_flags = []
+    cc_flags.append("-gencode")
+    cc_flags.append("arch=compute_90a,code=sm_90a")
 
-    # custom flags
+    # init custom flags
     DISABLE_HDIM64 = False
     DISABLE_HDIM96 = True
     DISABLE_HDIM128 = False
@@ -483,6 +517,7 @@ if not SKIP_CUDA_BUILD:
     DISABLE_SOFTCAP = False
     DISABLE_CLUSTER = False
 
+    # init feature flags
     feature_args = (
         []
         + (["-DFLASHATTENTION_DISABLE_BACKWARD"] if DISABLE_BACKWARD else [])
@@ -496,6 +531,7 @@ if not SKIP_CUDA_BUILD:
         + (["-DFLASHATTENTION_DISABLE_HDIM256"] if DISABLE_HDIM256 else [])
     )
 
+    # init sources
     DTYPE = ["bf16"] + (["fp16"] if not DISABLE_FP16 else [])
     HEAD_DIMENSIONS = ["all"]
     SOFTCAP = [""] + (["_softcap"] if not DISABLE_SOFTCAP else [])
@@ -512,6 +548,8 @@ if not SKIP_CUDA_BUILD:
     sources = [f"{ffa_dir_rel}/flash_api.cpp"] + sources_fwd_sm90 + sources_bwd_sm90
     sources += [f"{ffa_dir_rel}/fast_zero_fill.cu"]
     sources += [f"{ffa_dir_rel}/unique_consecutive_pairs.cu"]
+
+    # init nvcc flags
     nvcc_flags = [
         "-O3",
         "-Xptxas",
@@ -536,29 +574,93 @@ if not SKIP_CUDA_BUILD:
                 "-Xcompiler=/Zc:__cplusplus",  # sets __cplusplus correctly, CUTLASS_CONSTEXPR_IF_CXX17 needed for cutlass::gcd
             ]
         )
+
+    # init include dirs
     include_dirs = [
         common_dir,
-        ffa_dir_abs,
         cutlass_dir / "include",
+        ffa_dir_abs,
     ]
 
+    # init extra compile args
     extra_compile_args = {
         "cxx": ["-O3", "-std=c++17"] + feature_args,
-        "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag + feature_args,
+        "nvcc": nvcc_threads_args() + nvcc_flags + cc_flags + feature_args,
     }
 
-    ext_modules.append(
-        CUDAExtension(
-            name="flexible_flash_attention_cuda",
-            sources=sources,
-            extra_compile_args=extra_compile_args,
-            include_dirs=include_dirs,
-        )
+    return CUDAExtension(
+        name=to_full_ext_module_name(ext_module_name),
+        sources=sources,
+        extra_compile_args=extra_compile_args,
+        include_dirs=include_dirs,
     )
 
-package_data = {
-    "magi_attention": ["*.pyi", "**/*.pyi"],
-}
+
+def build_magi_attn_ext_module(
+    repo_dir: Path,
+    csrc_dir: Path,
+    common_dir: Path,
+) -> CUDAExtension | None:
+    ext_module_name = "magi_attn_ext"
+
+    if SKIP_MAGI_ATTN_EXT_BUILD:
+        find_prebuilt_lib(repo_dir, ext_module_name)
+        return None
+
+    print(
+        "\n# -------------------     Building magi_attn_ext     ------------------- #\n"
+    )
+
+    magi_attn_ext_dir_abs = csrc_dir / "extensions"
+
+    # init sources
+    cpp_files = glob.glob(str(magi_attn_ext_dir_abs / "*.cpp"))
+    sources = [str(Path(f).relative_to(repo_dir)) for f in cpp_files]
+
+    # init include dirs
+    include_dirs = [common_dir, magi_attn_ext_dir_abs]
+
+    # init extra compile args
+    extra_compile_args = {"cxx": ["-O3", "-std=c++17"]}
+
+    return CUDAExtension(
+        name=to_full_ext_module_name(ext_module_name),
+        sources=sources,
+        extra_compile_args=extra_compile_args,
+        include_dirs=include_dirs,
+    )
+
+
+# build ext modules
+ext_modules = []
+if not SKIP_CUDA_BUILD:
+    # init before building any ext module
+    init_ext_modules()
+
+    # define some paths for the ext modules below
+    repo_dir = Path(this_dir)
+    csrc_dir = repo_dir / "magi_attention" / "csrc"
+    common_dir = csrc_dir / "common"
+    cutlass_dir = csrc_dir / "cutlass"
+
+    # build magi attn ext module
+    magi_attn_ext_module = build_magi_attn_ext_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+    )
+    if magi_attn_ext_module is not None:
+        ext_modules.append(magi_attn_ext_module)
+
+    # build ffa ext module
+    ffa_ext_module = build_ffa_ext_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+        cutlass_dir=cutlass_dir,
+    )
+    if ffa_ext_module is not None:
+        ext_modules.append(ffa_ext_module)
 
 
 setup(
@@ -585,7 +687,7 @@ setup(
         "Operating System :: Unix",
     ],
     ext_modules=ext_modules,
-    cmdclass={"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension},
+    cmdclass=cmdclass,
     python_requires=">=3.10",
     install_requires=[
         "torch",

@@ -27,7 +27,7 @@ from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeKey,
     DistAttnRuntimeMgr,
 )
-from magi_attention.functional.dist_attn import DistFlashAttnRuntime
+from magi_attention.functional.dist_attn import DistAttnRuntime
 from magi_attention.meta import (
     calc_attn_meta_from_dispatch_meta,
     calc_dispatch_meta_from_qk_ranges,
@@ -388,6 +388,7 @@ def magi_attn_flex_key(
         total_seqlen_q += pad_size
         total_seqlen_k += pad_size
 
+    # init dist attn runtime key
     key = DistAttnRuntimeKey(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -401,6 +402,7 @@ def magi_attn_flex_key(
         dist_attn_config=dist_attn_config,
         is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
         is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
+        is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
     )
 
     # Validate sequence length
@@ -433,11 +435,11 @@ def magi_attn_flex_key(
             overlap_config=dist_attn_config.overlap_config,
         )
 
-        dist_attn_runtime = DistFlashAttnRuntime(
+        dist_attn_runtime = DistAttnRuntime(
             comm_meta=comm_meta,
             calc_meta=attn_calc_meta,
-            cp_group_kv=cp_group,
-            cp_group_dkv=cp_group,  # TODO: support interface to set distinct cp group for dkv
+            cp_group_gc=cp_group,
+            cp_group_gr=cp_group,  # TODO: support interface to set distinct cp group for group-reduce
         )
 
         # generate DistAttnRuntimeMgr
