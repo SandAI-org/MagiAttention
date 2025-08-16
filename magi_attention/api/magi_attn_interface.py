@@ -27,7 +27,7 @@ from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeKey,
     DistAttnRuntimeMgr,
 )
-from magi_attention.functional.dist_attn import DistFlashAttnRuntime
+from magi_attention.functional.dist_attn import DistAttnRuntime
 from magi_attention.meta import (
     calc_attn_meta_from_dispatch_meta,
     calc_dispatch_meta_from_qk_ranges,
@@ -435,11 +435,11 @@ def magi_attn_flex_key(
             overlap_config=dist_attn_config.overlap_config,
         )
 
-        dist_attn_runtime = DistFlashAttnRuntime(
+        dist_attn_runtime = DistAttnRuntime(
             comm_meta=comm_meta,
             calc_meta=attn_calc_meta,
             cp_group_gc=cp_group,
-            cp_group_gr=cp_group,  # TODO: support interface to set distinct cp group for dkv
+            cp_group_gr=cp_group,  # TODO: support interface to set distinct cp group for group-reduce
         )
 
         # generate DistAttnRuntimeMgr

@@ -199,13 +199,14 @@ class GroupCollectiveArg:
 
 @dataclass
 class CommMeta:
-    num_remote_kv_tokens_per_stage: list[
-        int
-    ]  # NOTE: this denotes sk or sv, not sk + sv
+    # for kv comm in fwd and dkv comm in bwd
+    # NOTE: this denotes sk or sv, not sk + sv
+    num_remote_kv_tokens_per_stage: list[int]
     kv_group_collective_args_list: list[GroupCollectiveArg]
-    num_remote_qo_tokens_per_stage: list[
-        int
-    ]  # NOTE: this denotes sq or so, not sq + so
+
+    # for qo comm in fwd and q,o,do,dq comm in bwd
+    # NOTE: this denotes sq or so, not sq + so
+    num_remote_qo_tokens_per_stage: list[int]
     qo_group_collective_args_list: list[GroupCollectiveArg]
 
     @property

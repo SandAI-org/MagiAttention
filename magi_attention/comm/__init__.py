@@ -65,5 +65,7 @@ def is_qo_comm_enable() -> bool:
     """
     Toggling this env variable to 1 to enable query/output communication,
     to eliminate the restriction that communication is limited solely to key/value.
+
+    NOTE: this feature is under development and not supported by now
     """
     return os.environ.get("MAGI_ATTENTION_QO_COMM", "0") == "1"

@@ -23,15 +23,15 @@ from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.functional.dist_attn import DistFlashAttnRuntime, dist_attn_func
+from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta.collection.calc_meta import AttnArg, AttnCalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 
 
-# TODO: add more unitest for dist ffa especially for causal
-class TestDistFlashAttn(DistTestBase):
+# TODO: add more unitest for dist attn
+class TestDistAttn(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
 
@@ -118,9 +118,12 @@ class TestDistFlashAttn(DistTestBase):
                     device_mesh=self.device_mesh,
                 )
             ],
+            # TODO: support qo comm meta calculation
+            num_remote_qo_tokens_per_stage=[0],
+            qo_group_collective_args_list=[None],  # type: ignore[list-item]
         )
 
-        dist_attn_runtime = DistFlashAttnRuntime(
+        dist_attn_runtime = DistAttnRuntime(
             comm_meta=comm_meta,
             calc_meta=attn_calc_meta,
             cp_group_gc=self.nccl_groups[0],

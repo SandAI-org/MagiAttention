@@ -754,7 +754,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             dist_attn_config=dist_attn_config,
             cp_mesh=self.device_mesh,
         )
-        # HACK: seperate cp group for dkv group-reduce
+        # HACK: seperate cp group for group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
 
         # -----   init global qkv   ---- #

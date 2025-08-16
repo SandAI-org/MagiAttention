@@ -154,20 +154,15 @@ def result_correction(
     return curr_out, curr_lse
 
 
-class DistFlashAttnRuntime:
+class DistAttnRuntime:
     """
     Runtime class for Distributed Flash Attention.
 
     Args:
-        config (DistFlashAttnConfig): Static configuration for distributed Flash Attention
-        runtime_meta (DistFlashAttnRuntimeMeta): Runtime metadata for distributed Flash Attention
-
-
-    NOTE:
-        A new DistFlashAttnRuntime should be instantiated for each forward pass
-        This runtime instance provides schedulable primitives for each layer's forward pass:
-            - fetch_remote_kv: Fetch remote kv buffer from other ranks to local
-            - do_attn_partially: Compute part of the attention result
+        comm_meta (CommMeta): the communication metadata
+        calc_meta (AttnCalcMeta): the calculation metadata
+        cp_group_gc (dist.ProcessGroup): the cp group for group-cast
+        cp_group_gr (dist.ProcessGroup): the cp group for group-reduce
     """
 
     def __init__(
@@ -587,7 +582,7 @@ class DistFlashAttnRuntime:
         return torch.chunk(kv, 2, dim=0)
 
     def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, DistFlashAttnRuntime):
+        if not isinstance(other, DistAttnRuntime):
             return False
         return (
             is_same_process_group(self.cp_group_gc, other.cp_group_gc)
@@ -597,7 +592,7 @@ class DistFlashAttnRuntime:
         )
 
 
-class DistFlashAttnFunc(torch.autograd.Function):
+class DistAttnFunc(torch.autograd.Function):
     """Distributed Flash Attention Function"""
 
     @staticmethod
@@ -606,7 +601,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
         local_q: torch.Tensor,
         local_k: torch.Tensor,
         local_v: torch.Tensor,
-        dist_attn_runtime: DistFlashAttnRuntime,
+        dist_attn_runtime: DistAttnRuntime,
     ):
         """
         Distributed Flash Attention forward function
@@ -615,7 +610,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
             local_q(torch.Tensor):
             local_k(torch.Tensor):
             local_v(torch.Tensor):
-            dist_attn_runtime(DistFlashAttnRuntime):
+            dist_attn_runtime(DistAttnRuntime):
 
         Returns:
             out(torch.Tensor):
@@ -677,7 +672,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
         partial_remote_out, partial_remote_lse = (
             partial_local_out,
             partial_local_lse,
-        )  # init acc buffer
+        )  # init acc buffer if used
         partial_out_reduce_works = []
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
             # wait for ith remote data prepared
@@ -788,7 +783,7 @@ class DistFlashAttnFunc(torch.autograd.Function):
         local_q, local_kv, out, lse = ctx.saved_tensors
         local_q: torch.Tensor
         local_kv: torch.Tensor
-        dist_attn_runtime: DistFlashAttnRuntime = ctx.dist_attn_runtime
+        dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
 
         if magi_attention.is_cuda_device_max_connections_one():
             # pre-fetch 0th remote kv
@@ -919,6 +914,6 @@ def dist_attn_func(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    dist_attn_runtime: DistFlashAttnRuntime,
+    dist_attn_runtime: DistAttnRuntime,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return DistFlashAttnFunc.apply(q, k, v, dist_attn_runtime)
+    return DistAttnFunc.apply(q, k, v, dist_attn_runtime)
