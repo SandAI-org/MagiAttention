@@ -626,11 +626,14 @@ def get_flex_mask_from_block_mask(
     block_mask: torch.Tensor,
     seq_len_q: int,
     seq_len_k: int,
+    num_q_heads: int,
+    num_kv_heads: int,
     block_row_sz: torch.Tensor = None,
     block_col_sz: torch.Tensor = None,
     bsz: int = 1,
 ):
     bsz, num_heads, num_q_blocks, num_kv_blocks = block_mask.shape
+    assert num_heads == num_q_heads, "Block mask must be query-specific"
     device = block_mask.device
 
     if block_row_sz is None and block_col_sz is None:
@@ -639,6 +642,9 @@ def get_flex_mask_from_block_mask(
         mode = "variable"
 
     if mode == "variable":
+        block_col_sz = block_col_sz.repeat_interleave(
+            num_q_heads // num_kv_heads, dim=0
+        )
         q_block_idx, k_block_idx = get_var_block_idx(
             block_mask=block_mask,
             seq_len_q=seq_len_q,

@@ -28,10 +28,13 @@ from magi_attention.utils.sparse_utils import (
     get_sdpa_mask_from_var_block_mask,
 )
 
-impls = ["ffa"]
+impls = ["ffa", "flex", "flashinfer"]
 
 # actual seqlen
-seqlen = 49152
+if "flex" in impls:
+    seqlen = 16384  # otherwise flexattention will cause OOM!
+else:
+    seqlen = 49152
 # sparsity_ratio = 1.0 will cause illegal access sometimes
 sparsity_ratio = [0.1, 0.2, 0.5, 0.8, 0.9]
 # sparsity_ratio = [1.0]
@@ -45,6 +48,9 @@ else:
 block_sizes = [
     # 64,
     128,
+    256,
+    512,
+    1024,
 ]  # average block size for variable block sparse attention
 min_q_block_size = 128
 min_kv_block_size = 128
@@ -52,11 +58,8 @@ min_kv_block_size = 128
 b = 1
 nhq = 32
 if "flex" in impls:
-    nhq = 1
-    nhk = 1  # otherwise flexattention will cause OOM!
-else:
-    nhk = nhq // 4
-
+    nhq = 4  # otherwise flexattention will cause OOM!
+nhk = nhq // 4
 # nhk = 16
 dtype = torch.bfloat16
 
@@ -238,10 +241,11 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         v = v.view(b * nhk, orig_seq_len_k, hd).contiguous()
         # BUG: using original block mask will cause illegal access sometimes
         # block_mask_cpu = block_mask.detach().squeeze(0).cpu()
+        kv_head_indices = torch.arange(0, nhq, nhq // nhk, device=device)
         block_mask_cpu = (
             torch.rand(nhk, num_q_blocks_orig, num_kv_blocks_orig) < sparsity_ratio
         )
-        block_row_sz_cpu = block_row_sz.detach().cpu()
+        block_row_sz_cpu = block_row_sz[..., kv_head_indices, :].detach().cpu()
         block_col_sz_cpu = block_col_sz.detach().cpu()
 
         # print(f"{block_row_sz=}")
@@ -275,6 +279,8 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
             block_mask,
             orig_seq_len_q,
             orig_seq_len_k,
+            nhq,
+            nhk,
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
             bsz=b,

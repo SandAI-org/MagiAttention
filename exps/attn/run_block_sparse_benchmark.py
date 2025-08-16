@@ -36,7 +36,10 @@ from magi_attention.utils.sparse_utils import (
 impls = ["ffa", "flashinfer", "vsa", "vsa_triton"]
 
 # actual seqlen
-seqlen = 49152
+if "flex" in impls:
+    seqlen = 16384  # otherwise flexattention will cause OOM!
+else:
+    seqlen = 49152
 
 sparsity_ratio = [0.1, 0.2, 0.5, 0.8, 1.0]
 # ss = [k * 1024 for k in [4, 96, 128]]
@@ -55,7 +58,7 @@ else:
 b = 1
 nhq = 32
 if "flex" in impls:
-    nhq = 1  # otherwise flexattention will cause OOM!
+    nhq = 4  # otherwise flexattention will cause OOM!
 if "vsa" in impls:
     # currently vsa doesn't support gqa
     # currently flashinfer doesn't support query-specific sparsity
@@ -358,7 +361,7 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
 
     elif attn_impl == "flex":
         flex_mask = get_flex_mask_from_block_mask(
-            block_mask, orig_seq_len_q, orig_seq_len_k, bsz=b
+            block_mask, orig_seq_len_q, orig_seq_len_k, nhq, nhk, bsz=b
         )
 
         def fn():
