@@ -301,7 +301,7 @@ class DistFlashAttnRuntime:
                     f"attn-fwd: area={attn_arg.total_area} | "
                     f"qr={attn_arg.q_ranges} | kr={attn_arg.k_ranges}"
                 ):
-                    out, lse, *rest = _flex_flash_attn_forward(
+                    out, lse = _flex_flash_attn_forward(
                         q=q,
                         k=k,
                         v=v,
@@ -390,7 +390,7 @@ class DistFlashAttnRuntime:
                     k=k,
                     v=v,
                     out=o,
-                    softmax_lse=lse,
+                    lse=lse,
                     dq=dq_acc,  # directly reduce to dq_acc
                     dk=partial_dk,
                     dv=partial_dv,

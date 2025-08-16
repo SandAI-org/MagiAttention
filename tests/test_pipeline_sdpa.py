@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import random
 from typing import Any
 
@@ -50,6 +49,7 @@ from magi_attention.testing.precision import (
     H100_TFLOPS_16,
     torch_attn_ref,
 )
+from magi_attention.testing.utils import switch_envvar_decorator
 from magi_attention.utils import (
     get_a2a_corr_factor,
     get_attn_mask_from_ffa_args,
@@ -57,6 +57,11 @@ from magi_attention.utils import (
     get_comm_cost_factor,
     str2seed,
     sync_rng,
+)
+
+# NOTE: this unitest will enable sdpa backend with fp64 dtype support
+enable_sdpa_backend_decorator = switch_envvar_decorator(
+    envvar_name="MAGI_ATTENTION_SDPA_BACKEND", enable=True
 )
 
 
@@ -69,9 +74,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             dist.new_group(list(range(self.world_size)), backend=self.backend)
             for _ in range(2)
         ]
-
-        # NOTE: test using sdpa backend with fp64 dtype support
-        os.environ["MAGI_ATTENTION_SDPA_BACKEND"] = "1"
 
         # -----    set up for hier comm   ---- #
 
@@ -110,9 +112,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     def world_size(self) -> int:
         return 1
 
+    @enable_sdpa_backend_decorator
     @with_comms
     @parameterize(
-        # TODO: test more diverse and complicated attn mask
         "attn_config",
         [
             # full attn with total seqlen 1k
@@ -660,6 +662,11 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         random_type_mapping: bool,
         run_bwd: bool = True,
     ):
+        # NOTE: test pipeline using sdpa does not need profile mode
+        # thus we always enable sanity check mode
+        assert magi_attention.is_sanity_check_enable()
+        assert magi_attention.is_sdpa_backend_enable()
+
         # -----    skip for world size   ---- #
 
         if (
@@ -667,10 +674,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             and self.world_size in attn_config[SKIP_WORLD_SIZE]
         ):
             return
-
-        # NOTE: test pipeline using sdpa does not need profile mode
-        # thus we always enable sanity check mode
-        assert magi_attention.is_sanity_check_enable()
 
         # -----    construct test case name   ---- #
 

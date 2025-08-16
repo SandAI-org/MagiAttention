@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
@@ -29,10 +30,14 @@ from magi_attention.api.functools import (
     pad_at_dim,
 )
 from magi_attention.api.magi_attn_interface import (
+    calc_attn,
+    dispatch,
     dist_attn_runtime_dict,
     get_position_ids,
     magi_attn_flex_dispatch,
+    magi_attn_flex_key,
     magi_attn_varlen_dispatch,
+    undispatch,
 )
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.ranges import AttnRanges
@@ -61,6 +66,7 @@ from magi_attention.testing.precision import (
     H100_NVLINK_BANDWIDTH,
     H100_TFLOPS_16,
 )
+from magi_attention.testing.utils import switch_deterministic_mode_decorator
 from magi_attention.utils import (
     get_a2a_corr_factor,
     get_calc_cost_factor,
@@ -130,7 +136,6 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
 
     @with_comms
     @parameterize(
-        # TODO: test more diverse and complicated attn mask
         "attn_config",
         [
             # full attn with seqlen 1k and batchsize 2
@@ -701,6 +706,141 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
     @skip_if_lt_x_gpu(8)
     def test_interface(self, *args, **kwargs):
         super().test_interface(*args, **kwargs)
+
+    @skip_if_lt_x_gpu(8)
+    @with_comms
+    @switch_deterministic_mode_decorator(enable=True)
+    def test_compiled_magiattn(self):
+        # --- Define attention config --- #
+
+        total_seqlen = 32 * 1024  # 32k tokens
+        num_heads_q = 48  # number of attention (query) heads
+        num_heads_kv = 8  # number of key/value heads (GQA)
+        head_dim = 128  # dimension of each attention head
+        dtype = torch.bfloat16  # attention activation / computation dtype
+        chunk_size = 512  # chunk size
+        embed_dim = 4096  # token embedding tensor
+
+        # --- Initialize MagiAttention meta configs for customized attention mask --- #
+
+        q_ranges = AttnRanges.from_ranges(
+            [
+                [0, 4096],  # 0~4k
+                [4096, 8192],  # 4k~8k
+                [8192, 12288],  # 8k~12k
+                [12288, 16384],  # 12k~16k
+                [16384, 20480],  # 16k~20k
+                [20480, 24576],  # 20k~24k
+                [24576, 28672],  # 24k~28k
+                [28672, 32768],  # 28k~32k
+            ]
+        )
+        k_ranges = AttnRanges.from_ranges(
+            [
+                [0, 4096],  # 0~4k
+                [0, 8192],  # 0~8k
+                [0, 12288],  # 0~12k
+                [0, 16384],  # 0~16k
+                [0, 20480],  # 0~20k
+                [0, 24576],  # 0~24k
+                [0, 28672],  # 0~28k
+                [0, 32768],  # 0~32k
+            ]
+        )
+        attn_mask_type = [AttnMaskType.FULL] * len(q_ranges)
+        total_seqlen_q = total_seqlen_k = total_seqlen
+        pad_size = compute_pad_size(  # pad embeds along seqlen dim for better performance
+            total_seqlen_q=total_seqlen_q,
+            cp_size=self.world_size,  # assuming we only have 1-dim context parallelism (cp)
+            chunk_size=chunk_size,
+        )
+
+        global_dout = torch.randn(
+            total_seqlen, num_heads_q, head_dim, device=self.device, dtype=dtype
+        )
+        dist.all_reduce(global_dout, group=self.process_group)
+
+        q_proj = nn.Linear(
+            embed_dim, num_heads_q * head_dim, dtype=dtype, device=self.device
+        )
+        k_proj = nn.Linear(
+            embed_dim, num_heads_kv * head_dim, dtype=dtype, device=self.device
+        )
+        v_proj = nn.Linear(
+            embed_dim, num_heads_kv * head_dim, dtype=dtype, device=self.device
+        )
+
+        # --- Compute magi_attn runtime key --- #
+
+        magi_attn_runtime_key = magi_attn_flex_key(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            pad_size=pad_size,
+            chunk_size=chunk_size,
+            cp_group_or_mesh=self.process_group,  # assuming we only have 1-dim context parallelism (cp)
+        )
+
+        total_out_ref, dx_ref = None, None
+        for iter in range(6):
+            use_compiled_magiattn = iter % 2 == 1
+
+            torch.manual_seed(self.seed + iter // 2)
+            x = torch.randn(
+                total_seqlen,
+                embed_dim,
+                device=self.device,
+                dtype=dtype,
+                requires_grad=True,
+            )
+            dist.all_reduce(x.data, group=self.process_group)
+
+            # --- Dispatch and pad --- #
+
+            local_x = dispatch(x, key=magi_attn_runtime_key)
+
+            # --- Simulate QKV projection --- #
+
+            local_q = q_proj(local_x).view(-1, num_heads_q, head_dim)
+            local_k = k_proj(local_x).view(-1, num_heads_kv, head_dim)
+            local_v = v_proj(local_x).view(-1, num_heads_kv, head_dim)
+
+            # --- Apply compiled magi_attn func --- #
+
+            # NOTE: since torch.compile does not support async dist comm,
+            # we can not compile it with fullgraph=True
+            magiattn_func = (
+                torch.compile(fullgraph=False)(calc_attn)
+                if use_compiled_magiattn
+                else calc_attn
+            )
+            local_out, _ = magiattn_func(
+                q=local_q,
+                k=local_k,
+                v=local_v,
+                key=magi_attn_runtime_key,
+            )
+
+            # --- Undispatch and unpad --- #
+
+            total_out = undispatch(
+                x=local_out,
+                key=magi_attn_runtime_key,
+            )
+
+            total_out.backward(global_dout)
+
+            dx = x.grad
+
+            if use_compiled_magiattn:
+                assert total_out_ref is not None and dx_ref is not None
+                torch.testing.assert_close(total_out, total_out_ref)
+                torch.testing.assert_close(dx, dx_ref)
+            else:
+                total_out_ref = total_out.detach().clone()
+                dx_ref = dx.detach().clone()
 
 
 if __name__ == "__main__":
