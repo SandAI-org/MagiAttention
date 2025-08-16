@@ -228,14 +228,12 @@ def _write_ninja_file(
     for source_file, object_file in zip(sources, objects):
         is_cuda_source = _is_cuda_file(source_file) and with_cuda
         if is_cuda_source:
-            if source_file.endswith("_sm90.cu"):
-                rule = "cuda_compile"
-            elif source_file.endswith("_sm80.cu"):
+            if source_file.endswith("_sm80.cu"):
                 rule = "cuda_compile_sm80"
             elif source_file.endswith("_sm100.cu"):
                 rule = "cuda_compile_sm100"
-            else:
-                rule = "cuda_compile_sm80_sm90"
+            else:  # only sm90
+                rule = "cuda_compile"
         else:
             rule = "compile"
         if IS_WINDOWS:
@@ -463,6 +461,10 @@ def build_ffa_ext_module(
     if SKIP_FFA_BUILD:
         return None
 
+    print(
+        "\n# -------------------     Building flexible_flash_attention_cuda     ------------------- #\n"
+    )
+
     ffa_dir_abs = csrc_dir / "flexible_flash_attention"
     ffa_dir_rel = ffa_dir_abs.relative_to(repo_dir)
 
@@ -569,6 +571,10 @@ def build_magi_attn_ext_module(
     if SKIP_MAGI_ATTN_EXT_BUILD:
         return None
 
+    print(
+        "\n# -------------------     Building magi_attn_ext     ------------------- #\n"
+    )
+
     magi_attn_ext_dir_abs = csrc_dir / "extensions"
 
     # init sources
@@ -604,6 +610,15 @@ if not SKIP_CUDA_BUILD:
     common_dir = csrc_dir / "common"
     cutlass_dir = csrc_dir / "cutlass"
 
+    # build magi attn ext module
+    magi_attn_ext_module = build_magi_attn_ext_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+    )
+    if magi_attn_ext_module is not None:
+        ext_modules.append(magi_attn_ext_module)
+
     # build ffa ext module
     ffa_ext_module = build_ffa_ext_module(
         repo_dir=repo_dir,
@@ -613,15 +628,6 @@ if not SKIP_CUDA_BUILD:
     )
     if ffa_ext_module is not None:
         ext_modules.append(ffa_ext_module)
-
-    # build magi attn ext module
-    magi_attn_ext_module = build_magi_attn_ext_module(
-        repo_dir=repo_dir,
-        csrc_dir=csrc_dir,
-        common_dir=common_dir,
-    )
-    if magi_attn_ext_module is not None:
-        ext_modules.append(magi_attn_ext_module)
 
 
 setup(
