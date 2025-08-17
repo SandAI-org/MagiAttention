@@ -58,13 +58,16 @@ exe_extension = sysconfig.get_config_var("EXE")
 # SKIP_CUDA_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files,
 # without any cuda compilation
 FORCE_BUILD = os.getenv("MAGI_ATTENTION_FORCE_BUILD", "0") == "1"
+
+# For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
+FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
+
+# Skip CUDA ext modules build
 SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
 SKIP_FFA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_BUILD", "0") == "1"
 SKIP_MAGI_ATTN_EXT_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
 )
-# For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
-FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 
 
 class MagiAttnBuildExtension(BuildExtension):
@@ -84,13 +87,6 @@ class MagiAttnBuildExtension(BuildExtension):
         # Ensure the directories exist
         os.makedirs(self.build_temp, exist_ok=True)
         os.makedirs(self.build_lib, exist_ok=True)
-
-
-# init cmdclass
-cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
-
-# init package_data
-package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
 
 
 def _write_ninja_file(
@@ -320,7 +316,7 @@ def _write_ninja_file(
 torch.utils.cpp_extension._write_ninja_file = _write_ninja_file
 
 
-def get_platform():
+def get_platform() -> str:
     """
     Returns the platform name as used in wheel filenames.
     """
@@ -335,7 +331,7 @@ def get_platform():
         raise ValueError("Unsupported platform: {}".format(sys.platform))
 
 
-def get_cuda_bare_metal_version(cuda_dir):
+def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
     raw_output = subprocess.check_output(
         [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
     )
@@ -364,7 +360,7 @@ def check_env_flag(name: str, default: str = "") -> bool:
 
 
 # Copied from https://github.com/triton-lang/triton/blob/main/python/setup.py
-def get_magi_attention_cache_path():
+def get_magi_attention_cache_path() -> str:
     user_home = os.getenv("MAGI_ATTENTION_HOME")
     if not user_home:
         user_home = (
@@ -390,7 +386,7 @@ def open_url(url):
     return urllib.request.urlopen(request, timeout=300)
 
 
-def download_and_copy(name, src_func, dst_path, version, url_func):
+def download_and_copy(name, src_func, dst_path, version, url_func) -> None:
     magi_attention_cache_path = get_magi_attention_cache_path()
     base_dir = os.path.dirname(__file__)
     system = platform.system()
@@ -419,13 +415,13 @@ def download_and_copy(name, src_func, dst_path, version, url_func):
         shutil.copy(src_path, dst_path)
 
 
-def nvcc_threads_args():
+def nvcc_threads_args() -> list[str]:
     nvcc_threads = os.getenv("NVCC_THREADS") or "2"
     return ["--threads", nvcc_threads]
 
 
-def init_ext_modules():
-    print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
+def init_ext_modules() -> None:
+    print(f"\n{torch.__version__=}\n")
 
     check_if_cuda_home_none(PACKAGE_NAME)
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
@@ -648,6 +644,12 @@ def build_magi_attn_ext_module(
         include_dirs=include_dirs,
     )
 
+
+# init cmdclass
+cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
+
+# init package_data
+package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
 
 # build ext modules
 ext_modules = []
