@@ -1,2 +1,3 @@
 rich
 versioningit
+packaging>=24.2

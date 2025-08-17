@@ -694,23 +694,9 @@ setup(
         )
     ),
     package_data=package_data,
-    include_package_data=True,
-    py_modules=["magi_attention"],
-    description="A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training",
+    include_package_data=False,
     long_description=long_description,
     long_description_content_type="text/markdown",
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: Apache Software License",
-        "Operating System :: Unix",
-    ],
     ext_modules=ext_modules,
     cmdclass=cmdclass,
-    python_requires=">=3.10",
-    install_requires=[
-        "torch",
-        "einops",
-        "packaging",
-        "ninja",
-    ],
 )
