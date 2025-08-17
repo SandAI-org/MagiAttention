@@ -66,15 +66,33 @@ SKIP_MAGI_ATTN_EXT_BUILD = (
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 
+
+class MagiAttnBuildExtension(BuildExtension):
+    def initialize_options(self):
+        super().initialize_options()
+        # Force the temporary build directory to be under the project's build/temp folder
+        self.build_temp = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "build", "temp"
+        )
+        # You can also specify the directory for the final library files.
+        # However, for editable installs, setuptools will automatically handle the linking,
+        # so mainly focus on build_temp.
+        self.build_lib = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "build", "lib"
+        )
+
+        # Ensure the directories exist
+        os.makedirs(self.build_temp, exist_ok=True)
+        os.makedirs(self.build_lib, exist_ok=True)
+
+
 # init cmdclass
-cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension}
+cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
 # init package_data
 package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
 
 
-# TODO: remove flags to compile with sm80
-# which we do not support for now
 def _write_ninja_file(
     path,
     cflags,
@@ -491,7 +509,7 @@ def build_ffa_ext_module(
     ext_module_name = "flexible_flash_attention_cuda"
 
     if SKIP_FFA_BUILD:
-        find_prebuilt_lib(repo_dir, ext_module_name)
+        # find_prebuilt_lib(repo_dir, ext_module_name)
         return None
 
     print(
@@ -604,7 +622,7 @@ def build_magi_attn_ext_module(
     ext_module_name = "magi_attn_ext"
 
     if SKIP_MAGI_ATTN_EXT_BUILD:
-        find_prebuilt_lib(repo_dir, ext_module_name)
+        # find_prebuilt_lib(repo_dir, ext_module_name)
         return None
 
     print(
