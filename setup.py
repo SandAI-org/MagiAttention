@@ -77,9 +77,7 @@ class MagiAttnBuildExtension(BuildExtension):
         self.build_temp = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "build", "temp"
         )
-        # You can also specify the directory for the final library files.
-        # However, for editable installs, setuptools will automatically handle the linking,
-        # so mainly focus on build_temp.
+        # Specify the directory for the final library files
         self.build_lib = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "build", "lib"
         )
