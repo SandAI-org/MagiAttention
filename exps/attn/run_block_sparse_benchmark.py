@@ -35,7 +35,6 @@ from magi_attention.utils.sparse_utils import (
 )
 
 impls = ["ffa", "flashinfer", "vsa", "vsa_triton", "flex"]
-impls = ["ffa", "flashinfer", "vsa", "vsa_triton", "flex"]
 
 # actual seqlen
 seqlens = [49152, 16384]

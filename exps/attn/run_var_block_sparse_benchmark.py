@@ -291,7 +291,14 @@ def sparse_attn_benchmark(
         elif attn_impl == "flex":
             try:
                 flex_mask = get_flex_mask_from_block_mask(
-                    block_mask, orig_seq_len_q, orig_seq_len_k, nhq, nhk, bsz=b
+                    block_mask,
+                    orig_seq_len_q,
+                    orig_seq_len_k,
+                    nhq,
+                    nhk,
+                    bsz=b,
+                    block_row_sz=block_row_sz,
+                    block_col_sz=block_col_sz,
                 )
             except Exception as e:
                 if "CUDA out of memory" not in str(e):
