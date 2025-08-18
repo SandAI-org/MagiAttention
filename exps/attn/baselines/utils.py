@@ -35,6 +35,27 @@ def seed_everything(seed=42):
     torch.cuda.manual_seed(seed)
 
 
+# availability check
+def block_sparse_available(
+    attn_impl: str, num_q_heads: int, num_kv_heads: int, block_size: int, wd: str
+) -> bool:
+    """
+    Check availability of different block sparse attention implementations.
+    """
+    if attn_impl == "vsa" or attn_impl == "vsa_triton":
+        # currently vsa only supports block size == 64
+        return num_q_heads == num_kv_heads and block_size == 64
+
+    if attn_impl == "flashinfer":
+        # flashinfer doesn't support backward
+        return wd == "fwd"
+
+    if attn_impl == "ffa" or attn_impl == "flex":
+        return True
+
+    return True
+
+
 def calculate_attn_flops(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
