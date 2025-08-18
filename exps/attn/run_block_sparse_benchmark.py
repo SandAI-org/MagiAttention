@@ -33,7 +33,7 @@ from magi_attention.utils.sparse_utils import (
     get_sdpa_mask_from_block_sparse_mask,
 )
 
-impls = ["ffa", "flashinfer", "vsa", "vsa_triton"]
+impls = ["ffa", "flashinfer", "vsa", "vsa_triton", "flex"]
 
 # actual seqlen
 if "flex" in impls:

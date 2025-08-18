@@ -139,10 +139,15 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
         sparsity=sparsity_ratio,
         device="cuda",
     )
-    # FIXEME: flashinfer will raise error if we don't use this blockmask.
-    # block_mask  = (
-    #        torch.rand(1, nhk, num_q_blocks_orig, num_kv_blocks_orig, device='cuda') < sparsity_ratio
-    #    )
+    # generate block mask totally random.
+    """
+    block_mask  = (
+            torch.rand(1, nhk, num_q_blocks_orig, num_kv_blocks_orig, device='cuda') < sparsity_ratio
+        )
+
+    repeats = nhq // nhk
+    block_mask = torch.repeat_interleave(block_mask, repeats=repeats, dim=1)
+    """
     max_seqlen_q = block_row_sz.max().item()
     max_seqlen_k = block_col_sz.max().item()
 
