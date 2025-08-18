@@ -71,20 +71,39 @@ SKIP_MAGI_ATTN_EXT_BUILD = (
 
 
 class MagiAttnBuildExtension(BuildExtension):
+    """
+    A BuildExtension that switches its behavior based on the command.
+
+    - For development installs (`pip install -e .`), it caches build artifacts
+      in the local `./build` directory for faster re-compilation.
+
+    - For building a distributable wheel (`python -m build --wheel`), it uses
+      the default temporary directory behavior of PyTorch's BuildExtension to
+      ensure robust and correct packaging.
+    """
+
     def initialize_options(self):
         super().initialize_options()
-        # Force the temporary build directory to be under the project's build/temp folder
-        self.build_temp = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "build", "temp"
-        )
-        # Specify the directory for the final library files
-        self.build_lib = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "build", "lib"
-        )
 
-        # Ensure the directories exist
-        os.makedirs(self.build_temp, exist_ok=True)
-        os.makedirs(self.build_lib, exist_ok=True)
+        # Core logic: Check if we are currently building a Wheel package
+        # 'bdist_wheel' is the key identifier triggered by the `python -m build` command
+        if "bdist_wheel" not in sys.argv:
+            # If not building a Wheel, it means we are in development mode (e.g., `pip install -e .`)
+            # In this case, we enable local caching
+            print("Development mode detected: Caching build artifacts in build/")
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            self.build_temp = os.path.join(project_root, "build", "temp")
+            self.build_lib = os.path.join(project_root, "build", "lib")
+
+            # Ensure the directories exist
+            os.makedirs(self.build_temp, exist_ok=True)
+            os.makedirs(self.build_lib, exist_ok=True)
+        else:
+            # If building a Wheel, we make no modifications and fully rely on the default PyTorch behavior
+            # This ensures that the .so files are correctly generated and packaged
+            print(
+                "Wheel build mode detected: Using default temporary directories in /tmp/ for robust packaging."
+            )
 
 
 def _write_ninja_file(
@@ -647,7 +666,7 @@ def build_magi_attn_ext_module(
 cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
 # init package_data
-package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi", "*.so"]}
+package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
 
 # build ext modules
 ext_modules = []
