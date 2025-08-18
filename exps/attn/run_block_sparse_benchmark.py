@@ -80,7 +80,7 @@ attn_flops_configs = [
         },
         plot_name=(
             f"block sparse attn-{wd} attn_mode-{attn_mode} "
-            f"{'n_head-' + str(nhq) if attn_mode == 'mha' else f'n_head-{nhq}:{nhq // num_group}'} "
+            f"{'n_head-' + str(nhq) if attn_mode == 'MHA' else f'n_head-{nhq}:{nhq // num_group}'} "
             f"block_size-{block_size} seq_len {seqlen}"
         ),
         # Name for the plot. Used also as a file name for saving the plot.
