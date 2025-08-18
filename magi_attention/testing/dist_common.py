@@ -13,13 +13,14 @@
 # limitations under the License.
 
 import datetime
-import os
 from functools import wraps
 from typing import Any, Callable
 
 import torch
 import torch.distributed as dist
 from torch.testing._internal.common_distributed import MultiProcessTestCase
+
+from .utils import switch_envvar_decorator
 
 NAME = "name"
 
@@ -37,15 +38,13 @@ PG_DEFAULT_BACKEND = "nccl" if DEVICE_TYPE == "cuda" else "gloo"
 
 NUM_DEVICES = 4
 
+RUN_IN_MP = "MAGI_ATTENTION_PARAMETERIZE_RUN_IN_MP"
+
+
 # We use this as a proxy for "multiple GPUs exist"
 if torch.cuda.is_available() and torch.cuda.device_count() > 1:
     # when we actually have multiple GPUs, relax the requirement to smaller counts.
     NUM_DEVICES = min(NUM_DEVICES, torch.cuda.device_count())
-
-
-# HACK: enable unitest sanity check if not using profile mode
-if os.environ.get("MAGI_ATTENTION_UNITEST_PROFILE_MODE", "0") != "1":
-    os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "1"
 
 
 class DistTestBase(MultiProcessTestCase):
@@ -127,3 +126,7 @@ def with_comms(func: TestFunc) -> TestFunc:
         self.destroy_pg()
 
     return wrapper
+
+
+def with_run_in_mp(func: TestFunc) -> TestFunc:
+    return switch_envvar_decorator(envvar_name=RUN_IN_MP, enable=True)(with_comms(func))

@@ -39,7 +39,7 @@ from .functools import apply_padding, pad_at_dim, unpad_at_dim
 
 dist_attn_runtime_dict = DistAttnRuntimeDict(
     max_size=magi_attention.dist_attn_runtime_dict_size()
-)  # [DistAttnRuntimeKey, DistAttnRuntimeMgr]
+)  # dict[DistAttnRuntimeKey, DistAttnRuntimeMgr]
 
 
 GeneralAttnMaskType: TypeAlias = str | AttnMaskType | Sequence[str | AttnMaskType]

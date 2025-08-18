@@ -151,10 +151,15 @@ def sparse_attn_benchmark(
         sparsity=sparsity_ratio,
         device="cuda",
     )
-    # FIXEME: flashinfer will raise error if we don't use this blockmask.
-    # block_mask  = (
-    #        torch.rand(1, nhk, num_q_blocks_orig, num_kv_blocks_orig, device='cuda') < sparsity_ratio
-    #    )
+    # generate block mask totally random.
+    """
+    block_mask  = (
+            torch.rand(1, nhk, num_q_blocks_orig, num_kv_blocks_orig, device='cuda') < sparsity_ratio
+        )
+
+    repeats = nhq // nhk
+    block_mask = torch.repeat_interleave(block_mask, repeats=repeats, dim=1)
+    """
     max_seqlen_q = block_row_sz.max().item()
     max_seqlen_k = block_col_sz.max().item()
 
@@ -205,7 +210,6 @@ def sparse_attn_benchmark(
         if attn_impl == "ffa":
             # flatten headdim for ffa cause
             # flat_block_sparse_mask = flatten_head_mask(block_mask)
-            print(f"{block_mask.shape=}")
             flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
 
             # 3. Generate ranges from the flattened 2D mask
@@ -259,13 +263,9 @@ def sparse_attn_benchmark(
             block_mask_cpu = (
                 torch.rand(nhk, num_q_blocks_orig, num_kv_blocks_orig) < sparsity_ratio
             )
+            # flashinfer requires the row_sz to be of shape [num_q_heads, num_kv_block].
             block_row_sz_cpu = block_row_sz[..., kv_head_indices, :].detach().cpu()
             block_col_sz_cpu = block_col_sz.detach().cpu()
-
-            # print(f"{block_row_sz=}")
-            # print(f"{block_col_sz=}")
-
-            # print(f"Sparsity = {sparsity_ratio} of elements to compute")
 
             # allocate 128MB workspace buffer
             workspace_buffer = torch.empty(

@@ -1387,12 +1387,33 @@ class TestDistAttnSolver(DistTestBase):
             min_chunk_size=min_chunk_size, max_num_chunks=max_num_chunks
         )
 
-        expected_attn_calc_host_slice_local_list = testcase.get(
+        expected_attn_calc_host_slice_local_list: list[AttnSlice] = testcase.get(
             "attn_calc_host_slice_local_list"
         )[rank]
-        expected_attn_calc_remote_slice_list_per_chunk = testcase.get(
-            "attn_calc_remote_slice_list_per_chunk"
-        )[rank]
+        expected_attn_calc_remote_slice_list_per_chunk: list[
+            list[MultiKAttnSlice]
+        ] = testcase.get("attn_calc_remote_slice_list_per_chunk")[rank]
+
+        # --------------- sort expected result  ---------------- #
+
+        expected_attn_calc_host_slice_local_list.sort(
+            key=lambda x: (
+                x.q_range.start,
+                x.q_range.end,
+                x.k_range.start,
+                x.k_range.end,
+                x.mask_type.value,
+            )
+        )
+        for attn_slice_list in expected_attn_calc_remote_slice_list_per_chunk:
+            attn_slice_list.sort(
+                key=lambda x: (
+                    x.q_range.start,
+                    x.q_range.end,
+                    x.k_ranges.start,
+                    x.k_ranges.end,
+                )
+            )
 
         # --------------      compute meta       -------------- #
 
@@ -1426,12 +1447,35 @@ class TestDistAttnSolver(DistTestBase):
 
         # -------------- compute host rank entry -------------- #
 
-        host_rank_entry_this_rank = _init_host_rank_entry_this_rank(
+        host_rank_entry_this_rank: HostRankEntry = _init_host_rank_entry_this_rank(
             host_q_ranges_global=host_q_ranges_global_this_rank,
             host_k_ranges_global=host_k_ranges_global_this_rank,
             remote_k_ranges_global=remote_k_ranges_global_this_rank,
             attn_calc_slice_global_list=bucket_this_rank.attn_slices,
         )
+
+        # --------------- sort result ------------------ #
+
+        host_rank_entry_this_rank.attn_calc_host_slice_local_list.sort(
+            key=lambda x: (
+                x.q_range.start,
+                x.q_range.end,
+                x.k_range.start,
+                x.k_range.end,
+                x.mask_type.value,
+            )
+        )
+        for (
+            attn_slice_list
+        ) in host_rank_entry_this_rank.attn_calc_remote_slice_list_per_chunk:
+            attn_slice_list.sort(
+                key=lambda x: (
+                    x.q_range.start,
+                    x.q_range.end,
+                    x.k_ranges.start,
+                    x.k_ranges.end,
+                )
+            )
 
         assert (
             host_rank_entry_this_rank.attn_calc_host_slice_local_list

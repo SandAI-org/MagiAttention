@@ -213,6 +213,28 @@ class DistAttnSolver:
             [] for _ in range(len(remote_k_ranges_global_per_chunk))
         ]
 
+        # sort attn_calc_slice_global_list with k_range of slice
+        global_slice_indices = argsort(
+            attn_calc_slice_global_list, key=lambda x: (x.k_range.start, x.k_range.end)
+        )
+        attn_calc_slice_global_list = [
+            attn_calc_slice_global_list[i] for i in global_slice_indices
+        ]
+        attn_calc_host_q_ranges_local = [
+            attn_calc_host_q_ranges_local[i] for i in global_slice_indices
+        ]
+
+        # get host_k_ranges start and end, init chunked_remote_k_ranges idx for iteration
+        self.chunk_remote_k_ranges_global_start_idx = 0
+        host_k_ranges_global_start: int = host_k_ranges_global.start
+        host_k_ranges_global_end: int = host_k_ranges_global.end
+
+        # get start and end for each chunked remote_k_ranges_global
+        chunk_remote_k_ranges_global_boundary = [
+            (attn_range.start, attn_range.end)
+            for attn_range in remote_k_ranges_global_per_chunk
+        ]
+
         for ith_attn_slice_global, ith_attn_calc_host_q_range_local in zip(
             attn_calc_slice_global_list,
             attn_calc_host_q_ranges_local,
@@ -225,13 +247,18 @@ class DistAttnSolver:
 
             # -------   make ith attn calc host slice local  ------ #
 
-            self._make_ith_attn_calc_host_slice(
-                host_k_ranges_global=host_k_ranges_global,
-                attn_calc_host_slice_local_list=attn_calc_host_slice_local_list,
-                ith_attn_calc_host_q_range_local=ith_attn_calc_host_q_range_local,
-                ith_attn_calc_k_ranges_global=ith_attn_calc_k_ranges_global,
-                ith_attn_slice_global_mask_type=ith_attn_slice_global_mask_type,
-            )
+            # skip directly when there is no overlap
+            if (
+                host_k_ranges_global_start < ith_attn_slice_global.k_range.end  # type: ignore
+                and host_k_ranges_global_end > ith_attn_slice_global.k_range.start  # type: ignore
+            ):
+                self._make_ith_attn_calc_host_slice(
+                    host_k_ranges_global=host_k_ranges_global,
+                    attn_calc_host_slice_local_list=attn_calc_host_slice_local_list,
+                    ith_attn_calc_host_q_range_local=ith_attn_calc_host_q_range_local,
+                    ith_attn_calc_k_ranges_global=ith_attn_calc_k_ranges_global,
+                    ith_attn_slice_global_mask_type=ith_attn_slice_global_mask_type,
+                )
 
             # -------   make ith attn calc remote slice per chunk  ------ #
 
@@ -241,7 +268,11 @@ class DistAttnSolver:
                 ith_attn_calc_host_q_range_local=ith_attn_calc_host_q_range_local,
                 ith_attn_calc_k_ranges_global=ith_attn_calc_k_ranges_global,
                 ith_attn_slice_global_mask_type=ith_attn_slice_global_mask_type,
+                chunk_remote_k_ranges_global_boundary=chunk_remote_k_ranges_global_boundary,
             )
+
+        # delete chunked_remote_k_ranges idx
+        del self.chunk_remote_k_ranges_global_start_idx
 
         host_rank_entry_this_rank = HostRankEntry(
             host_q_ranges_global=host_q_ranges_global,
@@ -353,6 +384,7 @@ class DistAttnSolver:
         ith_attn_calc_host_q_range_local: AttnRange,
         ith_attn_calc_k_ranges_global: AttnRanges,
         ith_attn_slice_global_mask_type: AttnMaskType,
+        chunk_remote_k_ranges_global_boundary: list[tuple[int, int]],
     ) -> None:
         """Make attn calc remote slice for the given remote k ranges global in each chunk,
             and append to 'attn_calc_remote_slice_list_per_chunk'
@@ -360,10 +392,23 @@ class DistAttnSolver:
         HACK: inplace operation for 'attn_calc_remote_slice_list_per_chunk' for the purpose of performance,
               need further refactor.
         """
-
-        for j, jth_chunk_remote_k_ranges_global in enumerate(
-            remote_k_ranges_global_per_chunk
+        for j in range(
+            self.chunk_remote_k_ranges_global_start_idx,
+            len(remote_k_ranges_global_per_chunk),
         ):
+            jth_chunk_remote_k_ranges_global = remote_k_ranges_global_per_chunk[j]
+            if (
+                chunk_remote_k_ranges_global_boundary[j][0]
+                >= ith_attn_calc_k_ranges_global[0].end
+            ):
+                break
+            elif (
+                chunk_remote_k_ranges_global_boundary[j][1]
+                <= ith_attn_calc_k_ranges_global[0].start
+            ):
+                self.chunk_remote_k_ranges_global_start_idx += 1
+                continue
+
             self._make_ith_attn_calc_remote_slice(
                 remote_k_ranges_global=jth_chunk_remote_k_ranges_global,
                 attn_calc_remote_slice_list=attn_calc_remote_slice_list_per_chunk[j],
