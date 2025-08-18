@@ -56,6 +56,13 @@ def block_sparse_available(
     return True
 
 
+def var_block_sparse_available(attn_impl: str, wd: str) -> bool:
+    if attn_impl == "flashinfer":
+        # flashinfer doesn't support variable block size
+        return wd == "fwd"
+    return True
+
+
 def calculate_attn_flops(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
