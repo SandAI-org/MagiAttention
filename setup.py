@@ -666,7 +666,7 @@ def build_magi_attn_ext_module(
 cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
 # init package_data
-package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
+package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi", "*.so"]}
 
 # build ext modules
 ext_modules = []
