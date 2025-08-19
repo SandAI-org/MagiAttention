@@ -1,0 +1,288 @@
+# Copyright (c) 2025 SandAI. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import Any
+
+from .enum import AttnMaskType
+from .range import AttnRange
+
+__all__ = [
+    "AttnRectangle",
+]
+
+INT_MAX = 10**9
+INT_MIN = -(10**9)
+
+
+class AttnRectangle:
+    """
+    A dataclass to manage any indices rectangle like
+    [start_q, end_q) [start_k, end_k) [start_d, end_d) mask_type
+    for attention computation
+    """
+
+    # TODO fix with range valid check logic
+
+    def __init__(
+        self,
+        q_range: AttnRange,
+        k_range: AttnRange,
+        d_range: AttnRange = AttnRange(INT_MIN, INT_MAX),
+        mask_type: AttnMaskType = AttnMaskType.FULL,
+    ) -> None:
+        self.check_valid(q_range=q_range, k_range=k_range, d_range=d_range)
+
+        self._q_range = q_range
+        self._k_range = k_range
+        # d_range is k_id - q_id == d_id diagonal line range
+        self._d_range = d_range
+        self._mask_type = mask_type
+
+    @property
+    def q_range(self):
+        return self._q_range
+
+    @q_range.setter
+    def q_range(self, value) -> None:
+        self.check_valid(q_range=value)
+        self._q_range = value
+
+    @property
+    def k_range(self):
+        return self._k_range
+
+    @k_range.setter
+    def k_range(self, value) -> None:
+        self.check_valid(k_range=value)
+        self._k_range = value
+
+    @property
+    def d_range(self):
+        return self._d_range
+
+    @d_range.setter
+    def d_range(self, value) -> None:
+        self.check_valid(d_range=value)
+        self._d_range = value
+
+    def is_valid(
+        self,
+        q_range: AttnRange | None = None,
+        k_range: AttnRange | None = None,
+        d_range: AttnRange | None = None,
+    ) -> bool:
+        q_range = self._q_range if q_range is None else q_range
+        k_range = self._k_range if k_range is None else k_range
+        d_range = self._d_range if d_range is None else d_range
+        if q_range.is_valid() and k_range.is_valid() and d_range.is_valid():
+            return True
+        return False
+
+    def check_valid(
+        self,
+        q_range: AttnRange | None = None,
+        k_range: AttnRange | None = None,
+        d_range: AttnRange | None = None,
+    ) -> None:
+        if not self.is_valid(q_range, k_range, d_range):
+            raise ValueError(
+                f"Some of the {q_range=} {k_range=} {d_range=} is invalid, no area include"
+            )
+
+    def shrink_d_range(self) -> bool:
+        d_range_min = self._k_range.start - (self._q_range.end - 1)
+        d_range_max = (self._k_range.end - 1) - self._q_range.start
+        d_range = self._d_range
+        d_range._start = max(self._d_range.start, d_range_min)
+        d_range._end = min(self._d_range.end, d_range_max)
+        self._d_range = d_range
+        return d_range.is_valid()
+
+    def shrink_q_range(self) -> bool:
+        # calc intersection of d_range end diagonal line & k_range start line
+        intersection_q_start = self._k_range.start - self._d_range.end
+        # calc instersection of d_range start diagonal line & k_range end line
+        intersection_q_end = self._k_range.end - self._d_range.start
+        q_range = self._q_range
+        q_range._start = max(self._q_range.start, intersection_q_start)
+        q_range._end = min(self._q_range.end, intersection_q_end)
+        self._q_range = q_range
+        return q_range.is_valid()
+
+    def shrink_k_range(self) -> bool:
+        # calc intersection of d_range start diagonal line & q_range start line
+        intersection_k_start = self._d_range.start + self._q_range.start
+        # calc intersection of d_range end diagonal line & q_range end line
+        intersection_k_end = self._d_range.end + self._q_range.end
+        k_range = self._k_range
+        k_range._start = max(self._k_range.start, intersection_k_start)
+        k_range._end = min(self._k_range.end, intersection_k_end)
+        self._k_range = k_range
+        return k_range.is_valid()
+
+    def cut_q(self, cutq: int) -> "AttnRectangle" | None:
+        if cutq < self._q_range.start or cutq >= self._q_range.end:
+            return None
+        cut_rect = self
+        q_range_left = self._q_range
+        q_range_right = self._q_range
+        q_range_left._end = q_range_right._start = cutq
+        self._q_range = q_range_left
+        cut_rect._q_range = q_range_right
+        return cut_rect
+
+    def cut_k(self, cutk: int) -> "AttnRectangle" | None:
+        if cutk < self._k_range.start or cutk >= self._k_range.end:
+            return None
+        cut_rect = self
+        k_range_left = self._k_range
+        k_range_right = self._k_range
+        k_range_left._end = k_range_right._start = cutk
+        self._k_range = k_range_left
+        cut_rect._k_range = k_range_right
+        return cut_rect
+
+    def area(self) -> int:
+        return self.count_areas(
+            self._q_range.start,
+            self._q_range.end,
+            self._k_range.start,
+            self._k_range.end,
+            self._d_range.start,
+            self._d_range.end,
+        )
+
+    def count_areas(self, lq, rq, lk, rk, ld, rd) -> int:
+        """
+        Calculate the number of integer points (q, k) that satisfy the conditions
+        Time complexity O(1)
+
+        Parameters:
+        lq, rq: Range of q [lq, rq)
+        lk, rk: Range of k [lk, rk)
+        ld, rd: Range of k-q [ld, rd]
+
+        Returns:
+        The number of points satisfying all conditions
+        """
+        # Handle boundary cases: invalid ranges
+        if rq <= lq or rk <= lk or rd < ld:
+            return 0
+
+        # Convert to integer closed intervals [Q1, Q2] and [K1, K2]
+        Q1, Q2 = lq, rq - 1  # Valid integer range for q
+        K1, K2 = lk, rk - 1  # Valid integer range for k
+
+        # Condition transformation: ld <= k-q <= rd -> q+ld <= k <= q+rd
+        # For each q, the valid range of k is [max(K1, q+ld), min(K2, q+rd)]
+        # The range is valid if and only if max(...) <= min(...)
+
+        # Calculate critical points (dividing intervals for q)
+        a = K1 - ld  # When q < a, q+ld < K1 -> lower bound of k is K1
+        b = K2 - rd  # When q > b, q+rd > K2 -> upper bound of k is K2
+
+        total = 0
+
+        # Divide q into intervals, ensuring no overlap
+        if a <= b:
+            # Interval 1: q ∈ [Q1, min(a-1, Q2)] -> lower bound of k is K1, upper bound is q+rd
+            q_start = Q1
+            q_end = min(a - 1, Q2)
+            if q_start <= q_end:
+                # Valid q must satisfy: q+rd ≥ K1 (otherwise k range is invalid)
+                m = max(q_start, K1 - rd)
+                n = q_end
+                if m <= n:
+                    # Number of k for each q: (q+rd) - K1 + 1 = q + (rd - K1 + 1)
+                    c = rd - K1 + 1
+                    sum_q = (n * (n + 1) // 2) - ((m - 1) * m // 2)
+                    sum_c = c * (n - m + 1)
+                    total += sum_q + sum_c
+
+            # Interval 2: q ∈ [max(a, Q1), min(b, Q2)] -> k range is [q+ld, q+rd] (completely within [K1,K2])
+            q_start = max(a, Q1)
+            q_end = min(b, Q2)
+            if q_start <= q_end:
+                # Number of k for each q: rd - ld + 1 (constant)
+                k_count = rd - ld + 1
+                total += k_count * (q_end - q_start + 1)
+
+            # Interval 3: q ∈ [max(b+1, Q1), Q2] -> lower bound of k is q+ld, upper bound is K2
+            q_start = max(b + 1, Q1)
+            q_end = Q2
+            if q_start <= q_end:
+                # Valid q must satisfy: q+ld <= K2 (otherwise k range is invalid)
+                m = q_start
+                n = min(q_end, K2 - ld)
+                if m <= n:
+                    # Number of k for each q: K2 - (q+ld) + 1 = (K2 - ld + 1) - q
+                    c = K2 - ld + 1
+                    sum_c = c * (n - m + 1)
+                    sum_q = (n * (n + 1) // 2) - ((m - 1) * m // 2)
+                    total += sum_c - sum_q
+        else:
+            # When a > b, three intervals
+            # Interval 1: q ∈ [Q1, min(b, Q2)] -> lower bound of k is K1, upper bound is q+rd
+            q_start = Q1
+            q_end = min(b, Q2)
+            if q_start <= q_end:
+                m = max(q_start, K1 - rd)
+                n = q_end
+                if m <= n:
+                    c = rd - K1 + 1
+                    sum_q = (n * (n + 1) // 2) - ((m - 1) * m // 2)
+                    sum_c = c * (n - m + 1)
+                    total += sum_q + sum_c
+
+            # Interval 2: q ∈ [max(b+1, Q1), min(a-1, Q2)] -> k range is [K1, K2] (completely contained)
+            q_start = max(b + 1, Q1)
+            q_end = min(a - 1, Q2)
+            if q_start <= q_end:
+                # Number of k for each q: K2 - K1 + 1 (constant)
+                if K1 <= K2:
+                    k_count = K2 - K1 + 1
+                    total += k_count * (q_end - q_start + 1)
+
+            # Interval 3: q ∈ [max(a, Q1), Q2] -> lower bound of k is q+ld, upper bound is K2
+            q_start = max(a, Q1)
+            q_end = Q2
+            if q_start <= q_end:
+                m = q_start
+                n = min(q_end, K2 - ld)
+                if m <= n:
+                    c = K2 - ld + 1
+                    sum_c = c * (n - m + 1)
+                    sum_q = (n * (n + 1) // 2) - ((m - 1) * m // 2)
+                    total += sum_c - sum_q
+
+        return total
+
+    def __len__(self) -> int:
+        return 1
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, AttnRectangle):
+            return (
+                self._q_range == other._q_range
+                and self._k_range == other._k_range
+                and self._d_range == other._d_range
+                and self._mask_type == other._mask_type
+            )
+        return False
+
+    def __hash__(self) -> int:
+        return hash((self._q_range, self._k_range, self._d_range))
+
+    def __repr__(self) -> str:
+        return f"{self._q_range} x {self._k_range} x {self._d_range}"
