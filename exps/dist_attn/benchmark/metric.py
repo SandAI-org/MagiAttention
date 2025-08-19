@@ -13,9 +13,15 @@
 # limitations under the License.
 
 import math
+from dataclasses import dataclass
+from typing import Optional
 
+from exps.attn.baselines.utils import calculate_attn_flops
 from exps.dist_attn.benchmark.enums import MetricsType
 from magi_attention.common import AttnRanges
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.meta.collection.calc_meta import AttnCalcMeta
+from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.container.bucket import AttnBucket
 
 NHQ = 48
@@ -26,6 +32,23 @@ FWD_COMP_MFU = 0.68
 BWD_COMP_MFU = 0.45
 COMM_SPEED = 50  # 50 GB/s
 COMM_MFU = 0.55
+
+
+@dataclass
+class MetricData:
+    comm_meta_list: list[CommMeta]
+    calc_meta_list: list[AttnCalcMeta]
+
+    q_heads: Optional[int] = None
+    kv_heads: Optional[int] = None
+    head_dim: Optional[int] = None
+    pass_type: Optional[str] = "fwd"
+
+
+@dataclass
+class MetricSet:
+    computation_amount_list: Optional[list[list[float]]] = None
+    comm_bytes_list: Optional[list[list[tuple[int, int]]]] = None
 
 
 class MetricsCalculator:
@@ -278,3 +301,224 @@ class MetricsCalculator:
             cost = max(cost, cost_this_rank)
 
         return cost
+
+
+class MetricDataCalculator:
+    @staticmethod
+    def calculate(
+        metrics_type: MetricsType,
+        metric_data: MetricData,
+    ) -> MetricSet:
+        assert metrics_type in [MetricsType.COMPUTATION_AMOUNT, MetricsType.COMM_BYTES]
+
+        calculate_function = {
+            MetricsType.COMPUTATION_AMOUNT: MetricDataCalculator.calculate_computational_cost,
+            MetricsType.COMM_BYTES: MetricDataCalculator.calculate_communication_cost,
+        }[metrics_type]
+
+        return calculate_function(metric_data=metric_data)
+
+    @staticmethod
+    def calculate_computational_cost(
+        metric_data: MetricData,
+    ) -> MetricSet:
+        calc_meta_list: list[AttnCalcMeta] = metric_data.calc_meta_list
+        num_heads_q, head_dim, pass_type = (
+            metric_data.q_heads,
+            metric_data.head_dim,
+            metric_data.pass_type,
+        )
+        assert num_heads_q is not None and head_dim is not None, (
+            f"Need q_heads and head_dim to calculate computation cost, "
+            f"but got {metric_data.q_heads=} and {metric_data.head_dim=}"
+        )
+        assert pass_type in [
+            "fwd",
+            "bwd",
+            "1f1b",
+        ], "Only support 'fwd', 'bwd' and '1f1b' pass!"
+        computation_amount_list: list[list[float]] = []
+
+        for calc_meta in calc_meta_list:
+            computation_amount_per_rank: list[float] = []
+            iter_attn_arg = [calc_meta.local_attn_arg] + calc_meta.remote_attn_args_list
+
+            for attn_arg in iter_attn_arg:
+                attn_mask_type = [
+                    [
+                        AttnMaskType.FULL,
+                        AttnMaskType.CAUSAL,
+                        AttnMaskType.INVCAUSAL,
+                        AttnMaskType.BICAUSAL,
+                    ][mask_type]
+                    for mask_type in attn_arg.attn_type_map
+                ]
+
+                flops_dict = calculate_attn_flops(
+                    q_ranges=attn_arg.q_ranges,
+                    k_ranges=attn_arg.k_ranges,
+                    attn_mask_type=attn_mask_type,
+                    total_seqlen_q=attn_arg.q_ranges.end,
+                    num_heads_q=num_heads_q,
+                    head_dim=head_dim,
+                )
+
+                computation_amount_per_rank.append(flops_dict[pass_type])
+
+            computation_amount_list.append(computation_amount_per_rank)
+
+        return MetricSet(computation_amount_list=computation_amount_list)
+
+    @staticmethod
+    def calculate_communication_cost(
+        metric_data: MetricData,
+    ) -> MetricSet:
+        comm_meta_list: list[CommMeta] = metric_data.comm_meta_list
+        num_heads_q, num_heads_kv, head_dim, pass_type = (
+            metric_data.q_heads,
+            metric_data.kv_heads,
+            metric_data.head_dim,
+            metric_data.pass_type,
+        )
+        assert (
+            num_heads_q is not None
+            and num_heads_kv is not None
+            and head_dim is not None
+        ), (
+            f"Need q_heads, kv_heads and head_dim to calculate computation cost, "
+            f"but got {metric_data.q_heads=}, {metric_data.kv_heads=} and {metric_data.head_dim=}"
+        )
+        assert pass_type in ["fwd", "bwd"], "Only support 'fwd' and 'bwd' pass!"
+        comm_bytes_list: list[list[tuple[int, int]]] = []
+
+        for comm_meta in comm_meta_list:
+            comm_bytes_this_rank: list[tuple[int, int]] = []
+
+            kv_recv_tokens_num_list: list[
+                int
+            ] = comm_meta.num_remote_kv_tokens_per_stage
+            qo_recv_tokens_num_list: list[
+                int
+            ] = comm_meta.num_remote_qo_tokens_per_stage
+
+            kv_send_tokens_num_list: list[int] = []
+            qo_send_tokens_num_list: list[int] = []
+
+            num_of_stage = len(comm_meta.num_remote_qo_tokens_per_stage)
+
+            for i in range(num_of_stage):
+                kv_group_collective_arg = comm_meta.kv_group_collective_args_list[i]
+                qo_group_collective_arg = comm_meta.qo_group_collective_args_list[i]
+
+                kv_send_tokens_num = sum(
+                    [
+                        kv_group_collective_arg.input_split_size_list[j]
+                        * len(kv_group_collective_arg.dst_indices_list[j])
+                        for j in range(
+                            len(kv_group_collective_arg.input_split_size_list)
+                        )
+                    ]
+                )
+                qo_send_tokens_num = sum(
+                    [
+                        qo_group_collective_arg.input_split_size_list[j]
+                        * len(qo_group_collective_arg.dst_indices_list[j])
+                        for j in range(
+                            len(qo_group_collective_arg.input_split_size_list)
+                        )
+                    ]
+                )
+
+                kv_send_tokens_num_list.append(kv_send_tokens_num)
+                qo_send_tokens_num_list.append(qo_send_tokens_num)
+
+            for i in range(num_of_stage + 2):
+                recv_bytes, send_bytes = 0, 0
+
+                if pass_type == "fwd":
+                    if i < num_of_stage:
+                        send_q_bytes = (
+                            qo_send_tokens_num_list[i] * num_heads_q * head_dim
+                        )
+                        send_kv_bytes = (
+                            kv_send_tokens_num_list[i] * num_heads_kv * head_dim * 2
+                        )
+
+                        recv_q_bytes = (
+                            qo_recv_tokens_num_list[i] * num_heads_q * head_dim
+                        )
+                        recv_kv_bytes = (
+                            kv_recv_tokens_num_list[i] * num_heads_kv * head_dim * 2
+                        )
+
+                        send_bytes += send_q_bytes + send_kv_bytes
+                        recv_bytes += recv_q_bytes + recv_kv_bytes
+
+                    if i > 1:
+                        send_o_bytes = (
+                            qo_recv_tokens_num_list[i - 2] * num_heads_q * head_dim
+                        )
+                        send_lse_bytes = qo_recv_tokens_num_list[i - 2] * num_heads_q
+
+                        recv_o_bytes = (
+                            qo_send_tokens_num_list[i - 2] * num_heads_q * head_dim
+                        )
+                        recv_lse_bytes = qo_send_tokens_num_list[i - 2] * num_heads_q
+
+                        send_bytes += send_o_bytes + send_lse_bytes
+                        recv_bytes += recv_o_bytes + recv_lse_bytes
+
+                elif pass_type == "bwd":
+                    if i < num_of_stage:
+                        send_q_bytes = (
+                            qo_send_tokens_num_list[i] * num_heads_q * head_dim
+                        )
+                        send_kv_bytes = (
+                            kv_send_tokens_num_list[i] * num_heads_kv * head_dim * 2
+                        )
+                        send_o_bytes = (
+                            qo_send_tokens_num_list[i] * num_heads_q * head_dim * 2
+                        )  # o and do
+                        send_lse_bytes = qo_send_tokens_num_list[i] * num_heads_q
+
+                        recv_q_bytes = (
+                            qo_recv_tokens_num_list[i] * num_heads_q * head_dim
+                        )
+                        recv_kv_bytes = (
+                            kv_recv_tokens_num_list[i] * num_heads_kv * head_dim * 2
+                        )
+                        recv_o_bytes = (
+                            kv_recv_tokens_num_list[i] * num_heads_q * head_dim * 2
+                        )  # o and do
+                        recv_lse_bytes = kv_recv_tokens_num_list[i] * num_heads_q
+
+                        send_bytes += (
+                            send_q_bytes + send_kv_bytes + send_o_bytes + send_lse_bytes
+                        )
+                        recv_bytes += (
+                            recv_q_bytes + recv_kv_bytes + recv_o_bytes + recv_lse_bytes
+                        )
+
+                    if i > 1:
+                        send_dq_bytes = (
+                            qo_recv_tokens_num_list[i - 2] * num_heads_q * head_dim
+                        )
+                        send_dkv_bytes = (
+                            kv_recv_tokens_num_list[i - 2] * num_heads_kv * head_dim * 2
+                        )
+
+                        recv_dq_bytes = (
+                            qo_send_tokens_num_list[i - 2] * num_heads_q * head_dim
+                        )
+                        recv_dkv_bytes = (
+                            kv_send_tokens_num_list[i - 2] * num_heads_kv * head_dim * 2
+                        )
+
+                        send_bytes += send_dq_bytes + send_dkv_bytes
+                        recv_bytes += recv_dq_bytes + recv_dkv_bytes
+
+                comm_bytes_this_rank.append((send_bytes, recv_bytes))
+
+            comm_bytes_list.append(comm_bytes_this_rank)
+
+        return MetricSet(comm_bytes_list=comm_bytes_list)
