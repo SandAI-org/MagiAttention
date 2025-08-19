@@ -232,36 +232,6 @@ def local_hold_remote_calc_ranges_comm_lens(
     return send_lens
 
 
-def calc_full_comm_meta_from_qk_ranges(
-    q_ranges: list,
-    k_ranges: list,
-    attn_mask_type: list,
-    # total_seqlen_q: int,
-    # total_seqlen_k: int,
-    # cp_size: int,
-    # cp_rank: int,
-    kBlockM: int,
-    kBlockN: int,
-):
-    if len(q_ranges) != len(k_ranges):
-        raise ValueError("q_ranges must equal k_ranges")
-
-    rectangles = list(zip(q_ranges, k_ranges, attn_mask_type))
-
-    rectangles.sort(key=lambda x: (x[1][0], x[1][1]))
-
-    sorted_q, sorted_k, sorted_attn_mask_type = zip(*rectangles)
-
-    for rec in rectangles:
-        area = calc_area_qkrange(rec[0], rec[1], rec[2], kBlockM, kBlockN, tile_q=True)
-        print(area)
-
-    print(sorted_q)
-    print(sorted_k)
-    print(sorted_attn_mask_type)
-    print(calc_uncover_ranges_gaps(list(sorted_k)))
-
-
 def calc_load_area_message(
     bucket: list,  # q k range mask type of all rank
     kBlockM: int,
@@ -353,33 +323,3 @@ def eval_solver_result(
         f"max_bwd_area:{max_bwd_area}\t\t load_balance_rate:{max_bwd_area * cp_size / total_bwd_area}"
     )
     print(f"max_bwd_comm_len:{max_bwd_comm_len}")
-
-
-if __name__ == "__main__":
-    bucket = [
-        [
-            [[0, 1024]],
-            [[1024, 2048]],
-            [AttnMaskType.FULL],
-        ],
-        [
-            [[1024, 2048]],
-            [[1024, 2048]],
-            [AttnMaskType.FULL],
-        ],
-        [
-            [[2048, 3072]],
-            [[2048, 3072]],
-            [AttnMaskType.FULL],
-        ],
-        [
-            [[3072, 4096]],
-            [[3072, 4096]],
-            [AttnMaskType.FULL],
-        ],
-    ]
-    local_ranges = [[[0, 1024]], [[1024, 2048]], [[2048, 3072]], [[3072, 4096]]]
-
-    kBlockM = 128
-    kBlockN = 128
-    eval_solver_result(bucket, local_ranges, kBlockM, kBlockN)
