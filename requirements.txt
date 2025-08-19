@@ -1,3 +1,4 @@
 rich
 versioningit
 packaging>=24.2
+setuptools>=77.0.0
