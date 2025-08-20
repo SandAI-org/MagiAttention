@@ -16,6 +16,7 @@ from . import enum, range_op
 from .mask import AttnMask
 from .range import AttnRange, RangeError
 from .ranges import AttnRanges
+from .rect_range import AttnRectRange
 from .rectangle import AttnRectangle
 from .rectangles import AttnRectangles
 
@@ -25,6 +26,7 @@ __all__ = [
     "AttnRange",
     "RangeError",
     "AttnRanges",
+    "AttnRectRange",
     "AttnRectangle",
     "AttnRectangles",
     "range_op",
