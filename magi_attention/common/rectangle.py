@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import Any, Union
 
 from .enum import AttnMaskType
@@ -59,7 +60,7 @@ class AttnRectangle:
             else AttnRectRange.from_parent(d_range)
         )
         # If there is no user-defined mask_type, set it to FULL
-        self._mask_type = mask_type
+        # self._mask_type = mask_type
 
         if mask_type == AttnMaskType.CAUSAL or mask_type == AttnMaskType.BICAUSAL:
             # d_index end is limit by the lower right corner
@@ -115,9 +116,9 @@ class AttnRectangle:
         k_range: AttnRectRange | None = None,
         d_range: AttnRectRange | None = None,
     ) -> bool:
-        q_range = self._q_range if q_range is None else q_range
-        k_range = self._k_range if k_range is None else k_range
-        d_range = self._d_range if d_range is None else d_range
+        q_range = self.q_range if q_range is None else q_range
+        k_range = self.k_range if k_range is None else k_range
+        d_range = self.d_range if d_range is None else d_range
         if (
             q_range.is_valid_open()
             and k_range.is_valid_open()
@@ -132,9 +133,9 @@ class AttnRectangle:
         k_range: AttnRectRange | None = None,
         d_range: AttnRectRange | None = None,
     ) -> None:
-        q_range = self._q_range if q_range is None else q_range
-        k_range = self._k_range if k_range is None else k_range
-        d_range = self._d_range if d_range is None else d_range
+        q_range = self.q_range if q_range is None else q_range
+        k_range = self.k_range if k_range is None else k_range
+        d_range = self.d_range if d_range is None else d_range
         if not self.is_valid(q_range, k_range, d_range):
             raise ValueError(
                 f"Some of the {q_range=} {k_range=} {d_range=} is invalid, no area include"
@@ -144,47 +145,41 @@ class AttnRectangle:
         return self if self.is_valid() else None
 
     def shrink_d_range(self) -> bool:
-        d_range_min = self._k_range.start - (self._q_range.end - 1)
-        d_range_max = (self._k_range.end - 1) - self._q_range.start
-        d_range = self._d_range
-        d_range.start = max(self._d_range.start, d_range_min)
-        d_range.end = min(self._d_range.end, d_range_max)
-        self._d_range = d_range
-        return d_range.is_valid_close()
+        d_range_min = self.k_range.start - (self.q_range.end - 1)
+        d_range_max = (self.k_range.end - 1) - self.q_range.start
+        self.d_range.start = max(self.d_range.start, d_range_min)
+        self.d_range.end = min(self.d_range.end, d_range_max)
+        return self.d_range.is_valid_close()
 
     def shrink_q_range(self) -> bool:
         # calc intersection of d_range end diagonal line & k_range start line
-        intersection_q_start = self._k_range.start - self._d_range.end
+        intersection_q_start = self.k_range.start - self.d_range.end
         # calc instersection of d_range start diagonal line & k_range end line
-        intersection_q_end = self._k_range.end - self._d_range.start
-        q_range = self._q_range
-        q_range.start = max(self._q_range.start, intersection_q_start)
-        q_range.end = min(self._q_range.end, intersection_q_end)
-        self._q_range = q_range
-        return q_range.is_valid_open()
+        intersection_q_end = self.k_range.end - self.d_range.start
+        self.q_range.start = max(self.q_range.start, intersection_q_start)
+        self.q_range.end = min(self.q_range.end, intersection_q_end)
+        return self.q_range.is_valid_open()
 
     def shrink_k_range(self) -> bool:
         # calc intersection of d_range start diagonal line & q_range start line
-        intersection_k_start = self._d_range.start + self._q_range.start
+        intersection_k_start = self.d_range.start + self.q_range.start
         # calc intersection of d_range end diagonal line & q_range end line
-        intersection_k_end = self._d_range.end + self._q_range.end
-        k_range = self._k_range
-        k_range.start = max(self._k_range.start, intersection_k_start)
-        k_range.end = min(self._k_range.end, intersection_k_end)
-        self._k_range = k_range
-        return k_range.is_valid_open()
+        intersection_k_end = self.d_range.end + self.q_range.end
+        self.k_range.start = max(self.k_range.start, intersection_k_start)
+        self.k_range.end = min(self.k_range.end, intersection_k_end)
+        return self.k_range.is_valid_open()
 
     def cut_q(
         self, cut_pos: int
     ) -> tuple[Union["AttnRectangle", None], Union["AttnRectangle", None]]:
-        if cut_pos < self._q_range.start:
+        if cut_pos < self.q_range.start:
             return None, self
-        if cut_pos >= self._q_range.end:
+        if cut_pos >= self.q_range.end:
             return self, None
-        cut_rect_left = self
-        cut_rect_right = self
-        cut_rect_left._q_range.end = cut_pos
-        cut_rect_right._q_range.start = cut_pos
+        cut_rect_left = copy.deepcopy(self)
+        cut_rect_right = copy.deepcopy(self)
+        cut_rect_left.q_range.end = cut_pos
+        cut_rect_right.q_range.start = cut_pos
         cut_rect_left.shrink_d_range()
         cut_rect_left.shrink_k_range()
         cut_rect_right.shrink_d_range()
@@ -194,25 +189,147 @@ class AttnRectangle:
     def cut_k(
         self, cut_pos: int
     ) -> tuple[Union["AttnRectangle", None], Union["AttnRectangle", None]]:
-        if cut_pos < self._k_range.start:
+        if cut_pos < self.k_range.start:
             return None, self
-        if cut_pos >= self._k_range.end:
+        if cut_pos >= self.k_range.end:
             return self, None
-        cut_rect_left = self
-        cut_rect_right = self
-        cut_rect_left._k_range.end = cut_pos
-        cut_rect_right._k_range.start = cut_pos
+        cut_rect_left = copy.deepcopy(self)
+        cut_rect_right = copy.deepcopy(self)
+        cut_rect_left.k_range.end = cut_pos
+        cut_rect_right.k_range.start = cut_pos
         cut_rect_left.shrink_d_range()
         cut_rect_left.shrink_q_range()
         cut_rect_right.shrink_d_range()
         cut_rect_right.shrink_q_range()
         return cut_rect_left.get_valid_or_none(), cut_rect_right.get_valid_or_none()
 
+    def intersection_q_id_on_left_boundary(self) -> int:
+        """get k_start d_start intersection, which is q id on left boundary"""
+        return self.k_range.start - self.d_range.start
+
+    def intersection_q_id_on_right_boundary(self) -> int:
+        """get k_end d_end intersection, which is q id on right boundary"""
+        return self.k_range.end - 1 - self.d_range.end
+
+    def is_full(self) -> bool:
+        return (
+            self.d_range.start <= self.k_range.start - (self.q_range.end - 1)
+            and self.d_range.end >= self.k_range.end - 1 - self.q_range.start
+        )
+
+    def is_causal(self) -> bool:
+        return (
+            self.d_range.start <= self.k_range.start - (self.q_range.end - 1)
+            and self.d_range.end == self.k_range.end - self.q_range.end
+        )
+
+    def is_inv_causal(self) -> bool:
+        return (
+            self.d_range.start == self.k_range.start - self.q_range.start
+            and self.d_range.end >= self.k_range.end - 1 - self.q_range.start
+        )
+
+    def is_bi_causal(self) -> bool:
+        return (
+            self.d_range.start == self.k_range.start - self.q_range.start
+            and self.d_range.end == self.k_range.end - self.q_range.end
+        )
+
     def to_qk_range_mask_type(
         self,
-    ) -> tuple[AttnRange, AttnRange, int]:
-        # TODO
-        return AttnRange(0, 0), AttnRange(0, 0), 0
+    ) -> list[tuple[AttnRange, AttnRange, int]]:
+        """
+        Change rectangle to q k range and mask type style.
+        Use recursive logic processing.
+        """
+        attn_arg: list[tuple[AttnRange, AttnRange, int]] = []
+
+        # Direct_return
+        # case 1: Full Mask
+        if self.is_full():
+            attn_arg.append((self.q_range.to_parent(), self.k_range.to_parent(), 0))
+            return attn_arg
+        # case 2: Causal Mask
+        if self.is_causal():
+            attn_arg.append((self.q_range.to_parent(), self.k_range.to_parent(), 1))
+            return attn_arg
+        # case 3: Inv Causal Mask
+        if self.is_inv_causal():
+            attn_arg.append((self.q_range.to_parent(), self.k_range.to_parent(), 2))
+            return attn_arg
+        # case 4: Bi Causal Mask
+        if self.is_bi_causal():
+            attn_arg.append((self.q_range.to_parent(), self.k_range.to_parent(), 3))
+            return attn_arg
+
+        # left boundary (k_start): q_start ~ q_id_l is Full, q_id_l ~ q_end is Inv Causal
+        q_id_l = self.intersection_q_id_on_left_boundary()
+        # right boundary (k_end) : q_start ~ q_id_r is Causal, q_id_r ~ q_end is Full
+        q_id_r = self.intersection_q_id_on_right_boundary()
+
+        if (
+            q_id_l < self.q_range.start
+            or q_id_l >= self.q_range.end
+            or q_id_r < self.q_range.start
+            or q_id_r >= self.q_range.end
+        ):
+            raise ValueError(f"rect{self} without shrinkage call to_qk_range_mask_type")
+
+        # no d_range start cut
+        if q_id_l == self.q_range.end - 1:
+            # q_start ~ q_id_r  : left full, right causal
+            # q_id_r + 1 ~ q_end    : left full, right full
+            up_rect, down_rect = self.cut_q(q_id_r + 1)
+            if up_rect is not None:
+                attn_arg.extend(up_rect.to_qk_range_mask_type())
+            if down_rect is not None:
+                attn_arg.extend(down_rect.to_qk_range_mask_type())
+            return attn_arg
+
+        # no d_range end cut
+        if q_id_r == self.q_range.start:
+            # q_start ~ q_id_l - 1  : left full, right full
+            # q_id_l ~ q_end    : left inv causal, right full
+            up_rect, down_rect = self.cut_q(q_id_l)
+            if up_rect is not None:
+                attn_arg.extend(up_rect.to_qk_range_mask_type())
+            if down_rect is not None:
+                attn_arg.extend(down_rect.to_qk_range_mask_type())
+            return attn_arg
+
+        if q_id_r <= q_id_l:
+            # q_start ~ q_id_r - 1  : left full, right causal
+            # q_id_r ~ q_id_l - 1   : left full, right full
+            # q_id_l ~ q_end    : left inv causal, right full
+            up_rect, down_rect = self.cut_q(q_id_l)
+            if up_rect is not None:
+                attn_arg.extend(up_rect.to_qk_range_mask_type())
+            if down_rect is not None:
+                attn_arg.extend(down_rect.to_qk_range_mask_type())
+            return attn_arg
+        elif q_id_r == q_id_l + 1:
+            # q_start ~ q_id_l  : left full, right causal
+            # q_id_r ~ q_end    : left inv causal, right full
+            up_rect, down_rect = self.cut_q(q_id_r)
+            if up_rect is not None:
+                attn_arg.extend(up_rect.to_qk_range_mask_type())
+            if down_rect is not None:
+                attn_arg.extend(down_rect.to_qk_range_mask_type())
+            return attn_arg
+        else:  # q_id_r > q_id_l + 1
+            # q_start ~ q_id_l - 1  : left full, right causal
+            # q_id_l ~ q_id_r   : left inv causal, right causal
+            # q_id_r + 1 ~ q_end    : left inv causal, right full
+            up_rect, mid_rect = self.cut_q(q_id_l)
+            if up_rect is not None:
+                attn_arg.extend(up_rect.to_qk_range_mask_type())
+            if mid_rect is not None:
+                mid_rect, down_rect = mid_rect.cut_q(q_id_r + 1)
+                if mid_rect is not None:
+                    attn_arg.extend(mid_rect.to_qk_range_mask_type())
+                if down_rect is not None:
+                    attn_arg.extend(down_rect.to_qk_range_mask_type())
+            return attn_arg
 
     def area(self) -> int:
         return self.count_areas(
@@ -338,7 +455,6 @@ class AttnRectangle:
                 self._q_range == other._q_range
                 and self._k_range == other._k_range
                 and self._d_range == other._d_range
-                and self._mask_type == other._mask_type
             )
         return False
 
