@@ -134,6 +134,44 @@ class AttnRectangles:
 
         return rects_left, rects_right
 
+    def cut_k(self, cut_pos: int) -> tuple["AttnRectangles", "AttnRectangles"]:
+        rects_left = AttnRectangles()
+        rects_right = AttnRectangles()
+        for rect in self._rects:
+            rect_left, rect_right = rect.cut_k(cut_pos=cut_pos)
+            if rect_left is not None:
+                rects_left.append(rect_left)
+            if rect_right is not None:
+                rects_right.append(rect_right)
+
+        return rects_left, rects_right
+
+    def get_rects_within_q_segment(
+        self,
+        q_start: int,
+        q_end: int,
+    ):
+        rects_in_seg = AttnRectangles()
+        for rect in self._rects:
+            rect_in_seg = rect.get_rect_within_q_segment(q_start, q_end)
+            if rect_in_seg is not None:
+                rects_in_seg.append(rect_in_seg)
+
+        return rects_in_seg
+
+    def get_rects_within_k_segment(
+        self,
+        k_start: int,
+        k_end: int,
+    ):
+        rects_in_seg = AttnRectangles()
+        for rect in self._rects:
+            rect_in_seg = rect.get_rect_within_k_segment(k_start, k_end)
+            if rect_in_seg is not None:
+                rects_in_seg.append(rect_in_seg)
+
+        return rects_in_seg
+
     @property
     def size(self) -> int:
         return len(self._rects)
