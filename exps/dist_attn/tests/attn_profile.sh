@@ -34,7 +34,10 @@ DISTRIBUTED_ARGS="
 
 echo $DISTRIBUTED_ARGS
 
-TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS attn_profile.py"
+
+SRC_SCRIPT="attn_profile.py"
+
+TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS $SRC_SCRIPT"
 
 # generate a timestamp for the nsys output file
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
