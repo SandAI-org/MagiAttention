@@ -122,6 +122,18 @@ class AttnRectangles:
 
         return attn_rects
 
+    def cut_q(self, cut_pos: int) -> tuple["AttnRectangles", "AttnRectangles"]:
+        rects_left = AttnRectangles()
+        rects_right = AttnRectangles()
+        for rect in self._rects:
+            rect_left, rect_right = rect.cut_q(cut_pos=cut_pos)
+            if rect_left is not None:
+                rects_left.append(rect_left)
+            if rect_right is not None:
+                rects_right.append(rect_right)
+
+        return rects_left, rects_right
+
     @property
     def size(self) -> int:
         return len(self._rects)
