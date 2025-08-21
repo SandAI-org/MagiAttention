@@ -765,7 +765,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
         )
 
 
-# dispatch 先切 ring，再切 ulysess
+# first dispatch ring，then ulysess
 class USPAllGatherNSA:
     def __init__(
         self,
