@@ -82,38 +82,38 @@ class TestUspNsaAttn(DistTestBase):
     @parameterize(
         "attn_mask_config",
         [
-            # {
-            #     "name": "full_2k",
-            #     "seqlen": 2048,
-            #     "q_ranges": AttnRanges.from_ranges(
-            #         [
-            #             [0, 2048],
-            #         ]
-            #     ),
-            #     "k_ranges": AttnRanges.from_ranges(
-            #         [
-            #             [0, 2048],
-            #         ]
-            #     ),
-            #     "attn_mask_type": AttnMaskType.FULL,
-            # },
             {
-                "name": "varlen_full_4k",
-                "seqlen": 4096,
+                "name": "full_2k",
+                "seqlen": 2048,
                 "q_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 1024],
-                        [1024, 4096],
+                        [0, 2048],
                     ]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 1024],
-                        [1024, 4096],
-                    ],
+                        [0, 2048],
+                    ]
                 ),
                 "attn_mask_type": AttnMaskType.FULL,
             },
+            # {
+            #     "name": "varlen_full_4k",
+            #     "seqlen": 4096,
+            #     "q_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 1024],
+            #             [1024, 4096],
+            #         ]
+            #     ),
+            #     "k_ranges": AttnRanges.from_ranges(
+            #         [
+            #             [0, 1024],
+            #             [1024, 4096],
+            #         ],
+            #     ),
+            #     "attn_mask_type": AttnMaskType.FULL,
+            # },
             # {
             #     "name": "varlen_full_4k",
             #     "seqlen": 4096,
@@ -169,7 +169,7 @@ class TestUspNsaAttn(DistTestBase):
                 "l_slc": 64,
                 "l_cmp": 64,
                 "stride": 64,
-                "slc_topk": 16,
+                "slc_topk": 8,
                 "block_size_q": 32,
                 "window_size_left": 4,
                 "window_size_right": 4,
@@ -318,7 +318,6 @@ class TestUspNsaAttn(DistTestBase):
         dq_global = collect_global_grad(attn, q.grad, q_ranges)
         dk_global = collect_global_grad(attn, k.grad, k_ranges)
         dv_global = collect_global_grad(attn, v.grad, k_ranges)
-        # print(f"{dq_global.shape=},{dk_global.shape=},{dv_global.shape=}")
 
         # -----    assert close nsa ref   ---- #
 
@@ -347,18 +346,23 @@ class TestUspNsaAttn(DistTestBase):
         output_ref = nsa_varlen(q_ref, k_ref, v_ref, q_ranges, k_ranges, None, False)
         output_ref.backward(dout_ref)
 
-        print(f"max diff out: {torch.abs(output_ref - out_global).max()}")
-        print(f"max diff dq: {torch.abs(q_ref.grad - dq_global).max()}")
-        print(f"max diff dk: {torch.abs(k_ref.grad - dk_global).max()}")
-        print(f"max diff dv: {torch.abs(v_ref.grad - dv_global).max()}")
+        # print(f"max diff out: {torch.abs(output_ref - out_global).max()}")
+        # print(f"max diff dq: {torch.abs(q_ref.grad - dq_global).max()}")
+        # print(f"max diff dk: {torch.abs(k_ref.grad - dk_global).max()}")
+        # print(f"max diff dv: {torch.abs(v_ref.grad - dv_global).max()}")
 
-        # print(f"{idx.shape=},{idx_ref.shape=}")
-        # assert torch.equal(idx, idx_ref)
-
-        # assert torch.allclose(output_ref, out_global, atol=1e-2, rtol=1e-2), "Output mismatch"
-        # assert torch.allclose(q_ref.grad, dq_global, atol=1e-2, rtol=1e-2), "dq mismatch"
-        # assert torch.allclose(k_ref.grad, dk_global, atol=1e-2, rtol=1e-2), "dk mismatch"
-        # assert torch.allclose(v_ref.grad, dv_global, atol=1e-2, rtol=1e-2), "dv mismatch"
+        assert torch.allclose(
+            output_ref, out_global, atol=1e-2, rtol=1e-2
+        ), "Output mismatch"
+        assert torch.allclose(
+            q_ref.grad, dq_global, atol=1e-2, rtol=1e-2
+        ), "dq mismatch"
+        assert torch.allclose(
+            k_ref.grad, dk_global, atol=1e-2, rtol=1e-2
+        ), "dk mismatch"
+        assert torch.allclose(
+            v_ref.grad, dv_global, atol=1e-2, rtol=1e-2
+        ), "dv mismatch"
 
 
 if __name__ == "__main__":
