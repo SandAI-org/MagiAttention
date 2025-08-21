@@ -27,6 +27,9 @@ class AttnRectRange(AttnRange):
     def from_parent(cls, attn_range: AttnRange):
         return cls(attn_range.start, attn_range.end)
 
+    def to_parent(self) -> AttnRange:
+        return AttnRange(self.start, self.end)
+
     @property
     def start(self) -> int:
         return self._start

@@ -118,7 +118,6 @@ class AttnRectangle:
         q_range = self._q_range if q_range is None else q_range
         k_range = self._k_range if k_range is None else k_range
         d_range = self._d_range if d_range is None else d_range
-        print(q_range, k_range, d_range)
         if (
             q_range.is_valid_open()
             and k_range.is_valid_open()
@@ -208,6 +207,12 @@ class AttnRectangle:
         cut_rect_right.shrink_d_range()
         cut_rect_right.shrink_q_range()
         return cut_rect_left.get_valid_or_none(), cut_rect_right.get_valid_or_none()
+
+    def to_qk_range_mask_type(
+        self,
+    ) -> tuple[AttnRange, AttnRange, int]:
+        # TODO
+        return AttnRange(0, 0), AttnRange(0, 0), 0
 
     def area(self) -> int:
         return self.count_areas(
