@@ -203,6 +203,40 @@ class AttnRectangle:
         cut_rect_right.shrink_q_range()
         return cut_rect_left.get_valid_or_none(), cut_rect_right.get_valid_or_none()
 
+    def get_rect_within_q_segment(
+        self,
+        q_start,
+        q_end,
+    ) -> Union["AttnRectangle", None]:
+        """
+        Obtain the part of the current rectangle within the interval q range
+        """
+        if q_end <= self.q_range.start or q_start >= self.q_range.end:
+            return None
+        rect_in_seg = copy.deepcopy(self)
+        rect_in_seg.q_range.start = max(rect_in_seg.q_range.start, q_start)
+        rect_in_seg.q_range.end = min(rect_in_seg.q_range.end, q_end)
+        rect_in_seg.shrink_d_range()
+        rect_in_seg.shrink_k_range()
+        return rect_in_seg
+
+    def get_rect_within_k_segment(
+        self,
+        k_start,
+        k_end,
+    ) -> Union["AttnRectangle", None]:
+        """
+        Obtain the part of the current rectangle within the interval k range
+        """
+        if k_end <= self.k_range.start or k_start >= self.k_range.end:
+            return None
+        rect_in_seg = copy.deepcopy(self)
+        rect_in_seg.k_range.start = max(rect_in_seg.k_range.start, k_start)
+        rect_in_seg.k_range.end = min(rect_in_seg.k_range.end, k_end)
+        rect_in_seg.shrink_d_range()
+        rect_in_seg.shrink_q_range()
+        return rect_in_seg
+
     def intersection_q_id_on_left_boundary(self) -> int:
         """get k_start d_start intersection, which is q id on left boundary"""
         return self.k_range.start - self.d_range.start
