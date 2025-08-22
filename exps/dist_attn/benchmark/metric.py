@@ -16,6 +16,8 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+import torch
+
 from exps.attn.baselines.utils import calculate_attn_flops
 from exps.dist_attn.benchmark.enums import MetricsType
 from magi_attention.common import AttnRanges
@@ -43,6 +45,12 @@ class MetricData:
     kv_heads: Optional[int] = None
     head_dim: Optional[int] = None
     pass_type: Optional[str] = "fwd"
+
+    fwd_cast_dtype: Optional[torch.dtype] = None  # fwd q, k, v
+    fwd_reduce_dtype: Optional[torch.dtype] = None  # fwd o
+    bwd_cast_dtype: Optional[torch.dtype] = None  # bwd q, k, v, o, do
+    bwd_reduce_dtype: Optional[torch.dtype] = None  # bwd dq, dk, dv
+    # Note: lse is fixed torch.float32
 
 
 @dataclass
@@ -389,6 +397,31 @@ class MetricDataCalculator:
             f"but got {metric_data.q_heads=}, {metric_data.kv_heads=} and {metric_data.head_dim=}"
         )
         assert pass_type in ["fwd", "bwd"], "Only support 'fwd' and 'bwd' pass!"
+
+        fwd_cast_dtype, fwd_reduce_dtype, bwd_cast_dtype, bwd_reduce_dtype = (
+            metric_data.fwd_cast_dtype,
+            metric_data.fwd_reduce_dtype,
+            metric_data.bwd_cast_dtype,
+            metric_data.bwd_reduce_dtype,
+        )
+        assert (
+            fwd_cast_dtype is not None
+            and fwd_reduce_dtype is not None
+            and bwd_cast_dtype is not None
+            and bwd_reduce_dtype is not None
+        ), (
+            f"Need set dtype for cast and reduce in fwd and bwd pass, "
+            f"but got {fwd_cast_dtype=}, {fwd_reduce_dtype=}, {bwd_cast_dtype=} and {bwd_reduce_dtype=}"
+        )
+
+        def dtype_nbytes(dtype: torch.dtype) -> int:
+            return torch.tensor([], dtype=dtype).element_size()
+
+        fwd_cast_dtype_bytes = dtype_nbytes(fwd_cast_dtype)
+        fwd_reduce_dtype_bytes = dtype_nbytes(fwd_reduce_dtype)
+        bwd_cast_dtype_bytes = dtype_nbytes(bwd_cast_dtype)
+        bwd_reduce_dtype_bytes = dtype_nbytes(bwd_reduce_dtype)
+
         comm_bytes_list: list[list[tuple[int, int]]] = []
 
         for comm_meta in comm_meta_list:
@@ -438,17 +471,31 @@ class MetricDataCalculator:
                 if pass_type == "fwd":
                     if i < num_of_stage:
                         send_q_bytes = (
-                            qo_send_tokens_num_list[i] * num_heads_q * head_dim
+                            qo_send_tokens_num_list[i]
+                            * num_heads_q
+                            * head_dim
+                            * fwd_cast_dtype_bytes
                         )
                         send_kv_bytes = (
-                            kv_send_tokens_num_list[i] * num_heads_kv * head_dim * 2
+                            kv_send_tokens_num_list[i]
+                            * num_heads_kv
+                            * head_dim
+                            * 2
+                            * fwd_cast_dtype_bytes
                         )
 
                         recv_q_bytes = (
-                            qo_recv_tokens_num_list[i] * num_heads_q * head_dim
+                            qo_recv_tokens_num_list[i]
+                            * num_heads_q
+                            * head_dim
+                            * fwd_cast_dtype_bytes
                         )
                         recv_kv_bytes = (
-                            kv_recv_tokens_num_list[i] * num_heads_kv * head_dim * 2
+                            kv_recv_tokens_num_list[i]
+                            * num_heads_kv
+                            * head_dim
+                            * 2
+                            * fwd_cast_dtype_bytes
                         )
 
                         send_bytes += send_q_bytes + send_kv_bytes
@@ -456,14 +503,24 @@ class MetricDataCalculator:
 
                     if i > 1:
                         send_o_bytes = (
-                            qo_recv_tokens_num_list[i - 2] * num_heads_q * head_dim
+                            qo_recv_tokens_num_list[i - 2]
+                            * num_heads_q
+                            * head_dim
+                            * fwd_reduce_dtype_bytes
                         )
-                        send_lse_bytes = qo_recv_tokens_num_list[i - 2] * num_heads_q
+                        send_lse_bytes = (
+                            qo_recv_tokens_num_list[i - 2] * num_heads_q * 4
+                        )
 
                         recv_o_bytes = (
-                            qo_send_tokens_num_list[i - 2] * num_heads_q * head_dim
+                            qo_send_tokens_num_list[i - 2]
+                            * num_heads_q
+                            * head_dim
+                            * fwd_reduce_dtype_bytes
                         )
-                        recv_lse_bytes = qo_send_tokens_num_list[i - 2] * num_heads_q
+                        recv_lse_bytes = (
+                            qo_send_tokens_num_list[i - 2] * num_heads_q * 4
+                        )
 
                         send_bytes += send_o_bytes + send_lse_bytes
                         recv_bytes += recv_o_bytes + recv_lse_bytes
@@ -471,26 +528,48 @@ class MetricDataCalculator:
                 elif pass_type == "bwd":
                     if i < num_of_stage:
                         send_q_bytes = (
-                            qo_send_tokens_num_list[i] * num_heads_q * head_dim
+                            qo_send_tokens_num_list[i]
+                            * num_heads_q
+                            * head_dim
+                            * bwd_cast_dtype_bytes
                         )
                         send_kv_bytes = (
-                            kv_send_tokens_num_list[i] * num_heads_kv * head_dim * 2
+                            kv_send_tokens_num_list[i]
+                            * num_heads_kv
+                            * head_dim
+                            * 2
+                            * bwd_cast_dtype_bytes
                         )
                         send_o_bytes = (
-                            qo_send_tokens_num_list[i] * num_heads_q * head_dim * 2
+                            qo_send_tokens_num_list[i]
+                            * num_heads_q
+                            * head_dim
+                            * 2
+                            * bwd_cast_dtype_bytes
                         )  # o and do
-                        send_lse_bytes = qo_send_tokens_num_list[i] * num_heads_q
+                        send_lse_bytes = qo_send_tokens_num_list[i] * num_heads_q * 4
 
                         recv_q_bytes = (
-                            qo_recv_tokens_num_list[i] * num_heads_q * head_dim
+                            qo_recv_tokens_num_list[i]
+                            * num_heads_q
+                            * head_dim
+                            * bwd_cast_dtype_bytes
                         )
                         recv_kv_bytes = (
-                            kv_recv_tokens_num_list[i] * num_heads_kv * head_dim * 2
+                            kv_recv_tokens_num_list[i]
+                            * num_heads_kv
+                            * head_dim
+                            * 2
+                            * bwd_cast_dtype_bytes
                         )
                         recv_o_bytes = (
-                            kv_recv_tokens_num_list[i] * num_heads_q * head_dim * 2
+                            kv_recv_tokens_num_list[i]
+                            * num_heads_q
+                            * head_dim
+                            * 2
+                            * bwd_cast_dtype_bytes
                         )  # o and do
-                        recv_lse_bytes = kv_recv_tokens_num_list[i] * num_heads_q
+                        recv_lse_bytes = kv_recv_tokens_num_list[i] * num_heads_q * 4
 
                         send_bytes += (
                             send_q_bytes + send_kv_bytes + send_o_bytes + send_lse_bytes
@@ -501,17 +580,31 @@ class MetricDataCalculator:
 
                     if i > 1:
                         send_dq_bytes = (
-                            qo_recv_tokens_num_list[i - 2] * num_heads_q * head_dim
+                            qo_recv_tokens_num_list[i - 2]
+                            * num_heads_q
+                            * head_dim
+                            * bwd_reduce_dtype_bytes
                         )
                         send_dkv_bytes = (
-                            kv_recv_tokens_num_list[i - 2] * num_heads_kv * head_dim * 2
+                            kv_recv_tokens_num_list[i - 2]
+                            * num_heads_kv
+                            * head_dim
+                            * 2
+                            * bwd_reduce_dtype_bytes
                         )
 
                         recv_dq_bytes = (
-                            qo_send_tokens_num_list[i - 2] * num_heads_q * head_dim
+                            qo_send_tokens_num_list[i - 2]
+                            * num_heads_q
+                            * head_dim
+                            * bwd_reduce_dtype_bytes
                         )
                         recv_dkv_bytes = (
-                            kv_send_tokens_num_list[i - 2] * num_heads_kv * head_dim * 2
+                            kv_send_tokens_num_list[i - 2]
+                            * num_heads_kv
+                            * head_dim
+                            * 2
+                            * bwd_reduce_dtype_bytes
                         )
 
                         send_bytes += send_dq_bytes + send_dkv_bytes
