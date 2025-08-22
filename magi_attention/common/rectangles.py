@@ -150,7 +150,7 @@ class AttnRectangles:
         self,
         q_start: int,
         q_end: int,
-    ):
+    ) -> "AttnRectangles":
         rects_in_seg = AttnRectangles()
         for rect in self._rects:
             rect_in_seg = rect.get_rect_within_q_segment(q_start, q_end)
@@ -163,7 +163,7 @@ class AttnRectangles:
         self,
         k_start: int,
         k_end: int,
-    ):
+    ) -> "AttnRectangles":
         rects_in_seg = AttnRectangles()
         for rect in self._rects:
             rect_in_seg = rect.get_rect_within_k_segment(k_start, k_end)

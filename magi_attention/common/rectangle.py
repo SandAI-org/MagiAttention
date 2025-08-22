@@ -205,8 +205,8 @@ class AttnRectangle:
 
     def get_rect_within_q_segment(
         self,
-        q_start,
-        q_end,
+        q_start: int,
+        q_end: int,
     ) -> Union["AttnRectangle", None]:
         """
         Obtain the part of the current rectangle within the interval q range
@@ -222,8 +222,8 @@ class AttnRectangle:
 
     def get_rect_within_k_segment(
         self,
-        k_start,
-        k_end,
+        k_start: int,
+        k_end: int,
     ) -> Union["AttnRectangle", None]:
         """
         Obtain the part of the current rectangle within the interval k range
