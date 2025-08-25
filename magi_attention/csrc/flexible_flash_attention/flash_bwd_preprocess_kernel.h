@@ -76,6 +76,7 @@ class FlashAttnBwdPreprocess {
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen_q, d, head)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
   using ShapedPsum = cute::Shape<int32_t, int32_t, int32_t>; // (max_seqlen_q, head, batch)
+                                                            // (4, total_seqlen, head)
   using StridedPsum = cute::Stride<_1, int64_t, int64_t>;
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (total_q, head)
   using StrideLSE = cute::Stride<_1, int64_t>;
@@ -233,21 +234,33 @@ class FlashAttnBwdPreprocess {
       dP_sum(mi) = flash::Allreduce<kGmemThreadsPerRow>::run(dP_sum_cur, sum_op);
     }
 
-    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(_, bidh, bidb);
+    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(0, _, bidh);
     Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block));
     if (get<1>(tOcO(_0{}, _0{}, _0{})) == 0) {
 #pragma unroll
       for (int mi = 0; mi < size(dP_sum); ++mi) {
         int const row = get<0>(tOcO(_0{}, mi, _0{}));
-        gdPsum(row) = row < seqlen_o - m_block * kBlockM ? dP_sum(mi) : 0;
+        if (row < seqlen_o - m_block * kBlockM )
+          gdPsum(row) = dP_sum(mi);
+        else
+          gdPsum(row) = 0;
+        // gdPsum(row) = row < seqlen_o - m_block * kBlockM ? dP_sum(mi) : 0;
       }
     }
 
     int const seqlen_rounded = cute::round_up(seqlen_o, kBlockM);
-    Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(_, bidh, bidb);
-    Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
+    // Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(_, bidh, bidb);
+    // Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
+
+    Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(0, _, bidh);
+    Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
+
+
     if (thread_idx < seqlen_rounded - m_block * kBlockM && thread_idx < kBlockM) {
-      gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
+      if (lse == -INFINITY)
+         return;
+      else
+        gLSElog2(thread_idx) = lse * float(M_LOG2E);
     }
 
     // if constexpr (Clear_dQ) {

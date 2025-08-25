@@ -476,8 +476,10 @@ struct CollectiveMainloopBwdSm90 {
     Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_Q)(_, _, bidh);
     Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, bidh_kv);
     Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_K)(_, _, bidh_kv);
-    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSE, params.stride_LSE_log2)(_, bidh, bidb);
-    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSE, params.stride_dPsum)(_, bidh, bidb);
+    // Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSE, params.stride_LSE_log2)(_, bidh, bidb);
+    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSE, params.stride_LSE_log2)(_, _, bidh); // add batch dim;
+    // Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSE, params.stride_dPsum)(_, bidh, bidb);
+    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSE, params.stride_dPsum)(_, _, bidh);
 
     Tensor gQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
     Tensor gdO = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdO), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
@@ -485,6 +487,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor gV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
     Tensor gLSE = local_tile(domain_offset(make_coord(0), mLSE), select<0>(TileShape_MNK{}), make_coord(_)); // (M, _)
     Tensor gdPsum = local_tile(domain_offset(make_coord(0), mdPsum), select<0>(TileShape_MNK{}), make_coord(_)); // (M, _)
+    // Tensor gLSE = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
