@@ -22,7 +22,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from magi_attention.common import AttnRange, AttnRanges, AttnRectangles
 from magi_attention.common.enum import AttnMaskType, DynamicAttnAlgType
 from magi_attention.meta.collection.calc_meta import AttnArg, AttnCalcMeta
-from magi_attention.meta.collection.comm_meta import GroupCollectiveArg
+from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.utils import nvtx
 
 # from magi_attention.meta.collection.dispatch_meta import DispatchMeta
@@ -149,17 +149,17 @@ class DynamicAttnSolver:
         self,
         **kwargs,
     ):
-        indexed_intervals = []
+        indexed_host_ranges_q = []
         for idx, intervals in enumerate(self.host_ranges_q):
-            indexed_intervals.extend([(interval, idx) for interval in intervals])
+            indexed_host_ranges_q.extend([(interval, idx) for interval in intervals])
 
         # sort with range start
-        indexed_intervals.sort(key=lambda x: x[0].start)
+        indexed_host_ranges_q.sort(key=lambda x: x[0].start)
 
         # cut rects with host_ranges endpoint
         rest_rects = self.rect
         cut_pos = 0
-        for item in indexed_intervals:
+        for item in indexed_host_ranges_q:
             interval: AttnRange = item[0]
             host_rank: int = item[1]
             if cut_pos != interval.start:
@@ -181,14 +181,160 @@ class DynamicAttnSolver:
         pass
 
     @nvtx.instrument_nvtx
-    def _calc_kv_group_collective_arg(self) -> GroupCollectiveArg:
-        # build group collective arg
+    def _calc_intersection_with_index(
+        self,
+        rangesA: AttnRanges,
+        rangesB: list[tuple[AttnRange, int]],
+    ) -> list[list[int]]:
+        # Calculate the intersection of intervals using the two-pointer method
+        i = j = 0
+        intersections: list[list[int]] = []
+        while i < len(rangesA) and j < len(rangesB):
+            rangeA = rangesA[i]
+            rangeB, index = rangesB[j]
+            start = max(rangeA.start, rangeB.start)
+            end = min(rangeA.end, rangeB.end)
+            if start < end:
+                if len(intersections) != 0:
+                    if intersections[-1][1] == start and intersections[-1][2] == index:
+                        # merge with previous interval
+                        intersections[-1][1] = end
+                    else:
+                        intersections.append([start, end, index])
+                else:
+                    intersections.append([start, end, index])
+            if rangeA.end < rangeB.end:
+                i += 1
+            else:
+                j += 1
+        return intersections
 
+    @nvtx.instrument_nvtx
+    def _calc_intersection(
+        self,
+        rangesA: AttnRanges,
+        rangesB: AttnRanges,
+    ) -> list[list[int]]:
+        # Calculate the intersection of intervals using the two-pointer method
+        i = j = 0
+        intersections: list[list[int]] = []
+        while i < len(rangesA) and j < len(rangesB):
+            rangeA = rangesA[i]
+            rangeB = rangesB[j]
+            start = max(rangeA.start, rangeB.start)
+            end = min(rangeA.end, rangeB.end)
+            if start < end:
+                if len(intersections) != 0:
+                    if intersections[-1][1] == start:
+                        # merge with previous interval
+                        intersections[-1][1] = end
+                    else:
+                        intersections.append([start, end])
+                else:
+                    intersections.append([start, end])
+
+            if rangeA.end < rangeB.end:
+                i += 1
+            else:
+                j += 1
+        return intersections
+
+    @nvtx.instrument_nvtx
+    def _calc_group_collective_arg(
+        self,
+        calc_kv: bool = True,
+    ) -> GroupCollectiveArg:
+        host_ranges = self.host_ranges_k if calc_kv else self.host_ranges_q
+        # =========== process local-calc-remote-hold message ===========
+        indexed_remote_hold_ranges = []
+        for idx, intervals in enumerate(host_ranges):
+            if idx != self.cp_rank:
+                indexed_remote_hold_ranges.extend(
+                    [(interval, idx) for interval in intervals]
+                )
+        # sort with range start
+        indexed_remote_hold_ranges.sort(key=lambda x: x[0].start)
+
+        local_calc_ranges: AttnRanges = (
+            self.remote_bucket_this_rank.get_kv_ranges_union()
+            if calc_kv
+            else self.remote_bucket_this_rank.get_qo_ranges_union()
+        )
+        # local_calc_ranges is sorted and merged
+        intersections = self._calc_intersection_with_index(
+            local_calc_ranges, indexed_remote_hold_ranges
+        )
+
+        # splict_size = end - start
+        output_split_size_list = [x[1] - x[0] for x in intersections]
+        src_index_list = [x[2] for x in intersections]
+
+        # print("local calc remote hold message")
+        # print(output_split_size_list)
+        # print(src_index_list)
+
+        # =========== process local-hold-remote-calc message ===========
+        host_ranges_this_rank: AttnRanges = host_ranges[self.cp_rank]
+        # host_ranges is sorted and merged
+
+        # Obtain the sending ranges and ranks using the scan line method
+        scanning_line_event = []
+        for remote_rank in range(self.cp_size):
+            if remote_rank == self.cp_rank:
+                continue
+            remote_calc_ranges = (
+                self.bucket_per_rank[remote_rank].get_kv_ranges_union()
+                if calc_kv
+                else self.bucket_per_rank[remote_rank].get_qo_ranges_union()
+            )
+            intersections = self._calc_intersection(
+                host_ranges_this_rank, remote_calc_ranges
+            )
+            for interval in intersections:
+                # add remote rank at start and delete at end
+                # event msg = +- (remote_rank + 1) to deal with remote_rank = 0
+                scanning_line_event.append((interval[0], remote_rank + 1))
+                scanning_line_event.append((interval[1], -remote_rank - 1))
+
+        scanning_line_event.sort(key=lambda x: x[0])
+
+        input_split_size_list = []
+        dst_indices_list = []
+        dst_indices = set()
+        i = 0
+        for host_range in host_ranges_this_rank:
+            cur_start = host_range.start
+            while cur_start < host_range.end:
+                while (
+                    i < len(scanning_line_event)
+                    and scanning_line_event[i][0] <= cur_start
+                ):
+                    event_msg = scanning_line_event[i][1]
+                    if event_msg > 0:
+                        add_rank = event_msg - 1
+                        dst_indices.add(add_rank)
+                    else:
+                        del_rank = -event_msg - 1
+                        dst_indices.remove(del_rank)
+                    i += 1
+                if i < len(scanning_line_event):
+                    cur_end = min(host_range.end, scanning_line_event[i][0])
+                else:
+                    cur_end = host_range.end
+                input_split_size_list.append(cur_end - cur_start)
+                dst_indices_list.append(list(dst_indices))
+                cur_start = cur_end
+
+        # print("local hold remote calc message")
+        # print(input_split_size_list)
+        # print(dst_indices_list)
+
+        # build group collective arg
         group_collective_arg = GroupCollectiveArg(
-            input_split_size_list=[],
-            output_split_size_list=[],
-            dst_indices_list=[],
-            src_index_list=[],
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_indices_list=dst_indices_list,
+            src_index_list=src_index_list,
             rank=self.cp_rank,
             world_size=self.cp_size,
             device_mesh=self.cp_mesh,
@@ -197,10 +343,47 @@ class DynamicAttnSolver:
         return group_collective_arg
 
     @nvtx.instrument_nvtx
+    def calc_comm_meta(self) -> CommMeta:
+        """Calculate communication meta for kv and qo group collective"""
+
+        num_remote_kv_tokens_per_stage: list[int] = []
+        kv_group_collective_args_list: list[GroupCollectiveArg] = []
+
+        kv_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
+            True
+        )
+        kv_group_collective_args_list.append(kv_group_collective_arg)
+        num_remote_kv_tokens_per_stage.append(
+            sum(kv_group_collective_arg.output_split_size_list)
+        )
+
+        num_remote_qo_tokens_per_stage: list[int] = []
+        qo_group_collective_args_list: list[GroupCollectiveArg] = []
+
+        qo_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
+            False
+        )
+        qo_group_collective_args_list.append(qo_group_collective_arg)
+        num_remote_qo_tokens_per_stage.append(
+            sum(qo_group_collective_arg.output_split_size_list)
+        )
+
+        # build comm meta
+        comm_meta = CommMeta(
+            num_remote_kv_tokens_per_stage=num_remote_kv_tokens_per_stage,
+            kv_group_collective_args_list=kv_group_collective_args_list,
+            num_remote_qo_tokens_per_stage=num_remote_qo_tokens_per_stage,
+            qo_group_collective_args_list=qo_group_collective_args_list,
+        )
+
+        return comm_meta
+
+    @nvtx.instrument_nvtx
     def calc_host_and_remote_bucket_this_rank(self) -> None:
         bucket_this_rank: AttnRectangles = self.bucket_per_rank[self.cp_rank]
-        host_ranges_q_this_rank: AttnRanges = self.host_ranges_q[self.cp_rank].sort()
-        host_ranges_k_this_rank: AttnRanges = self.host_ranges_q[self.cp_rank].sort()
+        host_ranges_q_this_rank: AttnRanges = self.host_ranges_q[self.cp_rank]
+        host_ranges_k_this_rank: AttnRanges = self.host_ranges_q[self.cp_rank]
+        # host_ranges is sorted and merged
         self.host_bucket_this_rank = AttnRectangles()
         self.remote_bucket_this_rank = AttnRectangles()
 

@@ -122,6 +122,18 @@ class AttnRectangles:
 
         return attn_rects
 
+    def get_qo_ranges_union(self) -> AttnRanges:
+        qo_ranges = AttnRanges()
+        for rect in self._rects:
+            qo_ranges.append(rect.q_range.to_parent())
+        return qo_ranges.merge()
+
+    def get_kv_ranges_union(self) -> AttnRanges:
+        kv_ranges = AttnRanges()
+        for rect in self._rects:
+            kv_ranges.append(rect.k_range.to_parent())
+        return kv_ranges.merge()
+
     def cut_q(self, cut_pos: int) -> tuple["AttnRectangles", "AttnRectangles"]:
         rects_left = AttnRectangles()
         rects_right = AttnRectangles()
