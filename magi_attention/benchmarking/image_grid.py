@@ -16,7 +16,7 @@ import math
 import os
 import re
 import sys
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -188,11 +188,11 @@ def to_pil_image(pic, mode=None):
 # https://github.com/pytorch/vision/blob/main/torchvision/utils.py#L25
 @torch.no_grad()
 def make_grid(
-    tensor: Union[torch.Tensor, List[torch.Tensor]],
+    tensor: torch.Tensor | list[torch.Tensor],
     nrow: int = 8,
     padding: int = 2,
     normalize: bool = False,
-    value_range: Optional[Tuple[int, int]] = None,
+    value_range: tuple[int, int] | None = None,
     scale_each: bool = False,
     pad_value: float = 0.0,
 ) -> torch.Tensor:
