@@ -134,6 +134,12 @@ class AttnRectangles:
             kv_ranges.append(rect.k_range.to_parent())
         return kv_ranges.merge()
 
+    def total_seqlen_qo(self) -> int:
+        return self.get_qo_ranges_union().total_seqlen
+
+    def total_seqlen_kv(self) -> int:
+        return self.get_kv_ranges_union().total_seqlen
+
     def cut_q(self, cut_pos: int) -> tuple["AttnRectangles", "AttnRectangles"]:
         rects_left = AttnRectangles()
         rects_right = AttnRectangles()
@@ -183,6 +189,12 @@ class AttnRectangles:
                 rects_in_seg.append(rect_in_seg)
 
         return rects_in_seg
+
+    def area(self) -> int:
+        total_area = 0
+        for rect in self._rects:
+            total_area += rect.area()
+        return total_area
 
     @property
     def size(self) -> int:

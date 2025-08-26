@@ -12,15 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
 from typing import Union
 
 # import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 from magi_attention.common import AttnRange, AttnRanges, AttnRectangles
-from magi_attention.common.enum import AttnMaskType, DynamicAttnAlgType
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.meta.algorithms import DynamicAttnAlgorithm
 from magi_attention.meta.collection.calc_meta import AttnArg, AttnCalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.utils import nvtx
@@ -28,40 +27,12 @@ from magi_attention.utils import nvtx
 # from magi_attention.meta.collection.dispatch_meta import DispatchMeta
 
 
-@dataclass(frozen=True)
-class DynamicAttnAlg(ABC):
-    """The abstract config/meta info dataclass for specific dynamic dispatch algorithm"""
-
-    @property
-    @abstractmethod
-    def type(self) -> DynamicAttnAlgType:
-        """The type enum of the dynamic dispatch algorithm"""
-
-
-@dataclass(frozen=True)
-class NCQDynamicAttnAlg(DynamicAttnAlg):
-    """The config/meta info dataclass for the non-comm-qo dynamic dispatch algorithm"""
-
-    @property
-    def type(self) -> DynamicAttnAlgType:
-        return DynamicAttnAlgType.NON_COMMUNICATION_QO
-
-
-@dataclass(frozen=True)
-class GRGDynamicAttnAlg(DynamicAttnAlg):
-    """The config/meta info dataclass for the greedy-random-grid dynamic dispatch algorithm"""
-
-    @property
-    def type(self) -> DynamicAttnAlgType:
-        return DynamicAttnAlgType.GREEDY_RANDOM_GRID
-
-
 class DynamicAttnSolver:
     """The dynamic-attn solver class to process dispatch meta for calc/comm meta"""
 
     def __init__(
         self,
-        alg: DynamicAttnAlg,
+        algorithm: DynamicAttnAlgorithm,
         # dispatch_meta_q: DispatchMeta,
         # dispatch_meta_k: DispatchMeta,
         total_seqlen_q: int,
@@ -76,7 +47,7 @@ class DynamicAttnSolver:
         cp_mesh: DeviceMesh | None = None,
         deterministic: bool = False,
     ):
-        self.alg = alg
+        self.algorithm = algorithm
 
         # for dispatch solver
         # self.cp_rank = dist.get_rank(cp_group)
@@ -106,11 +77,6 @@ class DynamicAttnSolver:
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
 
-        self.solve_func = {
-            DynamicAttnAlgType.NON_COMMUNICATION_QO: self._solve_with_non_comm_qo,
-            DynamicAttnAlgType.GREEDY_RANDOM_GRID: self._solve_with_greedy_random_grid,
-        }[self.alg.type]
-
         self.bucket_per_rank = [AttnRectangles() for _ in range(self.cp_size)]
 
     def solve(
@@ -120,65 +86,23 @@ class DynamicAttnSolver:
         mask_types: Union[list[int], list[AttnMaskType]],
     ):
         print("=============== solve begin ===================")
-        # save solve original message
-        # self.q_ranges = q_ranges
-        # self.k_ranges = k_ranges
-        # attn_mask_types = [
-        #     {
-        #         0: AttnMaskType.FULL,
-        #         1: AttnMaskType.CAUSAL,
-        #         2: AttnMaskType.INVCAUSAL,
-        #         3: AttnMaskType.BICAUSAL,
-        #     }[i]
-        #     if isinstance(i, int)
-        #     else i
-        #     for i in mask_types
-        # ]
-        # self.attn_mask_types = attn_mask_types
         self.rect = AttnRectangles.from_ranges(
             q_ranges=q_ranges, k_ranges=k_ranges, mask_types=mask_types
         )
-        self.solve_func(**asdict(self.alg))
+
+        self.algorithm.solve(
+            rects=self.rect,
+            host_ranges_q=self.host_ranges_q,
+            bucket_per_rank=self.bucket_per_rank,
+        )
+        # for idx, bucket in enumerate(self.bucket_per_rank):
+        #     print(f"rank{idx}'s bucket:")
+        #     print(bucket)
         self.calc_host_and_remote_bucket_this_rank()
         print(f"host bucket this rank {self.cp_rank}:")
         print(self.host_bucket_this_rank)
         print(f"remote bucket this rank {self.cp_rank}:")
         print(self.remote_bucket_this_rank)
-
-    def _solve_with_non_comm_qo(
-        self,
-        **kwargs,
-    ):
-        indexed_host_ranges_q = []
-        for idx, intervals in enumerate(self.host_ranges_q):
-            indexed_host_ranges_q.extend([(interval, idx) for interval in intervals])
-
-        # sort with range start
-        indexed_host_ranges_q.sort(key=lambda x: x[0].start)
-
-        # cut rects with host_ranges endpoint
-        rest_rects = self.rect
-        cut_pos = 0
-        for item in indexed_host_ranges_q:
-            interval: AttnRange = item[0]
-            host_rank: int = item[1]
-            if cut_pos != interval.start:
-                cut_pos = interval.start
-                _, rest_rects = rest_rects.cut_q(cut_pos=cut_pos)
-            cut_pos = interval.end
-            cut_rects, rest_rects = rest_rects.cut_q(cut_pos=cut_pos)
-            # give cut_rects to host_rank buckets
-            self.bucket_per_rank[host_rank].extend(cut_rects)
-
-        for idx, bucket in enumerate(self.bucket_per_rank):
-            print(f"rank{idx}'s bucket:")
-            print(bucket)
-
-    def _solve_with_greedy_random_grid(
-        self,
-        **kwargs,
-    ):
-        pass
 
     @nvtx.instrument_nvtx
     def _calc_intersection_with_index(
