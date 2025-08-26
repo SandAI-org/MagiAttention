@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from typing import Any, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -32,6 +32,8 @@ from magi_attention.utils import (
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
 from .utils import safe_subtract
+
+FusedOrTupleTensor: TypeAlias = torch.Tensor | tuple[torch.Tensor, ...]
 
 
 @nvtx.instrument_nvtx
@@ -200,9 +202,8 @@ class DistAttnRuntime:
             and not magi_attention.is_sdpa_backend_enable()
         )
 
-        assert (
-            not magi_attention.comm.is_qo_comm_enable()
-        ), "QO comm is not supported in dist attn yet"
+        # NOTE: for now, we concat q, o, do when and only when qo comm is enabled
+        self.concat_qo_do = magi_attention.comm.is_qo_comm_enable()
 
     @nvtx.instrument_nvtx
     def fetch_remote_kv(
@@ -228,11 +229,13 @@ class DistAttnRuntime:
         """
         _, num_heads, head_dim = local_kv.shape
 
-        # NOTE: we concat kv along seqlen dim, and the group_collective args already handle this behind
+        # get the group-cast args for kv
+        # NOTE: we concat kv along seqlen dim,
+        # and the group_collective args already handle this behind
         # thus we only need to handle the num_remote_kv_tokens_per_stage by multiplying 2
-        group_collective_args = self.comm_meta.kv_group_collective_args_list[
+        group_cast_args = self.comm_meta.kv_group_collective_args_list[
             overlap_stage
-        ]
+        ].to_group_cast_args()
         remote_kv_seqlen = (
             self.comm_meta.num_remote_kv_tokens_per_stage[overlap_stage] * 2
         )
@@ -246,10 +249,11 @@ class DistAttnRuntime:
             device=local_kv.device,
         )
 
+        # launch group cast kernel
         remote_kv_work = group_cast_collective(
             input=local_kv,
             output=remote_kv_buffer,
-            **group_collective_args.to_group_cast_args(),
+            **group_cast_args,
             group=self.cp_group_gc,
             async_op=True,
         )
@@ -286,9 +290,13 @@ class DistAttnRuntime:
 
         _, num_heads, head_dim = local_q.shape
 
-        group_collective_args = self.comm_meta.qo_group_collective_args_list[
+        # get the group-cast args for q
+        # HACK: we concat q,o,do along seqlen dim,
+        # and the group_collective args for qo already handle this behind
+        # thus we have to borrow the args for lse, which is the same for q only
+        group_cast_args = self.comm_meta.lse_group_collective_args_list[
             overlap_stage
-        ]
+        ].to_group_cast_args()
         remote_q_seqlen = self.comm_meta.num_remote_qo_tokens_per_stage[overlap_stage]
 
         # init remote q buffer
@@ -300,10 +308,11 @@ class DistAttnRuntime:
             device=local_q.device,
         )
 
+        # launch group cast kernel
         remote_q_work = group_cast_collective(
             input=local_q,
             output=remote_q_buffer,
-            **group_collective_args.to_group_cast_args(),
+            **group_cast_args,
             group=self.cp_group_gc,
             async_op=True,
         )
@@ -311,53 +320,136 @@ class DistAttnRuntime:
         return remote_q_work, remote_q_buffer
 
     @nvtx.instrument_nvtx
-    def fetch_remote_qo_lse_do(
+    def fetch_remote_qo_do(
         self,
-        local_q: torch.Tensor,
-        local_out: torch.Tensor,
-        local_lse: torch.Tensor,
-        local_do: torch.Tensor,
+        local_qo_do: FusedOrTupleTensor,
         overlap_stage: int,
-    ) -> tuple[WorkWithPostProcessFn, torch.Tensor]:
+    ) -> tuple[WorkWithPostProcessFn, FusedOrTupleTensor]:
         """
-        Fetch remote q, o, lse, do buffer from other ranks to local, and return the corresponding Work and buffer
+        Fetch remote q, o, do buffer from other ranks to local, and return the corresponding Work and buffer
 
         Args:
-            local_q(torch.Tensor): the local q tensor
-            local_out(torch.Tensor): the local out tensor
-            local_lse(torch.Tensor): the local lse tensor
-            local_do(torch.Tensor): the local do tensor
+            local_qo_do(FusedOrTupleTensor): the local q, o, do (fused or tupled) tensor
             overlap_stage(int): current overlap stage
 
         Returns:
-            remote_qo_lse_do_work(WorkWithPostProcessFn):
+            remote_qo_do_work(WorkWithPostProcessFn):
                 communication handle, used to wait for communication completion
-            remote_qo_lse_do_buffer(torch.Tensor): remote q, o, lse, do buffer
+            remote_qo_do_buffer(FusedOrTupleTensor): remote q, o, do buffer
 
         Shape:
-            - local_q: [num_tokens_q_local, num_heads, head_dim]
-            - local_out: [num_tokens_q_local, num_heads, head_dim]
-            - local_lse: [num_heads, num_tokens_q_local]
-            - local_do: [num_tokens_q_local, num_heads]
-            - remote_qo_lse_do_buffer: [num_tokens_qo_lse_do_remote_i, num_heads, head_dim],
+            - local_qo_do: [num_tokens_qo_do_local, num_heads, head_dim]
+            - remote_qo_do_buffer: [num_tokens_qo_do_remote_i, num_heads, head_dim],
                 for i = 0, 1, ..., overlap_degree - 1
         """
 
         if not magi_attention.comm.is_qo_comm_enable():
-            remote_qo_lse_do_buffer = (
-                local_q,
-                local_out,
-                local_lse,
-                local_do,
+            assert isinstance(local_qo_do, tuple)
+            remote_qo_do_buffer = local_qo_do
+            remote_qo_do_work = WorkWithPostProcessFn(
+                post_process_fn=lambda x: x  # take q,o,do and return q,o,do
             )
-            remote_qo_lse_do_work = WorkWithPostProcessFn(
-                post_process_fn=lambda x: x  # take q,o,lse,do and return q,o,lse,do
-            )
-            return remote_qo_lse_do_work, remote_qo_lse_do_buffer
+            return remote_qo_do_work, remote_qo_do_buffer
 
-        raise NotImplementedError(
-            "TODO: implement the group-cast with q,o,lse,do fused"
+        assert isinstance(local_qo_do, torch.Tensor)
+        _, num_heads, head_dim = local_qo_do.shape
+
+        # get the group-cast args for q
+        # NOTE: we concat q,o,do along seqlen dim,
+        # and the group_collective args already handle this behind
+        # thus we only need to handle the num_remote_qo_tokens_per_stage by multiplying 3
+        group_cast_args = self.comm_meta.qo_group_collective_args_list[
+            overlap_stage
+        ].to_group_cast_args()
+        remote_q_seqlen = self.comm_meta.num_remote_qo_tokens_per_stage[overlap_stage]
+        remote_qo_do_seqlen = remote_q_seqlen * 3
+
+        # init remote q,o,do output buffer
+        remote_qo_do_buffer = torch.empty(
+            remote_qo_do_seqlen,
+            num_heads,
+            head_dim,
+            dtype=local_qo_do.dtype,
+            device=local_qo_do.device,
         )
+
+        # launch group cast kernel
+        remote_qo_do_work = group_cast_collective(
+            input=local_qo_do,
+            output=remote_qo_do_buffer,
+            **group_cast_args,
+            group=self.cp_group_gc,
+            async_op=True,
+        )
+
+        return remote_qo_do_work, remote_qo_do_buffer
+
+    @nvtx.instrument_nvtx
+    def fetch_remote_lse(
+        self,
+        local_lse: torch.Tensor,
+        overlap_stage: int,
+    ) -> tuple[WorkWithPostProcessFn, torch.Tensor]:
+        """
+        Fetch remote lse buffer from other ranks to local, and return the corresponding Work and buffer
+
+        Args:
+            local_lse(torch.Tensor): the local lse tensor
+            overlap_stage(int): current overlap stage
+
+        Returns:
+            remote_lse_work(WorkWithPostProcessFn):
+                communication handle, used to wait for communication completion
+            remote_lse_buffer(torch.Tensor): remote lse buffer
+
+        Shape:
+            - local_lse: [num_heads, num_tokens_q_local]
+            - remote_lse_buffer: [num_heads, num_tokens_q_remote_i],
+                for i = 0, 1, ..., overlap_degree - 1
+        """
+
+        if not magi_attention.comm.is_qo_comm_enable():
+            remote_lse_buffer = local_lse
+            remote_lse_work = WorkWithPostProcessFn(
+                post_process_fn=lambda x: x  # take lse and return lse
+            )
+            return remote_lse_work, remote_lse_buffer
+
+        # FIXME: for now, ffa uses lse with the shape: [nhq, sq]
+        # for both fwd and bwd, which is not suitable for comm
+        local_lse = local_lse.transpose(0, 1).contiguous()
+        _, num_heads = local_lse.shape
+
+        # get the group-cast args for lse
+        group_cast_args = self.comm_meta.lse_group_collective_args_list[
+            overlap_stage
+        ].to_group_cast_args()
+        remote_lse_seqlen = self.comm_meta.num_remote_qo_tokens_per_stage[overlap_stage]
+
+        # init remote lse buffer with the shape: [sq, nhq]
+        remote_lse_buffer = torch.empty(
+            remote_lse_seqlen,
+            num_heads,
+            dtype=local_lse.dtype,
+            device=local_lse.device,
+        )
+
+        # launch group cast kernel
+        remote_lse_work = group_cast_collective(
+            input=local_lse,
+            output=remote_lse_buffer,
+            **group_cast_args,
+            group=self.cp_group_gc,
+            async_op=True,
+        )
+
+        # append post_process_fn to transpose lse from [sq, nhq] to [nhq, sq]
+        orig_post_process_fn = remote_lse_work.post_process_fn
+        remote_lse_work.post_process_fn = (
+            lambda x: orig_post_process_fn(x).transpose(0, 1).contiguous()
+        )
+
+        return remote_lse_work, remote_lse_buffer
 
     @nvtx.instrument_nvtx
     def attn_fwd_partial(
@@ -442,10 +534,8 @@ class DistAttnRuntime:
     @nvtx.instrument_nvtx
     def attn_bwd_partial(
         self,
-        do: torch.Tensor,
-        q: torch.Tensor,
+        qo_do: FusedOrTupleTensor,
         kv: torch.Tensor,
-        o: torch.Tensor,
         lse: torch.Tensor,
         dq_acc: torch.Tensor | None = None,
         overlap_stage: int | None = None,
@@ -454,12 +544,10 @@ class DistAttnRuntime:
         """Apply ffa bwd kernel to get partial dq, dkv
 
         Args:
-            do(torch.Tensor): partial do
-            q(torch.Tensor): local q
-            kv(torch.Tensor): current kv
-            o(torch.Tensor): partial o
-            lse(torch.Tensor): partial lse
-            dq_acc(torch.Tensor, optional): accumulative buffer for dq
+            qo_do (FusedOrTupleTensor): q, o, do fused or tupled tensor
+            kv (torch.Tensor): current kv
+            lse (torch.Tensor): partial lse
+            dq_acc (torch.Tensor, optional): accumulative buffer for dq
             overlap_stage(int, optional): Current overlap stage,
                 if None, it means local attention, otherwise it means remote attention
             deterministic(bool): Whether to use deterministic algorithm
@@ -478,6 +566,7 @@ class DistAttnRuntime:
             partial_dq = dq_acc if self.bwd_use_acc else None
             partial_dkv = None
         else:
+            q, o, do = self.maybe_chunk_qo_do(qo_do)
             k, v = self.chunk_kv(kv)
             if magi_attention.is_sdpa_backend_enable():
                 partial_dq, partial_dk, partial_dv = sdpa_bwd(
@@ -584,10 +673,14 @@ class DistAttnRuntime:
             partial_dkv_reduce_work(WorkWithPostProcessFn): partial dkv group-reduce work
 
         """
-        group_collective_args = self.comm_meta.kv_group_collective_args_list[
+        # get the group-reduce args for dkv
+        # NOTE: we concat kv along seqlen dim,
+        # and the group_collective args already handle this behind
+        group_reduce_args = self.comm_meta.kv_group_collective_args_list[
             overlap_stage
-        ]
+        ].to_group_reduce_args()
 
+        # init remote dkv buffer
         if partial_remote_dkv is None:  # skipped
             partial_remote_dkv = torch.empty_like(
                 ref_remote_dkv,
@@ -596,10 +689,11 @@ class DistAttnRuntime:
         elif not self.bwd_hp_reduce:
             partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)
 
+        # launch group-reduce kernel
         partial_dkv_reduce_work = group_reduce_collective(
             input=partial_remote_dkv,
             output=partial_local_dkv,
-            **group_collective_args.to_group_reduce_args(),
+            **group_reduce_args,
             group=self.cp_group_gr,
             async_op=True,
         )
@@ -620,10 +714,15 @@ class DistAttnRuntime:
             # the local dq has already been reduced to partial_local_dq by ffa bwd
             partial_dq_reduce_work = WorkWithPostProcessFn(post_process_fn=lambda x: x)
         elif magi_attention.comm.is_qo_comm_enable():
-            group_collective_args = self.comm_meta.qo_group_collective_args_list[
+            # get the group-reduce args for dq
+            # HACK: we concat q,o,do along seqlen dim,
+            # and the group_collective args for qo already handle this behind
+            # thus we have to borrow the args for lse, which is the same for dq only
+            group_reduce_args = self.comm_meta.lse_group_collective_args_list[
                 overlap_stage
-            ]
+            ].to_group_reduce_args()
 
+            # init remote dq buffer
             if partial_remote_dq is None:  # skipped
                 partial_remote_dq = torch.empty_like(
                     ref_remote_dq,
@@ -632,10 +731,11 @@ class DistAttnRuntime:
             elif not self.bwd_hp_reduce:
                 partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
 
+            # launch group-reduce kernel
             partial_dq_reduce_work = group_reduce_collective(
                 input=partial_remote_dq,
                 output=partial_local_dq,
-                **group_collective_args.to_group_reduce_args(),
+                **group_reduce_args,
                 group=self.cp_group_gr,
                 async_op=True,
             )
@@ -648,8 +748,8 @@ class DistAttnRuntime:
 
         return partial_dq_reduce_work
 
-    @staticmethod
     def concat_kv(
+        self,
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> torch.Tensor:
@@ -658,12 +758,30 @@ class DistAttnRuntime:
         # to enhance the performance of ffa kernel
         return torch.cat([k, v], dim=0)
 
-    @staticmethod
     def chunk_kv(
+        self,
         kv: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """chunk the kv tensor into k, v tensor views"""
         return torch.chunk(kv, 2, dim=0)
+
+    def maybe_concat_qo_do(
+        self,
+        q: torch.Tensor,
+        o: torch.Tensor,
+        do: torch.Tensor,
+    ) -> FusedOrTupleTensor:
+        """maybe concatenate q, o, do tensors into a single fused or tupled qo_do"""
+        # TODO: whether can we pack q, o, do togather along certain dim
+        # to enhance the performance of ffa kernel
+        return torch.cat([q, o, do], dim=0) if self.concat_qo_do else (q, o, do)
+
+    def maybe_chunk_qo_do(
+        self,
+        qo_do: FusedOrTupleTensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """maybe chunk the qo_do fused tensor into q, o, do tensor views"""
+        return torch.chunk(qo_do, 3, dim=0) if self.concat_qo_do else qo_do
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, DistAttnRuntime):
@@ -861,9 +979,10 @@ class DistAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
         local_q, local_kv, local_out, local_lse = ctx.saved_tensors
-        local_q: torch.Tensor
-        local_kv: torch.Tensor
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
+        local_qo_do = dist_attn_runtime.maybe_concat_qo_do(
+            q=local_q, o=local_out, do=grad_output
+        )
 
         if magi_attention.is_cuda_device_max_connections_one():
             # pre-fetch 0th remote kv
@@ -871,34 +990,47 @@ class DistAttnFunc(torch.autograd.Function):
                 remote_kv_work,
                 remote_kv_buffer,
             ) = dist_attn_runtime.fetch_remote_kv(local_kv=local_kv, overlap_stage=0)
-            # pre-fetch 0th remote q,o,lse,do
+            # pre-fetch 0th remote q,o,do
             (
-                remote_qo_lse_do_work,
-                remote_qo_lse_do_buffer,
-            ) = dist_attn_runtime.fetch_remote_qo_lse_do(
-                local_q=local_q,
-                local_out=local_out,
+                remote_qo_do_work,
+                remote_qo_do_buffer,
+            ) = dist_attn_runtime.fetch_remote_qo_do(
+                local_qo_do=local_qo_do,
+                overlap_stage=0,
+            )
+            # pre-fetch 0th remote lse
+            (
+                remote_lse_work,
+                remote_lse_buffer,
+            ) = dist_attn_runtime.fetch_remote_lse(
                 local_lse=local_lse,
-                local_do=grad_output,
                 overlap_stage=0,
             )
         else:
-            # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
+            # NOTE: when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
             # we issue all fetch-remote comms in advance of ffa bwd
             # and ffa bwd can still overlap with these comms
             # with the support of `sm_margin`, thx to persistent kernel design
+
+            # pre-fetch all remote kv
             remote_kv_works_with_buffers = [
                 dist_attn_runtime.fetch_remote_kv(
                     local_kv=local_kv, overlap_stage=ith_overlap_stage
                 )
                 for ith_overlap_stage in range(dist_attn_runtime.overlap_degree)
             ]
-            remote_qo_lse_do_works_with_buffers = [
-                dist_attn_runtime.fetch_remote_qo_lse_do(
-                    local_q=local_q,
-                    local_out=local_out,
+            # pre-fetch all remote q,o,do
+            remote_qo_do_works_with_buffers = [
+                dist_attn_runtime.fetch_remote_qo_do(
+                    local_qo_do=local_qo_do,
+                    overlap_stage=ith_overlap_stage,
+                )
+                for ith_overlap_stage in range(dist_attn_runtime.overlap_degree)
+            ]
+            # pre-fetch all remote lse
+            remote_lse_works_with_buffers = [
+                dist_attn_runtime.fetch_remote_lse(
                     local_lse=local_lse,
-                    local_do=grad_output,
                     overlap_stage=ith_overlap_stage,
                 )
                 for ith_overlap_stage in range(dist_attn_runtime.overlap_degree)
@@ -910,10 +1042,8 @@ class DistAttnFunc(torch.autograd.Function):
             partial_local_dq,
             partial_local_dkv,
         ) = dist_attn_runtime.attn_bwd_partial(
-            do=grad_output,
-            q=local_q,
+            qo_do=local_qo_do,
             kv=local_kv,
-            o=local_out,
             lse=local_lse,
             overlap_stage=None,
             deterministic=dist_attn_runtime.deterministic,
@@ -940,15 +1070,11 @@ class DistAttnFunc(torch.autograd.Function):
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
             # wait for ith remote data prepared
             if magi_attention.is_cuda_device_max_connections_one():
-                curr_remote_kv: torch.Tensor = remote_kv_work.wait_post_process(
-                    remote_kv_buffer
+                curr_remote_kv = remote_kv_work.wait_post_process(remote_kv_buffer)
+                curr_remote_qo_do = remote_qo_do_work.wait_post_process(
+                    remote_qo_do_buffer
                 )
-                (
-                    curr_remote_q,
-                    curr_remote_out,
-                    curr_remote_lse,
-                    curr_remote_do,
-                ) = remote_qo_lse_do_work.wait_post_process(remote_qo_lse_do_buffer)
+                curr_remote_lse = remote_lse_work.wait_post_process(remote_lse_buffer)
 
                 # pre-fetch (i+1)th remote data
                 if ith_overlap_stage < dist_attn_runtime.overlap_degree - 1:
@@ -959,13 +1085,17 @@ class DistAttnFunc(torch.autograd.Function):
                         local_kv=local_kv, overlap_stage=ith_overlap_stage + 1
                     )
                     (
-                        remote_qo_lse_do_work,
-                        remote_qo_lse_do_buffer,
-                    ) = dist_attn_runtime.fetch_remote_qo_lse_do(
-                        local_q=local_q,
-                        local_out=local_out,
+                        remote_qo_do_work,
+                        remote_qo_do_buffer,
+                    ) = dist_attn_runtime.fetch_remote_qo_do(
+                        local_qo_do=local_qo_do,
+                        overlap_stage=ith_overlap_stage + 1,
+                    )
+                    (
+                        remote_lse_work,
+                        remote_lse_buffer,
+                    ) = dist_attn_runtime.fetch_remote_lse(
                         local_lse=local_lse,
-                        local_do=grad_output,
                         overlap_stage=ith_overlap_stage + 1,
                     )
             else:
@@ -977,16 +1107,18 @@ class DistAttnFunc(torch.autograd.Function):
                     curr_remote_kv_buffer
                 )
                 (
-                    curr_remote_qo_lse_do_work,
-                    curr_remote_qo_lse_do__buffer,
-                ) = remote_qo_lse_do_works_with_buffers[ith_overlap_stage]
+                    curr_remote_qo_do_work,
+                    curr_remote_qo_do_buffer,
+                ) = remote_qo_do_works_with_buffers[ith_overlap_stage]
+                curr_remote_qo_do = curr_remote_qo_do_work.wait_post_process(
+                    curr_remote_qo_do_buffer
+                )
                 (
-                    curr_remote_q,
-                    curr_remote_out,
-                    curr_remote_lse,
-                    curr_remote_do,
-                ) = curr_remote_qo_lse_do_work.wait_post_process(
-                    curr_remote_qo_lse_do__buffer
+                    curr_remote_lse_work,
+                    curr_remote_lse_buffer,
+                ) = remote_lse_works_with_buffers[ith_overlap_stage]
+                curr_remote_lse = curr_remote_lse_work.wait_post_process(
+                    curr_remote_lse_buffer
                 )
 
             # do attn bwd with ith remote data
@@ -995,10 +1127,8 @@ class DistAttnFunc(torch.autograd.Function):
                 partial_remote_dq,
                 partial_remote_dkv,
             ) = dist_attn_runtime.attn_bwd_partial(
-                do=curr_remote_do,
-                q=curr_remote_q,
+                qo_do=curr_remote_qo_do,
                 kv=curr_remote_kv,
-                o=curr_remote_out,
                 lse=curr_remote_lse,
                 dq_acc=partial_local_dq,
                 overlap_stage=ith_overlap_stage,
@@ -1015,6 +1145,7 @@ class DistAttnFunc(torch.autograd.Function):
             partial_dkv_reduce_works.append(partial_dkv_reduce_work)
 
             # reduce ith partial dq
+            curr_remote_q, _, _ = dist_attn_runtime.maybe_chunk_qo_do(curr_remote_qo_do)
             partial_dq_reduce_work = dist_attn_runtime.reduce_partial_dq(
                 partial_remote_dq=partial_remote_dq,
                 partial_local_dq=partial_local_dq,
