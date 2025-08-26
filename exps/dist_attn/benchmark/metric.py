@@ -362,16 +362,18 @@ class MetricDataCalculator:
                     for mask_type in attn_arg.attn_type_map
                 ]
 
-                flops_dict = calculate_attn_flops(
-                    q_ranges=attn_arg.q_ranges,
-                    k_ranges=attn_arg.k_ranges,
-                    attn_mask_type=attn_mask_type,
-                    total_seqlen_q=attn_arg.q_ranges.end,
-                    num_heads_q=num_heads_q,
-                    head_dim=head_dim,
-                )
-
-                computation_amount_per_rank.append(flops_dict[pass_type])
+                if len(attn_arg.q_ranges) > 0:
+                    flops_dict = calculate_attn_flops(
+                        q_ranges=attn_arg.q_ranges,
+                        k_ranges=attn_arg.k_ranges,
+                        attn_mask_type=attn_mask_type,
+                        total_seqlen_q=attn_arg.q_ranges.end,
+                        num_heads_q=num_heads_q,
+                        head_dim=head_dim,
+                    )
+                    computation_amount_per_rank.append(flops_dict[pass_type])
+                else:
+                    computation_amount_per_rank.append(0)
 
             computation_amount_list.append(computation_amount_per_rank)
 
@@ -443,24 +445,31 @@ class MetricDataCalculator:
                 kv_group_collective_arg = comm_meta.kv_group_collective_args_list[i]
                 qo_group_collective_arg = comm_meta.qo_group_collective_args_list[i]
 
-                kv_send_tokens_num = sum(
-                    [
-                        kv_group_collective_arg.input_split_size_list[j]
-                        * len(kv_group_collective_arg.dst_indices_list[j])
-                        for j in range(
-                            len(kv_group_collective_arg.input_split_size_list)
-                        )
-                    ]
-                )
-                qo_send_tokens_num = sum(
-                    [
-                        qo_group_collective_arg.input_split_size_list[j]
-                        * len(qo_group_collective_arg.dst_indices_list[j])
-                        for j in range(
-                            len(qo_group_collective_arg.input_split_size_list)
-                        )
-                    ]
-                )
+                if kv_group_collective_arg is not None:
+                    kv_send_tokens_num = sum(
+                        [
+                            kv_group_collective_arg.input_split_size_list[j]
+                            * len(kv_group_collective_arg.dst_indices_list[j])
+                            for j in range(
+                                len(kv_group_collective_arg.input_split_size_list)
+                            )
+                        ]
+                    )
+                else:
+                    kv_send_tokens_num = 0  # type: ignore[unreachable]
+
+                if qo_group_collective_arg is not None:
+                    qo_send_tokens_num = sum(
+                        [
+                            qo_group_collective_arg.input_split_size_list[j]
+                            * len(qo_group_collective_arg.dst_indices_list[j])
+                            for j in range(
+                                len(qo_group_collective_arg.input_split_size_list)
+                            )
+                        ]
+                    )
+                else:
+                    qo_send_tokens_num = 0  # type: ignore[unreachable]
 
                 kv_send_tokens_num_list.append(kv_send_tokens_num)
                 qo_send_tokens_num_list.append(qo_send_tokens_num)
@@ -563,13 +572,13 @@ class MetricDataCalculator:
                             * bwd_cast_dtype_bytes
                         )
                         recv_o_bytes = (
-                            kv_recv_tokens_num_list[i]
+                            qo_recv_tokens_num_list[i]
                             * num_heads_q
                             * head_dim
                             * 2
                             * bwd_cast_dtype_bytes
                         )  # o and do
-                        recv_lse_bytes = kv_recv_tokens_num_list[i] * num_heads_q * 4
+                        recv_lse_bytes = qo_recv_tokens_num_list[i] * num_heads_q * 4
 
                         send_bytes += (
                             send_q_bytes + send_kv_bytes + send_o_bytes + send_lse_bytes
