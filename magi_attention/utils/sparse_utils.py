@@ -571,3 +571,86 @@ def get_sdpa_mask_from_var_block_mask(
         sdpa_mask[:, h_q, q_start:q_end, k_start:k_end] = True
 
     return sdpa_mask
+
+# ================ Utils for Native Sparse Attention ================
+
+def generate_ranges_from_topk_index_token_major(
+    topk_idx: torch.Tensor,
+    num_group: int,
+    block_n: int,
+    seqlen_k: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Generates offset query and key range tensors for Grouped-Query Attention (GQA)
+    in a vectorized manner.
+
+    This function assumes a memory layout where queries for the same time-step
+    are grouped together. The generated q_range for position `i` will be
+    `[offset + i * num_group, offset + (i + 1) * num_group]`.
+
+    Args:
+        topk_idx (torch.Tensor): A 3D integer tensor of shape
+            [num_kv_heads, seqlen_q, topk]. `num_kv_heads` is the number of
+            KV head groups (`num_q_heads / num_group`). Values of -1 are ignored.
+        num_group (int): The number of query heads in each group (GQA factor).
+        block_n (int): The size of each key block.
+        seqlen_k (int): The total sequence length of the Key/Value cache for a
+            *single KV head group*.
+
+    """
+    # 1. Get shape parameters and device.
+    num_kv_heads, seqlen_q, topk = topk_idx.shape
+    device = topk_idx.device
+    num_q_heads = num_kv_heads * num_group
+
+    q_ranges = []
+    k_ranges = []
+
+    for q_idx in range(seqlen_q):
+        for kv_head in range(num_kv_heads):
+            q_start = q_idx * num_q_heads + kv_head * num_group
+            q_end = q_start + num_group
+            for k_block in topk_idx[kv_head, q_idx]:
+                if k_block == -1:
+                    continue
+                k_start = kv_head * seqlen_k + k_block * block_n
+                k_end = k_start + block_n
+                q_ranges.append([q_start, q_end])
+                k_ranges.append([k_start, k_end])
+    q_ranges = torch.tensor(q_ranges, device=device, dtype=torch.int32)
+    k_ranges = torch.tensor(k_ranges, device=device, dtype=torch.int32)
+
+    return q_ranges, k_ranges
+
+def get_sdpa_mask_from_topk_index(
+    topk_idx: torch.Tensor,
+    num_group: int,
+    block_n: int,
+    seqlen_k: int,
+    bsz: int = 1,
+) -> torch.Tensor:
+    num_kv_heads, seqlen_q, topk = topk_idx.shape
+    device = topk_idx.device
+    num_q_heads = num_kv_heads * num_group
+
+    sdpa_mask = torch.zeros(
+        (bsz, num_q_heads, seqlen_q, seqlen_k), dtype=torch.bool, device=device
+    )
+
+    for kv_head in range(num_kv_heads):
+        for q_idx in range(seqlen_q):
+            for k_block in topk_idx[kv_head, q_idx]:
+                if k_block == -1:
+                    continue
+                h_q_start = kv_head * num_group
+                h_q_end = (kv_head + 1) * num_group
+                q_start = q_idx 
+                q_end = (q_idx + 1)
+                k_start = k_block * block_n
+                k_end = k_start + block_n
+
+                sdpa_mask[:, h_q_start:h_q_end, q_start:q_end, k_start:k_end] = True
+        
+    return sdpa_mask
+
+
