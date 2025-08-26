@@ -591,14 +591,16 @@ def magi_attn_flex_dispatch(
 def dispatch(
     x: torch.Tensor,
     key: DistAttnRuntimeKey,
+    pad_value: float = 0.0,
 ) -> torch.Tensor:
     """
-    Pad and dispatch the input tensor to local tensor on each rank along the seqlen dim.
+    Pad and dispatch the global input tensor to local tensor on each rank along the seqlen dim.
 
     Args:
-        x (torch.Tensor): input total tensor.
+        x (torch.Tensor): global input tensor.
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
             as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+        pad_value (float): the specific value to pad to input tensor. Defaults to 0.
 
     Returns:
         torch.Tensor: the padded and dispatched local tensor.
@@ -611,7 +613,7 @@ def dispatch(
         raise ValueError("The DistAttnRuntimeKey does not exist!")
 
     pad_size = key.pad_size
-    padded_x = pad_at_dim(x, 0, pad_size)
+    padded_x = pad_at_dim(x, 0, pad_size, value=pad_value)
 
     return mgr.dispatch_qo(padded_x)
 
