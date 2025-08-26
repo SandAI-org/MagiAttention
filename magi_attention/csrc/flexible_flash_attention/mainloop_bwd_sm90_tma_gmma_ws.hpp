@@ -1005,7 +1005,7 @@ struct CollectiveMainloopBwdSm90 {
       cute::copy(smem_tiled_copy_V, tdPsV_copy_view, tdPrV_copy_view);
     }
 
-    auto bwd_step = [&](int m_block, auto mask_fn) {
+    auto bwd_step = [&](int m_block, auto mask_fn, auto mask_q_fn) {
       Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select < !SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0 > (TileShape_MNK{}));
       consumer_wait(pipeline_q, smem_pipe_read);
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read.index()), tSrK, tSrS);
@@ -1038,7 +1038,7 @@ struct CollectiveMainloopBwdSm90 {
           return nullptr;
       }();
       mask_fn(tSrS, m_block);
-
+      mask_q_fn(tSrS, m_block);
       // Start debug print
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
@@ -1277,9 +1277,11 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
     auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type); };
+    auto mask_q_fn = [&](auto& tSrS, int m_block) { mask.template apply_q_mask<>(tSrS, m_block); };
+
     CUTLASS_PRAGMA_NO_UNROLL
     for (; m_block < m_block_max; ++m_block) {
-      bwd_step(m_block, mask_fn);
+      bwd_step(m_block, mask_fn, mask_q_fn);
     }
 
     if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
