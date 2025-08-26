@@ -32,6 +32,9 @@ class NCQDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         self,
         rects: AttnRectangles,
         host_ranges_q: list[AttnRanges],
+        host_ranges_k: list[AttnRanges],
+        num_heads_q: int,
+        num_heads_kv: int,
         bucket_per_rank: list[AttnRectangles],
     ) -> None:
         """
@@ -40,6 +43,9 @@ class NCQDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         Args:
             rect: Attention rectangles
             host_ranges_q: Q ranges for each rank
+            host_ranges_k: K ranges for each rank
+            num_heads_q: Number of Q heads
+            num_heads_kv: Number of KV heads
             bucket_per_rank: Buckets for each rank
         """
         indexed_host_ranges_q = []

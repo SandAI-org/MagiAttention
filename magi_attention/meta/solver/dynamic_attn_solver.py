@@ -93,6 +93,9 @@ class DynamicAttnSolver:
         self.algorithm.solve(
             rects=self.rect,
             host_ranges_q=self.host_ranges_q,
+            host_ranges_k=self.host_ranges_k,
+            num_heads_q=self.num_heads_q,
+            num_heads_kv=self.num_heads_kv,
             bucket_per_rank=self.bucket_per_rank,
         )
         # for idx, bucket in enumerate(self.bucket_per_rank):

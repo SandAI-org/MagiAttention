@@ -35,6 +35,9 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         self,
         rects: AttnRectangles,
         host_ranges_q: list[AttnRanges],
+        host_ranges_k: list[AttnRanges],
+        num_heads_q: int,
+        num_heads_kv: int,
         bucket_per_rank: list[AttnRectangles],
     ) -> None:
         """
@@ -43,6 +46,9 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         Args:
             rects: The attention rectangles
             host_ranges_q: The Q ranges of each rank
+            host_ranges_k: The K ranges of each rank
+            num_heads_q: The number of Q heads
+            num_heads_kv: The number of KV heads
             bucket_per_rank: The buckets of each rank
         """
         # TODO: Implement the greedy-random-grid algorithm logic
