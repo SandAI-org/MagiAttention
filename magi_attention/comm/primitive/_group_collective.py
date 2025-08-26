@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
-
 import torch
 import torch.distributed as dist
 
@@ -43,7 +41,7 @@ def group_cast_collective(
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
-    group: Optional[dist.ProcessGroup] = None,
+    group: dist.ProcessGroup | None = None,
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
@@ -167,7 +165,7 @@ def group_reduce_collective(
     output_split_size_list: list[int],
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
-    group: Optional[dist.ProcessGroup] = None,
+    group: dist.ProcessGroup | None = None,
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
