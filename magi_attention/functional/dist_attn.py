@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from logging import getLogger
 from typing import Any
 
 import torch
@@ -33,8 +32,6 @@ from magi_attention.utils import (
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
 from .utils import safe_subtract
-
-logger = getLogger("magi_attention")
 
 
 @nvtx.instrument_nvtx
