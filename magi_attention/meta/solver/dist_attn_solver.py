@@ -1306,6 +1306,12 @@ class DistAttnSolver:
         num_remote_kv_tokens_per_stage: list[int] = []
         kv_group_collective_args_list: list[GroupCollectiveArg] = []
 
+        # NOTE: this solver does not support qo comm for now
+        # thus we assign empty args for qo comm
+        num_remote_qo_tokens_per_stage: list[int] = [0] * self.overlap_degree
+        qo_group_collective_args_list: list[GroupCollectiveArg] = [None] * self.overlap_degree  # type: ignore[list-item]
+        lse_group_collective_args_list: list[GroupCollectiveArg] = [None] * self.overlap_degree  # type: ignore[list-item]
+
         for transfer_table_this_stage, remote_rank_entry_per_rank_this_stage in zip(
             self.transfer_table_per_stage,
             self.remote_rank_entry_per_rank_per_stage,
@@ -1330,9 +1336,9 @@ class DistAttnSolver:
         comm_meta = CommMeta(
             num_remote_kv_tokens_per_stage=num_remote_kv_tokens_per_stage,
             kv_group_collective_args_list=kv_group_collective_args_list,
-            # TODO: support qo comm meta calculation
-            num_remote_qo_tokens_per_stage=[0] * self.overlap_degree,
-            qo_group_collective_args_list=[None] * self.overlap_degree,  # type: ignore[list-item]
+            num_remote_qo_tokens_per_stage=num_remote_qo_tokens_per_stage,
+            qo_group_collective_args_list=qo_group_collective_args_list,
+            lse_group_collective_args_list=lse_group_collective_args_list,
         )
 
         return comm_meta
@@ -1417,6 +1423,7 @@ class DistAttnSolver:
             world_size=self.cp_size,
             device_mesh=self.cp_mesh,
             deterministic=self.deterministic,
+            packed_times=2,  # concat kv along seqlen dim
         )
 
         # sanity check for group-cast arg per rank
