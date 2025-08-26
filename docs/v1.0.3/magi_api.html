@@ -981,13 +981,14 @@ and for device mesh, we only support 1D or 2D mesh for now.</p></li>
 <dl class="py function">
 <dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.dispatch">
 <span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">dispatch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.dispatch" title="Link to this definition">#</a></dt>
-<dd><p>Pad and dispatch the input tensor to local tensor on each rank along the seqlen dim.</p>
+<dd><p>Pad and dispatch the global input tensor to local tensor on each rank along the seqlen dim.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>x</strong> (<em>torch.Tensor</em>) – input total tensor.</p></li>
+<li><p><strong>x</strong> (<em>torch.Tensor</em>) – global input tensor.</p></li>
 <li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the key that holds some inner meta data,
 as one argument for many other magi_attention APIs, about which the users may have no bother to care.</p></li>
+<li><p><strong>pad_value</strong> (<em>float</em>) – the specific value to pad to input tensor. Defaults to 0.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
