@@ -582,11 +582,10 @@ def generate_ranges_from_topk_index_token_major(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generates offset query and key range tensors for Grouped-Query Attention (GQA)
-    in a vectorized manner.
+    in a fully vectorized manner, assuming a token-major memory layout for Query.
 
-    This function assumes a memory layout where queries for the same time-step
-    are grouped together. The generated q_range for position `i` will be
-    `[offset + i * num_group, offset + (i + 1) * num_group]`.
+    In a token-major layout, all query heads for a single token are contiguous
+    in memory.
 
     Args:
         topk_idx (torch.Tensor): A 3D integer tensor of shape
@@ -603,24 +602,41 @@ def generate_ranges_from_topk_index_token_major(
     device = topk_idx.device
     num_q_heads = num_kv_heads * num_group
 
-    q_ranges = []
-    k_ranges = []
+    # 2. Create a mask to filter out invalid indices (-1).
+    # Shape: [num_kv_heads, seqlen_q, topk]
+    valid_mask = topk_idx != -1
 
-    for q_idx in range(seqlen_q):
-        for kv_head in range(num_kv_heads):
-            q_start = q_idx * num_q_heads + kv_head * num_group
-            q_end = q_start + num_group
-            for k_block in topk_idx[kv_head, q_idx]:
-                if k_block == -1:
-                    continue
-                k_start = kv_head * seqlen_k + k_block * block_n
-                k_end = k_start + block_n
-                q_ranges.append([q_start, q_end])
-                k_ranges.append([k_start, k_end])
-    q_ranges = torch.tensor(q_ranges, device=device, dtype=torch.int32)
-    k_ranges = torch.tensor(k_ranges, device=device, dtype=torch.int32)
+    # 3. Create index grids for broadcasting.
+    # These tensors represent the q_idx and kv_head loop variables.
+    q_indices = torch.arange(seqlen_q, device=device, dtype=torch.int32).view(1, seqlen_q, 1)
+    kv_head_indices = torch.arange(num_kv_heads, device=device, dtype=torch.int32).view(num_kv_heads, 1, 1)
 
-    return q_ranges, k_ranges
+    # 4. Calculate q_start and k_start for ALL possible pairs in a vectorized way.
+
+    # Calculate q_start for each query group. It only depends on q_idx and kv_head,
+    # so its shape will be [num_kv_heads, seqlen_q, 1].
+    q_start = q_indices * num_q_heads + kv_head_indices * num_group
+
+    # Calculate k_start for each potential key block.
+    # Broadcasting happens automatically:
+    # [num_kv_heads, 1, 1] * int + [num_kv_heads, seqlen_q, topk] * int
+    # The result has shape [num_kv_heads, seqlen_q, topk].
+    k_start = kv_head_indices * seqlen_k + topk_idx * block_n
+
+    # 5. Filter all start positions using the mask to get flat 1D tensors
+    # containing only the valid start positions.
+
+    # First, broadcast q_start to match the shape of the mask.
+    # Then, apply the mask to get a 1D tensor of valid starts.
+    valid_q_starts = torch.broadcast_to(q_start, topk_idx.shape)[valid_mask]
+    valid_k_starts = k_start[valid_mask]
+
+    # 6. Calculate end positions and stack to create the final range tensors.
+    # The result is a tensor of shape [num_valid_pairs, 2].
+    q_ranges = torch.stack([valid_q_starts, valid_q_starts + num_group], dim=1)
+    k_ranges = torch.stack([valid_k_starts, valid_k_starts + block_n], dim=1)
+
+    return q_ranges.int(), k_ranges.int()
 
 def get_sdpa_mask_from_topk_index(
     topk_idx: torch.Tensor,

@@ -28,7 +28,7 @@ from baselines.utils import seed_everything
 from baselines.nsa_ref.ops import compressed_attention, linear_compress
 from baselines.nsa_ref.ops.topk_sparse_attention import _topk_sparse_attention_fwd
 
-from magi_attention.utils.sparse_utils import generate_ranges_from_topk_index, get_sdpa_mask_from_topk_index, generate_ranges_from_topk_index_token_major
+from magi_attention.utils.sparse_utils import get_sdpa_mask_from_topk_index, generate_ranges_from_topk_index_token_major
 
 def create_cu_seqlens(seqlen: int) -> torch.Tensor:
     """Create cumulative sequence lengths tensor for batch processing."""
@@ -306,23 +306,23 @@ class NSACorrectnessTest:
         
         # Compute NSA reference attention
         print("Computing NSA reference attention...")
-        # output_nsa = self.compute_nsa_ref_attention(
-        #     q, k, v, topk_idx, cu_seqlens, block_size, head_dim
-        # )
+        output_nsa = self.compute_nsa_ref_attention(
+            q, k, v, topk_idx, cu_seqlens, block_size, head_dim
+        )
         # print(output_nsa)
         
         # print(f"FFA output shape: {output_ffa.shape}")
         # print(f"NSA output shape: {output_nsa.shape}")
 
-        output_sdpa = self.compute_sdpa_attention(
-            q, k, v, topk_idx, block_size, num_group, head_dim
-        )
+        # output_sdpa = self.compute_sdpa_attention(
+        #     q, k, v, topk_idx, block_size, num_group, head_dim
+        # )
         # print(output_sdpa)
         # breakpoint()
         
         # Compare outputs
         print("Comparing outputs...")
-        comparison = self.compare_outputs(output_ffa, output_sdpa, rtol, atol)
+        comparison = self.compare_outputs(output_ffa, output_nsa, rtol, atol)
         
         # Print results
         print(f"\nComparison Results:")
