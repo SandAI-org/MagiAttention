@@ -425,6 +425,7 @@ class DistAttnRuntime:
                         merge_q_ranges=None,
                         qk_map=None,
                         fwd_unique_count=None,
+                        ref_block_size=None,
                         softmax_scale=q.shape[-1] ** -0.5,
                         deterministic=deterministic,
                         softcap=0.0,

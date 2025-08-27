@@ -13,17 +13,22 @@
 # limitations under the License.
 
 import warnings
+import os
+from pathlib import Path
 
 import torch
 from packaging import version
 
 from magi_attention.utils import nvtx
+from torch.utils.cpp_extension import load as _torch_cpp_load
+from torch.utils.cpp_extension import load_inline as _torch_cpp_load_inline
+from ._flex_flash_attn_jit import get_ffa_jit_mod
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
 is_ffa_installed = False
 try:
-    from magi_attention import flexible_flash_attention_cuda  # type: ignore[attr-defined]
+    from magi_attention import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
 
     is_ffa_installed = True
 except ImportError:
@@ -147,7 +152,7 @@ def merge_ranges(
         merge_outer_ranges,
         range_map,
         unique_count,
-    ) = flexible_flash_attention_cuda.unique_consecutive_pairs(sorted_outer_ranges)
+    ) = flexible_flash_attention_utils_cuda.unique_consecutive_pairs(sorted_outer_ranges)
 
     return (
         merge_outer_ranges,
@@ -182,6 +187,8 @@ def _flex_flash_attn_forward_compilable(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
+    kblock_m: int | None,
+    kblock_n: int | None,
     softmax_scale: float,
     softcap: float,
     disable_fwd_atomic_reduction: bool,
@@ -190,14 +197,22 @@ def _flex_flash_attn_forward_compilable(
     sm_margin: int,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
-
-    assert is_ffa_installed, "FFA is not installed."
-
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
 
-    out_, lse = flexible_flash_attention_cuda.fwd(
+    mod, _ = get_ffa_jit_mod(
+        arch="90",
+        direction="fwd",
+        head_dim=q.shape[-1],
+        compute_dtype=q.dtype,
+        output_dtype=out_type or torch.float32,
+        softcap=softcap > 0.0,
+        disable_atomic_reduction=disable_fwd_atomic_reduction,
+        ref_block_size=(kblock_m, kblock_n) if kblock_m is not None and kblock_n is not None else None,
+    )
+
+    out_, lse = mod.fwd(
         q,
         k,
         v,
@@ -235,6 +250,8 @@ def _flex_flash_attn_forward_compilable_fake(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
+    kblock_m: int | None,
+    kblock_n: int | None,
     softmax_scale: float,
     softcap: float,
     disable_fwd_atomic_reduction: bool,
@@ -260,6 +277,7 @@ def _flex_flash_attn_forward(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
+    ref_block_size: tuple[int, int] | None,
     softmax_scale: float,
     softcap: float,
     disable_fwd_atomic_reduction: bool,
@@ -267,69 +285,48 @@ def _flex_flash_attn_forward(
     deterministic: bool,
     sm_margin: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if torch.compiler.is_compiling():
-        out = out or torch.empty_like(
-            q, dtype=out_type or torch.float32, device=q.device
-        )
-        lse = lse or torch.full(
-            (q.size(1), q.size(0)),
-            fill_value=float("-inf"),
-            dtype=torch.float32,
-            device=q.device,
-        )
+    q, k, v, q_ranges, k_ranges = [maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)]
 
-        # NOTE: we can not directly compile `_flex_flash_attn_forward`
-        # since torch.compile does not allow returning the mutated args (out, lse)
-        _flex_flash_attn_forward_compilable(
-            q=q,
-            k=k,
-            v=v,
-            out_=out,
-            lse=lse,
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            attn_type_map=attn_type_map,
-            merge_q_ranges=merge_q_ranges,
-            qk_map=qk_map,
-            fwd_unique_count=fwd_unique_count,
-            softmax_scale=softmax_scale,
-            softcap=softcap,
-            disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
-            out_type=out_type,
-            deterministic=deterministic,
-            sm_margin=sm_margin,
-        )
+    out = torch.empty_like(
+        q, dtype=out_type or torch.float32, device=q.device
+    ) if out is None else out
+    lse = torch.full(
+        (q.size(1), q.size(0)),
+        fill_value=float("-inf"),
+        dtype=torch.float32,
+        device=q.device,
+    ) if lse is None else lse
 
-        return out, lse
+    if ref_block_size is not None:
+        kblock_m, kblock_n = ref_block_size
+    else:
+        kblock_m = None
+        kblock_n = None
 
-    assert is_ffa_installed, "FFA is not installed."
-
-    q, k, v, q_ranges, k_ranges = [
-        maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
-    ]
-
-    out, lse = flexible_flash_attention_cuda.fwd(
-        q,
-        k,
-        v,
-        out,
-        lse,
-        q_ranges,
-        k_ranges,
-        max_seqlen_q,
-        max_seqlen_k,
-        attn_type_map,
-        merge_q_ranges,
-        qk_map,
-        fwd_unique_count,
-        softmax_scale,
-        softcap,
-        disable_fwd_atomic_reduction,
-        out_type,
-        deterministic,
-        sm_margin,
+    # NOTE: we can not directly compile `_flex_flash_attn_forward`
+    # since torch.compile does not allow returning the mutated args (out, lse)
+    _flex_flash_attn_forward_compilable(
+        q=q,
+        k=k,
+        v=v,
+        out_=out,
+        lse=lse,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        attn_type_map=attn_type_map,
+        merge_q_ranges=merge_q_ranges,
+        qk_map=qk_map,
+        fwd_unique_count=fwd_unique_count,
+        kblock_m=kblock_m,
+        kblock_n=kblock_n,
+        softmax_scale=softmax_scale,
+        softcap=softcap,
+        disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
+        out_type=out_type,
+        deterministic=deterministic,
+        sm_margin=sm_margin,
     )
 
     return out, lse
@@ -372,7 +369,15 @@ def _flex_flash_attn_backward_compilable(
 ) -> torch.Tensor:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
 
-    assert is_ffa_installed, "FFA is not installed."
+    mod, _ = get_ffa_jit_mod(
+        arch="90",
+        direction="bwd",
+        head_dim=q.shape[-1],
+        compute_dtype=q.dtype,
+        output_dtype=dk_type or torch.float32,
+        softcap=softcap > 0.0,
+        disable_atomic_reduction=disable_bwd_dkv_atomic_reduction
+    )
 
     dout, q, k, v, out_, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (dout, q, k, v, out_, q_ranges, k_ranges)
@@ -386,7 +391,7 @@ def _flex_flash_attn_backward_compilable(
         # FIXME: softmax_d should be in the shape of (hq, sq) to save memory
         softmax_d,
         _,
-    ) = flexible_flash_attention_cuda.bwd(
+    ) = mod.bwd(
         dout,
         q,
         k,
@@ -482,87 +487,41 @@ def _flex_flash_attn_backward(
     deterministic: bool,
     sm_margin: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if torch.compiler.is_compiling():
-        dq = torch.zeros_like(q, dtype=dq_type or torch.float32)
-        dk = torch.zeros_like(k, dtype=dq_type or torch.float32)
-        dv = torch.zeros_like(v, dtype=dq_type or torch.float32)
+    dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
+    dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
+    dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
 
-        # NOTE: we can not directly compile `_flex_flash_attn_backward`
-        # since torch.compile does not allow returning the mutated args (dq, dk, dv)
-        softmax_d = _flex_flash_attn_backward_compilable(
-            dout=dout,
-            q=q,
-            k=k,
-            v=v,
-            out_=out,
-            dq=dq,
-            dk=dk,
-            dv=dv,
-            lse=lse,
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            attn_type_map=attn_type_map,
-            merge_k_ranges=merge_k_ranges,
-            bwd_kq_map=bwd_kq_map,
-            bwd_unique_count=bwd_unique_count,
-            softmax_scale=softmax_scale,
-            softcap=softcap,
-            disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
-            dq_type=dq_type,
-            dk_type=dk_type,
-            dv_type=dv_type,
-            deterministic=deterministic,
-            sm_margin=sm_margin,
-        )
-
-        return dq, dk, dv, softmax_d
-
-    assert is_ffa_installed, "FFA is not installed."
-
-    dout, q, k, v, out, q_ranges, k_ranges = [
-        maybe_contiguous(x) for x in (dout, q, k, v, out, q_ranges, k_ranges)
-    ]
-
-    (
-        dq,
-        dk,
-        dv,
-        # shape: (b, hq, max_seqlen_q)
-        # FIXME: softmax_d should be in the shape of (hq, sq) to save memory
-        softmax_d,
-        _,
-    ) = flexible_flash_attention_cuda.bwd(
-        dout,
-        q,
-        k,
-        v,
-        out,
-        dq,
-        dk,
-        dv,
-        lse,
-        q_ranges,
-        k_ranges,
-        max_seqlen_q,
-        max_seqlen_k,
-        attn_type_map,
-        merge_k_ranges,
-        bwd_kq_map,
-        bwd_unique_count,
-        softmax_scale,
-        softcap,
-        disable_bwd_dkv_atomic_reduction,
-        dq_type,
-        dk_type,
-        dv_type,
-        deterministic,
-        sm_margin,
+    # NOTE: we can not directly compile `_flex_flash_attn_backward`
+    # since torch.compile does not allow returning the mutated args (dq, dk, dv)
+    softmax_d = _flex_flash_attn_backward_compilable(
+        dout=dout,
+        q=q,
+        k=k,
+        v=v,
+        out_=out,
+        dq=dq,
+        dk=dk,
+        dv=dv,
+        lse=lse,
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        attn_type_map=attn_type_map,
+        merge_k_ranges=merge_k_ranges,
+        bwd_kq_map=bwd_kq_map,
+        bwd_unique_count=bwd_unique_count,
+        softmax_scale=softmax_scale,
+        softcap=softcap,
+        disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
+        dq_type=dq_type,
+        dk_type=dk_type,
+        dv_type=dv_type,
+        deterministic=deterministic,
+        sm_margin=sm_margin,
     )
 
     return dq, dk, dv, softmax_d
-
 
 # -------------------       ffa autograd   ------------------- #
 
@@ -585,6 +544,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         sm_margin=0,
         disable_fwd_atomic_reduction=False,
         auto_range_merge=False,
+        ref_block_size=None,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -641,6 +601,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges,
             fwd_qk_map,
             fwd_unique_count,
+            ref_block_size,
             softmax_scale,
             softcap,
             disable_fwd_atomic_reduction,
@@ -759,6 +720,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # sm_margin
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
+            None,  # ref_block_size
         )
 
 
@@ -780,6 +742,7 @@ def flex_flash_attn_func(
     sm_margin: int = 0,
     disable_fwd_atomic_reduction: bool = False,
     auto_range_merge: bool = False,
+    ref_block_size: tuple[int, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
@@ -950,4 +913,5 @@ def flex_flash_attn_func(
         sm_margin,
         disable_fwd_atomic_reduction,
         auto_range_merge,
+        ref_block_size,
     )

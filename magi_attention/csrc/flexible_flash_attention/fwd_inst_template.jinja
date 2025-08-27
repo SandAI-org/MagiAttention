@@ -1,0 +1,103 @@
+// 自动生成的最小前向实例模块（JIT）。
+// 依据 URI 绑定的参数进行单实例编译：架构、计算/输出 dtype、HeadDim、softcap 与 atomic 选项。
+
+#include <torch/python.h>
+
+#include "flex_flash_common.hpp"
+#include "flash_fwd_launch_template.h"
+#include "flex_flash_fwd.hpp"
+
+// 由 Jinja 实参提供的编译时常量
+static constexpr int kArch = {{ arch_sm }};
+using TCompute = {{ compute_t }};
+using TOut     = {{ out_t }};
+static constexpr int kHeadDim = {{ head_dim }};
+static constexpr bool kHasSoftcap = {{ has_softcap }};
+static constexpr bool kDisableAtomic = {{ disable_atomic }};
+// 允许 Python 侧直接渲染出 tile 大小；若未提供则在编译期根据 head_dim 推导
+{% if kblock_m and kblock_n %}
+static constexpr int kBlockM = {{ kblock_m }};
+static constexpr int kBlockN = {{ kblock_n }};
+{% else %}
+static constexpr int kBlockM = std::get<0>(tile_size_fwd_sm90(kHeadDim, /*element_size*/2, kHasSoftcap));
+static constexpr int kBlockN = std::get<1>(tile_size_fwd_sm90(kHeadDim, /*element_size*/2, kHasSoftcap));
+{% endif %}
+
+// 运行时输入检查，确保与本实例的编译时约束一致
+static inline void _check_runtime_contract(
+    const at::Tensor& q,
+    std::optional<at::ScalarType> out_type_opt,
+    float softcap,
+    bool disable_atomic) {
+  TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
+              "JIT-FFA only supports fp16/bf16 for compute");
+  TORCH_CHECK(q.size(2) == kHeadDim,
+              "HeadDim mismatch: compiled=", kHeadDim, ", runtime=", q.size(2));
+  TORCH_CHECK(((softcap > 0.f) == kHasSoftcap),
+              "softcap mismatch with compiled variant");
+  TORCH_CHECK(disable_atomic == kDisableAtomic,
+              "disable_fwd_atomic_reduction mismatch with compiled variant");
+
+  if (out_type_opt.has_value()) {
+    at::ScalarType out_ty = out_type_opt.value();
+    if constexpr (std::is_same_v<TOut, float>) {
+      TORCH_CHECK(out_ty == at::kFloat,
+                  "out_type must be float32 for this JIT variant");
+    } else if constexpr (std::is_same_v<TOut, cutlass::half_t>) {
+      TORCH_CHECK(out_ty == at::kHalf,
+                  "out_type must be float16 for this JIT variant");
+    } else if constexpr (std::is_same_v<TOut, cutlass::bfloat16_t>) {
+      TORCH_CHECK(out_ty == at::kBFloat16,
+                  "out_type must be bfloat16 for this JIT variant");
+    }
+  }
+}
+
+// 前向实现：与绑定保持一致签名（flash_bindings.cpp 将绑定到本符号）
+std::vector<at::Tensor> mha_fwd(
+    const at::Tensor& q,
+    const at::Tensor& k,
+    const at::Tensor& v,
+    std::optional<at::Tensor>& out_,
+    std::optional<at::Tensor>& softmax_lse_,
+    const at::Tensor& q_ranges,
+    const at::Tensor& k_ranges,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    std::optional<const at::Tensor>& attn_type_map_,
+    std::optional<const at::Tensor>& merge_q_ranges_,
+    std::optional<const at::Tensor>& qk_map_,
+    std::optional<const at::Tensor>& unique_count_,
+    float const softmax_scale,
+    float const softcap,
+    bool const disable_fwd_atomic_reduction,
+    std::optional<at::ScalarType> out_type_,
+    bool const deterministic,
+    int const sm_margin) {
+
+  _check_runtime_contract(q, out_type_, softcap, disable_fwd_atomic_reduction);
+
+  // kBlockM/kBlockN 已在编译期常量中确定，若需要可在此使用
+
+  // 参数准备
+  auto [params, out, softmax_lse] = prepare_mha_fwd(
+      q, k, v, out_, softmax_lse_, q_ranges, k_ranges,
+      max_seqlen_q, max_seqlen_k, attn_type_map_, merge_q_ranges_, qk_map_,
+      unique_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
+      out_type_, deterministic, sm_margin);
+
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  // 核执行（单实例）
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic>(params, stream);
+
+  // 后处理：快速清零未覆盖区域（与库接口保持一致）
+  run_fast_zero_fill(params, stream);
+
+  return {out, softmax_lse};
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("fwd", &mha_fwd, "Forward (single-variant JIT)");
+}
+

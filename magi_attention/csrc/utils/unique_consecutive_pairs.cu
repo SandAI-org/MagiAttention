@@ -20,7 +20,6 @@
 #include <vector>
 
 #include "cuda_check.h"
-#include "flash.h"
 
 // ===================================================================
 // Data Structure for (int, int) Pairs
@@ -129,3 +128,5 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
 
   return {d_unique_pairs_out, d_unique_indices_out, d_unique_count_out};
 }
+
+
