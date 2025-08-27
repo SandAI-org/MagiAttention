@@ -60,10 +60,18 @@ def range_reduce_ref(
     if is_lse_reduce:
         assert (
             input_lse is not None and output_lse is not None
-        ), "input_lse and output_lse must be provided when reduce_op is 'lse'"
+        ), "lse reduction requires input_lse and output_lse"
         assert (
             input_lse.dtype == output_lse.dtype == torch.float32
-        ), "input_lse and output_lse must be float32 when reduce_op is 'lse'"
+        ), "lse reduction requires input_lse and output_lse to be float32"
+        assert input_lse.ndim == output_lse.ndim == 2, (
+            "lse reduction requires input and output must be 2D tensors "
+            "with the shape: [seqlen, nheads]"
+        )
+        assert input.ndim == output.ndim == 3, (
+            "lse reduction requires input and output must be 3D tensors "
+            "with the shape: [seqlen, nheads, head_dim]"
+        )
 
     # Handle the case when dim is not 0
     if dim != 0:
@@ -103,16 +111,16 @@ def range_reduce_ref(
             for (out_start, out_end), (in_start, in_end) in zip(
                 output_ranges, input_ranges
             ):
-                cur_lse = input_lse[in_start:in_end]
-                old_lse_acc = output_lse[out_start:out_end]
+                cur_lse = input_lse[:, in_start:in_end]
+                old_lse_acc = output_lse[:, out_start:out_end].clone()
                 new_lse_acc = correct_attn_lse(
                     lse1=old_lse_acc,
                     lse2=cur_lse,
                 )
-                output_lse[out_start:out_end].copy_(new_lse_acc)
+                output_lse[:, out_start:out_end].copy_(new_lse_acc)
 
                 cur_out = input[in_start:in_end]
-                old_out_acc = output[out_start:out_end]
+                old_out_acc = output[out_start:out_end].clone()
                 new_out_acc = correct_attn_out(
                     out1=old_out_acc,
                     lse1=old_lse_acc,
@@ -445,6 +453,8 @@ class TestRangeReduce(TestCase):
             input_lse=input_lse,
             output_lse=output_lse1,
         )
+
+        # check in-place
         assert output1.data_ptr() == out.data_ptr(), "Not in-place reduction"
         assert output_lse1.data_ptr() == lse.data_ptr(), "Not in-place reduction"
 
@@ -461,18 +471,24 @@ class TestRangeReduce(TestCase):
         )
 
         # Verify results match
+        err_msg_list: list[str] = []
         try:
             torch.testing.assert_close(out, out_ref)
         except AssertionError as e:
-            raise AssertionError(
+            err_msg_list.append(
                 f"Test case: {test_case} failed for out: {e}\nwhere {out=}\n{out_ref=}\n"
             )
         try:
             torch.testing.assert_close(lse, lse_ref)
         except AssertionError as e:
-            raise AssertionError(
+            err_msg_list.append(
                 f"Test case: {test_case} failed for lse: {e}\nwhere {lse=}\n{lse_ref=}\n"
             )
+
+        if err_msg_list:
+            raise AssertionError("\n".join(err_msg_list))
+
+        print(f"{out=}\n{out_ref=}\n")
 
 
 if __name__ == "__main__":

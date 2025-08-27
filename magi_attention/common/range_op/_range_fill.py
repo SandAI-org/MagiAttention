@@ -86,10 +86,6 @@ def range_fill_(
     Returns:
         The in-place filled input tensor
     """
-
-    # Check that input has no gradient
-    assert not input.requires_grad, "input must not require grad"
-
     # ---   calculate meta   --- #
 
     # Return directly if empty tensor
@@ -125,7 +121,7 @@ def range_fill_(
     else:
         kernel_input = input.contiguous()
 
-    # Calculate stride (considering memory step size of elements)
+    # Calculate stride
     input_stride = kernel_input.stride(0)
 
     # ---   calculate grid size   --- #
@@ -136,7 +132,6 @@ def range_fill_(
     ELEM_PER_BLOCK = 2048 // kernel_input.element_size()
     N_BLOCK = triton.cdiv(N, ELEM_PER_BLOCK)
 
-    # Calculate grid size
     grid = (M, N_BLOCK)
 
     # ---   launch kernel   --- #

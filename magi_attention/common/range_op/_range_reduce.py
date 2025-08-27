@@ -102,17 +102,19 @@ def range_sum_reduce_deter_kernel(
     ) * output_stride + block_idx_in_row * ELEM_PER_BLOCK
     curr_out_ptr = output_ptr + out_idx
 
+    # load output
     if not is_last_block:
         out = tl.load(curr_out_ptr + cols)
     else:
         out = tl.load(curr_out_ptr + cols, mask=cols < elem_in_last_block)
 
+    # reduce input
     out2inp_range_map_start = (
         out2inp_range_map_ptr + range_idx * out2inp_range_map_stride
     )
     for idx in tl.range(0, out2inp_range_map_stride):
         inp_range_idx = tl.load(out2inp_range_map_start + idx)
-        if inp_range_idx == -1:
+        if inp_range_idx == -1:  # placeholder
             pass
         else:
             input_range_start = tl.load(input_ranges_ptr + inp_range_idx * 2)
@@ -121,13 +123,16 @@ def range_sum_reduce_deter_kernel(
             ) * input_stride + block_idx_in_row * ELEM_PER_BLOCK
             curr_inp_ptr = input_ptr + inp_idx
 
+            # load input
             if not is_last_block:
                 inp = tl.load(curr_inp_ptr + cols)
             else:
                 inp = tl.load(curr_inp_ptr + cols, mask=cols < elem_in_last_block)
 
+            # add to output
             out += inp
 
+    # store reduced output
     if not is_last_block:
         tl.store(curr_out_ptr + cols, out)
     else:
@@ -166,19 +171,21 @@ def range_avg_reduce_kernel(
     ) * output_stride + block_idx_in_row * ELEM_PER_BLOCK
     curr_out_ptr = output_ptr + out_idx
 
+    # load output
     if not is_last_block:
         out = tl.load(curr_out_ptr + cols)
     else:
         out = tl.load(curr_out_ptr + cols, mask=cols < elem_in_last_block)
     out = out.to(tl.float32)
 
+    # reduce input
+    cnt = 0.0
     out2inp_range_map_start = (
         out2inp_range_map_ptr + range_idx * out2inp_range_map_stride
     )
-    cnt = 0.0
     for idx in tl.range(0, out2inp_range_map_stride):
         inp_range_idx = tl.load(out2inp_range_map_start + idx)
-        if inp_range_idx == -1:
+        if inp_range_idx == -1:  # placeholder
             pass
         else:
             cnt += 1.0
@@ -188,20 +195,132 @@ def range_avg_reduce_kernel(
             ) * input_stride + block_idx_in_row * ELEM_PER_BLOCK
             curr_inp_ptr = input_ptr + inp_idx
 
+            # load input
             if not is_last_block:
                 inp = tl.load(curr_inp_ptr + cols)
             else:
                 inp = tl.load(curr_inp_ptr + cols, mask=cols < elem_in_last_block)
 
+            # add to output
             out += inp
 
+    # scale by count
     if cnt > 1.0:
         out /= cnt
 
+    # store reduced output
     if not is_last_block:
         tl.store(curr_out_ptr + cols, out)
     else:
         tl.store(curr_out_ptr + cols, out, mask=cols < elem_in_last_block)
+
+
+@triton.jit
+def range_lse_reduce_kernel(
+    input_ptr,
+    input_lse_ptr,
+    output_ptr,
+    output_lse_ptr,
+    input_ranges_ptr,
+    output_ranges_ptr,
+    cu_range_sizes_ptr,
+    row_map_ptr,
+    out2inp_range_map_ptr,
+    input_stride_s,
+    input_stride_nh,
+    input_lse_stride_s,
+    output_stride_s,
+    output_stride_nh,
+    output_lse_stride_s,
+    out2inp_range_map_stride,
+    N: tl.constexpr,
+    N_BLOCK: tl.constexpr,
+    ELEM_PER_BLOCK: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    block_idx_in_row = tl.program_id(2)
+
+    range_idx = tl.load(row_map_ptr + row_idx)
+    cu_range_size = tl.load(cu_range_sizes_ptr + range_idx)
+    row_idx_in_range = row_idx - cu_range_size
+    is_last_block = block_idx_in_row == N_BLOCK - 1
+    elem_in_last_block = N - block_idx_in_row * ELEM_PER_BLOCK
+    cols = tl.arange(0, ELEM_PER_BLOCK)
+
+    output_range_start = tl.load(output_ranges_ptr + range_idx * 2)
+    out_idx = (
+        (output_range_start + row_idx_in_range) * output_stride_s
+        + head_idx * output_stride_nh
+        + block_idx_in_row * ELEM_PER_BLOCK
+    )
+    curr_out_ptr = output_ptr + out_idx
+
+    out_lse_idx = (
+        output_range_start + row_idx_in_range
+    ) * output_lse_stride_s + head_idx
+    curr_out_lse_ptr = output_lse_ptr + out_lse_idx
+
+    # load output
+    if not is_last_block:
+        out = tl.load(curr_out_ptr + cols)
+    else:
+        out = tl.load(curr_out_ptr + cols, mask=cols < elem_in_last_block)
+    out = out.to(tl.float32)
+
+    # load output lse
+    out_lse = tl.load(curr_out_lse_ptr)
+
+    # reduce input and input lse
+    out2inp_range_map_start = (
+        out2inp_range_map_ptr + range_idx * out2inp_range_map_stride
+    )
+    for idx in tl.range(0, out2inp_range_map_stride):
+        inp_range_idx = tl.load(out2inp_range_map_start + idx)
+        if inp_range_idx == -1:  # placeholder
+            pass
+        else:
+            input_range_start = tl.load(input_ranges_ptr + inp_range_idx * 2)
+            inp_idx = (
+                (input_range_start + row_idx_in_range) * input_stride_s
+                + head_idx * input_stride_nh
+                + block_idx_in_row * ELEM_PER_BLOCK
+            )
+            curr_inp_ptr = input_ptr + inp_idx
+            inp_lse_idx = (
+                input_range_start + row_idx_in_range
+            ) * input_lse_stride_s + head_idx
+            curr_inp_lse_ptr = input_lse_ptr + inp_lse_idx
+
+            # load input
+            if not is_last_block:
+                inp = tl.load(curr_inp_ptr + cols)
+            else:
+                inp = tl.load(curr_inp_ptr + cols, mask=cols < elem_in_last_block)
+
+            # load input lse
+            inp_lse = tl.load(curr_inp_lse_ptr)
+
+            # correct lse
+            reduced_lse = tl.log(tl.exp(out_lse) + tl.exp(inp_lse))
+
+            # reduce output
+            out = (
+                tl.exp(out_lse - reduced_lse) * out
+                + tl.exp(inp_lse - reduced_lse) * inp
+            )
+
+            # reduce output lse
+            out_lse = reduced_lse
+
+    # store reduced output
+    if not is_last_block:
+        tl.store(curr_out_ptr + cols, out)
+    else:
+        tl.store(curr_out_ptr + cols, out, mask=cols < elem_in_last_block)
+
+    # store reduced output lse
+    tl.store(curr_out_lse_ptr, out_lse)
 
 
 @nvtx.instrument_nvtx
@@ -262,21 +381,35 @@ def range_reduce(
         The output tensor with the corrected lse after reduction if reduce_op is "lse",
         otherwise only the output tensor after reduction
     """
+    deterministic |= (
+        reduce_op != "sum"
+    )  # only sum-reduce has non-deterministic kernel by now
+    is_lse_reduce = reduce_op == "lse"
+
+    # check
     assert (
         input_ranges.shape == output_ranges.shape
     ), f"{input_ranges=} and {output_ranges=} must have the same shape"
-
-    # for now, only sum-reduce has non-deterministic kernel
-    deterministic |= reduce_op != "sum"
-
-    is_lse_reduce = reduce_op == "lse"
     if is_lse_reduce:
         assert (
             input_lse is not None and output_lse is not None
         ), "lse reduction requires input_lse and output_lse"
+        assert (
+            input_lse.dtype == output_lse.dtype == torch.float32
+        ), "lse reduction requires input_lse and output_lse to be float32"
+        assert input_lse.ndim == output_lse.ndim == 2, (
+            "lse reduction requires input and output must be 2D tensors "
+            "with the shape: [seqlen, nheads]"
+        )
+        assert input.ndim == output.ndim == 3, (
+            "lse reduction requires input and output must be 3D tensors "
+            "with the shape: [seqlen, nheads, head_dim]"
+        )
 
     # Return directly if empty tensor
     if input_ranges.shape[0] == 0 or input.numel() == 0:
+        if is_lse_reduce:
+            return output, output_lse
         return output
 
     # ---   calculate meta   --- #
@@ -328,39 +461,65 @@ def range_reduce(
     # ---   pre-process input/output   --- #
 
     output_ = output
-    need_to_copy = False
+    need_copy_output = False
+    if is_lse_reduce:
+        output_lse_ = output_lse
+        need_copy_output_lse = False
 
     # Handle the case when dim is not 0
     if dim != 0:
+        need_copy_output = True
         input = input.transpose(0, dim).contiguous()
         output_ = output_.transpose(0, dim).contiguous()
-        need_to_copy = True
+        if is_lse_reduce:
+            need_copy_output_lse = True
+            input_lse = input_lse.transpose(0, dim).contiguous()  # type: ignore[union-attr]
+            output_lse_ = output_lse_.transpose(0, dim).contiguous()  # type: ignore[union-attr]
     else:
-        need_to_copy |= not output.is_contiguous()
+        need_copy_output |= not output.is_contiguous()
         input = input.contiguous()
         output_ = output_.contiguous()
+        if is_lse_reduce:
+            need_copy_output_lse |= not output_lse.is_contiguous()  # type: ignore[union-attr]
+            input_lse = input_lse.contiguous()  # type: ignore[union-attr]
+            output_lse_ = output_lse_.contiguous()  # type: ignore[union-attr]
 
     if not deterministic and output.dtype == torch.bfloat16:
         # NOTE: in non-deterministic mode, we will use triton atomic op
         # which does not support bfloat16, w.r.t. the issue:
         # https://github.com/pytorch/pytorch/issues/97016
         output_ = output_.to(torch.float32)
-        need_to_copy = True
+        need_copy_output = True
 
-    # Calculate stride (considering memory step size of elements)
-    input_stride = input.stride(0)
-    output_stride = output_.stride(0)
+    # Calculate stride
+    if is_lse_reduce:
+        input_stride_s, input_stride_nh, _ = input.stride()
+        output_stride_s, output_stride_nh, _ = output_.stride()
+        input_lse_stride_s, _ = input_lse.stride()  # type: ignore[union-attr]
+        output_lse_stride_s, _ = output_lse_.stride()  # type: ignore[union-attr]
+    else:
+        input_stride = input.stride(0)
+        output_stride = output_.stride(0)
 
     # ---   calculate grid size   --- #
 
-    # Calculate grid size
-    M = total_size
-    N = input.numel() // input.shape[0]
+    if is_lse_reduce:
+        M = total_size  # seqlen
+        H = input.shape[1]  # num_heads
+        N = input.numel() // input.shape[0] // H  # head dim
 
-    ELEM_PER_BLOCK = 2048 // input.element_size()
-    N_BLOCK = triton.cdiv(N, ELEM_PER_BLOCK)
+        ELEM_PER_BLOCK = 128 // input.element_size()
+        N_BLOCK = triton.cdiv(N, ELEM_PER_BLOCK)
 
-    grid = (M, N_BLOCK)
+        grid = (M, H, N_BLOCK)
+    else:
+        M = total_size  # seqlen
+        N = input.numel() // input.shape[0]  # hidden dim
+
+        ELEM_PER_BLOCK = 2048 // input.element_size()
+        N_BLOCK = triton.cdiv(N, ELEM_PER_BLOCK)
+
+        grid = (M, N_BLOCK)  # type: ignore[assignment]
 
     # ---   launch kernel   --- #
 
@@ -413,17 +572,44 @@ def range_reduce(
                 ELEM_PER_BLOCK,
             )
         case "lse":
-            raise NotImplementedError
+            range_lse_reduce_kernel[grid](
+                input,
+                input_lse,
+                output_,
+                output_lse_,
+                input_ranges,
+                unique_ordered_out_ranges,
+                cu_range_sizes,
+                row_map,
+                out2inp_range_map,
+                input_stride_s,
+                input_stride_nh,
+                input_lse_stride_s,
+                output_stride_s,
+                output_stride_nh,
+                output_lse_stride_s,
+                out2inp_range_map_stride,
+                N,
+                N_BLOCK,
+                ELEM_PER_BLOCK,
+            )
         case _:
-            raise ValueError(f"reduce_op {reduce_op} is not supported for range-reduce")
+            raise ValueError(f"Invalid reduce_op {reduce_op}")
 
     # ---   post-process output   --- #
 
     # If transposed earlier, transpose back
     if dim != 0:
         output_ = output_.transpose(0, dim)
+        if is_lse_reduce:
+            output_lse_ = output_lse_.transpose(0, dim)  # type: ignore[union-attr]
 
-    if need_to_copy:
+    if need_copy_output:
         output.data.copy_(output_)
+
+    if is_lse_reduce:
+        if need_copy_output_lse:
+            output_lse.data.copy_(output_lse_)  # type: ignore[union-attr]
+        return output, output_lse
 
     return output

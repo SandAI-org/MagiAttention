@@ -92,7 +92,6 @@ def range_gather(
     Returns:
         A new tensor containing the gathered values, put into output if provided.
     """
-
     # ---   calculate meta   --- #
 
     # Make ranges contiguous
@@ -138,7 +137,7 @@ def range_gather(
         input = input.contiguous()
         output = output.contiguous()
 
-    # Calculate stride (considering memory step size of elements)
+    # Calculate stride
     input_stride = input.stride(0)
     output_stride = output.stride(0)
 

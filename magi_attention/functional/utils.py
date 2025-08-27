@@ -44,7 +44,6 @@ def softmax_bwd(dout: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
     return dinp
 
 
-@torch.compile
 def correct_attn_lse(
     lse1: torch.Tensor,
     lse2: torch.Tensor,
@@ -57,7 +56,7 @@ def correct_attn_lse(
         lse2 (torch.Tensor): log-sum-exp tensor, with shape: [num_heads, seqlen]
 
     Returns:
-        lse(torch.Tensor): corrected log-sum-exp tensor, with shape: [num_heads, seqlen]
+        torch.Tensor: corrected log-sum-exp tensor, with shape: [num_heads, seqlen]
     """
 
     min_lse = to_higher_fp_dtype(torch.min(lse1, lse2), torch.float32)
@@ -74,7 +73,9 @@ def correct_attn_lse(
     return lse.to(lse1.dtype)
 
 
-@torch.compile
+correct_attn_lse_compiled = torch.compile(correct_attn_lse)
+
+
 def correct_attn_out(
     out1: torch.Tensor,
     lse1: torch.Tensor,
@@ -93,7 +94,7 @@ def correct_attn_out(
         lse (torch.Tensor): global lse, with shape: [num_heads, seqlen]
 
     Returns:
-        o(torch.Tensor): corrected global output tensor, with shape: [seqlen, num_heads, head_dim]
+        torch.Tensor: corrected global output tensor, with shape: [seqlen, num_heads, head_dim]
     """
     # formula: lsei_ = exp(lsei - lse)
     # shape: [h, s] -> [s, h] -> [s, h, 1]
@@ -108,6 +109,9 @@ def correct_attn_out(
     out = lse1_ * out1 + lse2_ * out2
 
     return out.to(out1.dtype)
+
+
+correct_attn_out_compiled = torch.compile(correct_attn_out)
 
 
 @nvtx.instrument_nvtx
@@ -139,15 +143,15 @@ def correct_attn_fwd_result(
 
     for i in range(len(lse_list) - 1):
         if i == 0:
-            curr_lse = correct_attn_lse(lse_list[0], lse_list[1])
-            curr_out = correct_attn_out(
+            curr_lse = correct_attn_lse_compiled(lse_list[0], lse_list[1])
+            curr_out = correct_attn_out_compiled(
                 out_list[0], lse_list[0], out_list[1], lse_list[1], curr_lse
             )
         else:
             original_lse = curr_lse
             original_out = curr_out
-            curr_lse = correct_attn_lse(original_lse, lse_list[i + 1])
-            curr_out = correct_attn_out(
+            curr_lse = correct_attn_lse_compiled(original_lse, lse_list[i + 1])
+            curr_out = correct_attn_out_compiled(
                 original_out,
                 original_lse,
                 out_list[i + 1],
