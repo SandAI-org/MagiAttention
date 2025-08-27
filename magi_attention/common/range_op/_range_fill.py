@@ -21,34 +21,7 @@ from magi_attention.utils import nvtx
 
 from .utils import _calc_cu_range_sizes, _calc_ranges_row_map
 
-__all__ = ["range_fill_", "range_fill_ref"]
-
-
-def range_fill_ref(
-    out: torch.Tensor,
-    ranges: torch.Tensor,
-    val: float,
-    dim: int = 0,
-) -> torch.Tensor:
-    # Return directly if ranges or tensor is empty
-    if ranges.shape[0] == 0 or out.numel() == 0:
-        return out
-
-    # Handle the case when dim is not 0
-    if dim != 0:
-        out = out.transpose(0, dim).contiguous()
-    else:
-        out = out.contiguous()
-
-    # Iterate through each range and fill with the specified value
-    for start, end in ranges:
-        out[start:end].fill_(val)
-
-    # If transposed earlier, transpose back
-    if dim != 0:
-        out = out.transpose(0, dim)
-
-    return out
+__all__ = ["range_fill_"]
 
 
 @triton.jit

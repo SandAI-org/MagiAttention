@@ -20,12 +20,12 @@ from torch.nn.functional import scaled_dot_product_attention as sdpa_func
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.functional import flex_flash_attn_func
-from magi_attention.functional.dist_attn import result_correction
 from magi_attention.functional.flex_flash_attn import (
     _flex_flash_attn_backward,
     _flex_flash_attn_forward,
     merge_ranges,
 )
+from magi_attention.functional.utils import correct_attn_fwd_result
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import assert_close, calc_inf_norm
@@ -176,7 +176,9 @@ class TestBlockSparseAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
         )
-        o_ref, lse_ref = result_correction(out_list=[o, o_acc], lse_list=[lse, lse_acc])
+        o_ref, lse_ref = correct_attn_fwd_result(
+            out_list=[o, o_acc], lse_list=[lse, lse_acc]
+        )
         o_auto_acc, lse_auto_acc = _flex_flash_attn_forward(
             q=q,
             k=k,
