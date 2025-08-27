@@ -14,7 +14,7 @@
 
 from functools import partial
 from itertools import chain
-from typing import Callable
+from typing import Callable, Literal
 
 import torch
 import torch.distributed as dist
@@ -1069,11 +1069,17 @@ def hier_group_reduce_impl_with_a2av(
     src_indices_list: list[list[int]],
     group: dist.ProcessGroup | None = None,
     async_op: bool = False,
+    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     assert (
         async_op
     ), "async_op must be True for hierarchical group-reduce collective by now"
+    assert (
+        reduce_op != "lse"
+    ), "hierarchical group reduce does not support lse reduction by now"
 
     rank = kwargs.pop("rank", dist.get_rank(group))
     world_size = kwargs.pop("world_size", dist.get_world_size(group))
