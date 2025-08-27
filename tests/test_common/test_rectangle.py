@@ -450,6 +450,8 @@ class TestAttnRectangle(TestCase):
             )
 
             parts = rand_rect.to_qk_range_mask_type()
+            # at most 3 parts
+            self.assertLessEqual(len(parts), 3)
 
             # area conservation: use the output (q_range, k_range, mask_type) to restore each sub-rectangle and sum the areas
             total_area = rand_rect.area()
