@@ -66,7 +66,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
 
     @property
     def dtype(self) -> torch.dtype:
-        return torch.int32
+        return torch.float32
 
     @property
     def process_group(self):
@@ -336,6 +336,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             {
                 "name": "naive_a2a_like_reduce",
                 "world_size": 4,
+                "reduce_op": "sum",
                 "send_buffer_per_rank": [
                     [0, 0, 0, 0],
                     [1, 1, 1, 1],
@@ -380,8 +381,9 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                 ],
             },
             {
-                "name": "normal_group_reduce",
+                "name": "normal_group_sum_reduce",
                 "world_size": 4,
+                "reduce_op": "sum",
                 "send_buffer_per_rank": [
                     [0, 1, 2, 3, 4],
                     [5, 6, 7, 8, 9, 10, 11],
@@ -425,6 +427,53 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                     [[1], [0, 1], [2]],
                 ],
             },
+            {
+                "name": "normal_group_avg_reduce",
+                "world_size": 4,
+                "reduce_op": "avg",
+                "send_buffer_per_rank": [
+                    [0, 1, 2, 3, 4],
+                    [5, 6, 7, 8, 9, 10, 11],
+                    [12, 13, 14, 15, 16],
+                    [17, 18, 19, 20, 21],
+                ],
+                "recv_buffer_before_reduce_per_rank": [
+                    [0, 0, 0, 0],
+                    [0, 0, 0, 0],
+                    [0, 0, 0, 0],
+                    [0, 0, 0, 0],
+                ],
+                "expected_recv_buffer_per_rank": [
+                    [4, 5, 10.5, 19],
+                    [17, 9, 13, 14],
+                    [20, 11, 7, 8],
+                    [10, 6.5, 15, 16],
+                ],
+                "input_split_size_list_per_rank": [
+                    [1, 1, 1, 2],
+                    [2, 2, 1, 1, 1],
+                    [1, 2, 2],
+                    [1, 1, 1, 1, 1],
+                ],
+                "output_split_size_list_per_rank": [
+                    [2, 1, 1],
+                    [1, 1, 2],
+                    [1, 1, 2],
+                    [1, 1, 2],
+                ],
+                "dst_index_list_per_rank": [
+                    [1, 2, 3, 0],
+                    [0, 2, 0, 3, 3],
+                    [0, 1, 3],
+                    [1, 1, 0, 2, 2],
+                ],
+                "src_indices_list_per_rank": [
+                    [[0, 1], [1, 2], [3]],
+                    [[3], [0, 3], [2]],
+                    [[3], [0, 3], [1]],
+                    [[1], [0, 1], [2]],
+                ],
+            },
         ],
     )
     @parameterize("use_hier_comm", [False, True])
@@ -435,13 +484,21 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
         async_op: bool,
         use_hier_comm: bool,
     ):
+        test_case_name = test_case["name"]
+        reduce_op = test_case["reduce_op"]
+        is_lse_reduce = reduce_op == "lse"
+
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
             return
 
         # skip for hier comm
         if use_hier_comm:
+            # TODO: support hier comm as a sync op
             if not async_op:
+                return
+            # TODO: support hier comm for lse reduce
+            if is_lse_reduce:
                 return
 
         # sanity check for meta args per rank
@@ -480,6 +537,31 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             dtype=self.dtype,
             device=self.device,
         )
+        if is_lse_reduce:
+            send_lse_buffer = torch.tensor(
+                test_case["send_lse_buffer_per_rank"][self.rank],
+                dtype=torch.float32,
+                device=self.device,
+            )
+            recv_lse_buffer_before_reduce = torch.tensor(
+                test_case["recv_lse_buffer_before_reduce_per_rank"][self.rank],
+                dtype=torch.float32,
+                device=self.device,
+            )
+            expected_recv_lse_buffer = torch.tensor(
+                test_case["expected_recv_lse_buffer_per_rank"][self.rank],
+                dtype=torch.float32,
+                device=self.device,
+            )
+            post_process_inputs = (
+                recv_buffer_before_reduce,
+                recv_lse_buffer_before_reduce,
+            )
+        else:
+            send_lse_buffer = None
+            recv_lse_buffer_before_reduce = None
+            expected_recv_lse_buffer = None
+            post_process_inputs = (recv_buffer_before_reduce,)  # type: ignore[assignment]
 
         # run group-reduce comm kernel
         with self._switch_hier_comm_context(enable=use_hier_comm):
@@ -495,22 +577,37 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                 src_indices_list=src_indices_list,
                 group=self.process_group,
                 async_op=async_op,
+                reduce_op=reduce_op,
+                input_lse=send_lse_buffer,
+                output_lse=recv_lse_buffer_before_reduce,
                 # NOTE: args below for hierarchical comm
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
             )
 
         # post process
-        recv_buffer_after_reduce = work.wait_post_process(recv_buffer_before_reduce)
+        post_process_outputs = work.wait_post_process(*post_process_inputs)
 
         # check results
+        recv_buffer_after_reduce = (
+            post_process_outputs[0] if is_lse_reduce else post_process_outputs
+        )
         self.assertTrue(
             torch.equal(recv_buffer_after_reduce, expected_recv_buffer),
             msg=(
-                f"Group-Reduce collective has failed: "
+                f"Group-Reduce collective {test_case_name=} failed: "
                 f"{recv_buffer_after_reduce=} != {expected_recv_buffer=}",
             ),
         )
+        if is_lse_reduce:
+            recv_lse_buffer_after_reduce = post_process_outputs[1]
+            self.assertTrue(
+                torch.equal(recv_lse_buffer_after_reduce, expected_recv_lse_buffer),
+                msg=(
+                    f"Group-Reduce collective {test_case_name=} failed: "
+                    f"{recv_lse_buffer_after_reduce=} != {expected_recv_lse_buffer=}",
+                ),
+            )
 
 
 class TestGroupCollectiveWithWorldSize6(TestGroupCollectiveWithWorldSize4):

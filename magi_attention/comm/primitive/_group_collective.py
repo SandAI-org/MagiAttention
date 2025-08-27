@@ -165,7 +165,7 @@ def group_reduce_collective(
     """Group reduce collective
 
     Args:
-        input (torch.Tensor): input tensor with shape [input_seqlen, ...]
+        input (torch.Tensor): input tensor with shape [input_seqlen, ...] to reduce from
         output (torch.Tensor): output tensor with shape [output_seqlen, ...] to reduce to
         input_split_size_list (list[int]): the size list to split the input tensor,
             where sum(input_split_size_list) == input_seqlen
@@ -185,12 +185,16 @@ def group_reduce_collective(
             - "avg": average reduction
             - "lse": log-sum-exp weighted average reduction, with lse correction
 
-            NOTE: if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse"
+            NOTE:
+                1. if reduce_op is "avg", we will sum-reduce to the output tensor and apply average division afterwards,
+                    so the user should guarantee that the output tensor is initialized to zero
+                    otherwise the semantics will be incorrect unless the user intentionally does this
+                2. if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
+                    and we only support input/output has shape [seqlen, num_heads, head_dim]
+                    while input_lse/output_lse has shape [seqlen, num_heads] for now
         input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
-            with shape [input_seqlen, ...] broadcastable to the input tensor,
             only required and used if reduce_op is "lse"
         output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
-            with shape [output_seqlen, ...] broadcastable to the output tensor,
             only required and used if reduce_op is "lse"
         kwargs: additional keyword arguments,
             this kernel is for now based on all2all-v,
@@ -231,6 +235,9 @@ def group_reduce_collective(
             src_indices_list=src_indices_list,
             group=group,
             async_op=async_op,
+            reduce_op=reduce_op,
+            input_lse=input_lse,
+            output_lse=output_lse,
             **kwargs,
         )
 
@@ -252,19 +259,45 @@ def group_reduce_collective(
         dst_index_list=dst_index_list,
         src_indices_list=src_indices_list,
         world_size=world_size,
+        reduce_op=reduce_op,
+        input_lse=input_lse,
+        output_lse=output_lse,
         **kwargs,
     )
 
     # ---------    lauch a2a comm kernel     --------- #
 
-    work = all2all_v(
-        input=a2a_input,
-        output=a2a_output,
-        input_split_size_list=a2a_input_split_size,
-        output_split_size_list=a2a_output_split_size,
-        group=group,
-        async_op=async_op,
-    )
+    if reduce_op == "lse":
+        # FIXME: for now, we can not fuse lse comm with out comm
+        # due to different shape and dtype, which should be considered and fixed in the future
+        a2a_input, a2a_input_lse = a2a_input
+        a2a_output, a2a_output_lse = a2a_output
+        work_out = all2all_v(
+            input=a2a_input,
+            output=a2a_output,
+            input_split_size_list=a2a_input_split_size,
+            output_split_size_list=a2a_output_split_size,
+            group=group,
+            async_op=async_op,
+        )
+        work_lse = all2all_v(
+            input=a2a_input_lse,
+            output=a2a_output_lse,
+            input_split_size_list=a2a_input_split_size,
+            output_split_size_list=a2a_output_split_size,
+            group=group,
+            async_op=async_op,
+        )
+        work = [work_out, work_lse]
+    else:
+        work = all2all_v(
+            input=a2a_input,
+            output=a2a_output,
+            input_split_size_list=a2a_input_split_size,
+            output_split_size_list=a2a_output_split_size,
+            group=group,
+            async_op=async_op,
+        )
 
     return WorkWithPostProcessFn(
         work=work,

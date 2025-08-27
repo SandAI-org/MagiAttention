@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import torch
 import triton
@@ -23,6 +23,9 @@ from magi_attention.utils import nvtx
 from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
 
 __all__ = ["range_reduce"]
+
+
+OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 @triton.jit
@@ -335,7 +338,7 @@ def range_reduce(
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
-) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+) -> OutMaybeWithLSE:
     """
     Reduce values from input tensor to output tensor based on specified ranges.
 
@@ -352,15 +355,15 @@ def range_reduce(
             - "lse": log-sum-exp weighted average reduction, with lse correction
 
             NOTE:
-                if reduce_op is "avg", we will sum-reduce to the output tensor and apply average division afterwards,
+                1. if reduce_op is "avg", we will sum-reduce to the output tensor and apply average division afterwards,
                     so the user should guarantee that the output tensor is initialized to zero
                     otherwise the semantics will be incorrect unless the user intentionally does this
-                if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse"
+                2. if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
+                    and we only support input/output has shape [seqlen, num_heads, head_dim]
+                    while input_lse/output_lse has shape [seqlen, num_heads] for now
         input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
-            whose shape should be broadcastable to the input tensor,
             only required and used if reduce_op is "lse"
         output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
-            whose shape should be broadcastable to the output tensor,
             only required and used if reduce_op is "lse"
 
         kwargs:
@@ -381,9 +384,8 @@ def range_reduce(
         The output tensor with the corrected lse after reduction if reduce_op is "lse",
         otherwise only the output tensor after reduction
     """
-    deterministic |= (
-        reduce_op != "sum"
-    )  # only sum-reduce has non-deterministic kernel by now
+    # only sum-reduce has non-deterministic kernel by now
+    deterministic |= reduce_op != "sum"
     is_lse_reduce = reduce_op == "lse"
 
     # check

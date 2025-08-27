@@ -14,7 +14,7 @@
 
 import unittest
 from collections import defaultdict
-from typing import Literal
+from typing import Literal, TypeAlias
 from unittest import TestCase
 
 import torch
@@ -22,6 +22,8 @@ import torch
 from magi_attention.common.range_op import range_reduce
 from magi_attention.functional.utils import correct_attn_lse, correct_attn_out
 from magi_attention.testing import parameterize
+
+OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 def range_reduce_ref(
@@ -33,7 +35,7 @@ def range_reduce_ref(
     reduce_op: Literal["sum", "avg", "lse"] = "sum",
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+) -> OutMaybeWithLSE:
     """Reference implementation of range reduce
 
     Args:
@@ -424,6 +426,8 @@ class TestRangeReduce(TestCase):
             test_case="Basic functionality with lse reduce",
         )
 
+        # TODO: add more test cases
+
     @staticmethod
     def compare_lse_range_reudce(
         input_tensor: torch.Tensor,
@@ -487,8 +491,6 @@ class TestRangeReduce(TestCase):
 
         if err_msg_list:
             raise AssertionError("\n".join(err_msg_list))
-
-        print(f"{out=}\n{out_ref=}\n")
 
 
 if __name__ == "__main__":
