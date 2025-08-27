@@ -43,7 +43,7 @@ def create_cu_seqlens(seqlen: int) -> torch.Tensor:
     return torch.arange(0, 2 * seqlen, seqlen, dtype=torch.int32)
 
 
-impls = ["ffa", "fsa", "nsa_ref"]
+impls = ["ffa", "nsa_ref"]
 
 # actual seqlen
 seqlens = [65536]
@@ -208,10 +208,9 @@ def sparse_attn_benchmark(
     H, N, TopK = topk_idx.shape
     num_blocks = topk_idx.max().item() + 1
     causal = (topk_idx == -1).sum().item() != 0
-    real_sparsity = 1 - (topk_idx != -1).sum().item() / topk_idx.numel()
-    print(f"Real Sparsity: {real_sparsity}")
+    real_sparsity = (topk_idx != -1).sum().item() * block_n / (orig_seq_len_k * N * H)
+    print(f"Real Sparsity: {real_sparsity * 100:.4f}% need to compute")
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * nhq * hd * real_sparsity
-    print(attn_flops)
 
     if attn_impl in ("ffa"):
         q = rearrange(q, "s h d -> (s h) 1 d") # NOTE: permuted for contiguous access of same group!
