@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import defaultdict
 from typing import Literal
 
 import torch
@@ -54,7 +55,15 @@ def range_reduce_ref(
             ):
                 output[out_start:out_end] += input[in_start:in_end]
         case "avg":
-            raise NotImplementedError
+            out_range_cnt_map: dict[tuple[int, int], int] = defaultdict(int)
+            for (out_start, out_end), (in_start, in_end) in zip(
+                output_ranges.tolist(), input_ranges.tolist()
+            ):
+                output[out_start:out_end] += input[in_start:in_end]
+                out_range_cnt_map[(out_start, out_end)] += 1
+
+            for (out_start, out_end), cnt in out_range_cnt_map.items():
+                output[out_start:out_end] /= cnt
         case "lse":
             assert (
                 input_lse is not None and output_lse is not None
@@ -179,6 +188,76 @@ def range_sum_reduce_deter_kernel(
         tl.store(curr_out_ptr + cols, out, mask=cols < elem_in_last_block)
 
 
+@triton.jit
+def range_avg_reduce_kernel(
+    input_ptr,
+    output_ptr,
+    input_ranges_ptr,
+    output_ranges_ptr,
+    cu_range_sizes_ptr,
+    row_map_ptr,
+    out2inp_range_map_ptr,
+    input_stride,
+    output_stride,
+    out2inp_range_map_stride,
+    N: tl.constexpr,
+    N_BLOCK: tl.constexpr,
+    ELEM_PER_BLOCK: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    block_idx_in_row = tl.program_id(1)
+
+    range_idx = tl.load(row_map_ptr + row_idx)
+    cu_range_size = tl.load(cu_range_sizes_ptr + range_idx)
+    row_idx_in_range = row_idx - cu_range_size
+    is_last_block = block_idx_in_row == N_BLOCK - 1
+    elem_in_last_block = N - block_idx_in_row * ELEM_PER_BLOCK
+    cols = tl.arange(0, ELEM_PER_BLOCK)
+
+    output_range_start = tl.load(output_ranges_ptr + range_idx * 2)
+    out_idx = (
+        output_range_start + row_idx_in_range
+    ) * output_stride + block_idx_in_row * ELEM_PER_BLOCK
+    curr_out_ptr = output_ptr + out_idx
+
+    if not is_last_block:
+        out = tl.load(curr_out_ptr + cols)
+    else:
+        out = tl.load(curr_out_ptr + cols, mask=cols < elem_in_last_block)
+    out = out.to(tl.float32)
+
+    out2inp_range_map_start = (
+        out2inp_range_map_ptr + range_idx * out2inp_range_map_stride
+    )
+    cnt = 0.0
+    for idx in tl.range(0, out2inp_range_map_stride):
+        inp_range_idx = tl.load(out2inp_range_map_start + idx)
+        if inp_range_idx == -1:
+            pass
+        else:
+            cnt += 1.0
+            input_range_start = tl.load(input_ranges_ptr + inp_range_idx * 2)
+            inp_idx = (
+                input_range_start + row_idx_in_range
+            ) * input_stride + block_idx_in_row * ELEM_PER_BLOCK
+            curr_inp_ptr = input_ptr + inp_idx
+
+            if not is_last_block:
+                inp = tl.load(curr_inp_ptr + cols)
+            else:
+                inp = tl.load(curr_inp_ptr + cols, mask=cols < elem_in_last_block)
+
+            out += inp
+
+    if cnt > 1.0:
+        out /= cnt
+
+    if not is_last_block:
+        tl.store(curr_out_ptr + cols, out)
+    else:
+        tl.store(curr_out_ptr + cols, out, mask=cols < elem_in_last_block)
+
+
 @nvtx.instrument_nvtx
 def range_reduce(
     input: torch.Tensor,
@@ -207,7 +286,11 @@ def range_reduce(
             - "avg": average reduction
             - "lse": log-sum-exp weighted average reduction, with lse correction
 
-            NOTE: if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse"
+            NOTE:
+                if reduce_op is "avg", we will sum-reduce to the output tensor and apply average division afterwards,
+                    so the user should guarantee that the output tensor is initialized to zero
+                    otherwise the semantics will be incorrect unless the user intentionally does this
+                if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse"
         input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
             with shape [input_seqlen, ...] broadcastable to the input tensor,
             only required and used if reduce_op is "lse"
@@ -366,7 +449,21 @@ def range_reduce(
                     ELEM_PER_BLOCK,
                 )
         case "avg":
-            raise NotImplementedError
+            range_avg_reduce_kernel[grid](
+                input,
+                output_,
+                input_ranges,
+                unique_ordered_out_ranges,
+                cu_range_sizes,
+                row_map,
+                out2inp_range_map,
+                input_stride,
+                output_stride,
+                out2inp_range_map_stride,
+                N,
+                N_BLOCK,
+                ELEM_PER_BLOCK,
+            )
         case "lse":
             raise NotImplementedError
         case _:

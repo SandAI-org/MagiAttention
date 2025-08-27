@@ -30,7 +30,7 @@ class TestRangeReduce(TestCase):
     def device(self) -> int:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    @parameterize("reduce_op", ["sum"])
+    @parameterize("reduce_op", ["sum", "avg"])
     @parameterize("deterministic", [False, True])
     def test_range_reduce(self, reduce_op, deterministic):
         """Test range_reduce function by comparing with reference implementation"""
@@ -39,6 +39,8 @@ class TestRangeReduce(TestCase):
 
         input_tensor = torch.randn(10, 5, device=self.device)
         output_tensor = torch.randn(8, 5, device=self.device)
+        if reduce_op == "avg":
+            output_tensor.zero_()
         input_ranges = torch.tensor(
             [[0, 2], [2, 3], [3, 6], [7, 8], [9, 10]],
             dtype=torch.int32,
@@ -80,6 +82,8 @@ class TestRangeReduce(TestCase):
 
         input_tensor = torch.randn(5, 10, 3, device=self.device)
         output_tensor = torch.randn(5, 8, 3, device=self.device)
+        if reduce_op == "avg":
+            output_tensor.zero_()
         input_ranges = torch.tensor(
             [[0, 3], [5, 8]], dtype=torch.int32, device=self.device
         )
@@ -102,6 +106,8 @@ class TestRangeReduce(TestCase):
 
         large_input = torch.randn(100, 20, device=self.device)
         large_output = torch.randn(70, 20, device=self.device)
+        if reduce_op == "avg":
+            large_output.zero_()
         large_input_ranges = torch.tensor(
             [[0, 30], [40, 80]], dtype=torch.int32, device=self.device
         )
@@ -123,6 +129,8 @@ class TestRangeReduce(TestCase):
 
         single_range_input = torch.randn(10, 5, device=self.device)
         single_range_output = torch.randn(4, 5, device=self.device)
+        if reduce_op == "avg":
+            single_range_output.zero_()
         single_input_range = torch.tensor(
             [[3, 7]], dtype=torch.int32, device=self.device
         )
@@ -144,6 +152,8 @@ class TestRangeReduce(TestCase):
 
         multi_dim_input = torch.randn(10, 5, 8, 4, device=self.device)
         multi_dim_output = torch.randn(8, 5, 8, 4, device=self.device)
+        if reduce_op == "avg":
+            multi_dim_output.zero_()
 
         self.compare_implementations(
             multi_dim_input,
@@ -157,6 +167,9 @@ class TestRangeReduce(TestCase):
         )
 
         multi_dim_output2 = torch.randn(10, 5, 12, 4, device=self.device)
+        if reduce_op == "avg":
+            multi_dim_output2.zero_()
+
         self.compare_implementations(
             multi_dim_input,
             multi_dim_output2,
@@ -173,6 +186,8 @@ class TestRangeReduce(TestCase):
         non_contiguous_input = torch.randn(10, 5, device=self.device).transpose(0, 1)
         non_contiguous_output = torch.randn(5, 8, device=self.device)
         assert not non_contiguous_input.is_contiguous()
+        if reduce_op == "avg":
+            non_contiguous_output.zero_()
 
         self.compare_implementations(
             non_contiguous_input,
@@ -190,6 +205,8 @@ class TestRangeReduce(TestCase):
         for dtype in [torch.float16, torch.float32, torch.int32, torch.int64]:
             typed_input = torch.randn(10, 5, device=self.device).to(dtype)
             typed_output = torch.randn(8, 5, device=self.device).to(dtype)
+            if reduce_op == "avg":
+                typed_output.zero_()
             if dtype.is_floating_point:
                 self.compare_implementations(
                     typed_input,
