@@ -40,7 +40,7 @@ class AttnRectangle:
         q_range: AttnRectRange | AttnRange,
         k_range: AttnRectRange | AttnRange,
         d_range: AttnRectRange | AttnRange | None = None,
-        mask_type: AttnMaskType = AttnMaskType.FULL,
+        mask_type: AttnMaskType | int = AttnMaskType.FULL,
     ) -> None:
         self._q_range = (
             q_range
@@ -59,17 +59,43 @@ class AttnRectangle:
             if isinstance(d_range, AttnRectRange)
             else AttnRectRange.from_parent(d_range)
         )
-        # If there is no user-defined mask_type, set it to FULL
-        # self._mask_type = mask_type
 
-        if mask_type == AttnMaskType.CAUSAL or mask_type == AttnMaskType.BICAUSAL:
+        # Get enum type mask_type for subsequent logic
+        if isinstance(mask_type, AttnMaskType):
+            enum_mask_type = mask_type
+        elif isinstance(mask_type, int):
+            # Integer to enum mapping
+            mask_type_map = {
+                0: AttnMaskType.FULL,
+                1: AttnMaskType.CAUSAL,
+                2: AttnMaskType.INVCAUSAL,
+                3: AttnMaskType.BICAUSAL,
+            }
+            if mask_type in mask_type_map:
+                enum_mask_type = mask_type_map[mask_type]
+            else:
+                raise ValueError(
+                    f"Invalid integer mask type: {mask_type}, valid range is 0-3"
+                )
+        else:
+            raise TypeError(
+                f"mask_type must be AttnMaskType or int type, but got {type(mask_type)}"
+            )
+
+        if (
+            enum_mask_type == AttnMaskType.CAUSAL
+            or enum_mask_type == AttnMaskType.BICAUSAL
+        ):
             # d_index end is limit by the lower right corner
             self._d_range.end = min(self._d_range.end, k_range.end - q_range.end)
         else:
             # d_index end is limit by the top right corner
             self._d_range.end = min(self._d_range.end, k_range.end - 1 - q_range.start)
 
-        if mask_type == AttnMaskType.INVCAUSAL or mask_type == AttnMaskType.BICAUSAL:
+        if (
+            enum_mask_type == AttnMaskType.INVCAUSAL
+            or enum_mask_type == AttnMaskType.BICAUSAL
+        ):
             # d_index start is limit by the top left corner
             self._d_range.start = max(
                 self._d_range.start, k_range.start - q_range.start
