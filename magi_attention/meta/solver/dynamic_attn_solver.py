@@ -22,6 +22,7 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta.algorithms import DynamicAttnAlgorithm
 from magi_attention.meta.collection.calc_meta import AttnArg, AttnCalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
+from magi_attention.meta.collection.dispatch_meta import DispatchMeta
 from magi_attention.utils import nvtx
 
 # from magi_attention.meta.collection.dispatch_meta import DispatchMeta
@@ -33,16 +34,16 @@ class DynamicAttnSolver:
     def __init__(
         self,
         algorithm: DynamicAttnAlgorithm,
-        # dispatch_meta_q: DispatchMeta,
-        # dispatch_meta_k: DispatchMeta,
-        total_seqlen_q: int,
-        total_seqlen_k: int,
-        host_ranges_q: list[AttnRanges],
-        host_ranges_k: list[AttnRanges],
-        num_heads_q: int,
-        num_heads_kv: int,
-        cp_rank: int,
-        cp_size: int,
+        dispatch_meta_q: DispatchMeta | None = None,
+        dispatch_meta_k: DispatchMeta | None = None,
+        total_seqlen_q: int | None = None,
+        total_seqlen_k: int | None = None,
+        host_ranges_q: list[AttnRanges] | None = None,
+        host_ranges_k: list[AttnRanges] | None = None,
+        num_heads_q: int = 1,
+        num_heads_kv: int = 1,
+        cp_rank: int | None = None,
+        cp_size: int | None = None,
         # cp_group: dist.ProcessGroup,
         cp_mesh: DeviceMesh | None = None,
         deterministic: bool = False,
@@ -55,24 +56,31 @@ class DynamicAttnSolver:
         # self.cp_group = cp_group
         self.cp_mesh = cp_mesh
 
-        # self.total_seqlen_q: int = dispatch_meta_q.total_seqlen
-        # self.total_seqlen_k: int = dispatch_meta_k.total_seqlen
-        # self.host_ranges_q: list[AttnRanges] = dispatch_meta_q.host_ranges_per_rank
-        # self.host_ranges_k: list[AttnRanges] = dispatch_meta_k.host_ranges_per_rank
         self.deterministic = deterministic
 
-        # for test
-        self.cp_rank = cp_rank
-        self.cp_size = cp_size
-
-        self.total_seqlen_q: int = total_seqlen_q
-        self.total_seqlen_k: int = total_seqlen_k
-        self.host_ranges_q: list[AttnRanges] = [
-            host_ranges.merge() for host_ranges in host_ranges_q
-        ]
-        self.host_ranges_k: list[AttnRanges] = [
-            host_ranges.merge() for host_ranges in host_ranges_k
-        ]
+        # Prefer values from dispatch meta if provided
+        if dispatch_meta_q is not None and dispatch_meta_k is not None:
+            self.cp_rank = dispatch_meta_q.cp_rank
+            self.cp_size = dispatch_meta_q.cp_size
+            self.total_seqlen_q = dispatch_meta_q.total_seqlen
+            self.total_seqlen_k = dispatch_meta_k.total_seqlen
+            self.host_ranges_q = [
+                hr.merge() for hr in dispatch_meta_q.host_ranges_per_rank
+            ]
+            self.host_ranges_k = [
+                hr.merge() for hr in dispatch_meta_k.host_ranges_per_rank
+            ]
+        else:
+            assert total_seqlen_q is not None and total_seqlen_k is not None
+            assert host_ranges_q is not None and host_ranges_k is not None
+            assert cp_rank is not None and cp_size is not None
+            # for test/manual path
+            self.cp_rank = cp_rank
+            self.cp_size = cp_size
+            self.total_seqlen_q = total_seqlen_q
+            self.total_seqlen_k = total_seqlen_k
+            self.host_ranges_q = [host_ranges.merge() for host_ranges in host_ranges_q]
+            self.host_ranges_k = [host_ranges.merge() for host_ranges in host_ranges_k]
 
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
@@ -309,7 +317,7 @@ class DynamicAttnSolver:
     def calc_host_and_remote_bucket_this_rank(self) -> None:
         bucket_this_rank: AttnRectangles = self.bucket_per_rank[self.cp_rank]
         host_ranges_q_this_rank: AttnRanges = self.host_ranges_q[self.cp_rank]
-        host_ranges_k_this_rank: AttnRanges = self.host_ranges_q[self.cp_rank]
+        host_ranges_k_this_rank: AttnRanges = self.host_ranges_k[self.cp_rank]
         # host_ranges is sorted and merged
         self.host_bucket_this_rank = AttnRectangles()
         self.remote_bucket_this_rank = AttnRectangles()
