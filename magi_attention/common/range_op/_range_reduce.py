@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Literal
 
 import torch
 import triton
@@ -21,11 +22,56 @@ from magi_attention.utils import nvtx
 
 from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
 
-__all__ = ["range_reduce"]
+__all__ = ["range_reduce", "range_reduce_ref"]
+
+
+def range_reduce_ref(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    input_ranges: torch.Tensor,
+    output_ranges: torch.Tensor,
+    dim: int = 0,
+    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """sum-reduce a2a output to output
+    as a post-processing func for group_reduce_collective
+    """
+
+    # Handle the case when dim is not 0
+    if dim != 0:
+        input = input.transpose(0, dim).contiguous()
+        output = output.transpose(0, dim).contiguous()
+    else:
+        input = input.contiguous()
+        output = output.contiguous()
+
+    match reduce_op:
+        case "sum":
+            for (out_start, out_end), (in_start, in_end) in zip(
+                output_ranges, input_ranges
+            ):
+                output[out_start:out_end] += input[in_start:in_end]
+        case "avg":
+            raise NotImplementedError
+        case "lse":
+            assert (
+                input_lse is not None and output_lse is not None
+            ), "input_lse and output_lse must be provided when reduce_op is 'lse'"
+            raise NotImplementedError
+        case _:
+            raise ValueError(f"Invalid reduce_op: {reduce_op}")
+
+    # If transposed earlier, transpose back
+    if dim != 0:
+        output = output.transpose(0, dim)
+
+    return output
 
 
 @triton.jit
-def range_reduce_kernel(
+def range_sum_reduce_nondeter_kernel(
     input_ptr,
     output_ptr,
     input_ranges_ptr,
@@ -70,7 +116,7 @@ def range_reduce_kernel(
 
 
 @triton.jit
-def range_reduce_deter_kernel(
+def range_sum_reduce_deter_kernel(
     input_ptr,
     output_ptr,
     input_ranges_ptr,
@@ -141,6 +187,9 @@ def range_reduce(
     output_ranges: torch.Tensor,
     dim: int = 0,
     deterministic: bool = False,
+    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> torch.Tensor:
     """
@@ -153,27 +202,47 @@ def range_reduce(
         output_ranges (torch.Tensor): Tensor of [start, end] ranges in the output
         dim (int, optional): Dimension along which to perform the reduction. Default is 0.
         deterministic(bool, optional): Whether to enable deterministic mode
+        reduce_op (Literal["sum", "avg", "weight", "lse"]): the reduce operation to use. Defaults to "sum"
+            - "sum": sum reduction
+            - "avg": average reduction
+            - "lse": log-sum-exp weighted average reduction, with lse correction
+
+            NOTE: if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse"
+        input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
+            with shape [input_seqlen, ...] broadcastable to the input tensor,
+            only required and used if reduce_op is "lse"
+        output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
+            with shape [output_seqlen, ...] broadcastable to the output tensor,
+            only required and used if reduce_op is "lse"
 
         kwargs:
             - cu_range_sizes (torch.Tensor) : Cumulative sizes of input ranges,
                 or cumulative sizes of output ranges in deterministic mode
             - total_size (int): Total number of rows of the input to process,
                 or total number of rows of the output to be reduced in deterministic mode
-
             - row_map (torch.Tensor): mapping from row indices to input range indices,
                 or mapping from row indices to output range indices in deterministic mode
             - out2inp_range_map (torch.Tensor): mapping from each output range index to the list of input range indices
                 that need to be reduced, e.g. [(2, -1), (1, 3)] means that:
-                    1. input_range[2] will reduce to output_range[0] (-1 is just the placeholder to be equal shape)
-                    2. input_ranges[1] and input_ranges[3] will reduce to output_range[1]
-                **NOTE**: this is only used in deterministic mode
+                1. input_range[2] will reduce to output_range[0] (-1 is just the placeholder to be equal shape)
+                2. input_ranges[1] and input_ranges[3] will reduce to output_range[1]
+                NOTE: this is only used in deterministic mode
 
     Returns:
-        The output tensor after reduction
+        The output tensor with output lse after reduction if reduce_op is"", otherwise the input tensor
     """
     assert (
         input_ranges.shape == output_ranges.shape
     ), f"{input_ranges=} and {output_ranges=} must have the same shape"
+
+    # for now, only sum-reduce has non-deterministic kernel
+    deterministic |= reduce_op != "sum"
+
+    is_lse_reduce = reduce_op == "lse"
+    if is_lse_reduce:
+        assert (
+            input_lse is not None and output_lse is not None
+        ), "lse reduction requires input_lse and output_lse"
 
     # Return directly if empty tensor
     if input_ranges.shape[0] == 0 or input.numel() == 0:
@@ -264,37 +333,44 @@ def range_reduce(
 
     # ---   launch kernel   --- #
 
-    # Launch kernel
-    if deterministic:
-        range_reduce_deter_kernel[grid](
-            input,
-            output_,
-            input_ranges,
-            unique_ordered_out_ranges,
-            cu_range_sizes,
-            row_map,
-            out2inp_range_map,
-            input_stride,
-            output_stride,
-            out2inp_range_map_stride,
-            N,
-            N_BLOCK,
-            ELEM_PER_BLOCK,
-        )
-    else:
-        range_reduce_kernel[grid](
-            input,
-            output_,
-            input_ranges,
-            output_ranges,
-            cu_range_sizes,
-            row_map,
-            input_stride,
-            output_stride,
-            N,
-            N_BLOCK,
-            ELEM_PER_BLOCK,
-        )
+    match reduce_op:
+        case "sum":
+            if deterministic:
+                range_sum_reduce_deter_kernel[grid](
+                    input,
+                    output_,
+                    input_ranges,
+                    unique_ordered_out_ranges,
+                    cu_range_sizes,
+                    row_map,
+                    out2inp_range_map,
+                    input_stride,
+                    output_stride,
+                    out2inp_range_map_stride,
+                    N,
+                    N_BLOCK,
+                    ELEM_PER_BLOCK,
+                )
+            else:
+                range_sum_reduce_nondeter_kernel[grid](
+                    input,
+                    output_,
+                    input_ranges,
+                    output_ranges,
+                    cu_range_sizes,
+                    row_map,
+                    input_stride,
+                    output_stride,
+                    N,
+                    N_BLOCK,
+                    ELEM_PER_BLOCK,
+                )
+        case "avg":
+            raise NotImplementedError
+        case "lse":
+            raise NotImplementedError
+        case _:
+            raise ValueError(f"reduce_op {reduce_op} is not supported for range-reduce")
 
     # ---   post-process output   --- #
 

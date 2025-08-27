@@ -17,37 +17,8 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.common.range_op import range_reduce
+from magi_attention.common.range_op._range_reduce import range_reduce, range_reduce_ref
 from magi_attention.testing import parameterize
-
-
-def range_reduce_ref(
-    input: torch.Tensor,
-    output: torch.Tensor,
-    input_ranges: torch.Tensor,
-    output_ranges: torch.Tensor,
-    dim: int = 0,
-) -> torch.Tensor:
-    """sum-reduce a2a output to output
-    as a post-processing func for group_reduce_collective
-    """
-
-    # Handle the case when dim is not 0
-    if dim != 0:
-        input = input.transpose(0, dim).contiguous()
-        output = output.transpose(0, dim).contiguous()
-    else:
-        input = input.contiguous()
-        output = output.contiguous()
-
-    for (out_start, out_end), (in_start, in_end) in zip(output_ranges, input_ranges):
-        output[out_start:out_end] += input[in_start:in_end]
-
-    # If transposed earlier, transpose back
-    if dim != 0:
-        output = output.transpose(0, dim)
-
-    return output
 
 
 class TestRangeReduce(TestCase):
@@ -59,8 +30,9 @@ class TestRangeReduce(TestCase):
     def device(self) -> int:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    @parameterize("reduce_op", ["sum"])
     @parameterize("deterministic", [False, True])
-    def test_range_reduce(self, deterministic):
+    def test_range_reduce(self, reduce_op, deterministic):
         """Test range_reduce function by comparing with reference implementation"""
 
         # --- Test case 1: Basic functionality --- #
@@ -84,6 +56,7 @@ class TestRangeReduce(TestCase):
             input_ranges,
             output_ranges,
             deterministic=deterministic,
+            reduce_op=reduce_op,
             test_case="Basic functionality",
         )
 
@@ -99,6 +72,7 @@ class TestRangeReduce(TestCase):
             empty_ranges,
             empty_ranges,
             deterministic=deterministic,
+            reduce_op=reduce_op,
             test_case="Empty tensor handling",
         )
 
@@ -120,6 +94,7 @@ class TestRangeReduce(TestCase):
             output_ranges,
             dim=1,
             deterministic=deterministic,
+            reduce_op=reduce_op,
             test_case="Different dimension (dim=1)",
         )
 
@@ -140,6 +115,7 @@ class TestRangeReduce(TestCase):
             large_input_ranges,
             large_output_ranges,
             deterministic=deterministic,
+            reduce_op=reduce_op,
             test_case="Large tensors",
         )
 
@@ -160,6 +136,7 @@ class TestRangeReduce(TestCase):
             single_input_range,
             single_output_range,
             deterministic=deterministic,
+            reduce_op=reduce_op,
             test_case="Edge case - single range",
         )
 
@@ -175,6 +152,7 @@ class TestRangeReduce(TestCase):
             output_ranges,
             dim=0,
             deterministic=deterministic,
+            reduce_op=reduce_op,
             test_case="Multi-dimensional tensors (dim=0)",
         )
 
@@ -186,6 +164,7 @@ class TestRangeReduce(TestCase):
             output_ranges,
             dim=2,
             deterministic=deterministic,
+            reduce_op=reduce_op,
             test_case="Multi-dimensional tensors (dim=2)",
         )
 
@@ -202,6 +181,7 @@ class TestRangeReduce(TestCase):
             output_ranges,
             dim=1,
             deterministic=deterministic,
+            reduce_op=reduce_op,
             test_case="Non-contiguous memory layout",
         )
 
@@ -217,6 +197,7 @@ class TestRangeReduce(TestCase):
                     input_ranges,
                     output_ranges,
                     deterministic=deterministic,
+                    reduce_op=reduce_op,
                     test_case=f"Various data types ({dtype=})",
                 )
 
@@ -228,6 +209,7 @@ class TestRangeReduce(TestCase):
         output_ranges,
         dim=0,
         deterministic=False,
+        reduce_op="sum",
         test_case: str = "",
     ):
         # Copy output tensors for comparison
@@ -242,6 +224,7 @@ class TestRangeReduce(TestCase):
             output_ranges=output_ranges,
             dim=dim,
             deterministic=deterministic,
+            reduce_op=reduce_op,
         )
 
         # Call the reference implementation
@@ -251,6 +234,7 @@ class TestRangeReduce(TestCase):
             input_ranges=input_ranges,
             output_ranges=output_ranges,
             dim=dim,
+            reduce_op=reduce_op,
         )
 
         # Verify results match
