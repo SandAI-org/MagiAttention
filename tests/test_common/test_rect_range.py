@@ -234,6 +234,94 @@ class TestAttnRectRange(TestCase):
         self.assertEqual(single_range.seqlen, 1)
         self.assertEqual(len(single_range), 1)
 
+    def test_from_range_interface(self):
+        """Test the from_range static method with various input types and parameters"""
+
+        # ---------    test from NaiveRange (tuple)     --------- #
+        naive_range_tuple = (3, 8)
+        rect_range_from_tuple = AttnRectRange.from_range(naive_range_tuple)
+        self.assertEqual(rect_range_from_tuple.start, 3)
+        self.assertEqual(rect_range_from_tuple.end, 8)
+        self.assertIsInstance(rect_range_from_tuple, AttnRectRange)
+
+        # ---------    test from NaiveRange (list)     --------- #
+        naive_range_list = [5, 12]
+        rect_range_from_list = AttnRectRange.from_range(naive_range_list)
+        self.assertEqual(rect_range_from_list.start, 5)
+        self.assertEqual(rect_range_from_list.end, 12)
+        self.assertIsInstance(rect_range_from_list, AttnRectRange)
+
+        # ---------    test from AttnRectRange instance     --------- #
+        original_rect_range = AttnRectRange(7, 15)
+        rect_range_from_instance = AttnRectRange.from_range(original_rect_range)
+        self.assertEqual(rect_range_from_instance.start, 7)
+        self.assertEqual(rect_range_from_instance.end, 15)
+        self.assertIsInstance(rect_range_from_instance, AttnRectRange)
+        # Verify it's a deep copy, not the same object
+        self.assertIsNot(rect_range_from_instance, original_rect_range)
+
+        # ---------    test from AttnRange instance     --------- #
+        attn_range = AttnRange(2, 9)
+        rect_range_from_attn = AttnRectRange.from_range(attn_range)
+        self.assertEqual(rect_range_from_attn.start, 2)
+        self.assertEqual(rect_range_from_attn.end, 9)
+        self.assertIsInstance(rect_range_from_attn, AttnRectRange)
+
+        # ---------    test with check=True for valid ranges     --------- #
+        valid_range = (4, 10)
+        rect_range_with_check = AttnRectRange.from_range(valid_range, check=True)
+        self.assertEqual(rect_range_with_check.start, 4)
+        self.assertEqual(rect_range_with_check.end, 10)
+
+        # ---------    test with check=True for invalid ranges     --------- #
+        invalid_range = (10, 4)  # start > end
+        with self.assertRaises(RangeError):
+            AttnRectRange.from_range(invalid_range, check=True)
+
+        # ---------    test edge cases with from_range     --------- #
+        # Empty range
+        empty_range = (5, 5)
+        rect_range_empty = AttnRectRange.from_range(empty_range)
+        self.assertTrue(rect_range_empty.is_empty())
+        self.assertEqual(rect_range_empty.start, 5)
+        self.assertEqual(rect_range_empty.end, 5)
+
+        # Single element range
+        single_range = (3, 4)
+        rect_range_single = AttnRectRange.from_range(single_range)
+        self.assertFalse(rect_range_single.is_empty())
+        self.assertEqual(rect_range_single.seqlen, 1)
+
+        # Zero range
+        zero_range = (0, 0)
+        rect_range_zero = AttnRectRange.from_range(zero_range)
+        self.assertTrue(rect_range_zero.is_empty())
+        self.assertEqual(rect_range_zero.seqlen, 0)
+
+        # ---------    test from_range preserves equality     --------- #
+        range1 = AttnRectRange(3, 7)
+        range2 = AttnRectRange.from_range(range1)
+        self.assertEqual(range1, range2)
+
+        # Should be equal after creating from naive range
+        naive_range = (3, 7)
+        range3 = AttnRectRange.from_range(naive_range)
+        self.assertEqual(range1, range3)
+
+        # ---------    test from_range with negative values     --------- #
+        negative_range = (-5, -2)
+        rect_range_negative = AttnRectRange.from_range(negative_range)
+        self.assertEqual(rect_range_negative.start, -5)
+        self.assertEqual(rect_range_negative.end, -2)
+        self.assertEqual(rect_range_negative.seqlen, 3)
+
+        # Negative range should pass validation with check=True (since -5 <= -2)
+        rect_range_negative_checked = AttnRectRange.from_range(
+            negative_range, check=True
+        )
+        self.assertEqual(rect_range_negative_checked.start, -5)
+        self.assertEqual(rect_range_negative_checked.end, -2)
+
 
 if __name__ == "__main__":
     unittest.main()

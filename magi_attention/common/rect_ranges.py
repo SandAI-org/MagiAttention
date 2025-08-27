@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import Any, Iterator, Union
 
 from .range import AttnRange
@@ -65,8 +66,8 @@ class AttnRectRanges:
         ],
         check: bool = False,
     ) -> "AttnRectRanges":
-        if isinstance(ranges, AttnRectRanges):  # just copy
-            attn_ranges = ranges
+        if isinstance(ranges, AttnRectRanges):
+            attn_ranges = copy.deepcopy(ranges)
         else:
             attn_ranges = AttnRectRanges()
             _ranges = [AttnRectRange.from_range(attn_range) for attn_range in ranges]

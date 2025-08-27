@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import Any, Union
 
 from .range import AttnRange, NaiveRange, RangeError
@@ -51,8 +52,8 @@ class AttnRectRange(AttnRange):
         attn_range: Union[NaiveRange, list[int], "AttnRectRange", AttnRange],
         check: bool = False,
     ) -> "AttnRectRange":
-        if isinstance(attn_range, AttnRectRange):  # just copy
-            res = attn_range
+        if isinstance(attn_range, AttnRectRange):
+            res = copy.deepcopy(attn_range)
         elif isinstance(attn_range, AttnRange):
             res = AttnRectRange(start=attn_range.start, end=attn_range.end)
         else:
