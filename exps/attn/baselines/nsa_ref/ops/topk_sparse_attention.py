@@ -109,14 +109,14 @@ def forward_kernel_orig(
                 axis=0,
             )
             """
-            real_topk = tl.sum(
-                tl.where((topk_idx >= 0), 1, 0),
-                axis=0,
-            )
             # real_topk = tl.sum(
-            #     tl.where((topk_idx >= 0) & (topk_idx <= pid_q_j // block_size), 1, 0),
+            #     tl.where((topk_idx >= 0), 1, 0),
             #     axis=0,
             # )
+            real_topk = tl.sum(
+                tl.where((topk_idx >= 0) & (topk_idx <= pid_q_j // block_size), 1, 0),
+                axis=0,
+            )
             # init qkv pointer
             q_ptrs = tl.make_block_ptr(
                 base=q_ptr + (q_start + pid_q_j) * stride_qn + pid_h * stride_qh,
