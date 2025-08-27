@@ -17,7 +17,34 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.common.range_op._range_fill import range_fill_, range_fill_ref
+from magi_attention.common.range_op import range_fill_
+
+
+def range_fill_ref(
+    out: torch.Tensor,
+    ranges: torch.Tensor,
+    val: float,
+    dim: int = 0,
+) -> torch.Tensor:
+    # Return directly if ranges or tensor is empty
+    if ranges.shape[0] == 0 or out.numel() == 0:
+        return out
+
+    # Handle the case when dim is not 0
+    if dim != 0:
+        out = out.transpose(0, dim).contiguous()
+    else:
+        out = out.contiguous()
+
+    # Iterate through each range and fill with the specified value
+    for start, end in ranges:
+        out[start:end].fill_(val)
+
+    # If transposed earlier, transpose back
+    if dim != 0:
+        out = out.transpose(0, dim)
+
+    return out
 
 
 class TestRangeFill(TestCase):

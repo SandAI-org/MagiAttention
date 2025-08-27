@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import defaultdict
 from typing import Literal
 
 import torch
@@ -23,60 +22,7 @@ from magi_attention.utils import nvtx
 
 from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
 
-__all__ = ["range_reduce", "range_reduce_ref"]
-
-
-def range_reduce_ref(
-    input: torch.Tensor,
-    output: torch.Tensor,
-    input_ranges: torch.Tensor,
-    output_ranges: torch.Tensor,
-    dim: int = 0,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
-    input_lse: torch.Tensor | None = None,
-    output_lse: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """sum-reduce a2a output to output
-    as a post-processing func for group_reduce_collective
-    """
-
-    # Handle the case when dim is not 0
-    if dim != 0:
-        input = input.transpose(0, dim).contiguous()
-        output = output.transpose(0, dim).contiguous()
-    else:
-        input = input.contiguous()
-        output = output.contiguous()
-
-    match reduce_op:
-        case "sum":
-            for (out_start, out_end), (in_start, in_end) in zip(
-                output_ranges, input_ranges
-            ):
-                output[out_start:out_end] += input[in_start:in_end]
-        case "avg":
-            out_range_cnt_map: dict[tuple[int, int], int] = defaultdict(int)
-            for (out_start, out_end), (in_start, in_end) in zip(
-                output_ranges.tolist(), input_ranges.tolist()
-            ):
-                output[out_start:out_end] += input[in_start:in_end]
-                out_range_cnt_map[(out_start, out_end)] += 1
-
-            for (out_start, out_end), cnt in out_range_cnt_map.items():
-                output[out_start:out_end] /= cnt
-        case "lse":
-            assert (
-                input_lse is not None and output_lse is not None
-            ), "input_lse and output_lse must be provided when reduce_op is 'lse'"
-            raise NotImplementedError
-        case _:
-            raise ValueError(f"Invalid reduce_op: {reduce_op}")
-
-    # If transposed earlier, transpose back
-    if dim != 0:
-        output = output.transpose(0, dim)
-
-    return output
+__all__ = ["range_reduce"]
 
 
 @triton.jit
@@ -270,7 +216,7 @@ def range_reduce(
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
     """
     Reduce values from input tensor to output tensor based on specified ranges.
 
@@ -292,10 +238,10 @@ def range_reduce(
                     otherwise the semantics will be incorrect unless the user intentionally does this
                 if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse"
         input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
-            with shape [input_seqlen, ...] broadcastable to the input tensor,
+            whose shape should be broadcastable to the input tensor,
             only required and used if reduce_op is "lse"
         output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
-            with shape [output_seqlen, ...] broadcastable to the output tensor,
+            whose shape should be broadcastable to the output tensor,
             only required and used if reduce_op is "lse"
 
         kwargs:
@@ -312,7 +258,9 @@ def range_reduce(
                 NOTE: this is only used in deterministic mode
 
     Returns:
-        The output tensor with output lse after reduction if reduce_op is"", otherwise the input tensor
+        tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+        The output tensor with the corrected lse after reduction if reduce_op is "lse",
+        otherwise only the output tensor after reduction
     """
     assert (
         input_ranges.shape == output_ranges.shape

@@ -16,141 +16,18 @@ from typing import Any, TypeAlias
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 
 import magi_attention
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.meta.collection import AttnCalcMeta, CommMeta
-from magi_attention.utils import (
-    is_same_process_group,
-    max_fp_dtype,
-    nvtx,
-    to_higher_fp_dtype,
-)
+from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
-from .utils import safe_subtract
+from .utils import correct_attn_fwd_result
 
 FusedOrTupleTensor: TypeAlias = torch.Tensor | tuple[torch.Tensor, ...]
-
-
-@nvtx.instrument_nvtx
-@torch.compile
-def correct_attn_lse(
-    lse1: torch.Tensor,
-    lse2: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Corrects the log sum exp tensor for online attention.
-
-    Args:
-        lse1(torch.Tensor): log sum exp tensor, with shape: [batch_size, num_heads, seq_len]
-        lse2(torch.Tensor): log sum exp tensor, with shape: [batch_size, num_heads, seq_len]
-
-    Returns:
-        lse(torch.Tensor): corrected log sum exp tensor, with shape: [batch_size, num_heads, seq_len]
-    """
-
-    min_lse = to_higher_fp_dtype(torch.min(lse1, lse2), torch.float32)
-    max_lse = to_higher_fp_dtype(torch.max(lse1, lse2), torch.float32)
-
-    # formula derivation:
-    # lse = log(exp(lse1) + exp(lse2))
-    #     = lse1 + log(1 + exp(lse2 - lse1))
-    #     = max_lse + log(1 + exp(min_lse - max_lse))
-    #     = max_lse + log1p(exp(min_lse - max_lse))
-    #     = max_lse + softplus(min_lse - max_lse)
-    lse = max_lse + F.softplus(safe_subtract(min_lse, max_lse))
-
-    return lse.to(lse1.dtype)
-
-
-@nvtx.instrument_nvtx
-@torch.compile
-def correct_attn_output(
-    o1: torch.Tensor,
-    lse1: torch.Tensor,
-    o2: torch.Tensor,
-    lse2: torch.Tensor,
-    lse: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Corrects the output tensor for online attention.
-
-    Args:
-        o1(torch.Tensor): local output tensor o1, with shape: [batch_size, seq_len, num_heads, head_dim]
-        lse1(torch.Tensor): local lse for o1, with shape: [batch_size, num_heads, seq_len]
-        o2(torch.Tensor): local output tensor o2, with shape: [batch_size, seq_len, num_heads, head_dim]
-        lse2(torch.Tensor): local lse for o2, with shape: [batch_size, num_heads, seq_len]
-        lse(torch.Tensor): global lse, with shape: [batch_size, num_heads, seq_len]
-
-    Returns:
-        o(torch.Tensor): corrected global output tensor, with shape: [batch_size, seq_len, num_heads, head_dim]
-    """
-    # formula: lsei_ = exp(lsei - lse)
-    # shape: [b, h, s] -> [b, s, h] -> [b, s, h, 1]
-    lse1_, lse2_ = [
-        to_higher_fp_dtype(
-            safe_subtract(lsei, lse).exp().transpose(-1, -2).unsqueeze(-1),
-            torch.float32,
-        )
-        for lsei in [lse1, lse2]
-    ]
-
-    o = lse1_ * o1 + lse2_ * o2
-
-    return o.to(o1.dtype)
-
-
-@nvtx.instrument_nvtx
-def result_correction(
-    out_list: list[torch.Tensor],
-    lse_list: list[torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Corrects the attention result.
-
-    Args:
-        out_list(list[torch.Tensor]):
-        lse_list(list[torch.Tensor]):
-
-    Returns:
-        out(torch.Tensor):
-        lse(torch.Tensor):
-
-    Shape:
-        - out: [num_tokens_q, num_heads, head_dim]
-        - lse: [num_heads, num_tokens_q]
-    """
-    if len(lse_list) == 1:
-        # NOTE: if there is only one out and lse,
-        # we just return them directly, no need to correct
-        return out_list[0], lse_list[0]
-
-    curr_lse = None
-    curr_out = None
-
-    for i in range(len(lse_list) - 1):
-        if i == 0:
-            curr_lse = correct_attn_lse(lse_list[0], lse_list[1])
-            curr_out = correct_attn_output(
-                out_list[0], lse_list[0], out_list[1], lse_list[1], curr_lse
-            )
-        else:
-            original_lse = curr_lse
-            original_out = curr_out
-            curr_lse = correct_attn_lse(original_lse, lse_list[i + 1])
-            curr_out = correct_attn_output(
-                original_out,
-                original_lse,
-                out_list[i + 1],
-                lse_list[i + 1],
-                curr_lse,
-            )
-
-    return curr_out, curr_lse
 
 
 class DistAttnRuntime:
@@ -956,7 +833,7 @@ class DistAttnFunc(torch.autograd.Function):
             local_out = partial_local_out
             local_lse = partial_local_lse
         else:  # the final local out, lse need to be reduced manually from all partial out, lse
-            local_out, local_lse = result_correction(
+            local_out, local_lse = correct_attn_fwd_result(
                 out_list=partial_out_list,
                 lse_list=partial_lse_list,
             )
