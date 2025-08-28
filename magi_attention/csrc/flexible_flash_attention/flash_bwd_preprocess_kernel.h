@@ -78,7 +78,7 @@ class FlashAttnBwdPreprocess {
   using ShapedPsum = cute::Shape<int32_t, int32_t, int32_t>; // (max_seqlen_q, head, batch)
   using StridedPsum = cute::Stride<_1, int64_t, int64_t>;
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (total_q, head)
-  using StrideLSE = cute::Stride<_1, int64_t>;
+  using StrideLSE = cute::Stride<int64_t, _1>;
 
   // Device side arguments
   struct Arguments {

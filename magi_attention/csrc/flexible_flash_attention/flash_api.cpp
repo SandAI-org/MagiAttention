@@ -557,13 +557,13 @@ std::vector<at::Tensor> mha_fwd(
     softmax_lse = softmax_lse_.value();
     TORCH_CHECK(softmax_lse.scalar_type() == at::kFloat, "softmax_lse must have dtype float32");
     CHECK_DEVICE(softmax_lse);
-    CHECK_SHAPE(softmax_lse, num_heads_qo, total_q);
+    CHECK_SHAPE(softmax_lse, total_q, num_heads_qo);
     CHECK_CONTIGUOUS(softmax_lse);
   } else {
     // Create softmax_lse tensor, need to satisfy two conditions
     // 1. initialize with -infinity
     // 2. use float32 to ensure numerical stability
-    softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
+    softmax_lse = torch::full({total_q, num_heads_qo}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
   }
 
   // Determine the output type
@@ -787,7 +787,7 @@ std::vector<at::Tensor> mha_bwd(
   // check softmax_lse (dtype, device, layout)
   TORCH_CHECK(softmax_lse.dtype() == at::kFloat, "softmax_lse must have dtype torch.float32");
   CHECK_DEVICE(softmax_lse);
-  CHECK_SHAPE(softmax_lse, num_heads_qo, total_q);
+  CHECK_SHAPE(softmax_lse, total_q, num_heads_qo);
   TORCH_CHECK(softmax_lse.stride(-1) == 1, "softmax_lse tensor must have contiguous last dimension");
 
   // check q_ranges, k_ranges (dtype, device, layout)

@@ -110,7 +110,7 @@ struct CollectiveEpilogueFwd {
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>;
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (seqlen_q, nheads_kv)
-  using StrideLSE = cute::Stride<_1, int64_t>; // (seqlen_q, head)
+  using StrideLSE = cute::Stride<int64_t, _1>; // (seqlen_q, head)
   using CopyOpR2S = std::conditional_t<
       ArchTag::kMinComputeCapability >= 90,
       // cute::SM90_U32x4_STSM_N if Element size is 2 bytes (fp16, bf16)
@@ -352,7 +352,8 @@ struct CollectiveEpilogueFwd {
     // Tensor sO_pi = cute::as_position_independent_swizzle_tensor(sO);
 
     // Define Tensor for mLSE
-    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE + offset_o * get<0>(params.stride_LSE)), params.shape_LSE, params.stride_LSE)(_, bidh);
+    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
+    Tensor gLSE = local_tile(cute::domain_offset(make_coord(offset_o), mLSE), select<0>(TileShape_MNK_PV{}), make_coord(m_block));
 
     // Make sure all WGs have finished reading V
     // Technically we don't need this if we're not using smem, but the mainloop makes the assumption that
@@ -404,7 +405,7 @@ struct CollectiveEpilogueFwd {
         }
 
         if (row + offset_o < get<0>(params.shape_O)) {
-          lse_prev(mi) = mLSE(row);
+          lse_prev(mi) = gLSE(row);
 
           if (lse_prev(mi) != -INFINITY) {
             // If there is any non-inf lse_prev, we cannot skip correction
@@ -430,7 +431,7 @@ struct CollectiveEpilogueFwd {
       int const row = m_block * kBlockM + get<0>(taccOcO_row(mi));
       if (row < seqlen_o) {
         if (get<1>(taccOcO_row(_0{})) == 0) {
-          mLSE(row) = lse_final(mi);
+          gLSE(row) = lse_final(mi);
         }
       }
     }
