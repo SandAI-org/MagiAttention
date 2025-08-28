@@ -40,7 +40,7 @@ void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
        {params.total_q, params.d, params.h_qo},
        {params.o_row_stride, _1{}, params.o_head_stride},
        static_cast<float*>(params.softmax_lse_ptr),
-       {_1{}, params.total_q}});
+       {params.h_qo, _1{}}});
 
   dim3 grid_dims = ZeroFillKernel::get_grid_shape(kernel_params);
   dim3 block_dims = ZeroFillKernel::get_block_shape();

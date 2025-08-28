@@ -47,7 +47,7 @@ class FastZeroFillKernel {
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
   // (seqlen_q, num_heads_qo)
   using ShapeLSE = cute::Shape<int32_t, int32_t>;
-  using StrideLSE = cute::Stride<_1, int64_t>;
+  using StrideLSE = cute::Stride<int64_t, _1>;
 
   // These are for storing the output tensor without TMA (e.g., for setting output to zero)
   static constexpr int kGmemElemsPerStore = sizeof(cute::uint128_t) / sizeof(T_out);
@@ -128,6 +128,7 @@ class FastZeroFillKernel {
 
     // Initialize global tensors
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
+    Tensor gLSE = local_tile(mLSE, cute::select<0>(TileShapeMK{}), make_coord(block)); // (M, )
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
     Tensor gO = local_tile(mO, TileShapeMK{}, make_coord(block, _0{})); // (M, K)
 
@@ -155,9 +156,9 @@ class FastZeroFillKernel {
 #pragma unroll
     for (int32_t i = 0; i < size(tLSErLSE); ++i) {
       // Load LSE into tLSErLSE and set tOpOm to true if the LSE is -INFINITY
-      int32_t row = get<0>(tOcO((_0{}, _0{}), i, _0{})) + offset_o;
-      if (row < seqlen_o) {
-        tLSErLSE(i) = mLSE(row);
+      int32_t row = get<0>(tOcO((_0{}, _0{}), i, _0{}));
+      if (row < seqlen_o - offset_o) {
+        tLSErLSE(i) = gLSE(row);
         tOpOm(i) = tLSErLSE(i) == -INFINITY;
       } else {
         tLSErLSE(i) = -INFINITY;
