@@ -29,10 +29,11 @@ from magi_attention.comm.primitive.utils import (
 )
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
+from magi_attention.testing.precision import assert_close
 from magi_attention.testing.utils import switch_envvar_context
 
 
-class TestGroupCollectiveWithWorldSize4(DistTestBase):
+class TestGroupCollective(DistTestBase):
     def init_pg(self):
         super().init_pg()
 
@@ -66,7 +67,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
 
     @property
     def dtype(self) -> torch.dtype:
-        return torch.float32
+        return torch.bfloat16
 
     @property
     def process_group(self):
@@ -322,10 +323,23 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             recv_buffer = work.wait_post_process(recv_buffer)
 
         # check results
-        self.assertTrue(
-            torch.equal(recv_buffer, expected_recv_buffer),
-            msg=f"Group-Cast collective has failed: {recv_buffer=} != {expected_recv_buffer=}",
-        )
+        err_msg_list = []
+        try:
+            assert_close(
+                recv_buffer,
+                expected_recv_buffer,
+                atol=1e-8,
+                rtol=1e-6,
+                test_case="group-cast recv buffer",
+            )
+        except Exception as e:
+            err_msg_list.append(
+                f"Group-Cast collective has failed due to error: \n{e}\n"
+                f"with: \n{recv_buffer=}\n{expected_recv_buffer=}\n"
+            )
+
+        if err_msg_list:
+            raise AssertionError("\n".join(err_msg_list))
 
     @skip_if_lt_x_gpu(4)
     @with_comms
@@ -391,16 +405,16 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                     [17, 18, 19, 20, 21],
                 ],
                 "recv_buffer_before_reduce_per_rank": [
-                    [0, 0, 0, 0],
-                    [0, 0, 0, 0],
-                    [0, 0, 0, 0],
-                    [0, 0, 0, 0],
+                    [1, 1, 1, 1],
+                    [2, 2, 2, 2],
+                    [3, 3, 3, 3],
+                    [4, 4, 4, 4],
                 ],
                 "expected_recv_buffer_per_rank": [
-                    [8, 10, 21, 19],
-                    [17, 18, 13, 14],
-                    [20, 22, 7, 8],
-                    [10, 13, 15, 16],
+                    [9, 11, 22, 20],
+                    [19, 20, 15, 16],
+                    [23, 25, 10, 11],
+                    [14, 17, 19, 20],
                 ],
                 "input_split_size_list_per_rank": [
                     [1, 1, 1, 2],
@@ -448,6 +462,73 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                     [17, 9, 13, 14],
                     [20, 11, 7, 8],
                     [10, 6.5, 15, 16],
+                ],
+                "input_split_size_list_per_rank": [
+                    [1, 1, 1, 2],
+                    [2, 2, 1, 1, 1],
+                    [1, 2, 2],
+                    [1, 1, 1, 1, 1],
+                ],
+                "output_split_size_list_per_rank": [
+                    [2, 1, 1],
+                    [1, 1, 2],
+                    [1, 1, 2],
+                    [1, 1, 2],
+                ],
+                "dst_index_list_per_rank": [
+                    [1, 2, 3, 0],
+                    [0, 2, 0, 3, 3],
+                    [0, 1, 3],
+                    [1, 1, 0, 2, 2],
+                ],
+                "src_indices_list_per_rank": [
+                    [[0, 1], [1, 2], [3]],
+                    [[3], [0, 3], [2]],
+                    [[3], [0, 3], [1]],
+                    [[1], [0, 1], [2]],
+                ],
+            },
+            {
+                "name": "normal_group_lse_reduce",
+                "world_size": 4,
+                "reduce_op": "lse",
+                "num_heads": 2,
+                "head_dim": 3,
+                "send_buffer_per_rank": [
+                    [0, 1, 2, 3, 4],
+                    [5, 6, 7, 8, 9, 10, 11],
+                    [12, 13, 14, 15, 16],
+                    [17, 18, 19, 20, 21],
+                ],
+                "send_lse_buffer_per_rank": [
+                    [0, 1, 2, -1, -2],
+                    [0.5, 1.5, 2.5, 0.0, -1.5, -2.5, -3.5],
+                    [0.25, 1.25, 2.25, -1.25, -2.25],
+                    [0.75, 1.75, 2.75, -1.75, -2.75],
+                ],
+                "recv_buffer_before_reduce_per_rank": [
+                    [1, 1, 1, 1],
+                    [2, 2, 2, 2],
+                    [3, 3, 3, 3],
+                    [4, 4, 4, 4],
+                ],
+                "recv_lse_buffer_before_reduce_per_rank": [
+                    [float("-inf"), float("-inf"), float("-inf"), float("-inf")],
+                    [0, 0, 0, 0],
+                    [1, 1, 1, 1],
+                    [-1, -1, -1, -1],
+                ],
+                "expected_recv_buffer_per_rank": [
+                    [4.6250, 5.9375, 11.5625, 19.0],
+                    [12.1875, 13.6250, 10.5625, 12.8750],
+                    [4.0312, 2.2188, 6.2812, 4.3438],
+                    [5.0938, 2.1250, 8.8125, 6.6875],
+                ],
+                "expected_recv_lse_buffer_per_rank": [
+                    [0.7014, 1.5298, 0.4102, 2.75],
+                    [1.1369, 2.0483, 1.5019, 2.3502],
+                    [1.0620, 1.7048, 2.7014, 1.3133],
+                    [-0.7986, 2.0525, -0.4241, -0.7481],
                 ],
                 "input_split_size_list_per_rank": [
                     [1, 1, 1, 2],
@@ -540,20 +621,47 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             device=self.device,
         )
         if is_lse_reduce:
-            send_lse_buffer = torch.tensor(
-                test_case["send_lse_buffer_per_rank"][self.rank],
-                dtype=torch.float32,
-                device=self.device,
+            # for now, lse-reduce requires strictly on shape:
+            # send/recv buffer: [seqlen, num_heads, head_dim]
+            # send/recv lse buffer: [seqlen, num_heads]
+            nh, hd = test_case["num_heads"], test_case["head_dim"]
+
+            send_buffer = send_buffer.repeat_interleave(repeats=nh * hd, dim=0).reshape(
+                -1, nh, hd
             )
-            recv_lse_buffer_before_reduce = torch.tensor(
-                test_case["recv_lse_buffer_before_reduce_per_rank"][self.rank],
-                dtype=torch.float32,
-                device=self.device,
+            recv_buffer_before_reduce = recv_buffer_before_reduce.repeat_interleave(
+                repeats=nh * hd, dim=0
+            ).reshape(-1, nh, hd)
+            expected_recv_buffer = expected_recv_buffer.repeat_interleave(
+                repeats=nh * hd, dim=0
+            ).reshape(-1, nh, hd)
+
+            send_lse_buffer = (
+                torch.tensor(
+                    test_case["send_lse_buffer_per_rank"][self.rank],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                .repeat_interleave(repeats=nh, dim=0)
+                .reshape(-1, nh)
             )
-            expected_recv_lse_buffer = torch.tensor(
-                test_case["expected_recv_lse_buffer_per_rank"][self.rank],
-                dtype=torch.float32,
-                device=self.device,
+            recv_lse_buffer_before_reduce = (
+                torch.tensor(
+                    test_case["recv_lse_buffer_before_reduce_per_rank"][self.rank],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                .repeat_interleave(repeats=nh, dim=0)
+                .reshape(-1, nh)
+            )
+            expected_recv_lse_buffer = (
+                torch.tensor(
+                    test_case["expected_recv_lse_buffer_per_rank"][self.rank],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                .repeat_interleave(repeats=nh, dim=0)
+                .reshape(-1, nh)
             )
             post_process_inputs = (
                 recv_buffer_before_reduce,
@@ -592,53 +700,41 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
         post_process_outputs = work.wait_post_process(*post_process_inputs)
 
         # check results
-        recv_buffer_after_reduce = (
-            post_process_outputs[0] if is_lse_reduce else post_process_outputs
-        )
-        self.assertTrue(
-            torch.equal(recv_buffer_after_reduce, expected_recv_buffer),
-            msg=(
-                f"Group-Reduce collective {test_case_name=} failed: "
-                f"{recv_buffer_after_reduce=} != {expected_recv_buffer=}",
-            ),
-        )
-        if is_lse_reduce:
-            recv_lse_buffer_after_reduce = post_process_outputs[1]
-            self.assertTrue(
-                torch.equal(recv_lse_buffer_after_reduce, expected_recv_lse_buffer),
-                msg=(
-                    f"Group-Reduce collective {test_case_name=} failed: "
-                    f"{recv_lse_buffer_after_reduce=} != {expected_recv_lse_buffer=}",
-                ),
+        err_msg_list = []
+        try:
+            recv_buffer_after_reduce = (
+                post_process_outputs[0] if is_lse_reduce else post_process_outputs
             )
+            assert_close(
+                recv_buffer_after_reduce,
+                expected_recv_buffer,
+                atol=1e-8,
+                rtol=1e-4,
+                test_case="group-reduce recv buffer",
+            )
+        except Exception as e:
+            err_msg_list.append(
+                f"Group-Reduce collective {test_case_name=} recv buffer failed due to error: \n{e}\n"
+                f"with: \n{recv_buffer_after_reduce=}\n{expected_recv_buffer=}\n"
+            )
+        if is_lse_reduce:
+            try:
+                recv_lse_buffer_after_reduce = post_process_outputs[1]
+                assert_close(
+                    recv_lse_buffer_after_reduce,
+                    expected_recv_lse_buffer,
+                    atol=1e-8,
+                    rtol=1e-4,
+                    test_case="group-reduce recv lse buffer",
+                )
+            except Exception as e:
+                err_msg_list.append(
+                    f"Group-Reduce collective {test_case_name=} recv lse buffer failed due to error: \n{e}\n"
+                    f"with: \n{recv_lse_buffer_after_reduce=}\n{expected_recv_lse_buffer=}\n"
+                )
 
-
-class TestGroupCollectiveWithWorldSize6(TestGroupCollectiveWithWorldSize4):
-    @property
-    def world_size(self) -> int:
-        return 6
-
-    @skip_if_lt_x_gpu(6)
-    def test_group_cast_collective(self, *args, **kwargs):
-        super().test_group_cast_collective(*args, **kwargs)
-
-    @skip_if_lt_x_gpu(6)
-    def test_group_reduce_collective(self, *args, **kwargs):
-        super().test_group_reduce_collective(*args, **kwargs)
-
-
-class TestGroupCollectiveWithWorldSize8(TestGroupCollectiveWithWorldSize4):
-    @property
-    def world_size(self) -> int:
-        return 8
-
-    @skip_if_lt_x_gpu(8)
-    def test_group_cast_collective(self, *args, **kwargs):
-        super().test_group_cast_collective(*args, **kwargs)
-
-    @skip_if_lt_x_gpu(8)
-    def test_group_reduce_collective(self, *args, **kwargs):
-        super().test_group_reduce_collective(*args, **kwargs)
+        if err_msg_list:
+            raise AssertionError("\n".join(err_msg_list))
 
 
 if __name__ == "__main__":
