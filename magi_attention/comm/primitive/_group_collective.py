@@ -26,7 +26,7 @@ from ._group_collective_hier import (
     hier_group_cast_impl_with_a2av,
     hier_group_reduce_impl_with_a2av,
 )
-from .utils import _calc_group_cast_a2a_args, _calc_group_reduce_a2a_args
+from .utils import calc_group_cast_a2a_args, calc_group_reduce_a2a_args
 
 __all__ = [
     "group_cast_collective",
@@ -117,7 +117,7 @@ def group_cast_collective(
         a2a_output_split_size,
         a2a_input_split_size,
         post_process_fn,
-    ) = _calc_group_cast_a2a_args(
+    ) = calc_group_cast_a2a_args(
         input=input,
         output=output,
         input_split_size_list=input_split_size_list,
@@ -251,7 +251,7 @@ def group_reduce_collective(
         a2a_output_split_size,
         a2a_input_split_size,
         post_process_fn,
-    ) = _calc_group_reduce_a2a_args(
+    ) = calc_group_reduce_a2a_args(
         input=input,
         output=output,
         input_split_size_list=input_split_size_list,

@@ -438,6 +438,8 @@ def range_reduce(
         else:
             out2inp_range_map = out2inp_range_map.contiguous()
             out2inp_range_map_stride = out2inp_range_map.shape[1]
+        # sanity check
+        assert out2inp_range_map.size(0) == unique_ordered_out_ranges.size(0)
 
     # Calculate cu_range_sizes and total_size if not provided
     cu_range_sizes = kwargs.pop("cu_range_sizes", None)
@@ -449,6 +451,11 @@ def range_reduce(
         )
     else:
         cu_range_sizes = cu_range_sizes.contiguous()
+    # sanity check
+    if deterministic:
+        assert cu_range_sizes.size(0) == unique_ordered_out_ranges.size(0) + 1
+    else:
+        assert cu_range_sizes.size(0) == input_ranges.size(0) + 1
 
     # Calculate row_map if not provided
     row_map = kwargs.pop("row_map", None)
@@ -459,6 +466,8 @@ def range_reduce(
         )
     else:
         row_map = row_map.contiguous()
+    # sanity check
+    assert row_map.size(0) == total_size
 
     # ---   pre-process input/output   --- #
 

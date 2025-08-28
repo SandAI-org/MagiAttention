@@ -107,6 +107,8 @@ def range_gather(
         )
     else:
         cu_range_sizes = cu_range_sizes.contiguous()
+    # sanity check
+    assert cu_range_sizes.size(0) == ranges.size(0) + 1
 
     # Calculate row_map if not provided
     row_map = kwargs.pop("row_map", None)
@@ -114,6 +116,8 @@ def range_gather(
         row_map = _calc_ranges_row_map(ranges, total_size)
     else:
         row_map = row_map.contiguous()
+    # sanity check
+    assert row_map.size(0) == total_size
 
     # ---   pre-process input/output   --- #
 
