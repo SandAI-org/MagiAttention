@@ -109,7 +109,7 @@ def get_ffa_jit_mod(
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
     gen_directory.mkdir(parents=True, exist_ok=True)
 
-    # 读取并渲染 jinja 模板
+    # Read and render the Jinja template
     template_path = (
         Path(__file__).resolve().parents[1]
         / "csrc"
@@ -118,8 +118,8 @@ def get_ffa_jit_mod(
     )
     template = jinja2.Template(template_path.read_text(encoding="utf-8"))
 
-    # 直接使用函数参数作为真值来源
-    # 归一化 arch 到整数 SM（允许传入 "90", "90a" 等）。
+    # Use function arguments as the single source of truth
+    # Normalize arch into integer SM (supports inputs like "90", "90a")
     try:
         arch_sm = int(arch)
     except Exception:
@@ -146,7 +146,7 @@ def get_ffa_jit_mod(
     inst_cu = gen_directory / "fwd_inst.cu"
     inst_cu.write_text(rendered, encoding="utf-8")
 
-    # 构建最小依赖集合
+    # Minimal source set to build
     base_dir = Path(__file__).resolve().parents[1]
     csrc_dir = base_dir / "csrc" / "flexible_flash_attention"
     sources = [
@@ -155,7 +155,7 @@ def get_ffa_jit_mod(
         csrc_dir / "fast_zero_fill.cu",
     ]
 
-    # 仅保留本 head_dim，裁剪编译时间
+    # Disable other head dimensions to reduce compile time
     disable_dims = {64, 128, 192, 256} - {head_dim}
     extra_cflags = []
     for d in sorted(disable_dims):

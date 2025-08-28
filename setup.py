@@ -49,19 +49,19 @@ from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 with open("./README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
-# ninja build does not work unless include_dirs are abs path
+# Note: ninja build requires include_dirs to be absolute paths
 this_dir = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_NAME = "magi_attention"
 NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
 exe_extension = sysconfig.get_config_var("EXE")
 
-# For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
+# For CI: allow forcing C++11 ABI to match NVCR images that use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 
-# Skip CUDA ext modules build
+# Skip building CUDA extension modules
 SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
 
-# 已不再构建 flexible_flash_attention_cuda 主模块
+# We no longer build the main flexible_flash_attention_cuda module
 SKIP_MAGI_ATTN_EXT_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
 )
@@ -84,22 +84,19 @@ class MagiAttnBuildExtension(BuildExtension):
     def initialize_options(self):
         super().initialize_options()
 
-        # Core logic: Check if we are currently building a Wheel package
-        # 'bdist_wheel' is the key identifier triggered by the `python -m build` command
+        # Core logic: check if wheel build is running. 'bdist_wheel' is triggered by `python -m build`.
         if "bdist_wheel" not in sys.argv:
-            # If not building a Wheel, it means we are in development mode (e.g., `pip install -e .`)
-            # In this case, we enable local caching
+            # If not building a wheel (i.e., dev install like `pip install -e .`), enable local caching
             print("Development mode detected: Caching build artifacts in build/")
             project_root = os.path.dirname(os.path.abspath(__file__))
             self.build_temp = os.path.join(project_root, "build", "temp")
             self.build_lib = os.path.join(project_root, "build", "lib")
 
-            # Ensure the directories exist
+            # Ensure directories exist
             os.makedirs(self.build_temp, exist_ok=True)
             os.makedirs(self.build_lib, exist_ok=True)
         else:
-            # If building a Wheel, we make no modifications and fully rely on the default PyTorch behavior
-            # This ensures that the .so files are correctly generated and packaged
+            # If building a wheel, rely on the default PyTorch behavior so .so files are correctly packaged
             print(
                 "Wheel build mode detected: Using default temporary directories in /tmp/ for robust packaging."
             )
@@ -128,8 +125,7 @@ def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
 def check_if_cuda_home_none(global_option: str) -> None:
     if CUDA_HOME is not None:
         return
-    # warn instead of error because user could be downloading prebuilt wheels, so nvcc won't be necessary
-    # in that case.
+    # Warn instead of error: users may be downloading prebuilt wheels; nvcc not required in that case.
     warnings.warn(
         f"{global_option} was requested, but nvcc was not found.  Are you sure your environment has nvcc available?  "
         "If you're installing within a container from https://hub.docker.com/r/pytorch/pytorch, "
@@ -237,8 +233,7 @@ def init_ext_modules() -> None:
             os.path.join(base_dir, os.pardir, "third_party", "nvidia", "backend", "bin")
         )
         nvcc_path_new = os.path.join(ctk_path_new, f"nvcc{exe_extension}")
-        # Need to append to path otherwise nvcc can't find cicc in nvvm/bin/cicc
-        # nvcc 12.8 seems to hard-code looking for cicc in ../nvvm/bin/cicc
+        # Append to PATH so nvcc can find cicc in nvvm/bin/cicc (12.8 seems hard-coded to ../nvvm/bin/cicc)
         os.environ["PATH"] = ctk_path_new + os.pathsep + os.environ["PATH"]
         os.environ["PYTORCH_NVCC"] = nvcc_path_new
         # Make nvcc executable, sometimes after the copy it loses its permissions

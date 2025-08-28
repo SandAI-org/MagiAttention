@@ -33,7 +33,7 @@ class FlashInferJITLogger(logging.Logger):
             with open(log_path, "w") as f:  # noqa: F841
                 pass
         self.addHandler(logging.FileHandler(log_path))
-        # set the format of the log
+        # Configure log format
         self.handlers[0].setFormatter(
             logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         )
@@ -49,7 +49,7 @@ logger = FlashInferJITLogger("magi.jit")
 
 
 def check_cuda_arch():
-    # cuda arch check for fp8 at the moment.
+    # CUDA arch check (currently for FP8 readiness)
     for cuda_arch_flags in torch_cpp_ext._get_cuda_arch_flags():
         arch = int(re.search(r"compute_(\d+)", cuda_arch_flags).group(1))
         if arch < 75:
@@ -120,7 +120,7 @@ class JitSpec:
         return hashlib.sha256(json.dumps(sig, sort_keys=True).encode("utf-8")).hexdigest()
 
     def _update_signature(self) -> None:
-        # 计算签名并记录是否变化，用于决定是否需要重编译
+        # Compute signature and track changes to decide if rebuild is necessary
         self.ninja_path.parent.mkdir(parents=True, exist_ok=True)
         new_hash = self._compute_signature()
         version = 0
@@ -177,7 +177,7 @@ class JitSpec:
         elif self.aot_path.exists() and _artifact_exists(self.aot_path, mod_name):
             lib_dir = self.aot_path
         else:
-            # 写入 ninja 并根据签名决定是否需要重编译
+            # Write ninja and decide whether to rebuild based on signature
             self.write_ninja()
             lib_dir = self.jit_library_path
             sig_changed = getattr(self, "__sig_changed", True)

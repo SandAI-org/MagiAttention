@@ -1,5 +1,5 @@
-// 自动生成的最小反向实例模块（JIT）。
-// 依据 URI 绑定的参数进行单实例编译：架构、计算 dtype、DKV 输出 dtype、HeadDim、softcap 与 dkv-atomic 选项。
+// Auto-generated minimal backward instantiation module (JIT).
+// Single-variant compilation bound to URI parameters: arch, compute dtype, DKV output dtype, head dim, softcap, and dkv-atomic options.
 
 #include <torch/python.h>
 
@@ -7,7 +7,7 @@
 #include "flash_bwd_launch_template.h"
 #include "flex_flash_bwd.hpp"
 
-// 由 Jinja 实参提供的编译时常量
+// Compile-time constants provided by Jinja arguments
 static constexpr int kArch = {{ arch_sm }};
 using TCompute = {{ compute_t }};
 using TDkv     = {{ out_t }};
@@ -15,7 +15,7 @@ static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableDkvAtomic = {{ disable_atomic }};
 
-// 运行时输入检查，确保与本实例的编译时约束一致
+// Runtime contract checks to ensure consistency with compile-time constraints
 static inline void _check_runtime_contract_bwd(
     const at::Tensor& q,
     std::optional<at::ScalarType> dk_type_opt,
@@ -46,7 +46,7 @@ static inline void _check_runtime_contract_bwd(
   check_dkv(dv_type_opt, "dv_type");
 }
 
-// 反向实现：与绑定保持一致签名
+// Backward implementation: matches the binding signature
 std::vector<at::Tensor> mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
@@ -76,7 +76,7 @@ std::vector<at::Tensor> mha_bwd(
 
   _check_runtime_contract_bwd(q, dk_type_, dv_type_, softcap, disable_bwd_dkv_atomic_reduction);
 
-  // 参数准备（含输出张量分配）
+  // Parameter preparation (including output tensor allocation)
   auto [params, dq, dk, dv, softmax_d, softmax_lse_log2] = prepare_mha_bwd(
       dout, q, k, v, out, dq_, dk_, dv_, softmax_lse, q_ranges, k_ranges,
       max_seqlen_q, max_seqlen_k, attn_type_map_, merge_k_ranges_, bwd_kq_map_,
@@ -85,7 +85,7 @@ std::vector<at::Tensor> mha_bwd(
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-  // 核执行（单实例）
+  // Kernel launch (single variant)
   run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic>(params, stream);
 
   return {dq, dk, dv, softmax_d, softmax_lse_log2};
