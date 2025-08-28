@@ -102,7 +102,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       {params.total_q, params.d, params.h_qo}, // shape_O
       {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O
       static_cast<float*>(params.softmax_lse_ptr), // LSE
-      {_1{}, params.total_q}, // stride_LSE
+      {params.h_qo, _1{}}, // stride_LSE
       params.h_qo,
       params.h_kv,
       params.range_locks,
