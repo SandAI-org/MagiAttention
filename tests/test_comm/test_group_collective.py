@@ -334,7 +334,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
         "test_case",
         [
             {
-                "name": "naive_a2a_like_reduce",
+                "name": "naive_a2a_like_sum_reduce",
                 "world_size": 4,
                 "reduce_op": "sum",
                 "send_buffer_per_rank": [
@@ -477,12 +477,14 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
         ],
     )
     @parameterize("use_hier_comm", [False, True])
+    @parameterize("deterministic", [False, True])
     @parameterize("async_op", [True])  # skip async_op=False to speed up
     def test_group_reduce_collective(
         self,
         test_case: dict[str, Any],
-        async_op: bool,
         use_hier_comm: bool,
+        deterministic: bool,
+        async_op: bool,
     ):
         test_case_name = test_case["name"]
         reduce_op = test_case["reduce_op"]
@@ -497,8 +499,8 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
             # TODO: support hier comm as a sync op
             if not async_op:
                 return
-            # TODO: support hier comm for lse reduce
-            if is_lse_reduce:
+            # TODO: support hier comm for avg/lse reduce
+            if reduce_op != "sum":
                 return
 
         # sanity check for meta args per rank
@@ -583,6 +585,7 @@ class TestGroupCollectiveWithWorldSize4(DistTestBase):
                 # NOTE: args below for hierarchical comm
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
+                deterministic=deterministic,
             )
 
         # post process

@@ -22,16 +22,20 @@ import torch
 from magi_attention.comm.primitive.utils import (
     _calc_group_cast_a2a_input_args,
     _calc_group_reduce_a2a_input_args,
-    _reduce_to_tensor,
-    _unpermute_tensor,
+    reduce_to_tensor,
+    unpermute_tensor,
 )
 
 
 class TestGroupCollectiveUtils(TestCase):
+    @property
+    def device(self) -> int:
+        return torch.cuda.current_device()
+
     def test_unpermute_tensor(self):
         # ---------    normal unperm idxs     --------- #
 
-        x = torch.randn(6, 3, 4, device=torch.cuda.current_device())
+        x = torch.randn(6, 3, 4, device=self.device)
 
         unperm_idxs1 = [0, 2, 1]
         split_sizes1 = [2, 1, 3]
@@ -41,16 +45,16 @@ class TestGroupCollectiveUtils(TestCase):
                 x, unperm_idxs1, split_sizes1
             ),
         )
-        y1 = _unpermute_tensor(
+        y1 = unpermute_tensor(
             x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
                     [[0, 2], [3, 6], [2, 3]],
                     dtype=torch.int32,
-                    device=torch.cuda.current_device(),
+                    device=self.device,
                 ),
                 "cu_range_sizes": torch.tensor(
-                    [0, 2, 5, 6], dtype=torch.int32, device=torch.cuda.current_device()
+                    [0, 2, 5, 6], dtype=torch.int32, device=self.device
                 ),
                 "total_size": 6,
                 "dim": 0,
@@ -80,16 +84,16 @@ class TestGroupCollectiveUtils(TestCase):
                 x, unperm_idxs2, split_sizes2
             ),
         )
-        y2 = _unpermute_tensor(
+        y2 = unpermute_tensor(
             x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
                     [[5, 6], [2, 5], [0, 2]],
                     dtype=torch.int32,
-                    device=torch.cuda.current_device(),
+                    device=self.device,
                 ),
                 "cu_range_sizes": torch.tensor(
-                    [0, 1, 4, 6], dtype=torch.int32, device=torch.cuda.current_device()
+                    [0, 1, 4, 6], dtype=torch.int32, device=self.device
                 ),
                 "total_size": 6,
                 "dim": 0,
@@ -118,16 +122,16 @@ class TestGroupCollectiveUtils(TestCase):
                 x, unperm_idxs3, split_sizes3
             ),
         )
-        y3 = _unpermute_tensor(
+        y3 = unpermute_tensor(
             x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
                     [[4, 6], [0, 3], [3, 4]],
                     dtype=torch.int32,
-                    device=torch.cuda.current_device(),
+                    device=self.device,
                 ),
                 "cu_range_sizes": torch.tensor(
-                    [0, 2, 5, 6], dtype=torch.int32, device=torch.cuda.current_device()
+                    [0, 2, 5, 6], dtype=torch.int32, device=self.device
                 ),
                 "total_size": 6,
                 "dim": 0,
@@ -150,8 +154,8 @@ class TestGroupCollectiveUtils(TestCase):
 
         # ---------    empty unperm idxs     --------- #
 
-        x = torch.randn(6, 3, 4, device=torch.cuda.current_device())
-        emp = torch.empty(0, 3, 4, device=torch.cuda.current_device())
+        x = torch.randn(6, 3, 4, device=self.device)
+        emp = torch.empty(0, 3, 4, device=self.device)
         unperm_idxs4 = []
         split_sizes4 = [1, 2, 3]
 
@@ -161,14 +165,12 @@ class TestGroupCollectiveUtils(TestCase):
                 x, unperm_idxs4, split_sizes4
             ),
         )
-        y4 = _unpermute_tensor(
+        y4 = unpermute_tensor(
             x,
             unperm_after_a2a_kwargs={
-                "ranges": torch.tensor(
-                    [], dtype=torch.int32, device=torch.cuda.current_device()
-                ),
+                "ranges": torch.tensor([], dtype=torch.int32, device=self.device),
                 "cu_range_sizes": torch.tensor(
-                    [], dtype=torch.int32, device=torch.cuda.current_device()
+                    [0], dtype=torch.int32, device=self.device
                 ),
                 "total_size": 0,
                 "dim": 0,
@@ -188,11 +190,9 @@ class TestGroupCollectiveUtils(TestCase):
         output_split_size_list = [3, 4, 2]
 
         a2a_output = torch.randn(
-            sum(a2a_output_tensor_size_list), h, device=torch.cuda.current_device()
+            sum(a2a_output_tensor_size_list), h, device=self.device
         )
-        output = torch.randn(
-            sum(output_split_size_list), h, device=torch.cuda.current_device()
-        )
+        output = torch.randn(sum(output_split_size_list), h, device=self.device)
         output_ref = output.clone()
 
         # ---------    ref     --------- #
@@ -242,13 +242,13 @@ class TestGroupCollectiveUtils(TestCase):
         cu_range_sizes = torch.cumsum(cu_range_sizes, dim=0)
 
         range_reduce_kwargs = {
-            "input_ranges": input_ranges.to(torch.cuda.current_device()),
-            "output_ranges": output_ranges.to(torch.cuda.current_device()),
-            "cu_range_sizes": cu_range_sizes.to(torch.cuda.current_device()),
+            "input_ranges": input_ranges.to(self.device),
+            "output_ranges": output_ranges.to(self.device),
+            "cu_range_sizes": cu_range_sizes.to(self.device),
             "total_size": total_size,
         }
 
-        reduced_output = _reduce_to_tensor(
+        reduced_output = reduce_to_tensor(
             output=output_ref,
             a2a_output=a2a_output,
             range_reduce_kwargs=range_reduce_kwargs,
@@ -272,9 +272,7 @@ class TestGroupCollectiveUtils(TestCase):
         input_split_size_list = [3, 4, 2, 6, 1]
         dst_indices_list = [[0, 1], [2, 3], [1, 2, 3], [], [0, 1, 2, 3]]
         world_size = 4
-        tensor = torch.randn(
-            (sum(input_split_size_list), h), device=torch.cuda.current_device()
-        )
+        tensor = torch.randn((sum(input_split_size_list), h), device=self.device)
 
         # ---------    ref     --------- #
 
@@ -310,9 +308,7 @@ class TestGroupCollectiveUtils(TestCase):
         input_split_size_list = [3, 4, 2, 6, 1]
         dst_indices_list = [[], [], [], [], []]
         world_size = 4
-        tensor = torch.randn(
-            (sum(input_split_size_list), h), device=torch.cuda.current_device()
-        )
+        tensor = torch.randn((sum(input_split_size_list), h), device=self.device)
 
         # ---------    ref     --------- #
 
@@ -347,9 +343,7 @@ class TestGroupCollectiveUtils(TestCase):
         input_split_size_list = [3, 4, 2, 6, 1]
         dst_index_list = [0, 3, 1, 2, 0]
         world_size = 4
-        tensor = torch.randn(
-            (sum(input_split_size_list), h), device=torch.cuda.current_device()
-        )
+        tensor = torch.randn((sum(input_split_size_list), h), device=self.device)
 
         # ---------    ref     --------- #
 
@@ -377,9 +371,8 @@ class TestGroupCollectiveUtils(TestCase):
         self.assertTrue(torch.equal(a2a_input_ref, a2a_input))
         self.assertEqual(a2a_input_split_size_ref, a2a_input_split_size)
 
-    @classmethod
     def _seqlens2curanges(
-        cls,
+        self,
         seqlens: list[int],
     ) -> list[tuple[int, int]]:
         cu_seqlens = list(accumulate(seqlens))
@@ -388,9 +381,8 @@ class TestGroupCollectiveUtils(TestCase):
             for i in range(len(cu_seqlens))
         ]
 
-    @classmethod
     def _unpermute_tensor_ref(
-        cls,
+        self,
         input_tensor: torch.Tensor,
         unperm_index: torch.LongTensor,
     ) -> torch.Tensor:
@@ -403,9 +395,8 @@ class TestGroupCollectiveUtils(TestCase):
             index=unperm_index,
         )
 
-    @classmethod
     def _calc_unpermute_index_tensor(
-        cls,
+        self,
         tensor: torch.Tensor,
         unpermute_index_list: list[int],
         tensor_size_list: list[int],
@@ -429,14 +420,13 @@ class TestGroupCollectiveUtils(TestCase):
 
         return unperm_index_tensor
 
-    @classmethod
     def _calc_group_cast_a2a_input_meta_args_ref(
-        cls,
+        self,
         input_split_size_list: list[int],
         dst_indices_list: list[list[int]],
         world_size: int,
     ) -> tuple[list[int], torch.LongTensor]:
-        input_size_ranges = cls._seqlens2curanges(input_split_size_list)
+        input_size_ranges = self._seqlens2curanges(input_split_size_list)
 
         a2a_input_size_repeat_ranges_with_rank = sorted(  # stable sort
             list(
@@ -467,7 +457,7 @@ class TestGroupCollectiveUtils(TestCase):
                 )
             ),
             dtype=torch.int32,
-            device=torch.cuda.current_device(),
+            device=self.device,
         )
 
         return (
@@ -475,9 +465,8 @@ class TestGroupCollectiveUtils(TestCase):
             a2a_input_unperm_index_tensor,
         )
 
-    @classmethod
     def _calc_group_cast_a2a_input_args_ref(
-        cls,
+        self,
         input: torch.Tensor,
         input_split_size_list: list[int],
         dst_indices_list: list[list[int]],
@@ -486,7 +475,7 @@ class TestGroupCollectiveUtils(TestCase):
         (
             a2a_input_split_size,
             a2a_input_unperm_index_tensor,
-        ) = cls._calc_group_cast_a2a_input_meta_args_ref(
+        ) = self._calc_group_cast_a2a_input_meta_args_ref(
             input_split_size_list=input_split_size_list,
             dst_indices_list=dst_indices_list,
             world_size=world_size,
@@ -499,9 +488,8 @@ class TestGroupCollectiveUtils(TestCase):
 
         return a2a_input, a2a_input_split_size
 
-    @classmethod
     def _calc_group_cast_a2a_output_meta_args_ref(
-        cls,
+        self,
         output_split_size_list: list[int],
         src_index_list: list[int],
         world_size: int,
@@ -531,7 +519,7 @@ class TestGroupCollectiveUtils(TestCase):
 
         # ---------    calc post-process args    --------- #
 
-        tensor_size_ranges = cls._seqlens2curanges(a2a_output_tensor_size_list)
+        tensor_size_ranges = self._seqlens2curanges(a2a_output_tensor_size_list)
         a2a_output_unperm_index_tensor = torch.tensor(
             list(
                 chain(
@@ -542,7 +530,7 @@ class TestGroupCollectiveUtils(TestCase):
                 )
             ),
             dtype=torch.int32,
-            device=torch.cuda.current_device(),
+            device=self.device,
         )
 
         return (
@@ -550,9 +538,8 @@ class TestGroupCollectiveUtils(TestCase):
             a2a_output_unperm_index_tensor,
         )
 
-    @classmethod
     def _reduce_to_tensor_ref(
-        cls,
+        self,
         output: torch.Tensor,
         a2a_output: torch.Tensor,
         reduce_index: torch.LongTensor,
@@ -567,17 +554,16 @@ class TestGroupCollectiveUtils(TestCase):
             source=a2a_output,
         )
 
-    @classmethod
     def _calc_reduce_index_tensor(
-        cls,
+        self,
         a2a_output_unpermute_index_list: list[int],
         a2a_output_tensor_size_list: list[int],
         output_split_size_list: list[int],
         num_src_list: list[int],
     ) -> torch.LongTensor:
-        tensor_size_ranges = cls._seqlens2curanges(a2a_output_tensor_size_list)
-        output_size_ranges = cls._seqlens2curanges(output_split_size_list)
-        cum_src_ranges = cls._seqlens2curanges(num_src_list)
+        tensor_size_ranges = self._seqlens2curanges(a2a_output_tensor_size_list)
+        output_size_ranges = self._seqlens2curanges(output_split_size_list)
+        cum_src_ranges = self._seqlens2curanges(num_src_list)
 
         a2a_output_reduce_index = [0] * sum(a2a_output_tensor_size_list)
         for cum_src_range, output_size_range in zip(cum_src_ranges, output_size_ranges):
@@ -592,19 +578,18 @@ class TestGroupCollectiveUtils(TestCase):
         a2a_output_reduce_index_tensor = torch.tensor(
             a2a_output_reduce_index,
             dtype=torch.int32,
-            device=torch.cuda.current_device(),
+            device=self.device,
         )
 
         return a2a_output_reduce_index_tensor
 
-    @classmethod
     def _calc_group_reduce_a2a_input_meta_args_ref(
-        cls,
+        self,
         input_split_size_list: list[int],
         dst_index_list: list[int],
         world_size: int,
     ) -> tuple[list[int], torch.LongTensor]:
-        input_size_ranges = cls._seqlens2curanges(input_split_size_list)
+        input_size_ranges = self._seqlens2curanges(input_split_size_list)
 
         unperm_input_size_ranges_with_rank = sorted(
             [
@@ -631,7 +616,7 @@ class TestGroupCollectiveUtils(TestCase):
                 )
             ),
             dtype=torch.int32,
-            device=torch.cuda.current_device(),
+            device=self.device,
         )
 
         return (
@@ -639,9 +624,8 @@ class TestGroupCollectiveUtils(TestCase):
             a2a_input_unperm_index_tensor,
         )
 
-    @classmethod
     def _calc_group_reduce_a2a_input_args_ref(
-        cls,
+        self,
         input: torch.Tensor,
         input_split_size_list: list[int],
         dst_index_list: list[int],
@@ -657,7 +641,7 @@ class TestGroupCollectiveUtils(TestCase):
             (
                 a2a_input_split_size,
                 a2a_input_unperm_index_tensor,
-            ) = cls._calc_group_reduce_a2a_input_meta_args_ref(
+            ) = self._calc_group_reduce_a2a_input_meta_args_ref(
                 input_split_size_list=input_split_size_list,
                 dst_index_list=dst_index_list,
                 world_size=world_size,
@@ -667,9 +651,8 @@ class TestGroupCollectiveUtils(TestCase):
 
         return a2a_input, a2a_input_split_size
 
-    @classmethod
     def _calc_group_reduce_a2a_output_meta_args_ref(
-        cls,
+        self,
         output_split_size_list: list[int],
         src_indices_list: list[list[int]],
         world_size: int,
@@ -695,9 +678,9 @@ class TestGroupCollectiveUtils(TestCase):
         # ---------    calc post-process args    --------- #
 
         num_src_list = [len(src_indices) for src_indices in src_indices_list]
-        tensor_size_ranges = cls._seqlens2curanges(a2a_output_tensor_size_list)
-        output_size_ranges = cls._seqlens2curanges(output_split_size_list)
-        cum_src_ranges = cls._seqlens2curanges(num_src_list)
+        tensor_size_ranges = self._seqlens2curanges(a2a_output_tensor_size_list)
+        output_size_ranges = self._seqlens2curanges(output_split_size_list)
+        cum_src_ranges = self._seqlens2curanges(num_src_list)
 
         a2a_output_reduce_index = [0] * sum(a2a_output_tensor_size_list)
         for cum_src_range, output_size_range in zip(cum_src_ranges, output_size_ranges):
@@ -712,7 +695,7 @@ class TestGroupCollectiveUtils(TestCase):
         a2a_output_reduce_index_tensor = torch.tensor(
             a2a_output_reduce_index,
             dtype=torch.int32,
-            device=torch.cuda.current_device(),
+            device=self.device,
         )
 
         return (
@@ -720,17 +703,16 @@ class TestGroupCollectiveUtils(TestCase):
             a2a_output_reduce_index_tensor,
         )
 
-    @classmethod
     def _calc_group_reduce_a2a_output_phase2_meta_args_ref(
-        cls,
+        self,
         a2a_output_tensor_size_list: list[int],
         a2a_output_unpermute_index_list: list[int],
         output_split_size_list: list[int],
         num_src_list: list[int],
     ):
-        a2a_output_size_ranges = cls._seqlens2curanges(a2a_output_tensor_size_list)
-        output_size_ranges = cls._seqlens2curanges(output_split_size_list)
-        cum_src_ranges = cls._seqlens2curanges(num_src_list)
+        a2a_output_size_ranges = self._seqlens2curanges(a2a_output_tensor_size_list)
+        output_size_ranges = self._seqlens2curanges(output_split_size_list)
+        cum_src_ranges = self._seqlens2curanges(num_src_list)
         a2a_output_reduce_ranges_list = []
         for start, end in cum_src_ranges:
             a2a_output_reduce_ranges_list.append(
