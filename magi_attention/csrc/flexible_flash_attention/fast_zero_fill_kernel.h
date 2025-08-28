@@ -156,9 +156,9 @@ class FastZeroFillKernel {
 #pragma unroll
     for (int32_t i = 0; i < size(tLSErLSE); ++i) {
       // Load LSE into tLSErLSE and set tOpOm to true if the LSE is -INFINITY
-      int32_t row = get<0>(tOcO((_0{}, _0{}), i, _0{}));
-      if (row < seqlen_o - offset_o) {
-        tLSErLSE(i) = gLSE(row);
+      int32_t row_block = get<0>(tOcO((_0{}, _0{}), i, _0{}));
+      if (row_block + offset_o < seqlen_o) {
+        tLSErLSE(i) = gLSE(row_block);
         tOpOm(i) = tLSErLSE(i) == -INFINITY;
       } else {
         tLSErLSE(i) = -INFINITY;

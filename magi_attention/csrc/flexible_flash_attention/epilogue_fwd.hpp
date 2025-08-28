@@ -399,13 +399,15 @@ struct CollectiveEpilogueFwd {
 #pragma unroll
       for (int mi = 0; mi < size(lse_prev); ++mi) {
         // Load lse_prev from gmem -> smem, and calculate lse_final
-        int const row = m_block * kBlockM + get<0>(taccOcO_row(mi));
-        if (row >= seqlen_o) {
+        int const row_block = get<0>(taccOcO_row(mi));
+        int const row_batch = m_block * kBlockM + row_block;
+        if (row_batch >= seqlen_o) {
           lse(mi) = -INFINITY;
         }
 
-        if (row + offset_o < get<0>(params.shape_O)) {
-          lse_prev(mi) = gLSE(row);
+        int const row_global = row_batch + offset_o;
+        if (row_global < get<0>(params.shape_O)) {
+          lse_prev(mi) = gLSE(row_block);
 
           if (lse_prev(mi) != -INFINITY) {
             // If there is any non-inf lse_prev, we cannot skip correction
@@ -428,10 +430,11 @@ struct CollectiveEpilogueFwd {
 // Store correct lse_final to gmem
 #pragma unroll
     for (int mi = 0; mi < size(lse_final); ++mi) {
-      int const row = m_block * kBlockM + get<0>(taccOcO_row(mi));
-      if (row < seqlen_o) {
+      int const row_block = get<0>(taccOcO_row(mi));
+      int const row_batch = m_block * kBlockM + row_block;
+      if (row_batch < seqlen_o) {
         if (get<1>(taccOcO_row(_0{})) == 0) {
-          gLSE(row) = lse_final(mi);
+          gLSE(row_block) = lse_final(mi);
         }
       }
     }
