@@ -179,7 +179,7 @@ def range_avg_reduce_kernel(
         out = tl.load(curr_out_ptr + cols)
     else:
         out = tl.load(curr_out_ptr + cols, mask=cols < elem_in_last_block)
-    out = out.to(tl.float32)
+    out = out.to(tl.float32)  # for high-precision accumulation
 
     # reduce input
     cnt = 0.0
@@ -269,7 +269,7 @@ def range_lse_reduce_kernel(
         out = tl.load(curr_out_ptr + cols)
     else:
         out = tl.load(curr_out_ptr + cols, mask=cols < elem_in_last_block)
-    out = out.to(tl.float32)
+    out = out.to(tl.float32)  # for high-precision accumulation
 
     # load output lse
     out_lse = tl.load(curr_out_lse_ptr)

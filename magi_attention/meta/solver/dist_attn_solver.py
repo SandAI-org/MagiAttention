@@ -73,6 +73,10 @@ class DistAttnSolver:
         self.shard_seqlen_k = dispatch_meta_k.shard_seqlen
         self.deterministic = magi_attention.is_deterministic_mode_enable()
 
+        assert (
+            not magi_attention.comm.is_qo_comm_enable()
+        ), "QO comm is not supported for this dist-attn solver"
+
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
 
@@ -1310,7 +1314,6 @@ class DistAttnSolver:
         # thus we assign empty args for qo comm
         num_remote_qo_tokens_per_stage: list[int] = [0] * self.overlap_degree
         qo_group_collective_args_list: list[GroupCollectiveArg] = [None] * self.overlap_degree  # type: ignore[list-item]
-        lse_group_collective_args_list: list[GroupCollectiveArg] = [None] * self.overlap_degree  # type: ignore[list-item]
 
         for transfer_table_this_stage, remote_rank_entry_per_rank_this_stage in zip(
             self.transfer_table_per_stage,
@@ -1338,7 +1341,6 @@ class DistAttnSolver:
             kv_group_collective_args_list=kv_group_collective_args_list,
             num_remote_qo_tokens_per_stage=num_remote_qo_tokens_per_stage,
             qo_group_collective_args_list=qo_group_collective_args_list,
-            lse_group_collective_args_list=lse_group_collective_args_list,
         )
 
         return comm_meta
@@ -1423,7 +1425,6 @@ class DistAttnSolver:
             world_size=self.cp_size,
             device_mesh=self.cp_mesh,
             deterministic=self.deterministic,
-            packed_times=2,  # concat kv along seqlen dim
         )
 
         # sanity check for group-cast arg per rank
