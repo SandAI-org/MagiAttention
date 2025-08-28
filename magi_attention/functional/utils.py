@@ -52,11 +52,11 @@ def correct_attn_lse(
     Corrects the log-sum-exp tensor for online attention.
 
     Args:
-        lse1 (torch.Tensor): log-sum-exp tensor, with shape: [num_heads, seqlen]
-        lse2 (torch.Tensor): log-sum-exp tensor, with shape: [num_heads, seqlen]
+        lse1 (torch.Tensor): log-sum-exp tensor, with shape: [seqlen, num_heads]
+        lse2 (torch.Tensor): log-sum-exp tensor, with shape: [seqlen, num_heads]
 
     Returns:
-        torch.Tensor: corrected log-sum-exp tensor, with shape: [num_heads, seqlen]
+        torch.Tensor: corrected log-sum-exp tensor, with shape: [seqlen, num_heads]
     """
 
     min_lse = to_higher_fp_dtype(torch.min(lse1, lse2), torch.float32)
@@ -88,19 +88,19 @@ def correct_attn_out(
 
     Args:
         out1 (torch.Tensor): local output tensor1, with shape: [seqlen, num_heads, head_dim]
-        lse1 (torch.Tensor): local lse for out1, with shape: [num_heads, seqlen]
+        lse1 (torch.Tensor): local lse for out1, with shape: [seqlen, num_heads]
         out2 (torch.Tensor): local output tensor2, with shape: [seqlen, num_heads, head_dim]
-        lse2 (torch.Tensor): local lse for out2, with shape: [num_heads, seqlen]
-        lse (torch.Tensor): global lse, with shape: [num_heads, seqlen]
+        lse2 (torch.Tensor): local lse for out2, with shape: [seqlen, num_heads]
+        lse (torch.Tensor): global lse, with shape: [seqlen, num_heads]
 
     Returns:
         torch.Tensor: corrected global output tensor, with shape: [seqlen, num_heads, head_dim]
     """
     # formula: lsei_ = exp(lsei - lse)
-    # shape: [h, s] -> [s, h] -> [s, h, 1]
+    # shape: [s, h] -> [s, h, 1]
     lse1_, lse2_ = [
         to_higher_fp_dtype(
-            safe_subtract(lsei, lse).exp().transpose(-1, -2).unsqueeze(-1),
+            safe_subtract(lsei, lse).exp().unsqueeze(-1),
             torch.float32,
         )
         for lsei in [lse1, lse2]
@@ -131,7 +131,7 @@ def correct_attn_fwd_result(
 
     Shape:
         out: [seqlen, num_heads, head_dim]
-        lse: [num_heads, seqlen]
+        lse: [seqlen, num_heads]
     """
     if len(lse_list) == 1:
         # NOTE: if there is only one out and lse,

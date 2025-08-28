@@ -246,7 +246,7 @@ class TestFlexFlashAttn(DistTestBase):
     ):
         t, h, d = q.shape
         o_acc = torch.randn_like(q, dtype=torch.float32)
-        lse_acc = torch.randn([h, t], device=q.device, dtype=torch.float32)
+        lse_acc = torch.randn([t, h], device=q.device, dtype=torch.float32)
 
         softmax_scale = 1.0 / (d**0.5)
 
