@@ -290,13 +290,18 @@ def _flex_flash_attn_forward(
     ]
 
     out = (
-        torch.empty_like(q, dtype=out_type or torch.float32, device=q.device)
+        torch.empty_like(
+            q,
+            dtype=out_type
+            or (q.dtype if disable_fwd_atomic_reduction else torch.float32),
+            device=q.device,
+        )
         if out is None
         else out
     )
     lse = (
         torch.full(
-            (q.size(1), q.size(0)),
+            (q.size(0), q.size(1)),
             fill_value=float("-inf"),
             dtype=torch.float32,
             device=q.device,
@@ -613,7 +618,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             softmax_scale,
             softcap,
             disable_fwd_atomic_reduction,
-            torch.float32,  # out_type
+            q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
             deterministic,
             sm_margin,
         )
