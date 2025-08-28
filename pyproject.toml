@@ -6,7 +6,7 @@ authors = [
   {name = "littsk", email = "zeweitao@sand.ai"},
   {name = "Strivin0311", email = "yunpenghuang@sand.ai"},
 ]
-license = "Apache-2.0"
+license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
