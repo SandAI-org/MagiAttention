@@ -663,10 +663,10 @@ def sanity_check_for_group_reduce_meta_args_per_rank(
 @nvtx.instrument_nvtx
 def reduce_to_tensor(
     output: torch.Tensor,
+    output_lse: torch.Tensor | None,
     a2a_output: OutMaybeWithLSE,
     range_reduce_kwargs: dict,
     reduce_op: Literal["sum", "avg", "lse"] = "sum",
-    output_lse: torch.Tensor | None = None,
 ) -> OutMaybeWithLSE:
     """sum-reduce a2a output to output
     as a post-processing func for group_reduce
@@ -923,6 +923,11 @@ def calc_group_reduce_a2a_args(
         reduce_op=reduce_op,
         range_reduce_kwargs=range_reduce_kwargs,
     )
+    if reduce_op != "lse":
+        post_process_fn = partial(
+            post_process_fn,
+            output_lse=None,
+        )
 
     return (
         a2a_output,

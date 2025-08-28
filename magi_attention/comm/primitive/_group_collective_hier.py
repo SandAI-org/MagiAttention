@@ -800,12 +800,14 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
     ) -> Callable[[torch.Tensor], torch.Tensor]:
         post_process_fn_pre_intra = partial(
             reduce_to_tensor,
+            output_lse=None,  # TODO: support lse reduce
             a2a_output=a2a_output_pre_intra,
             range_reduce_kwargs=self.range_reduce_kwargs_pre_intra,
         )
 
         post_process_fn_inter = partial(
             reduce_to_tensor,
+            output_lse=None,  # TODO: support lse reduce
             a2a_output=a2a_output_inter,
             range_reduce_kwargs=self.range_reduce_kwargs_inter,
         )
