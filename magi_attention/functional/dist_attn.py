@@ -91,19 +91,19 @@ class DistAttnRuntime:
         overlap_stage: int,
     ) -> tuple[WorkWithPostProcessFn, torch.Tensor]:
         """
-        Fetch remote kv buffer from other ranks to local, and return the corresponding Work and buffer
+        Fetch remote kv buffer from other ranks to local, and return the corresponding work and buffer
 
         Args:
-            local_kv(torch.Tensor): the concatenated local kv tensor
-            overlap_stage(int): current overlap stage
+            local_kv (torch.Tensor): the concatenated local kv tensor
+            overlap_stage (int): current overlap stage
 
         Returns:
-            remote_kv_work(WorkWithPostProcessFn): communication handle, used to wait for communication completion
-            remote_kv_buffer(torch.Tensor): remote kv buffer
+            remote_kv_work (WorkWithPostProcessFn): communication handle, used to wait for communication completion
+            remote_kv_buffer (torch.Tensor): remote kv buffer
 
         Shape:
-            - local_kv: [num_tokens_kv_local, num_heads, head_dim]
-            - remote_kv_buffer: [num_tokens_kv_remote_i, num_heads, head_dim],
+            local_kv: [num_tokens_kv_local*2, num_heads_kv, head_dim]
+            remote_kv_buffer: [num_tokens_kv_remote_i*2, num_heads_kv, head_dim],
                 for i = 0, 1, ..., overlap_degree - 1
         """
         _, num_heads, head_dim = local_kv.shape
@@ -141,19 +141,20 @@ class DistAttnRuntime:
         overlap_stage: int,
     ) -> tuple[WorkWithPostProcessFn, torch.Tensor]:
         """
-        Fetch remote q buffer from other ranks to local, and return the corresponding Work and buffer
+        Fetch remote q buffer from other ranks to local, and return the corresponding work and buffer
 
         Args:
-            local_q(torch.Tensor): the local q tensor
-            overlap_stage(int): current overlap stage
+            local_q (torch.Tensor): the local q tensor
+            overlap_stage (int): current overlap stage
 
         Returns:
-            remote_q_work(WorkWithPostProcessFn): communication handle, used to wait for communication completion
-            remote_q_buffer(torch.Tensor): remote q buffer
+            remote_q_work (WorkWithPostProcessFn): communication handle, used to wait for communication completion
+
+            remote_q_buffer (torch.Tensor): remote q buffer
 
         Shape:
-            - local_q: [num_tokens_q_local, num_heads, head_dim]
-            - remote_q_buffer: [num_tokens_q_remote_i, num_heads, head_dim],
+            local_q: [num_tokens_q_local, num_heads_q, head_dim]
+            remote_q_buffer: [num_tokens_q_remote_i, num_heads_q, head_dim],
                 for i = 0, 1, ..., overlap_degree - 1
         """
 
@@ -197,20 +198,21 @@ class DistAttnRuntime:
         overlap_stage: int,
     ) -> tuple[WorkWithPostProcessFn, FusedOrTupleTensor]:
         """
-        Fetch remote q, o, do buffer from other ranks to local, and return the corresponding Work and buffer
+        Fetch remote q, o, do buffer from other ranks to local, and return the corresponding work and buffer
 
         Args:
-            local_qo_do(FusedOrTupleTensor): the local q, o, do (fused or tupled) tensor
-            overlap_stage(int): current overlap stage
+            local_qo_do (FusedOrTupleTensor): the local q, o, do (fused or tupled) tensor
+            overlap_stage (int): current overlap stage
 
         Returns:
-            remote_qo_do_work(WorkWithPostProcessFn):
+            remote_qo_do_work (WorkWithPostProcessFn):
                 communication handle, used to wait for communication completion
-            remote_qo_do_buffer(FusedOrTupleTensor): remote q, o, do buffer
+
+            remote_qo_do_buffer (FusedOrTupleTensor): remote q, o, do buffer
 
         Shape:
-            - local_qo_do: [num_tokens_qo_do_local, num_heads, head_dim]
-            - remote_qo_do_buffer: [num_tokens_qo_do_remote_i, num_heads, head_dim],
+            local_qo_do: [num_tokens_qo_do_local*3, num_heads_q, head_dim]
+            remote_qo_do_buffer: [num_tokens_qo_do_remote_i*3, num_heads_q, head_dim],
                 for i = 0, 1, ..., overlap_degree - 1
         """
 
@@ -260,20 +262,21 @@ class DistAttnRuntime:
         overlap_stage: int,
     ) -> tuple[WorkWithPostProcessFn, torch.Tensor]:
         """
-        Fetch remote lse buffer from other ranks to local, and return the corresponding Work and buffer
+        Fetch remote lse buffer from other ranks to local, and return the corresponding work and buffer
 
         Args:
-            local_lse(torch.Tensor): the local lse tensor
-            overlap_stage(int): current overlap stage
+            local_lse (torch.Tensor): the local lse tensor
+            overlap_stage (int): current overlap stage
 
         Returns:
-            remote_lse_work(WorkWithPostProcessFn):
+            remote_lse_work (WorkWithPostProcessFn):
                 communication handle, used to wait for communication completion
-            remote_lse_buffer(torch.Tensor): remote lse buffer
+
+            remote_lse_buffer (torch.Tensor): remote lse buffer
 
         Shape:
-            - local_lse: [num_heads, num_tokens_q_local]
-            - remote_lse_buffer: [num_heads, num_tokens_q_remote_i],
+            local_lse: [num_tokens_q_local, num_heads_q]
+            remote_lse_buffer: [num_tokens_q_remote_i, num_heads_q],
                 for i = 0, 1, ..., overlap_degree - 1
         """
         # HACK: since lse usually has different shape and dtype from q,o,do
@@ -287,9 +290,6 @@ class DistAttnRuntime:
             )
             return remote_lse_work, remote_lse_buffer
 
-        # FIXME: for now, ffa uses lse with the shape: [nhq, sq]
-        # for both fwd and bwd, which is not suitable for comm
-        local_lse = local_lse.transpose(0, 1).contiguous()
         _, num_heads = local_lse.shape
 
         # get the group-cast args for lse
@@ -315,12 +315,6 @@ class DistAttnRuntime:
             async_op=True,
         )
 
-        # append post_process_fn to transpose lse from [sq, nhq] to [nhq, sq]
-        orig_post_process_fn = remote_lse_work.post_process_fn
-        remote_lse_work.post_process_fn = (
-            lambda x: orig_post_process_fn(x).transpose(0, 1).contiguous()
-        )
-
         return remote_lse_work, remote_lse_buffer
 
     @nvtx.instrument_nvtx
@@ -337,22 +331,24 @@ class DistAttnRuntime:
         Compute a part of the attention result
 
         Args:
-            q(torch.Tensor): local q
-            kv(torch.Tensor): current kv
+            q (torch.Tensor): local q
+            kv (torch.Tensor): current kv
             out_acc (torch.Tensor, optional): accumulative buffer for out
             lse_acc (torch.Tensor, optional): accumulative buffer for lse
-            overlap_stage(int, optional): Current overlap stage,
+            overlap_stage (int, optional): Current overlap stage,
                 if None, it means local attention, otherwise it means remote attention
             deterministic(bool): Whether to use deterministic algorithm
 
         Returns:
-            out(torch.Tensor | None): partial out, or None if skipped
-            lse(torch.Tensor | None): partial log-sum-exp, or None if skipped
+            out (torch.Tensor | None): partial out, or None if skipped
+
+            lse (torch.Tensor | None): partial log-sum-exp, or None if skipped
+
         Shape:
-            - q: [num_tokens_q, num_heads, head_dim]
-            - kv: [num_tokens_kv, num_heads, head_dim]
-            - out: [num_tokens_q, num_heads, head_dim]
-            - lse: [num_heads, num_tokens_q]
+            q: [num_tokens_q, num_heads_q, head_dim]
+            kv: [num_tokens_kv*2, num_heads_kv, head_dim]
+            out: [num_tokens_q, num_heads_q, head_dim]
+            lse: [num_tokens_q, num_heads_q]
         """
         if overlap_stage is None:
             attn_arg = self.calc_meta.local_attn_arg
@@ -420,13 +416,22 @@ class DistAttnRuntime:
             kv (torch.Tensor): current kv
             lse (torch.Tensor): partial lse
             dq_acc (torch.Tensor, optional): accumulative buffer for dq
-            overlap_stage(int, optional): Current overlap stage,
+            overlap_stage (int, optional): Current overlap stage,
                 if None, it means local attention, otherwise it means remote attention
-            deterministic(bool): Whether to use deterministic algorithm
+            deterministic (bool): Whether to use deterministic algorithm
 
         Returns:
-            partial_dq(torch.Tensor): partial dq, or None if skipped
-            partial_dkv(torch.Tensor): partial dkv, or None if skipped
+            partial_dq (torch.Tensor | None): partial dq, or None if skipped
+
+            partial_dkv (torch.Tensor | None): partial dkv, or None if skipped
+
+        Shape:
+            q: [num_tokens_q, num_heads_q, head_dim]
+            o: [num_tokens_q, num_heads_q, head_dim]
+            do: [num_tokens_q, num_heads_q, head_dim]
+            kv: [num_tokens_kv*2, num_heads_kv, head_dim]
+            partial_dq: [num_tokens_q, num_heads_q, head_dim]
+            partial_dkv: [num_tokens_kv*2, num_heads_kv, head_dim]
         """
 
         if overlap_stage is None:
@@ -499,19 +504,18 @@ class DistAttnRuntime:
         Reduce remote out and lse to lse-reduce to local out and lse for the given overlap stage
 
         Args:
-            partial_remote_out(torch.Tensor, optional):
+            partial_remote_out (torch.Tensor, optional):
                 partial remote out in float32 dtype, or None if skipped
-            partial_remote_lse(torch.Tensor, optional):
+            partial_remote_lse (torch.Tensor, optional):
                 partial remote lse in float32 dtype, or None if skipped
-            partial_local_out(torch.Tensor): partial local out to be reduced
-            partial_local_lse(torch.Tensor): partial local lse to be reduced
-            ref_remote_out(torch.Tensor):
+            partial_local_out (torch.Tensor): partial local out to be reduced
+            partial_local_lse (torch.Tensor): partial local lse to be reduced
+            ref_remote_out (torch.Tensor):
                 reference remote out, to provide meta info like dtype and shape
-            overlap_stage(int): current overlap stage
+            overlap_stage (int): current overlap stage
 
         Returns:
-            partial_out_lse_reduce_work(WorkWithPostProcessFn): partial out and lse group-reduce work
-
+            partial_out_lse_reduce_work (WorkWithPostProcessFn): partial out and lse group-reduce work
         """
 
         if not magi_attention.comm.is_qo_comm_enable():
@@ -563,16 +567,15 @@ class DistAttnRuntime:
         Reduce remote dkv to sum-reduce to local dkv for the given overlap stage
 
         Args:
-            partial_remote_dkv(torch.Tensor, optional):
+            partial_remote_dkv (torch.Tensor, optional):
                 partial remote dkv in float32 dtype, or None if skipped
-            partial_local_dkv(torch.Tensor): partial local dkv to be reduced
-            ref_remote_dkv(torch.Tensor):
+            partial_local_dkv (torch.Tensor): partial local dkv to be reduced
+            ref_remote_dkv (torch.Tensor):
                 reference remote dkv, to provide meta info like dtype and shape
-            overlap_stage(int): current overlap stage
+            overlap_stage (int): current overlap stage
 
         Returns:
-            partial_dkv_reduce_work(WorkWithPostProcessFn): partial dkv group-reduce work
-
+            partial_dkv_reduce_work (WorkWithPostProcessFn): partial dkv group-reduce work
         """
         # get the group-reduce args for dkv
         group_reduce_args = self.comm_meta.kv_group_collective_args_list[
@@ -611,15 +614,15 @@ class DistAttnRuntime:
         Reduce remote dq to sum-reduce to local dq for the given overlap stage
 
         Args:
-            partial_remote_dq(torch.Tensor, optional):
+            partial_remote_dq (torch.Tensor, optional):
                 partial remote dq in float32 dtype, or None if skipped
-            partial_local_dq(torch.Tensor): partial local dq to be reduced
-            ref_remote_dq(torch.Tensor):
+            partial_local_dq (torch.Tensor): partial local dq to be reduced
+            ref_remote_dq (torch.Tensor):
                 reference remote dq, to provide meta info like dtype and shape
-            overlap_stage(int): current overlap stage
+            overlap_stage (int): current overlap stage
 
         Returns:
-            partial_dq_reduce_work(WorkWithPostProcessFn): partial dq group-reduce work
+            partial_dq_reduce_work (WorkWithPostProcessFn): partial dq group-reduce work
         """
         # NOTE: no need to reduce partial_remote_dq for ffa backend
         # since it is already reduced to partial_local_dq in the ffa bwd kernel
@@ -666,7 +669,9 @@ class DistAttnRuntime:
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> torch.Tensor:
-        """concatenate k, v tensors into a single coalesced kv"""
+        """Concatenate k, v tensors into a single coalesced kv
+        along the seqlen dim
+        """
         # TODO: whether can we pack kv togather along certain dim
         # to enhance the performance of ffa kernel
         return torch.cat([k, v], dim=0)
@@ -675,7 +680,9 @@ class DistAttnRuntime:
         self,
         kv: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """chunk the kv tensor into k, v tensor views"""
+        """Chunk the kv tensor into k, v tensor views
+        along the seqlen dim
+        """
         return torch.chunk(kv, 2, dim=0)
 
     def maybe_concat_qo_do(
@@ -684,7 +691,9 @@ class DistAttnRuntime:
         o: torch.Tensor,
         do: torch.Tensor,
     ) -> FusedOrTupleTensor:
-        """maybe concatenate q, o, do tensors into a single fused or tupled qo_do"""
+        """Maybe concatenate q, o, do tensors into a single fused or tupled qo_do
+        along the seqlen dim
+        """
         # TODO: whether can we pack q, o, do togather along certain dim
         # to enhance the performance of ffa kernel
         return torch.cat([q, o, do], dim=0) if self.concat_qo_do else (q, o, do)
@@ -693,7 +702,9 @@ class DistAttnRuntime:
         self,
         qo_do: FusedOrTupleTensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """maybe chunk the qo_do fused tensor into q, o, do tensor views"""
+        """Maybe chunk the qo_do fused tensor into q, o, do tensor views
+        along the seqlen dim
+        """
         return torch.chunk(qo_do, 3, dim=0) if self.concat_qo_do else qo_do
 
     def __eq__(self, other: Any) -> bool:
@@ -719,21 +730,25 @@ class DistAttnFunc(torch.autograd.Function):
         dist_attn_runtime: DistAttnRuntime,
     ):
         """
-        Distributed Flash Attention forward function
+        Distributed Attention forward function
 
         Args:
-            local_q(torch.Tensor):
-            local_k(torch.Tensor):
-            local_v(torch.Tensor):
-            dist_attn_runtime(DistAttnRuntime):
+            local_q (torch.Tensor): local q tensor
+            local_k (torch.Tensor): local k tensor
+            local_v (torch.Tensor): local v tensor
+            dist_attn_runtime(DistAttnRuntime): dist attn runtime
 
         Returns:
-            out(torch.Tensor):
+            local_out (torch.Tensor): local out tensor
+
+            local_lse (torch.Tensor): local lse tensor
 
         Shape:
-            - local_q: [num_tokens_q_local, num_heads, head_dim]
-            - local_k: [num_tokens_k_local, num_heads, head_dim]
-            - local_v: [num_tokens_v_local, num_heads, head_dim]
+            local_q: [num_tokens_q_local, num_heads_q, head_dim]
+            local_k: [num_tokens_kv_local, num_heads_kv, head_dim]
+            local_v: [num_tokens_kv_local, num_heads_kv, head_dim]
+            local_out: [num_tokens_q_local, num_heads_q, head_dim]
+            local_lse: [num_tokens_q_local, num_heads_q]
         """
 
         if not dist_attn_runtime.fwd_use_acc:
@@ -876,9 +891,15 @@ class DistAttnFunc(torch.autograd.Function):
 
         if local_out is None:  # attn computation are all skipped
             # NOTE: We cannot use torch.empty_like here, because empty_like may contain nan values,
-            #       and once gradients between different tokens need to be reduced, the nan values
-            #       from pad tokens would interfere with the gradients of other tokens
+            # and once gradients between different tokens need to be reduced, the nan values
+            # from pad tokens would interfere with the gradients of other tokens
             local_out = torch.zeros_like(local_q)
+            local_lse = torch.full(
+                (local_q.size(0), local_q.size(1)),
+                fill_value=float("-inf"),
+                dtype=torch.float32,
+                device=local_q.device,
+            )
         else:
             # NOTE: since we've increased the precision of partial out for correction
             # here we need to downcast to q dtype to both return and save for backward
@@ -1097,4 +1118,17 @@ def dist_attn_func(
     v: torch.Tensor,
     dist_attn_runtime: DistAttnRuntime,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Distributed attention autograd function
+
+    Args:
+        q (torch.Tensor): [num_tokens_q_local, num_heads_q, head_dim]
+        k (torch.Tensor): [num_tokens_kv_local, num_heads_kv, head_dim]
+        v (torch.Tensor): [num_tokens_kv_local, num_heads_kv, head_dim]
+        dist_attn_runtime (DistAttnRuntime): distributed attention runtime
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]:
+            - out with shape [num_tokens_q_local, num_heads_q, head_dim]
+            - lse with shape [num_tokens_q_local, num_heads_q]
+    """
     return DistAttnFunc.apply(q, k, v, dist_attn_runtime)
