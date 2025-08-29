@@ -221,8 +221,9 @@ struct CollectiveMainloopBwdSm90 {
   using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (total_q, d, head)
   using StrideQKV = cute::Stride<int64_t, _1, int64_t>;
   // using ShapeLSE = cute::Shape<int32_t, int32_t, int32_t>; // (max_seqlen_q, head, batch)
-  using ShapeLSE = cute::Shape<_4, int32_t, int32_t>;
-  using StrideLSE = cute::Stride<_1, _4, int64_t>; // (max_seqlen_q, head, batch)
+  using ShapeLSE = cute::Shape<_4, int32_t, int32_t>; // (4, total_seqlen, head)
+  // using StrideLSE = cute::Stride<_1, int64_t, int64_t>; // (max_seqlen_q, head, batch)
+  using StrideLSE = cute::Stride<_1, _4, int64_t>; // (4, total_seqlen, head)
 
   using GmemTiledCopydQaccum = cute::SM90_TMA_REDUCE_ADD;
   using TileShape_dQaccum = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
@@ -486,6 +487,26 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sLSE = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSE{});
     Tensor sdPsum = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSE{});
 
+    if (thread_idx == 0 && bidh == 0) {
+      printf("--- sLSE Debug Info (Block 0, Thread 0) ---\n");
+      printf("sLSE Object: ");
+      print(sLSE);
+      printf("\n");
+
+      printf("sLSE Shape: ");
+      print(shape(sLSE));
+      printf("\n");
+
+      printf("sLSE Stride: ");
+      print(stride(sLSE));
+      printf("\n");
+
+      printf("sLSE Data Pointer: %p\n", sLSE.data());
+
+      printf("sLSE Size: %d\n", size(sLSE));
+      printf("-----------------------------------------\n");
+    }
+
     int bidh_kv = params.qhead_per_khead_divmod.divide(bidh);
 
     // Prepare the TMA loads
@@ -516,6 +537,28 @@ struct CollectiveMainloopBwdSm90 {
         cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum),
         make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})),
         make_coord(_0{}, _)); // (4, M, _)
+
+    // In CollectiveMainloopBwdSm90.h -> load() function
+    // print gLSE
+    if (thread_idx == 0 && bidh == 0) {
+      printf("--- gLSE Debug Info (Block 0, Thread 0) ---\n");
+      printf("gLSE Object: ");
+      print(gLSE);
+      printf("\n");
+
+      printf("gLSE Shape: ");
+      print(shape(gLSE));
+      printf("\n");
+
+      printf("gLSE Stride: ");
+      print(stride(gLSE));
+      printf("\n");
+
+      printf("gLSE Data Pointer: %p\n", gLSE.data());
+
+      printf("gLSE Size: %d\n", size(gLSE));
+      printf("-----------------------------------------\n");
+    }
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
@@ -560,7 +603,7 @@ struct CollectiveMainloopBwdSm90 {
           tQsQ(_, smem_pipe_write.index()));
       if (bidh == 0 && thread_idx == 0) {
         // printf("[BWD LOAD BEGIN]\n");
-        printf(
+        /*printf(
             "[BWD COPY BEFORE TMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
             bidb,
             kBlockM,
@@ -568,10 +611,41 @@ struct CollectiveMainloopBwdSm90 {
             n_block,
             m_block_min,
             m_block_max,
-            attn_type);
+            attn_type); */
+
+        printf("gLSE to copy:\n");
+        printf("gLSE Object: ");
+        print(gLSE(_, _, m_block));
+        printf("\n");
+
+        printf("gLSE Shape: ");
+        print(shape(gLSE(_, _, m_block)));
+        printf("\n");
+
+        printf("gLSE Stride: ");
+        print(stride(gLSE(_, _, m_block)));
+        printf("\n");
+
+        printf("gLSE Data Pointer: %p\n", gLSE(_, _, m_block).data());
+
+        printf("sLSE to copy:\n");
+        printf("sLSE Object: ");
+        print(sLSE(_, _, smem_pipe_write.index()));
+        printf("\n");
+
+        printf("sLSE Shape: ");
+        print(shape(sLSE(_, _, smem_pipe_write.index())));
+        printf("\n");
+
+        printf("sLSE Stride: ");
+        print(stride(sLSE(_, _, smem_pipe_write.index())));
+        printf("\n");
+
+        printf("sLSE Data Pointer: %p\n", sLSE(_, _, smem_pipe_write.index()).data());
       }
+
       copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write.index()));
-      if (bidh == 0 && thread_idx == 0) {
+      /*if (bidh == 0 && thread_idx == 0) {
         // printf("[BWD LOAD BEGIN]\n");
         printf(
             "[BWD COPY AFTER TMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
@@ -582,7 +656,7 @@ struct CollectiveMainloopBwdSm90 {
             m_block_min,
             m_block_max,
             attn_type);
-      }
+      } */
     }
 
     if (lane_predicate) {
@@ -619,6 +693,7 @@ struct CollectiveMainloopBwdSm90 {
             params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
             tQgQ(_, m_block + 1),
             tQsQ(_, smem_pipe_write.index()));
+        /*
         if (bidh == 0 && thread_idx == 0) {
           // printf("[BWD LOAD BEGIN]\n");
           printf(
@@ -631,8 +706,9 @@ struct CollectiveMainloopBwdSm90 {
               m_block_min,
               m_block_max,
               attn_type);
-        }
+        } */
         copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block + 1), sLSE(_, _, smem_pipe_write.index()));
+        /*
         if (bidh == 0 && thread_idx == 0) {
           // printf("[BWD LOAD BEGIN]\n");
           printf(
@@ -645,7 +721,7 @@ struct CollectiveMainloopBwdSm90 {
               m_block_min,
               m_block_max,
               attn_type);
-        }
+        } */
       }
     }
 
