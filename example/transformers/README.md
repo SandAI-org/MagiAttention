@@ -242,27 +242,27 @@ elif model_args.model_name_or_path:
 ## Experiments
 
 ### Training Environment
-| **Env**                 | **version**                                                                                |
-| ----------------------------- | -------------------------------------------------------------------------------------------- |
-|  docker             |  ngc25.02-py3  |
-|  MagiAttention      |  Tags: v1.0.2
-|  transformers       |  Tags: 4.51.3
-|  accelerate         |  Tags: 1.6.0
+| **Env**              | **version**                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------------- |
+| docker               | ngc25.02-py3                                                                                   |
+| MagiAttention        | Tags: v1.0.2                                                                                   |
+| transformers         | Tags: 4.51.3                                                                                   |
+| accelerate           | Tags: 1.6.0                                                                                    |
 
 ### Training Settings
 
-| **Configuration**                 | **Value**                                                                                |
-| ----------------------------- | -------------------------------------------------------------------------------------------- |
-| **Dataset**                   | [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext)                        |
-| **Model**                | [LLaMA-3-1B](https://huggingface.co/meta-llama/Llama-3.2-1B)                                                                                     |
-| **Number of Layers**          | 16                                                                                           |
-| **Hidden Size**               | 2048                                                                                         |
-| **Number of Attention Heads** | 32                                                                                           |
-| **Group Query Attention**     | Enabled                                                                                      |
-| **Number of Query Groups**    | 8                                                                                            |
-| **Sequence Length**           | 8192                                                                                         |
-| **Parallel Size**     | CP1/4/8 (MagiAttention) vs no cp(torch native) with a global batch size of 8        |
-| **Training Steps**       | 3000                                                                                      |
+| **Configuration**                 | **Value**                                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------------------------- |
+| **Dataset**                       | [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext)                       |
+| **Model**                         | [LLaMA-3-1B](https://huggingface.co/meta-llama/Llama-3.2-1B)                                |
+| **Number of Layers**              | 16                                                                                          |
+| **Hidden Size**                   | 2048                                                                                        |
+| **Number of Attention Heads**     | 32                                                                                          |
+| **Group Query Attention**         | Enabled                                                                                     |
+| **Number of Query Groups**        | 8                                                                                           |
+| **Sequence Length**               | 8192                                                                                        |
+| **Parallel Size**                 | CP1/4/8 (MagiAttention) vs no cp (torch native) with a global batch size of 8               |
+| **Training Steps**                | 3000                                                                                        |
 
 
 ### Results

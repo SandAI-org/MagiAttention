@@ -199,18 +199,30 @@ class GroupCollectiveArg:
 
 @dataclass
 class CommMeta:
-    num_remote_tokens_per_stage: list[int]
-    group_collective_args_list: list[GroupCollectiveArg]
+    # for kv comm in fwd and dkv comm in bwd
+    # NOTE: this denotes sk or sv, not sk + sv
+    num_remote_kv_tokens_per_stage: list[int]
+    kv_group_collective_args_list: list[GroupCollectiveArg]
+
+    # for qo comm in fwd and q,o,do,dq comm in bwd
+    # NOTE: this denotes sq or so, not sq + so
+    num_remote_qo_tokens_per_stage: list[int]
+    qo_group_collective_args_list: list[GroupCollectiveArg]
 
     @property
     def overlap_degree(self) -> int:
-        return len(self.num_remote_tokens_per_stage)
+        return len(self.num_remote_kv_tokens_per_stage)
 
     def __post_init__(self):
-        assert len(self.num_remote_tokens_per_stage) == len(
-            self.group_collective_args_list
+        assert (
+            len(self.num_remote_kv_tokens_per_stage)
+            == len(self.kv_group_collective_args_list)
+            == len(self.num_remote_qo_tokens_per_stage)
+            == len(self.qo_group_collective_args_list)
         ), (
             f"Got inconsistent overlap degree: "
-            f"{len(self.num_remote_tokens_per_stage)=} and "
-            f"{len(self.group_collective_args_list)=}."
+            f"{len(self.num_remote_kv_tokens_per_stage)=}, "
+            f"{len(self.kv_group_collective_args_list)=}, "
+            f"{len(self.num_remote_qo_tokens_per_stage)=} and "
+            f"{len(self.qo_group_collective_args_list)=}."
         )

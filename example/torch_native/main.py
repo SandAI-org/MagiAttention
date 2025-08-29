@@ -28,7 +28,7 @@ from torch.optim.lr_scheduler import LinearLR
 from magi_attention.api import magi_attn_varlen_dispatch, undispatch
 from magi_attention.api.functools import (
     compute_pad_size,
-    full_attention_to_varlen_attention,
+    infer_varlen_mask_from_batch,
     squash_batch_dim,
 )
 from magi_attention.common.enum import AttnOverlapMode
@@ -235,7 +235,7 @@ def prepare_data(device_mesh, train_iter):
     pad_size = compute_pad_size(local_input.size(0), cp_size, CHUNK_SIZE)
     logger(f"{pad_size=}", rank=0)
 
-    cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
+    cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(
         batch_size // dp_size, seqlen
     )
 

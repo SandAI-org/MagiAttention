@@ -45,7 +45,7 @@ from magi_attention.api import (
 )
 from magi_attention.api.functools import (
     compute_pad_size,
-    full_attention_to_varlen_attention,
+    infer_varlen_mask_from_batch,
     squash_batch_dim,
 )
 from magi_attention.config import DistAttnConfig
@@ -265,9 +265,7 @@ class MagiTrainer(Trainer):
         local_input = squash_batch_dim(inputs)
         cp_size = int(os.environ.get("CP_SIZE", 1))
         pad_size = compute_pad_size(local_input.size(0), cp_size, chunk_size=512)
-        cu_seqlens_q, cu_seqlens_k = full_attention_to_varlen_attention(
-            batch_size, seqlen
-        )
+        cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(batch_size, seqlen)
         local_input = local_input.unsqueeze(0)
 
         return local_input, cu_seqlens_q, cu_seqlens_k, pad_size

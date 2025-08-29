@@ -145,7 +145,7 @@ def get_usp_pg(device_mesh):
     return {ParallelMode.ULYSESS: a2a_pg, ParallelMode.RING: p2p_pg}
 
 
-# 非正交 group
+# non-orthogonal group
 # def get_loongtrain_pg(device_mesh, window_num, rank):
 #     p2p_pg = device_mesh.get_group(mesh_dim=ParallelMode.RING)
 #     a2a_pg = device_mesh.get_group(mesh_dim=ParallelMode.ULYSESS)

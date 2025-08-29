@@ -155,8 +155,8 @@ def sparse_attn_benchmark(sparsity_ratio, hd, wd, block_size, attn_impl):
             mask_3d=block_mask,
             block_m=block_m,
             block_n=block_n,
-            num_q_heads=orig_head,  # 您的代码中使用 nheads
-            num_k_heads=orig_head,  # 您的代码中Q/K头数量相同
+            num_q_heads=orig_head,  # nheads
+            num_k_heads=orig_head,  # nheads (MHA)
             seq_len=orig_seq_len_q,
         )
 

@@ -71,6 +71,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             os.environ.get("MAGI_ATTENTION_UNITEST_PROFILE_MODE", "0") == "1"
         )
 
+        if self.profile_mode:
+            # disable sanity check when profiling
+            os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "0"
+
         # init several pgs with all ranks
         self.nccl_groups = [
             dist.new_group(list(range(self.world_size)), backend=self.backend)
@@ -120,7 +124,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
     @with_comms
     @parameterize(
-        # TODO: test more diverse and complicated attn mask
         "attn_config",
         [
             # full attn with total seqlen 14k
@@ -473,6 +476,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         if self.profile_mode:  # [start_iter, end_iter)
             prof_iters, prof_start_iter, prof_end_iter = 10, 5, 8
+            assert not magi_attention.is_sanity_check_enable()
         else:
             prof_iters, prof_start_iter, prof_end_iter = 1, -1, -1
             assert magi_attention.is_sanity_check_enable()
@@ -602,8 +606,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dist_attn_config=dist_attn_config,
                 cp_mesh=self.device_mesh,
             )
-            # HACK: seperate cp group for dkv group-reduce
-            dist_attn_runtime_mgr.dist_attn_runtime.cp_group_dkv = self.nccl_groups[1]
+            # HACK: seperate cp group for group-reduce
+            dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
 
             # -----   init global qkv   ---- #
 

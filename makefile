@@ -24,10 +24,12 @@ install:
 	git submodule update --init --recursive
 	pip install --no-build-isolation .
 
+uninstall:
+	pip uninstall -y magi_attention
+
 build_dist:
 	make clean
-	git submodule update --init --recursive
-	python -m build --wheel --no-isolation
+	make build
 	pip install dist/*.whl
 	make test
 
@@ -46,12 +48,9 @@ coverage:
 	coverage html
 
 clean:
-	rm -rf __pycache__
-	rm -rf tests/__pycache__
-	rm -rf magi_attention/__pycache__
-	rm -rf magi_attention/_version.py
+	find . -type d -name "__pycache__" -exec rm -rf {} +
 	rm -rf build
 	rm -rf dist
+	rm -rf magi_attention/_version.py
 	rm -rf magi_attention.egg-info
-	rm -rf src/magi_attention.egg-info
-	pip uninstall -y magi_attention
+	make uninstall
