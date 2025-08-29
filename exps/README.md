@@ -13,6 +13,13 @@ cd exps/attn
 bash run_benchmark.sh
 ```
 
+## Kernel-Level Block Sparse Attention Performance
+
+```bash
+cd exps/attn
+
+bash run_block_sparse_benchmark.sh
+```
 
 ## Module-Level Distributed Attention Performance and Scalability
 
