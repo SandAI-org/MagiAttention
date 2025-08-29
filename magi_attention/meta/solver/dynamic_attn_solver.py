@@ -93,7 +93,6 @@ class DynamicAttnSolver:
         k_ranges: AttnRanges,
         mask_types: Union[list[int], list[AttnMaskType]],
     ):
-        print("=============== solve begin ===================")
         self.rect = AttnRectangles.from_ranges(
             q_ranges=q_ranges, k_ranges=k_ranges, mask_types=mask_types
         )
@@ -110,10 +109,10 @@ class DynamicAttnSolver:
         #     print(f"rank{idx}'s bucket:")
         #     print(bucket)
         self.calc_host_and_remote_bucket_this_rank()
-        print(f"host bucket this rank {self.cp_rank}:")
-        print(self.host_bucket_this_rank)
-        print(f"remote bucket this rank {self.cp_rank}:")
-        print(self.remote_bucket_this_rank)
+        # print(f"host bucket this rank {self.cp_rank}:")
+        # print(self.host_bucket_this_rank)
+        # print(f"remote bucket this rank {self.cp_rank}:")
+        # print(self.remote_bucket_this_rank)
 
     @nvtx.instrument_nvtx
     def _calc_intersection_with_index(

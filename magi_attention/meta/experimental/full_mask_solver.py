@@ -45,7 +45,7 @@ def eval_greedy_algorithm(
         fwd_recv_len = (
             qk_rate * len(qo_lcrh[i]) + len(kv_lcrh[i]) * 2 + qk_rate * len(qo_lhrc[i])
         )
-        comm_max = max(fwd_send_len, fwd_recv_len)
+        comm_max = max(comm_max, fwd_send_len, fwd_recv_len)
     return comm_max
 
 
