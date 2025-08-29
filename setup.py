@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import glob
+import itertools
 import os
 import platform
 import shutil
@@ -40,6 +41,7 @@ this_dir = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_NAME = "magi_attention"
 NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
 exe_extension = sysconfig.get_config_var("EXE")
+USER_HOME = os.getenv("MAGI_ATTENTION_HOME")
 
 # For CI: allow forcing C++11 ABI to match NVCR images that use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
@@ -47,12 +49,23 @@ FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 # Skip building CUDA extension modules
 SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
 
-# We no longer build the main flexible_flash_attention_cuda module
+# We no longer build the flexible_flash_attention_cuda module
+# instead, we only pre-build some common options with ref_block_size=None if PREBUILD_FFA is True
+# and leave others built in jit mode
+PREBUILD_FFA = os.getenv("MAGI_ATTENTION_PREBUILD_FFA", "1") == "1"
+PREBUILD_FFA_JOBS = int(os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", "256"))
+
+# You can also set the flags below to skip building other ext modules
+SKIP_FFA_UTILS_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD", "0") == "1"
 SKIP_MAGI_ATTN_EXT_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
 )
 
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
+
+# NOTE: for now, we only support building ffa with sm90
+# thus here we restrict the cuda arch list to avoid unnecessary compilation
+os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
 
 
 class MagiAttnBuildExtension(BuildExtension):
@@ -90,8 +103,7 @@ class MagiAttnBuildExtension(BuildExtension):
     def build_extensions(self):
         super().build_extensions()
         # After core extensions are built, optionally prebuild FFA JIT kernels (ref_block_size=None)
-        prebuild = os.getenv("MAGI_ATTENTION_PREBUILD_ENABLE", "1") == "1"
-        if not SKIP_CUDA_BUILD and prebuild:
+        if not SKIP_CUDA_BUILD and PREBUILD_FFA:
             prebuild_ffa_kernels()
 
 
@@ -119,7 +131,7 @@ def check_if_cuda_home_none(global_option: str) -> None:
 
 # Copied from https://github.com/triton-lang/triton/blob/main/python/setup.py
 def get_magi_attention_cache_path() -> str:
-    user_home = os.getenv("MAGI_ATTENTION_HOME")
+    user_home = USER_HOME
     if not user_home:
         user_home = (
             os.getenv("HOME")
@@ -129,7 +141,7 @@ def get_magi_attention_cache_path() -> str:
         )
     if not user_home:
         raise RuntimeError("Could not find user home directory")
-    return os.path.join(user_home, ".magi_attention")
+    return os.path.join(user_home, f".{PACKAGE_NAME}")
 
 
 def open_url(url):
@@ -185,7 +197,7 @@ def init_ext_modules() -> None:
 
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
     if bare_metal_version < Version("12.3"):
-        raise RuntimeError("magi_attention is only supported on CUDA 12.3 and above")
+        raise RuntimeError(f"{PACKAGE_NAME} is only supported on CUDA 12.3 and above")
 
     # ptxas 12.8 gives the best perf currently
     # We want to use the nvcc front end from 12.6 however, since if we use nvcc 12.8
@@ -240,6 +252,9 @@ def build_ffa_utils_ext_module(
     common_dir: Path,
 ) -> CUDAExtension | None:
     ext_module_name = "flexible_flash_attention_utils_cuda"
+
+    if SKIP_FFA_UTILS_BUILD:
+        return None
 
     print(
         "\n# -------------------     Building flexible_flash_attention_utils_cuda     ------------------- #\n"
@@ -328,7 +343,7 @@ if not SKIP_CUDA_BUILD:
 
     # define some paths for the ext modules below
     repo_dir = Path(this_dir)
-    csrc_dir = repo_dir / "magi_attention" / "csrc"
+    csrc_dir = repo_dir / PACKAGE_NAME / "csrc"
     common_dir = csrc_dir / "common"
     cutlass_dir = csrc_dir / "cutlass"
 
@@ -365,26 +380,28 @@ def prebuild_ffa_kernels() -> None:
         from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_spec
     except ModuleNotFoundError as e:
         raise RuntimeError(
-            "Prebuild failed: cannot import magi_attention during build. "
+            f"Prebuild failed: cannot import {PACKAGE_NAME} during build. "
             "Ensure source tree is available. Error: "
         ) from e
 
+    # determine the combinations of prebuild options
+    directions = ["fwd", "bwd"]
     head_dims = [64, 128]
     compute_dtypes = [torch.bfloat16, torch.float16]
-    out_dtype = torch.float32
+    out_dtypes = [torch.float32, torch.bfloat16, torch.float16]
     softcaps = [False, True]
     disable_atomic_opts = [False, True]
 
-    combos = []
-    for direction in ("fwd", "bwd"):
-        for h in head_dims:
-            for cdtype in compute_dtypes:
-                for sc in softcaps:
-                    for da in disable_atomic_opts if direction == "fwd" else [False]:
-                        combos.append((direction, h, cdtype, out_dtype, sc, da))
+    combos = itertools.product(
+        directions,
+        head_dims,
+        compute_dtypes,
+        out_dtypes,
+        softcaps,
+        disable_atomic_opts,
+    )
 
-    jobs = int(os.getenv("MAGI_ATTENTION_PREBUILD_JOBS", "256"))
-
+    # prebuild the kernels in parallel for the determined options
     def _build_one(args):
         direction, h, cdtype, odtype, sc, da = args
         spec, uri = get_ffa_jit_spec(
@@ -397,14 +414,14 @@ def prebuild_ffa_kernels() -> None:
             disable_atomic_reduction=da,
             ref_block_size=None,
         )
-        spec.build()
+        spec.build(verbose=True)
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
         if src_dir.exists():
             shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
         return uri
 
-    with ThreadPoolExecutor(max_workers=jobs) as ex:
+    with ThreadPoolExecutor(max_workers=PREBUILD_FFA_JOBS) as ex:
         futs = {ex.submit(_build_one, c): c for c in combos}
         for fut in as_completed(futs):
             c = futs[fut]
@@ -416,7 +433,7 @@ def prebuild_ffa_kernels() -> None:
 
 
 setup(
-    name="magi_attention",
+    name=PACKAGE_NAME,
     packages=find_packages(
         exclude=(
             "build",
