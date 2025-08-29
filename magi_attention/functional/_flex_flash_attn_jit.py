@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -222,7 +223,6 @@ def get_ffa_jit_spec(
     return spec, uri
 
 
-@lru_cache(maxsize=None)
 def get_ffa_jit_mod(
     direction: Literal["fwd", "bwd"],
     head_dim: int,
@@ -248,3 +248,8 @@ def get_ffa_jit_mod(
     )
 
     return spec.build_and_load()
+
+
+# Disable caching when MAGI_ATTENTION_NO_CACHE=1 (caching is enabled by default)
+if os.getenv("MAGI_ATTENTION_NO_CACHE", "0") != "1":
+    get_ffa_jit_mod = lru_cache(maxsize=None)(get_ffa_jit_mod)
