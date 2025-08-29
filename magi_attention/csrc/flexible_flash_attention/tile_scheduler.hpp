@@ -58,8 +58,7 @@ class DynamicPersistentTileScheduler {
 
  public:
   using SharedStorage = std::conditional_t<Deterministic, thrust::pair<int4, int3>, int4>;
-  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>,
-                                                           cute::tuple<int32_t, int32_t, int32_t>>;
+  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
  protected:
   SharedStorage* const work_info_smem;
@@ -256,10 +255,7 @@ class DynamicPersistentTileScheduler {
         } else {
           *work_info_smem = thrust::make_pair<int4, int3>(
               make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
-              make_int3(cute::get<0>(work_info.conflict_batch_msg),
-                        cute::get<1>(work_info.conflict_batch_msg),
-                        cute::get<2>(work_info.conflict_batch_msg))
-          );
+              make_int3(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg), cute::get<2>(work_info.conflict_batch_msg)));
         }
       }
       flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
@@ -303,10 +299,7 @@ class DynamicPersistentTileScheduler {
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
           *work_info_smem = thrust::make_pair(
               make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
-              make_int3(cute::get<0>(work_info.conflict_batch_msg),
-                        cute::get<1>(work_info.conflict_batch_msg),
-                        cute::get<2>(work_info.conflict_batch_msg))
-          );
+              make_int3(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg), cute::get<2>(work_info.conflict_batch_msg)));
         }
         flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
         return work_info;

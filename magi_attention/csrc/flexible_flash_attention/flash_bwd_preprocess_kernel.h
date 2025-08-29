@@ -76,7 +76,7 @@ class FlashAttnBwdPreprocess {
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen_q, d, head)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
   using ShapedPsum = cute::Shape<int32_t, int32_t, int32_t>; // (max_seqlen_q, head, batch)
-                                                            // (4, total_seqlen, head)
+                                                             // (4, total_seqlen, head)
   using StridedPsum = cute::Stride<_1, int64_t, int64_t>;
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (total_q, head)
   using StrideLSE = cute::Stride<_1, int64_t>;
@@ -240,7 +240,7 @@ class FlashAttnBwdPreprocess {
 #pragma unroll
       for (int mi = 0; mi < size(dP_sum); ++mi) {
         int const row = get<0>(tOcO(_0{}, mi, _0{}));
-        if (row < seqlen_o - m_block * kBlockM )
+        if (row < seqlen_o - m_block * kBlockM)
           gdPsum(row) = dP_sum(mi);
         else
           gdPsum(row) = 0;
@@ -255,10 +255,9 @@ class FlashAttnBwdPreprocess {
     Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(0, _, bidh);
     Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
-
     if (thread_idx < seqlen_rounded - m_block * kBlockM && thread_idx < kBlockM) {
       if (lse == -INFINITY)
-         return;
+        return;
       else
         gLSElog2(thread_idx) = lse * float(M_LOG2E);
     }

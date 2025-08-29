@@ -965,7 +965,6 @@ std::vector<at::Tensor> mha_bwd(
   softmax_d = torch::empty({num_heads_qo, total_q, 4}, opts.dtype(torch::kFloat));
   softmax_lse_log2 = torch::empty({num_heads_qo, total_q, 4}, opts.dtype(torch::kFloat));
 
-
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore;
   tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
