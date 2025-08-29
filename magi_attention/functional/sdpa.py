@@ -48,8 +48,8 @@ def sdpa_fwd_out_lse_rearrange(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # reshape out to [num_tokens, num_heads, head_dim]
     out = out.squeeze(0).transpose(0, 1).contiguous()
-    # reshape lse to [num_heads, num_tokens]
-    lse = lse.squeeze(0)
+    # reshape lse to [num_tokens, num_heads]
+    lse = lse.squeeze(0).transpose(0, 1).contiguous()
 
     return out, lse
 
@@ -140,6 +140,25 @@ def sdpa_fwd(
     v: torch.Tensor,
     attn_arg: AttnArg,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """SDPA forward function
+
+    Args:
+        q (torch.Tensor): [num_tokens_q, num_heads_q, head_dim]
+            or [batch_size, num_heads_q, num_tokens_q, head_dim]
+        k (torch.Tensor): [num_tokens_kv, num_heads_kv, head_dim]
+            or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
+        v (torch.Tensor): [num_tokens_kv, num_heads_kv, head_dim]
+            or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
+
+        attn_arg (AttnArg): attention arguments for ffa
+
+    Returns:
+        torch.Tensor: out with shape [num_tokens_q, num_heads_q, head_dim]
+            or [batch_size, num_heads_q, num_tokens_q, head_dim]
+
+        torch.Tensor: lse with shape [num_tokens_q, num_heads_q]
+            or [batch_size, num_heads_q, num_tokens_q]
+    """
     rearrange = len(q.shape) == 3  # from [t, nh, hd] to [1, nh, t, hd]
 
     if rearrange:
@@ -183,12 +202,11 @@ def sdpa_bwd_qkvodo_lse_rearrange(
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
-    # reshape qkvdo to [1, num_heads, num_tokens, head_dim]
-    q, k, v, o, do = [
-        e.transpose(0, 1).unsqueeze(0).contiguous() for e in (q, k, v, o, do)
+    # reshape q, k, v, do to [1, num_heads, num_tokens, head_dim]
+    # and lse to [1, num_heads, num_tokens]
+    q, k, v, o, do, lse = [
+        e.transpose(0, 1).unsqueeze(0).contiguous() for e in (q, k, v, o, do, lse)
     ]
-    # reshape lse to [1, num_heads, num_tokens]
-    lse = lse.unsqueeze(0)
 
     return q, k, v, o, do, lse
 
@@ -198,7 +216,7 @@ def sdpa_bwd_dqdkdv_rearrange(
     dk: torch.Tensor,
     dv: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # reshape dqdkdv to [num_heads, num_tokens, head_dim]
+    # reshape dq,dk,dv to [num_tokens, num_heads, head_dim]
     dq, dk, dv = [e.squeeze(0).transpose(0, 1).contiguous() for e in (dq, dk, dv)]
 
     return dq, dk, dv
@@ -307,6 +325,33 @@ def sdpa_bwd(
     lse: torch.Tensor,
     attn_arg: AttnArg,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """SDPA backward function
+
+    Args:
+        do (torch.Tensor): [num_tokens_q, num_heads_q, head_dim]
+            or [batch_size, num_heads_q, num_tokens_q, head_dim]
+        q (torch.Tensor): [num_tokens_q, num_heads_q, head_dim]
+            or [batch_size, num_heads_q, num_tokens_q, head_dim]
+        k (torch.Tensor): [num_tokens_kv, num_heads_kv, head_dim]
+            or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
+        v (torch.Tensor): [num_tokens_kv, num_heads_kv, head_dim]
+            or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
+        o (torch.Tensor): [num_tokens_q, num_heads_q, head_dim]
+            or [batch_size, num_heads_q, num_tokens_q, head_dim]
+        lse (torch.Tensor): [num_tokens_q, num_heads_q]
+            or [batch_size, num_heads_q, num_tokens_q]
+        attn_arg (AttnArg): attention arguments for ffa
+
+    Returns:
+        torch.Tensor: dq with shape [num_tokens_q, num_heads_q, head_dim]
+            or [batch_size, num_heads_q, num_tokens_q, head_dim]
+
+        torch.Tensor: dk with shape [num_tokens_kv, num_heads_kv, head_dim]
+            or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
+
+        torch.Tensor: dv with shape [num_tokens_kv, num_heads_kv, head_dim]
+            or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
+    """
     rearrange = len(q.shape) == 3  # from [t, nh, hd] to [1, nh, t, hd]
 
     if rearrange:
