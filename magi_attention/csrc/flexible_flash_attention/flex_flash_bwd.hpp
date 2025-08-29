@@ -132,7 +132,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
   CHECK_SHAPE(v, total_k, num_heads_kv, head_size);
   TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1 && out.stride(-1) == 1 && dout.stride(-1) == 1);
 
-  TORCH_CHECK(softmax_lse.dtype() == at::kFloat); CHECK_DEVICE(softmax_lse); CHECK_SHAPE(softmax_lse, num_heads_qo, total_q); TORCH_CHECK(softmax_lse.stride(-1) == 1);
+  TORCH_CHECK(softmax_lse.dtype() == at::kFloat); CHECK_DEVICE(softmax_lse); CHECK_SHAPE(softmax_lse, total_q, num_heads_qo); TORCH_CHECK(softmax_lse.stride(-1) == 1);
 
   TORCH_CHECK(q_ranges.dtype() == torch::kInt32 && k_ranges.dtype() == torch::kInt32);
   CHECK_DEVICE(q_ranges); CHECK_DEVICE(k_ranges);

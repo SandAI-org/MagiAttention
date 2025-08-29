@@ -37,26 +37,28 @@ def is_hierarchical_comm_enable() -> bool:
 
 def ffa_fwd_sm_margin_save_for_comm() -> int:
     """
-    The sm margin number of ffa forward kernel saved for comm kernels
+    The sm margin number of ffa forward kernel saved for comm kernels.
+    Default value is 4 if CUDA_DEVICE_MAX_CONNECTIONS > 1, otherwise 0
     """
 
     sm_margin = os.environ.get("MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN", None)
     if sm_margin is None:  # set by default
         max_connections = int(os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8"))
-        sm_margin = "8" if max_connections > 1 else "0"
+        sm_margin = "4" if max_connections > 1 else "0"
 
     return int(sm_margin)
 
 
 def ffa_bwd_sm_margin_save_for_comm() -> int:
     """
-    The sm margin number of ffa backward kernel saved for comm kernels
+    The sm margin number of ffa backward kernel saved for comm kernels.
+    Default value is 4 if CUDA_DEVICE_MAX_CONNECTIONS > 1, otherwise 0
     """
 
     sm_margin = os.environ.get("MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN", None)
     if sm_margin is None:  # set by default
         max_connections = int(os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8"))
-        sm_margin = "8" if max_connections > 1 else "0"
+        sm_margin = "4" if max_connections > 1 else "0"
 
     return int(sm_margin)
 
