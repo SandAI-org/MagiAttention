@@ -225,7 +225,7 @@ class VarlenNSA(nn.Module):
         q_slc_fa = q.view(total_seqlen_q, 1, q_heads, self.hidden_dim)
         k_slc_fa = K_slc.permute(1, 2, 0, 3).contiguous()
         v_slc_fa = V_slc.permute(1, 2, 0, 3).contiguous()
-        out_slc, _ = flash_attn_func(
+        out_slc = flash_attn_func(
             q_slc_fa,
             k_slc_fa,
             v_slc_fa,
@@ -243,7 +243,7 @@ class VarlenNSA(nn.Module):
         )
         max_seqlen_q = q_ranges.max_seqlen
         max_seqlen_k = k_ranges.max_seqlen
-        out_win, _ = flash_attn_varlen_func(
+        out_win = flash_attn_varlen_func(
             q,
             k,
             v,
