@@ -14,7 +14,6 @@
  * limitations under the License.
  *********************************************************************************/
 
-
 #include <torch/extension.h>
 #include <tuple>
 

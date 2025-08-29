@@ -14,7 +14,6 @@
  * limitations under the License.
  *********************************************************************************/
 
-
 #include "flex_flash_common.hpp"
 
 void set_params_fprop(

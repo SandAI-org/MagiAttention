@@ -14,7 +14,6 @@
  * limitations under the License.
  *********************************************************************************/
 
-
 #include <torch/version.h>
 
 #if TORCH_VERSION_MAJOR < 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR < 4)
