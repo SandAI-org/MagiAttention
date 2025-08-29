@@ -156,13 +156,13 @@ struct Mask {
   template <typename Engine, typename Layout>
   CUTLASS_DEVICE void apply_q_mask(Tensor<Engine, Layout>& tSrS, const int m_block) const {
     static_assert(Layout::rank == 3, "Only support 3D Tensor");
-    // printf("apply_q_mask!\n");
 
     auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
     auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
 
     static constexpr int Row = !SwapAB ? 0 : 1, Col = !SwapAB ? 1 : 0;
 
+    // Create identity tensor for block shape
     Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
     Tensor tScS = thread_mma.partition_C(cS);
 
@@ -184,6 +184,7 @@ struct Mask {
 
 #pragma unroll
     for (int m = 0; m < cute::size<0>(tSrS_rowcol); ++m) {
+      // mask if q is out of bound.
       if (m >= seqlenq_row_limit) {
         /*
          printf("out of boundary!")
