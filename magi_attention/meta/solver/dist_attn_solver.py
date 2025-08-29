@@ -48,8 +48,8 @@ from magi_attention.utils import (
 )
 from magi_attention.utils._utils import argsort
 
-from ._slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
 from .overlap_solver import OverlapConfig, OverlapSolver, OverlapStageCost
+from .slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
 
 
 class DistAttnSolver:
