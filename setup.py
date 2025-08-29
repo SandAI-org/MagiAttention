@@ -239,7 +239,7 @@ def to_full_ext_module_name(ext_module_name: str) -> str:
     return f"{PACKAGE_NAME}.{ext_module_name}"
 
 
-def build_utils_ext_module(
+def build_ffa_utils_ext_module(
     repo_dir: Path,
     csrc_dir: Path,
     common_dir: Path,
@@ -347,13 +347,13 @@ if not SKIP_CUDA_BUILD:
         ext_modules.append(magi_attn_ext_module)
 
     # build utils ext module
-    utils_ext_module = build_utils_ext_module(
+    ffa_utils_ext_module = build_ffa_utils_ext_module(
         repo_dir=repo_dir,
         csrc_dir=csrc_dir,
         common_dir=common_dir,
     )
-    if utils_ext_module is not None:
-        ext_modules.append(utils_ext_module)
+    if ffa_utils_ext_module is not None:
+        ext_modules.append(ffa_utils_ext_module)
 
 
 def prebuild_ffa_kernels() -> None:

@@ -23,11 +23,11 @@ from ._flex_flash_attn_jit import get_ffa_jit_mod
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
-is_ffa_installed = False
+is_ffa_utils_installed = False
 try:
     from magi_attention import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
 
-    is_ffa_installed = True
+    is_ffa_utils_installed = True
 except ImportError:
     warnings.warn("FFA is not installed.")
 
@@ -139,7 +139,7 @@ def merge_ranges(
         Unique Count:
          tensor(2, dtype=torch.int32)
     """
-    assert is_ffa_installed, "FFA is not installed."
+    assert is_ffa_utils_installed, "FFA utils is not installed."
 
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
