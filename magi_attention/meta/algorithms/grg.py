@@ -40,6 +40,9 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         indexed_host_ranges_q: list[tuple[AttnRange, int]],
         indexed_host_ranges_k: list[tuple[AttnRange, int]],
     ) -> list[list[AttnRectangles]]:
+        # print(f"rects: {rects}")
+        # print(f"indexed_host_ranges_q: {indexed_host_ranges_q}")
+        # print(f"indexed_host_ranges_k: {indexed_host_ranges_k}")
         rest_rects = rects
         grid_rects = []
         # cut Q tiles
@@ -68,7 +71,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                             f"No rectangles are cut at position {k_cut_pos}"
                         )
                 k_cut_pos = k_tile_range.end
-                q_k_tile_rects, rest_rects = rest_rects.cut_k(cut_pos=k_cut_pos)
+                q_k_tile_rects, q_tile_rects = q_tile_rects.cut_k(cut_pos=k_cut_pos)
                 q_tile_list.append(q_k_tile_rects)
 
             grid_rects.append(q_tile_list)
@@ -265,6 +268,11 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         grid_rects = self._get_grid_rects(
             rects, indexed_host_ranges_q, indexed_host_ranges_k
         )
+
+        # for i in range(len(grid_rects)):
+        #     for j in range(len(grid_rects[i])):
+        #         print(f"grid_rects[{i}][{j}]: {grid_rects[i][j]}")
+
         m = len(grid_rects)
         n = len(grid_rects[0])
 
@@ -365,6 +373,8 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 if new_solver_eval < local_eval:
                     local_eval = new_solver_eval
                     local_optimal_solver_map = new_solver_map
+
+        # print(f"local_optimal_solver_map: {local_optimal_solver_map}")
 
         # calc result stage
         for i in range(m):
