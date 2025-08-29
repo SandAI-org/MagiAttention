@@ -70,7 +70,7 @@ FLEXIBLE_FLASH_ATTENTION_CSRC_DIR = MAGI_ATTENTION_CSRC_DIR / "flexible_flash_at
 
 MAGI_ATTENTION_INCLUDE_DIR = MAGI_ATTENTION_CSRC_DIR / "common"
 # MAGI_SRC_DIR = _package_root / "data" / "src"
-MAGI_ATTENTION_AOT_DIR = _package_root
+MAGI_ATTENTION_AOT_DIR = _package_root / "lib"
 CUTLASS_INCLUDE_DIRS = [
     _package_root / "csrc" / "cutlass" / "include",
     _package_root / "csrc" / "cutlass" / "tools" / "util" / "include",
