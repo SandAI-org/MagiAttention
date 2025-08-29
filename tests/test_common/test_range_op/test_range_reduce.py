@@ -106,20 +106,16 @@ def range_reduce_ref(
             for (out_start, out_end), cnt in out_range_cnt_map.items():
                 output[out_start:out_end] /= cnt
         case "lse":
-            # transpose from [s, nh] to [nh, s]
-            input_lse = input_lse.transpose(-1, -2)  # type: ignore[union-attr]
-            output_lse = output_lse.transpose(-1, -2)  # type: ignore[union-attr]
-
             for (out_start, out_end), (in_start, in_end) in zip(
                 output_ranges, input_ranges
             ):
-                cur_lse = input_lse[:, in_start:in_end]
-                old_lse_acc = output_lse[:, out_start:out_end].clone()
+                cur_lse = input_lse[in_start:in_end]  # type: ignore[index]
+                old_lse_acc = output_lse[out_start:out_end].clone()  # type: ignore[index]
                 new_lse_acc = correct_attn_lse(
                     lse1=old_lse_acc,
                     lse2=cur_lse,
                 )
-                output_lse[:, out_start:out_end].copy_(new_lse_acc)
+                output_lse[out_start:out_end].copy_(new_lse_acc)  # type: ignore[index]
 
                 cur_out = input[in_start:in_end]
                 old_out_acc = output[out_start:out_end].clone()
@@ -131,9 +127,6 @@ def range_reduce_ref(
                     lse=new_lse_acc,
                 )
                 output[out_start:out_end].copy_(new_out_acc)
-
-            # transpose from [nh, s] back to [s, nh]
-            output_lse = output_lse.transpose(-1, -2)
         case _:
             raise ValueError(f"Invalid reduce_op: {reduce_op}")
 

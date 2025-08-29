@@ -250,8 +250,10 @@ class TestGroupCollectiveUtils(TestCase):
 
         reduced_output = reduce_to_tensor(
             output=output_ref,
+            output_lse=None,  # TODO: test lse-reduce
             a2a_output=a2a_output,
             range_reduce_kwargs=range_reduce_kwargs,
+            reduce_op="sum",  # TODO: test other reduce ops
         )
 
         # ---------    check     --------- #
