@@ -142,6 +142,7 @@ class JitSpec:
     def build(self, verbose: bool) -> None:
         tmpdir = get_tmpdir()
         with FileLock(tmpdir / f"{self.name}.lock", thread_local=False):
+            self.write_ninja()
             run_ninja(jit_env.MAGI_ATTENTION_JIT_DIR, self.ninja_path, verbose)
 
     def build_and_load(self):
@@ -157,7 +158,6 @@ class JitSpec:
         if self.aot_path.exists() and _artifact_exists(self.aot_path, mod_name):
             lib_dir = self.aot_path
         else:
-            self.write_ninja()
             self.build(verbose)
             lib_dir = self.jit_library_path
 

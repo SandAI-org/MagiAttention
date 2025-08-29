@@ -187,10 +187,8 @@ def get_ffa_jit_spec(
     sources = [
         inst_cu,
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flex_flash_common.cpp",
+        jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "fast_zero_fill.cu",
     ]
-    if direction == "fwd":
-        # Fast zero fill is only used in fwd
-        sources.append(jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "fast_zero_fill.cu")
 
     include_dirs = [
         jit_env.MAGI_ATTENTION_INCLUDE_DIR.resolve(),

@@ -90,14 +90,9 @@ class MagiAttnBuildExtension(BuildExtension):
     def build_extensions(self):
         super().build_extensions()
         # After core extensions are built, optionally prebuild FFA JIT kernels (ref_block_size=None)
-        if (
-            not SKIP_CUDA_BUILD
-            and os.getenv("MAGI_ATTENTION_PREBUILD_ENABLE", "1") == "1"
-        ):
-            try:
-                prebuild_ffa_kernels()
-            except Exception as e:
-                warnings.warn(f"Prebuild FFA kernels failed: {e}")
+        prebuild = os.getenv("MAGI_ATTENTION_PREBUILD_ENABLE", "1") == "1"
+        if not SKIP_CUDA_BUILD and prebuild:
+            prebuild_ffa_kernels()
 
 
 def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
@@ -322,8 +317,8 @@ def build_magi_attn_ext_module(
 # init cmdclass
 cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
-# init package_data
-package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi", "*.so", "**/*.so"]}
+# init package_data (minimal, rest controlled by MANIFEST.in)
+package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
 
 # build ext modules
 ext_modules = []
@@ -360,8 +355,19 @@ def prebuild_ffa_kernels() -> None:
     print(
         "\n# -------------------     Prebuilding FFA JIT kernels (ref_block_size=None)     ------------------- #\n"
     )
-    from magi_attention.common.jit import env as jit_env
-    from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_spec
+
+    # During build time, the package isn't installed yet. Fall back to source tree import.
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    try:
+        from magi_attention.common.jit import env as jit_env
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_spec
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "Prebuild failed: cannot import magi_attention during build. "
+            "Ensure source tree is available. Error: "
+        ) from e
 
     head_dims = [64, 128]
     compute_dtypes = [torch.bfloat16, torch.float16]
@@ -391,7 +397,7 @@ def prebuild_ffa_kernels() -> None:
             disable_atomic_reduction=da,
             ref_block_size=None,
         )
-        spec.build_and_load()
+        spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
         if src_dir.exists():
@@ -422,7 +428,7 @@ setup(
         )
     ),
     package_data=package_data,
-    include_package_data=False,
+    include_package_data=True,
     long_description=long_description,
     long_description_content_type="text/markdown",
     ext_modules=ext_modules,

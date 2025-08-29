@@ -1,0 +1,21 @@
+# Include essentials
+include README.md
+include LICENSE
+
+# Only include source code under csrc (runtime JIT/extension needs)
+recursive-include magi_attention/csrc/common *.h *.hpp
+recursive-include magi_attention/csrc/extensions *.hpp *.cpp
+recursive-include magi_attention/csrc/flexible_flash_attention *.h *.hpp *.cuh *.cu *.cpp *.jinja *.py
+recursive-include magi_attention/csrc/utils *.cpp *.cu
+
+# Cutlass: keep only headers under include/
+prune magi_attention/csrc/cutlass
+graft magi_attention/csrc/cutlass/include
+
+# Exclude unnecessary directories and artifacts anywhere
+recursive-exclude magi_attention/csrc **/__pycache__/**
+recursive-exclude magi_attention/csrc **/.git/**
+
+# Exclude compiled/binary/intermediate files globally (keep *.so)
+global-exclude *.pyd *.dll *.dylib *.a *.lib *.o *.obj *.ptx *.cubin *.bin *.ninja
+global-exclude *.pyc *.pyo *.pyd *.swp *.tmp *.log
