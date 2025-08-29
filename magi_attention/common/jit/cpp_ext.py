@@ -1,3 +1,19 @@
+#
+# Copyright (c) 2025 SandAI. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
 # Adapted from https://github.com/pytorch/pytorch/blob/v2.7.0/torch/utils/cpp_extension.py
 
 import os
@@ -36,7 +52,7 @@ def generate_ninja_build_for_op(
     extra_cflags: Optional[List[str]],
     extra_cuda_cflags: Optional[List[str]],
     extra_ldflags: Optional[List[str]],
-    extra_include_dirs: Optional[List[Path]],
+    extra_include_dirs: Optional[List[str]],
     needs_device_linking: bool = False,
 ) -> str:
     system_includes = [
@@ -57,10 +73,10 @@ def generate_ninja_build_for_op(
     common_cflags += _get_pybind11_abi_build_flags()
     common_cflags += _get_glibcxx_abi_build_flags()
     if extra_include_dirs is not None:
-        for dir in extra_include_dirs:
-            common_cflags.append(f"-I{dir.resolve()}")
-    for dir in system_includes:
-        common_cflags.append(f"-isystem {dir}")
+        for include_dir in extra_include_dirs:
+            common_cflags.append(f"-I{include_dir}")
+    for sys_include in system_includes:
+        common_cflags.append(f"-isystem {sys_include}")
 
     cflags = [
         "$common_cflags",
@@ -136,7 +152,7 @@ def generate_ninja_build_for_op(
         "  deps = gcc",
         "",
         "rule cuda_compile",
-        "  command = $nvcc --generate-dependencies-with-compile --dependency-output $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags",
+        "  command = $nvcc --generate-dependencies-with-compile --dependency-output $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags",  # noqa: E501
         "  depfile = $out.d",
         "  deps = gcc",
         "",
@@ -188,6 +204,8 @@ def run_ninja(workdir: Path, ninja_file: Path, verbose: bool) -> None:
         str(workdir.resolve()),
         "-f",
         str(ninja_file.resolve()),
+        "-d",
+        "explain",
     ]
     num_workers = _get_num_workers(verbose)
     if num_workers is not None:

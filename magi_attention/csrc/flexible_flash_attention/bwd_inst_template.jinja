@@ -8,7 +8,7 @@
 #include "flex_flash_bwd.hpp"
 
 // Compile-time constants provided by Jinja arguments
-static constexpr int kArch = {{ arch_sm }};
+static constexpr int kArch = {{ arch_sm_num }};
 using TCompute = {{ compute_t }};
 using TDkv     = {{ out_t }};
 static constexpr int kHeadDim = {{ head_dim }};
@@ -94,5 +94,3 @@ std::vector<at::Tensor> mha_bwd(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("bwd", &mha_bwd, "Backward (single-variant JIT)");
 }
-
-

@@ -8,7 +8,7 @@
 #include "flex_flash_fwd.hpp"
 
 // Compile-time constants provided by Jinja arguments
-static constexpr int kArch = {{ arch_sm }};
+static constexpr int kArch = {{ arch_sm_num }};
 using TCompute = {{ compute_t }};
 using TOut     = {{ out_t }};
 static constexpr int kHeadDim = {{ head_dim }};
@@ -100,4 +100,3 @@ std::vector<at::Tensor> mha_fwd(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fwd", &mha_fwd, "Forward (single-variant JIT)");
 }
-

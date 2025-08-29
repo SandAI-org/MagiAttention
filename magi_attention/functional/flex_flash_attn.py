@@ -13,15 +13,12 @@
 # limitations under the License.
 
 import warnings
-import os
-from pathlib import Path
 
 import torch
 from packaging import version
 
 from magi_attention.utils import nvtx
-from torch.utils.cpp_extension import load as _torch_cpp_load
-from torch.utils.cpp_extension import load_inline as _torch_cpp_load_inline
+
 from ._flex_flash_attn_jit import get_ffa_jit_mod
 
 # isort: off
@@ -152,7 +149,9 @@ def merge_ranges(
         merge_outer_ranges,
         range_map,
         unique_count,
-    ) = flexible_flash_attention_utils_cuda.unique_consecutive_pairs(sorted_outer_ranges)
+    ) = flexible_flash_attention_utils_cuda.unique_consecutive_pairs(
+        sorted_outer_ranges
+    )
 
     return (
         merge_outer_ranges,
@@ -201,15 +200,16 @@ def _flex_flash_attn_forward_compilable(
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
 
-    mod, _ = get_ffa_jit_mod(
-        arch="90",
+    mod = get_ffa_jit_mod(
         direction="fwd",
         head_dim=q.shape[-1],
         compute_dtype=q.dtype,
         output_dtype=out_type or torch.float32,
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_fwd_atomic_reduction,
-        ref_block_size=(kblock_m, kblock_n) if kblock_m is not None and kblock_n is not None else None,
+        ref_block_size=(kblock_m, kblock_n)
+        if kblock_m is not None and kblock_n is not None
+        else None,
     )
 
     out_, lse = mod.fwd(
@@ -285,17 +285,25 @@ def _flex_flash_attn_forward(
     deterministic: bool,
     sm_margin: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    q, k, v, q_ranges, k_ranges = [maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)]
+    q, k, v, q_ranges, k_ranges = [
+        maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
+    ]
 
-    out = torch.empty_like(
-        q, dtype=out_type or torch.float32, device=q.device
-    ) if out is None else out
-    lse = torch.full(
-        (q.size(1), q.size(0)),
-        fill_value=float("-inf"),
-        dtype=torch.float32,
-        device=q.device,
-    ) if lse is None else lse
+    out = (
+        torch.empty_like(q, dtype=out_type or torch.float32, device=q.device)
+        if out is None
+        else out
+    )
+    lse = (
+        torch.full(
+            (q.size(1), q.size(0)),
+            fill_value=float("-inf"),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        if lse is None
+        else lse
+    )
 
     if ref_block_size is not None:
         kblock_m, kblock_n = ref_block_size
@@ -369,14 +377,13 @@ def _flex_flash_attn_backward_compilable(
 ) -> torch.Tensor:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
 
-    mod, _ = get_ffa_jit_mod(
-        arch="90",
+    mod = get_ffa_jit_mod(
         direction="bwd",
         head_dim=q.shape[-1],
         compute_dtype=q.dtype,
         output_dtype=dk_type or torch.float32,
         softcap=softcap > 0.0,
-        disable_atomic_reduction=disable_bwd_dkv_atomic_reduction
+        disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
     )
 
     dout, q, k, v, out_, q_ranges, k_ranges = [
@@ -522,6 +529,7 @@ def _flex_flash_attn_backward(
     )
 
     return dq, dk, dv, softmax_d
+
 
 # -------------------       ffa autograd   ------------------- #
 

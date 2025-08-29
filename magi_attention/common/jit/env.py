@@ -1,3 +1,19 @@
+#
+# Copyright (c) 2025 SandAI. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
 """
 Copyright (c) 2024 by FlashInfer team.
 
@@ -52,7 +68,10 @@ MAGI_ATTENTION_WORKSPACE_DIR = _get_workspace_dir_name()
 MAGI_ATTENTION_JIT_DIR = MAGI_ATTENTION_WORKSPACE_DIR / "cached_ops"
 MAGI_ATTENTION_GEN_SRC_DIR = MAGI_ATTENTION_WORKSPACE_DIR / "generated"
 _package_root = pathlib.Path(__file__).resolve().parents[2]
+
 MAGI_ATTENTION_CSRC_DIR = _package_root / "csrc"
+FLEXIBLE_FLASH_ATTENTION_CSRC_DIR = MAGI_ATTENTION_CSRC_DIR / "flexible_flash_attention"
+
 MAGI_ATTENTION_INCLUDE_DIR = MAGI_ATTENTION_CSRC_DIR / "common"
 # MAGI_SRC_DIR = _package_root / "data" / "src"
 MAGI_ATTENTION_AOT_DIR = _package_root

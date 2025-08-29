@@ -13,11 +13,9 @@
 # limitations under the License.
 
 import glob
-import itertools
 import os
 import platform
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import stat
 import subprocess
 import sys
@@ -25,25 +23,13 @@ import sysconfig
 import tarfile
 import urllib.request
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import torch
 from packaging.version import Version, parse
 from setuptools import find_packages, setup
-from torch.utils.cpp_extension import (
-    COMMON_HIP_FLAGS,
-    CUDA_HOME,
-    IS_HIP_EXTENSION,
-    IS_WINDOWS,
-    SUBPROCESS_DECODE_ARGS,
-    BuildExtension,
-    CUDAExtension,
-    _is_cuda_file,
-    _join_cuda_home,
-    _join_rocm_home,
-    _maybe_write,
-    get_cxx_compiler,
-)
+from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 with open("./README.md", "r", encoding="utf-8") as fh:
@@ -66,8 +52,8 @@ SKIP_MAGI_ATTN_EXT_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
 )
 
-os.environ["MAGI_ATTENTION_FORCE_BUILD"] = "1"
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
+
 
 class MagiAttnBuildExtension(BuildExtension):
     """
@@ -104,7 +90,10 @@ class MagiAttnBuildExtension(BuildExtension):
     def build_extensions(self):
         super().build_extensions()
         # After core extensions are built, optionally prebuild FFA JIT kernels (ref_block_size=None)
-        if not SKIP_CUDA_BUILD and os.getenv("MAGI_ATTENTION_PREBUILD_ENABLE", "1") == "1":
+        if (
+            not SKIP_CUDA_BUILD
+            and os.getenv("MAGI_ATTENTION_PREBUILD_ENABLE", "1") == "1"
+        ):
             try:
                 prebuild_ffa_kernels()
             except Exception as e:
@@ -368,42 +357,32 @@ if not SKIP_CUDA_BUILD:
 
 
 def prebuild_ffa_kernels() -> None:
-    """
-    预编译所有 ref_block_size=None 的 FFA 组合（前向/反向），并将产物拷贝到 AOT 目录。
-    使用线程池在模块粒度并行（ninja 内部也会并行）。
-    通过 MAGI_ATTENTION_PREBUILD_JOBS 控制并行数，默认 4。
-    """
-    print("\n# -------------------     Prebuilding FFA JIT kernels (ref_block_size=None)     ------------------- #\n")
-    from magi_attention.functional._flex_flash_attn_jit import (
-        get_ffa_jit_mod,
+    print(
+        "\n# -------------------     Prebuilding FFA JIT kernels (ref_block_size=None)     ------------------- #\n"
     )
     from magi_attention.common.jit import env as jit_env
+    from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_spec
 
     head_dims = [64, 128]
     compute_dtypes = [torch.bfloat16, torch.float16]
-    # 对齐运行时默认行为：前向 out=float32；反向输出类型也使用 float32
     out_dtype = torch.float32
     softcaps = [False, True]
-    # 前向存在该选项；反向默认 False，但这里一并覆盖两种
     disable_atomic_opts = [False, True]
-    arch = "90a"
 
-    # 组合生成（direction, head_dim, compute_dtype, out_dtype, softcap, disable_atomic)
     combos = []
     for direction in ("fwd", "bwd"):
         for h in head_dims:
             for cdtype in compute_dtypes:
                 for sc in softcaps:
-                    for da in (disable_atomic_opts if direction == "fwd" else [False]):
+                    for da in disable_atomic_opts if direction == "fwd" else [False]:
                         combos.append((direction, h, cdtype, out_dtype, sc, da))
 
     jobs = int(os.getenv("MAGI_ATTENTION_PREBUILD_JOBS", "256"))
 
     def _build_one(args):
         direction, h, cdtype, odtype, sc, da = args
-        # 触发构建（ref_block_size=None）
-        _, uri = get_ffa_jit_mod(
-            arch=arch,
+        spec, uri = get_ffa_jit_spec(
+            arch=(9, 0),
             direction=direction,
             head_dim=h,
             compute_dtype=cdtype,
@@ -412,7 +391,7 @@ def prebuild_ffa_kernels() -> None:
             disable_atomic_reduction=da,
             ref_block_size=None,
         )
-        # 将 JIT 产物目录复制到 AOT 目录
+        spec.build_and_load()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
         if src_dir.exists():

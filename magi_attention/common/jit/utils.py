@@ -1,3 +1,19 @@
+#
+# Copyright (c) 2025 SandAI. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
 """
 Copyright (c) 2024 by FlashInfer team.
 
@@ -26,7 +42,7 @@ def write_if_different(path: pathlib.Path, content: str) -> None:
                 return
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
 
@@ -54,17 +70,4 @@ filename_safe_dtype_map = {
     torch.uint32: "u32",
     torch.int64: "i64",
     torch.uint64: "u64",
-}
-
-pos_encoding_mode_literal = {
-    0: "PosEncodingMode::kNone",
-    1: "PosEncodingMode::kRoPELlama",
-    2: "PosEncodingMode::kALiBi",
-}
-
-mask_mode_literal = {
-    0: "MaskMode::kNone",
-    1: "MaskMode::kCausal",
-    2: "MaskMode::kCustom",
-    3: "MaskMode::kMultiItemScoring",
 }
