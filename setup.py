@@ -15,13 +15,10 @@
 import glob
 import itertools
 import os
-import platform
 import shutil
-import stat
 import subprocess
 import sys
 import sysconfig
-import tarfile
 import urllib.request
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -62,10 +59,6 @@ SKIP_MAGI_ATTN_EXT_BUILD = (
 )
 
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
-
-# NOTE: for now, we only support building ffa with sm90
-# thus here we restrict the cuda arch list to avoid unnecessary compilation
-os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
 
 
 class MagiAttnBuildExtension(BuildExtension):
@@ -156,35 +149,6 @@ def open_url(url):
     return urllib.request.urlopen(request, timeout=300)
 
 
-def download_and_copy(name, src_func, dst_path, version, url_func) -> None:
-    magi_attention_cache_path = get_magi_attention_cache_path()
-    base_dir = os.path.dirname(__file__)
-    system = platform.system()
-    arch = platform.machine()
-    arch = {"arm64": "aarch64"}.get(arch, arch)
-    supported = {"Linux": "linux", "Darwin": "linux"}
-    url = url_func(supported[system], arch, version)
-    src_path = src_func(supported[system], arch, version)
-    tmp_path = os.path.join(
-        magi_attention_cache_path, "nvidia", name
-    )  # path to cache the download
-    dst_path = os.path.join(
-        base_dir, os.pardir, "third_party", "nvidia", "backend", dst_path
-    )  # final binary path
-    src_path = os.path.join(tmp_path, src_path)
-    download = not os.path.exists(src_path)
-    if download:
-        print(f"downloading and extracting {url} ...")
-        file = tarfile.open(fileobj=open_url(url), mode="r|*")
-        file.extractall(path=tmp_path)
-    os.makedirs(os.path.split(dst_path)[0], exist_ok=True)
-    print(f"copy {src_path} to {dst_path} ...")
-    if os.path.isdir(src_path):
-        shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
-    else:
-        shutil.copy(src_path, dst_path)
-
-
 def nvcc_threads_args() -> list[str]:
     nvcc_threads = os.getenv("NVCC_THREADS") or "2"
     return ["--threads", nvcc_threads]
@@ -196,44 +160,9 @@ def init_ext_modules() -> None:
     check_if_cuda_home_none(PACKAGE_NAME)
 
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    if bare_metal_version < Version("12.3"):
-        raise RuntimeError(f"{PACKAGE_NAME} is only supported on CUDA 12.3 and above")
-
-    # ptxas 12.8 gives the best perf currently
-    # We want to use the nvcc front end from 12.6 however, since if we use nvcc 12.8
-    # Cutlass 3.8 will expect the new data types in cuda.h from CTK 12.8, which we don't have.
-    if bare_metal_version != Version("12.8"):
-        download_and_copy(
-            name="nvcc",
-            src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin",
-            dst_path="bin",
-            version=NVIDIA_TOOLCHAIN_VERSION["nvcc"],
-            url_func=lambda system, arch, version: f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",  # noqa: E501
-        )
-        download_and_copy(
-            name="ptxas",
-            src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin/ptxas",
-            dst_path="bin",
-            version=NVIDIA_TOOLCHAIN_VERSION["ptxas"],
-            url_func=lambda system, arch, version: f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",  # noqa: E501
-        )
-        download_and_copy(
-            name="ptxas",
-            src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/nvvm/bin",
-            dst_path="nvvm/bin",
-            version=NVIDIA_TOOLCHAIN_VERSION["ptxas"],
-            url_func=lambda system, arch, version: f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",  # noqa: E501
-        )
-        base_dir = os.path.dirname(__file__)
-        ctk_path_new = os.path.abspath(
-            os.path.join(base_dir, os.pardir, "third_party", "nvidia", "backend", "bin")
-        )
-        nvcc_path_new = os.path.join(ctk_path_new, f"nvcc{exe_extension}")
-        # Append to PATH so nvcc can find cicc in nvvm/bin/cicc (12.8 seems hard-coded to ../nvvm/bin/cicc)
-        os.environ["PATH"] = ctk_path_new + os.pathsep + os.environ["PATH"]
-        os.environ["PYTORCH_NVCC"] = nvcc_path_new
-        # Make nvcc executable, sometimes after the copy it loses its permissions
-        os.chmod(nvcc_path_new, os.stat(nvcc_path_new).st_mode | stat.S_IEXEC)
+    assert bare_metal_version >= Version(
+        "12.8"
+    ), f"{PACKAGE_NAME} is only supported on CUDA 12.8 and above"
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
