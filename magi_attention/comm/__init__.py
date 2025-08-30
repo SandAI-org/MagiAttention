@@ -26,8 +26,10 @@ __all__ = [
 
 def is_hierarchical_comm_enable() -> bool:
     """
-    Toggling this env variable to 1 to enable hierarchical group-collective comm
+    Toggle this env variable to ``1`` to enable hierarchical group-collective comm
     within 2-dim cp group (inter_node group + intra_node group)
+
+    Default value is ``0``
 
     NOTE: this is for now a temporary solution to reduce the redundant inter-node comm
     and might be removed or updated in the future
@@ -37,8 +39,10 @@ def is_hierarchical_comm_enable() -> bool:
 
 def ffa_fwd_sm_margin_save_for_comm() -> int:
     """
-    The sm margin number of ffa forward kernel saved for comm kernels.
-    Default value is 4 if CUDA_DEVICE_MAX_CONNECTIONS > 1, otherwise 0
+    Set the value of this env variable to control
+    the number of SMs of the ffa forward kernel saved for comm kernels
+
+    Default value is ``4`` if "CUDA_DEVICE_MAX_CONNECTIONS" > ``1``, otherwise ``0``
     """
 
     sm_margin = os.environ.get("MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN", None)
@@ -51,8 +55,10 @@ def ffa_fwd_sm_margin_save_for_comm() -> int:
 
 def ffa_bwd_sm_margin_save_for_comm() -> int:
     """
-    The sm margin number of ffa backward kernel saved for comm kernels.
-    Default value is 4 if CUDA_DEVICE_MAX_CONNECTIONS > 1, otherwise 0
+    Set the value of this env variable to control
+    the number of SMs of the ffa backward kernel saved for comm kernels
+
+    Default value is ``4`` if "CUDA_DEVICE_MAX_CONNECTIONS" > ``1``, otherwise ``0``
     """
 
     sm_margin = os.environ.get("MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN", None)
@@ -65,8 +71,10 @@ def ffa_bwd_sm_margin_save_for_comm() -> int:
 
 def is_qo_comm_enable() -> bool:
     """
-    Toggling this env variable to 1 to enable query/output communication,
-    to eliminate the restriction that communication is limited solely to key/value.
+    Toggle this env variable to ``1`` to enable query/output communication,
+    to eliminate the restriction that communication is limited solely to key/value
+
+    Default value is ``0``
 
     NOTE: this feature is under development and not supported by now
     """

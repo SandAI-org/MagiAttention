@@ -43,7 +43,9 @@ __all__ = [
 
 def is_sanity_check_enable() -> bool:
     """
-    Toggling this env variable to 1 can enable many sanity check codes inside magi_attention
+    Toggle this env variable to ``1`` can enable many sanity check codes inside magi_attention
+
+    Default value is ``0``
 
     NOTE: this is only supposed to be used for testing or debugging,
     since the extra sanity-check overhead might be non-negligible
@@ -53,8 +55,10 @@ def is_sanity_check_enable() -> bool:
 
 def is_sdpa_backend_enable() -> bool:
     """
-    Toggling this env variable to 1 can switch the attn kernel backend
-    from ffa to sdpa-math, to support higher precision like fp32, fp64,
+    Toggle this env variable to ``1`` can switch the attn kernel backend
+    from ffa to sdpa-math, to support higher precision like fp32 or fp64
+
+    Default value is ``0``
 
     NOTE: this is only supposed to be used for testing or debugging,
     since the performance is not acceptable
@@ -64,7 +68,7 @@ def is_sdpa_backend_enable() -> bool:
 
 def is_cuda_device_max_connections_one() -> bool:
     """
-    Toggle this env variable to 1 to check if cuda device to have only one connection,
+    Check if "CUDA_DEVICE_MAX_CONNECTIONS" is set to ``1``,
     which will prevent the concurrency among multiple cuda streams
     """
     return os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS", "8") == "1"
@@ -72,15 +76,19 @@ def is_cuda_device_max_connections_one() -> bool:
 
 def is_deterministic_mode_enable() -> bool:
     """
-    Toggle this env variable to 1 to enable deterministic mode
+    Toggle this env variable to ``1`` to enable deterministic mode
     to use deterministic algorithms for all magi_attention kernels
+
+    Default value is ``0``
     """
     return os.environ.get("MAGI_ATTENTION_DETERMINISTIC_MODE", "0") == "1"
 
 
 def dist_attn_runtime_dict_size() -> int:
     """
-    Modify the value of this env variable to change the size of ``dist_attn_runtime_dict``.
-    The default value is ``100``.
+    Set the value of this env variable to control
+    the size of ``dist_attn_runtime_dict``
+
+    Default value is ``100``
     """
     return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "100"))
