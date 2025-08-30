@@ -963,8 +963,9 @@ std::vector<at::Tensor> mha_bwd(
   // softmax_lse_log2 = torch::empty({batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
 
   // add a dimension for TMA alignment(16bytes)
-  softmax_d = torch::empty({num_heads_qo, total_q, 4}, opts.dtype(torch::kFloat));
-  softmax_lse_log2 = torch::empty({num_heads_qo, total_q, 4}, opts.dtype(torch::kFloat));
+  int const total_q_rounded = round_multiple(total_q, kBlockM);
+  softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+  softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
 
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore;

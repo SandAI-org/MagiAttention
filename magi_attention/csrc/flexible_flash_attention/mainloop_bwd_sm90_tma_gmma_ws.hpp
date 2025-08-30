@@ -1238,7 +1238,7 @@ struct CollectiveMainloopBwdSm90 {
           return nullptr;
       }();
       mask_fn(tSrS, m_block);
-      mask_q_fn(tSrS, m_block);
+      // mask_q_fn(tSrS, m_block);
       // Start debug print
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);

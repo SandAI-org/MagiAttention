@@ -259,9 +259,7 @@ class FlashAttnBwdPreprocess {
     if (thread_idx < seqlen_rounded - m_block * kBlockM && thread_idx < kBlockM) {
       // gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
       // we should not write lse back if lse if out of bound.
-      if (lse == -INFINITY)
-        return;
-      else
+      if (lse != -INFINITY)
         gLSElog2(thread_idx) = lse * float(M_LOG2E);
     }
 
