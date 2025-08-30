@@ -143,7 +143,11 @@ class JitSpec:
         tmpdir = get_tmpdir()
         with FileLock(tmpdir / f"{self.name}.lock", thread_local=False):
             self.write_ninja()
-            run_ninja(jit_env.MAGI_ATTENTION_JIT_DIR, self.ninja_path, verbose)
+            run_ninja(
+                jit_env.MAGI_ATTENTION_JIT_DIR / f"{self.name}",
+                self.ninja_path,
+                verbose,
+            )
 
     def build_and_load(self):
         verbose = os.environ.get("MAGI_ATTENTION_BUILD_VERBOSE", "0") == "1"

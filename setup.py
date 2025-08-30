@@ -29,7 +29,7 @@ from pathlib import Path
 
 import torch
 from packaging.version import Version, parse
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
@@ -434,7 +434,7 @@ def prebuild_ffa_kernels() -> None:
 
 setup(
     name=PACKAGE_NAME,
-    packages=find_packages(
+    packages=find_namespace_packages(
         exclude=(
             "build",
             "tests",
