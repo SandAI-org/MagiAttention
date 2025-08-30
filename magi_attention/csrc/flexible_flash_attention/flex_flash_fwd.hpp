@@ -134,7 +134,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
    at::Tensor softmax_lse;
    if (softmax_lse_.has_value()) {
      softmax_lse = softmax_lse_.value();
-     TORCH_CHECK(softmax_lse.scalar_type() == at::kFloat); CHECK_DEVICE(softmax_lse); CHECK_SHAPE(softmax_lse, num_heads_qo, total_q); CHECK_CONTIGUOUS(softmax_lse);
+     TORCH_CHECK(softmax_lse.scalar_type() == at::kFloat); CHECK_DEVICE(softmax_lse); CHECK_SHAPE(softmax_lse, total_q, num_heads_qo); CHECK_CONTIGUOUS(softmax_lse);
    } else {
      softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
    }

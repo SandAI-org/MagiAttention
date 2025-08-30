@@ -24,11 +24,11 @@ def _calc_cu_range_sizes(
     if isinstance(ranges, torch.Tensor):
         ranges = ranges.tolist()
 
-    cu_range_sizes = []
+    cu_range_sizes = [0]
     total_size = 0
     for start, end in ranges:
-        cu_range_sizes.append(total_size)
         total_size += end - start
+        cu_range_sizes.append(total_size)
 
     cu_range_sizes = torch.tensor(cu_range_sizes, dtype=torch.int32, device=device)
 

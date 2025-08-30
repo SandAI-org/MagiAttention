@@ -23,7 +23,7 @@ from magi_attention.common.ranges import AttnRanges
 from magi_attention.testing.precision import torch_attn_ref
 
 
-def test_fa3_func(q, k, v, dout, causal, deterministic, qkv_format="bshd"):
+def fa3_test_func(q, k, v, dout, causal, deterministic, qkv_format="bshd"):
     q_layer, k_layer, v_layer = [x.detach().clone() for x in [q, k, v]]
     q_layer.requires_grad_(True)
     k_layer.requires_grad_(True)
@@ -38,7 +38,7 @@ def test_fa3_func(q, k, v, dout, causal, deterministic, qkv_format="bshd"):
     v_layer.retain_grad()
     softmax_scale = q.shape[-1] ** (-0.5)
     window_size = (-1, 0) if causal else (-1, -1)
-    out, lse = flash_attn_func(
+    out = flash_attn_func(
         q_layer,
         k_layer,
         v_layer,
@@ -51,7 +51,7 @@ def test_fa3_func(q, k, v, dout, causal, deterministic, qkv_format="bshd"):
     dq, dk, dv = q_layer.grad, k_layer.grad, v_layer.grad
     if qkv_format == "sbhd":
         out, dq, dk, dv = [x.transpose(0, 1).contiguous() for x in [out, dq, dk, dv]]
-    return (out, lse, dq, dk, dv)
+    return (out, dq, dk, dv)
 
 
 def generate_unpad_indices(cu_seqlens, cu_seqlens_padded, device):
@@ -65,7 +65,7 @@ def generate_unpad_indices(cu_seqlens, cu_seqlens_padded, device):
     return indices
 
 
-def test_fa3_varlen_func(
+def fa3_varlen_test_func(
     q_,
     k_,
     v_,
@@ -137,7 +137,7 @@ def test_fa3_varlen_func(
     k_part.requires_grad_(True)
     v_part.requires_grad_(True)
 
-    out_, lse = flash_attn_varlen_func(
+    out_ = flash_attn_varlen_func(
         q_part,
         k_part,
         v_part,
@@ -179,7 +179,7 @@ def test_fa3_varlen_func(
         out, dq, dk, dv = [x.transpose(0, 1).contiguous() for x in [out, dq, dk, dv]]
 
     print(f"{out.shape=},{dq.shape=},{dk.shape=},{dv.shape=}")
-    return (out, lse, dq, dk, dv)
+    return (out, dq, dk, dv)
 
 
 def make_causal_mask(

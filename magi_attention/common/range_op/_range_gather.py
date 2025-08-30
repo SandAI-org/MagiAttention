@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import torch
 import triton
 import triton.language as tl
@@ -93,7 +92,6 @@ def range_gather(
     Returns:
         A new tensor containing the gathered values, put into output if provided.
     """
-
     # ---   calculate meta   --- #
 
     # Make ranges contiguous
@@ -109,6 +107,8 @@ def range_gather(
         )
     else:
         cu_range_sizes = cu_range_sizes.contiguous()
+    # sanity check
+    assert cu_range_sizes.size(0) == ranges.size(0) + 1
 
     # Calculate row_map if not provided
     row_map = kwargs.pop("row_map", None)
@@ -116,6 +116,8 @@ def range_gather(
         row_map = _calc_ranges_row_map(ranges, total_size)
     else:
         row_map = row_map.contiguous()
+    # sanity check
+    assert row_map.size(0) == total_size
 
     # ---   pre-process input/output   --- #
 
@@ -139,7 +141,7 @@ def range_gather(
         input = input.contiguous()
         output = output.contiguous()
 
-    # Calculate stride (considering memory step size of elements)
+    # Calculate stride
     input_stride = input.stride(0)
     output_stride = output.stride(0)
 

@@ -24,7 +24,7 @@ from magi_attention.utils import str2seed
 from . import dist_common, utils
 from .dist_common import RUN_IN_MP
 from .gt_dispatcher import GroundTruthDispatcher
-from .precision import EPSILON, assert_close, torch_attn_ref
+from .precision import assert_close, torch_attn_ref
 
 __all__ = [
     "dist_common",
@@ -33,7 +33,6 @@ __all__ = [
     "assert_close",
     "torch_attn_ref",
     "parameterize",
-    "EPSILON",
 ]
 
 

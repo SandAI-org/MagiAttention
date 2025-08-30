@@ -204,7 +204,8 @@ def _flex_flash_attn_forward_compilable(
         direction="fwd",
         head_dim=q.shape[-1],
         compute_dtype=q.dtype,
-        output_dtype=out_type or torch.float32,
+        output_dtype=out_type
+        or (q.dtype if disable_fwd_atomic_reduction else torch.float32),
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_fwd_atomic_reduction,
         ref_block_size=(kblock_m, kblock_n)
@@ -290,13 +291,18 @@ def _flex_flash_attn_forward(
     ]
 
     out = (
-        torch.empty_like(q, dtype=out_type or torch.float32, device=q.device)
+        torch.empty_like(
+            q,
+            dtype=out_type
+            or (q.dtype if disable_fwd_atomic_reduction else torch.float32),
+            device=q.device,
+        )
         if out is None
         else out
     )
     lse = (
         torch.full(
-            (q.size(1), q.size(0)),
+            (q.size(0), q.size(1)),
             fill_value=float("-inf"),
             dtype=torch.float32,
             device=q.device,
@@ -381,7 +387,8 @@ def _flex_flash_attn_backward_compilable(
         direction="bwd",
         head_dim=q.shape[-1],
         compute_dtype=q.dtype,
-        output_dtype=dk_type or torch.float32,
+        output_dtype=dk_type
+        or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
     )
@@ -613,7 +620,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             softmax_scale,
             softcap,
             disable_fwd_atomic_reduction,
-            torch.float32,  # out_type
+            q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
             deterministic,
             sm_margin,
         )

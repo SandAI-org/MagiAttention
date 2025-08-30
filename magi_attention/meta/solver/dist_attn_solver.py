@@ -48,8 +48,8 @@ from magi_attention.utils import (
 )
 from magi_attention.utils._utils import argsort
 
-from ._slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
 from .overlap_solver import OverlapConfig, OverlapSolver, OverlapStageCost
+from .slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
 
 
 class DistAttnSolver:
@@ -72,6 +72,10 @@ class DistAttnSolver:
         self.shard_seqlen_q = dispatch_meta_q.shard_seqlen
         self.shard_seqlen_k = dispatch_meta_k.shard_seqlen
         self.deterministic = magi_attention.is_deterministic_mode_enable()
+
+        assert (
+            not magi_attention.comm.is_qo_comm_enable()
+        ), "QO comm is not supported for this dist-attn solver"
 
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
@@ -1306,6 +1310,11 @@ class DistAttnSolver:
         num_remote_kv_tokens_per_stage: list[int] = []
         kv_group_collective_args_list: list[GroupCollectiveArg] = []
 
+        # NOTE: this solver does not support qo comm for now
+        # thus we assign empty args for qo comm
+        num_remote_qo_tokens_per_stage: list[int] = [0] * self.overlap_degree
+        qo_group_collective_args_list: list[GroupCollectiveArg] = [None] * self.overlap_degree  # type: ignore[list-item]
+
         for transfer_table_this_stage, remote_rank_entry_per_rank_this_stage in zip(
             self.transfer_table_per_stage,
             self.remote_rank_entry_per_rank_per_stage,
@@ -1330,9 +1339,8 @@ class DistAttnSolver:
         comm_meta = CommMeta(
             num_remote_kv_tokens_per_stage=num_remote_kv_tokens_per_stage,
             kv_group_collective_args_list=kv_group_collective_args_list,
-            # TODO: support qo comm meta calculation
-            num_remote_qo_tokens_per_stage=[0] * self.overlap_degree,
-            qo_group_collective_args_list=[None] * self.overlap_degree,  # type: ignore[list-item]
+            num_remote_qo_tokens_per_stage=num_remote_qo_tokens_per_stage,
+            qo_group_collective_args_list=qo_group_collective_args_list,
         )
 
         return comm_meta

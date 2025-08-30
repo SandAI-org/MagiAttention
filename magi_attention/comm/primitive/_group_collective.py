@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -26,7 +26,7 @@ from ._group_collective_hier import (
     hier_group_cast_impl_with_a2av,
     hier_group_reduce_impl_with_a2av,
 )
-from .utils import _calc_group_cast_a2a_args, _calc_group_reduce_a2a_args
+from .utils import calc_group_cast_a2a_args, calc_group_reduce_a2a_args
 
 __all__ = [
     "group_cast_collective",
@@ -43,49 +43,37 @@ def group_cast_collective(
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
-    group: Optional[dist.ProcessGroup] = None,
+    group: dist.ProcessGroup | None = None,
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """
     Args:
-        input(torch.Tensor): input tensor with shape [input_seqlen,...]
-        output(torch.Tensor): output tensor with shape [output_seqlen,...]
-        input_split_size_list(list[int]): the size list to split the input tensor,
+        input (torch.Tensor): input tensor with shape [input_seqlen, ...]
+        output (torch.Tensor): output tensor with shape [output_seqlen, ...]
+        input_split_size_list (list[int]): the size list to split the input tensor,
             where sum(input_split_size_list) == input_seqlen
-        output_split_size_list(list[int]): the size list to split the output tensor,
+        output_split_size_list (list[int]): the size list to split the output tensor,
             where sum(output_split_size_list) == output_seqlen
-        dst_indices_list(list[list[int]]): the destination indices list for each input split to broadcast to,
+        dst_indices_list (list[list[int]]): the destination indices list for each input split to broadcast to,
             where len(dst_indices_list) == len(input_split_size_list)
-        src_index_list(list[int]): the source index list for each output split to receive from,
+        src_index_list (list[int]): the source index list for each output split to receive from,
             where len(src_index_list) == len(output_split_size_list)
+
             NOTE: the order of the output splits are "stable", which means the ones from the same source
             will be in the same order as the input splits
-
-        HACK:
-        **kwargs: additional keyword arguments,
-        this kernel is for now based on all2all-v,
-        thus introducing pre-/post-processing overhead
-        on both tensor and meta info to be compatible with all2all-v input/output.
-        Therefore, we add `kwargs` since the processing of meta info
-        can be processed in advance, and just passed in through `kwargs` to reduce runtime overhead
+        group (dist.ProcessGroup | None): the process group to use, if None, use the default group
+        async_op (bool): whether to use async op. Defaults to False
+        kwargs: additional keyword arguments,
+            this kernel is for now based on all2all-v,
+            thus introducing pre-/post-processing overhead
+            on both tensor and meta info to be compatible with all2all-v input/output.
+            Therefore, we add `kwargs` since the processing of meta info
+            can be processed in advance, and just passed in through `kwargs` to reduce runtime overhead
 
     Returns:
-        work_with_post_process_fn(WorkWithPostProcessFn): async work with the post-process function
+        work_with_post_process_fn (WorkWithPostProcessFn): async work with the post-process function
         to transfer from a2a-v output tensor to group-cast output tensor
-
-    TODO: add examples
-
-    NOTE(xiaowu):
-        * The input can be split into a list of [splited_input] using input_split_size_list,
-            where each splited_input can be sent to 0 or multiple ranks,
-            and the destination ranks are determined by dst_indices_list.
-        * The output can be split into a list of [splited_output] using output_split_size_list,
-            where each splited_output must be received from exactly 1 src_rank,
-            and the source ranks are determined by src_index_list.
-
-    REVIEW(xiaowu):
-        * Must each splited_output be received from exactly 1 src_rank? Could it be 0?
     """
 
     assert len(input_split_size_list) == len(dst_indices_list), (
@@ -129,7 +117,7 @@ def group_cast_collective(
         a2a_output_split_size,
         a2a_input_split_size,
         post_process_fn,
-    ) = _calc_group_cast_a2a_args(
+    ) = calc_group_cast_a2a_args(
         input=input,
         output=output,
         input_split_size_list=input_split_size_list,
@@ -167,45 +155,57 @@ def group_reduce_collective(
     output_split_size_list: list[int],
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
-    group: Optional[dist.ProcessGroup] = None,
+    group: dist.ProcessGroup | None = None,
     async_op: bool = False,
+    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
-    """
+    """Group reduce collective
 
     Args:
-        input(torch.Tensor): input tensor with shape [input_seqlen,...]
-        output(torch.Tensor): output tensor with shape [output_seqlen,...]
-        input_split_size_list(list[int]): the size list to split the input tensor,
+        input (torch.Tensor): input tensor with shape [input_seqlen, ...] to reduce from
+        output (torch.Tensor): output tensor with shape [output_seqlen, ...] to reduce to
+        input_split_size_list (list[int]): the size list to split the input tensor,
             where sum(input_split_size_list) == input_seqlen
-        output_split_size_list(list[int]): the size list to split the output tensor,
+        output_split_size_list (list[int]): the size list to split the output tensor,
             where sum(output_split_size_list) == output_seqlen
-        dst_index_list(list[int]): the destination index list for each input split to return to,
+        dst_index_list (list[int]): the destination index list for each input split to return to,
             where len(dst_index_list) == len(input_split_size_list)
-        src_indices_list(list[list[int]]): the source indices list for each output split to reduce from,
+        src_indices_list (list[list[int]]): the source indices list for each output split to reduce from,
             where len(src_indices_list) == len(output_split_size_list)
+
             NOTE: since any reduce operation satisfies the commutative property, the order of the input splits to reduce
             to the same output split does not matter
+        group (dist.ProcessGroup | None): the process group to use, if None, use the default group
+        async_op (bool): whether to use async op. Defaults to False
+        reduce_op (Literal["sum", "avg", "weight", "lse"]): the reduce operation to use. Defaults to "sum"
+            - "sum": sum reduction
+            - "avg": average reduction
+            - "lse": log-sum-exp weighted average reduction, with lse correction
 
-        HACK:
-        **kwargs: additional keyword arguments,
-        this kernel is for now based on all2all-v,
-        thus introducing pre-/post-processing overhead
-        on both tensor and meta info to be compatible with all2all-v input/output.
-        Therefore, we add `kwargs` since the processing of meta info
-        can be processed in advance, and just passed in through `kwargs` to reduce runtime overhead
+            NOTE:
+                1. if reduce_op is "avg", we will sum-reduce to the output tensor and apply average division afterwards,
+                    so the user should guarantee that the output tensor is initialized to zero
+                    otherwise the semantics will be incorrect unless the user intentionally does this
+                2. if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
+                    and we only support input/output has shape [seqlen, num_heads, head_dim]
+                    while input_lse/output_lse has shape [seqlen, num_heads] for now
+        input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
+            only required and used if reduce_op is "lse"
+        output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
+            only required and used if reduce_op is "lse"
+        kwargs: additional keyword arguments,
+            this kernel is for now based on all2all-v,
+            thus introducing pre-/post-processing overhead
+            on both tensor and meta info to be compatible with all2all-v input/output.
+            Therefore, we add `kwargs` since the processing of meta info
+            can be processed in advance, and just passed in through `kwargs` to reduce runtime overhead
 
     Returns:
-        work_with_post_process_fn(WorkWithPostProcessFn): async work with the post-process function
+        work_with_post_process_fn (WorkWithPostProcessFn): async work with the post-process function
         to transfer from a2a-v output tensor to group-reduce output tensor
-
-    NOTE(xiaowu):
-        * The input can be split into a list of [splited_input] using input_split_size_list,
-            where each splited_input must be sent to one rank,
-            and the destination rank is determined by dst_index_list.
-        * The output can be split into a list of [splited_output] using output_split_size_list,
-            where each splited_output can be reduced from 0 or multiple src_ranks,
-            and the source ranks for reduction are determined by src_indices_list.
     """
     assert len(input_split_size_list) == len(dst_index_list), (
         f"input_split_size_list and dst_index_list should have the same length, "
@@ -235,6 +235,9 @@ def group_reduce_collective(
             src_indices_list=src_indices_list,
             group=group,
             async_op=async_op,
+            reduce_op=reduce_op,
+            input_lse=input_lse,
+            output_lse=output_lse,
             **kwargs,
         )
 
@@ -248,7 +251,7 @@ def group_reduce_collective(
         a2a_output_split_size,
         a2a_input_split_size,
         post_process_fn,
-    ) = _calc_group_reduce_a2a_args(
+    ) = calc_group_reduce_a2a_args(
         input=input,
         output=output,
         input_split_size_list=input_split_size_list,
@@ -256,19 +259,45 @@ def group_reduce_collective(
         dst_index_list=dst_index_list,
         src_indices_list=src_indices_list,
         world_size=world_size,
+        reduce_op=reduce_op,
+        input_lse=input_lse,
+        output_lse=output_lse,
         **kwargs,
     )
 
     # ---------    lauch a2a comm kernel     --------- #
 
-    work = all2all_v(
-        input=a2a_input,
-        output=a2a_output,
-        input_split_size_list=a2a_input_split_size,
-        output_split_size_list=a2a_output_split_size,
-        group=group,
-        async_op=async_op,
-    )
+    if reduce_op == "lse":
+        # FIXME: for now, we can not fuse lse comm with out comm
+        # due to different shape and dtype, which should be considered and fixed in the future
+        a2a_input, a2a_input_lse = a2a_input
+        a2a_output, a2a_output_lse = a2a_output
+        work_out = all2all_v(
+            input=a2a_input,
+            output=a2a_output,
+            input_split_size_list=a2a_input_split_size,
+            output_split_size_list=a2a_output_split_size,
+            group=group,
+            async_op=async_op,
+        )
+        work_lse = all2all_v(
+            input=a2a_input_lse,
+            output=a2a_output_lse,
+            input_split_size_list=a2a_input_split_size,
+            output_split_size_list=a2a_output_split_size,
+            group=group,
+            async_op=async_op,
+        )
+        work = [work_out, work_lse]
+    else:
+        work = all2all_v(
+            input=a2a_input,
+            output=a2a_output,
+            input_split_size_list=a2a_input_split_size,
+            output_split_size_list=a2a_output_split_size,
+            group=group,
+            async_op=async_op,
+        )
 
     return WorkWithPostProcessFn(
         work=work,

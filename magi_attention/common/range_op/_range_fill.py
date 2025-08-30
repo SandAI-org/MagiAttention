@@ -86,10 +86,6 @@ def range_fill_(
     Returns:
         The in-place filled input tensor
     """
-
-    # Check that input has no gradient
-    assert not input.requires_grad, "input must not require grad"
-
     # ---   calculate meta   --- #
 
     # Return directly if empty tensor
@@ -109,6 +105,8 @@ def range_fill_(
         )
     else:
         cu_range_sizes = cu_range_sizes.contiguous()
+    # sanity check
+    assert cu_range_sizes.size(0) == ranges.size(0) + 1
 
     # Calculate row_map if not provided
     row_map = kwargs.pop("row_map", None)
@@ -116,6 +114,8 @@ def range_fill_(
         row_map = _calc_ranges_row_map(ranges, total_size)
     else:
         row_map = row_map.contiguous()
+    # sanity check
+    assert row_map.size(0) == total_size
 
     # ---   pre-process input/output   --- #
 
@@ -125,7 +125,7 @@ def range_fill_(
     else:
         kernel_input = input.contiguous()
 
-    # Calculate stride (considering memory step size of elements)
+    # Calculate stride
     input_stride = kernel_input.stride(0)
 
     # ---   calculate grid size   --- #
@@ -136,12 +136,10 @@ def range_fill_(
     ELEM_PER_BLOCK = 2048 // kernel_input.element_size()
     N_BLOCK = triton.cdiv(N, ELEM_PER_BLOCK)
 
-    # Calculate grid size
     grid = (M, N_BLOCK)
 
     # ---   launch kernel   --- #
 
-    # Launch kernel
     range_fill_kernel[grid](
         kernel_input,
         ranges,

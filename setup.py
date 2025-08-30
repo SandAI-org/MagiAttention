@@ -13,14 +13,12 @@
 # limitations under the License.
 
 import glob
+import itertools
 import os
-import platform
 import shutil
-import stat
 import subprocess
 import sys
 import sysconfig
-import tarfile
 import urllib.request
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,7 +26,7 @@ from pathlib import Path
 
 import torch
 from packaging.version import Version, parse
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
@@ -40,6 +38,7 @@ this_dir = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_NAME = "magi_attention"
 NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
 exe_extension = sysconfig.get_config_var("EXE")
+USER_HOME = os.getenv("MAGI_ATTENTION_HOME")
 
 # For CI: allow forcing C++11 ABI to match NVCR images that use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
@@ -47,7 +46,14 @@ FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 # Skip building CUDA extension modules
 SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
 
-# We no longer build the main flexible_flash_attention_cuda module
+# We no longer build the flexible_flash_attention_cuda module
+# instead, we only pre-build some common options with ref_block_size=None if PREBUILD_FFA is True
+# and leave others built in jit mode
+PREBUILD_FFA = os.getenv("MAGI_ATTENTION_PREBUILD_FFA", "1") == "1"
+PREBUILD_FFA_JOBS = int(os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", "256"))
+
+# You can also set the flags below to skip building other ext modules
+SKIP_FFA_UTILS_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD", "0") == "1"
 SKIP_MAGI_ATTN_EXT_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
 )
@@ -90,8 +96,7 @@ class MagiAttnBuildExtension(BuildExtension):
     def build_extensions(self):
         super().build_extensions()
         # After core extensions are built, optionally prebuild FFA JIT kernels (ref_block_size=None)
-        prebuild = os.getenv("MAGI_ATTENTION_PREBUILD_ENABLE", "1") == "1"
-        if not SKIP_CUDA_BUILD and prebuild:
+        if not SKIP_CUDA_BUILD and PREBUILD_FFA:
             prebuild_ffa_kernels()
 
 
@@ -119,7 +124,7 @@ def check_if_cuda_home_none(global_option: str) -> None:
 
 # Copied from https://github.com/triton-lang/triton/blob/main/python/setup.py
 def get_magi_attention_cache_path() -> str:
-    user_home = os.getenv("MAGI_ATTENTION_HOME")
+    user_home = USER_HOME
     if not user_home:
         user_home = (
             os.getenv("HOME")
@@ -129,7 +134,7 @@ def get_magi_attention_cache_path() -> str:
         )
     if not user_home:
         raise RuntimeError("Could not find user home directory")
-    return os.path.join(user_home, ".magi_attention")
+    return os.path.join(user_home, f".{PACKAGE_NAME}")
 
 
 def open_url(url):
@@ -144,35 +149,6 @@ def open_url(url):
     return urllib.request.urlopen(request, timeout=300)
 
 
-def download_and_copy(name, src_func, dst_path, version, url_func) -> None:
-    magi_attention_cache_path = get_magi_attention_cache_path()
-    base_dir = os.path.dirname(__file__)
-    system = platform.system()
-    arch = platform.machine()
-    arch = {"arm64": "aarch64"}.get(arch, arch)
-    supported = {"Linux": "linux", "Darwin": "linux"}
-    url = url_func(supported[system], arch, version)
-    src_path = src_func(supported[system], arch, version)
-    tmp_path = os.path.join(
-        magi_attention_cache_path, "nvidia", name
-    )  # path to cache the download
-    dst_path = os.path.join(
-        base_dir, os.pardir, "third_party", "nvidia", "backend", dst_path
-    )  # final binary path
-    src_path = os.path.join(tmp_path, src_path)
-    download = not os.path.exists(src_path)
-    if download:
-        print(f"downloading and extracting {url} ...")
-        file = tarfile.open(fileobj=open_url(url), mode="r|*")
-        file.extractall(path=tmp_path)
-    os.makedirs(os.path.split(dst_path)[0], exist_ok=True)
-    print(f"copy {src_path} to {dst_path} ...")
-    if os.path.isdir(src_path):
-        shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
-    else:
-        shutil.copy(src_path, dst_path)
-
-
 def nvcc_threads_args() -> list[str]:
     nvcc_threads = os.getenv("NVCC_THREADS") or "2"
     return ["--threads", nvcc_threads]
@@ -184,44 +160,9 @@ def init_ext_modules() -> None:
     check_if_cuda_home_none(PACKAGE_NAME)
 
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    if bare_metal_version < Version("12.3"):
-        raise RuntimeError("magi_attention is only supported on CUDA 12.3 and above")
-
-    # ptxas 12.8 gives the best perf currently
-    # We want to use the nvcc front end from 12.6 however, since if we use nvcc 12.8
-    # Cutlass 3.8 will expect the new data types in cuda.h from CTK 12.8, which we don't have.
-    if bare_metal_version != Version("12.8"):
-        download_and_copy(
-            name="nvcc",
-            src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin",
-            dst_path="bin",
-            version=NVIDIA_TOOLCHAIN_VERSION["nvcc"],
-            url_func=lambda system, arch, version: f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",  # noqa: E501
-        )
-        download_and_copy(
-            name="ptxas",
-            src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/bin/ptxas",
-            dst_path="bin",
-            version=NVIDIA_TOOLCHAIN_VERSION["ptxas"],
-            url_func=lambda system, arch, version: f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",  # noqa: E501
-        )
-        download_and_copy(
-            name="ptxas",
-            src_func=lambda system, arch, version: f"cuda_nvcc-{system}-{arch}-{version}-archive/nvvm/bin",
-            dst_path="nvvm/bin",
-            version=NVIDIA_TOOLCHAIN_VERSION["ptxas"],
-            url_func=lambda system, arch, version: f"https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz",  # noqa: E501
-        )
-        base_dir = os.path.dirname(__file__)
-        ctk_path_new = os.path.abspath(
-            os.path.join(base_dir, os.pardir, "third_party", "nvidia", "backend", "bin")
-        )
-        nvcc_path_new = os.path.join(ctk_path_new, f"nvcc{exe_extension}")
-        # Append to PATH so nvcc can find cicc in nvvm/bin/cicc (12.8 seems hard-coded to ../nvvm/bin/cicc)
-        os.environ["PATH"] = ctk_path_new + os.pathsep + os.environ["PATH"]
-        os.environ["PYTORCH_NVCC"] = nvcc_path_new
-        # Make nvcc executable, sometimes after the copy it loses its permissions
-        os.chmod(nvcc_path_new, os.stat(nvcc_path_new).st_mode | stat.S_IEXEC)
+    assert bare_metal_version >= Version(
+        "12.8"
+    ), f"{PACKAGE_NAME} is only supported on CUDA 12.8 and above"
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
@@ -240,6 +181,9 @@ def build_ffa_utils_ext_module(
     common_dir: Path,
 ) -> CUDAExtension | None:
     ext_module_name = "flexible_flash_attention_utils_cuda"
+
+    if SKIP_FFA_UTILS_BUILD:
+        return None
 
     print(
         "\n# -------------------     Building flexible_flash_attention_utils_cuda     ------------------- #\n"
@@ -317,9 +261,6 @@ def build_magi_attn_ext_module(
 # init cmdclass
 cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
-# init package_data (minimal, rest controlled by MANIFEST.in)
-package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
-
 # build ext modules
 ext_modules = []
 if not SKIP_CUDA_BUILD:
@@ -328,7 +269,7 @@ if not SKIP_CUDA_BUILD:
 
     # define some paths for the ext modules below
     repo_dir = Path(this_dir)
-    csrc_dir = repo_dir / "magi_attention" / "csrc"
+    csrc_dir = repo_dir / PACKAGE_NAME / "csrc"
     common_dir = csrc_dir / "common"
     cutlass_dir = csrc_dir / "cutlass"
 
@@ -365,26 +306,28 @@ def prebuild_ffa_kernels() -> None:
         from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_spec
     except ModuleNotFoundError as e:
         raise RuntimeError(
-            "Prebuild failed: cannot import magi_attention during build. "
+            f"Prebuild failed: cannot import {PACKAGE_NAME} during build. "
             "Ensure source tree is available. Error: "
         ) from e
 
+    # determine the combinations of prebuild options
+    directions = ["fwd", "bwd"]
     head_dims = [64, 128]
     compute_dtypes = [torch.bfloat16, torch.float16]
-    out_dtype = torch.float32
+    out_dtypes = [torch.float32, torch.bfloat16, torch.float16]
     softcaps = [False, True]
     disable_atomic_opts = [False, True]
 
-    combos = []
-    for direction in ("fwd", "bwd"):
-        for h in head_dims:
-            for cdtype in compute_dtypes:
-                for sc in softcaps:
-                    for da in disable_atomic_opts if direction == "fwd" else [False]:
-                        combos.append((direction, h, cdtype, out_dtype, sc, da))
+    combos = itertools.product(
+        directions,
+        head_dims,
+        compute_dtypes,
+        out_dtypes,
+        softcaps,
+        disable_atomic_opts,
+    )
 
-    jobs = int(os.getenv("MAGI_ATTENTION_PREBUILD_JOBS", "256"))
-
+    # prebuild the kernels in parallel for the determined options
     def _build_one(args):
         direction, h, cdtype, odtype, sc, da = args
         spec, uri = get_ffa_jit_spec(
@@ -397,14 +340,14 @@ def prebuild_ffa_kernels() -> None:
             disable_atomic_reduction=da,
             ref_block_size=None,
         )
-        spec.build()
+        spec.build(verbose=True)
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
         if src_dir.exists():
             shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
         return uri
 
-    with ThreadPoolExecutor(max_workers=jobs) as ex:
+    with ThreadPoolExecutor(max_workers=PREBUILD_FFA_JOBS) as ex:
         futs = {ex.submit(_build_one, c): c for c in combos}
         for fut in as_completed(futs):
             c = futs[fut]
@@ -416,8 +359,8 @@ def prebuild_ffa_kernels() -> None:
 
 
 setup(
-    name="magi_attention",
-    packages=find_packages(
+    name=PACKAGE_NAME,
+    packages=find_namespace_packages(
         exclude=(
             "build",
             "tests",
@@ -427,8 +370,7 @@ setup(
             "assets",
         )
     ),
-    package_data=package_data,
-    include_package_data=True,
+    # package data is defined in pyproject.toml
     long_description=long_description,
     long_description_content_type="text/markdown",
     ext_modules=ext_modules,
