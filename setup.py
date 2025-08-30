@@ -332,9 +332,6 @@ def build_magi_attn_ext_module(
 # init cmdclass
 cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
-# init package_data (minimal, rest controlled by MANIFEST.in)
-package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
-
 # build ext modules
 ext_modules = []
 if not SKIP_CUDA_BUILD:
@@ -444,8 +441,7 @@ setup(
             "assets",
         )
     ),
-    package_data=package_data,
-    include_package_data=True,
+    # package data is defined in pyproject.toml
     long_description=long_description,
     long_description_content_type="text/markdown",
     ext_modules=ext_modules,
