@@ -32,8 +32,10 @@ __all__ = [
 
 def is_ffa_fwd_inplace_correct_enable() -> bool:
     """
-    Toggling this env variable to `1` can enable inplace-correct for out and lse in ffa forward
-    to avoid the storage of partial results and the memory-bound `result_correction` as a forward post process
+    Toggle this env variable to ``1`` can enable inplace-correct for out and lse in ffa forward
+    to avoid the storage of partial results and the memory-bound ``result_correction`` as a forward post process
+
+    Default value is ``0``
 
     NOTE: this feature will be enabled by default as long as it's stable (i.e. no effect on accuracy or performance)
     """
@@ -42,8 +44,10 @@ def is_ffa_fwd_inplace_correct_enable() -> bool:
 
 def is_ffa_bwd_high_precision_reduce_enable() -> bool:
     """
-    Toggling this env variable to `1` can enable high-precision (fp32) reduce for dkv among ranks in ffa backward
+    Toggle this env variable to ``1`` can enable high-precision (fp32) reduce for dkv among ranks in ffa backward
     to increase the precision at the cost of double comm overhead
+
+    Default value is ``0``
 
     NOTE: inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dkv,
     however, by default we will downcast it to kv dtype before reducing among ranks to decrease comm overhead
