@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import itertools
+import glob
 import os
 import platform
 import shutil
@@ -23,292 +23,79 @@ import sysconfig
 import tarfile
 import urllib.request
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import torch
 from packaging.version import Version, parse
 from setuptools import find_packages, setup
-from torch.utils.cpp_extension import (
-    COMMON_HIP_FLAGS,
-    CUDA_HOME,
-    IS_HIP_EXTENSION,
-    IS_WINDOWS,
-    SUBPROCESS_DECODE_ARGS,
-    BuildExtension,
-    CUDAExtension,
-    _is_cuda_file,
-    _join_cuda_home,
-    _join_rocm_home,
-    _maybe_write,
-    get_cxx_compiler,
-)
+from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 with open("./README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
-# ninja build does not work unless include_dirs are abs path
+# Note: ninja build requires include_dirs to be absolute paths
 this_dir = os.path.dirname(os.path.abspath(__file__))
-
 PACKAGE_NAME = "magi_attention"
+NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
+exe_extension = sysconfig.get_config_var("EXE")
+
+# For CI: allow forcing C++11 ABI to match NVCR images that use C++11 ABI
+FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
+
+# Skip building CUDA extension modules
+SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
+
+# We no longer build the main flexible_flash_attention_cuda module
+SKIP_MAGI_ATTN_EXT_BUILD = (
+    os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
+)
+
+os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
 
 
-# FORCE_BUILD: Force a fresh build locally, instead of attempting to find prebuilt wheels
-# SKIP_CUDA_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files,
-# without any cuda compilation
-FORCE_BUILD = os.getenv("MAGI_ATTENTION_FORCE_BUILD", "FALSE") == "TRUE"
-SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
-# For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
-FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "FALSE") == "TRUE"
+class MagiAttnBuildExtension(BuildExtension):
+    """
+    A BuildExtension that switches its behavior based on the command.
 
+    - For development installs (`pip install -e .`), it caches build artifacts
+      in the local `./build` directory for faster re-compilation.
 
-# TODO: remove flags to compile with sm80
-# which we do not support for now
-def _write_ninja_file(
-    path,
-    cflags,
-    post_cflags,
-    cuda_cflags,
-    cuda_post_cflags,
-    cuda_dlink_post_cflags,
-    sources,
-    objects,
-    ldflags,
-    library_target,
-    with_cuda,
-    **kwargs,  # kwargs (ignored) to absorb new flags in torch.utils.cpp_extension
-) -> None:
-    r"""Write a ninja file that does the desired compiling and linking.
-
-    `path`: Where to write this file
-    `cflags`: list of flags to pass to $cxx. Can be None.
-    `post_cflags`: list of flags to append to the $cxx invocation. Can be None.
-    `cuda_cflags`: list of flags to pass to $nvcc. Can be None.
-    `cuda_postflags`: list of flags to append to the $nvcc invocation. Can be None.
-    `sources`: list of paths to source files
-    `objects`: list of desired paths to objects, one per source.
-    `ldflags`: list of flags to pass to linker. Can be None.
-    `library_target`: Name of the output library. Can be None; in that case,
-                      we do no linking.
-    `with_cuda`: If we should be compiling with CUDA.
+    - For building a distributable wheel (`python -m build --wheel`), it uses
+      the default temporary directory behavior of PyTorch's BuildExtension to
+      ensure robust and correct packaging.
     """
 
-    def sanitize_flags(flags):
-        if flags is None:
-            return []
+    def initialize_options(self):
+        super().initialize_options()
+
+        # Core logic: check if wheel build is running. 'bdist_wheel' is triggered by `python -m build`.
+        if "bdist_wheel" not in sys.argv:
+            # If not building a wheel (i.e., dev install like `pip install -e .`), enable local caching
+            print("Development mode detected: Caching build artifacts in build/")
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            self.build_temp = os.path.join(project_root, "build", "temp")
+            self.build_lib = os.path.join(project_root, "build", "lib")
+
+            # Ensure directories exist
+            os.makedirs(self.build_temp, exist_ok=True)
+            os.makedirs(self.build_lib, exist_ok=True)
         else:
-            return [flag.strip() for flag in flags]
-
-    cflags = sanitize_flags(cflags)
-    post_cflags = sanitize_flags(post_cflags)
-    cuda_cflags = sanitize_flags(cuda_cflags)
-    cuda_post_cflags = sanitize_flags(cuda_post_cflags)
-    cuda_dlink_post_cflags = sanitize_flags(cuda_dlink_post_cflags)
-    ldflags = sanitize_flags(ldflags)
-
-    # Sanity checks...
-    assert len(sources) == len(objects)
-    assert len(sources) > 0
-
-    compiler = get_cxx_compiler()
-
-    # Version 1.3 is required for the `deps` directive.
-    config = ["ninja_required_version = 1.3"]
-    config.append(f"cxx = {compiler}")
-    if with_cuda or cuda_dlink_post_cflags:
-        if IS_HIP_EXTENSION:
-            nvcc = _join_rocm_home("bin", "hipcc")
-        else:
-            nvcc = _join_cuda_home("bin", "nvcc")
-        if "PYTORCH_NVCC" in os.environ:
-            nvcc_from_env = os.getenv(
-                "PYTORCH_NVCC"
-            )  # user can set nvcc compiler with ccache using the environment variable here
-        else:
-            nvcc_from_env = nvcc
-        config.append(f"nvcc_from_env = {nvcc_from_env}")
-        config.append(f"nvcc = {nvcc}")
-
-    if IS_HIP_EXTENSION:
-        post_cflags = COMMON_HIP_FLAGS + post_cflags
-    flags = [f'cflags = {" ".join(cflags)}']
-    flags.append(f'post_cflags = {" ".join(post_cflags)}')
-    if with_cuda:
-        flags.append(f'cuda_cflags = {" ".join(cuda_cflags)}')
-        flags.append(f'cuda_post_cflags = {" ".join(cuda_post_cflags)}')
-        cuda_post_cflags_sm80 = [
-            s if s != "arch=compute_90a,code=sm_90a" else "arch=compute_80,code=sm_80"
-            for s in cuda_post_cflags
-        ]
-        flags.append(f'cuda_post_cflags_sm80 = {" ".join(cuda_post_cflags_sm80)}')
-        cuda_post_cflags_sm80_sm90 = cuda_post_cflags + [
-            "-gencode",
-            "arch=compute_80,code=sm_80",
-        ]
-        flags.append(
-            f'cuda_post_cflags_sm80_sm90 = {" ".join(cuda_post_cflags_sm80_sm90)}'
-        )
-        cuda_post_cflags_sm100 = [
-            s
-            if s != "arch=compute_90a,code=sm_90a"
-            else "arch=compute_100a,code=sm_100a"
-            for s in cuda_post_cflags
-        ]
-        flags.append(f'cuda_post_cflags_sm100 = {" ".join(cuda_post_cflags_sm100)}')
-    flags.append(f'cuda_dlink_post_cflags = {" ".join(cuda_dlink_post_cflags)}')
-    flags.append(f'ldflags = {" ".join(ldflags)}')
-
-    # Turn into absolute paths so we can emit them into the ninja build
-    # file wherever it is.
-    sources = [os.path.abspath(file) for file in sources]
-
-    # See https://ninja-build.org/build.ninja.html for reference.
-    compile_rule = ["rule compile"]
-    if IS_WINDOWS:
-        compile_rule.append(
-            "  command = cl /showIncludes $cflags -c $in /Fo$out $post_cflags"
-        )
-        compile_rule.append("  deps = msvc")
-    else:
-        compile_rule.append(
-            "  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out $post_cflags"
-        )
-        compile_rule.append("  depfile = $out.d")
-        compile_rule.append("  deps = gcc")
-
-    if with_cuda:
-        cuda_compile_rule = ["rule cuda_compile"]
-        nvcc_gendeps = ""
-        # --generate-dependencies-with-compile is not supported by ROCm
-        # Nvcc flag `--generate-dependencies-with-compile` is not supported by sccache, which may increase build time.
-        if (
-            torch.version.cuda is not None
-            and os.getenv("TORCH_EXTENSION_SKIP_NVCC_GEN_DEPENDENCIES", "0") != "1"
-        ):
-            cuda_compile_rule.append("  depfile = $out.d")
-            cuda_compile_rule.append("  deps = gcc")
-            # Note: non-system deps with nvcc are only supported
-            # on Linux so use --generate-dependencies-with-compile
-            # to make this work on Windows too.
-            nvcc_gendeps = (
-                "--generate-dependencies-with-compile --dependency-output $out.d"
+            # If building a wheel, rely on the default PyTorch behavior so .so files are correctly packaged
+            print(
+                "Wheel build mode detected: Using default temporary directories in /tmp/ for robust packaging."
             )
-        cuda_compile_rule_sm80 = (
-            ["rule cuda_compile_sm80"]
-            + cuda_compile_rule[1:]
-            + [
-                f"  command = $nvcc_from_env {nvcc_gendeps} $cuda_cflags -c $in -o $out $cuda_post_cflags_sm80"
-            ]
-        )
-        cuda_compile_rule_sm80_sm90 = (
-            ["rule cuda_compile_sm80_sm90"]
-            + cuda_compile_rule[1:]
-            + [
-                f"  command = $nvcc_from_env {nvcc_gendeps} $cuda_cflags -c $in -o $out $cuda_post_cflags_sm80_sm90"
-            ]
-        )
-        cuda_compile_rule_sm100 = (
-            ["rule cuda_compile_sm100"]
-            + cuda_compile_rule[1:]
-            + [
-                f"  command = $nvcc_from_env {nvcc_gendeps} $cuda_cflags -c $in -o $out $cuda_post_cflags_sm100"
-            ]
-        )
-        cuda_compile_rule.append(
-            f"  command = $nvcc_from_env {nvcc_gendeps} $cuda_cflags -c $in -o $out $cuda_post_cflags"
-        )
 
-    # Emit one build rule per source to enable incremental build.
-    build = []
-    for source_file, object_file in zip(sources, objects):
-        is_cuda_source = _is_cuda_file(source_file) and with_cuda
-        if is_cuda_source:
-            if source_file.endswith("_sm90.cu"):
-                rule = "cuda_compile"
-            elif source_file.endswith("_sm80.cu"):
-                rule = "cuda_compile_sm80"
-            elif source_file.endswith("_sm100.cu"):
-                rule = "cuda_compile_sm100"
-            else:
-                rule = "cuda_compile_sm80_sm90"
-        else:
-            rule = "compile"
-        if IS_WINDOWS:
-            source_file = source_file.replace(":", "$:")
-            object_file = object_file.replace(":", "$:")
-        source_file = source_file.replace(" ", "$ ")
-        object_file = object_file.replace(" ", "$ ")
-        build.append(f"build {object_file}: {rule} {source_file}")
-
-    if cuda_dlink_post_cflags:
-        devlink_out = os.path.join(os.path.dirname(objects[0]), "dlink.o")
-        devlink_rule = ["rule cuda_devlink"]
-        devlink_rule.append("  command = $nvcc $in -o $out $cuda_dlink_post_cflags")
-        devlink = [f'build {devlink_out}: cuda_devlink {" ".join(objects)}']
-        objects += [devlink_out]
-    else:
-        devlink_rule, devlink = [], []
-
-    if library_target is not None:
-        link_rule = ["rule link"]
-        if IS_WINDOWS:
-            cl_paths = (
-                subprocess.check_output(["where", "cl"])
-                .decode(*SUBPROCESS_DECODE_ARGS)
-                .split("\r\n")
-            )
-            if len(cl_paths) >= 1:
-                cl_path = os.path.dirname(cl_paths[0]).replace(":", "$:")
-            else:
-                raise RuntimeError("MSVC is required to load C++ extensions")
-            link_rule.append(
-                f'  command = "{cl_path}/link.exe" $in /nologo $ldflags /out:$out'
-            )
-        else:
-            link_rule.append("  command = $cxx $in $ldflags -o $out")
-
-        link = [f'build {library_target}: link {" ".join(objects)}']
-
-        default = [f"default {library_target}"]
-    else:
-        link_rule, link, default = [], [], []
-
-    # 'Blocks' should be separated by newlines, for visual benefit.
-    blocks = [config, flags, compile_rule]
-    if with_cuda:
-        blocks.append(cuda_compile_rule)  # type: ignore[possibly-undefined]
-        blocks.append(cuda_compile_rule_sm80)  # type: ignore[possibly-undefined]
-        blocks.append(cuda_compile_rule_sm80_sm90)  # type: ignore[possibly-undefined]
-        blocks.append(cuda_compile_rule_sm100)  # type: ignore[possibly-undefined]
-    blocks += [devlink_rule, link_rule, build, devlink, link, default]
-    content = "\n\n".join("\n".join(b) for b in blocks)
-    # Ninja requires a new lines at the end of the .ninja file
-    content += "\n"
-    _maybe_write(path, content)
+    def build_extensions(self):
+        super().build_extensions()
+        # After core extensions are built, optionally prebuild FFA JIT kernels (ref_block_size=None)
+        prebuild = os.getenv("MAGI_ATTENTION_PREBUILD_ENABLE", "1") == "1"
+        if not SKIP_CUDA_BUILD and prebuild:
+            prebuild_ffa_kernels()
 
 
-# HACK: we monkey patch pytorch's _write_ninja_file to pass
-# "-gencode arch=compute_sm90a,code=sm_90a" to files ending in '_sm90.cu',
-# and pass "-gencode arch=compute_sm80,code=sm_80" to files ending in '_sm80.cu'
-torch.utils.cpp_extension._write_ninja_file = _write_ninja_file
-
-
-def get_platform():
-    """
-    Returns the platform name as used in wheel filenames.
-    """
-    if sys.platform.startswith("linux"):
-        return "linux_x86_64"
-    elif sys.platform == "darwin":
-        mac_version = ".".join(platform.mac_ver()[0].split(".")[:2])
-        return f"macosx_{mac_version}_x86_64"
-    elif sys.platform == "win32":
-        return "win_amd64"
-    else:
-        raise ValueError("Unsupported platform: {}".format(sys.platform))
-
-
-def get_cuda_bare_metal_version(cuda_dir):
+def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
     raw_output = subprocess.check_output(
         [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
     )
@@ -322,8 +109,7 @@ def get_cuda_bare_metal_version(cuda_dir):
 def check_if_cuda_home_none(global_option: str) -> None:
     if CUDA_HOME is not None:
         return
-    # warn instead of error because user could be downloading prebuilt wheels, so nvcc won't be necessary
-    # in that case.
+    # Warn instead of error: users may be downloading prebuilt wheels; nvcc not required in that case.
     warnings.warn(
         f"{global_option} was requested, but nvcc was not found.  Are you sure your environment has nvcc available?  "
         "If you're installing within a container from https://hub.docker.com/r/pytorch/pytorch, "
@@ -331,13 +117,8 @@ def check_if_cuda_home_none(global_option: str) -> None:
     )
 
 
-# Taken from https://github.com/pytorch/pytorch/blob/master/tools/setup_helpers/env.py
-def check_env_flag(name: str, default: str = "") -> bool:
-    return os.getenv(name, default).upper() in ["ON", "1", "YES", "TRUE", "Y"]
-
-
 # Copied from https://github.com/triton-lang/triton/blob/main/python/setup.py
-def get_magi_attention_cache_path():
+def get_magi_attention_cache_path() -> str:
     user_home = os.getenv("MAGI_ATTENTION_HOME")
     if not user_home:
         user_home = (
@@ -363,7 +144,7 @@ def open_url(url):
     return urllib.request.urlopen(request, timeout=300)
 
 
-def download_and_copy(name, src_func, dst_path, version, url_func):
+def download_and_copy(name, src_func, dst_path, version, url_func) -> None:
     magi_attention_cache_path = get_magi_attention_cache_path()
     base_dir = os.path.dirname(__file__)
     system = platform.system()
@@ -392,26 +173,16 @@ def download_and_copy(name, src_func, dst_path, version, url_func):
         shutil.copy(src_path, dst_path)
 
 
-def nvcc_threads_args():
+def nvcc_threads_args() -> list[str]:
     nvcc_threads = os.getenv("NVCC_THREADS") or "2"
     return ["--threads", nvcc_threads]
 
 
-NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
-
-exe_extension = sysconfig.get_config_var("EXE")
-
-
-cmdclass = {}  # type: ignore[var-annotated]
-ext_modules = []
-
-
-if not SKIP_CUDA_BUILD:
-    print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
-    TORCH_MAJOR = int(torch.__version__.split(".")[0])
-    TORCH_MINOR = int(torch.__version__.split(".")[1])
+def init_ext_modules() -> None:
+    print(f"\n{torch.__version__=}\n")
 
     check_if_cuda_home_none(PACKAGE_NAME)
+
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
     if bare_metal_version < Version("12.3"):
         raise RuntimeError("magi_attention is only supported on CUDA 12.3 and above")
@@ -446,16 +217,11 @@ if not SKIP_CUDA_BUILD:
             os.path.join(base_dir, os.pardir, "third_party", "nvidia", "backend", "bin")
         )
         nvcc_path_new = os.path.join(ctk_path_new, f"nvcc{exe_extension}")
-        # Need to append to path otherwise nvcc can't find cicc in nvvm/bin/cicc
-        # nvcc 12.8 seems to hard-code looking for cicc in ../nvvm/bin/cicc
+        # Append to PATH so nvcc can find cicc in nvvm/bin/cicc (12.8 seems hard-coded to ../nvvm/bin/cicc)
         os.environ["PATH"] = ctk_path_new + os.pathsep + os.environ["PATH"]
         os.environ["PYTORCH_NVCC"] = nvcc_path_new
         # Make nvcc executable, sometimes after the copy it loses its permissions
         os.chmod(nvcc_path_new, os.stat(nvcc_path_new).st_mode | stat.S_IEXEC)
-
-    cc_flag = []
-    cc_flag.append("-gencode")
-    cc_flag.append("arch=compute_90a,code=sm_90a")
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
@@ -463,102 +229,190 @@ if not SKIP_CUDA_BUILD:
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
 
-    repo_dir = Path(this_dir)
 
-    cutlass_dir = repo_dir / "magi_attention" / "csrc" / "cutlass"
+def to_full_ext_module_name(ext_module_name: str) -> str:
+    return f"{PACKAGE_NAME}.{ext_module_name}"
 
-    ffa_dir_abs = repo_dir / "magi_attention" / "csrc" / "flexible_flash_attention"
-    ffa_dir_rel = ffa_dir_abs.relative_to(repo_dir)
 
-    common_dir = repo_dir / "magi_attention" / "csrc" / "common"
+def build_ffa_utils_ext_module(
+    repo_dir: Path,
+    csrc_dir: Path,
+    common_dir: Path,
+) -> CUDAExtension | None:
+    ext_module_name = "flexible_flash_attention_utils_cuda"
 
-    # custom flags
-    DISABLE_HDIM64 = False
-    DISABLE_HDIM96 = True
-    DISABLE_HDIM128 = False
-    DISABLE_HDIM192 = True
-    DISABLE_HDIM256 = True
-    DISABLE_FP16 = False
-    DISABLE_BACKWARD = False
-    DISABLE_SOFTCAP = False
-    DISABLE_CLUSTER = False
-
-    feature_args = (
-        []
-        + (["-DFLASHATTENTION_DISABLE_BACKWARD"] if DISABLE_BACKWARD else [])
-        + (["-DFLASHATTENTION_DISABLE_SOFTCAP"] if DISABLE_SOFTCAP else [])
-        + (["-DFLASHATTENTION_DISABLE_FP16"] if DISABLE_FP16 else [])
-        + (["-DFLASHATTENTION_DISABLE_CLUSTER"] if DISABLE_CLUSTER else [])
-        + (["-DFLASHATTENTION_DISABLE_HDIM64"] if DISABLE_HDIM64 else [])
-        + (["-DFLASHATTENTION_DISABLE_HDIM96"] if DISABLE_HDIM96 else [])
-        + (["-DFLASHATTENTION_DISABLE_HDIM128"] if DISABLE_HDIM128 else [])
-        + (["-DFLASHATTENTION_DISABLE_HDIM192"] if DISABLE_HDIM192 else [])
-        + (["-DFLASHATTENTION_DISABLE_HDIM256"] if DISABLE_HDIM256 else [])
+    print(
+        "\n# -------------------     Building flexible_flash_attention_utils_cuda     ------------------- #\n"
     )
 
-    DTYPE = ["bf16"] + (["fp16"] if not DISABLE_FP16 else [])
-    HEAD_DIMENSIONS = ["all"]
-    SOFTCAP = [""] + (["_softcap"] if not DISABLE_SOFTCAP else [])
-    sources_fwd_sm90 = [
-        f"{ffa_dir_rel}/instantiations/flash_fwd_hdim{hdim}_{dtype}{softcap}_sm90.cu"
-        for hdim, dtype, softcap in itertools.product(HEAD_DIMENSIONS, DTYPE, SOFTCAP)
+    utils_dir_abs = csrc_dir / "utils"
+    utils_dir_rel = utils_dir_abs.relative_to(repo_dir)
+
+    sources = [
+        f"{utils_dir_rel}/bindings.cpp",
+        f"{utils_dir_rel}/unique_consecutive_pairs.cu",
     ]
-    sources_bwd_sm90 = [
-        f"{ffa_dir_rel}/instantiations/flash_bwd_hdim{hdim}_{dtype}{softcap}_sm90.cu"
-        for hdim, dtype, softcap in itertools.product(HEAD_DIMENSIONS, DTYPE, SOFTCAP)
-    ]
-    if DISABLE_BACKWARD:
-        sources_bwd_sm90 = []
-    sources = [f"{ffa_dir_rel}/flash_api.cpp"] + sources_fwd_sm90 + sources_bwd_sm90
-    sources += [f"{ffa_dir_rel}/fast_zero_fill.cu"]
-    sources += [f"{ffa_dir_rel}/unique_consecutive_pairs.cu"]
-    nvcc_flags = [
-        "-O3",
-        "-Xptxas",
-        "-v",
-        "-std=c++17",
-        "--ftemplate-backtrace-limit=0",  # To debug template code
-        "--use_fast_math",
-        # "--keep",
-        # "--ptxas-options=--verbose,--register-usage-level=5,--warn-on-local-memory-usage", # printing out number of registers
-        "--resource-usage",  # printing out number of registers
-        # f"--split-compile={os.getenv('NVCC_THREADS', '4')}",  # split-compile is faster
-        "-lineinfo",  # TODO: disable this for release to reduce binary size
-        "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED",  # Necessary for the WGMMA shapes that we use
-        "-DCUTLASS_ENABLE_GDC_FOR_SM90",  # For PDL
-        "-DCUTLASS_DEBUG_TRACE_LEVEL=0",  # Can toggle for debugging
-        "-DNDEBUG",  # Important, otherwise performance is severely impacted
-    ]
-    if get_platform() == "win_amd64":
-        nvcc_flags.extend(
-            [
-                "-D_USE_MATH_DEFINES",  # for M_LN2
-                "-Xcompiler=/Zc:__cplusplus",  # sets __cplusplus correctly, CUTLASS_CONSTEXPR_IF_CXX17 needed for cutlass::gcd
-            ]
-        )
+
     include_dirs = [
         common_dir,
-        ffa_dir_abs,
-        cutlass_dir / "include",
+        utils_dir_abs,
     ]
 
     extra_compile_args = {
-        "cxx": ["-O3", "-std=c++17"] + feature_args,
-        "nvcc": nvcc_threads_args() + nvcc_flags + cc_flag + feature_args,
+        "cxx": ["-O3", "-std=c++17"],
+        "nvcc": nvcc_threads_args()
+        + [
+            "-O3",
+            "-Xptxas",
+            "-v",
+            "-std=c++17",
+            "--use_fast_math",
+            "-lineinfo",
+            "-DNDEBUG",
+        ],
     }
 
-    ext_modules.append(
-        CUDAExtension(
-            name="flexible_flash_attention_cuda",
-            sources=sources,
-            extra_compile_args=extra_compile_args,
-            include_dirs=include_dirs,
-        )
+    return CUDAExtension(
+        name=to_full_ext_module_name(ext_module_name),
+        sources=sources,
+        extra_compile_args=extra_compile_args,
+        include_dirs=include_dirs,
     )
 
-package_data = {
-    "magi_attention": ["*.pyi", "**/*.pyi"],
-}
+
+def build_magi_attn_ext_module(
+    repo_dir: Path,
+    csrc_dir: Path,
+    common_dir: Path,
+) -> CUDAExtension | None:
+    ext_module_name = "magi_attn_ext"
+
+    if SKIP_MAGI_ATTN_EXT_BUILD:
+        return None
+
+    print(
+        "\n# -------------------     Building magi_attn_ext     ------------------- #\n"
+    )
+
+    magi_attn_ext_dir_abs = csrc_dir / "extensions"
+
+    # init sources
+    cpp_files = glob.glob(str(magi_attn_ext_dir_abs / "*.cpp"))
+    sources = [str(Path(f).relative_to(repo_dir)) for f in cpp_files]
+
+    # init include dirs
+    include_dirs = [common_dir, magi_attn_ext_dir_abs]
+
+    # init extra compile args
+    extra_compile_args = {"cxx": ["-O3", "-std=c++17"]}
+
+    return CUDAExtension(
+        name=to_full_ext_module_name(ext_module_name),
+        sources=sources,
+        extra_compile_args=extra_compile_args,
+        include_dirs=include_dirs,
+    )
+
+
+# init cmdclass
+cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
+
+# init package_data (minimal, rest controlled by MANIFEST.in)
+package_data = {PACKAGE_NAME: ["*.pyi", "**/*.pyi"]}
+
+# build ext modules
+ext_modules = []
+if not SKIP_CUDA_BUILD:
+    # init before building any ext module
+    init_ext_modules()
+
+    # define some paths for the ext modules below
+    repo_dir = Path(this_dir)
+    csrc_dir = repo_dir / "magi_attention" / "csrc"
+    common_dir = csrc_dir / "common"
+    cutlass_dir = csrc_dir / "cutlass"
+
+    # build magi attn ext module
+    magi_attn_ext_module = build_magi_attn_ext_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+    )
+    if magi_attn_ext_module is not None:
+        ext_modules.append(magi_attn_ext_module)
+
+    # build utils ext module
+    ffa_utils_ext_module = build_ffa_utils_ext_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+    )
+    if ffa_utils_ext_module is not None:
+        ext_modules.append(ffa_utils_ext_module)
+
+
+def prebuild_ffa_kernels() -> None:
+    print(
+        "\n# -------------------     Prebuilding FFA JIT kernels (ref_block_size=None)     ------------------- #\n"
+    )
+
+    # During build time, the package isn't installed yet. Fall back to source tree import.
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    try:
+        from magi_attention.common.jit import env as jit_env
+        from magi_attention.functional._flex_flash_attn_jit import get_ffa_jit_spec
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "Prebuild failed: cannot import magi_attention during build. "
+            "Ensure source tree is available. Error: "
+        ) from e
+
+    head_dims = [64, 128]
+    compute_dtypes = [torch.bfloat16, torch.float16]
+    out_dtype = torch.float32
+    softcaps = [False, True]
+    disable_atomic_opts = [False, True]
+
+    combos = []
+    for direction in ("fwd", "bwd"):
+        for h in head_dims:
+            for cdtype in compute_dtypes:
+                for sc in softcaps:
+                    for da in disable_atomic_opts if direction == "fwd" else [False]:
+                        combos.append((direction, h, cdtype, out_dtype, sc, da))
+
+    jobs = int(os.getenv("MAGI_ATTENTION_PREBUILD_JOBS", "256"))
+
+    def _build_one(args):
+        direction, h, cdtype, odtype, sc, da = args
+        spec, uri = get_ffa_jit_spec(
+            arch=(9, 0),
+            direction=direction,
+            head_dim=h,
+            compute_dtype=cdtype,
+            output_dtype=odtype,
+            softcap=sc,
+            disable_atomic_reduction=da,
+            ref_block_size=None,
+        )
+        spec.build()
+        src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
+        dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
+        if src_dir.exists():
+            shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+        return uri
+
+    with ThreadPoolExecutor(max_workers=jobs) as ex:
+        futs = {ex.submit(_build_one, c): c for c in combos}
+        for fut in as_completed(futs):
+            c = futs[fut]
+            try:
+                uri = fut.result()
+                print(f"Prebuilt: {uri}")
+            except Exception as e:
+                print(f"Prebuild failed for {c}: {e}")
 
 
 setup(
@@ -575,22 +429,8 @@ setup(
     ),
     package_data=package_data,
     include_package_data=True,
-    py_modules=["magi_attention"],
-    description="A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Mask Training",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: Apache Software License",
-        "Operating System :: Unix",
-    ],
     ext_modules=ext_modules,
-    cmdclass={"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension},
-    python_requires=">=3.10",
-    install_requires=[
-        "torch",
-        "einops",
-        "packaging",
-        "ninja",
-    ],
+    cmdclass=cmdclass,
 )

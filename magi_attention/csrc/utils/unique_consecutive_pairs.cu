@@ -20,7 +20,6 @@
 #include <vector>
 
 #include "cuda_check.h"
-#include "flash.h"
 
 // ===================================================================
 // Data Structure for (int, int) Pairs

@@ -25,7 +25,7 @@ from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType, AttnRole
 from magi_attention.config import DistAttnConfig
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
-from magi_attention.functional.dist_attn import DistFlashAttnRuntime, dist_attn_func
+from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta import (
     calc_attn_meta_from_dispatch_meta,
     calc_dispatch_meta_from_qk_ranges,
@@ -50,6 +50,7 @@ class DistAttnRuntimeKey:
     dist_attn_config: DistAttnConfig
     is_deterministic_mode_enable: bool
     is_hierarchical_comm_enable: bool
+    is_qo_comm_enable: bool
 
 
 class DistAttnRuntimeMgr:
@@ -61,7 +62,7 @@ class DistAttnRuntimeMgr:
         chunk_size: int,
         dist_attn_config: DistAttnConfig,
         attn_solver: DistAttnSolver,
-        dist_attn_runtime: DistFlashAttnRuntime,
+        dist_attn_runtime: DistAttnRuntime,
         *,
         ref_q_ranges: AttnRanges,
         ref_k_ranges: AttnRanges,
@@ -416,11 +417,11 @@ def init_dist_attn_runtime_mgr(
         cp_mesh=cp_mesh,
     )
 
-    dist_attn_runtime = DistFlashAttnRuntime(
+    dist_attn_runtime = DistAttnRuntime(
         comm_meta=comm_meta,
         calc_meta=attn_calc_meta,
-        cp_group_kv=cp_group,
-        cp_group_dkv=cp_group,  # TODO: support interface to set distinct cp group for dkv
+        cp_group_gc=cp_group,
+        cp_group_gr=cp_group,  # TODO: support interface to set distinct cp group for group-reduce
     )
 
     return DistAttnRuntimeMgr(

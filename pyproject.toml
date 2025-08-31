@@ -6,12 +6,11 @@ authors = [
   {name = "littsk", email = "zeweitao@sand.ai"},
   {name = "Strivin0311", email = "yunpenghuang@sand.ai"},
 ]
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
 ]
 
@@ -23,7 +22,13 @@ classifiers = [
 profile = "black"
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "build", "versioningit"]
+requires = [
+    "setuptools>=61.0",
+    "wheel",
+    "torch",
+    "ninja",
+    "packaging"
+]
 build-backend = "setuptools.build_meta"
 
 [tool.versioningit]

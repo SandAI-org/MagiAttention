@@ -1,5 +1,6 @@
 # magi_attention
 magi_attention/_version.py
+magi_attention/flex_flash_attn*
 *.nsys-rep
 *.ncu-rep
 
