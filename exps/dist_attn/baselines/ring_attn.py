@@ -300,7 +300,6 @@ class TERingAGAttnFunc(torch.autograd.Function):
                         **{},
                     )
                     softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
-                    # print(f"{out_per_step[i].shape=},{softmax_lse_per_step[i].shape=}")
 
             if i > 0:
                 with torch.cuda.stream(flash_attn_streams[i - 1]):
@@ -826,19 +825,20 @@ class TERingAttnFunc(torch.autograd.Function):
                         **{},
                     )
                     softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
+                    # softmax_lse_per_step[i] = softmax_lse_per_step[i].narrow(0, 0, q_inputs[i % 2].shape[0])
+                    # [b, np, sq, 1] -> [b, np, sq]
+                    # or [t, np, 1] -> [t, np]
+                    softmax_lse_per_step[i].squeeze_(-1)  # type: ignore[attr-defined]
+                    if softmax_lse_in_packed_format:
+                        softmax_lse_per_step[i] = (
+                            softmax_lse_per_step[i].transpose(0, 1).contiguous()  # type: ignore[attr-defined]
+                        )
 
             if i > 0:
                 # wait until fwd restuls correction of last step is done
                 if i > 1:
                     flash_attn_streams[(i - 1) % 2].wait_event(
                         fwd_results_correction_done
-                    )
-                # [b, np, sq, 1] -> [b, np, sq]
-                # or [t, np, 1] -> [t, np]
-                softmax_lse_per_step[i - 1].squeeze_(-1)  # type: ignore[attr-defined]
-                if softmax_lse_in_packed_format:
-                    softmax_lse_per_step[i - 1] = (
-                        softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()  # type: ignore[attr-defined]
                     )
 
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
@@ -858,11 +858,13 @@ class TERingAttnFunc(torch.autograd.Function):
                             cu_seqlens_q_padded,
                             softmax_lse_in_packed_format,
                         )
-                if i < cp_size:
-                    flash_attn_streams[(i - 1) % 2].record_event(
-                        fwd_results_correction_done
-                    )
 
+                # if i < cp_size:
+                flash_attn_streams[(i - 1) % 2].record_event(
+                    fwd_results_correction_done
+                )
+
+        flash_attn_streams[cp_size % 2].wait_event(fwd_results_correction_done)
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
         second_half_lse_seqlen = None
