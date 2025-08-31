@@ -572,13 +572,17 @@ def get_sdpa_mask_from_var_block_mask(
 
     return sdpa_mask
 
+
 # ================ Utils for Native Sparse Attention ================
 
+
+# TODO: strict causal
 def generate_ranges_from_topk_index_token_major(
     topk_idx: torch.Tensor,
     num_group: int,
     block_n: int,
     seqlen_k: int,
+    causal: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generates offset query and key range tensors for Grouped-Query Attention (GQA)
@@ -608,8 +612,12 @@ def generate_ranges_from_topk_index_token_major(
 
     # 3. Create index grids for broadcasting.
     # These tensors represent the q_idx and kv_head loop variables.
-    q_indices = torch.arange(seqlen_q, device=device, dtype=torch.int32).view(1, seqlen_q, 1)
-    kv_head_indices = torch.arange(num_kv_heads, device=device, dtype=torch.int32).view(num_kv_heads, 1, 1)
+    q_indices = torch.arange(seqlen_q, device=device, dtype=torch.int32).view(
+        1, seqlen_q, 1
+    )
+    kv_head_indices = torch.arange(num_kv_heads, device=device, dtype=torch.int32).view(
+        num_kv_heads, 1, 1
+    )
 
     # 4. Calculate q_start and k_start for ALL possible pairs in a vectorized way.
 
@@ -638,6 +646,7 @@ def generate_ranges_from_topk_index_token_major(
 
     return q_ranges.int(), k_ranges.int()
 
+
 def get_sdpa_mask_from_topk_index(
     topk_idx: torch.Tensor,
     num_group: int,
@@ -660,13 +669,11 @@ def get_sdpa_mask_from_topk_index(
                     continue
                 h_q_start = kv_head * num_group
                 h_q_end = (kv_head + 1) * num_group
-                q_start = q_idx 
-                q_end = (q_idx + 1)
+                q_start = q_idx
+                q_end = q_idx + 1
                 k_start = k_block * block_n
                 k_end = k_start + block_n
 
                 sdpa_mask[:, h_q_start:h_q_end, q_start:q_end, k_start:k_end] = True
-        
+
     return sdpa_mask
-
-

@@ -12,38 +12,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import math
+import os
 from datetime import datetime
 from functools import partial
 
 import torch
-from einops import rearrange
 from baselines.attn_impl import ffa_func
-from baselines.utils import (
-    seed_everything,
+from baselines.fsa.ops.FSA_topk_sparse_attention import (
+    _topk_sparse_attention_fwd_opt_per_seq,
 )
-from baselines.fsa.ops.FSA_topk_sparse_attention import (_topk_sparse_attention_fwd_opt,
-                                                         _topk_sparse_attention_fwd_opt_per_seq,
-                                               backward_dq_opt)
 from baselines.nsa_ref.ops import compressed_attention, linear_compress
-from baselines.nsa_ref.ops.topk_sparse_attention import (_topk_sparse_attention_fwd,
-                                               backward_dq)
-from baselines.nsa_ref.ops.utils import get_num_warps_stages, is_hopper_gpu
+from baselines.nsa_ref.ops.topk_sparse_attention import _topk_sparse_attention_fwd
+from baselines.nsa_ref.ops.utils import is_hopper_gpu
+from baselines.utils import seed_everything
+from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
-from magi_attention.utils.sparse_utils import generate_ranges_from_topk_index_token_major
+from magi_attention.utils.sparse_utils import (
+    generate_ranges_from_topk_index_token_major,
+)
 
 IS_HOPPER_GPU = is_hopper_gpu()
 
 os.environ["PYTHONPATH"] = "exps/attn/baselines"
+
 
 def create_cu_seqlens(seqlen: int) -> torch.Tensor:
     """Create cumulative sequence lengths tensor for batch processing."""
     return torch.arange(0, 2 * seqlen, seqlen, dtype=torch.int32)
 
 
-impls = ["ffa", "nsa_ref"]
+impls = ["ffa", "fsa", "nsa_ref"]
 
 # actual seqlen
 seqlens = [65536]
@@ -140,11 +140,12 @@ def sparse_attn_benchmark(
     kernel_size = 32
     kernel_stride = 16
 
-
     # Create test data
     device = "cuda"
 
-    assert num_q_heads % num_k_heads == 0, "num_k_heads must be divisible by num_q_heads"
+    assert (
+        num_q_heads % num_k_heads == 0
+    ), "num_k_heads must be divisible by num_q_heads"
     num_share_q_heads = num_q_heads // num_k_heads
 
     # Generate random q, k, v tensors
@@ -153,9 +154,15 @@ def sparse_attn_benchmark(
     v = torch.randn(seqlen, num_k_heads, head_dim, device=device, dtype=dtype)
 
     # generate nsa parameters
-    compress_key = torch.randn(num_k_heads, head_dim * kernel_size, head_dim, device=device, dtype=dtype)
-    compress_value = torch.randn(num_k_heads, head_dim * kernel_size, head_dim, device=device, dtype=dtype)
-    intra_block_pe = torch.randn(num_k_heads, kernel_size, head_dim, device=device, dtype=dtype)
+    compress_key = torch.randn(
+        num_k_heads, head_dim * kernel_size, head_dim, device=device, dtype=dtype
+    )
+    compress_value = torch.randn(
+        num_k_heads, head_dim * kernel_size, head_dim, device=device, dtype=dtype
+    )
+    intra_block_pe = torch.randn(
+        num_k_heads, kernel_size, head_dim, device=device, dtype=dtype
+    )
 
     # Create cumulative sequence lengths
     cu_seqlens = create_cu_seqlens(seqlen).to(device)
@@ -213,7 +220,9 @@ def sparse_attn_benchmark(
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * nhq * hd * real_sparsity
 
     if attn_impl in ("ffa"):
-        q = rearrange(q, "s h d -> (s h) 1 d") # NOTE: permuted for contiguous access of same group!
+        q = rearrange(
+            q, "s h d -> (s h) 1 d"
+        )  # NOTE: permuted for contiguous access of same group!
         k = rearrange(k, "s h d -> (h s) 1 d")
         v = rearrange(v, "s h d -> (h s) 1 d")
 
@@ -283,6 +292,7 @@ def sparse_attn_benchmark(
                 sm_scale,
                 causal=causal,
             )
+
             def fn():
                 return func_opt()
 
@@ -334,7 +344,6 @@ def sparse_attn_benchmark(
 
                 def fn():
                     pass
-        
 
     # --------- try do the bench --------- #
     if is_attn_impl_support_this_mask:
