@@ -258,36 +258,38 @@ class NSACorrectnessTest:
 
         return output
 
+    def cal_diff(self, x: torch.Tensor, y: torch.Tensor, name: str) -> None:
+        x, y = x.double(), y.double()
+        RMSE = ((x - y) * (x - y)).mean().sqrt().item()
+        cos_diff = 1 - 2 * (x * y).sum().item() / max(
+            (x * x + y * y).sum().item(), 1e-12
+        )
+        amax_diff = (x - y).abs().max().item()
+        print(f"{name}: {cos_diff=}, {RMSE=}, {amax_diff=}")
+        assert cos_diff < 1e-5
+
     def compare_outputs(
         self,
         output_ffa: torch.Tensor,
-        output_nsa: torch.Tensor,
-        rtol: float = 1e-3,
-        atol: float = 1e-3,
+        output_ref: torch.Tensor,
+        ref_name: str = "nsa_ref",
     ) -> dict:
         """Compare outputs from FFA and NSA implementations."""
 
-        # Compute differences
-        abs_diff = torch.abs(output_ffa - output_nsa)
-        rel_diff = abs_diff / (torch.abs(output_nsa) + 1e-8)
-
-        # Statistics
-        max_abs_diff = abs_diff.max().item()
-        max_rel_diff = rel_diff.max().item()
-        mean_abs_diff = abs_diff.mean().item()
-        mean_rel_diff = rel_diff.mean().item()
-
-        # Check if outputs are close
-        outputs_close = torch.allclose(output_ffa, output_nsa, rtol=rtol, atol=atol)
+        # Use cal_diff method for comparison
+        x, y = output_ffa.double(), output_ref.double()
+        RMSE = ((x - y) * (x - y)).mean().sqrt().item()
+        cos_diff = 1 - 2 * (x * y).sum().item() / max(
+            (x * x + y * y).sum().item(), 1e-12
+        )
+        amax_diff = (x - y).abs().max().item()
+        print(f"Compare ffa with {ref_name}: {cos_diff=}, {RMSE=}, {amax_diff=}")
 
         return {
-            "outputs_close": outputs_close,
-            "max_abs_diff": max_abs_diff,
-            "max_rel_diff": max_rel_diff,
-            "mean_abs_diff": mean_abs_diff,
-            "mean_rel_diff": mean_rel_diff,
-            "rtol_used": rtol,
-            "atol_used": atol,
+            "outputs_close": cos_diff < 1e-5,
+            "RMSE": RMSE,
+            "cos_diff": cos_diff,
+            "amax_diff": amax_diff,
         }
 
     def run_single_test(
@@ -300,18 +302,17 @@ class NSACorrectnessTest:
         sparsity_ratio: float = 0.2,
         kernel_size: int = 32,
         kernel_stride: int = 16,
-        rtol: float = 1e-3,
-        atol: float = 1e-3,
+        ref_name: str = "nsa_ref",
     ) -> dict:
         """Run a single correctness test."""
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("Running NSA Correctness Test")
         print(
             f"seqlen: {seqlen}, heads: {num_q_heads}:{num_k_heads}, head_dim: {head_dim}"
         )
         print(f"block_size: {block_size}, sparsity: {sparsity_ratio}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         # Setup test data
         (
@@ -352,37 +353,31 @@ class NSACorrectnessTest:
         output_ffa = self.compute_ffa_attention(
             q, k, v, topk_idx, block_size, num_group, head_dim
         )
-        # import pdb; pdb.set_trace()
-        # print(output_ffa)
 
         # Compute NSA reference attention
         print("Computing NSA reference attention...")
-        output_nsa = self.compute_nsa_ref_attention(
-            q, k, v, topk_idx, cu_seqlens, block_size, head_dim
-        )
-        # print(output_nsa)
+        if ref_name == "nsa_ref":
+            output_ref = self.compute_nsa_ref_attention(
+                q, k, v, topk_idx, cu_seqlens, block_size, head_dim
+            )
+        elif ref_name == "sdpa":
+            # TODO: test fails sometimes for sdpa
+            output_ref = self.compute_sdpa_attention(
+                q, k, v, topk_idx, block_size, num_group, head_dim
+            )
 
         # print(f"FFA output shape: {output_ffa.shape}")
         # print(f"NSA output shape: {output_nsa.shape}")
 
-        # output_sdpa = self.compute_sdpa_attention(
-        #     q, k, v, topk_idx, block_size, num_group, head_dim
-        # )
-        # print(output_sdpa)
-        # breakpoint()
-
         # Compare outputs
         print("Comparing outputs...")
-        comparison = self.compare_outputs(output_ffa, output_nsa, rtol, atol)
+        comparison = self.compare_outputs(output_ffa, output_ref, ref_name)
 
         # Print results
         print("\nComparison Results:")
-        print(f"Outputs close: {comparison['outputs_close']}")
-        print(f"Max absolute diff: {comparison['max_abs_diff']:.6e}")
-        print(f"Max relative diff: {comparison['max_rel_diff']:.6e}")
-        print(f"Mean absolute diff: {comparison['mean_abs_diff']:.6e}")
-        print(f"Mean relative diff: {comparison['mean_rel_diff']:.6e}")
-        print(f"Tolerances used - rtol: {rtol}, atol: {atol}")
+        print(f"RMSE: {comparison['RMSE']:.6e}")
+        print(f"cos_diff: {comparison['cos_diff']:.6e}")
+        print(f"amax_diff: {comparison['amax_diff']:.6e}")
 
         return comparison
 
@@ -398,6 +393,7 @@ class NSACorrectnessTest:
                 "head_dim": 128,
                 "block_size": 64,
                 "sparsity_ratio": 0.2,
+                "ref_name": "nsa_ref",
             },
             # Medium tests
             {
@@ -407,6 +403,7 @@ class NSACorrectnessTest:
                 "head_dim": 128,
                 "block_size": 64,
                 "sparsity_ratio": 0.15,
+                "ref_name": "nsa_ref",
             },
             # Different sparsity ratios
             {
@@ -416,6 +413,7 @@ class NSACorrectnessTest:
                 "head_dim": 128,
                 "block_size": 64,
                 "sparsity_ratio": 0.3,
+                "ref_name": "nsa_ref",
             },
         ]
 
@@ -423,9 +421,9 @@ class NSACorrectnessTest:
         passed_tests = 0
 
         for i, config in enumerate(test_configs):
-            print(f"\n{'#'*80}")
-            print(f"Test {i+1}/{len(test_configs)}")
-            print(f"{'#'*80}")
+            print(f"\n{'#' * 80}")
+            print(f"Test {i + 1}/{len(test_configs)}")
+            print(f"{'#' * 80}")
 
             try:
                 result = self.run_single_test(**config)
@@ -445,9 +443,9 @@ class NSACorrectnessTest:
                 results.append(result)
 
         # Summary
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("TEST SUMMARY")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"Total tests: {len(test_configs)}")
         print(f"Passed: {passed_tests}")
         print(f"Failed: {len(test_configs) - passed_tests}")

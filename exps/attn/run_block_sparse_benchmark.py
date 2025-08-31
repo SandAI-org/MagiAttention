@@ -219,6 +219,7 @@ def sparse_attn_benchmark(
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_k=max_seqlen_k,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
+                    # ref_block_size=[block_m, block_n], # TODO: kernel hanging for non 128x128 block size
                 )
 
             if wd == "bwd":

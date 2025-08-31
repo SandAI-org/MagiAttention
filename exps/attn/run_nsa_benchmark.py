@@ -260,6 +260,7 @@ def sparse_attn_benchmark(
                     max_seqlen_k=block_size,
                     softmax_scale=sm_scale,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
+                    # ref_block_size=[num_group, block_size], # TODO: support SwapAB
                 )
 
             if wd == "bwd":
