@@ -274,7 +274,8 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutQ{})) * cutlass::sizeof_bits_v<Element> / 8);
   static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(SmemLayoutK{}) * cutlass::sizeof_bits_v<Element> / 8);
   static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(size(SmemLayoutV{}) * cutlass::sizeof_bits_v<Element> / 8);
-  static constexpr uint32_t TmaTransactionBytesLSE = static_cast<uint32_t>(size(select<0>(SmemLayoutLSE{})) * cutlass::sizeof_bits_v<ElementAccum> / 8);
+  // static constexpr uint32_t TmaTransactionBytesLSE = static_cast<uint32_t>(size(select<0>(SmemLayoutLSE{})) * cutlass::sizeof_bits_v<ElementAccum> / 8);
+  static constexpr uint32_t TmaTransactionBytesLSE = static_cast<uint32_t>(4 * size(select<1>(SmemLayoutLSE{})) * cutlass::sizeof_bits_v<ElementAccum> / 8);
 
   // These are tuned for speed. They don't affect correctness.
   // We have separate iterations with causal masking. Not necessary for hdim 128 but for hdim 64
@@ -486,26 +487,6 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutV{});
     Tensor sLSE = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSE{});
     Tensor sdPsum = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSE{});
-    /*
-    if (thread_idx == 0 && bidh == 0) {
-      printf("--- sLSE Debug Info (Block 0, Thread 0) ---\n");
-      printf("sLSE Object: ");
-      print(sLSE);
-      printf("\n");
-
-      printf("sLSE Shape: ");
-      print(shape(sLSE));
-      printf("\n");
-
-      printf("sLSE Stride: ");
-      print(stride(sLSE));
-      printf("\n");
-
-      printf("sLSE Data Pointer: %p\n", sLSE.data());
-
-      printf("sLSE Size: %d\n", size(sLSE));
-      printf("-----------------------------------------\n");
-    } */
 
     int bidh_kv = params.qhead_per_khead_divmod.divide(bidh);
 
@@ -537,29 +518,6 @@ struct CollectiveMainloopBwdSm90 {
         cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum),
         make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})),
         make_coord(_0{}, _)); // (4, M, _)
-
-    // In CollectiveMainloopBwdSm90.h -> load() function
-    // print gLSE
-    /*
-    if (thread_idx == 0 && bidh == 0) {
-      printf("--- gLSE Debug Info (Block 0, Thread 0) ---\n");
-      printf("gLSE Object: ");
-      print(gLSE);
-      printf("\n");
-
-      printf("gLSE Shape: ");
-      print(shape(gLSE));
-      printf("\n");
-
-      printf("gLSE Stride: ");
-      print(stride(gLSE));
-      printf("\n");
-
-      printf("gLSE Data Pointer: %p\n", gLSE.data());
-
-      printf("gLSE Size: %d\n", size(gLSE));
-      printf("-----------------------------------------\n");
-    } */
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
@@ -648,18 +606,6 @@ struct CollectiveMainloopBwdSm90 {
 
       // copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, m_block), sLSE(_, smem_pipe_write.index()));
       copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write.index()));
-      /*if (bidh == 0 && thread_idx == 0) {
-        // printf("[BWD LOAD BEGIN]\n");
-        printf(
-            "[BWD COPY AFTER TMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
-            bidb,
-            kBlockM,
-            kBlockN,
-            n_block,
-            m_block_min,
-            m_block_max,
-            attn_type);
-      } */
     }
 
     if (lane_predicate) {
@@ -696,37 +642,9 @@ struct CollectiveMainloopBwdSm90 {
             params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
             tQgQ(_, m_block + 1),
             tQsQ(_, smem_pipe_write.index()));
-        /*
-        if (bidh == 0 && thread_idx == 0) {
-          // printf("[BWD LOAD BEGIN]\n");
-          printf(
-              "[BWD COPY BEFORE TMA 1] bidb: %d,  kBlockM: %d, m_block: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
-              bidb,
-              kBlockM,
-              m_block,
-              kBlockN,
-              n_block,
-              m_block_min,
-              m_block_max,
-              attn_type);
-        } */
 
         // copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, m_block + 1), sLSE(_, smem_pipe_write.index()));
         copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block + 1), sLSE(_, _, smem_pipe_write.index()));
-        /*
-        if (bidh == 0 && thread_idx == 0) {
-          // printf("[BWD LOAD BEGIN]\n");
-          printf(
-              "[BWD COPY AFTER TMA 1] bidb: %d,  kBlockM: %d, m_block: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
-              bidb,
-              kBlockM,
-              m_block,
-              kBlockN,
-              n_block,
-              m_block_min,
-              m_block_max,
-              attn_type);
-        } */
       }
     }
 
@@ -855,12 +773,6 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
-    /*if (bidh == 0 && threadIdx.x == 0) {
-     printf(" [BWD store_dq BEGIN] \n");
-     //printf("[BWD store_dq BEGIN] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n", bidb, kBlockM, kBlockN,
-    n_block,
-     //m_block_min, m_block_max, attn_type);
-    }*/
     if constexpr (Deterministic) {
       // update conflict state of batches
       // bidb_last is the previous bidb, need to update conflict state of bidb_last ~ bidb
@@ -1028,8 +940,8 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
+    /*
     if (bidh == 0 && thread_idx == 0) {
-      // printf("[BWD MMA BEGIN]\n");
       printf(
           "[BWD MMA BEGIN] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
           bidb,
@@ -1039,7 +951,7 @@ struct CollectiveMainloopBwdSm90 {
           m_block_min,
           m_block_max,
           attn_type);
-    }
+    } */
     // It's possible to have m_block_max <= m_block_min. Exit early
     if (m_block_max <= m_block_min) {
       return false;
@@ -1238,7 +1150,7 @@ struct CollectiveMainloopBwdSm90 {
           return nullptr;
       }();
       mask_fn(tSrS, m_block);
-      // mask_q_fn(tSrS, m_block);
+      mask_q_fn(tSrS, m_block);
       // Start debug print
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
