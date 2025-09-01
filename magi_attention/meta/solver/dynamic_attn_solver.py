@@ -306,6 +306,13 @@ class DynamicAttnSolver:
 
         return comm_meta
 
+    def calc_area(self) -> int:
+        """Calculate the area of the buckets for testing correctness"""
+        area = 0
+        for rects in self.bucket_per_rank:
+            area += rects.area()
+        return area
+
     @nvtx.instrument_nvtx
     def calc_host_and_remote_bucket_this_rank(self) -> None:
         bucket_this_rank: AttnRectangles = self.bucket_per_rank[self.cp_rank]

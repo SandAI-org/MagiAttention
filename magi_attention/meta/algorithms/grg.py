@@ -294,7 +294,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                         job_list.append((i, j))
 
         # random initialize stage
-        random_times = 100000 // m // n
+        random_times = 1000000 // m // n
         local_eval = float("inf")
         for _ in range(random_times):
             new_solver_map = self._greedy_algorithm(
@@ -327,7 +327,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             random.shuffle(job_list)
 
         # refinement stage
-        refine_times = 100000 // m // n
+        refine_times = 1000000 // m // n
         for iter in range(refine_times):
             random.shuffle(job_list)
             solver_map = copy.deepcopy(local_optimal_solver_map)
@@ -375,6 +375,9 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     local_optimal_solver_map = new_solver_map
 
         # print(f"local_optimal_solver_map: {local_optimal_solver_map}")
+
+        # TODO: When the area load is unbalanced,
+        # a heuristic method is used to divide the host rangeinterval into more segments
 
         # calc result stage
         for i in range(m):
