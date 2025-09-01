@@ -29,7 +29,7 @@ try:
 
     is_ffa_utils_installed = True
 except ImportError:
-    warnings.warn("FFA is not installed.")
+    warnings.warn("FFA utils is not installed.")
 
 # isort: on
 

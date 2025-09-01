@@ -56,6 +56,7 @@ exclude = [
 
 [tool.setuptools.package-data]
 "magi_attention" = [
+    # include pyi files
     "*.pyi",
     "**/*.pyi",
     # common headers and utils for runtime/JIT
@@ -75,4 +76,6 @@ exclude = [
     "csrc/cutlass/include/**",
     # include instantiations of flexible_flash_attention
     "lib/*/*.so",
+    # include ext modules besides flexible_flash_attention
+    "*.so",
 ]
