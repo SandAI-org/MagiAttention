@@ -331,7 +331,7 @@ class DistAttnRuntime:
         Compute a part of the attention result
 
         Args:
-            q (torch.Tensor): local q
+            q (torch.Tensor): current q
             kv (torch.Tensor): current kv
             out_acc (torch.Tensor, optional): accumulative buffer for out
             lse_acc (torch.Tensor, optional): accumulative buffer for lse
@@ -412,9 +412,9 @@ class DistAttnRuntime:
         """Apply ffa bwd kernel to get partial dq, dkv
 
         Args:
-            qo_do (FusedOrTupleTensor): q, o, do fused or tupled tensor
+            qo_do (FusedOrTupleTensor): current q, o, do fused or tupled tensor
             kv (torch.Tensor): current kv
-            lse (torch.Tensor): partial lse
+            lse (torch.Tensor): current lse
             dq_acc (torch.Tensor, optional): accumulative buffer for dq
             overlap_stage (int, optional): Current overlap stage,
                 if None, it means local attention, otherwise it means remote attention

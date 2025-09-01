@@ -30,7 +30,7 @@ from .utils import (
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
     _calc_unperm_range_gather_kwargs_from_split_size_list,
-    reduce_to_tensor,
+    sum_reduce_to_tensor,
     unpermute_tensor,
 )
 
@@ -799,15 +799,13 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         stashed_tensors: list[torch.Tensor] | None = None,
     ) -> Callable[[torch.Tensor], torch.Tensor]:
         post_process_fn_pre_intra = partial(
-            reduce_to_tensor,
-            output_lse=None,  # TODO: support lse reduce
+            sum_reduce_to_tensor,
             a2a_output=a2a_output_pre_intra,
             range_reduce_kwargs=self.range_reduce_kwargs_pre_intra,
         )
 
         post_process_fn_inter = partial(
-            reduce_to_tensor,
-            output_lse=None,  # TODO: support lse reduce
+            sum_reduce_to_tensor,
             a2a_output=a2a_output_inter,
             range_reduce_kwargs=self.range_reduce_kwargs_inter,
         )

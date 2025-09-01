@@ -22,7 +22,7 @@ import torch
 from magi_attention.comm.primitive.utils import (
     _calc_group_cast_a2a_input_args,
     _calc_group_reduce_a2a_input_args,
-    reduce_to_tensor,
+    sum_reduce_to_tensor,
     unpermute_tensor,
 )
 
@@ -248,7 +248,7 @@ class TestGroupCollectiveUtils(TestCase):
             "total_size": total_size,
         }
 
-        reduced_output = reduce_to_tensor(
+        reduced_output = sum_reduce_to_tensor(
             output=output_ref,
             output_lse=None,  # TODO: test lse-reduce
             a2a_output=a2a_output,

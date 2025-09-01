@@ -661,26 +661,41 @@ def sanity_check_for_group_reduce_meta_args_per_rank(
 
 
 @nvtx.instrument_nvtx
-def reduce_to_tensor(
+def sum_reduce_to_tensor(
     output: torch.Tensor,
-    output_lse: torch.Tensor | None,
-    a2a_output: OutMaybeWithLSE,
+    a2a_output: torch.Tensor,
     range_reduce_kwargs: dict,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
-) -> OutMaybeWithLSE:
+) -> torch.Tensor:
     """sum-reduce a2a output to output
     as a post-processing func for group_reduce
     """
 
-    if reduce_op == "lse":
-        a2a_output, a2a_output_lse = a2a_output
-    else:
-        a2a_output_lse = None
+    output = range_reduce(
+        input=a2a_output,
+        output=output,
+        reduce_op="sum",
+        **range_reduce_kwargs,
+    )
+
+    return output
+
+
+@nvtx.instrument_nvtx
+def lse_reduce_to_tensor(
+    output: torch.Tensor,
+    output_lse: torch.Tensor,
+    a2a_output: torch.Tensor,
+    a2a_output_lse: torch.Tensor,
+    range_reduce_kwargs: dict,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """lse-reduce a2a output and a2a_output_lse to output and output_lse
+    as a post-processing func for group_reduce with reduce_op="lse"
+    """
 
     output = range_reduce(
         input=a2a_output,
         output=output,
-        reduce_op=reduce_op,
+        reduce_op="lse",
         input_lse=a2a_output_lse,
         output_lse=output_lse,
         **range_reduce_kwargs,
@@ -917,17 +932,23 @@ def calc_group_reduce_a2a_args(
 
     # ---------    prepare post process fn     --------- #
 
-    post_process_fn = partial(
-        reduce_to_tensor,
-        a2a_output=a2a_output,
-        reduce_op=reduce_op,
-        range_reduce_kwargs=range_reduce_kwargs,
-    )
-    if reduce_op != "lse":
-        post_process_fn = partial(
-            post_process_fn,
-            output_lse=None,
-        )
+    match reduce_op:
+        case "lse":
+            a2a_output, a2a_output_lse = a2a_output
+            post_process_fn = partial(
+                lse_reduce_to_tensor,
+                a2a_output=a2a_output,
+                a2a_output_lse=a2a_output_lse,
+                range_reduce_kwargs=range_reduce_kwargs,
+            )
+        case "sum":
+            post_process_fn = partial(
+                sum_reduce_to_tensor,
+                a2a_output=a2a_output,
+                range_reduce_kwargs=range_reduce_kwargs,
+            )
+        case _:
+            raise RuntimeError(f"reduce_op={reduce_op} not supported")
 
     return (
         a2a_output,
