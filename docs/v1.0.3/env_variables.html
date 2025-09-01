@@ -403,47 +403,58 @@
 <section id="for-performance">
 <h2>For Performance<a class="headerlink" href="#for-performance" title="Link to this heading">#</a></h2>
 <p><strong>MAGI_ATTENTION_HIERARCHICAL_COMM</strong></p>
-<p>Toggling <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_HIERARCHICAL_COMM</span></code> env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group).</p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group). The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This is for now a temporary solution to reduce the redundant inter-node communication and might be removed or updated in the future.</p>
 </div>
 <p><strong>MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN</strong></p>
-<p>The sm margin number of ffa forward kernel saved for comm kernels.</p>
+<p>Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels. The default value is <code class="docutils literal notranslate"><span class="pre">4</span></code> if <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code>, otherwise <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <p><strong>MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN</strong></p>
-<p>The sm margin number of ffa backward kernel saved for comm kernels.</p>
+<p>Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels. The default value is <code class="docutils literal notranslate"><span class="pre">4</span></code> if <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code>, otherwise <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <p><strong>MAGI_ATTENTION_FFA_FORWARD_INPLACE_CORRECT</strong></p>
-<p>Toggling this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable inplace-correct for out and lse in ffa forward to avoid the storage of partial results and the memory-bound <code class="docutils literal notranslate"><span class="pre">result_correction</span></code> as a forward post process.</p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable inplace-correct for out and lse in ffa forward to avoid the storage of partial results and the memory-bound <code class="docutils literal notranslate"><span class="pre">result_correction</span></code> as a forward post process. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This feature will be enabled by default as long as it’s stable (i.e. no effect on accuracy or performance).</p>
 </div>
 <p><strong>MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE</strong></p>
-<p>Toggling this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable high-precision (fp32) reduce for dkv among ranks in ffa backward to increase the precision at the cost of double comm overhead。</p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable high-precision (fp32) reduce for dkv among ranks in ffa backward to increase the precision at the cost of double comm overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dkv.
 However, by default we will downcast it to kv dtype before reducing among ranks to decrease comm overhead.</p>
 </div>
 <p><strong>MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE</strong></p>
-<p>Modify the value of this env variable to change the size of <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">100</span></code>. See <code class="docutils literal notranslate"><span class="pre">magi_attention.api.magi_attn_interface.py</span></code> for more information.</p>
+<p>Set the value of this env variable to control the size of <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">100</span></code>.</p>
 </section>
 <section id="for-debug">
 <h2>For Debug<a class="headerlink" href="#for-debug" title="Link to this heading">#</a></h2>
 <p><strong>MAGI_ATTENTION_SANITY_CHECK</strong></p>
-<p>Toggling <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_SANITY_CHECK</span></code> env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable many sanity check codes inside magi_attention.</p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable many sanity check codes inside magi_attention. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This is only supposed to be used for testing or debugging, since the extra sanity-check overhead might be non-negligible.</p>
 </div>
 <p><strong>MAGI_ATTENTION_SDPA_BACKEND</strong></p>
-<p>Toggling <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_SDPA_BACKEND</span></code> env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can switch the attn kernel backend from ffa to sdpa-math, to support higher precision like <code class="docutils literal notranslate"><span class="pre">fp32</span></code>, <code class="docutils literal notranslate"><span class="pre">fp64</span></code>.</p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can switch the attn kernel backend from ffa to sdpa-math, to support higher precision like <code class="docutils literal notranslate"><span class="pre">fp32</span></code> or <code class="docutils literal notranslate"><span class="pre">fp64</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>This is only supposed to be used for testing or debugging, since the performance is not acceptable.</p>
 </div>
 <p><strong>MAGI_ATTENTION_DETERMINISTIC_MODE</strong></p>
-<p>Toggle <code class="docutils literal notranslate"><span class="pre">MAGI_ATTENTION_DETERMINISTIC_MODE</span></code> env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable deterministic mode to use deterministic algorithms for all magi_attention kernels.</p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable deterministic mode to use deterministic algorithms for all magi_attention kernels. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+</section>
+<section id="for-build">
+<h2>For Build<a class="headerlink" href="#for-build" title="Link to this heading">#</a></h2>
+<p><strong>MAGI_ATTENTION_PREBUILD_FFA</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable pre-build ffa kernels for some common options with <code class="docutils literal notranslate"><span class="pre">ref_block_size=None</span></code> and leave others built in jit mode. The default value is <code class="docutils literal notranslate"><span class="pre">1</span></code>.</p>
+<p><strong>MAGI_ATTENTION_PREBUILD_FFA_JOBS</strong></p>
+<p>Set the value of this env variable to control the number of jobs used to pre-build ffa kernels. The default value is <code class="docutils literal notranslate"><span class="pre">256</span></code>.</p>
+<p><strong>MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">flexible_flash_attention_utils_cuda</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">magi_attn_ext</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 </section>
 </section>
 
@@ -472,6 +483,7 @@ However, by default we will downcast it to kv dtype before reducing among ranks 
     <ul class="visible nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-performance">For Performance</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-debug">For Debug</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-build">For Build</a></li>
 </ul>
   </nav></div>
 
