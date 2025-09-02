@@ -58,7 +58,6 @@ from .grpcoll_utils import (
 )
 
 
-# noinspection PyShadowingNames
 def test_main(
     args: argparse.Namespace,
     num_sms: int,
@@ -301,7 +300,6 @@ def test_main(
         )
 
     # Test dispatch
-    # noinspection PyShadowingNames
     def check_data(check_x, rank_prefix_matrix):
         assert torch.allclose(check_x.amin(dim=1), check_x.amax(dim=1))
         check_start = 0
@@ -776,7 +774,6 @@ def test_main(
         print("", flush=True)
 
 
-# noinspection PyUnboundLocalVariable,PyShadowingNames
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     # rank: global rank in default group
     # num_ranks: number of ranks in default group
