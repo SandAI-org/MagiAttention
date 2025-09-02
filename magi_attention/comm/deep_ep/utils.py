@@ -39,8 +39,6 @@ from typing import Any, Optional, Tuple
 
 import torch
 import torch.distributed as dist
-
-# noinspection PyUnresolvedReferences
 from deep_ep_cpp import EventHandle
 
 
@@ -115,12 +113,10 @@ def check_nvlink_connections(group: dist.ProcessGroup):
     if "PCIE" in torch.cuda.get_device_name():
         assert group.size() <= 2, "PCIe GPUs only have pairwise NVLink connections"
 
-        # noinspection PyUnresolvedReferences
         import pynvml
 
         pynvml.nvmlInit()
 
-        # noinspection PyTypeChecker
         devices = (
             os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
             .strip(",")

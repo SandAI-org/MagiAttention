@@ -37,12 +37,9 @@
 import os
 from typing import Callable, List, Optional, Tuple, Union
 
-# noinspection PyUnresolvedReferences
 import deep_ep_cpp
 import torch
 import torch.distributed as dist
-
-# noinspection PyUnresolvedReferences
 from deep_ep_cpp import Config, EventHandle
 
 from .utils import EventOverlap, check_nvlink_connections
@@ -335,7 +332,6 @@ class Buffer:
         assert num_ranks in config_map, f"Unsupported number of EP ranks: {num_ranks}"
         return config_map[num_ranks]
 
-    # noinspection PyTypeChecker
     def get_dispatch_layout(
         self,
         topk_idx: torch.Tensor,
@@ -386,7 +382,6 @@ class Buffer:
             EventOverlap(event),
         )
 
-    # noinspection PyTypeChecker
     def dispatch(
         self,
         x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
@@ -578,7 +573,6 @@ class Buffer:
                 EventOverlap(event),
             )
 
-    # noinspection PyTypeChecker
     def combine(
         self,
         x: torch.Tensor,
@@ -656,7 +650,6 @@ class Buffer:
         )
         return recv_x, recv_topk_weights, EventOverlap(event)
 
-    # noinspection PyTypeChecker
     def internode_dispatch(
         self,
         x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
@@ -813,7 +806,6 @@ class Buffer:
                 EventOverlap(event),
             )
 
-    # noinspection PyTypeChecker
     def internode_combine(
         self,
         x: torch.Tensor,
@@ -884,7 +876,6 @@ class Buffer:
             num_max_dispatch_tokens_per_rank, hidden, num_experts
         )
 
-    # noinspection PyTypeChecker
     def low_latency_dispatch(
         self,
         x: torch.Tensor,
@@ -990,7 +981,6 @@ class Buffer:
             hook,
         )
 
-    # noinspection PyTypeChecker
     def low_latency_combine(
         self,
         x: torch.Tensor,

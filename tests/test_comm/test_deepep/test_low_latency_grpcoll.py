@@ -415,14 +415,12 @@ def test_main(
                                 ), f"Error: {diff=}, {zero_copy=}"
                                 hash_value ^= hash_tensor(combined_x)
 
-    # noinspection PyShadowingNames
     def large_gemm_with_hook(hook):
         mat_0 = torch.randn((8192, 8192), dtype=torch.float)
         mat_1 = torch.randn((8192, 8192), dtype=torch.float)
         mat_0 @ mat_1
         hook()
 
-    # noinspection PyShadowingNames
     def test_func(return_recv_hook: bool):
         recv_x, recv_count, handle, event, hook = buffer.low_latency_dispatch(
             x_pure_rand,
@@ -494,7 +492,6 @@ def test_main(
     return hash_value
 
 
-# noinspection PyUnboundLocalVariable,PyShadowingNames
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     # init dist
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
