@@ -76,6 +76,11 @@ class MagiAttnBuildExtension(BuildExtension):
     def initialize_options(self):
         super().initialize_options()
 
+        # Before core extensions are built,
+        # optionally prebuild FFA JIT kernels (ref_block_size=None)
+        if not SKIP_CUDA_BUILD and PREBUILD_FFA:
+            prebuild_ffa_kernels()
+
         # Core logic: check if wheel build is running. 'bdist_wheel' is triggered by `python -m build`.
         if "bdist_wheel" not in sys.argv:
             # If not building a wheel (i.e., dev install like `pip install -e .`), enable local caching
@@ -95,9 +100,6 @@ class MagiAttnBuildExtension(BuildExtension):
 
     def build_extensions(self):
         super().build_extensions()
-        # After core extensions are built, optionally prebuild FFA JIT kernels (ref_block_size=None)
-        if not SKIP_CUDA_BUILD and PREBUILD_FFA:
-            prebuild_ffa_kernels()
 
 
 def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:

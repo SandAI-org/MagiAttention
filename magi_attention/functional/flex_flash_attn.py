@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
-
 import torch
 from packaging import version
 
@@ -29,7 +27,7 @@ try:
 
     is_ffa_utils_installed = True
 except ImportError:
-    warnings.warn("FFA utils is not installed.")
+    pass
 
 # isort: on
 
