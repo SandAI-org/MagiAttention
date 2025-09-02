@@ -108,7 +108,6 @@ def setup_dist_env(
     )  # noqa: E231
 
 
-# noinspection PyShadowingNames
 def test_main(
     args: argparse.Namespace,
     num_sms: int,
@@ -362,7 +361,6 @@ def test_main(
         num_rdma_token_sent = num_tokens_per_rdma_rank.sum().item()
 
     # Test dispatch
-    # noinspection PyShadowingNames
     def check_data(check_x, recv_gbl_rank_prefix_sum):
         assert torch.allclose(check_x.amin(dim=1), check_x.amax(dim=1))
         check_start = 0
@@ -841,7 +839,6 @@ def test_main(
         print("", flush=True)
 
 
-# noinspection PyUnboundLocalVariable,PyShadowingNames
 def test_loop(args: argparse.Namespace):
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
