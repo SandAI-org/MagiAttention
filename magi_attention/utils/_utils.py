@@ -31,11 +31,9 @@ from typing import (
     Union,
 )
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.distributed as dist
-from rich import print as rprint
 
 from . import nvtx
 
@@ -63,6 +61,8 @@ def rprint_rank(
     rank: int | None = None,
     width: int = 50,
 ) -> None:  # pragma: no cover
+    from rich import print as rprint
+
     if rank is None or dist.get_rank() == rank:
         rank = dist.get_rank()
         rprint(
@@ -291,45 +291,170 @@ def vis_matrix(
     val_ticks: list[float] | None = None,
     format_ticks: Callable | None = None,
     save_path: str | None = None,
+    alpha: float = 1.0,
+    interpolation_order: int = 1,
+    plot_interpolation: str = "nearest",
 ) -> None:  # pragma: no cover
+    """
+    Visualizes a 2D matrix as a grayscale image. Supports proportional downsampling.
+
+    Args:
+        matrix: The 2D numpy array to visualize.
+        title: The title of the plot.
+        xlabel: The label for the x-axis.
+        ylabel: The label for the y-axis.
+        val_ticks: Optional list of tick values for the color bar.
+        format_ticks: Optional formatting function for the color bar tick labels.
+        save_path: Optional path to save the plot. If None, the plot is not saved.
+        alpha: Downsampling ratio factor (0 < alpha <= 1.0). Defaults to 1.0 (no downsampling).
+            If alpha is less than 1.0, the matrix will be downsampled proportionally before plotting.
+        interpolation_order: The order of interpolation used for downsampling
+            (0 for nearest, 1 for linear, 2 for quadratic, 3 for cubic).
+            Only applies when alpha < 1.0. Defaults to 1 (linear interpolation).
+        plot_interpolation: The interpolation method for `imshow`. Common values include "nearest",
+            "bilinear", "bicubic". Defaults to "nearest".
+    """
+
+    import matplotlib.pyplot as plt
+    from scipy.ndimage import zoom
+
+    if not isinstance(matrix, np.ndarray) or matrix.ndim != 2:
+        raise ValueError("Input 'matrix' must be a 2D numpy array.")
+
+    # Validate alpha parameter
+    assert (
+        0 < alpha <= 1.0
+    ), "'alpha' must be greater than 0 and less than or equal to 1.0"
+
     cmap = plt.cm.gray
-    nrows, ncols = matrix.shape[0], matrix.shape[1]
+    original_nrows, original_ncols = matrix.shape[0], matrix.shape[1]
 
-    fig, ax = plt.subplots()
-    cax = ax.imshow(matrix, cmap=cmap, interpolation="nearest")
+    matrix_to_plot = matrix
+    current_nrows, current_ncols = original_nrows, original_ncols
 
-    ax.set_xticks(np.arange(ncols), np.arange(ncols))
-    ax.set_yticks(np.arange(nrows), np.arange(nrows))
+    # Downsample if alpha is less than 1.0
+    if alpha < 1.0:
+        # Calculate new dimensions, ensuring they are at least 1 (unless original dimension is 0)
+        new_nrows = max(1, int(original_nrows * alpha)) if original_nrows > 0 else 0
+        new_ncols = max(1, int(original_ncols * alpha)) if original_ncols > 0 else 0
 
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
+        # Only perform zoom if target dimensions are smaller than original and valid
+        if (new_nrows > 0 and new_ncols > 0) and (
+            new_nrows < original_nrows or new_ncols < original_ncols
+        ):
+            zoom_factors = (new_nrows / original_nrows, new_ncols / original_ncols)
+            try:
+                matrix_to_plot = zoom(matrix, zoom_factors, order=interpolation_order)
+            except Exception as e:
+                print(
+                    f"Error during downsampling with scipy.ndimage.zoom: {e}. Original matrix will be used."
+                )
+                matrix_to_plot = matrix
+                new_nrows, new_ncols = original_nrows, original_ncols  # Reset on error
+            current_nrows, current_ncols = (
+                matrix_to_plot.shape[0],
+                matrix_to_plot.shape[1],
+            )
+        elif original_nrows == 0 or original_ncols == 0:
+            # Handle cases where the original matrix is empty
+            matrix_to_plot = np.array([])
+            current_nrows, current_ncols = 0, 0
 
-    cbar = plt.colorbar(cax)
+    # Set up the figure and axes
+    # Adjust figsize based on the aspect ratio of the matrix to be plotted
+    # Use a fixed width (e.g., 8 inches) and calculate height to maintain aspect ratio
+    # Ensure a minimum size for readability, even for small matrices
+    fig_width = 8
+    # Calculate aspect ratio, preventing division by zero for empty or single-dimension matrices
+    aspect_ratio = current_nrows / current_ncols if current_ncols > 0 else 1.0
+    fig_height = max(3.0, fig_width * aspect_ratio)  # Minimum height of 3 inches
 
-    if val_ticks is not None:
-        cbar.set_ticks(val_ticks)
-    if format_ticks is not None:
-        cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(format_ticks))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    if current_nrows == 0 or current_ncols == 0:
+        raise RuntimeError("Matrix is empty or too small after downsampling.")
+    else:
+        # Plot the (potentially downsampled) matrix
+        cax = ax.imshow(matrix_to_plot, cmap=cmap, interpolation=plot_interpolation)
+
+        # Set ticks based on the dimensions of the currently plotted matrix
+        # This preserves the original function's intent of labeling each pixel for *display*.
+        ax.set_xticks(np.arange(current_ncols))
+        ax.set_xticklabels(np.arange(current_ncols))
+        ax.set_yticks(np.arange(current_nrows))
+        ax.set_yticklabels(np.arange(current_nrows))
+
+        if alpha < 1.0:
+            ax.set_title(f"{title} (downsampled ratio: {alpha * 100:.1f}%)")
+        else:
+            ax.set_title(title)
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+
+        # Ensure cells are square and adjust plot limits for pixel-perfect display
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlim(-0.5, current_ncols - 0.5)
+        ax.set_ylim(
+            current_nrows - 0.5, -0.5
+        )  # Invert Y-axis to match typical image plotting origin
+
+        # Add color bar
+        cbar = plt.colorbar(
+            cax, ax=ax, fraction=0.046, pad=0.04
+        )  # Attach colorbar to main axes, better sizing
+
+        if val_ticks is not None:
+            cbar.set_ticks(val_ticks)
+        if format_ticks is not None:
+            cbar.ax.yaxis.set_major_formatter(plt.FuncFormatter(format_ticks))
+
+    # Save the plot before showing
+    if save_path is not None:
+        try:
+            plt.savefig(
+                save_path, bbox_inches="tight", dpi=300
+            )  # dpi=300 for higher quality
+        except Exception as e:
+            print(f"Error saving plot to {save_path}: {e}")
 
     plt.show()
-
-    if save_path is not None:
-        plt.savefig(save_path)
+    plt.close(fig)  # Close the figure after showing or saving to free up memory
 
 
 def vis_attn_mask(
     attn_mask: torch.Tensor,
+    alpha: float = 1.0,
     save_path: str | None = None,
 ) -> None:  # pragma: no cover
+    """
+    Visualizes a 2D attention mask (torch.Tensor) using the vis_matrix function.
+
+    This function converts a PyTorch attention mask tensor to a NumPy array,
+    then calls `vis_matrix` to plot it as a grayscale image, potentially
+    downsampling it based on the `alpha` parameter. The attention mask is typically
+    expected to contain 0s (for unmasked/allowed attention) and 1s (for masked/disallowed attention).
+
+    Args:
+        attn_mask: A 2D torch.Tensor representing the attention mask.
+            Expected to have dimensions (sequence_length_q, sequence_length_k).
+        alpha: Downsampling ratio factor (0 < alpha <= 1.0). Defaults to 1.0 (no downsampling).
+            If alpha is less than 1.0, the attention mask will be downsampled proportionally
+            before being passed to `vis_matrix` for plotting.
+        save_path: Optional path to save the plot. If None, the plot is not saved.
+            This path is passed directly to the `vis_matrix` function.
+    """
     vis_matrix(
-        attn_mask.cpu().numpy(),
-        title="attn_mask",
-        xlabel="k",
-        ylabel="q",
+        attn_mask.cpu().numpy(),  # Convert to NumPy array and move to CPU if necessary
+        title="Attention Mask",  # Changed title to be more generic
+        xlabel="Key Sequence Index (k)",  # Changed xlabel for clarity
+        ylabel="Query Sequence Index (q)",  # Changed ylabel for clarity
         val_ticks=[0, 1],
-        format_ticks=lambda x, pos: "unmasked" if x == 0 else "unmasked",
+        format_ticks=lambda x, pos: "Masked"
+        if x == 0
+        else "Unmasked",  # Adjusted labels
         save_path=save_path,
+        alpha=alpha,
     )
 
 
