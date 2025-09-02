@@ -24,7 +24,7 @@ Set the value of this env variable to control the number of SMs of the ffa backw
 
 **MAGI_ATTENTION_FFA_FORWARD_INPLACE_CORRECT**
 
-Toggle this env variable to `1` can enable inplace-correct for out and lse in ffa forward to avoid the storage of partial results and the memory-bound `result_correction` as a forward post process. The default value is `0`.
+Toggle this env variable to `1` can enable inplace-correct for out and lse in ffa forward to avoid the storage of partial results and the memory-bound `correct_attn_fwd_result` as a forward post process. The default value is `0`.
 
 ```{note}
 This feature will be enabled by default as long as it's stable (i.e. no effect on accuracy or performance).
