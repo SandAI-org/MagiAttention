@@ -681,6 +681,26 @@ def sum_reduce_to_tensor(
 
 
 @nvtx.instrument_nvtx
+def avg_reduce_to_tensor(
+    output: torch.Tensor,
+    a2a_output: torch.Tensor,
+    range_reduce_kwargs: dict,
+) -> torch.Tensor:
+    """avg-reduce a2a output to output
+    as a post-processing func for group_reduce
+    """
+
+    output = range_reduce(
+        input=a2a_output,
+        output=output,
+        reduce_op="avg",
+        **range_reduce_kwargs,
+    )
+
+    return output
+
+
+@nvtx.instrument_nvtx
 def lse_reduce_to_tensor(
     output: torch.Tensor,
     output_lse: torch.Tensor,
@@ -934,16 +954,21 @@ def calc_group_reduce_a2a_args(
 
     match reduce_op:
         case "lse":
-            a2a_output, a2a_output_lse = a2a_output
             post_process_fn = partial(
                 lse_reduce_to_tensor,
-                a2a_output=a2a_output,
-                a2a_output_lse=a2a_output_lse,
+                a2a_output=a2a_output[0],  # a2a_output
+                a2a_output_lse=a2a_output[1],  # a2a_output_lse
                 range_reduce_kwargs=range_reduce_kwargs,
             )
         case "sum":
             post_process_fn = partial(
                 sum_reduce_to_tensor,
+                a2a_output=a2a_output,
+                range_reduce_kwargs=range_reduce_kwargs,
+            )
+        case "avg":
+            post_process_fn = partial(
+                avg_reduce_to_tensor,
                 a2a_output=a2a_output,
                 range_reduce_kwargs=range_reduce_kwargs,
             )
