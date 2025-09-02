@@ -3,8 +3,8 @@ name = "magi_attention"
 dynamic = ["version"]
 description = "A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heterogeneous Data Training"
 authors = [
-  {name = "littsk", email = "zeweitao@sand.ai"},
-  {name = "Strivin0311", email = "yunpenghuang@sand.ai"},
+    {name = "littsk", email = "zeweitao@sand.ai"},
+    {name = "Strivin0311", email = "yunpenghuang@sand.ai"},
 ]
 license = "Apache-2.0"
 readme = "README.md"
