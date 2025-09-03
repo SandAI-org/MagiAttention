@@ -40,7 +40,13 @@ from typing import Any, Optional, Tuple
 import torch
 import torch.distributed as dist
 
-from magi_attention.deep_ep_cpp import EventHandle
+is_magi_attn_comm_installed = False
+try:
+    from magi_attention.magi_attn_comm.deep_ep_cpp import EventHandle
+
+    is_magi_attn_comm_installed = True
+except ImportError:
+    pass
 
 
 class EventOverlap:
@@ -64,6 +70,8 @@ class EventOverlap:
             event: the CUDA event captured.
             extra_tensors: an easier way to simulate PyTorch tensor `record_stream`, may be useful with CUDA graph.
         """
+        assert is_magi_attn_comm_installed, "magi_attn_comm is not installed."
+
         self.event = event
 
         # NOTES: we use extra tensors to achieve stream recording, otherwise,
