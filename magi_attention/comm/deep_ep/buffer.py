@@ -37,10 +37,11 @@
 import os
 from typing import Callable, List, Optional, Tuple, Union
 
-import deep_ep_cpp
 import torch
 import torch.distributed as dist
-from deep_ep_cpp import Config, EventHandle
+
+from magi_attention import deep_ep_cpp
+from magi_attention.deep_ep_cpp import Config, EventHandle
 
 from .utils import EventOverlap, check_nvlink_connections
 

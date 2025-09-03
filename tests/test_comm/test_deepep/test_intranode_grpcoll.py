@@ -38,10 +38,10 @@ import argparse
 import random
 import time
 
-import deep_ep
 import torch
 import torch.distributed as dist
 
+from magi_attention.comm import deep_ep
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.testing.grpcoll_utils import (
     bench,
@@ -408,9 +408,9 @@ def test_main(
                     if with_topk:
                         print(
                             (
-                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"
-                                f"{recv_topk_idx.shape=} | {recv_topk_idx=}\n"
-                                f"{recv_topk_weights.shape=} | {recv_topk_weights=}\n"
+                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
+                                f"{recv_topk_idx.shape=} | {recv_topk_idx=}\n"  # type: ignore[union-attr]
+                                f"{recv_topk_weights.shape=} | {recv_topk_weights=}\n"  # type: ignore[union-attr]
                                 f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
                                 f"{rank_prefix_matrix.shape=} | {rank_prefix_matrix=}\n"  # handle[0]
                                 f"{channel_prefix_matrix.shape=} | {channel_prefix_matrix=}\n"  # handle[1]
@@ -424,7 +424,7 @@ def test_main(
                     else:
                         print(
                             (
-                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"
+                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
                                 f"{recv_topk_idx=}\n"
                                 f"{recv_topk_weights=}\n"
                                 f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
@@ -470,24 +470,26 @@ def test_main(
                     if with_topk:
                         # Check `topk_idx`
                         assert (
-                            recv_topk_idx.eq(-1)
+                            recv_topk_idx.eq(-1)  # type: ignore[union-attr]
                             | (
-                                (recv_topk_idx >= 0)
+                                (recv_topk_idx >= 0)  # type: ignore[operator]
                                 & (recv_topk_idx < (num_experts // num_ranks))
                             )
-                        ).sum().item() == recv_topk_idx.numel()
+                        ).sum().item() == recv_topk_idx.numel()  # type: ignore[union-attr]
                         for i, count in enumerate(recv_num_tokens_per_expert_list):
-                            assert recv_topk_idx.eq(i).sum().item() == count
+                            assert recv_topk_idx.eq(i).sum().item() == count  # type: ignore[union-attr]
 
                         # Check `topk_weights`
-                        recv_topk_weights_clone = recv_topk_weights.clone()
+                        recv_topk_weights_clone = recv_topk_weights.clone()  # type: ignore[union-attr]
                         if current_x is not x_pure_rand:
-                            recv_topk_weights[
-                                recv_topk_idx.eq(-1)
-                            ] = recv_topk_weights.amax(dim=1, keepdim=True).expand_as(
+                            recv_topk_weights[  # type: ignore[union-attr,index]
+                                recv_topk_idx.eq(-1)  # type: ignore[union-attr]
+                            ] = recv_topk_weights.amax(  # type: ignore[union-attr]
+                                dim=1, keepdim=True
+                            ).expand_as(  # type: ignore[union-attr]
                                 recv_topk_weights
                             )[
-                                recv_topk_idx.eq(-1)
+                                recv_topk_idx.eq(-1)  # type: ignore[union-attr]
                             ]
                             check_data(recv_topk_weights, rank_prefix_matrix)
 
@@ -520,9 +522,10 @@ def test_main(
                         # print
                         print(
                             (
-                                f"\n[RANK {rank}]: {recv_worst_x.shape=}\n"
-                                f"{recv_worst_topk_idx.shape=} | {recv_worst_topk_idx[0]=}\n"
-                                f"{recv_worst_topk_weights.shape=} | {recv_worst_topk_weights[0]=}\n\n"
+                                f"\n[RANK {rank}]: {recv_worst_x.shape=}\n"  # type: ignore[union-attr]
+                                f"{recv_worst_topk_idx.shape=} | {recv_worst_topk_idx[0]=}\n"  # type: ignore[union-attr,index]
+                                f"{recv_worst_topk_weights.shape=} | "  # type: ignore[union-attr]
+                                f"{recv_worst_topk_weights[0]=}\n\n"  # type: ignore[union-attr,index]
                             ),
                             flush=True,
                         )
@@ -537,18 +540,18 @@ def test_main(
                         # check
                         assert len(empty_list) == 0
                         assert num_worst_tokens == recv_worst_x.size(0)
-                        assert num_worst_tokens == recv_worst_topk_idx.size(0)
-                        assert num_worst_tokens == recv_worst_topk_weights.size(0)
+                        assert num_worst_tokens == recv_worst_topk_idx.size(0)  # type: ignore[union-attr,index]
+                        assert num_worst_tokens == recv_worst_topk_weights.size(0)  # type: ignore[union-attr]
                         assert torch.equal(recv_x, recv_worst_x[: recv_x.size(0)])
                         assert torch.equal(
-                            recv_topk_idx, recv_worst_topk_idx[: recv_x.size(0)]
+                            recv_topk_idx, recv_worst_topk_idx[: recv_x.size(0)]  # type: ignore[index]
                         )
                         assert torch.equal(
                             recv_topk_weights_clone,
-                            recv_worst_topk_weights[: recv_x.size(0)],
+                            recv_worst_topk_weights[: recv_x.size(0)],  # type: ignore[index]
                         )
                         assert torch.all(
-                            recv_worst_topk_idx[recv_x.size(0) :] == -1
+                            recv_worst_topk_idx[recv_x.size(0) :] == -1  # type: ignore[index]
                         ).item()
 
                     if local_rank == 0:
@@ -623,7 +626,7 @@ def test_main(
                         print(
                             (
                                 f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
-                                f"{combined_topk_weights.shape=} | {combined_topk_weights=}\n"
+                                f"{combined_topk_weights.shape=} | {combined_topk_weights=}\n"  # type: ignore[union-attr]
                                 f"Before combine: {send_head.shape=} | {send_head=}\n\n"
                             ),
                             flush=True,

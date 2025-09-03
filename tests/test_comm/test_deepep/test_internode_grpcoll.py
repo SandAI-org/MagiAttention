@@ -40,10 +40,10 @@ import random
 import time
 from typing import Callable
 
-import deep_ep
 import torch
 import torch.distributed as dist
 
+from magi_attention.comm import deep_ep
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.testing.grpcoll_utils import (
     bench,
@@ -485,9 +485,9 @@ def test_main(
                     if with_topk:
                         print(
                             (
-                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"
-                                f"{recv_topk_idx.shape=} | {recv_topk_idx=}\n"
-                                f"{recv_topk_weights.shape=} | {recv_topk_weights=}\n"
+                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
+                                f"{recv_topk_idx.shape=} | {recv_topk_idx=}\n"  # type: ignore[union-attr]
+                                f"{recv_topk_weights.shape=} | {recv_topk_weights=}\n"  # type: ignore[union-attr]
                                 f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
                                 f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[0]
                                 f"{rdma_channel_prefix_matrix.shape=} | {rdma_channel_prefix_matrix=}\n"  # handle[1]
@@ -505,7 +505,7 @@ def test_main(
                     else:
                         print(
                             (
-                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"
+                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
                                 f"{recv_topk_idx=}\n"
                                 f"{recv_topk_weights=}\n"
                                 f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
@@ -547,23 +547,25 @@ def test_main(
                     if with_topk:
                         # Check `topk_idx`
                         assert (
-                            recv_topk_idx.eq(-1)
+                            recv_topk_idx.eq(-1)  # type: ignore[union-attr]
                             | (
-                                (recv_topk_idx >= 0)
+                                (recv_topk_idx >= 0)  # type: ignore[operator]
                                 & (recv_topk_idx < (num_experts // num_ranks))
                             )
-                        ).sum().item() == recv_topk_idx.numel()
+                        ).sum().item() == recv_topk_idx.numel()  # type: ignore[union-attr]
                         for i, count in enumerate(recv_num_tokens_per_expert_list):
-                            assert recv_topk_idx.eq(i).sum().item() == count
+                            assert recv_topk_idx.eq(i).sum().item() == count  # type: ignore[union-attr]
 
                         # Check `topk_weights`
                         if current_x is not x_pure_rand:
-                            recv_topk_weights[
-                                recv_topk_idx.eq(-1)
-                            ] = recv_topk_weights.amax(dim=1, keepdim=True).expand_as(
+                            recv_topk_weights[  # type: ignore[index]
+                                recv_topk_idx.eq(-1)  # type: ignore[union-attr]
+                            ] = recv_topk_weights.amax(  # type: ignore[union-attr]
+                                dim=1, keepdim=True
+                            ).expand_as(  # type: ignore[union-attr]
                                 recv_topk_weights
                             )[
-                                recv_topk_idx.eq(-1)
+                                recv_topk_idx.eq(-1)  # type: ignore[union-attr]
                             ]
                             check_data(recv_topk_weights, recv_gbl_rank_prefix_sum)
 
@@ -645,7 +647,7 @@ def test_main(
                         print(
                             (
                                 f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
-                                f"{combined_topk_weights.shape=} | {combined_topk_weights=}\n"
+                                f"{combined_topk_weights.shape=} | {combined_topk_weights=}\n"  # type: ignore[union-attr]
                                 f"Before combine: {send_rdma_head.shape=} | {send_rdma_head=}\n\n"
                                 f"Before combine: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"
                             ),

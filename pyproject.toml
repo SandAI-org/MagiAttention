@@ -73,6 +73,10 @@ exclude = [
     "csrc/flexible_flash_attention/**/*.py",
     "csrc/utils/*.cpp",
     "csrc/utils/*.cu",
+    "csrc/comm/**/*.hpp",
+    "csrc/comm/**/*.cpp",
+    "csrc/comm/**/*.cuh",
+    "csrc/comm/**/*.cu",
     # only ship CUTLASS public headers
     "csrc/cutlass/include/**",
     # include instantiations of flexible_flash_attention

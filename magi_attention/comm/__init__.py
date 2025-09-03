@@ -14,12 +14,13 @@
 
 import os
 
-from . import functional, primitive
+from . import deep_ep, functional, primitive
 from .work import WorkWithPostProcessFn
 
 __all__ = [
     "primitive",
     "functional",
+    "deep_ep",
     "WorkWithPostProcessFn",
 ]
 
