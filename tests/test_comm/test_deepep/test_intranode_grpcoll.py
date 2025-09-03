@@ -43,8 +43,7 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
-
-from .grpcoll_utils import (
+from magi_attention.testing.grpcoll_utils import (
     bench,
     calc_diff,
     get_output_split_size_list_and_src_index_list,
