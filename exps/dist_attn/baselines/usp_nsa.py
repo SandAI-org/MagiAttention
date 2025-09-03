@@ -269,6 +269,7 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             None,  # merge_q_ranges
             None,  # fwd_qk_map
             None,  # fwd_unique_count
+            None,  # ref_block_size
             softmax_scale,
             0.0,  # softcap
             False,  # disable_fwd_atomic_reduction
@@ -282,8 +283,8 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             flatten_q,
             flatten_k_ag,
             flatten_v_ag,
-            None,
-            None,
+            None,  # out
+            None,  # lse
             q_ranges_tensor,
             k_ranges_tensor,
             max_seqlen_q,
@@ -372,9 +373,9 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             flatten_k_ag,
             flatten_v_ag,
             out,
-            None,
-            None,
-            None,
+            None,  # dq
+            None,  # dk
+            None,  # dv
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
@@ -448,6 +449,7 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             None,  # merge_q_ranges
             None,  # fwd_qk_map
             None,  # fwd_unique_count
+            None,  # ref_block_size
             softmax_scale,
             0.0,  # softcap
             False,  # disable_fwd_atomic_reduction
@@ -461,8 +463,8 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             q,
             k_ag,
             v_ag,
-            None,
-            None,
+            None,  # out
+            None,  # lse
             runtime_meta.q_ranges_tensor,
             runtime_meta.k_ranges_tensor,
             runtime_meta.max_seqlen_q,
@@ -514,9 +516,9 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             k_ag,
             v_ag,
             out,
-            None,
-            None,
-            None,
+            None,  # dq
+            None,  # dk
+            None,  # dv
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
@@ -645,6 +647,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             None,  # merge_q_ranges
             None,  # fwd_qk_map
             None,  # fwd_unique_count
+            None,  # ref_block_size
             softmax_scale,
             0.0,  # softcap
             False,  # disable_fwd_atomic_reduction
@@ -658,8 +661,8 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             q_cmp,
             k_ag_cmp,
             v_ag_cmp,
-            None,
-            None,
+            None,  # out
+            None,  # lse
             runtime_meta.q_ranges_tensor,
             runtime_meta.k_ranges_tensor,
             runtime_meta.max_seqlen_q,
@@ -721,9 +724,9 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             k_ag_cmp,
             v_ag_cmp,
             out,
-            None,
-            None,
-            None,
+            None,  # dq
+            None,  # dk
+            None,  # dv
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,

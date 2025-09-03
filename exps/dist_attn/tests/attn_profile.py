@@ -229,7 +229,7 @@ class MyAttnProfile(MultiProcessTestCase):
         # dv_global = collect_global_grad(attn, v.grad, cu_seqlens, host_cu_seqlens, "dv")
 
         # max_seqlen = get_max_seqlen(host_cu_seqlens)
-        # test_out_ref,test_lse_ref,test_dq_ref,test_dk_ref,test_dv_ref = test_fa3_varlen_func(
+        # test_out_ref,test_lse_ref,test_dq_ref,test_dk_ref,test_dv_ref = fa3_varlen_test_func(
         #     q,
         #     k,
         #     v,

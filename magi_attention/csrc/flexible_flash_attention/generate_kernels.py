@@ -22,7 +22,7 @@ import itertools
 from collections import namedtuple
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Generator
 
 KERNEL_BATCH = namedtuple("KERNEL_BATCH", ["template", "filename"])
 
@@ -219,7 +219,7 @@ def write_kernel(kernel: Kernel | KERNEL_BATCH, autogen_dir: Path) -> None:
     (autogen_dir / kernel.filename).write_text(kernel.template)
 
 
-def main(output_dir: Optional[str]) -> None:
+def main(output_dir: str | None) -> None:
     output_dir = Path(output_dir) if output_dir is not None else Path(__file__).parent
     output_dir.mkdir(parents=True, exist_ok=True)
     kernels_all = list(get_all_kernels())

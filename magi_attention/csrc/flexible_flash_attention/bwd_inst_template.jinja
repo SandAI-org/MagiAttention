@@ -1,0 +1,96 @@
+// Auto-generated minimal backward instantiation module (JIT).
+// Single-variant compilation bound to URI parameters: arch, compute dtype, DKV output dtype, head dim, softcap, and dkv-atomic options.
+
+#include <torch/python.h>
+
+#include "flex_flash_common.hpp"
+#include "flash_bwd_launch_template.h"
+#include "flex_flash_bwd.hpp"
+
+// Compile-time constants provided by Jinja arguments
+static constexpr int kArch = {{ arch_sm_num }};
+using TCompute = {{ compute_t }};
+using TDkv     = {{ out_t }};
+static constexpr int kHeadDim = {{ head_dim }};
+static constexpr bool kHasSoftcap = {{ has_softcap }};
+static constexpr bool kDisableDkvAtomic = {{ disable_atomic }};
+
+// Runtime contract checks to ensure consistency with compile-time constraints
+static inline void _check_runtime_contract_bwd(
+    const at::Tensor& q,
+    std::optional<at::ScalarType> dk_type_opt,
+    std::optional<at::ScalarType> dv_type_opt,
+    float softcap,
+    bool disable_dkv_atomic) {
+  TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
+              "JIT-FFA bwd only supports fp16/bf16 compute");
+  TORCH_CHECK(q.size(2) == kHeadDim,
+              "HeadDim mismatch: compiled=", kHeadDim, ", runtime=", q.size(2));
+  TORCH_CHECK(((softcap > 0.f) == kHasSoftcap),
+              "softcap mismatch with compiled variant");
+  TORCH_CHECK(disable_dkv_atomic == kDisableDkvAtomic,
+              "disable_bwd_dkv_atomic_reduction mismatch with compiled variant");
+
+  auto check_dkv = [](std::optional<at::ScalarType> t, const char* name) {
+    if (!t.has_value()) return;
+    at::ScalarType ty = t.value();
+    if constexpr (std::is_same_v<TDkv, float>) {
+      TORCH_CHECK(ty == at::kFloat, name, " must be float32 for this JIT variant");
+    } else if constexpr (std::is_same_v<TDkv, cutlass::half_t>) {
+      TORCH_CHECK(ty == at::kHalf, name, " must be float16 for this JIT variant");
+    } else if constexpr (std::is_same_v<TDkv, cutlass::bfloat16_t>) {
+      TORCH_CHECK(ty == at::kBFloat16, name, " must be bfloat16 for this JIT variant");
+    }
+  };
+  check_dkv(dk_type_opt, "dk_type");
+  check_dkv(dv_type_opt, "dv_type");
+}
+
+// Backward implementation: matches the binding signature
+std::vector<at::Tensor> mha_bwd(
+    const at::Tensor& dout,
+    const at::Tensor& q,
+    const at::Tensor& k,
+    const at::Tensor& v,
+    const at::Tensor& out,
+    std::optional<const at::Tensor>& dq_,
+    std::optional<const at::Tensor>& dk_,
+    std::optional<const at::Tensor>& dv_,
+    const at::Tensor& softmax_lse,
+    const at::Tensor& q_ranges,
+    const at::Tensor& k_ranges,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    std::optional<const at::Tensor>& attn_type_map_,
+    std::optional<const at::Tensor>& merge_k_ranges_,
+    std::optional<const at::Tensor>& bwd_kq_map_,
+    std::optional<const at::Tensor>& bwd_unique_count_,
+    float const softmax_scale,
+    float const softcap,
+    bool disable_bwd_dkv_atomic_reduction,
+    std::optional<at::ScalarType> dq_type_,
+    std::optional<at::ScalarType> dk_type_,
+    std::optional<at::ScalarType> dv_type_,
+    bool const deterministic,
+    int const sm_margin) {
+
+  _check_runtime_contract_bwd(q, dk_type_, dv_type_, softcap, disable_bwd_dkv_atomic_reduction);
+
+  // Parameter preparation (including output tensor allocation)
+  auto [params, dq, dk, dv, softmax_d, softmax_lse_log2] = prepare_mha_bwd(
+      dout, q, k, v, out, dq_, dk_, dv_, softmax_lse, q_ranges, k_ranges,
+      max_seqlen_q, max_seqlen_k, attn_type_map_, merge_k_ranges_, bwd_kq_map_,
+      bwd_unique_count_, softmax_scale, softcap, disable_bwd_dkv_atomic_reduction,
+      dq_type_, dk_type_, dv_type_, deterministic, sm_margin);
+
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  // Kernel launch (single variant)
+  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic>(params, stream);
+
+  return {dq, dk, dv, softmax_d, softmax_lse_log2};
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("bwd", &mha_bwd, "Backward (single-variant JIT)");
+}

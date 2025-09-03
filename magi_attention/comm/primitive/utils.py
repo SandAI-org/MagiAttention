@@ -15,8 +15,7 @@
 from collections import defaultdict
 from functools import partial
 from itertools import accumulate, chain, pairwise
-from logging import getLogger
-from typing import Any, Callable, TypeAlias
+from typing import Any, Callable, Literal, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -32,8 +31,6 @@ from magi_attention.common.range_op.utils import (
 )
 from magi_attention.common.ranges import NaiveRanges
 from magi_attention.utils import nvtx
-
-logger = getLogger("magi_attention")
 
 
 def get_pg_backend(pg: dist.ProcessGroup, device: str = "cuda") -> dist.Backend:
@@ -66,7 +63,7 @@ def _sanity_check_nccl_send_recv(
         raise AssertionError("\n".join(msg))
 
 
-def _seqlens2curanges(
+def seqlens2curanges(
     seqlens: list[int],
 ) -> NaiveRanges:
     """Make seqlens to cumulative ranges
@@ -127,7 +124,7 @@ def _calc_unperm_range_gather_kwargs_from_split_size_list(
     total_size = sum(split_size_list)
 
     # calculate each range's start and end
-    ranges = _seqlens2curanges(split_size_list)
+    ranges = seqlens2curanges(split_size_list)
 
     # re-order ranges to be in the order of the output tensor
     ranges = [ranges[i] for i in unpermute_index_list]
@@ -228,10 +225,10 @@ def _calc_range_reduce_kwargs_from_ranges(
     return range_reduce_kwargs
 
 
-# ------------------        utils for group cast collective       ------------------ #
+# ------------------        utils for group cast       ------------------ #
 
 
-def _group_cast_impl_with_batch_p2p(
+def group_cast_impl_with_batch_p2p(
     input: torch.Tensor,
     output: torch.Tensor,
     input_split_size_list: list[int],
@@ -346,12 +343,12 @@ def sanity_check_for_group_cast_meta_args_per_rank(
 
 
 @nvtx.instrument_nvtx
-def _unpermute_tensor(
+def unpermute_tensor(
     tensor: torch.Tensor,
     unperm_after_a2a_kwargs: dict,
 ) -> torch.Tensor:
     """unpermute a2a output to output
-    as a post-processing func for group_cast_collective
+    as a post-processing func for group_cast
     """
 
     return range_gather(
@@ -367,7 +364,7 @@ def _calc_group_cast_a2a_input_meta_args(
     world_size: int,
     device: torch.device,
 ) -> tuple[list[int], dict]:
-    input_size_ranges = _seqlens2curanges(input_split_size_list)
+    input_size_ranges = seqlens2curanges(input_split_size_list)
 
     a2a_input_size_ranges_with_rank: RangesWithRank = sorted(
         list(
@@ -536,7 +533,7 @@ def _calc_group_cast_a2a_output_args(
 
 @torch.no_grad()
 @nvtx.instrument_nvtx
-def _calc_group_cast_a2a_args(
+def calc_group_cast_a2a_args(
     input: torch.Tensor,
     output: torch.Tensor,
     input_split_size_list: list[int],
@@ -579,7 +576,7 @@ def _calc_group_cast_a2a_args(
     # ---------    prepare post-process fn    --------- #
 
     post_process_fn = partial(
-        _unpermute_tensor,
+        unpermute_tensor,
         unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
     )
 
@@ -592,7 +589,9 @@ def _calc_group_cast_a2a_args(
     )
 
 
-# ------------------        utils for group reduce collective       ------------------ #
+# ------------------        utils for group reduce       ------------------ #
+
+OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 def sanity_check_for_group_reduce_meta_args_per_rank(
@@ -662,18 +661,43 @@ def sanity_check_for_group_reduce_meta_args_per_rank(
 
 
 @nvtx.instrument_nvtx
-def _reduce_to_tensor(
+def sum_reduce_to_tensor(
     output: torch.Tensor,
     a2a_output: torch.Tensor,
     range_reduce_kwargs: dict,
 ) -> torch.Tensor:
     """sum-reduce a2a output to output
-    as a post-processing func for group_reduce_collective
+    as a post-processing func for group_reduce
     """
 
     output = range_reduce(
         input=a2a_output,
         output=output,
+        reduce_op="sum",
+        **range_reduce_kwargs,
+    )
+
+    return output
+
+
+@nvtx.instrument_nvtx
+def lse_reduce_to_tensor(
+    output: torch.Tensor,
+    output_lse: torch.Tensor,
+    a2a_output: torch.Tensor,
+    a2a_output_lse: torch.Tensor,
+    range_reduce_kwargs: dict,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """lse-reduce a2a output and a2a_output_lse to output and output_lse
+    as a post-processing func for group_reduce with reduce_op="lse"
+    """
+
+    output = range_reduce(
+        input=a2a_output,
+        output=output,
+        reduce_op="lse",
+        input_lse=a2a_output_lse,
+        output_lse=output_lse,
         **range_reduce_kwargs,
     )
 
@@ -687,7 +711,7 @@ def _calc_group_reduce_a2a_input_meta_args(
     world_size: int,
     device: torch.device,
 ) -> tuple[list[int], dict]:
-    input_size_ranges = _seqlens2curanges(input_split_size_list)
+    input_size_ranges = seqlens2curanges(input_split_size_list)
     a2a_input_size_ranges_with_rank: RangesWithRank = sorted(
         [(input_size_ranges[i], dst_rank) for i, dst_rank in enumerate(dst_index_list)],
         key=lambda x: x[1],
@@ -713,8 +737,10 @@ def _calc_group_reduce_a2a_input_args(
     input_split_size_list: list[int],
     dst_index_list: list[int],
     world_size: int,
+    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    input_lse: torch.Tensor | None = None,
     **kwargs,
-) -> tuple[torch.Tensor, list[int]]:
+) -> tuple[OutMaybeWithLSE, list[int]]:
     # -----     group_reduce_a2a_input meta args     ----- #
 
     # check if pre-calculated
@@ -736,6 +762,12 @@ def _calc_group_reduce_a2a_input_args(
         input=input,
         **perm_before_a2a_kwargs,
     )
+    if reduce_op == "lse":
+        a2a_input_lse = range_gather(
+            input=input_lse,
+            **perm_before_a2a_kwargs,
+        )
+        a2a_input = (a2a_input, a2a_input_lse)
 
     return a2a_input, a2a_input_split_size
 
@@ -767,9 +799,9 @@ def _calc_group_reduce_a2a_output_meta_args(
     num_src_list = [len(src_indices) for src_indices in src_indices_list]
 
     # phase2 meta
-    a2a_output_size_ranges = _seqlens2curanges(a2a_output_tensor_size_list)
-    output_size_ranges = _seqlens2curanges(output_split_size_list)
-    cum_src_ranges = _seqlens2curanges(num_src_list)
+    a2a_output_size_ranges = seqlens2curanges(a2a_output_tensor_size_list)
+    output_size_ranges = seqlens2curanges(output_split_size_list)
+    cum_src_ranges = seqlens2curanges(num_src_list)
     a2a_output_reduce_ranges_list: list[NaiveRanges] = []
     for start, end in cum_src_ranges:
         a2a_output_reduce_ranges_list.append(
@@ -798,8 +830,14 @@ def _calc_group_reduce_a2a_output_args(
     output_split_size_list: list[int],
     src_indices_list: list[list[int]],
     world_size: int,
+    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    output_lse: torch.Tensor | None = None,
+    deterministic: bool = False,
     **kwargs,
-) -> tuple[torch.Tensor, list[int], dict]:
+) -> tuple[OutMaybeWithLSE, list[int], dict]:
+    # only sum-reduce has non-deterministic kernel by now
+    deterministic |= reduce_op != "sum"
+
     # -----     group_reduce_a2a_output meta args     ----- #
 
     # check if pre-calculated
@@ -815,7 +853,7 @@ def _calc_group_reduce_a2a_output_args(
             src_indices_list=src_indices_list,
             world_size=world_size,
             device=output.device,
-            deterministic=kwargs.get("deterministic", False),
+            deterministic=deterministic,
         )
 
     # -----     group_reduce_a2a_output tensor args     ----- #
@@ -825,6 +863,13 @@ def _calc_group_reduce_a2a_output_args(
         device=output.device,
         dtype=output.dtype,
     )
+    if reduce_op == "lse":
+        a2a_output_lse = torch.empty(
+            [sum(a2a_output_split_size), *output_lse.shape[1:]],  # type: ignore[union-attr]
+            device=output.device,
+            dtype=output_lse.dtype,  # type: ignore[union-attr]
+        )
+        a2a_output = (a2a_output, a2a_output_lse)
 
     return (
         a2a_output,
@@ -835,7 +880,7 @@ def _calc_group_reduce_a2a_output_args(
 
 @torch.no_grad()
 @nvtx.instrument_nvtx
-def _calc_group_reduce_a2a_args(
+def calc_group_reduce_a2a_args(
     input: torch.Tensor,
     output: torch.Tensor,
     input_split_size_list: list[int],
@@ -843,21 +888,29 @@ def _calc_group_reduce_a2a_args(
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
     world_size: int,
+    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
+    OutMaybeWithLSE,
+    OutMaybeWithLSE,
     list[int],
     list[int],
-    Callable[[torch.Tensor], torch.Tensor],
+    Callable[[OutMaybeWithLSE], OutMaybeWithLSE],
 ]:
     # ---------    calc a2a_input_split_size and a2a input     --------- #
 
-    a2a_input, a2a_input_split_size = _calc_group_reduce_a2a_input_args(
+    (
+        a2a_input,
+        a2a_input_split_size,
+    ) = _calc_group_reduce_a2a_input_args(
         input=input,
         input_split_size_list=input_split_size_list,
         dst_index_list=dst_index_list,
         world_size=world_size,
+        reduce_op=reduce_op,
+        input_lse=input_lse,
         **kwargs,
     )
 
@@ -872,16 +925,30 @@ def _calc_group_reduce_a2a_args(
         output_split_size_list=output_split_size_list,
         src_indices_list=src_indices_list,
         world_size=world_size,
+        reduce_op=reduce_op,
+        output_lse=output_lse,
         **kwargs,
     )
 
     # ---------    prepare post process fn     --------- #
 
-    post_process_fn = partial(
-        _reduce_to_tensor,
-        a2a_output=a2a_output,
-        range_reduce_kwargs=range_reduce_kwargs,
-    )
+    match reduce_op:
+        case "lse":
+            a2a_output, a2a_output_lse = a2a_output
+            post_process_fn = partial(
+                lse_reduce_to_tensor,
+                a2a_output=a2a_output,
+                a2a_output_lse=a2a_output_lse,
+                range_reduce_kwargs=range_reduce_kwargs,
+            )
+        case "sum":
+            post_process_fn = partial(
+                sum_reduce_to_tensor,
+                a2a_output=a2a_output,
+                range_reduce_kwargs=range_reduce_kwargs,
+            )
+        case _:
+            raise RuntimeError(f"reduce_op={reduce_op} not supported")
 
     return (
         a2a_output,

@@ -108,7 +108,7 @@ def generate_sliding_window_mask_with_numpy(
     return mask
 
 
-class TestApiFunction(TestCase):
+class TestFunctools(TestCase):
     @parameterize(
         "testcase",
         [

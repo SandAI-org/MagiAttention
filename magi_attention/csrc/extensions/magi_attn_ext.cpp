@@ -14,7 +14,6 @@
  * limitations under the License.
  *********************************************************************************/
 
-
 #include <pybind11/functional.h>
 #include <torch/python.h>
 

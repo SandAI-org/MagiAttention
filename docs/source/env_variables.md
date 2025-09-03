@@ -7,7 +7,7 @@ In **MagiAttention**, many features need to be configured through environment va
 
 **MAGI_ATTENTION_HIERARCHICAL_COMM**
 
-Toggling `MAGI_ATTENTION_HIERARCHICAL_COMM` env variable to `1` to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group).
+Toggle this env variable to `1` to enable hierarchical group-collective comm within 2-dim cp group (inter_node group + intra_node group). The default value is `0`.
 
 ```{note}
 This is for now a temporary solution to reduce the redundant inter-node communication and might be removed or updated in the future.
@@ -15,16 +15,16 @@ This is for now a temporary solution to reduce the redundant inter-node communic
 
 **MAGI_ATTENTION_FFA_FORWARD_SM_MARGIN**
 
-The sm margin number of ffa forward kernel saved for comm kernels.
+Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
 
 **MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**
 
-The sm margin number of ffa backward kernel saved for comm kernels.
+Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
 
 
 **MAGI_ATTENTION_FFA_FORWARD_INPLACE_CORRECT**
 
-Toggling this env variable to `1` can enable inplace-correct for out and lse in ffa forward to avoid the storage of partial results and the memory-bound `result_correction` as a forward post process.
+Toggle this env variable to `1` can enable inplace-correct for out and lse in ffa forward to avoid the storage of partial results and the memory-bound `correct_attn_fwd_result` as a forward post process. The default value is `0`.
 
 ```{note}
 This feature will be enabled by default as long as it's stable (i.e. no effect on accuracy or performance).
@@ -32,7 +32,7 @@ This feature will be enabled by default as long as it's stable (i.e. no effect o
 
 **MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE**
 
-Toggling this env variable to `1` can enable high-precision (fp32) reduce for dkv among ranks in ffa backward to increase the precision at the cost of double comm overhead。
+Toggle this env variable to `1` can enable high-precision (fp32) reduce for dkv among ranks in ffa backward to increase the precision at the cost of double comm overhead. The default value is `0`.
 
 ```{note}
 Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dkv.
@@ -41,14 +41,13 @@ However, by default we will downcast it to kv dtype before reducing among ranks 
 
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
 
-Modify the value of this env variable to change the size of `dist_attn_runtime_dict`. The default value is `100`. See `magi_attention.api.magi_attn_interface.py` for more information.
-
+Set the value of this env variable to control the size of `dist_attn_runtime_dict`. The default value is `100`.
 
 ## For Debug
 
 **MAGI_ATTENTION_SANITY_CHECK**
 
-Toggling `MAGI_ATTENTION_SANITY_CHECK` env variable to `1` can enable many sanity check codes inside magi_attention.
+Toggle this env variable to `1` can enable many sanity check codes inside magi_attention. The default value is `0`.
 
 ```{note}
 This is only supposed to be used for testing or debugging, since the extra sanity-check overhead might be non-negligible.
@@ -56,7 +55,7 @@ This is only supposed to be used for testing or debugging, since the extra sanit
 
 **MAGI_ATTENTION_SDPA_BACKEND**
 
-Toggling `MAGI_ATTENTION_SDPA_BACKEND` env variable to `1` can switch the attn kernel backend from ffa to sdpa-math, to support higher precision like `fp32`, `fp64`.
+Toggle this env variable to `1` can switch the attn kernel backend from ffa to sdpa-math, to support higher precision like `fp32` or `fp64`. The default value is `0`.
 
 ```{note}
 This is only supposed to be used for testing or debugging, since the performance is not acceptable.
@@ -64,4 +63,26 @@ This is only supposed to be used for testing or debugging, since the performance
 
 **MAGI_ATTENTION_DETERMINISTIC_MODE**
 
-Toggle `MAGI_ATTENTION_DETERMINISTIC_MODE` env variable to `1` to enable deterministic mode to use deterministic algorithms for all magi_attention kernels.
+Toggle this env variable to `1` to enable deterministic mode to use deterministic algorithms for all magi_attention kernels. The default value is `0`.
+
+
+## For Build
+
+**MAGI_ATTENTION_PREBUILD_FFA**
+
+Toggle this env variable to `1` can enable pre-build ffa kernels for some common options with `ref_block_size=None` and leave others built in jit mode. The default value is `1`.
+
+
+**MAGI_ATTENTION_PREBUILD_FFA_JOBS**
+
+Set the value of this env variable to control the number of jobs used to pre-build ffa kernels. The default value is `256`.
+
+
+**MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD**
+
+Toggle this env variable to `1` can skip building `flexible_flash_attention_utils_cuda`. The default value is `0`.
+
+
+**MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD**
+
+Toggle this env variable to `1` can skip building `magi_attn_ext`. The default value is `0`.

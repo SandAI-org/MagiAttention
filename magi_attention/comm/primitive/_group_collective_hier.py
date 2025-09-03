@@ -14,7 +14,7 @@
 
 from functools import partial
 from itertools import chain
-from typing import Callable
+from typing import Callable, Literal
 
 import torch
 import torch.distributed as dist
@@ -30,8 +30,8 @@ from .utils import (
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
     _calc_unperm_range_gather_kwargs_from_split_size_list,
-    _reduce_to_tensor,
-    _unpermute_tensor,
+    sum_reduce_to_tensor,
+    unpermute_tensor,
 )
 
 __all__ = [
@@ -140,7 +140,7 @@ class HierGroupCastMetaSolver:
         stashed_tensors: list[torch.Tensor] | None = None,
     ):
         core_post_process_fn_hier = partial(
-            _unpermute_tensor,
+            unpermute_tensor,
             unperm_after_a2a_kwargs=self.unperm_after_a2a_kwargs_hier,
         )
 
@@ -799,13 +799,13 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         stashed_tensors: list[torch.Tensor] | None = None,
     ) -> Callable[[torch.Tensor], torch.Tensor]:
         post_process_fn_pre_intra = partial(
-            _reduce_to_tensor,
+            sum_reduce_to_tensor,
             a2a_output=a2a_output_pre_intra,
             range_reduce_kwargs=self.range_reduce_kwargs_pre_intra,
         )
 
         post_process_fn_inter = partial(
-            _reduce_to_tensor,
+            sum_reduce_to_tensor,
             a2a_output=a2a_output_inter,
             range_reduce_kwargs=self.range_reduce_kwargs_inter,
         )
@@ -1015,7 +1015,7 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         )
 
         self.pre_process_fn_hier = partial(
-            _unpermute_tensor, unperm_after_a2a_kwargs=self.perm_before_a2a_kwargs_hier
+            unpermute_tensor, unperm_after_a2a_kwargs=self.perm_before_a2a_kwargs_hier
         )
 
 
@@ -1069,11 +1069,17 @@ def hier_group_reduce_impl_with_a2av(
     src_indices_list: list[list[int]],
     group: dist.ProcessGroup | None = None,
     async_op: bool = False,
+    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     assert (
         async_op
     ), "async_op must be True for hierarchical group-reduce collective by now"
+    assert (
+        reduce_op == "sum"
+    ), "hierarchical group reduce only supports sum reduction by now"
 
     rank = kwargs.pop("rank", dist.get_rank(group))
     world_size = kwargs.pop("world_size", dist.get_world_size(group))

@@ -75,32 +75,32 @@ def _generate_copyright(path, comment_mark) -> list[str]:
     else:
         header = f"Copyright (c) 2025-{NOW} SandAI. All Rights Reserved."
 
-    ans = [
-        start_mark
-        + (
-            "/**********************************************************************************"
-            if is_c_file
-            else " "
+    ans = []
+
+    if is_c_file:
+        ans.append(
+            start_mark
+            + (
+                "/**********************************************************************************"
+            )
+            + os.linesep
         )
-        + os.linesep
-    ]
     ans.append(start_mark + (" * " if is_c_file else " ") + header + os.linesep)
     for idx, line in enumerate(copyright[1:]):
         if start_mark == "#":
             ans.append(comment_mark + " " + line.rstrip() + os.linesep)
         else:
             ans.append(start_mark + " * " + line.rstrip() + os.linesep)
-    ans.append(
-        start_mark
-        + (
-            " *********************************************************************************/"
-            if is_c_file
-            else " "
+    if is_c_file:
+        ans.append(
+            start_mark
+            + (
+                " *********************************************************************************/"
+            )
+            + os.linesep
         )
-        + os.linesep
-    )
     if end_mark != "#":
-        ans.append(end_mark + os.linesep)
+        ans.append(end_mark)
 
     return ans
 

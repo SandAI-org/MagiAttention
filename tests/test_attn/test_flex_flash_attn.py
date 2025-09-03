@@ -22,12 +22,12 @@ from torch.testing._internal.common_utils import run_tests
 import magi_attention.testing
 from magi_attention.common import AttnRanges
 from magi_attention.functional import flex_flash_attn_func
-from magi_attention.functional.dist_attn import result_correction
 from magi_attention.functional.flex_flash_attn import (
     _flex_flash_attn_backward,
     _flex_flash_attn_forward,
     merge_ranges,
 )
+from magi_attention.functional.utils import correct_attn_fwd_result
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import (
@@ -246,7 +246,7 @@ class TestFlexFlashAttn(DistTestBase):
     ):
         t, h, d = q.shape
         o_acc = torch.randn_like(q, dtype=torch.float32)
-        lse_acc = torch.randn([h, t], device=q.device, dtype=torch.float32)
+        lse_acc = torch.randn([t, h], device=q.device, dtype=torch.float32)
 
         softmax_scale = 1.0 / (d**0.5)
 
@@ -295,6 +295,7 @@ class TestFlexFlashAttn(DistTestBase):
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
+            ref_block_size=None,
             softmax_scale=softmax_scale,
             softcap=0.0,
             disable_fwd_atomic_reduction=False,
@@ -303,7 +304,9 @@ class TestFlexFlashAttn(DistTestBase):
             sm_margin=0,
         )
 
-        o_ref, lse_ref = result_correction(out_list=[o, o_acc], lse_list=[lse, lse_acc])
+        o_ref, lse_ref = correct_attn_fwd_result(
+            out_list=[o, o_acc], lse_list=[lse, lse_acc]
+        )
 
         # NOTE: The auto accumulation call must follow the non-auto accumulation call,
         # as the latter modifies the input tensors, and the former relies on these modified tensors.
@@ -321,6 +324,7 @@ class TestFlexFlashAttn(DistTestBase):
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
+            ref_block_size=None,
             softmax_scale=softmax_scale,
             softcap=0.0,
             disable_fwd_atomic_reduction=False,

@@ -122,39 +122,6 @@ class VarlenNSA(nn.Module):
             # h,s,sk @ h,sk,d -> s,h,d
             out_cmp_part = torch.einsum("hsn,hnd->shd", P_cmp_part, v_part)
 
-            # tmp_ranges_q = AttnRanges.from_ranges(
-            #         [
-            #             [0, 128],
-            #         ]
-            # )
-            # tmp_ranges_k = AttnRanges.from_ranges(
-            #         [
-            #             [0, 2],
-            #         ]
-            # )
-            # attn_type_map = torch.tensor([0], dtype=torch.int32, device=q.device)
-            # out_cmp_tmp, _ = flex_flash_attn_func(
-            #     q_part,
-            #     k_part.transpose(0,1).contiguous(),
-            #     v_part.transpose(0,1).contiguous(),
-            #     tmp_ranges_q.to_tensor(q.device),
-            #     tmp_ranges_k.to_tensor(q.device),
-            #     128,
-            #     2,
-            #     attn_type_map
-            # )
-
-            # out_cmp_fa, _ = flash_attn_func(
-            #     q_part.unsqueeze(0),
-            #     k_part.transpose(0,1).contiguous().unsqueeze(0),
-            #     v_part.transpose(0,1).contiguous().unsqueeze(0),
-            #     softmax_scale=softmax_scale,
-            #     causal=False,
-            #     deterministic=True,
-            # )
-            # out_cmp_fa = out_cmp_fa.squeeze(0)
-            # print(f"max diff fa out: {torch.abs(out_cmp_part - out_cmp_fa).max()}")
-
             out_cmp[start_q:end_q, :, :] = out_cmp_part
 
             # compute P_slc, h,s,sk
@@ -225,7 +192,7 @@ class VarlenNSA(nn.Module):
         q_slc_fa = q.view(total_seqlen_q, 1, q_heads, self.hidden_dim)
         k_slc_fa = K_slc.permute(1, 2, 0, 3).contiguous()
         v_slc_fa = V_slc.permute(1, 2, 0, 3).contiguous()
-        out_slc, _ = flash_attn_func(
+        out_slc = flash_attn_func(
             q_slc_fa,
             k_slc_fa,
             v_slc_fa,
@@ -243,7 +210,7 @@ class VarlenNSA(nn.Module):
         )
         max_seqlen_q = q_ranges.max_seqlen
         max_seqlen_k = k_ranges.max_seqlen
-        out_win, _ = flash_attn_varlen_func(
+        out_win = flash_attn_varlen_func(
             q,
             k,
             v,

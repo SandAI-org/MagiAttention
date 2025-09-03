@@ -39,3 +39,43 @@ default-version = "1.0.3"
 file = "magi_attention/_version.py"
 encoding = "utf-8"
 template = "__version__ = '{version}'"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["magi_attention*"]
+exclude = [
+    "build*",
+    "tests*",
+    "dist*",
+    "docs*",
+    "tools*",
+    "assets*",
+]
+
+[tool.setuptools.package-data]
+"magi_attention" = [
+    # include pyi files
+    "*.pyi",
+    "**/*.pyi",
+    # common headers and utils for runtime/JIT
+    "csrc/common/*.h",
+    "csrc/extensions/*.hpp",
+    "csrc/extensions/*.cpp",
+    "csrc/flexible_flash_attention/**/*.h",
+    "csrc/flexible_flash_attention/**/*.hpp",
+    "csrc/flexible_flash_attention/**/*.cuh",
+    "csrc/flexible_flash_attention/**/*.cu",
+    "csrc/flexible_flash_attention/**/*.cpp",
+    "csrc/flexible_flash_attention/**/*.jinja",
+    "csrc/flexible_flash_attention/**/*.py",
+    "csrc/utils/*.cpp",
+    "csrc/utils/*.cu",
+    # only ship CUTLASS public headers
+    "csrc/cutlass/include/**",
+    # include instantiations of flexible_flash_attention
+    "lib/*/*.so",
+    # include ext modules besides flexible_flash_attention
+    "*.so",
+]

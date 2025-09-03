@@ -40,6 +40,8 @@ using namespace cute;
 
 template <
     int Arch,
+    int kBlockM,
+    int kBlockN,
     int kHeadDim,
     int ClusterM,
     typename Element,
@@ -51,11 +53,8 @@ template <
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
-  static constexpr std::tuple<int, int, bool, bool> kBlockMN_RS_IntraWGOverlap = tile_size_fwd_sm90(kHeadDim, sizeof(Element) /*element_size*/, Has_softcap);
-  static constexpr int kBlockM = std::get<0>(kBlockMN_RS_IntraWGOverlap);
-  static constexpr int kBlockN = std::get<1>(kBlockMN_RS_IntraWGOverlap);
-  static constexpr bool MmaPV_is_RS = std::get<2>(kBlockMN_RS_IntraWGOverlap);
-  static constexpr bool IntraWGOverlap = std::get<3>(kBlockMN_RS_IntraWGOverlap);
+  static constexpr bool MmaPV_is_RS = true;
+  static constexpr bool IntraWGOverlap = true;
 
   static constexpr int kStages = 2;
 
@@ -103,7 +102,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       {params.total_q, params.d, params.h_qo}, // shape_O
       {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O
       static_cast<float*>(params.softmax_lse_ptr), // LSE
-      {_1{}, params.total_q}, // stride_LSE
+      {params.h_qo, _1{}}, // stride_LSE
       params.h_qo,
       params.h_kv,
       params.range_locks,
@@ -153,18 +152,16 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   CHECK_CUDA_KERNEL_LAUNCH();
 }
 
-template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction>
+template <int Arch, int kBlockM, int kBlockN, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  // Only needed here to decide if we should use cluster
-  static constexpr int kBlockM = std::get<0>(tile_size_fwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
   // TODO: support cluster launch
   static constexpr bool Enable_cluster = false;
   CLUSTER_SWITCH(cutlass::ceil_div(params.total_q, kBlockM) % 2 == 0, Use_cluster, [&] {
     static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
     BOOL_SWITCH(params.merge_q_ranges != nullptr, MergeRange, [&] {
       BOOL_SWITCH(params.deterministic, Deterministic, [&] {
-        run_flash_fwd<Arch, kHeadDim, ClusterM, T, T_out, Has_softcap, DisableFwdAtomicReduction, Deterministic, MergeRange>(params, stream);
+        run_flash_fwd<Arch, kBlockM, kBlockN, kHeadDim, ClusterM, T, T_out, Has_softcap, DisableFwdAtomicReduction, Deterministic, MergeRange>(params, stream);
       });
     });
   });

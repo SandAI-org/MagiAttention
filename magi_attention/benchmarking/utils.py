@@ -15,7 +15,6 @@
 import re
 import time
 from contextlib import contextmanager
-from typing import Optional
 
 import torch
 
@@ -68,7 +67,7 @@ def time_manager(name: str = ""):
 def get_max_diff(
     a: torch.Tensor,
     b: torch.Tensor,
-    ref: Optional[torch.Tensor] = None,
+    ref: torch.Tensor | None = None,
     times: float = 1.0,
 ):
     """get the maximum difference between a and b if ref is None,

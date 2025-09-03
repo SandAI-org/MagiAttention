@@ -84,6 +84,10 @@ class TestBaselineAttn(DistTestBase):
     def device(self):
         return torch.cuda.current_device()
 
+    # @property
+    # def world_size(self) -> int:
+    #     return 4
+
     def assert_close_to_sdpa_ref(
         self,
         total_q: torch.Tensor,
@@ -483,6 +487,8 @@ class TestBaselineAttn(DistTestBase):
                 cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
                 global_loongtrain_pg_groups[key] = cp_group
 
+        dist.barrier()
+
         # -----    init test data   ---- #
 
         seqlen = attn_mask_config["seqlen"]
@@ -601,6 +607,7 @@ class TestBaselineAttn(DistTestBase):
         self.assert_close_to_sdpa_ref(
             q, k, v, dout, out_global, dq_global, dk_global, dv_global, dtype, mask
         )
+        torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

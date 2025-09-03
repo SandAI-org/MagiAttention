@@ -14,19 +14,16 @@
  * limitations under the License.
  *********************************************************************************/
 
-#pragma once
+#include <torch/extension.h>
+#include <tuple>
 
-#include <pybind11/pybind11.h>
-#include <pybind11/pytypes.h>
-#include <torch/types.h>
+// Forward declaration; implemented in unique_consecutive_pairs.cu
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+unique_consecutive_pairs_ext(torch::Tensor sorted_input_tensor);
 
-#include "attn_ranges.hpp"
-
-#ifndef TORCH_EXTENSION_NAME
-#define TORCH_EXTENSION_NAME magi_attn_ext
-#endif
-
-
-namespace magi_attn_ext {
-
-} // namespace magi_attn_ext
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def(
+      "unique_consecutive_pairs",
+      &unique_consecutive_pairs_ext,
+      "Find unique (int, int) pairs from a pre-sorted [N,2] int32 CUDA tensor");
+}

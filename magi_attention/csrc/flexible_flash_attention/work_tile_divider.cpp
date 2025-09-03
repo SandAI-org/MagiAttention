@@ -25,7 +25,6 @@
 #include <cutlass/kernel_launch.h>
 
 #include "cuda_check.h"
-#include "flash.h"
 #include "work_tile_divider.hpp"
 
 using namespace cute;
