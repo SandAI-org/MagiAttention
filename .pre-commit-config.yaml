@@ -11,7 +11,7 @@ repos:
         name: copyright_checker
         entry: python3 ./tools/codestyle/copyright.py
         language: system
-        files: \.(c|cc|cxx|cpp|cu|h|hpp|hxx|proto|py|pyi|sh)$
+        files: \.(c|cc|cxx|cpp|cu|cuh|h|hpp|hxx|proto|py|pyi|sh)$
     -   id: check-for-chinese
         name: check for Chinese characters
         entry: python3 ./tools/codestyle/check_for_chinese.py

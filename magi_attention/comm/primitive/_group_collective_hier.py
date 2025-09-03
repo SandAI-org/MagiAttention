@@ -799,13 +799,13 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         stashed_tensors: list[torch.Tensor] | None = None,
     ) -> Callable[[torch.Tensor], torch.Tensor]:
         post_process_fn_pre_intra = partial(
-            sum_reduce_to_tensor,
+            sum_reduce_to_tensor,  # TODO: support other reduce ops
             a2a_output=a2a_output_pre_intra,
             range_reduce_kwargs=self.range_reduce_kwargs_pre_intra,
         )
 
         post_process_fn_inter = partial(
-            sum_reduce_to_tensor,
+            sum_reduce_to_tensor,  # TODO: support other reduce ops
             a2a_output=a2a_output_inter,
             range_reduce_kwargs=self.range_reduce_kwargs_inter,
         )

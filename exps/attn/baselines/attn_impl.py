@@ -23,7 +23,9 @@ from flash_attn_interface import flash_attn_varlen_func as fa3_varlen_func
 from packaging import version
 from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.functional import scaled_dot_product_attention as sdpa_func
-from transformer_engine.pytorch.attention import FusedAttnFunc
+from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+    FusedAttnFunc,
+)
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
 
