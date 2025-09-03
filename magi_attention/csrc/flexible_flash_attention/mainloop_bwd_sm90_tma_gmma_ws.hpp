@@ -177,11 +177,16 @@ struct CollectiveMainloopBwdSm90 {
   // it's still a valid smem address.
   // using SmemLayoutLSE = cute::Layout<cute::Shape<Int<kBlockM>, Int<kStages>>, cute::Stride<_1, Int<cute::round_up(kBlockM, 64)>>>;
   using SmemLayoutLSE = cute::Layout<cute::Shape<_4, Int<kBlockM>, Int<kStages>>, cute::Stride<_1, _4, Int<4 * cute::round_up(kBlockM, 64)>>>;
-
+  /*
   using SmemLayoutLSEMma = std::conditional_t<
       SdP_swapAB,
       cute::Layout<cute::Shape<Int<kBlockN>, Int<kBlockM>, Int<kStages>>, cute::Stride<_0, _1, Int<cute::round_up(kBlockM, 64)>>>,
       cute::Layout<cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kStages>>, cute::Stride<_1, _0, Int<cute::round_up(kBlockM, 64)>>>>;
+  */
+  using SmemLayoutLSEMma = std::conditional_t<
+      SdP_swapAB,
+      cute::Layout<cute::Shape<_4, Int<kBlockN>, Int<kBlockM>, Int<kStages>>, cute::Stride<_1, _0, _4, Int<4 * cute::round_up(kBlockM, 64)>>>,
+      cute::Layout<cute::Shape<_4, Int<kBlockM>, Int<kBlockN>, Int<kStages>>, cute::Stride<_1, _4, _0, Int<4 * cute::round_up(kBlockM, 64)>>>>;
 
   // Note this is the transpose in terms of the view, not in terms of memory.
   using SmemLayoutQt = decltype(cute::composition(
@@ -975,13 +980,16 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdQ = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{}));
     Tensor sdQt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumtTMA{}));
     // Tensor cdQsdQ = make_identity_tensor(SmemLayoutdQaccumTMA{}.shape());
-    Tensor sLSE = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSE{}); // reconstruct sLSE;
-    auto sLSE_slice = sLSE(_0{}, _, _);
-
     // Tensor sLSEMma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSEMma{});
-    Tensor sLSEMma = make_tensor(make_smem_ptr(sLSE_slice.data()), SmemLayoutLSEMma{});
 
-    Tensor sdPsumMma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
+    // Tensor sdPsumMma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
+
+    Tensor sdPsumMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
+
+    Tensor sLSEMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSEMma{});
+    Tensor sLSEMma = sLSEMma_full(_0{}, _, _, _);
+    Tensor sdPsumMma = sdPsumMma_full(_0{}, _, _, _);
+
 
     static_assert(
         stride<0>(typename TiledMmaSdP::ALayout{}) == 0 and stride<0>(typename TiledMmaSdP::BLayout{}) == 0 and
