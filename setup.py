@@ -242,11 +242,16 @@ def build_magi_attn_comm_module(
     csrc_dir: Path,
     common_dir: Path,
 ) -> CUDAExtension | None:
-    # FIXME: rename to magi_attn_comm
-    ext_module_name = "deep_ep_cpp"
+    ext_module_name = "magi_attn_comm"
 
     if SKIP_MAGI_ATTN_COMM_BUILD:
         return None
+
+    print(
+        "\n# -------------------     Building magi_attn_comm     ------------------- #\n"
+    )
+
+    # ---   for deep_ep_cpp submodule   --- #
 
     # find nvshmem
     disable_nvshmem = False
