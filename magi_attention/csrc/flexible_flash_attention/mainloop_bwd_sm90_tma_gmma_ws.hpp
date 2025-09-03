@@ -473,19 +473,6 @@ struct CollectiveMainloopBwdSm90 {
       return false;
     }
 
-    if (bidh == 0 && thread_idx == 0) {
-      // printf("[BWD LOAD BEGIN]\n");
-      printf(
-          "[BWD LOAD BEGIN] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
-          bidb,
-          kBlockM,
-          kBlockN,
-          n_block,
-          m_block_min,
-          m_block_max,
-          attn_type);
-    }
-
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
     Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
@@ -523,6 +510,11 @@ struct CollectiveMainloopBwdSm90 {
         cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum),
         make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})),
         make_coord(_0{}, _)); // (4, M, _)
+
+    if (thread_idx == 0 && bidh == 0) {
+      printf("gLSE:\n");
+      print_tensor(gLSE);
+    }
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
@@ -565,49 +557,6 @@ struct CollectiveMainloopBwdSm90 {
           params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
           tQgQ(_, m_block),
           tQsQ(_, smem_pipe_write.index()));
-      /*
-      if (bidh == 0 && thread_idx == 0) {
-        // printf("[BWD LOAD BEGIN]\n");
-        printf(
-            "[BWD COPY BEFORE TMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
-            bidb,
-            kBlockM,
-            kBlockN,
-            n_block,
-            m_block_min,
-            m_block_max,
-            attn_type);
-
-        printf("gLSE to copy:\n");
-        printf("gLSE Object: ");
-        print(gLSE(_, _, m_block));
-        printf("\n");
-
-        printf("gLSE Shape: ");
-        print(shape(gLSE(_, _, m_block)));
-        printf("\n");
-
-        printf("gLSE Stride: ");
-        print(stride(gLSE(_, _, m_block)));
-        printf("\n");
-
-        printf("gLSE Data Pointer: %p\n", gLSE(_, _, m_block).data());
-
-        printf("sLSE to copy:\n");
-        printf("sLSE Object: ");
-        print(sLSE(_, _, smem_pipe_write.index()));
-        printf("\n");
-
-        printf("sLSE Shape: ");
-        print(shape(sLSE(_, _, smem_pipe_write.index())));
-        printf("\n");
-
-        printf("sLSE Stride: ");
-        print(stride(sLSE(_, _, smem_pipe_write.index())));
-        printf("\n");
-
-        printf("sLSE Data Pointer: %p\n", sLSE(_, _, smem_pipe_write.index()).data());
-      } */
 
       // copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, m_block), sLSE(_, smem_pipe_write.index()));
       copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write.index()));
@@ -945,18 +894,6 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
-    /*
-    if (bidh == 0 && thread_idx == 0) {
-      printf(
-          "[BWD MMA BEGIN] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
-          bidb,
-          kBlockM,
-          kBlockN,
-          n_block,
-          m_block_min,
-          m_block_max,
-          attn_type);
-    } */
     // It's possible to have m_block_max <= m_block_min. Exit early
     if (m_block_max <= m_block_min) {
       return false;
@@ -985,7 +922,6 @@ struct CollectiveMainloopBwdSm90 {
     // Tensor sdPsumMma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
 
     Tensor sdPsumMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
-
     Tensor sLSEMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSEMma{});
     Tensor sLSEMma = sLSEMma_full(_0{}, _, _, _);
     Tensor sdPsumMma = sdPsumMma_full(_0{}, _, _, _);
@@ -1104,30 +1040,9 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     auto bwd_step = [&](int m_block, auto mask_fn, auto mask_q_fn) {
-      if (bidh == 0 && thread_idx == 0) {
-        printf(
-            "[BWD_STEP BEGIN] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
-            bidb,
-            kBlockM,
-            kBlockN,
-            n_block,
-            m_block_min,
-            m_block_max,
-            attn_type);
-      }
       Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select < !SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0 > (TileShape_MNK{}));
       consumer_wait(pipeline_q, smem_pipe_read);
-      if (bidh == 0 && thread_idx == 0) {
-        printf(
-            "[BWD_STEP after consumer_wait] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
-            bidb,
-            kBlockM,
-            kBlockN,
-            n_block,
-            m_block_min,
-            m_block_max,
-            attn_type);
-      }
+
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read.index()), tSrK, tSrS);
       Tensor tLSErLSE = cute::conditional_return<!ShuffleLSE>(make_fragment_like(tLSEsLSE(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
       if constexpr (!ShuffleLSE) {
@@ -1150,6 +1065,28 @@ struct CollectiveMainloopBwdSm90 {
 
       // Reshape tSrS from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
       Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
+      /*
+      if (thread_idx == 0 && bidh == 0) {
+        printf("sLSE\n");
+        print_tensor(sLSE);
+      }
+      if (thread_idx == 0 && bidh == 0) {
+        printf("sLSE_slice\n");
+        print_tensor(sLSE_slice);
+      } */
+
+      if (thread_idx == 0 && bidh == 0 && bidb == 0) {
+        printf("tLSEsLSE\n");
+        print_tensor(tLSEsLSE);
+      }
+      if (thread_idx == 0 && bidh == 0 && bidb == 0) {
+        printf("sLSEMma\n");
+        print_tensor(sLSEMma);
+      }
+      if (bidh == 0 && thread_idx == 0 && bidb == 0) {
+        printf("score before softmax and mask:\n");
+        print_tensor(scores);
+      }
       // dtanh needs to happen before masking, otherwise we get 1 - (-inf)^2 = NaN in the dtanh
       auto dtanh = [&] {
         if constexpr (Has_softcap)
@@ -1185,7 +1122,10 @@ struct CollectiveMainloopBwdSm90 {
           scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - lse_scaled);
         }
       }
-
+      if (bidh == 0 && thread_idx == 0 && bidb == 0) {
+        printf("score after softmax and mask:\n");
+        print_tensor(scores);
+      }
       // Start debug print
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
@@ -1386,17 +1326,6 @@ struct CollectiveMainloopBwdSm90 {
       ++smem_pipe_read;
       if constexpr (!Q_dO_same_stages) {
         ++smem_pipe_read_do;
-      }
-      if (bidh == 0 && thread_idx == 0) {
-        printf(
-            "[BWD_STEP END] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n",
-            bidb,
-            kBlockM,
-            kBlockN,
-            n_block,
-            m_block_min,
-            m_block_max,
-            attn_type);
       }
     };
 
