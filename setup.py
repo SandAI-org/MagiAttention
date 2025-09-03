@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import glob
+import importlib
+import importlib.resources
 import itertools
 import os
 import shutil
@@ -46,6 +48,10 @@ FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 # Skip building CUDA extension modules
 SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
 
+# NOTE: this flag now only used for magi_attn_comm to disable sm90 features
+# to be compatible with other architectures such as sm80
+DISABLE_SM90_FEATURES = os.getenv("MAGI_ATTENTION_DISABLE_SM90_FEATURES", "0") == "1"
+
 # We no longer build the flexible_flash_attention_cuda module
 # instead, we only pre-build some common options with ref_block_size=None if PREBUILD_FFA is True
 # and leave others built in jit mode
@@ -57,49 +63,11 @@ SKIP_FFA_UTILS_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD", "0") == 
 SKIP_MAGI_ATTN_EXT_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
 )
+SKIP_MAGI_ATTN_COMM_BUILD = (
+    os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD", "0") == "1"
+)
 
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
-
-
-class MagiAttnBuildExtension(BuildExtension):
-    """
-    A BuildExtension that switches its behavior based on the command.
-
-    - For development installs (`pip install -e .`), it caches build artifacts
-      in the local `./build` directory for faster re-compilation.
-
-    - For building a distributable wheel (`python -m build --wheel`), it uses
-      the default temporary directory behavior of PyTorch's BuildExtension to
-      ensure robust and correct packaging.
-    """
-
-    def initialize_options(self):
-        super().initialize_options()
-
-        # Before core extensions are built,
-        # optionally prebuild FFA JIT kernels (ref_block_size=None)
-        if not SKIP_CUDA_BUILD and PREBUILD_FFA:
-            prebuild_ffa_kernels()
-
-        # Core logic: check if wheel build is running. 'bdist_wheel' is triggered by `python -m build`.
-        if "bdist_wheel" not in sys.argv:
-            # If not building a wheel (i.e., dev install like `pip install -e .`), enable local caching
-            print("Development mode detected: Caching build artifacts in build/")
-            project_root = os.path.dirname(os.path.abspath(__file__))
-            self.build_temp = os.path.join(project_root, "build", "temp")
-            self.build_lib = os.path.join(project_root, "build", "lib")
-
-            # Ensure directories exist
-            os.makedirs(self.build_temp, exist_ok=True)
-            os.makedirs(self.build_lib, exist_ok=True)
-        else:
-            # If building a wheel, rely on the default PyTorch behavior so .so files are correctly packaged
-            print(
-                "Wheel build mode detected: Using default temporary directories in /tmp/ for robust packaging."
-            )
-
-    def build_extensions(self):
-        super().build_extensions()
 
 
 def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
@@ -137,6 +105,15 @@ def get_magi_attention_cache_path() -> str:
     if not user_home:
         raise RuntimeError("Could not find user home directory")
     return os.path.join(user_home, f".{PACKAGE_NAME}")
+
+
+# Copied from https://github.com/deepseek-ai/DeepEP/blob/main/setup.py
+# Wheel specific: The wheels only include the soname of the host library (libnvshmem_host.so.X)
+def get_nvshmem_host_lib_name():
+    for path in importlib.resources.files("nvidia.nvshmem").iterdir():
+        for file in path.rglob("libnvshmem_host.so.*"):
+            return file.name
+    raise ModuleNotFoundError("libnvshmem_host.so not found")
 
 
 def open_url(url):
@@ -260,8 +237,154 @@ def build_magi_attn_ext_module(
     )
 
 
-# init cmdclass
-cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
+def build_magi_attn_comm_module(
+    repo_dir: Path,
+    csrc_dir: Path,
+    common_dir: Path,
+) -> CUDAExtension | None:
+    # FIXME: rename to magi_attn_comm
+    ext_module_name = "deep_ep_cpp"
+
+    if SKIP_MAGI_ATTN_COMM_BUILD:
+        return None
+
+    # find nvshmem
+    disable_nvshmem = False
+    nvshmem_dir = os.getenv("NVSHMEM_DIR", None)
+    nvshmem_host_lib = "libnvshmem_host.so"
+    if nvshmem_dir is None:
+        try:
+            nvshmem_dir = importlib.util.find_spec(  # type: ignore[union-attr,index]
+                "nvidia.nvshmem"
+            ).submodule_search_locations[0]
+            nvshmem_host_lib = get_nvshmem_host_lib_name()
+            import nvidia.nvshmem as nvshmem  # noqa: F401
+        except (ModuleNotFoundError, AttributeError, IndexError):
+            warnings.warn(
+                "`NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. "
+                "All internode and low-latency features are disabled\n"
+            )
+            disable_nvshmem = True
+    else:
+        disable_nvshmem = False
+
+    if not disable_nvshmem:
+        assert os.path.exists(
+            nvshmem_dir  # type: ignore[arg-type]
+        ), f"The specified NVSHMEM directory does not exist: {nvshmem_dir}"
+
+    magi_attn_comm_dir_abs = csrc_dir / "comm"
+    deepep_csrc_dir_abs = magi_attn_comm_dir_abs / "deepep_csrc"
+    deepep_csrc_dir_rel = deepep_csrc_dir_abs.relative_to(repo_dir)
+
+    # init sources
+    sources = [
+        f"{deepep_csrc_dir_rel}/deep_ep.cpp",
+        f"{deepep_csrc_dir_rel}/kernels/runtime.cu",
+        f"{deepep_csrc_dir_rel}/kernels/layout.cu",
+        f"{deepep_csrc_dir_rel}/kernels/intranode.cu",
+    ]
+
+    # init include dirs
+    include_dirs = [common_dir, deepep_csrc_dir_abs]
+
+    # init extra compile args
+    cxx_flags = [
+        "-O3",
+        "-Wno-deprecated-declarations",
+        "-Wno-unused-variable",
+        "-Wno-sign-compare",
+        "-Wno-reorder",
+        "-Wno-attributes",
+    ]
+    nvcc_flags = [
+        "-O3",
+        "-Xcompiler",
+        "-O3",
+        "-gencode",
+        "arch=compute_90,code=sm_90",
+    ]  # Explicitly specify sm_90
+
+    # extend flags, dirs and args
+    library_dirs = []
+    nvcc_dlink = []
+    extra_link_args = []
+    if disable_nvshmem:
+        cxx_flags.append("-DDISABLE_NVSHMEM")
+        nvcc_flags.append("-DDISABLE_NVSHMEM")
+    else:
+        sources.extend(
+            [
+                f"{deepep_csrc_dir_rel}/kernels/internode.cu",
+                f"{deepep_csrc_dir_rel}/kernels/internode_ll.cu",
+            ]
+        )
+        include_dirs.extend([f"{nvshmem_dir}/include"])  # type: ignore[list-item]
+        library_dirs.extend([f"{nvshmem_dir}/lib"])
+        nvcc_dlink.extend(["-dlink", f"-L{nvshmem_dir}/lib", "-lnvshmem_device"])
+        extra_link_args.extend(
+            [
+                f"-l:{nvshmem_host_lib}",
+                "-l:libnvshmem_device.a",
+                f"-Wl,-rpath,{nvshmem_dir}/lib",
+            ]
+        )
+
+    if DISABLE_SM90_FEATURES:
+        # Prefer A100
+        os.environ["TORCH_CUDA_ARCH_LIST"] = os.getenv("TORCH_CUDA_ARCH_LIST", "8.0")
+
+        # Disable some SM90 features: FP8, launch methods, and TMA
+        cxx_flags.append("-DDISABLE_SM90_FEATURES")
+        nvcc_flags.append("-DDISABLE_SM90_FEATURES")
+
+        # Disable internode and low-latency kernels
+        assert disable_nvshmem
+    else:
+        # Prefer H800 series
+        os.environ["TORCH_CUDA_ARCH_LIST"] = os.getenv("TORCH_CUDA_ARCH_LIST", "9.0")
+
+        # CUDA 12 flags
+        nvcc_flags.extend(["-rdc=true", "--ptxas-options=--register-usage-level=10"])
+
+    # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
+    if os.environ["TORCH_CUDA_ARCH_LIST"].strip() != "9.0":
+        assert int(os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", 1)) == 1
+        os.environ["DISABLE_AGGRESSIVE_PTX_INSTRS"] = "1"
+
+    # Disable aggressive PTX instructions
+    if int(os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1")):
+        cxx_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
+        nvcc_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
+
+    # Put them together
+    extra_compile_args = {
+        "cxx": cxx_flags,
+        "nvcc": nvcc_flags,
+    }
+    if len(nvcc_dlink) > 0:
+        extra_compile_args["nvcc_dlink"] = nvcc_dlink
+
+    # Summary
+    print("Build summary:")
+    print(f" > Sources: {sources}")
+    print(f" > Includes: {include_dirs}")
+    print(f" > Libraries: {library_dirs}")
+    print(f" > Compilation flags: {extra_compile_args}")
+    print(f" > Link flags: {extra_link_args}")
+    print(f' > Arch list: {os.environ["TORCH_CUDA_ARCH_LIST"]}')
+    print(f" > NVSHMEM path: {nvshmem_dir}")
+    print()
+
+    return CUDAExtension(
+        name=to_full_ext_module_name(ext_module_name),
+        include_dirs=include_dirs,
+        library_dirs=library_dirs,
+        sources=sources,
+        extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args,
+    )
+
 
 # build ext modules
 ext_modules = []
@@ -275,6 +398,15 @@ if not SKIP_CUDA_BUILD:
     common_dir = csrc_dir / "common"
     cutlass_dir = csrc_dir / "cutlass"
 
+    # build ffa utils ext module
+    ffa_utils_ext_module = build_ffa_utils_ext_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+    )
+    if ffa_utils_ext_module is not None:
+        ext_modules.append(ffa_utils_ext_module)
+
     # build magi attn ext module
     magi_attn_ext_module = build_magi_attn_ext_module(
         repo_dir=repo_dir,
@@ -284,14 +416,14 @@ if not SKIP_CUDA_BUILD:
     if magi_attn_ext_module is not None:
         ext_modules.append(magi_attn_ext_module)
 
-    # build utils ext module
-    ffa_utils_ext_module = build_ffa_utils_ext_module(
+    # build magi attn ext module
+    magi_attn_comm_module = build_magi_attn_comm_module(
         repo_dir=repo_dir,
         csrc_dir=csrc_dir,
         common_dir=common_dir,
     )
-    if ffa_utils_ext_module is not None:
-        ext_modules.append(ffa_utils_ext_module)
+    if magi_attn_comm_module is not None:
+        ext_modules.append(magi_attn_comm_module)
 
 
 def prebuild_ffa_kernels() -> None:
@@ -358,6 +490,51 @@ def prebuild_ffa_kernels() -> None:
                 print(f"Prebuilt: {uri}")
             except Exception as e:
                 print(f"Prebuild failed for {c}: {e}")
+
+
+class MagiAttnBuildExtension(BuildExtension):
+    """
+    A BuildExtension that switches its behavior based on the command.
+
+    - For development installs (`pip install -e .`), it caches build artifacts
+      in the local `./build` directory for faster re-compilation.
+
+    - For building a distributable wheel (`python -m build --wheel`), it uses
+      the default temporary directory behavior of PyTorch's BuildExtension to
+      ensure robust and correct packaging.
+    """
+
+    def initialize_options(self):
+        super().initialize_options()
+
+        # Before core extensions are built,
+        # optionally prebuild FFA JIT kernels (ref_block_size=None)
+        if not SKIP_CUDA_BUILD and PREBUILD_FFA:
+            prebuild_ffa_kernels()
+
+        # Core logic: check if wheel build is running. 'bdist_wheel' is triggered by `python -m build`.
+        if "bdist_wheel" not in sys.argv:
+            # If not building a wheel (i.e., dev install like `pip install -e .`), enable local caching
+            print("Development mode detected: Caching build artifacts in build/")
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            self.build_temp = os.path.join(project_root, "build", "temp")
+            self.build_lib = os.path.join(project_root, "build", "lib")
+
+            # Ensure directories exist
+            os.makedirs(self.build_temp, exist_ok=True)
+            os.makedirs(self.build_lib, exist_ok=True)
+        else:
+            # If building a wheel, rely on the default PyTorch behavior so .so files are correctly packaged
+            print(
+                "Wheel build mode detected: Using default temporary directories in /tmp/ for robust packaging."
+            )
+
+    def build_extensions(self):
+        super().build_extensions()
+
+
+# init cmdclass
+cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
 
 setup(

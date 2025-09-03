@@ -39,10 +39,10 @@ import os
 import random
 from functools import partial
 
-import deep_ep
 import torch
 import torch.distributed as dist
 
+from magi_attention.comm import deep_ep
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.testing.grpcoll_utils import (
     bench,
@@ -243,7 +243,7 @@ def test_main(
                                 packed_recv_x[1].view(-1, hidden // 128),
                             ).view(packed_recv_x[0].shape)
                             if dispatch_use_fp8
-                            else packed_recv_x.clone()
+                            else packed_recv_x.clone()  # type: ignore[attr-defined]
                         )
 
                         # unpack
@@ -263,7 +263,7 @@ def test_main(
                         print(
                             (
                                 f"[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n\n"
-                                f"{packed_recv_x=} | {packed_recv_x.shape=}\n"
+                                f"{packed_recv_x=} | {packed_recv_x.shape=}\n"  # type: ignore[attr-defined]
                                 f"{packed_recv_count=} | {sum(packed_recv_count)=} | {packed_recv_count.shape=}\n"
                                 f"{packed_recv_src_info=} | {packed_recv_src_info.shape=}\n"
                                 f"{packed_recv_layout_range=} | {packed_recv_layout_range.shape=}\n"
@@ -343,7 +343,7 @@ def test_main(
                                 )
                             else:
                                 hash_value ^= hash_tensor(
-                                    packed_recv_x[i, :num_valid_tokens]
+                                    packed_recv_x[i, :num_valid_tokens]  # type: ignore[call-overload]
                                 )
 
                         if rank == 0:

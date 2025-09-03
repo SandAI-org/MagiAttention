@@ -39,7 +39,8 @@ from typing import Any, Optional, Tuple
 
 import torch
 import torch.distributed as dist
-from deep_ep_cpp import EventHandle
+
+from magi_attention.deep_ep_cpp import EventHandle
 
 
 class EventOverlap:
