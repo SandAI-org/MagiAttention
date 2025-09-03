@@ -88,6 +88,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         comm_len_n: list[int],
         eval_solver_map: list[list[int]],
         area_map: list[list[int]],
+        qk_rate: float = 1.0,
     ) -> float:
         # calc the area max
         area_per_rank = [0 for _ in range(cp_size)]
@@ -133,8 +134,12 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 kv_lcrh_len[i] += comm_len_n[j]
 
         for i in range(cp_size):
-            fwd_send_len = qo_lhrc_len[i] + kv_lhrc_len[i] * 2 + qo_lcrh_len[i]
-            fwd_recv_len = qo_lcrh_len[i] + kv_lcrh_len[i] * 2 + qo_lhrc_len[i]
+            fwd_send_len = (
+                qk_rate * qo_lhrc_len[i] + kv_lhrc_len[i] * 2 + qk_rate * qo_lcrh_len[i]
+            )
+            fwd_recv_len = (
+                qk_rate * qo_lcrh_len[i] + kv_lcrh_len[i] * 2 + qk_rate * qo_lhrc_len[i]
+            )
             comm_max = max(comm_max, fwd_send_len, fwd_recv_len)
 
         # cost function: communication cost max * area max
@@ -241,6 +246,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             num_heads_kv: The number of KV heads
             bucket_per_rank: The buckets of each rank
         """
+        qk_rate = num_heads_q / num_heads_kv
         # get the host rank list of Q and K
         cp_size = len(bucket_per_rank)
         rank_m = []
@@ -320,6 +326,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 comm_len_n,
                 new_solver_map,
                 area_map,
+                qk_rate,
             )
             if new_solver_eval < local_eval:
                 local_eval = new_solver_eval
@@ -369,6 +376,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     comm_len_n,
                     new_solver_map,
                     area_map,
+                    qk_rate,
                 )
                 if new_solver_eval < local_eval:
                     local_eval = new_solver_eval

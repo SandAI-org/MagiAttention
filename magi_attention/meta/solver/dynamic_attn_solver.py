@@ -108,6 +108,12 @@ class DynamicAttnSolver:
 
         self.calc_host_and_remote_bucket_this_rank()
 
+    def output_solve_result(self) -> None:
+        for rank in range(self.cp_size):
+            print(f"rank {rank} bucket:")
+            for rect in self.bucket_per_rank[rank]:
+                print(rect)
+
     @nvtx.instrument_nvtx
     def _calc_intersection_with_index(
         self,
@@ -171,12 +177,14 @@ class DynamicAttnSolver:
     def _calc_group_collective_arg(
         self,
         calc_kv: bool = True,
+        calc_local_range: bool = True,
     ) -> GroupCollectiveArg:
         host_ranges = self.host_ranges_k if calc_kv else self.host_ranges_q
         # =========== process local-calc-remote-hold message ===========
         indexed_remote_hold_ranges = []
         for idx, intervals in enumerate(host_ranges):
-            if idx != self.cp_rank:
+            # if calc_local_range == True, host range needs send to itself
+            if (idx != self.cp_rank) or calc_local_range:
                 indexed_remote_hold_ranges.extend(
                     [(interval, idx) for interval in intervals]
                 )
@@ -208,13 +216,22 @@ class DynamicAttnSolver:
         # Obtain the sending ranges and ranks using the scan line method
         scanning_line_event = []
         for remote_rank in range(self.cp_size):
-            if remote_rank == self.cp_rank:
+            # calc global range do not need host range communicate to itself
+            if (not calc_local_range) and remote_rank == self.cp_rank:
                 continue
-            remote_calc_ranges = (
-                self.bucket_per_rank[remote_rank].get_kv_ranges_union()
-                if calc_kv
-                else self.bucket_per_rank[remote_rank].get_qo_ranges_union()
-            )
+            # calc local range need host range communicate to itself when have calc job
+            if calc_local_range and remote_rank == self.cp_rank:
+                remote_calc_ranges = (
+                    self.remote_bucket_this_rank.get_kv_ranges_union()
+                    if calc_kv
+                    else self.remote_bucket_this_rank.get_qo_ranges_union()
+                )
+            else:
+                remote_calc_ranges = (
+                    self.bucket_per_rank[remote_rank].get_kv_ranges_union()
+                    if calc_kv
+                    else self.bucket_per_rank[remote_rank].get_qo_ranges_union()
+                )
             intersections = self._calc_intersection(
                 host_ranges_this_rank, remote_calc_ranges
             )
@@ -271,14 +288,18 @@ class DynamicAttnSolver:
         return group_collective_arg
 
     @nvtx.instrument_nvtx
-    def calc_comm_meta(self) -> CommMeta:
+    def calc_comm_meta(
+        self,
+        calc_local_range: bool = True,
+    ) -> CommMeta:
         """Calculate communication meta for kv and qo group collective"""
 
         num_remote_kv_tokens_per_stage: list[int] = []
         kv_group_collective_args_list: list[GroupCollectiveArg] = []
 
         kv_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
-            True
+            calc_kv=True,
+            calc_local_range=calc_local_range,
         )
         kv_group_collective_args_list.append(kv_group_collective_arg)
         num_remote_kv_tokens_per_stage.append(
@@ -289,7 +310,8 @@ class DynamicAttnSolver:
         qo_group_collective_args_list: list[GroupCollectiveArg] = []
 
         qo_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
-            False
+            calc_kv=False,
+            calc_local_range=calc_local_range,
         )
         qo_group_collective_args_list.append(qo_group_collective_arg)
         num_remote_qo_tokens_per_stage.append(
@@ -356,13 +378,16 @@ class DynamicAttnSolver:
         self.remote_bucket_this_rank.extend(rest_rects_q)
 
     @nvtx.instrument_nvtx
-    def calc_attn_calc_meta(self) -> AttnCalcMeta:
+    def calc_attn_calc_meta(
+        self,
+        calc_local_range: bool = True,
+    ) -> AttnCalcMeta:
         """Calculate flex-flash-attention calculation meta for this rank"""
         local_attn_arg = AttnArg(
             q_ranges=AttnRanges(),
             k_ranges=AttnRanges(),
             attn_type_map=[],
-            shard_seqlen_q=self.total_seqlen_q,
+            shard_seqlen_q=self.host_ranges_q[self.cp_rank].total_seqlen,
             total_area=0,
         )
         for rect in self.host_bucket_this_rank:
@@ -387,6 +412,20 @@ class DynamicAttnSolver:
                 remote_attn_arg.k_ranges.append(k_range)
                 remote_attn_arg.attn_type_map.append(mask_type)
             remote_attn_arg.total_area += rect.area()
+
+        if calc_local_range:
+            local_attn_arg.q_ranges = local_attn_arg.q_ranges.make_ranges_local(
+                local_attn_arg.q_ranges
+            )
+            local_attn_arg.k_ranges = local_attn_arg.k_ranges.make_ranges_local(
+                local_attn_arg.k_ranges
+            )
+            remote_attn_arg.q_ranges = remote_attn_arg.q_ranges.make_ranges_local(
+                remote_attn_arg.q_ranges
+            )
+            remote_attn_arg.k_ranges = remote_attn_arg.k_ranges.make_ranges_local(
+                remote_attn_arg.k_ranges
+            )
 
         remote_attn_args_list: list[AttnArg] = []
         remote_attn_args_list.append(remote_attn_arg)
