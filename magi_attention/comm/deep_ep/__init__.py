@@ -34,8 +34,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from magi_attention.deep_ep_cpp import Config, EventHandle
-
-from .buffer import Buffer
+from .buffer import Buffer, Config, EventHandle
 
 __all__ = ["Buffer", "Config", "EventHandle"]

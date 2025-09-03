@@ -57,7 +57,7 @@
 #include "kernels/exception.cuh"
 
 #ifndef TORCH_EXTENSION_NAME
-#define TORCH_EXTENSION_NAME deep_ep_cpp
+#define TORCH_EXTENSION_NAME magi_attn_comm
 #endif
 
 namespace deep_ep {

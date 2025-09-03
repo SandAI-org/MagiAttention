@@ -1362,22 +1362,27 @@ bool is_sm90_compiled() {
 } // namespace deep_ep
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.doc() = "DeepEP: an efficient expert-parallel communication library";
+    m.doc() = "Magi Attention Communication C++ Library"; // optional module docstring
 
-    pybind11::class_<deep_ep::Config>(m, "Config")
+    pybind11::module_ deep_ep_cpp_submodule = m.def_submodule(
+        "deep_ep_cpp",
+        "DeepEP: an efficient expert-parallel communication library"
+    );
+
+    pybind11::class_<deep_ep::Config>(deep_ep_cpp_submodule, "Config")
         .def(pybind11::init<int, int, int, int, int>(),
              py::arg("num_sms") = 20,
              py::arg("num_max_nvl_chunked_send_tokens") = 6, py::arg("num_max_nvl_chunked_recv_tokens") = 256,
              py::arg("num_max_rdma_chunked_send_tokens") = 6, py::arg("num_max_rdma_chunked_recv_tokens") = 256)
         .def("get_nvl_buffer_size_hint", &deep_ep::Config::get_nvl_buffer_size_hint)
         .def("get_rdma_buffer_size_hint", &deep_ep::Config::get_rdma_buffer_size_hint);
-    m.def("get_low_latency_rdma_size_hint", &deep_ep::get_low_latency_rdma_size_hint);
+    deep_ep_cpp_submodule.def("get_low_latency_rdma_size_hint", &deep_ep::get_low_latency_rdma_size_hint);
 
-    pybind11::class_<deep_ep::EventHandle>(m, "EventHandle")
+    pybind11::class_<deep_ep::EventHandle>(deep_ep_cpp_submodule, "EventHandle")
         .def(pybind11::init<>())
         .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
 
-    pybind11::class_<deep_ep::Buffer>(m, "Buffer")
+    pybind11::class_<deep_ep::Buffer>(deep_ep_cpp_submodule, "Buffer")
         .def(pybind11::init<int, int, int64_t, int64_t, bool, bool>())
         .def("is_available", &deep_ep::Buffer::is_available)
         .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
@@ -1400,5 +1405,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
         .def("get_next_low_latency_combine_buffer", &deep_ep::Buffer::get_next_low_latency_combine_buffer);
 
-    m.def("is_sm90_compiled", deep_ep::is_sm90_compiled);
+    deep_ep_cpp_submodule.def("is_sm90_compiled", deep_ep::is_sm90_compiled);
 }
