@@ -35,7 +35,8 @@
  * @param headdim Attention head dimension size
  * @param element_size Element size, defaults to 2 bytes (FP16/BF16)
  * @param softcap Whether to enable softcap, defaults to false
- * @return std::tuple<int, int, bool, bool> Returns a tuple of tile configuration, {kBlockM, kBlockN, MmaPV_is_RS, IntraWGOverlap}
+ * @return std::tuple<int, int, bool, bool> Returns a tuple of tile configuration, {kBlockM, kBlockN, MmaPV_is_RS,
+ * IntraWGOverlap}
  */
 constexpr std::tuple<int, int, bool, bool> tile_size_fwd_sm90(int headdim, int element_size = 2, bool softcap = false) {
   // Currently only support FP16/BF16
@@ -49,7 +50,7 @@ constexpr std::tuple<int, int, bool, bool> tile_size_fwd_sm90(int headdim, int e
     // Good for long seqlen (>= 4k) but suffers from tile quantization at short seqlen
     // return {192, is_causal || is_local ? 192 : 176, true, false};
   } else if (headdim <= 128) {
-    return {128, 128, true, true};
+    return {64, 64, true, true};
     // {128, 192, false, false} and {192, 128, false, true} are quite good too
     // 128 x 192 hits the limit of smem if MmaPV_is_RS, 128 x 144 hits the limit if !MmaPV_is_RS
   } else if (headdim <= 192) {

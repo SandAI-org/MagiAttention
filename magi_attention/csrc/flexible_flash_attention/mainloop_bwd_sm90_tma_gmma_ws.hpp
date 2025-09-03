@@ -130,7 +130,13 @@ struct CollectiveMainloopBwdSm90 {
       std::conditional_t<
           Mma_dKV_is_RS,
           decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShapeAtomdKV, GMMA::Major::K, GMMA::Major::MN>()),
-          decltype(cute::GMMA::ss_op_selector < Element, Element, ElementAccum, TileShapeAtomdKV, !dKV_swapAB ? PdSt_Major : GMMA::Major::MN, !dKV_swapAB ? GMMA::Major::MN : PdSt_Major > ())>{},
+          decltype(cute::GMMA::ss_op_selector<
+                   Element,
+                   Element,
+                   ElementAccum,
+                   TileShapeAtomdKV,
+                   !dKV_swapAB ? PdSt_Major : GMMA::Major::MN,
+                   !dKV_swapAB ? GMMA::Major::MN : PdSt_Major>())>{},
       AtomLayoutdKV{}));
 
   using TileShapeAtomdQ = std::conditional_t<
@@ -145,7 +151,13 @@ struct CollectiveMainloopBwdSm90 {
       std::conditional_t<
           Mma_dQ_is_RS,
           decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShapeAtomdQ, GMMA::Major::K, GMMA::Major::MN>()),
-          decltype(cute::GMMA::ss_op_selector < Element, Element, ElementAccum, TileShapeAtomdQ, !dQ_swapAB ? PdS_Major : GMMA::Major::MN, !dQ_swapAB ? GMMA::Major::MN : PdS_Major > ())>{},
+          decltype(cute::GMMA::ss_op_selector<
+                   Element,
+                   Element,
+                   ElementAccum,
+                   TileShapeAtomdQ,
+                   !dQ_swapAB ? PdS_Major : GMMA::Major::MN,
+                   !dQ_swapAB ? GMMA::Major::MN : PdS_Major>())>{},
       AtomLayoutdQ{}));
 
   // We need to accommodate both Q and Q^T (and dO and dO^T) in shared memory.
@@ -359,8 +371,8 @@ struct CollectiveMainloopBwdSm90 {
     StrideLSE const stride_dPsum;
     float const softmax_scale, softmax_scale_log2;
     float const softcap_val;
-    int const* const q_ranges;
-    int const* const k_ranges;
+    int2 const* const q_ranges;
+    int2 const* const k_ranges;
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
     int const n_block_max_num;
@@ -697,7 +709,7 @@ struct CollectiveMainloopBwdSm90 {
       // update conflict state of batches
       // bidb_last is the previous bidb, need to update conflict state of bidb_last ~ bidb
       // block_now is the block id of bidb, block_size = kBlock
-      // params.q_ranges[2 * bidb] ~ params.q_ranges[2 * bidb + 1] is the range of bidb
+      // params.q_ranges[bidb].x ~ params.q_ranges[bidb].y is the range of bidb
       int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
       uint32_t smid = blockIdx.x;
       uint32_t sm_stride = gridDim.x;
@@ -705,7 +717,7 @@ struct CollectiveMainloopBwdSm90 {
       // update missed batch's conflict state, loop for bidb_last ~ bidb
       while (bidb_last < bidb) {
         // bidb_last_l ~ bidb_last_r is the range of bidb_last
-        int bidb_last_l = params.q_ranges[2 * bidb_last], bidb_last_r = params.q_ranges[2 * bidb_last + 1];
+        int bidb_last_l = params.q_ranges[bidb_last].x, bidb_last_r = params.q_ranges[bidb_last].y;
         int l = bidb_last_l / kBlockM + lane; // bidb_last_l / kBlock is first block id
         int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlockM); // calc total block num of bidb_last
         int r = (bidb_last_l + block_num * kBlockM - 1) / kBlockM; // calc last block id
@@ -981,7 +993,7 @@ struct CollectiveMainloopBwdSm90 {
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print(mdQaccum); printf("\n"); print(gdQaccum_); printf("\n"); print(gdQaccum); printf("\n"); print(tdQgdQaccum);
     // printf("\n"); }
 
-    flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask(thread_idx, seqlen_q, seqlen_k);
+    flash::Mask<kBlockM, kBlockN, TiledMmaSdP, SdP_swapAB> mask;
 
     int m_block = m_block_min;
     // tiled_mma_dKV.accumulate_ = GMMA::ScaleOut::Zero;
@@ -1003,7 +1015,7 @@ struct CollectiveMainloopBwdSm90 {
     }
 
     auto bwd_step = [&](int m_block, auto mask_fn) {
-      Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select < !SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0 > (TileShape_MNK{}));
+      Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
       consumer_wait(pipeline_q, smem_pipe_read);
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read.index()), tSrK, tSrS);
       Tensor tLSErLSE = cute::conditional_return<!ShuffleLSE>(make_fragment_like(tLSEsLSE(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
@@ -1016,7 +1028,7 @@ struct CollectiveMainloopBwdSm90 {
           tLSErLSE(i) = tLSEsLSE((thread_idx % 32) / 4 + i * 8, smem_pipe_read.index());
         }
       }
-      Tensor tdPrdP = partition_fragment_C(tiled_mma_SdP, select < !SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0 > (TileShape_MNK{}));
+      Tensor tdPrdP = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
       PipelineState_dO smem_pipe_read_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_read, smem_pipe_read_do);
       consumer_wait(pipeline_do, smem_pipe_read_do_cur);
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_dP, tdPrdO(_, _, _, smem_pipe_read_do_cur.index()), tdPrV, tdPrdP);
@@ -1146,7 +1158,7 @@ struct CollectiveMainloopBwdSm90 {
         // SMEM fence to make sure sdS is written before it's read by WGMMA
         cutlass::arch::fence_view_async_shared();
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
-        Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select < !dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0 > (TileShape_MNK{}));
+        Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
         pipeline_do.consumer_release(smem_pipe_read_do_cur); // release dO
@@ -1230,7 +1242,7 @@ struct CollectiveMainloopBwdSm90 {
 
         cutlass::arch::fence_view_async_shared();
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
-        Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select < !dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0 > (TileShape_MNK{}));
+        Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/0>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(
@@ -1273,7 +1285,7 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
-    auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type); };
+    auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
     CUTLASS_PRAGMA_NO_UNROLL
     for (; m_block < m_block_max; ++m_block) {
       bwd_step(m_block, mask_fn);

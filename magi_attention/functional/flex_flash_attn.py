@@ -142,7 +142,10 @@ def merge_ranges(
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
     sorted_inner_ranges = inner_ranges[sorted_idx]
-    sorted_attn_type_map = attn_type_map[sorted_idx]
+    if attn_type_map is None:
+        sorted_attn_type_map = None
+    else:
+        sorted_attn_type_map = attn_type_map[sorted_idx]
     (
         merge_outer_ranges,
         range_map,
@@ -600,28 +603,29 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_unique_count = None
             bwd_unique_count = None
 
-        out, lse = _flex_flash_attn_forward(
-            q,
-            k,
-            v,
-            None,  # out
-            None,  # lse
-            fwd_q_ranges,
-            fwd_k_ranges,
-            max_seqlen_q,
-            max_seqlen_k,
-            fwd_attn_type_map,
-            merge_q_ranges,
-            fwd_qk_map,
-            fwd_unique_count,
-            ref_block_size,
-            softmax_scale,
-            softcap,
-            disable_fwd_atomic_reduction,
-            q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
-            deterministic,
-            sm_margin,
-        )
+        with nvtx.add_nvtx_event("ffa_func"):
+            out, lse = _flex_flash_attn_forward(
+                q,
+                k,
+                v,
+                None,  # out
+                None,  # lse
+                fwd_q_ranges,
+                fwd_k_ranges,
+                max_seqlen_q,
+                max_seqlen_k,
+                fwd_attn_type_map,
+                merge_q_ranges,
+                fwd_qk_map,
+                fwd_unique_count,
+                ref_block_size,
+                softmax_scale,
+                softcap,
+                disable_fwd_atomic_reduction,
+                q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
+                deterministic,
+                sm_margin,
+            )
 
         # Cast output to the same dtype as q
         out = out.to(q.dtype)

@@ -198,7 +198,6 @@ def build_ffa_utils_ext_module(
         f"{utils_dir_rel}/bindings.cpp",
         f"{utils_dir_rel}/unique_consecutive_pairs.cu",
     ]
-
     include_dirs = [
         common_dir,
         utils_dir_abs,
