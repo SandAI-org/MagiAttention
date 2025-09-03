@@ -158,6 +158,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         area_map: list[list[int]],
         grid_rects: list[list[AttnRectangles]],
         job_list: list[tuple[int, int]],
+        qk_rate: float = 1.0,
     ) -> list[list[int]]:
         # initialize the row rank set, col rank set, rank calc area, and total area
         row: list[set] = [set() for _ in range(m)]
@@ -209,11 +210,13 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     for rank in rank_choice_list
                 ]
                 # normalize the communication length weight
-                sum_comm_len_weight = sum([comm_len_m[rank] for rank in row[i]]) + sum(
-                    [comm_len_n[rank] for rank in col[j]]
-                )
+                sum_comm_len_weight = sum(
+                    [comm_len_m[rank] for rank in row[i]]
+                ) * qk_rate + sum([comm_len_n[rank] for rank in col[j]])
                 for rank in row[i]:
-                    weights_list[rank] += comm_len_m[rank] / sum_comm_len_weight
+                    weights_list[rank] += (
+                        comm_len_m[rank] * qk_rate / sum_comm_len_weight
+                    )
                 for rank in col[j]:
                     weights_list[rank] += comm_len_n[rank] / sum_comm_len_weight
                 rank_choice = random.choices(
