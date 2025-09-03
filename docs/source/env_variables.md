@@ -127,3 +127,7 @@ Toggle this env variable to `1` can skip building `flexible_flash_attention_util
 **MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD**
 
 Toggle this env variable to `1` can skip building `magi_attn_ext`. The default value is `0`.
+
+**MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD**
+
+Toggle this env variable to `1` can skip building `magi_attn_comm`. The default value is `0`.
