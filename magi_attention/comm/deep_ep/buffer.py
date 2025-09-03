@@ -40,16 +40,10 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 
+from magi_attention.magi_attn_comm import deep_ep_cpp
+from magi_attention.magi_attn_comm.deep_ep_cpp import Config, EventHandle
+
 from .utils import EventOverlap, check_nvlink_connections
-
-is_magi_attn_comm_installed = False
-try:
-    from magi_attention.magi_attn_comm import deep_ep_cpp
-    from magi_attention.magi_attn_comm.deep_ep_cpp import Config, EventHandle
-
-    is_magi_attn_comm_installed = True
-except ImportError:
-    pass
 
 __all__ = ["Buffer", "Config", "EventHandle"]
 
@@ -103,7 +97,6 @@ class Buffer:
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
         """
-        assert is_magi_attn_comm_installed, "magi_attn_comm is not installed."
 
         check_nvlink_connections(group)
 
