@@ -303,7 +303,9 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                         job_list.append((i, j))
 
         # random initialize stage
-        random_times = 1000000 // m // n
+        random_times = min(
+            1000000 // m // n, 1000
+        )  # limit the maximum number of iterations
         local_eval = float("inf")
         for _ in range(random_times):
             new_solver_map = self._greedy_algorithm(
@@ -337,7 +339,9 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             random.shuffle(job_list)
 
         # refinement stage
-        refine_times = 1000000 // m // n
+        refine_times = min(
+            1000000 // m // n, 1000
+        )  # limit the maximum number of iterations
         for iter in range(refine_times):
             random.shuffle(job_list)
             solver_map = copy.deepcopy(local_optimal_solver_map)
