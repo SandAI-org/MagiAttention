@@ -316,7 +316,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
 
                 // Rare cases to loop again
                 if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-                    printf("DeepEP timeout for dispatch senders, rank %d, responsible_channel = %d\n", rank, responsible_channel);
+                    printf("grpcoll timeout for dispatch senders, rank %d, responsible_channel = %d\n", rank, responsible_channel);
                     trap();
                 }
             }
@@ -424,7 +424,7 @@ dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx, int64_t* recv_to
 
                 // Timeout check
                 if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-                    printf("DeepEP timeout for dispatch receivers, rank %d, responsible_channel = %d, tokens remained: %d\n", rank, responsible_channel, num_tokens_to_recv);
+                    printf("grpcoll timeout for dispatch receivers, rank %d, responsible_channel = %d, tokens remained: %d\n", rank, responsible_channel, num_tokens_to_recv);
                     trap();
                 }
             }
@@ -697,7 +697,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
 
                 // Rare cases to loop again
                 if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-                    printf("DeepEP timeout for combine senders, rank %d, responsible_channel = %d\n", rank, responsible_channel);
+                    printf("grpcoll timeout for combine senders, rank %d, responsible_channel = %d\n", rank, responsible_channel);
                     trap();
                 }
             }
@@ -816,7 +816,7 @@ combine(dtype_t* recv_x, float* recv_topk_weights,
                 while (__any_sync(0xffffffff, channel_tail_idx[lane_id] <= expected_head and expected_head >= 0)) {
                     // Timeout check
                     if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-                        printf("DeepEP timeout for combine receivers, rank %d, responsible_channel = %d, expect = %d\n", rank, responsible_channel, expected_head);
+                        printf("grpcoll timeout for combine receivers, rank %d, responsible_channel = %d, expect = %d\n", rank, responsible_channel, expected_head);
                         trap();
                     }
                 }
