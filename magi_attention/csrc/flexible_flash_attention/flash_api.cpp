@@ -169,7 +169,7 @@ void set_params_fprop(
   params.h_kv = h_kv;
   params.max_seqlen_q = max_seqlen_q;
   params.max_seqlen_k = max_seqlen_k;
-  params.max_seqlen_k_rounded = max_seqlen_q_rounded;
+  params.max_seqlen_q_rounded = max_seqlen_q_rounded;
   params.max_seqlen_k_rounded = max_seqlen_k_rounded;
   params.total_q = total_q;
   params.total_k = total_k;
