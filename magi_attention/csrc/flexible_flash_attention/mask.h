@@ -165,15 +165,16 @@ struct Mask {
     // Create identity tensor for block shape
     Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
     Tensor tScS = thread_mma.partition_C(cS);
-
     Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
     Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tScS.layout()));
+    Tensor t0ScS = thread0_mma.partition_C(cS);
+    Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
 
     int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
 
     int const seqlenq_row_limit = seqlen_q - m_block * kBlockM - thread_row_offset;
 
-    if (thread_idx == 0 && bidb == 0 && bidh == 0) {
+    if (thread_idx == 0 && bidb == 1 && bidh == 0) {
       printf("mask_q_fn:\n");
       printf("Block M: %d seqlen_q: %d thread_row_offset: %d seqlenq_row_limit: %d\n", m_block, seqlen_q, thread_row_offset, seqlenq_row_limit);
     }
@@ -190,7 +191,10 @@ struct Mask {
 #pragma unroll
     for (int m = 0; m < cute::size<0>(tSrS_rowcol); ++m) {
       // mask if q is out of bound.
-      if (m >= seqlenq_row_limit) {
+      if (bidb == 1 && bidh == 0 && thread_idx == 0) {
+        printf("row_idx: %d\n", int(get<Row>(t0ScS_rowcol(m, _0{}))));
+      }
+      if (int(get<Row>(t0ScS_rowcol(m, _0{}))) >= seqlenq_row_limit) {
         /*
          printf("out of boundary!")
          printf("--- Mask Debug (TID %d, Block M %d, idx M: %d) ---\n", thread_idx, m_block, m);

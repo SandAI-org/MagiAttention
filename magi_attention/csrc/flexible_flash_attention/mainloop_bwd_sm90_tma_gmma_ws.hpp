@@ -1075,15 +1075,15 @@ struct CollectiveMainloopBwdSm90 {
         print_tensor(sLSE_slice);
       } */
 
-      if (thread_idx == 0 && bidh == 0 && bidb == 0) {
+      if (thread_idx == 0 && bidh == 0 && bidb == 1) {
         printf("tLSEsLSE\n");
         print_tensor(tLSEsLSE);
       }
-      if (thread_idx == 0 && bidh == 0 && bidb == 0) {
+      if (thread_idx == 0 && bidh == 0 && bidb == 1) {
         printf("sLSEMma\n");
         print_tensor(sLSEMma);
       }
-      if (bidh == 0 && thread_idx == 0 && bidb == 0) {
+      if (bidh == 0 && thread_idx == 0 && bidb == 1) {
         printf("score before softmax and mask:\n");
         print_tensor(scores);
         printf("tSrS before mask:\n");
@@ -1100,7 +1100,7 @@ struct CollectiveMainloopBwdSm90 {
       mask_fn(tSrS, m_block);
       mask_q_fn(tSrS, m_block);
 
-      if (bidh == 0 && thread_idx == 0 && bidb == 0) {
+      if (bidh == 0 && thread_idx == 0 && bidb == 1) {
         printf("score after mask:\n");
         print_tensor(scores);
         printf("tSrS after mask:\n");
@@ -1134,7 +1134,7 @@ struct CollectiveMainloopBwdSm90 {
           scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - lse_scaled);
         }
       }
-      if (bidh == 0 && thread_idx == 0 && bidb == 0) {
+      if (bidh == 0 && thread_idx == 0 && bidb == 1) {
         printf("score after softmax and mask:\n");
         print_tensor(scores);
       }
@@ -1244,7 +1244,7 @@ struct CollectiveMainloopBwdSm90 {
             taccdQrdQ(dqi) *= params.softmax_scale;
           }
           cute::copy(r2s_tiled_copy_dQaccum, taccdQrdQ, tdQsdQaccum);
-          // if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
+          // if (thread_idx == 0 && bidh == 0 && bidb == 1 && n_block == 0) {
           //     printf("=================== before retile ===================\n");
           //     cute::print_tensor(tdQrdQ);
           //     printf("=================== after retile ===================\n");
@@ -1271,7 +1271,7 @@ struct CollectiveMainloopBwdSm90 {
           //             tdQsdQaccum(i) = 0;
           //         }
           //     }
-          //     if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
+          //     if (thread_idx == 0 && bidh == 0 && bidb == 1 && n_block == 0) {
           //         printf("=================== tdQsdQaccum ===================\n");
           //         cute::print_tensor(tdQsdQaccum);
           //         printf("=================== bound ===================\n");
