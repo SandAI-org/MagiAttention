@@ -279,19 +279,19 @@ def build_magi_attn_comm_module(
         ), f"The specified NVSHMEM directory does not exist: {nvshmem_dir}"
 
     magi_attn_comm_dir_abs = csrc_dir / "comm"
-    deepep_csrc_dir_abs = magi_attn_comm_dir_abs / "deepep_csrc"
-    deepep_csrc_dir_rel = deepep_csrc_dir_abs.relative_to(repo_dir)
+    grpcoll_dir_abs = magi_attn_comm_dir_abs / "grpcoll"
+    grpcoll_dir_rel = grpcoll_dir_abs.relative_to(repo_dir)
 
     # init sources
     sources = [
-        f"{deepep_csrc_dir_rel}/deep_ep.cpp",
-        f"{deepep_csrc_dir_rel}/kernels/runtime.cu",
-        f"{deepep_csrc_dir_rel}/kernels/layout.cu",
-        f"{deepep_csrc_dir_rel}/kernels/intranode.cu",
+        f"{grpcoll_dir_rel}/buffer.cpp",
+        f"{grpcoll_dir_rel}/kernels/runtime.cu",
+        f"{grpcoll_dir_rel}/kernels/layout.cu",
+        f"{grpcoll_dir_rel}/kernels/intranode.cu",
     ]
 
     # init include dirs
-    include_dirs = [common_dir, deepep_csrc_dir_abs]
+    include_dirs = [common_dir, grpcoll_dir_abs]
 
     # init extra compile args
     cxx_flags = [
@@ -320,8 +320,8 @@ def build_magi_attn_comm_module(
     else:
         sources.extend(
             [
-                f"{deepep_csrc_dir_rel}/kernels/internode.cu",
-                f"{deepep_csrc_dir_rel}/kernels/internode_ll.cu",
+                f"{grpcoll_dir_rel}/kernels/internode.cu",
+                f"{grpcoll_dir_rel}/kernels/internode_ll.cu",
             ]
         )
         include_dirs.extend([f"{nvshmem_dir}/include"])  # type: ignore[list-item]
