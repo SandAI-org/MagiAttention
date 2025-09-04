@@ -85,14 +85,20 @@ class DynamicAttnSolver:
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
 
+        # set some attributes that might be fetched from outside
+        self.host_q_ranges_global = self.host_ranges_q[self.cp_rank]
+        self.host_k_ranges_global = self.host_ranges_k[self.cp_rank]
+
         self.bucket_per_rank = [AttnRectangles() for _ in range(self.cp_size)]
 
     def solve(
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
-        mask_types: Union[list[int], list[AttnMaskType]],
+        mask_types: Union[list[int], list[AttnMaskType], AttnMaskType],
     ):
+        if isinstance(mask_types, AttnMaskType):
+            mask_types = [mask_types] * len(q_ranges)
         self.rect = AttnRectangles.from_ranges(
             q_ranges=q_ranges, k_ranges=k_ranges, mask_types=mask_types
         )

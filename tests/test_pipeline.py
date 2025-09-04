@@ -34,7 +34,10 @@ from magi_attention.config import (
     UniformOverlapAlg,
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
-from magi_attention.meta.solver.dispatch_solver import MinHeapDispatchAlg
+from magi_attention.meta.solver.dispatch_solver import (
+    MinHeapDispatchAlg,
+    SequentialDispatchAlg,
+)
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import (
     NAME,
@@ -537,9 +540,16 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         num_heads_q, num_heads_kv = num_heads
 
+        # TODO: make it as a environment variable
+        use_dynamic_attn_solver = True
+
         dist_attn_config = DistAttnConfig(
             # TODO: test other dispatch algs
-            dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+            dispatch_config=DispatchConfig(
+                alg=MinHeapDispatchAlg()
+                if not use_dynamic_attn_solver
+                else SequentialDispatchAlg()
+            ),
             overlap_config=OverlapConfig(
                 **{
                     k: v
@@ -605,6 +615,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 is_k_permutable=True,
                 dist_attn_config=dist_attn_config,
                 cp_mesh=self.device_mesh,
+                num_heads_q=num_heads_q,
+                num_heads_kv=num_heads_kv,
+                use_dynamic_attn_solver=use_dynamic_attn_solver,
             )
             # HACK: seperate cp group for group-reduce
             dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]

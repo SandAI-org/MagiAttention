@@ -30,9 +30,11 @@ from magi_attention.meta import (
     calc_attn_meta_from_dispatch_meta,
     calc_dispatch_meta_from_qk_ranges,
 )
+from magi_attention.meta.algorithms.grg import GRGDynamicAttnAlgorithm
 from magi_attention.meta.collection import DispatchMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
+from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_to_list
 
 
@@ -61,7 +63,7 @@ class DistAttnRuntimeMgr:
         k_dispatch_meta: DispatchMeta,
         chunk_size: int,
         dist_attn_config: DistAttnConfig,
-        attn_solver: DistAttnSolver,
+        attn_solver: DistAttnSolver | DynamicAttnSolver,
         dist_attn_runtime: DistAttnRuntime,
         *,
         ref_q_ranges: AttnRanges,
@@ -318,6 +320,9 @@ def init_dist_attn_runtime_mgr(
     is_k_permutable: bool,
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
     cp_mesh: DeviceMesh | None = None,
+    num_heads_q: int = 1,
+    num_heads_kv: int = 1,
+    use_dynamic_attn_solver: bool = False,
 ) -> DistAttnRuntimeMgr:
     """
 
@@ -408,14 +413,32 @@ def init_dist_attn_runtime_mgr(
         is_k_permutable=is_k_permutable,
     )
 
-    comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
-        dispatch_meta_q=q_dispatch_meta,
-        dispatch_meta_k=k_dispatch_meta,
-        bucket_per_rank=attn_buckets,
-        cp_group=cp_group,
-        overlap_config=dist_attn_config.overlap_config,
-        cp_mesh=cp_mesh,
-    )
+    if use_dynamic_attn_solver:
+        dynamic_attn_solver = DynamicAttnSolver(
+            algorithm=GRGDynamicAttnAlgorithm(),
+            dispatch_meta_q=q_dispatch_meta,
+            dispatch_meta_k=k_dispatch_meta,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            cp_mesh=cp_mesh,
+            deterministic=False,
+        )
+        dynamic_attn_solver.solve(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            mask_types=attn_mask_type,
+        )
+        comm_meta = dynamic_attn_solver.calc_comm_meta()
+        attn_calc_meta = dynamic_attn_solver.calc_attn_calc_meta()
+    else:
+        comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
+            dispatch_meta_q=q_dispatch_meta,
+            dispatch_meta_k=k_dispatch_meta,
+            bucket_per_rank=attn_buckets,
+            cp_group=cp_group,
+            overlap_config=dist_attn_config.overlap_config,
+            cp_mesh=cp_mesh,
+        )
 
     dist_attn_runtime = DistAttnRuntime(
         comm_meta=comm_meta,
@@ -430,7 +453,7 @@ def init_dist_attn_runtime_mgr(
         k_dispatch_meta,
         chunk_size,
         dist_attn_config,
-        attn_solver,
+        dynamic_attn_solver if use_dynamic_attn_solver else attn_solver,
         dist_attn_runtime,
         ref_q_ranges=q_ranges,
         ref_k_ranges=k_ranges,
