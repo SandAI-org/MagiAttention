@@ -279,6 +279,8 @@ def test_main(
         f"{num_tokens_per_rdma_rank.shape=}\n",  # type: ignore[union-attr]
         flush=True,
     )
+    # RDMA dispatch counts
+    num_rdma_token_sent = num_tokens_per_rdma_rank.sum().item()  # type: ignore[union-attr]
 
     # Expert meta
     gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
@@ -315,9 +317,6 @@ def test_main(
             print("", flush=True)
         group.barrier()
         time.sleep(1)
-
-    # RDMA dispatch counts
-    num_rdma_token_sent = num_tokens_per_rdma_rank.sum().item()  # type: ignore[union-attr]
 
     # Test dispatch
     def check_data(check_x, recv_gbl_rank_prefix_sum):
@@ -442,46 +441,29 @@ def test_main(
                         send_rdma_head,  # handle[8]
                         send_nvl_head,  # handle[9]
                     ) = handle
-                    if with_topk:
-                        print(
-                            (
-                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
-                                f"{recv_topk_idx.shape=} | {recv_topk_idx=}\n"  # type: ignore[union-attr]
-                                f"{recv_topk_weights.shape=} | {recv_topk_weights=}\n"  # type: ignore[union-attr]
-                                f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
-                                f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[0]
-                                f"{rdma_channel_prefix_matrix.shape=} | {rdma_channel_prefix_matrix=}\n"  # handle[1]
-                                f"{gbl_channel_prefix_matrix.shape=} | {gbl_channel_prefix_matrix=}\n"  # handle[2]
-                                f"{recv_rdma_channel_prefix_matrix.shape=} | {recv_rdma_channel_prefix_matrix=}\n"  # handle[3]
-                                f"{recv_rdma_rank_prefix_sum.shape=} | {recv_rdma_rank_prefix_sum=}\n"  # handle[4]
-                                f"{recv_gbl_channel_prefix_matrix.shape=} | {recv_gbl_channel_prefix_matrix=}\n"  # handle[5]
-                                f"{recv_gbl_rank_prefix_sum.shape=} | {recv_gbl_rank_prefix_sum=}\n"  # handle[6]
-                                f"{recv_src_meta.shape=} | {recv_src_meta=}\n"  # handle[7]
-                                f"After dipatch: {send_rdma_head.shape=} | {send_rdma_head=}\n"  # handle[8]
-                                f"After dipatch: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"  # handle[9]
-                            ),
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            (
-                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
-                                f"{recv_topk_idx=}\n"
-                                f"{recv_topk_weights=}\n"
-                                f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
-                                f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[0]
-                                f"{rdma_channel_prefix_matrix.shape=} | {rdma_channel_prefix_matrix=}\n"  # handle[1]
-                                f"{gbl_channel_prefix_matrix.shape=} | {gbl_channel_prefix_matrix=}\n"  # handle[2]
-                                f"{recv_rdma_channel_prefix_matrix.shape=} | {recv_rdma_channel_prefix_matrix=}\n"  # handle[3]
-                                f"{recv_rdma_rank_prefix_sum.shape=} | {recv_rdma_rank_prefix_sum=}\n"  # handle[4]
-                                f"{recv_gbl_channel_prefix_matrix.shape=} | {recv_gbl_channel_prefix_matrix=}\n"  # handle[5]
-                                f"{recv_gbl_rank_prefix_sum.shape=} | {recv_gbl_rank_prefix_sum=}\n"  # handle[6]
-                                f"{recv_src_meta.shape=} | {recv_src_meta=}\n"  # handle[7]
-                                f"After dipatch: {send_rdma_head.shape=} | {send_rdma_head=}\n"  # handle[8]
-                                f"After dipatch: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"  # handle[9]
-                            ),
-                            flush=True,
-                        )
+                    recv_topk_idx_shape = recv_topk_idx.shape if with_topk else None  # type: ignore[union-attr]
+                    recv_topk_weights_shape = (
+                        recv_topk_weights.shape if with_topk else None  # type: ignore[union-attr]
+                    )
+                    print(
+                        (
+                            f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
+                            f"{recv_topk_idx_shape=} | {recv_topk_idx=}\n"  # type: ignore[union-attr]
+                            f"{recv_topk_weights_shape=} | {recv_topk_weights=}\n"  # type: ignore[union-attr]
+                            f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
+                            f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[0]
+                            f"{rdma_channel_prefix_matrix.shape=} | {rdma_channel_prefix_matrix=}\n"  # handle[1]
+                            f"{gbl_channel_prefix_matrix.shape=} | {gbl_channel_prefix_matrix=}\n"  # handle[2]
+                            f"{recv_rdma_channel_prefix_matrix.shape=} | {recv_rdma_channel_prefix_matrix=}\n"  # handle[3]
+                            f"{recv_rdma_rank_prefix_sum.shape=} | {recv_rdma_rank_prefix_sum=}\n"  # handle[4]
+                            f"{recv_gbl_channel_prefix_matrix.shape=} | {recv_gbl_channel_prefix_matrix=}\n"  # handle[5]
+                            f"{recv_gbl_rank_prefix_sum.shape=} | {recv_gbl_rank_prefix_sum=}\n"  # handle[6]
+                            f"{recv_src_meta.shape=} | {recv_src_meta=}\n"  # handle[7]
+                            f"After dipatch: {send_rdma_head.shape=} | {send_rdma_head=}\n"  # handle[8]
+                            f"After dipatch: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"  # handle[9]
+                        ),
+                        flush=True,
+                    )
 
                     # cast back from fp8
                     recv_x = (
@@ -603,26 +585,18 @@ def test_main(
                     event.current_stream_wait() if async_mode else ()
 
                     # print
-                    if with_topk:
-                        print(
-                            (
-                                f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
-                                f"{combined_topk_weights.shape=} | {combined_topk_weights=}\n"  # type: ignore[union-attr]
-                                f"Before combine: {send_rdma_head.shape=} | {send_rdma_head=}\n\n"
-                                f"Before combine: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"
-                            ),
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            (
-                                f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
-                                f"{combined_topk_weights=}\n"
-                                f"Before combine: {send_rdma_head.shape=} | {send_rdma_head=}\n\n"
-                                f"Before combine: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"
-                            ),
-                            flush=True,
-                        )
+                    combined_topk_weights_shape = (
+                        combined_topk_weights.shape if with_topk else None  # type: ignore[union-attr]
+                    )
+                    print(
+                        (
+                            f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
+                            f"{combined_topk_weights_shape=} | {combined_topk_weights=}\n"  # type: ignore[union-attr]
+                            f"Before combine: {send_rdma_head.shape=} | {send_rdma_head=}\n\n"
+                            f"Before combine: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"
+                        ),
+                        flush=True,
+                    )
 
                     # check
                     assert torch.equal(combined_x, combined_x_gr)
