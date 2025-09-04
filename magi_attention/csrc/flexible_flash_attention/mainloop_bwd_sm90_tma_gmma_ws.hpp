@@ -1086,7 +1086,10 @@ struct CollectiveMainloopBwdSm90 {
       if (bidh == 0 && thread_idx == 0 && bidb == 0) {
         printf("score before softmax and mask:\n");
         print_tensor(scores);
+        printf("tSrS before mask:\n");
+        print_tensor(tSrS);
       }
+
       // dtanh needs to happen before masking, otherwise we get 1 - (-inf)^2 = NaN in the dtanh
       auto dtanh = [&] {
         if constexpr (Has_softcap)
@@ -1096,6 +1099,15 @@ struct CollectiveMainloopBwdSm90 {
       }();
       mask_fn(tSrS, m_block);
       mask_q_fn(tSrS, m_block);
+
+      if (bidh == 0 && thread_idx == 0 && bidb == 0) {
+        printf("score after mask:\n");
+        print_tensor(scores);
+        printf("tSrS after mask:\n");
+        print_tensor(tSrS);
+      }
+
+
       // Start debug print
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
@@ -1337,7 +1349,7 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
     auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type); };
-    auto mask_q_fn = [&](auto& tSrS, int m_block) { mask.template apply_q_mask<>(tSrS, m_block); };
+    auto mask_q_fn = [&](auto& tSrS, int m_block) { mask.template apply_q_mask<>(tSrS, m_block, bidb, bidh); };
 
     CUTLASS_PRAGMA_NO_UNROLL
     for (; m_block < m_block_max; ++m_block) {
