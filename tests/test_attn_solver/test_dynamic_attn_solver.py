@@ -233,8 +233,12 @@ class TestDynamicAttnSolver(DistTestBase):
 
             local_attn_arg = attn_calc_meta.local_attn_arg
             job_num = len(local_attn_arg.q_ranges)
-            host_range_q_max_len = solver.host_ranges_q[rank].merge().total_seqlen
-            host_range_k_max_len = solver.host_ranges_k[rank].merge().total_seqlen
+            host_range_q_max_len = max(
+                [range_q.end for range_q in solver.host_ranges_q[rank]]
+            )
+            host_range_k_max_len = max(
+                [range_k.end for range_k in solver.host_ranges_k[rank]]
+            )
             for i in range(job_num):
                 q_range = local_attn_arg.q_ranges[i]
                 k_range = local_attn_arg.k_ranges[i]
