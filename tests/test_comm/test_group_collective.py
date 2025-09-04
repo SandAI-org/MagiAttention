@@ -22,8 +22,11 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
-from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
-from magi_attention.comm.primitive.utils import (
+from magi_attention.comm.primitive.grpcoll import (
+    group_cast_collective,
+    group_reduce_collective,
+)
+from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
     sanity_check_for_group_reduce_meta_args_per_rank,
 )
