@@ -41,11 +41,12 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.magi_attn_comm import grpcoll
-from magi_attention.magi_attn_comm.grpcoll import Config, EventHandle
 
-from .utils import EventOverlap, check_nvlink_connections
+from ._config import Config
+from ._event import EventHandle, EventOverlap
+from .utils import check_nvlink_connections
 
-__all__ = ["Buffer", "Config", "EventHandle"]
+__all__ = ["Buffer"]
 
 
 class Buffer:

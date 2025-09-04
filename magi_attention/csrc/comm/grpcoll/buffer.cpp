@@ -46,7 +46,7 @@
 #include <pybind11/functional.h>
 #include <torch/python.h>
 
-#include "deep_ep.hpp"
+#include "buffer.hpp"
 #include "kernels/api.cuh"
 #include "kernels/configs.cuh"
 
@@ -129,7 +129,7 @@ Buffer::~Buffer() noexcept(false) {
     if (not explicitly_destroy) {
         destroy();
     } else if (not destroyed) {
-        printf("WARNING: destroy() was not called before DeepEP buffer destruction, which can leak resources.\n");
+        printf("WARNING: destroy() was not called before grpcoll buffer destruction, which can leak resources.\n");
         fflush(stdout);
     }
 }
@@ -506,7 +506,7 @@ Buffer::intranode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
 
                 // Timeout check
                 if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS)
-                    throw std::runtime_error("DeepEP error: CPU recv timeout");
+                    throw std::runtime_error("grpcoll error: CPU recv timeout");
             }
             num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
         }
@@ -705,7 +705,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                            int expert_alignment, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
     // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
-    // If users of DeepEP need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
+    // If users of grpcoll need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
     // unless we release GIL here.
     py::gil_scoped_release release;
 
@@ -877,7 +877,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
                 printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
                 for (int i = 0; i < num_local_experts; ++ i)
                     printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
-                throw std::runtime_error("DeepEP error: timeout (dispatch CPU)");
+                throw std::runtime_error("grpcoll error: timeout (dispatch CPU)");
             }
         }
         num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);

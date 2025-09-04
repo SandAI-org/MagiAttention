@@ -117,7 +117,7 @@ def transfer_group_cast_meta_to_dispatch_meta(
             (num_splits, num_ranks), fill_value=-1, dtype=dtype, device="cpu"
         )
         # no other meanings, just placeholders,
-        # since the topk weights are used outside of deepep intranode/internode kernels
+        # since the topk weights are used outside of grpcoll intranode/internode kernels
         # and for low-latency kernels, due to the incompatibility, we hackly set pure-one topk-weights outside
         topk_weights = (
             torch.ones((num_tokens, num_ranks), dtype=torch.float32, device=device)
