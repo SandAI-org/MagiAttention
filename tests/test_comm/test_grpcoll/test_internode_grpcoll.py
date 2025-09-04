@@ -259,7 +259,7 @@ def test_main(
         f"[RANK {rank}]: {input_split_size_list=} | {dst_indices_list=} | "
         f"{output_split_size_list=} | {src_index_list=} | {sum(output_split_size_list)=}\n",
         f"[RANK {rank}]: {topk_idx=} | {topk_weights=}\n",
-        f"[RANK {rank}]: {rank_idx=}\n",
+        f"[RANK {rank}]: {rank_idx=} | {rdma_rank_idx=}\n",
         flush=True,
     )
 
@@ -301,7 +301,7 @@ def test_main(
             ref_num_tokens_per_rdma_rank,
             ref_num_tokens_per_expert,
             ref_is_token_in_rank,
-            _,
+            _,  # event_overlap,
         ) = buffer.get_dispatch_layout(topk_idx, num_experts)
 
         # assert close to layout ref
