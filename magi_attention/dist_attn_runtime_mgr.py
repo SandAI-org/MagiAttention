@@ -435,13 +435,21 @@ def init_dist_attn_runtime_mgr(
             cp_mesh=cp_mesh,
             deterministic=False,
         )
+        # if cp_rank == 1:
+        #     print(f"q_ranges: {q_ranges}")
+        #     print(f"k_ranges: {k_ranges}")
+        #     print(f"attn_mask_type: {attn_mask_type}")
         dynamic_attn_solver.solve(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             mask_types=attn_mask_type,
         )
+        # dynamic_attn_solver.output_solve_result()
         comm_meta = dynamic_attn_solver.calc_comm_meta()
         attn_calc_meta = dynamic_attn_solver.calc_attn_calc_meta()
+        # if cp_rank == 1:
+        #     print(f"comm_meta: {comm_meta}")
+        #     print(f"attn_calc_meta: {attn_calc_meta}")
     else:
         comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
             dispatch_meta_q=q_dispatch_meta,

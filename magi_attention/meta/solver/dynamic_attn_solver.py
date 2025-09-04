@@ -415,6 +415,12 @@ class DynamicAttnSolver:
             remote_attn_arg_total_area += rect.area()
 
         if calc_local_range:
+            local_attn_arg_q_ranges = self.host_q_ranges_global.make_ranges_local(
+                local_attn_arg_q_ranges
+            )
+            local_attn_arg_k_ranges = self.host_k_ranges_global.make_ranges_local(
+                local_attn_arg_k_ranges
+            )
             remote_attn_arg_q_ranges = remote_attn_arg_q_ranges.make_ranges_local(
                 remote_attn_arg_q_ranges
             )
