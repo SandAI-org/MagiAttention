@@ -30,7 +30,10 @@ from magi_attention.meta import (
     calc_attn_meta_from_dispatch_meta,
     calc_dispatch_meta_from_qk_ranges,
 )
-from magi_attention.meta.algorithms.grg import GRGDynamicAttnAlgorithm
+from magi_attention.meta.algorithms import (
+    GRGDynamicAttnAlgorithm,
+    NCQDynamicAttnAlgorithm,
+)
 from magi_attention.meta.collection import DispatchMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
@@ -323,6 +326,7 @@ def init_dist_attn_runtime_mgr(
     num_heads_q: int = 1,
     num_heads_kv: int = 1,
     use_dynamic_attn_solver: bool = False,
+    use_grg_dynamic_alg: bool = True,
 ) -> DistAttnRuntimeMgr:
     """
 
@@ -355,6 +359,12 @@ def init_dist_attn_runtime_mgr(
         dist_attn_config (DistAttnConfig): dist attn config
 
         cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
+
+        num_heads_q (int): number of heads of query. Default: 1
+        num_heads_kv (int): number of heads of key/value. Default: 1
+
+        use_dynamic_attn_solver (bool): whether to use dynamic attn solver. Default: False
+        use_grg_dynamic_alg (bool): whether to use grg dynamic alg. Default: True
 
     Returns:
         DistAttnRuntimeMgr: dist attn runtime mgr
@@ -415,7 +425,9 @@ def init_dist_attn_runtime_mgr(
 
     if use_dynamic_attn_solver:
         dynamic_attn_solver = DynamicAttnSolver(
-            algorithm=GRGDynamicAttnAlgorithm(),
+            algorithm=GRGDynamicAttnAlgorithm()
+            if use_grg_dynamic_alg
+            else NCQDynamicAttnAlgorithm(),
             dispatch_meta_q=q_dispatch_meta,
             dispatch_meta_k=k_dispatch_meta,
             num_heads_q=num_heads_q,

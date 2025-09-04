@@ -475,6 +475,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         random_type_mapping: bool,
         run_bwd: bool = True,
     ):
+        # TODO: make it as a environment variable
+        use_dynamic_attn_solver = magi_attention.comm.is_qo_comm_enable()
+        use_grg_dynamic_alg = False  # TODO: test `True`
+
         # -----    switch mode   ---- #
 
         if self.profile_mode:  # [start_iter, end_iter)
@@ -496,6 +500,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             and self.world_size in attn_config[SKIP_WORLD_SIZE]
         ):
             return
+
+        # -----    skip for mso   ---- #
+
+        if use_dynamic_attn_solver:
+            # TODO: support mso for dynamic attn solver
+            if overlap_config[NAME] != "disable_mso":
+                return
 
         # -----    construct test case name   ---- #
 
@@ -537,11 +548,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         chunk_size: int = attn_config["chunk_size"]
-
         num_heads_q, num_heads_kv = num_heads
-
-        # TODO: make it as a environment variable
-        use_dynamic_attn_solver = True
 
         dist_attn_config = DistAttnConfig(
             # TODO: test other dispatch algs
@@ -618,6 +625,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 num_heads_q=num_heads_q,
                 num_heads_kv=num_heads_kv,
                 use_dynamic_attn_solver=use_dynamic_attn_solver,
+                use_grg_dynamic_alg=use_grg_dynamic_alg,
             )
             # HACK: seperate cp group for group-reduce
             dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]

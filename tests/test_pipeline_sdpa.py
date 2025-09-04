@@ -29,11 +29,14 @@ from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
     DistAttnConfig,
-    MinHeapDispatchAlg,
     OverlapConfig,
     UniformOverlapAlg,
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
+from magi_attention.meta.solver.dispatch_solver import (
+    MinHeapDispatchAlg,
+    SequentialDispatchAlg,
+)
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import (
     NAME,
@@ -101,7 +104,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         return torch.cuda.current_device()
 
     @property
-    def process_group(self):
+    def process_group(self) -> dist.ProcessGroup:
         return dist.distributed_c10d._get_default_group()
 
     @property
@@ -667,6 +670,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         assert magi_attention.is_sanity_check_enable()
         assert magi_attention.is_sdpa_backend_enable()
 
+        # TODO: make it as a environment variable
+        use_dynamic_attn_solver = magi_attention.comm.is_qo_comm_enable()
+        use_grg_dynamic_alg = False  # TODO: test `True`
+
         # -----    skip for world size   ---- #
 
         if (
@@ -674,6 +681,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             and self.world_size in attn_config[SKIP_WORLD_SIZE]
         ):
             return
+
+        # -----    skip for mso   ---- #
+
+        if use_dynamic_attn_solver:
+            # TODO: support mso for dynamic attn solver
+            if overlap_config[NAME] != "disable_mso":
+                return
 
         # -----    construct test case name   ---- #
 
@@ -708,7 +722,11 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         dist_attn_config = DistAttnConfig(
             # TODO: test other dispatch algs
-            dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+            dispatch_config=DispatchConfig(
+                alg=MinHeapDispatchAlg()
+                if not use_dynamic_attn_solver
+                else SequentialDispatchAlg()
+            ),
             overlap_config=OverlapConfig(
                 **{k: v for k, v in overlap_config.items() if k not in (NAME,)},
                 calc_cost_factor=get_calc_cost_factor(
@@ -756,6 +774,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             is_k_permutable=True,
             dist_attn_config=dist_attn_config,
             cp_mesh=self.device_mesh,
+            use_dynamic_attn_solver=use_dynamic_attn_solver,
+            use_grg_dynamic_alg=use_grg_dynamic_alg,
         )
         # HACK: seperate cp group for group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]

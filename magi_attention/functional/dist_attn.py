@@ -81,8 +81,8 @@ class DistAttnRuntime:
 
         # NOTE: for now, we concat q, o, do when and only when qo comm is enabled
         self.concat_qo_do = magi_attention.comm.is_qo_comm_enable()
-        # NOTE: for now, we always use low-precision output for out-lse reduce comm
-        self.fwd_hp_reduce = False
+        # TODO: set this in a more thorough way
+        self.fwd_hp_reduce = self.fwd_use_acc
 
     @nvtx.instrument_nvtx
     def fetch_remote_kv(
@@ -533,11 +533,17 @@ class DistAttnRuntime:
         if partial_remote_out is None:  # skipped
             partial_remote_out = torch.empty_like(
                 ref_remote_out,
-                dtype=torch.float32 if self.fwd_hp_reduce else ref_remote_out.dtype,
+                dtype=max_fp_dtype(ref_remote_out.dtype, torch.float32)
+                if self.fwd_hp_reduce
+                else ref_remote_out.dtype,
+                device=ref_remote_out.device,
             )
             partial_remote_lse = torch.empty(
-                (ref_remote_out.size(1), ref_remote_out.size(0)),  # [nhq, sq]
-                dtype=torch.float32,  # lse always in float32
+                (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
+                dtype=max_fp_dtype(
+                    ref_remote_out.dtype, torch.float32
+                ),  # lse always in high-precision
+                device=ref_remote_out.device,
             )
         elif not self.fwd_hp_reduce:
             partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
@@ -799,6 +805,20 @@ class DistAttnFunc(torch.autograd.Function):
             partial_out_list.append(partial_local_out)
             partial_lse_list.append(partial_local_lse)
 
+        if partial_local_out is None:
+            partial_local_out = torch.zeros_like(
+                local_q,
+                dtype=max_fp_dtype(local_q.dtype, torch.float32)
+                if dist_attn_runtime.fwd_use_acc
+                else local_q.dtype,
+            )
+            partial_local_lse = torch.full(
+                (local_q.size(0), local_q.size(1)),
+                fill_value=float("-inf"),
+                dtype=torch.float32,
+                device=local_q.device,
+            )
+
         partial_remote_out, partial_remote_lse = (
             partial_local_out,
             partial_local_lse,
@@ -988,11 +1008,13 @@ class DistAttnFunc(torch.autograd.Function):
         if partial_local_dq is None or partial_local_dkv is None:
             partial_local_dq = torch.zeros_like(
                 local_q,
-                dtype=max_fp_dtype(local_q.dtype, torch.float32),
+                dtype=max_fp_dtype(local_q.dtype, torch.float32)
+                if dist_attn_runtime.bwd_hp_reduce
+                else local_q.dtype,
             )
             partial_local_dkv = torch.zeros_like(
                 local_kv,
-                dtype=torch.float32
+                dtype=max_fp_dtype(local_kv.dtype, torch.float32)
                 if dist_attn_runtime.bwd_hp_reduce
                 else local_kv.dtype,
             )

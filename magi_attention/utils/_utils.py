@@ -519,11 +519,18 @@ def get_attn_mask_from_ffa_args(
     return mask
 
 
+def is_fp_dtype_at_least(
+    tensor: torch.Tensor,
+    lowest_precision: torch.dtype,
+) -> bool:
+    return torch.finfo(tensor.dtype).bits >= torch.finfo(lowest_precision).bits
+
+
 def to_higher_fp_dtype(
     tensor: torch.Tensor,
     lowest_precision: torch.dtype,
 ) -> torch.Tensor:
-    if torch.finfo(tensor.dtype).bits < torch.finfo(lowest_precision).bits:
+    if not is_fp_dtype_at_least(tensor, lowest_precision):
         return tensor.to(lowest_precision)
     return tensor
 

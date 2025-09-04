@@ -18,7 +18,7 @@ import torch
 import triton
 import triton.language as tl
 
-from magi_attention.utils import nvtx
+from magi_attention.utils import is_fp_dtype_at_least, nvtx
 
 from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
 
@@ -396,9 +396,9 @@ def range_reduce(
         assert (
             input_lse is not None and output_lse is not None
         ), "lse reduction requires input_lse and output_lse"
-        assert (
-            input_lse.dtype == output_lse.dtype == torch.float32
-        ), "lse reduction requires input_lse and output_lse to be float32"
+        assert is_fp_dtype_at_least(input_lse, torch.float32) and is_fp_dtype_at_least(
+            output_lse, torch.float32
+        ), "lse reduction requires input_lse and output_lse at least float32"
         assert input_lse.ndim == output_lse.ndim == 2, (
             "lse reduction requires input and output must be 2D tensors "
             "with the shape: [seqlen, nheads]"

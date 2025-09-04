@@ -96,31 +96,28 @@ def assert_close(
         else:
             print(no_mismatch_info)
     except AssertionError as e:
-        if mismatch_threshold > 0:
-            error_msg = str(e)
-            mismatched_elements, total_elements, mismatch_ratio = extract_mismatch_info(
-                error_msg
-            )
+        error_msg = str(e)
+        mismatched_elements, total_elements, mismatch_ratio = extract_mismatch_info(
+            error_msg
+        )
 
-            mismatch_info = (
-                f"[{test_case}]: mismatch_ratio = {mismatched_elements} / {total_elements} "
-                f"= {mismatch_ratio * 100:.4f} % | mismatch_threshold={mismatch_threshold * 100:.2f} %"
-            )
+        mismatch_info = (
+            f"[{test_case}]: mismatch_ratio = {mismatched_elements} / {total_elements} "
+            f"= {mismatch_ratio * 100:.4f} % | mismatch_threshold={mismatch_threshold * 100:.2f} %"
+        )
 
-            if mismatch_ratio <= mismatch_threshold:
-                if torch.distributed.is_initialized():
-                    if torch.distributed.get_rank() == 0:
-                        print(mismatch_info)
-                else:
+        if mismatch_ratio <= mismatch_threshold:
+            if torch.distributed.is_initialized():
+                if torch.distributed.get_rank() == 0:
                     print(mismatch_info)
-                return
             else:
-                raise type(e)(
-                    f"\n>>>>>>>  Torch Error Message: \n\n{error_msg}\n\n"
-                    f">>>>>>>  Mismatch Detailed Info: \n\n{mismatch_info}\n\n"
-                ) from e
-
-        raise e
+                print(mismatch_info)
+            return
+        else:
+            raise type(e)(
+                f"\n>>>>>>>  Torch Error Message: \n\n{error_msg}\n\n"
+                f">>>>>>>  Mismatch Detailed Info: \n\n{mismatch_info}\n\n"
+            ) from e
 
 
 @torch.no_grad
