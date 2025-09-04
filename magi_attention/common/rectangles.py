@@ -107,14 +107,23 @@ class AttnRectangles:
 
         rects_len = len(attn_mask_type)
         attn_rects = AttnRectangles()
-        _rects = [
-            AttnRectangle(
-                q_range=attn_q_ranges[i],
-                k_range=attn_k_ranges[i],
-                mask_type=attn_mask_type[i],
+
+        _rects = []
+        for i in range(rects_len):
+            # remove bi_causal invalid mask area
+            if (
+                attn_mask_type[i] == AttnMaskType.BICAUSAL
+                and attn_q_ranges[i].seqlen > attn_k_ranges[i].seqlen
+            ):
+                continue
+            _rects.append(
+                AttnRectangle(
+                    q_range=attn_q_ranges[i],
+                    k_range=attn_k_ranges[i],
+                    mask_type=attn_mask_type[i],
+                )
             )
-            for i in range(rects_len)
-        ]
+
         attn_rects._rects = _rects
 
         if check:
