@@ -42,7 +42,7 @@
 #include "exception.cuh"
 #include "launch.cuh"
 
-namespace deep_ep {
+namespace magi_attn_comm::grpcoll {
 
 namespace layout {
 
@@ -172,4 +172,4 @@ void get_dispatch_layout(const int64_t* topk_idx,
 
 } // namespace layout
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll

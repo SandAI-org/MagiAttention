@@ -51,7 +51,7 @@
 #include "ibgda_device.cuh"
 #endif
 
-namespace deep_ep {
+namespace magi_attn_comm::grpcoll {
 
 namespace intranode {
 
@@ -130,4 +130,4 @@ void finalize() {
 
 } // namespace internode
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll

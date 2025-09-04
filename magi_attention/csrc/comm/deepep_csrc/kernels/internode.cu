@@ -48,7 +48,7 @@
 #include "utils.cuh"
 #include "ibgda_device.cuh"
 
-namespace deep_ep {
+namespace magi_attn_comm::grpcoll {
 
 namespace internode {
 
@@ -1901,4 +1901,4 @@ void combine(cudaDataType_t type,
 
 } // namespace internode
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll

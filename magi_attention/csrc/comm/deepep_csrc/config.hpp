@@ -43,7 +43,7 @@
 #include "kernels/api.cuh"
 #include "kernels/exception.cuh"
 
-namespace deep_ep {
+namespace magi_attn_comm::grpcoll {
 
 template <typename dtype_t>
 dtype_t ceil_div(dtype_t a, dtype_t b) {
@@ -225,4 +225,4 @@ size_t get_low_latency_rdma_size_hint(int num_max_dispatch_tokens_per_rank, int 
     return ((num_bytes + NUM_BUFFER_ALIGNMENT_BYTES) / NUM_BUFFER_ALIGNMENT_BYTES) * NUM_BUFFER_ALIGNMENT_BYTES;
 }
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll

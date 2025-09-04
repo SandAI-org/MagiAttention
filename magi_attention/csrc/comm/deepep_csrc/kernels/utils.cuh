@@ -60,7 +60,7 @@
         ST_FUNC(__dst + __i, LD_FUNC(__src + __i)); \
 }
 
-namespace deep_ep {
+namespace magi_attn_comm::grpcoll {
 
 template <int kBytes>
 struct VecInt {};
@@ -590,4 +590,4 @@ __forceinline__ __device__ T warp_reduce_min(T value) {
     return warp_reduce<kNumLanes, T>(value, ReduceMin<T>{});
 }
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll

@@ -43,7 +43,7 @@
 #include "launch.cuh"
 #include "ibgda_device.cuh"
 
-namespace deep_ep {
+namespace magi_attn_comm::grpcoll {
 
 namespace internode_ll {
 
@@ -756,4 +756,4 @@ LAUNCH_KERNEL(&cfg, combine_func, \
 
 } // namespace internode_ll
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll

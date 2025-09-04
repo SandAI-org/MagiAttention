@@ -60,7 +60,7 @@
 #define TORCH_EXTENSION_NAME magi_attn_comm
 #endif
 
-namespace deep_ep {
+namespace magi_attn_comm::grpcoll {
 
 struct Buffer {
     EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 8, "The number of maximum NVLink peers must be 8");
@@ -201,4 +201,4 @@ public:
     get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
 };
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll

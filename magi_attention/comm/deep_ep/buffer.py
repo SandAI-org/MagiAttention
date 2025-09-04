@@ -40,8 +40,8 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 
-from magi_attention.magi_attn_comm import deep_ep_cpp
-from magi_attention.magi_attn_comm.deep_ep_cpp import Config, EventHandle
+from magi_attention.magi_attn_comm import grpcoll
+from magi_attention.magi_attn_comm.grpcoll import Config, EventHandle
 
 from .utils import EventOverlap, check_nvlink_connections
 
@@ -108,7 +108,7 @@ class Buffer:
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
-        self.runtime = deep_ep_cpp.Buffer(
+        self.runtime = grpcoll.Buffer(
             self.rank,
             self.group_size,
             num_nvl_bytes,
@@ -186,7 +186,7 @@ class Buffer:
 
     @staticmethod
     def is_sm90_compiled():
-        return deep_ep_cpp.is_sm90_compiled()
+        return grpcoll.is_sm90_compiled()
 
     @staticmethod
     def set_num_sms(new_num_sms: int) -> None:
@@ -229,7 +229,7 @@ class Buffer:
         Returns:
             size: the RDMA buffer size recommended.
         """
-        return deep_ep_cpp.get_low_latency_rdma_size_hint(
+        return grpcoll.get_low_latency_rdma_size_hint(
             num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts
         )
 

@@ -42,7 +42,8 @@
 
 #include <vector>
 
-namespace deep_ep {
+
+namespace magi_attn_comm::grpcoll {
 
 // Intranode runtime
 namespace intranode {
@@ -205,4 +206,4 @@ void combine(void* combined_x,
 
 } // namespace internode_ll
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll
