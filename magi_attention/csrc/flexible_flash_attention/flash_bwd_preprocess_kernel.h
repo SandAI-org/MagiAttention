@@ -237,7 +237,9 @@ class FlashAttnBwdPreprocess {
 
     // Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(_, bidh, bidb);
     Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(0, _, bidh); // total_q
-    Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block));
+    //Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block));
+    Tensor gdPsum = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block));
+
     if (get<1>(tOcO(_0{}, _0{}, _0{})) == 0) {
 #pragma unroll
       for (int mi = 0; mi < size(dP_sum); ++mi) {
@@ -248,12 +250,13 @@ class FlashAttnBwdPreprocess {
           gdPsum(row) = dP_sum(mi);
       }
     }
+    /*
     if (bidb == 1 && bidh == 0 && thread_idx == 0) {
       printf("dP_sum:\n");
       print_tensor(dP_sum);
       printf("gdp_sum:\n");
       print_tensor(gdPsum);
-    }
+    } */
 
     int const seqlen_rounded = cute::round_up(seqlen_o, kBlockM);
     // Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(_, bidh, bidb);
@@ -268,7 +271,13 @@ class FlashAttnBwdPreprocess {
       if (lse != -INFINITY)
         gLSElog2(thread_idx) = lse * float(M_LOG2E);
     }
-
+    /*
+    if (bidb == 1 && bidh == 0 && thread_idx == 0) {
+      printf("gLSElog2\n");
+      print_tensor(gLSElog2);
+      printf("mLSElog2\n");
+      print_tensor(mLSElog2);
+    } */
     // if constexpr (Clear_dQ) {
     //     Tensor mdQaccum = make_tensor(make_gmem_ptr(params.ptr_dQaccum), params.shape_dQaccum, params.stride_dQaccum)(_, bidh, !is_varlen ? bidb : 0);
     //     Tensor gdQaccum = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_padded * kHeadDim), mdQaccum), Shape<Int<kBlockM * kHeadDim>>{},

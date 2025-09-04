@@ -73,15 +73,15 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       {params.do_row_stride, _1{}, params.do_head_stride}, // stride_dO
       static_cast<float*>(params.dsoftmax_sum),
       // {params.max_seqlen_q_rounded, params.h_qo, params.b}, // shape_dPsum
-      {_4{}, params.total_q, params.h_qo}, // new shape_dPsum
+      {_4{}, params.total_q_rounded, params.h_qo}, // new shape_dPsum
       // {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_dPsum
-      {_1{}, _4{}, params.total_q * 4}, // new stride_dPsum
+      {_1{}, _4{}, params.total_q_rounded * 4}, // new stride_dPsum
       {params.total_q, params.h_qo}, // shape_LSE
       static_cast<float*>(params.softmax_lse_ptr),
       {_1{}, params.total_q}, // stride_LSE
       static_cast<float*>(params.softmax_lse_log2_ptr),
       // {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_LSE_log2
-      {_1{}, _4{}, params.total_q * 4}, // new stride_LSE_log2
+      {_1{}, _4{}, params.total_q_rounded * 4}, // new stride_LSE_log2
       params.q_ranges,
       params.k_ranges};
   typename PreprocessKernel::Params preprocess_params = PreprocessKernel::to_underlying_arguments(preprocess_args);
@@ -145,12 +145,12 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
       static_cast<float*>(params.softmax_lse_log2_ptr),
       // {params.max_seqlen_q_rounded, params.h_qo, params.b}, // shape_LSE
-      {_4{}, params.total_q, params.h_qo}, // new shape_lse
+      {_4{}, params.total_q_rounded, params.h_qo}, // new shape_lse
       // {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_LSE_log2
-      {_1{}, _4{}, params.total_q * 4}, // new stride lse_log2
+      {_1{}, _4{}, params.total_q_rounded * 4}, // new stride lse_log2
       static_cast<float*>(params.dsoftmax_sum),
       // {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_dPsum
-      {_1{}, _4{}, params.total_q * 4}, // new stride_dPsum
+      {_1{}, _4{}, params.total_q_rounded * 4}, // new stride_dPsum
       params.scale_softmax,
       params.softcap,
       params.q_ranges,

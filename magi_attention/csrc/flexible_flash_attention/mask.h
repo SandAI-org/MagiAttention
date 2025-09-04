@@ -174,10 +174,10 @@ struct Mask {
 
     int const seqlenq_row_limit = seqlen_q - m_block * kBlockM - thread_row_offset;
 
-    if (thread_idx == 0 && bidb == 1 && bidh == 0) {
+    /*if (thread_idx == 0 && bidb == 1 && bidh == 0) {
       printf("mask_q_fn:\n");
       printf("Block M: %d seqlen_q: %d thread_row_offset: %d seqlenq_row_limit: %d\n", m_block, seqlen_q, thread_row_offset, seqlenq_row_limit);
-    }
+    }*/
     /*
     if (m_block == 1 && thread_idx == 1) {
       printf("--- Mask Debug (TID %d, Block M %d) ---\n", thread_idx, m_block);

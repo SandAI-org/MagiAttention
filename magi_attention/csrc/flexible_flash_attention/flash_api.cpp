@@ -85,6 +85,7 @@ void set_params_fprop(
     const size_t max_seqlen_k_rounded,
     const size_t total_q,
     const size_t total_k,
+    const size_t total_q_rounded,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -168,10 +169,11 @@ void set_params_fprop(
   params.h_kv = h_kv;
   params.max_seqlen_q = max_seqlen_q;
   params.max_seqlen_k = max_seqlen_k;
-  params.max_seqlen_q_rounded = max_seqlen_q_rounded;
+  params.max_seqlen_k_rounded = max_seqlen_q_rounded;
   params.max_seqlen_k_rounded = max_seqlen_k_rounded;
   params.total_q = total_q;
   params.total_k = total_k;
+  params.total_q_rounded = total_q_rounded;
   params.d = d;
   params.d_rounded = d_rounded;
   // Set the different scale values.
@@ -193,6 +195,7 @@ void set_params_dgrad(
     const size_t max_seqlen_k_rounded,
     const size_t total_q,
     const size_t total_k,
+    const size_t total_q_rounded,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -235,6 +238,7 @@ void set_params_dgrad(
       max_seqlen_k_rounded,
       total_q,
       total_k,
+      total_q_rounded,
       h_qo,
       h_kv,
       d,
@@ -545,7 +549,7 @@ std::vector<at::Tensor> mha_fwd(
   // Round max seqlen to multiple of 128
   int const max_seqlen_q_rounded = round_multiple(max_seqlen_q, 128);
   int const max_seqlen_k_rounded = round_multiple(max_seqlen_k, 128);
-
+  int const total_q_rounded = round_multiple(total_q + 128, 128);
   // Otherwise the kernel will be launched from cuda:0 device
   // Cast to char to avoid compiler warning about narrowing
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
@@ -635,6 +639,7 @@ std::vector<at::Tensor> mha_fwd(
       max_seqlen_k_rounded,
       total_q,
       total_k,
+      total_q_rounded,
       num_heads_qo,
       num_heads_kv,
       head_size,
@@ -963,7 +968,7 @@ std::vector<at::Tensor> mha_bwd(
   // softmax_lse_log2 = torch::empty({batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
 
   // add a dimension for TMA alignment(16bytes)
-  int const total_q_rounded = round_multiple(total_q, kBlockM);
+  int const total_q_rounded = round_multiple(total_q + kBlockM, kBlockM);
   softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
   softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
 
@@ -997,6 +1002,7 @@ std::vector<at::Tensor> mha_bwd(
       max_seqlen_k_rounded,
       total_q,
       total_k,
+      total_q_rounded,
       num_heads_qo,
       num_heads_kv,
       head_size,

@@ -511,9 +511,18 @@ struct CollectiveMainloopBwdSm90 {
         make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})),
         make_coord(_0{}, _)); // (4, M, _)
 
-    if (thread_idx == 0 && bidh == 0) {
+    if (thread_idx == 0 && bidh == 0 && bidb == 1) {
       printf("gLSE:\n");
       print_tensor(gLSE);
+      printf("mLSE:\n");
+      print_tensor(mLSE);
+    }
+
+    if (thread_idx == 0 && bidh == 0 && bidb == 1) {
+      printf("mdpsum:\n");
+      print_tensor(mdPsum);
+      printf("gdpsum:\n");
+      print_tensor(gdPsum);
     }
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
@@ -1065,7 +1074,7 @@ struct CollectiveMainloopBwdSm90 {
 
       // Reshape tSrS from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
       Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
-      /*
+
       if (thread_idx == 0 && bidh == 0) {
         printf("sLSE\n");
         print_tensor(sLSE);
@@ -1073,7 +1082,7 @@ struct CollectiveMainloopBwdSm90 {
       if (thread_idx == 0 && bidh == 0) {
         printf("sLSE_slice\n");
         print_tensor(sLSE_slice);
-      } */
+      }
 
       if (thread_idx == 0 && bidh == 0 && bidb == 1) {
         printf("tLSEsLSE\n");
@@ -1082,6 +1091,8 @@ struct CollectiveMainloopBwdSm90 {
       if (thread_idx == 0 && bidh == 0 && bidb == 1) {
         printf("sLSEMma\n");
         print_tensor(sLSEMma);
+        printf("sdPsumMma\n");
+        print_tensor(sdPsumMma);
       }
       if (bidh == 0 && thread_idx == 0 && bidb == 1) {
         printf("score before softmax and mask:\n");
@@ -1134,10 +1145,11 @@ struct CollectiveMainloopBwdSm90 {
           scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - lse_scaled);
         }
       }
+      /*
       if (bidh == 0 && thread_idx == 0 && bidb == 1) {
         printf("score after softmax and mask:\n");
         print_tensor(scores);
-      }
+      } */
       // Start debug print
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
@@ -1164,10 +1176,11 @@ struct CollectiveMainloopBwdSm90 {
       warpgroup_wait<0>();
       // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
       Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
+      /*
       if (bidb == 1 && bidh == 0 && thread_idx == 0) {
         printf("ds before compute\n");
         print_tensor(dS);
-      }
+      } */
 #pragma unroll
       for (int mi = 0; mi < size<0>(dS); ++mi) {
         float const dP_sum_cur = [&] {
@@ -1184,6 +1197,7 @@ struct CollectiveMainloopBwdSm90 {
           }
         }
       }
+
 
       if (bidb == 1 && bidh == 0 && thread_idx == 0) {
         printf("ds after compute\n");
