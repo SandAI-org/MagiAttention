@@ -1,0 +1,68 @@
+repos:
+# Common hooks
+-   repo: local
+    hooks:
+    -   id: copyright_checker
+        name: copyright_checker
+        entry: python3 ./tools/codestyle/copyright.py
+        language: system
+        files: \.(c|cc|cxx|cpp|cu|cuh|h|hpp|hxx|proto|py|pyi|sh)$
+    -   id: check-for-chinese
+        name: check for Chinese characters
+        entry: python3 ./tools/codestyle/check_for_chinese.py
+        language: system
+        pass_filenames: true
+        always_run: true
+        files: \.(txt|md|yaml|c|cc|cxx|cpp|cu|h|hpp|hxx|proto|py|pyi|sh)$
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+    -   id: check-added-large-files
+        args: ['--maxkb=10000']
+    -   id: check-merge-conflict
+    -   id: check-symlinks
+    -   id: detect-private-key
+    -   id: end-of-file-fixer
+    -   id: sort-simple-yaml
+        files: (ops|backward|op_[a-z_]+)\.yaml$
+    -   id: trailing-whitespace
+        files: (.*\.(py|bzl|md|rst|c|cc|cxx|cpp|cu|h|hpp|hxx|xpu|kps|cmake|yaml|yml|hook)|BUILD|.*\.BUILD|WORKSPACE|CMakeLists\.txt)$
+-   repo: https://github.com/Lucas-C/pre-commit-hooks.git
+    rev: v1.5.1
+    hooks:
+    -   id: remove-crlf
+    -   id: remove-tabs
+        name: Tabs remover (C++)
+        files: \.(c|cc|cxx|cpp|cu|h|hpp|hxx|xpu|kps)$
+        args: [--whitespaces-count, '2']
+    -   id: remove-tabs
+        name: Tabs remover (Python)
+        files: (.*\.(py|bzl)|BUILD|.*\.BUILD|WORKSPACE)$
+        args: [--whitespaces-count, '4']
+# For Python files
+-   repo: https://github.com/psf/black.git
+    rev: 23.3.0
+    hooks:
+    -   id: black
+        files: (.*\.(py|pyi|bzl)|BUILD|.*\.BUILD|WORKSPACE)$
+-   repo: https://github.com/PyCQA/flake8
+    rev: 6.1.0
+    hooks:
+    -   id: flake8
+        args: ["--config=.flake8"]
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.5
+    hooks:
+    -   id: ruff
+        args: [--fix, --exit-non-zero-on-fix, --no-cache]
+-   repo: https://github.com/pre-commit/mirrors-isort
+    rev: v5.10.1
+    hooks:
+    -   id: isort
+        files: \.py$
+-   repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.15.0
+    hooks:
+    -   id: mypy
+        files: \.py$
+        args: [--config=mypy.ini, --ignore-missing-imports]

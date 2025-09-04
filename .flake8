@@ -1,0 +1,11 @@
+[flake8]
+# Maximum allowed line length
+max-line-length = 127
+ignore = 
+    # Ignore line break before binary operator
+    W503  
+    # Ignore whitespace before ':'
+    E203
+exclude = 
+    # Exclude Python interface files
+    *.pyi  

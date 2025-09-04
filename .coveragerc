@@ -1,0 +1,28 @@
+# EXAMPLE::
+# coverage run -m pytest tests/
+# coverage combine
+# coverage report
+# coverage html
+
+[run]
+# Specify the package/directory for collecting coverage data
+source = magi_fsdp
+# Enable parallel mode
+parallel = True
+# Specify concurrency type
+concurrency = multiprocessing
+# Coverage data file path
+data_file = .coverage
+
+# Specify file or directory patterns to exclude
+omit = 
+    */tests/*
+    */site-packages/*
+    */__init__.py
+
+[report]
+# Specify code lines to exclude from coverage statistics
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
