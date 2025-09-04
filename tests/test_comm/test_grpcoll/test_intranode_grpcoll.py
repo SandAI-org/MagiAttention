@@ -178,7 +178,16 @@ def test_main(
     print(f"[RANK {rank}]: {combined_x_gr.shape=} | {combined_x_gr=}\n", flush=True)
 
     # transfer group-cast meta args to dispatch meta args
-    rank_idx, topk_idx, topk_weights = transfer_group_cast_meta_to_dispatch_meta(
+    (
+        rank_idx,
+        _,  # rdma_rank_idx,
+        num_tokens_per_rank,
+        _,  # num_tokens_per_rdma_rank,
+        is_token_in_rank,
+        topk_idx,
+        topk_weights,
+        num_tokens_per_expert,
+    ) = transfer_group_cast_meta_to_dispatch_meta(
         rank,
         num_ranks,
         num_local_experts,
@@ -210,30 +219,6 @@ def test_main(
     # Rank layout meta
     # num_tokens_per_rank[r]: the number of tokens sent to rank r by this rank
     # gbl_num_tokens_per_rank[r]: the number of tokens sent to rank r by all ranks
-    num_tokens_per_rank = torch.empty((num_ranks,), dtype=torch.int, device="cuda")
-    token_idx_in_rank = torch.full(
-        (num_ranks, num_tokens), -1, dtype=torch.long, device="cuda"
-    )
-    for i in range(num_ranks):
-        num_tokens_per_rank[i] = (
-            rank_idx == i
-        ).sum()  # the number of tokens sent to rank i
-        token_sel = (rank_idx == i).max(dim=-1)[
-            0
-        ]  # token_sel[j]: whether token j is sent to rank i
-        count = token_sel.sum().item()  # the number of tokens sent to rank i
-        # after this step, all True (tokens[:count])'s token idx will move to the left
-        tokens = torch.sort(token_sel.to(torch.int), descending=True)[1]
-        # after this step, all True (tokens[:count])'s token idx will sort in ascending order
-        tokens[:count] = torch.sort(tokens[:count])[0]
-        # after this step, token_idx_in_rank[r][j]: for rank r, the order idx of jth token to send (-1 means not sent)
-        token_idx_in_rank[i][tokens[:count]] = torch.arange(
-            count, dtype=torch.long, device="cuda"
-        )
-    # after this step, token_idx_in_rank[j][r]: for jth token, its order idx to send to rank r (-1 means not sent)
-    token_idx_in_rank = token_idx_in_rank.T.contiguous().to(torch.int)
-    # after this step, is_token_in_rank[j][r]: whether jth token is sent to rank r
-    is_token_in_rank = token_idx_in_rank >= 0
     gbl_num_tokens_per_rank = num_tokens_per_rank.clone()
     dist.all_reduce(gbl_num_tokens_per_rank, group=group)
     if local_rank == 0:
@@ -249,25 +234,19 @@ def test_main(
     # Expert meta
     # num_tokens_per_expert[e]: the number of tokens sent to expert e by this rank
     # gbl_num_tokens_per_expert[e]: the number of tokens sent to expert e by all ranks
-    if use_topk:
-        num_tokens_per_expert = torch.zeros(
-            (num_experts,), dtype=torch.int, device="cuda"
-        )
-        for i in range(num_experts):
-            num_tokens_per_expert[i] = (topk_idx == i).sum()
-        gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
-        dist.all_reduce(gbl_num_tokens_per_expert, group=group)
-        if local_rank == 0:
-            print(
-                f"{gbl_num_tokens_per_expert=} | {gbl_num_tokens_per_expert.shape=}\n",
-                flush=True,
-            )
+    gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
+    dist.all_reduce(gbl_num_tokens_per_expert, group=group)
+    if local_rank == 0:
         print(
-            f"[RANK {rank}]: {num_tokens_per_expert=} | {num_tokens_per_expert.shape=}\n",
+            f"{gbl_num_tokens_per_expert=} | {gbl_num_tokens_per_expert.shape=}\n",
             flush=True,
         )
-
-        # get dispatch layout from buffer
+    print(
+        f"[RANK {rank}]: {num_tokens_per_expert=} | {num_tokens_per_expert.shape=}\n",
+        flush=True,
+    )
+    if use_topk:
+        # get dispatch layout from buffer as reference
         (
             ref_num_tokens_per_rank,
             ref_num_tokens_per_rdma_rank,
@@ -288,19 +267,6 @@ def test_main(
             print("", flush=True)
         group.barrier()
         time.sleep(1)
-    else:
-        num_tokens_per_expert = num_tokens_per_rank
-        gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
-        dist.all_reduce(gbl_num_tokens_per_expert, group=group)
-        if local_rank == 0:
-            print(
-                f"{gbl_num_tokens_per_expert=} | {gbl_num_tokens_per_expert.shape=}\n",
-                flush=True,
-            )
-        print(
-            f"[RANK {rank}]: {num_tokens_per_expert=} | {num_tokens_per_expert.shape=}\n",
-            flush=True,
-        )
 
     # Test dispatch
     def check_data(check_x, rank_prefix_matrix):
@@ -319,22 +285,20 @@ def test_main(
                 for with_topk in (use_topk,):  # (False, True):
                     if local_rank == 0:
                         print(
-                            "\n# ------    Test Intranode Dispatch   ------ #\n",
-                            flush=True,
-                        )
-                        print(
+                            "\n# ------    Test Intranode Dispatch   ------ #\n"
                             f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, '
                             f'{"with" if with_topk else "without"} top-k '
                             f"(async={async_mode}, previous={previous_mode}) ...",
                             flush=True,
-                            end="",
                         )
+
                     # prepare dispatch args
                     # x: shape=[num_local_tokens, hidden_dim]
                     # num_tokens_per_rank: shape=[num_ranks]: the number of tokens sent to each rank
                     # num_tokens_per_expert: shape=[num_experts]: the number of tokens sent to each expert
                     # is_token_in_rank: shape=[num_local_tokens, num_ranks]: whether a local token should be sent to a rank
-                    # NOTE: if using top-k, the above args are calculated by buffer.get_dispatch_layout(topk_idx, num_experts)
+                    # NOTE: if using top-k, the above args can be
+                    #   calculated by buffer.get_dispatch_layout(topk_idx, num_experts)
                     #   where the topk_idx: shape=[num_local_tokens, topk]: the global expert idx for each local token
                     #   but we don't have to pass the topk_idx into dispatch kernels
                     dispatch_args = {
@@ -345,6 +309,7 @@ def test_main(
                         "config": config,
                         "async_finish": async_mode,
                     }
+
                     if with_topk:
                         dispatch_args.update(
                             {
@@ -416,38 +381,25 @@ def test_main(
                         is_token_in_rank_handle,  # handle[4]
                         send_head,  # handle[5]
                     ) = handle
-                    if with_topk:
-                        print(
-                            (
-                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
-                                f"{recv_topk_idx.shape=} | {recv_topk_idx=}\n"  # type: ignore[union-attr]
-                                f"{recv_topk_weights.shape=} | {recv_topk_weights=}\n"  # type: ignore[union-attr]
-                                f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
-                                f"{rank_prefix_matrix.shape=} | {rank_prefix_matrix=}\n"  # handle[0]
-                                f"{channel_prefix_matrix.shape=} | {channel_prefix_matrix=}\n"  # handle[1]
-                                f"{recv_channel_prefix_matrix.shape=} | {recv_channel_prefix_matrix=}\n"  # handle[2]
-                                f"{recv_src_idx.shape=} | {recv_src_idx=}\n"  # handle[3]
-                                f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[4]
-                                f"After dipatch: {send_head.shape=} | {send_head=}\n\n"  # handle[5]
-                            ),
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            (
-                                f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
-                                f"{recv_topk_idx=}\n"
-                                f"{recv_topk_weights=}\n"
-                                f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
-                                f"{rank_prefix_matrix.shape=} | {rank_prefix_matrix=}\n"  # handle[0]
-                                f"{channel_prefix_matrix.shape=} | {channel_prefix_matrix=}\n"  # handle[1]
-                                f"{recv_channel_prefix_matrix.shape=} | {recv_channel_prefix_matrix=}\n"  # handle[2]
-                                f"{recv_src_idx.shape=} | {recv_src_idx=}\n"  # handle[3]
-                                f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[4]
-                                f"After dipatch: {send_head.shape=} | {send_head=}\n\n"  # handle[5]
-                            ),
-                            flush=True,
-                        )
+                    recv_topk_idx_shape = recv_topk_idx.shape if with_topk else None  # type: ignore[union-attr]
+                    recv_topk_weights_shape = (
+                        recv_topk_weights.shape if with_topk else None  # type: ignore[union-attr]
+                    )
+                    print(
+                        (
+                            f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
+                            f"{recv_topk_idx_shape=} | {recv_topk_idx=}\n"  # type: ignore[union-attr]
+                            f"{recv_topk_weights_shape=} | {recv_topk_weights=}\n"  # type: ignore[union-attr]
+                            f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
+                            f"{rank_prefix_matrix.shape=} | {rank_prefix_matrix=}\n"  # handle[0]
+                            f"{channel_prefix_matrix.shape=} | {channel_prefix_matrix=}\n"  # handle[1]
+                            f"{recv_channel_prefix_matrix.shape=} | {recv_channel_prefix_matrix=}\n"  # handle[2]
+                            f"{recv_src_idx.shape=} | {recv_src_idx=}\n"  # handle[3]
+                            f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[4]
+                            f"After dipatch: {send_head.shape=} | {send_head=}\n\n"  # handle[5]
+                        ),
+                        flush=True,
+                    )
 
                     # cast back from fp8
                     recv_x = (
@@ -633,24 +585,17 @@ def test_main(
                     event.current_stream_wait() if async_mode else ()
 
                     # print
-                    if with_topk:
-                        print(
-                            (
-                                f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
-                                f"{combined_topk_weights.shape=} | {combined_topk_weights=}\n"  # type: ignore[union-attr]
-                                f"Before combine: {send_head.shape=} | {send_head=}\n\n"
-                            ),
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            (
-                                f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
-                                f"{combined_topk_weights=}\n"
-                                f"Before combine: {send_head.shape=} | {send_head=}\n\n"
-                            ),
-                            flush=True,
-                        )
+                    combined_topk_weights_shape = (
+                        combined_topk_weights.shape if with_topk else None  # type: ignore[union-attr]
+                    )
+                    print(
+                        (
+                            f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
+                            f"{combined_topk_weights_shape=} | {combined_topk_weights=}\n"  # type: ignore[union-attr]
+                            f"Before combine: {send_head.shape=} | {send_head=}\n\n"
+                        ),
+                        flush=True,
+                    )
 
                     # check
                     assert torch.equal(combined_x, combined_x_gr)
