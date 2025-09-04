@@ -225,12 +225,22 @@ def test_main(
     print(f"[RANK {rank}]: {combined_x_gr.shape=} | {combined_x_gr=}\n", flush=True)
 
     # transfer group-cast meta args to dispatch meta args
-    rank_idx, topk_idx, topk_weights = transfer_group_cast_meta_to_dispatch_meta(
+    (
+        rank_idx,
+        rdma_rank_idx,
+        num_tokens_per_rank,
+        num_tokens_per_rdma_rank,
+        is_token_in_rank,
+        topk_idx,
+        topk_weights,
+        num_tokens_per_expert,
+    ) = transfer_group_cast_meta_to_dispatch_meta(
         rank,
         num_ranks,
         num_local_experts,
         input_split_size_list,
         dst_indices_list,
+        num_nodes=num_nodes,
         device="cuda",
         use_topk=use_topk,
     )
@@ -248,34 +258,11 @@ def test_main(
     print(
         f"[RANK {rank}]: {input_split_size_list=} | {dst_indices_list=} | "
         f"{output_split_size_list=} | {src_index_list=} | {sum(output_split_size_list)=}\n",
+        f"[RANK {rank}]: {topk_idx=} | {topk_weights=}\n",
+        f"[RANK {rank}]: {rank_idx=}\n",
         flush=True,
     )
-    print(f"[RANK {rank}]: {topk_idx=} | {topk_weights=}\n", flush=True)
-    print(f"[RANK {rank}]: {rank_idx=}\n", flush=True)
 
-    rdma_rank_idx = rank_idx // num_local_ranks
-    rdma_rank_idx.masked_fill_(rank_idx == -1, -1)
-    inplace_unique(rdma_rank_idx, num_nodes)
-
-    # Rank layout meta
-    num_tokens_per_rank = torch.empty((num_ranks,), dtype=torch.int, device="cuda")
-    num_tokens_per_rdma_rank = torch.empty((num_nodes,), dtype=torch.int, device="cuda")
-    token_idx_in_rank = torch.full(
-        (num_ranks, num_tokens), -1, dtype=torch.long, device="cuda"
-    )
-    for i in range(num_ranks):
-        num_tokens_per_rank[i] = (rank_idx == i).sum()
-        token_sel = (rank_idx == i).max(dim=-1)[0]
-        count = token_sel.sum().item()
-        tokens = torch.sort(token_sel.to(torch.int), descending=True)[1]
-        tokens[:count] = torch.sort(tokens[:count])[0]
-        token_idx_in_rank[i][tokens[:count]] = torch.arange(
-            count, dtype=torch.long, device="cuda"
-        )
-    for i in range(num_nodes):
-        num_tokens_per_rdma_rank[i] = (rdma_rank_idx == i).sum()
-    token_idx_in_rank = token_idx_in_rank.T.contiguous().to(torch.int)
-    is_token_in_rank = token_idx_in_rank >= 0
     gbl_num_tokens_per_rank = num_tokens_per_rank.clone()
     dist.all_reduce(gbl_num_tokens_per_rank, group=group)
     if local_rank == 0:
@@ -288,29 +275,24 @@ def test_main(
         flush=True,
     )
     print(
-        f"[RANK {rank}]: {num_tokens_per_rdma_rank=} | {num_tokens_per_rdma_rank.shape=}\n",
+        f"[RANK {rank}]: {num_tokens_per_rdma_rank=} | "
+        f"{num_tokens_per_rdma_rank.shape=}\n",  # type: ignore[union-attr]
         flush=True,
     )
 
     # Expert meta
-    if use_topk:
-        num_tokens_per_expert = torch.zeros(
-            (num_experts,), dtype=torch.int, device="cuda"
-        )
-        for i in range(num_experts):
-            num_tokens_per_expert[i] = (topk_idx == i).sum()
-        gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
-        dist.all_reduce(gbl_num_tokens_per_expert, group=group)
-        if local_rank == 0:
-            print(
-                f"{gbl_num_tokens_per_expert=} | {gbl_num_tokens_per_expert.shape=}\n",
-                flush=True,
-            )
+    gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
+    dist.all_reduce(gbl_num_tokens_per_expert, group=group)
+    if local_rank == 0:
         print(
-            f"[RANK {rank}]: {num_tokens_per_expert=} | {num_tokens_per_expert.shape=}\n",
+            f"{gbl_num_tokens_per_expert=} | {gbl_num_tokens_per_expert.shape=}\n",
             flush=True,
         )
-
+    print(
+        f"[RANK {rank}]: {num_tokens_per_expert=} | {num_tokens_per_expert.shape=}\n",
+        flush=True,
+    )
+    if use_topk:
         # get dispatch layout from buffer
         (
             ref_num_tokens_per_rank,
@@ -333,35 +315,9 @@ def test_main(
             print("", flush=True)
         group.barrier()
         time.sleep(1)
-    else:
-        num_tokens_per_expert = num_tokens_per_rank
-        gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
-        dist.all_reduce(gbl_num_tokens_per_expert, group=group)
-        if local_rank == 0:
-            print(
-                f"{gbl_num_tokens_per_expert=} | {gbl_num_tokens_per_expert.shape=}\n",
-                flush=True,
-            )
-        print(
-            f"[RANK {rank}]: {num_tokens_per_expert=} | {num_tokens_per_expert.shape=}\n",
-            flush=True,
-        )
 
     # RDMA dispatch counts
-    if use_topk:
-        rdma_idx = topk_idx // (num_experts // num_nodes)
-        rdma_idx.masked_fill_(topk_idx == -1, -1)
-        inplace_unique(rdma_idx, num_nodes)
-        num_rdma_token_sent = rdma_idx.ne(-1).sum().item()
-        assert torch.equal(rdma_idx, rdma_rank_idx)
-        assert torch.equal(num_rdma_token_sent, num_tokens_per_rdma_rank.sum().item())
-        print(
-            f"[RANK {rank}]: {rdma_idx=} | {rdma_idx.shape=} | {num_rdma_token_sent=}\n",
-            flush=True,
-        )
-    else:
-        rdma_idx = None
-        num_rdma_token_sent = num_tokens_per_rdma_rank.sum().item()
+    num_rdma_token_sent = num_tokens_per_rdma_rank.sum().item()  # type: ignore[union-attr]
 
     # Test dispatch
     def check_data(check_x, recv_gbl_rank_prefix_sum):
