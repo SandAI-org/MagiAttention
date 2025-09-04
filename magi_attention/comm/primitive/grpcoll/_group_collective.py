@@ -21,7 +21,7 @@ import magi_attention
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.utils import nvtx
 
-from ._all2all_v import all2all_v
+from .._all2all_v import all2all_v
 from ._group_collective_hier import (
     hier_group_cast_impl_with_a2av,
     hier_group_reduce_impl_with_a2av,

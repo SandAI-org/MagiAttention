@@ -19,11 +19,11 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
-from magi_attention.comm.primitive._group_collective_hier import (
+from magi_attention.comm.primitive.grpcoll._group_collective_hier import (
     init_hier_group_cast_meta_solver,
     init_hier_group_reduce_meta_solver,
 )
-from magi_attention.comm.primitive.utils import (
+from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_input_meta_args,
     _calc_group_cast_a2a_output_meta_args,
     _calc_group_reduce_a2a_input_meta_args,

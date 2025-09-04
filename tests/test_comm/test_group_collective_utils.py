@@ -19,7 +19,7 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.comm.primitive.utils import (
+from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_input_args,
     _calc_group_reduce_a2a_input_args,
     sum_reduce_to_tensor,

@@ -12,14 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import grpcoll
-from ._all2all_v import all2all_v
-from ._all_gather_v import all_gather_v
-from ._scatter_v import scatter_v
+from ._group_collective import group_cast_collective, group_reduce_collective
 
 __all__ = [
-    "all_gather_v",
-    "scatter_v",
-    "all2all_v",
-    "grpcoll",
+    "group_cast_collective",
+    "group_reduce_collective",
 ]

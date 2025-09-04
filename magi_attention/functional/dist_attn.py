@@ -18,7 +18,10 @@ import torch
 import torch.distributed as dist
 
 import magi_attention
-from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
+from magi_attention.comm.primitive.grpcoll import (
+    group_cast_collective,
+    group_reduce_collective,
+)
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx

@@ -23,7 +23,7 @@ from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.utils import nvtx
 
-from ._all2all_v import all2all_v
+from .._all2all_v import all2all_v
 from .utils import (
     _calc_group_cast_a2a_input_meta_args,
     _calc_group_cast_a2a_output_meta_args,
