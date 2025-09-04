@@ -18,7 +18,7 @@ import torch
 import triton
 import triton.language as tl
 
-from magi_attention.utils import is_fp_dtype_at_least, nvtx
+from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype, nvtx
 
 from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
 
@@ -26,6 +26,13 @@ __all__ = ["range_reduce"]
 
 
 OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+
+torch2triton_dtype_map = {
+    torch.float16: tl.float16,
+    torch.bfloat16: tl.bfloat16,
+    torch.float32: tl.float32,
+    torch.float64: tl.float64,
+}
 
 
 @triton.jit
@@ -88,6 +95,7 @@ def range_sum_reduce_deter_kernel(
     N: tl.constexpr,
     N_BLOCK: tl.constexpr,
     ELEM_PER_BLOCK: tl.constexpr,
+    reduce_dtype: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
     block_idx_in_row = tl.program_id(1)
@@ -110,6 +118,7 @@ def range_sum_reduce_deter_kernel(
         out = tl.load(curr_out_ptr + cols)
     else:
         out = tl.load(curr_out_ptr + cols, mask=cols < elem_in_last_block)
+    out = out.to(reduce_dtype)
 
     # reduce input
     out2inp_range_map_start = (
@@ -131,6 +140,7 @@ def range_sum_reduce_deter_kernel(
                 inp = tl.load(curr_inp_ptr + cols)
             else:
                 inp = tl.load(curr_inp_ptr + cols, mask=cols < elem_in_last_block)
+            inp = inp.to(reduce_dtype)
 
             # add to output
             out += inp
@@ -157,6 +167,7 @@ def range_avg_reduce_kernel(
     N: tl.constexpr,
     N_BLOCK: tl.constexpr,
     ELEM_PER_BLOCK: tl.constexpr,
+    reduce_dtype: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
     block_idx_in_row = tl.program_id(1)
@@ -179,7 +190,7 @@ def range_avg_reduce_kernel(
         out = tl.load(curr_out_ptr + cols)
     else:
         out = tl.load(curr_out_ptr + cols, mask=cols < elem_in_last_block)
-    out = out.to(tl.float32)  # for high-precision accumulation
+    out = out.to(reduce_dtype)
 
     # reduce input
     cnt = 0.0
@@ -203,6 +214,7 @@ def range_avg_reduce_kernel(
                 inp = tl.load(curr_inp_ptr + cols)
             else:
                 inp = tl.load(curr_inp_ptr + cols, mask=cols < elem_in_last_block)
+            inp = inp.to(reduce_dtype)
 
             # add to output
             out += inp
@@ -239,6 +251,7 @@ def range_lse_reduce_kernel(
     N: tl.constexpr,
     N_BLOCK: tl.constexpr,
     ELEM_PER_BLOCK: tl.constexpr,
+    reduce_dtype: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
@@ -269,10 +282,10 @@ def range_lse_reduce_kernel(
         out = tl.load(curr_out_ptr + cols)
     else:
         out = tl.load(curr_out_ptr + cols, mask=cols < elem_in_last_block)
-    out = out.to(tl.float32)  # for high-precision accumulation
+    out = out.to(reduce_dtype)
 
     # load output lse
-    out_lse = tl.load(curr_out_lse_ptr)
+    out_lse = tl.load(curr_out_lse_ptr).to(reduce_dtype)
 
     # reduce input and input lse
     out2inp_range_map_start = (
@@ -300,9 +313,10 @@ def range_lse_reduce_kernel(
                 inp = tl.load(curr_inp_ptr + cols)
             else:
                 inp = tl.load(curr_inp_ptr + cols, mask=cols < elem_in_last_block)
+            inp = inp.to(reduce_dtype)
 
             # load input lse
-            inp_lse = tl.load(curr_inp_lse_ptr)
+            inp_lse = tl.load(curr_inp_lse_ptr).to(reduce_dtype)
 
             # correct lse
             reduced_lse = tl.log(tl.exp(out_lse) + tl.exp(inp_lse))
@@ -335,6 +349,7 @@ def range_reduce(
     dim: int = 0,
     deterministic: bool = False,
     reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -361,6 +376,11 @@ def range_reduce(
                 2. if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
                     and we only support input/output has shape [seqlen, num_heads, head_dim]
                     while input_lse/output_lse has shape [seqlen, num_heads] for now
+        reduce_dtype (torch.dtype): the dtype for the reduction.
+            Defaults to None to use: maximum precision of the input/output and fp32
+
+            NOTE: this is only used for those deterministic kernels, and for non-deterministic kernels,
+            the dtype will always be the same dtype as the input/output
         input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
             only required and used if reduce_op is "lse"
         output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
@@ -415,6 +435,10 @@ def range_reduce(
         return output
 
     # ---   calculate meta   --- #
+
+    # Determine the reduce dtype
+    reduce_dtype = reduce_dtype or max_fp_dtype(input.dtype, torch.float32)
+    reduce_dtype = torch2triton_dtype_map[reduce_dtype]
 
     # Make input_ranges and output_ranges contiguous
     input_ranges = input_ranges.contiguous()
@@ -551,6 +575,7 @@ def range_reduce(
                     N,
                     N_BLOCK,
                     ELEM_PER_BLOCK,
+                    reduce_dtype,
                 )
             else:
                 range_sum_reduce_nondeter_kernel[grid](
@@ -581,6 +606,7 @@ def range_reduce(
                 N,
                 N_BLOCK,
                 ELEM_PER_BLOCK,
+                reduce_dtype,
             )
         case "lse":
             range_lse_reduce_kernel[grid](
@@ -603,6 +629,7 @@ def range_reduce(
                 N,
                 N_BLOCK,
                 ELEM_PER_BLOCK,
+                reduce_dtype,
             )
         case _:
             raise ValueError(f"Invalid reduce_op {reduce_op}")

@@ -22,6 +22,7 @@ import torch
 from magi_attention.common.range_op import range_reduce
 from magi_attention.functional.utils import correct_attn_lse, correct_attn_out
 from magi_attention.testing import parameterize
+from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype
 
 OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
@@ -33,6 +34,7 @@ def range_reduce_ref(
     output_ranges: torch.Tensor,
     dim: int = 0,
     reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
 ) -> OutMaybeWithLSE:
@@ -48,6 +50,8 @@ def range_reduce_ref(
             - "sum": sum reduction
             - "avg": average reduction
             - "lse": log-sum-exp weighted average reduction, with lse correction
+        reduce_dtype (torch.dtype | None, optional): The dtype to use for the reduced tensor.
+            Defaults to None to use the maximum precision between input/output and fp32.
         input_lse (torch.Tensor | None, optional): Log-sum-exp tensor for input. Defaults to None.
         output_lse (torch.Tensor | None, optional): Log-sum-exp tensor for output. Defaults to None.
 
@@ -58,14 +62,18 @@ def range_reduce_ref(
         NOTE: for simplicity, this reference function does not guarantee in-place reduction
     """
 
+    reduce_dtype = reduce_dtype or max_fp_dtype(
+        input.dtype, output.dtype, torch.float32
+    )
+
     is_lse_reduce = reduce_op == "lse"
     if is_lse_reduce:
         assert (
             input_lse is not None and output_lse is not None
         ), "lse reduction requires input_lse and output_lse"
-        assert (
-            input_lse.dtype == output_lse.dtype == torch.float32
-        ), "lse reduction requires input_lse and output_lse to be float32"
+        assert is_fp_dtype_at_least(input_lse, torch.float32) and is_fp_dtype_at_least(
+            output_lse, torch.float32
+        ), "lse reduction requires input_lse and output_lse at least float32"
         assert input_lse.ndim == output_lse.ndim == 2, (
             "lse reduction requires input and output must be 2D tensors "
             "with the shape: [seqlen, nheads]"
@@ -85,6 +93,15 @@ def range_reduce_ref(
     else:
         input = input.contiguous()
         output = output.contiguous()
+
+    # Cast to reduce_dtype
+    orig_output_dtype = output.dtype
+    input = input.to(reduce_dtype)
+    output = output.to(reduce_dtype)
+    if is_lse_reduce:
+        orig_output_lse_dtype = output_lse.dtype  # type: ignore[union-attr]
+        input_lse = input_lse.to(reduce_dtype)  # type: ignore[union-attr]
+        output_lse = output_lse.to(reduce_dtype)  # type: ignore[union-attr]
 
     output_ranges = output_ranges.tolist()
     input_ranges = input_ranges.tolist()
@@ -136,7 +153,10 @@ def range_reduce_ref(
         if is_lse_reduce:
             output_lse = output_lse.transpose(0, dim)  # type: ignore[union-attr]
 
+    # Cast back to original dtype
+    output = output.to(orig_output_dtype)
     if is_lse_reduce:
+        output_lse = output_lse.to(orig_output_lse_dtype)  # type: ignore[union-attr]
         return output, output_lse
 
     return output
@@ -151,15 +171,24 @@ class TestRangeReduce(TestCase):
     def device(self) -> int:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    @property
+    def dtype(self) -> torch.dtype:
+        return torch.bfloat16
+
     @parameterize("reduce_op", ["sum", "avg"])
+    @parameterize("reduce_dtype", [None, torch.float32, torch.float64])
     @parameterize("deterministic", [False, True])
-    def test_normal_range_reduce(self, reduce_op, deterministic):
+    def test_normal_range_reduce(self, reduce_op, reduce_dtype, deterministic):
         """Test range_reduce function with normal reduction"""
+
+        if not deterministic and reduce_dtype is not None:
+            # non-deterministic mode only supports None
+            return
 
         # --- Test case 1: Basic functionality --- #
 
-        input_tensor = torch.randn(10, 5, device=self.device)
-        output_tensor = torch.randn(8, 5, device=self.device)
+        input_tensor = torch.randn(10, 5, dtype=self.dtype, device=self.device)
+        output_tensor = torch.randn(8, 5, dtype=self.dtype, device=self.device)
         if reduce_op == "avg":
             output_tensor.zero_()
         input_ranges = torch.tensor(
@@ -180,13 +209,14 @@ class TestRangeReduce(TestCase):
             output_ranges,
             deterministic=deterministic,
             reduce_op=reduce_op,
+            reduce_dtype=reduce_dtype,
             test_case="Basic functionality",
         )
 
         # --- Test case 2: Empty tensor handling --- #
 
-        empty_input = torch.empty(0, 5, device=self.device)
-        empty_output = torch.empty(0, 5, device=self.device)
+        empty_input = torch.empty(0, 5, dtype=self.dtype, device=self.device)
+        empty_output = torch.empty(0, 5, dtype=self.dtype, device=self.device)
         empty_ranges = torch.empty(0, 2, dtype=torch.int32, device=self.device)
 
         self.compare_normal_range_reudce(
@@ -196,13 +226,14 @@ class TestRangeReduce(TestCase):
             empty_ranges,
             deterministic=deterministic,
             reduce_op=reduce_op,
+            reduce_dtype=reduce_dtype,
             test_case="Empty tensor handling",
         )
 
         # --- Test case 3: Different dimension --- #
 
-        input_tensor = torch.randn(5, 10, 3, device=self.device)
-        output_tensor = torch.randn(5, 8, 3, device=self.device)
+        input_tensor = torch.randn(5, 10, 3, dtype=self.dtype, device=self.device)
+        output_tensor = torch.randn(5, 8, 3, dtype=self.dtype, device=self.device)
         if reduce_op == "avg":
             output_tensor.zero_()
         input_ranges = torch.tensor(
@@ -220,13 +251,14 @@ class TestRangeReduce(TestCase):
             dim=1,
             deterministic=deterministic,
             reduce_op=reduce_op,
+            reduce_dtype=reduce_dtype,
             test_case="Different dimension (dim=1)",
         )
 
         # --- Test case 4: Large tensors --- #
 
-        large_input = torch.randn(100, 20, device=self.device)
-        large_output = torch.randn(70, 20, device=self.device)
+        large_input = torch.randn(100, 20, dtype=self.dtype, device=self.device)
+        large_output = torch.randn(70, 20, dtype=self.dtype, device=self.device)
         if reduce_op == "avg":
             large_output.zero_()
         large_input_ranges = torch.tensor(
@@ -243,13 +275,14 @@ class TestRangeReduce(TestCase):
             large_output_ranges,
             deterministic=deterministic,
             reduce_op=reduce_op,
+            reduce_dtype=reduce_dtype,
             test_case="Large tensors",
         )
 
         # --- Test case 5: Edge case - single range --- #
 
-        single_range_input = torch.randn(10, 5, device=self.device)
-        single_range_output = torch.randn(4, 5, device=self.device)
+        single_range_input = torch.randn(10, 5, dtype=self.dtype, device=self.device)
+        single_range_output = torch.randn(4, 5, dtype=self.dtype, device=self.device)
         if reduce_op == "avg":
             single_range_output.zero_()
         single_input_range = torch.tensor(
@@ -266,13 +299,14 @@ class TestRangeReduce(TestCase):
             single_output_range,
             deterministic=deterministic,
             reduce_op=reduce_op,
+            reduce_dtype=reduce_dtype,
             test_case="Edge case - single range",
         )
 
         # --- Test case 6: Multi-dimensional tensors --- #
 
-        multi_dim_input = torch.randn(10, 5, 8, 4, device=self.device)
-        multi_dim_output = torch.randn(8, 5, 8, 4, device=self.device)
+        multi_dim_input = torch.randn(10, 5, 8, 4, dtype=self.dtype, device=self.device)
+        multi_dim_output = torch.randn(8, 5, 8, 4, dtype=self.dtype, device=self.device)
         if reduce_op == "avg":
             multi_dim_output.zero_()
 
@@ -284,10 +318,13 @@ class TestRangeReduce(TestCase):
             dim=0,
             deterministic=deterministic,
             reduce_op=reduce_op,
+            reduce_dtype=reduce_dtype,
             test_case="Multi-dimensional tensors (dim=0)",
         )
 
-        multi_dim_output2 = torch.randn(10, 5, 12, 4, device=self.device)
+        multi_dim_output2 = torch.randn(
+            10, 5, 12, 4, dtype=self.dtype, device=self.device
+        )
         if reduce_op == "avg":
             multi_dim_output2.zero_()
 
@@ -299,13 +336,16 @@ class TestRangeReduce(TestCase):
             dim=2,
             deterministic=deterministic,
             reduce_op=reduce_op,
+            reduce_dtype=reduce_dtype,
             test_case="Multi-dimensional tensors (dim=2)",
         )
 
         # --- Test case 7: Non-contiguous memory layout --- #
 
-        non_contiguous_input = torch.randn(10, 5, device=self.device).transpose(0, 1)
-        non_contiguous_output = torch.randn(5, 8, device=self.device)
+        non_contiguous_input = torch.randn(
+            10, 5, dtype=self.dtype, device=self.device
+        ).transpose(0, 1)
+        non_contiguous_output = torch.randn(5, 8, dtype=self.dtype, device=self.device)
         assert not non_contiguous_input.is_contiguous()
         if reduce_op == "avg":
             non_contiguous_output.zero_()
@@ -318,6 +358,7 @@ class TestRangeReduce(TestCase):
             dim=1,
             deterministic=deterministic,
             reduce_op=reduce_op,
+            reduce_dtype=reduce_dtype,
             test_case="Non-contiguous memory layout",
         )
 
@@ -336,6 +377,7 @@ class TestRangeReduce(TestCase):
                     output_ranges,
                     deterministic=deterministic,
                     reduce_op=reduce_op,
+                    reduce_dtype=reduce_dtype,
                     test_case=f"Various data types ({dtype=})",
                 )
 
@@ -345,9 +387,10 @@ class TestRangeReduce(TestCase):
         output_tensor: torch.Tensor,
         input_ranges: torch.Tensor,
         output_ranges: torch.Tensor,
-        dim=0,
-        deterministic=False,
-        reduce_op="sum",
+        dim: int = 0,
+        deterministic: bool = False,
+        reduce_op: Literal["sum", "avg", "lse"] = "sum",
+        reduce_dtype: torch.dtype | None = None,
         test_case: str = "",
     ):
         assert reduce_op != "lse", "this func does not support lse-reduce"
@@ -365,6 +408,7 @@ class TestRangeReduce(TestCase):
             dim=dim,
             deterministic=deterministic,
             reduce_op=reduce_op,
+            reduce_dtype=reduce_dtype,
         )
         assert output1.data_ptr() == result.data_ptr(), "Not in-place reduction"  # type: ignore[union-attr]
 
@@ -376,6 +420,7 @@ class TestRangeReduce(TestCase):
             output_ranges=output_ranges,
             dim=dim,
             reduce_op=reduce_op,
+            reduce_dtype=reduce_dtype,
         )
 
         # Verify results match
@@ -388,13 +433,14 @@ class TestRangeReduce(TestCase):
                 f"in {deter_str} mode: {e}\nwhere {result=}\n{expected=}\n"
             )
 
-    def test_lse_range_reduce(self):
+    @parameterize("reduce_dtype", [None, torch.float32, torch.float64])
+    def test_lse_range_reduce(self, reduce_dtype):
         """Test range_reduce function with lse reduction"""
 
         # --- Test case 1: Basic functionality --- #
 
-        input_tensor = torch.randn(10, 5, 3, dtype=torch.bfloat16, device=self.device)
-        output_tensor = torch.randn(8, 5, 3, dtype=torch.bfloat16, device=self.device)
+        input_tensor = torch.randn(10, 5, 3, dtype=self.dtype, device=self.device)
+        output_tensor = torch.randn(8, 5, 3, dtype=self.dtype, device=self.device)
         input_lse = torch.randn(10, 5, dtype=torch.float32, device=self.device)
         output_lse = torch.randn(8, 5, dtype=torch.float32, device=self.device)
         input_ranges = torch.tensor(
@@ -416,6 +462,7 @@ class TestRangeReduce(TestCase):
             input_ranges,
             output_ranges,
             dim=0,
+            reduce_dtype=reduce_dtype,
             test_case="Basic functionality with lse reduce",
         )
 
@@ -429,7 +476,8 @@ class TestRangeReduce(TestCase):
         output_lse: torch.Tensor,
         input_ranges: torch.Tensor,
         output_ranges: torch.Tensor,
-        dim=0,
+        dim: int = 0,
+        reduce_dtype: torch.dtype | None = None,
         test_case: str = "",
     ):
         # Copy output tensors for comparison
@@ -447,6 +495,7 @@ class TestRangeReduce(TestCase):
             dim=dim,
             deterministic=True,
             reduce_op="lse",
+            reduce_dtype=reduce_dtype,
             input_lse=input_lse,
             output_lse=output_lse1,
         )
@@ -465,6 +514,7 @@ class TestRangeReduce(TestCase):
             reduce_op="lse",
             input_lse=input_lse,
             output_lse=output_lse2,
+            reduce_dtype=reduce_dtype,
         )
 
         # Verify results match
