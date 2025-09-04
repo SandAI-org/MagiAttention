@@ -1164,6 +1164,10 @@ struct CollectiveMainloopBwdSm90 {
       warpgroup_wait<0>();
       // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
       Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
+      if (bidb == 1 && bidh == 0 && thread_idx == 0) {
+        printf("ds before compute\n");
+        print_tensor(dS);
+      }
 #pragma unroll
       for (int mi = 0; mi < size<0>(dS); ++mi) {
         float const dP_sum_cur = [&] {
@@ -1179,6 +1183,13 @@ struct CollectiveMainloopBwdSm90 {
             dS(mi, ni) *= dtanh(mi, ni);
           }
         }
+      }
+
+      if (bidb == 1 && bidh == 0 && thread_idx == 0) {
+        printf("ds after compute\n");
+        print_tensor(dS);
+        printf("tLSErdPsum\n");
+        print_tensor(tLSErdPsum);
       }
 
       // Convert scores from fp32 to fp16/bf16

@@ -248,6 +248,12 @@ class FlashAttnBwdPreprocess {
           gdPsum(row) = dP_sum(mi);
       }
     }
+    if (bidb == 1 && bidh == 0 && thread_idx == 0) {
+      printf("dP_sum:\n");
+      print_tensor(dP_sum);
+      printf("gdp_sum:\n");
+      print_tensor(gdPsum);
+    }
 
     int const seqlen_rounded = cute::round_up(seqlen_o, kBlockM);
     // Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(_, bidh, bidb);
