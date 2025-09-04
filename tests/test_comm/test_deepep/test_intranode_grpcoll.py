@@ -318,9 +318,6 @@ def test_main(
                             "\n# ------    Test Intranode Dispatch   ------ #\n",
                             flush=True,
                         )
-
-                    # prepare dispatch args
-                    if local_rank == 0:
                         print(
                             f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, '
                             f'{"with" if with_topk else "without"} top-k '
@@ -328,10 +325,18 @@ def test_main(
                             flush=True,
                             end="",
                         )
+                    # prepare dispatch args
+                    # x: shape=[num_local_tokens, hidden_dim]
+                    # num_tokens_per_rank: shape=[num_ranks]: the number of tokens sent to each rank
+                    # num_tokens_per_expert: shape=[num_experts]: the number of tokens sent to each expert
+                    # is_token_in_rank: shape=[num_local_tokens, num_ranks]: whether a local token should be sent to a rank
+                    # NOTE: if using top-k, the above args are calculated by buffer.get_dispatch_layout(topk_idx, num_experts)
+                    #   where the topk_idx: shape=[num_local_tokens, topk]: the global expert idx for each local token
+                    #   but we don't have to pass the topk_idx into dispatch kernels
                     dispatch_args = {
                         "x": current_x,
-                        "num_tokens_per_rank": num_tokens_per_rank,
                         "is_token_in_rank": is_token_in_rank,
+                        "num_tokens_per_rank": num_tokens_per_rank,
                         "num_tokens_per_expert": num_tokens_per_expert,
                         "config": config,
                         "async_finish": async_mode,
@@ -355,9 +360,11 @@ def test_main(
                     # recv_topk_idx: shape=[num_recv_tokens, topk]:
                     #   the local expert idx for this rank w.r.t.
                     #   each recv token's topk list (-1 means not sent to this rank)
+                    #   None if not with_topk
                     # recv_topk_weights: shape=[num_recv_tokens, topk]:
                     #   the corr. weight for each recv token's topk list
                     #   (if idx = -1, then weight = 0.)
+                    #   None if not with_topk
                     # recv_num_tokens_per_expert_list: shape=[num_local_experts,]:
                     #   the number of tokens to recv for each local expert in this rank
                     # handle: the tuple of some meta tensors that will be passed to combine or cached dispatch

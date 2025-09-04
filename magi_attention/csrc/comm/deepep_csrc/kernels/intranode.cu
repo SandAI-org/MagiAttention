@@ -44,7 +44,7 @@
 #include "launch.cuh"
 #include "utils.cuh"
 
-namespace deep_ep {
+namespace magi_attn_comm::grpcoll {
 
 namespace intranode {
 
@@ -972,4 +972,4 @@ void combine(cudaDataType_t type,
 
 } // namespace intranode
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll

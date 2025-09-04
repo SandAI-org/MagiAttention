@@ -50,7 +50,11 @@
 #include "kernels/api.cuh"
 #include "kernels/configs.cuh"
 
-namespace deep_ep {
+namespace py = pybind11;
+
+namespace grpcoll = magi_attn_comm::grpcoll;
+
+namespace magi_attn_comm::grpcoll {
 
 Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy):
         rank(rank), num_ranks(num_ranks),
@@ -154,11 +158,11 @@ int Buffer::get_local_device_id() const {
     return device_id;
 }
 
-pybind11::bytearray Buffer::get_local_ipc_handle() const {
+py::bytearray Buffer::get_local_ipc_handle() const {
     return {ipc_handles[nvl_rank].reserved, CUDA_IPC_HANDLE_SIZE};
 }
 
-pybind11::bytearray Buffer::get_local_nvshmem_unique_id() const {
+py::bytearray Buffer::get_local_nvshmem_unique_id() const {
 #ifndef DISABLE_NVSHMEM
     EP_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get NVSHMEM unique ID");
     auto unique_id = internode::get_unique_id();
@@ -168,7 +172,7 @@ pybind11::bytearray Buffer::get_local_nvshmem_unique_id() const {
 #endif
 }
 
-torch::Tensor Buffer::get_local_buffer_tensor(const pybind11::object& dtype, int64_t offset, bool use_rdma_buffer) const {
+torch::Tensor Buffer::get_local_buffer_tensor(const py::object& dtype, int64_t offset, bool use_rdma_buffer) const {
     torch::ScalarType casted_dtype = torch::python::detail::py_object_to_dtype(dtype);
     auto element_bytes = static_cast<int64_t>(elementSize(casted_dtype));
     auto base_ptr = static_cast<uint8_t*>(use_rdma_buffer ? rdma_buffer_ptr : buffer_ptrs[nvl_rank]) + offset;
@@ -223,8 +227,8 @@ void Buffer::destroy() {
 }
 
 void Buffer::sync(const std::vector<int> &device_ids,
-                  const std::vector<std::optional<pybind11::bytearray>> &all_gathered_handles,
-                  const std::optional<pybind11::bytearray>& root_unique_id_opt) {
+                  const std::vector<std::optional<py::bytearray>> &all_gathered_handles,
+                  const std::optional<py::bytearray>& root_unique_id_opt) {
     EP_HOST_ASSERT(not is_available());
 
     // Sync IPC handles
@@ -703,7 +707,7 @@ Buffer::internode_dispatch(const torch::Tensor& x, const std::optional<torch::Te
     // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
     // If users of DeepEP need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
     // unless we release GIL here.
-    pybind11::gil_scoped_release release;
+    py::gil_scoped_release release;
 
     const int num_channels = config.num_sms / 2;
     EP_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -1359,51 +1363,52 @@ bool is_sm90_compiled() {
 #endif
 }
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.doc() = "Magi Attention Communication C++ Library"; // optional module docstring
+    m.doc() = "Magi Attention Communication Library";
 
-    pybind11::module_ deep_ep_cpp_submodule = m.def_submodule(
-        "deep_ep_cpp",
-        "DeepEP: an efficient expert-parallel communication library"
+    py::module_ grpcoll_submodule = m.def_submodule(
+        "grpcoll",
+        "Group-Collective Communication Sub-Library based on DeepEP"
     );
 
-    pybind11::class_<deep_ep::Config>(deep_ep_cpp_submodule, "Config")
-        .def(pybind11::init<int, int, int, int, int>(),
+    py::class_<grpcoll::Config>(grpcoll_submodule, "Config")
+        .def(py::init<int, int, int, int, int>(),
              py::arg("num_sms") = 20,
              py::arg("num_max_nvl_chunked_send_tokens") = 6, py::arg("num_max_nvl_chunked_recv_tokens") = 256,
              py::arg("num_max_rdma_chunked_send_tokens") = 6, py::arg("num_max_rdma_chunked_recv_tokens") = 256)
-        .def("get_nvl_buffer_size_hint", &deep_ep::Config::get_nvl_buffer_size_hint)
-        .def("get_rdma_buffer_size_hint", &deep_ep::Config::get_rdma_buffer_size_hint);
-    deep_ep_cpp_submodule.def("get_low_latency_rdma_size_hint", &deep_ep::get_low_latency_rdma_size_hint);
+        .def("get_nvl_buffer_size_hint", &grpcoll::Config::get_nvl_buffer_size_hint)
+        .def("get_rdma_buffer_size_hint", &grpcoll::Config::get_rdma_buffer_size_hint);
+    grpcoll_submodule.def("get_low_latency_rdma_size_hint", &grpcoll::get_low_latency_rdma_size_hint);
 
-    pybind11::class_<deep_ep::EventHandle>(deep_ep_cpp_submodule, "EventHandle")
-        .def(pybind11::init<>())
-        .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
+    py::class_<grpcoll::EventHandle>(grpcoll_submodule, "EventHandle")
+        .def(py::init<>())
+        .def("current_stream_wait", &grpcoll::EventHandle::current_stream_wait);
 
-    pybind11::class_<deep_ep::Buffer>(deep_ep_cpp_submodule, "Buffer")
-        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool>())
-        .def("is_available", &deep_ep::Buffer::is_available)
-        .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
-        .def("get_rdma_rank", &deep_ep::Buffer::get_rdma_rank)
-        .def("get_root_rdma_rank", &deep_ep::Buffer::get_root_rdma_rank)
-        .def("get_local_device_id", &deep_ep::Buffer::get_local_device_id)
-        .def("get_local_ipc_handle", &deep_ep::Buffer::get_local_ipc_handle)
-        .def("get_local_nvshmem_unique_id", &deep_ep::Buffer::get_local_nvshmem_unique_id)
-        .def("get_local_buffer_tensor", &deep_ep::Buffer::get_local_buffer_tensor)
-        .def("get_comm_stream", &deep_ep::Buffer::get_comm_stream)
-        .def("sync", &deep_ep::Buffer::sync)
-        .def("destroy", &deep_ep::Buffer::destroy)
-        .def("get_dispatch_layout", &deep_ep::Buffer::get_dispatch_layout)
-        .def("intranode_dispatch", &deep_ep::Buffer::intranode_dispatch)
-        .def("intranode_combine", &deep_ep::Buffer::intranode_combine)
-        .def("internode_dispatch", &deep_ep::Buffer::internode_dispatch)
-        .def("internode_combine", &deep_ep::Buffer::internode_combine)
-        .def("clean_low_latency_buffer", &deep_ep::Buffer::clean_low_latency_buffer)
-        .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
-        .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
-        .def("get_next_low_latency_combine_buffer", &deep_ep::Buffer::get_next_low_latency_combine_buffer);
+    py::class_<grpcoll::Buffer>(grpcoll_submodule, "Buffer")
+        .def(py::init<int, int, int64_t, int64_t, bool, bool>())
+        .def("is_available", &grpcoll::Buffer::is_available)
+        .def("get_num_rdma_ranks", &grpcoll::Buffer::get_num_rdma_ranks)
+        .def("get_rdma_rank", &grpcoll::Buffer::get_rdma_rank)
+        .def("get_root_rdma_rank", &grpcoll::Buffer::get_root_rdma_rank)
+        .def("get_local_device_id", &grpcoll::Buffer::get_local_device_id)
+        .def("get_local_ipc_handle", &grpcoll::Buffer::get_local_ipc_handle)
+        .def("get_local_nvshmem_unique_id", &grpcoll::Buffer::get_local_nvshmem_unique_id)
+        .def("get_local_buffer_tensor", &grpcoll::Buffer::get_local_buffer_tensor)
+        .def("get_comm_stream", &grpcoll::Buffer::get_comm_stream)
+        .def("sync", &grpcoll::Buffer::sync)
+        .def("destroy", &grpcoll::Buffer::destroy)
+        .def("get_dispatch_layout", &grpcoll::Buffer::get_dispatch_layout)
+        .def("intranode_dispatch", &grpcoll::Buffer::intranode_dispatch)
+        .def("intranode_combine", &grpcoll::Buffer::intranode_combine)
+        .def("internode_dispatch", &grpcoll::Buffer::internode_dispatch)
+        .def("internode_combine", &grpcoll::Buffer::internode_combine)
+        .def("clean_low_latency_buffer", &grpcoll::Buffer::clean_low_latency_buffer)
+        .def("low_latency_dispatch", &grpcoll::Buffer::low_latency_dispatch)
+        .def("low_latency_combine", &grpcoll::Buffer::low_latency_combine)
+        .def("get_next_low_latency_combine_buffer", &grpcoll::Buffer::get_next_low_latency_combine_buffer);
 
-    deep_ep_cpp_submodule.def("is_sm90_compiled", deep_ep::is_sm90_compiled);
+    grpcoll_submodule.def("is_sm90_compiled", grpcoll::is_sm90_compiled);
 }

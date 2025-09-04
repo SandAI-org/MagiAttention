@@ -251,7 +251,7 @@ def build_magi_attn_comm_module(
         "\n# -------------------     Building magi_attn_comm     ------------------- #\n"
     )
 
-    # ---   for deep_ep_cpp submodule   --- #
+    # ---   for grpcoll submodule   --- #
 
     # find nvshmem
     disable_nvshmem = False

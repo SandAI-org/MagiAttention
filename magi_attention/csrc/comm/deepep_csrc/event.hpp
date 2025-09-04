@@ -43,7 +43,7 @@
 
 #include "kernels/exception.cuh"
 
-namespace deep_ep {
+namespace magi_attn_comm::grpcoll {
 
 struct EventHandle {
     std::shared_ptr<torch::Event> event;
@@ -80,4 +80,4 @@ void stream_wait(const at::cuda::CUDAStream& s, const EventHandle& event) {
     s.unwrap().wait(*event.event);
 }
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll

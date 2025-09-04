@@ -51,7 +51,7 @@
 #include "exception.cuh"
 #include "utils.cuh"
 
-namespace deep_ep {
+namespace magi_attn_comm::grpcoll {
 
 EP_STATIC_ASSERT(NVSHMEMI_IBGDA_MIN_QP_DEPTH >= 64, "Invalid QP minimum depth");
 
@@ -539,4 +539,4 @@ nvshmemi_ibgda_quiet(int dst_pe, int qp_id) {
     ibgda_poll_cq(qp->tx_wq.cq, prod_idx);
 }
 
-} // namespace deep_ep
+} // namespace magi_attn_comm::grpcoll

@@ -40,7 +40,7 @@ from typing import Any, Optional, Tuple
 import torch
 import torch.distributed as dist
 
-from magi_attention.magi_attn_comm.deep_ep_cpp import EventHandle
+from magi_attention.magi_attn_comm.grpcoll import EventHandle
 
 
 class EventOverlap:
