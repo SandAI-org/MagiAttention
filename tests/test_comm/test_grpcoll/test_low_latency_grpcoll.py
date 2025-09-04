@@ -141,7 +141,16 @@ def test_main(
     print(f"[RANK {rank}]: {combined_x_gr.shape=} | {combined_x_gr=}\n", flush=True)
 
     # transfer group-cast meta args to dispatch meta args
-    _, topk_idx, topk_weights = transfer_group_cast_meta_to_dispatch_meta(
+    (
+        _,
+        _,
+        _,
+        _,
+        _,
+        topk_idx,
+        topk_weights,
+        _,
+    ) = transfer_group_cast_meta_to_dispatch_meta(
         rank,
         num_ranks,
         num_local_experts,
@@ -160,10 +169,6 @@ def test_main(
         flush=True,
     )
     print(f"[RANK {rank}]: {topk_idx=} | {topk_weights=}\n", flush=True)
-
-    # Randomly mask some positions
-    # for i in range(10):
-    #     topk_idx[random.randint(0, num_tokens - 1), random.randint(0, num_topk - 1)] = -1
 
     # Check dispatch correctness
     do_check = True
@@ -283,7 +288,7 @@ def test_main(
                         )
                         all_topk_idx = torch.empty(
                             (num_ranks, num_tokens, num_topk),
-                            dtype=topk_idx.dtype,
+                            dtype=topk_idx.dtype,  # type: ignore[union-attr]
                             device="cuda",
                         )
                         dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
@@ -449,7 +454,7 @@ def test_main(
     num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
     num_dispatch_comm_bytes, num_combine_comm_bytes = 0, 0
     for i in range(num_tokens):
-        num_selections = (topk_idx[i] != -1).sum().item()
+        num_selections = (topk_idx[i] != -1).sum().item()  # type: ignore[index]
         num_dispatch_comm_bytes += num_fp8_bytes * num_selections
         num_combine_comm_bytes += num_bf16_bytes * num_selections
 

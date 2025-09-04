@@ -101,10 +101,22 @@ def transfer_group_cast_meta_to_dispatch_meta(
     num_local_experts: int,
     input_split_size_list: list[int],
     dst_indices_list: list[list[int]],
+    num_nodes: int = 1,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
     use_topk: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor,
+]:
+    num_local_ranks = num_ranks // num_nodes
+    num_experts = num_local_experts * num_ranks
     num_tokens = sum(input_split_size_list)
     num_splits = len(input_split_size_list)
     input_split_size_list_tensor = torch.tensor(
@@ -113,7 +125,7 @@ def transfer_group_cast_meta_to_dispatch_meta(
 
     if use_topk:
         assert num_local_experts == num_ranks
-        topk_idxs = torch.full(
+        topk_idx = torch.full(
             (num_splits, num_ranks), fill_value=-1, dtype=dtype, device="cpu"
         )
         # no other meanings, just placeholders,
@@ -144,17 +156,18 @@ def transfer_group_cast_meta_to_dispatch_meta(
                     else num_dst_local_experts
                 )
                 end = start + num
-                topk_idxs[split_idx][start:end] = dst_rank * num_ranks + torch.arange(
+                topk_idx[split_idx][start:end] = dst_rank * num_ranks + torch.arange(
                     num, dtype=dtype
                 )
                 start = end
-        topk_idxs = topk_idxs.to(device).repeat_interleave(
+        topk_idx = topk_idx.to(device).repeat_interleave(
             input_split_size_list_tensor, dim=0, output_size=num_tokens
         )  # shape=(num_tokens, num_ranks)
     else:
         assert num_local_experts == 1
-        topk_idxs, topk_weights = None, None
+        topk_idx, topk_weights = None, None
 
+    # construct rank_idx
     rank_idx = torch.full(
         (num_splits, num_ranks), fill_value=-1, dtype=dtype, device="cpu"
     )
@@ -168,7 +181,73 @@ def transfer_group_cast_meta_to_dispatch_meta(
         input_split_size_list_tensor, dim=0, output_size=num_tokens
     )  # shape=(num_tokens, num_ranks)
 
-    return rank_idx, topk_idxs, topk_weights
+    # construct rdma_rank_idx
+    if num_nodes > 1:
+        rdma_rank_idx = rank_idx // num_local_ranks
+        rdma_rank_idx.masked_fill_(rank_idx == -1, -1)
+        inplace_unique(rdma_rank_idx, num_nodes)
+    else:
+        rdma_rank_idx = None
+
+    # construct rank layout meta
+    # num_tokens_per_rank[r]: the number of tokens sent to rank r by this rank
+    # num_tokens_per_rdma_rank[r]: the number of tokens sent to RDMA rank r by this rank
+    # is_token_in_rank[j][r]: whether jth token is sent to rank r
+    num_tokens_per_rank = torch.empty((num_ranks,), dtype=torch.int, device="cuda")
+    token_idx_in_rank = torch.full(
+        (num_ranks, num_tokens), -1, dtype=torch.long, device="cuda"
+    )
+    for i in range(num_ranks):
+        num_tokens_per_rank[i] = (
+            rank_idx == i
+        ).sum()  # the number of tokens sent to rank i
+        token_sel = (rank_idx == i).max(dim=-1)[
+            0
+        ]  # token_sel[j]: whether token j is sent to rank i
+        count = token_sel.sum().item()  # the number of tokens sent to rank i
+        # after this step, all True (tokens[:count])'s token idx will move to the left
+        tokens = torch.sort(token_sel.to(torch.int), descending=True)[1]
+        # after this step, all True (tokens[:count])'s token idx will sort in ascending order
+        tokens[:count] = torch.sort(tokens[:count])[0]
+        # after this step, token_idx_in_rank[r][j]: for rank r, the order idx of jth token to send (-1 means not sent)
+        token_idx_in_rank[i][tokens[:count]] = torch.arange(
+            count, dtype=torch.long, device="cuda"
+        )
+    # after this step, token_idx_in_rank[j][r]: for jth token, its order idx to send to rank r (-1 means not sent)
+    token_idx_in_rank = token_idx_in_rank.T.contiguous().to(torch.int)
+    # after this step, is_token_in_rank[j][r]: whether jth token is sent to rank r
+    is_token_in_rank = token_idx_in_rank >= 0
+
+    if num_nodes > 1:
+        num_tokens_per_rdma_rank = torch.empty(
+            (num_nodes,), dtype=torch.int, device="cuda"
+        )
+        for i in range(num_nodes):
+            num_tokens_per_rdma_rank[i] = (rdma_rank_idx == i).sum()
+    else:
+        num_tokens_per_rdma_rank = None
+
+    # construct expert meta
+    # num_tokens_per_expert[e]: the number of tokens sent to expert e by this rank
+    if use_topk:
+        num_tokens_per_expert = torch.zeros(
+            (num_experts,), dtype=torch.int, device="cuda"
+        )
+        for i in range(num_experts):
+            num_tokens_per_expert[i] = (topk_idx == i).sum()
+    else:
+        num_tokens_per_expert = num_tokens_per_rank
+
+    return (
+        rank_idx,
+        rdma_rank_idx,
+        num_tokens_per_rank,
+        num_tokens_per_rdma_rank,
+        is_token_in_rank,
+        topk_idx,
+        topk_weights,
+        num_tokens_per_expert,
+    )
 
 
 def init_dist(local_rank: int, num_local_ranks: int):
