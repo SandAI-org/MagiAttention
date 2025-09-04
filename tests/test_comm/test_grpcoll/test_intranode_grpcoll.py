@@ -211,10 +211,10 @@ def test_main(
         f"[RANK {rank}]: {input_split_size_list=} | {dst_indices_list=} | "
         f"{output_split_size_list=} | {src_index_list=} | "
         f"{sum(output_split_size_list)=}\n",
+        f"{topk_idx=} | {topk_weights=}\n",
+        f"{rank_idx=}\n",
         flush=True,
     )
-    print(f"[RANK {rank}]: {topk_idx=} | {topk_weights=}\n", flush=True)
-    print(f"[RANK {rank}]: {rank_idx=}\n", flush=True)
 
     # Rank layout meta
     # num_tokens_per_rank[r]: the number of tokens sent to rank r by this rank
@@ -249,10 +249,10 @@ def test_main(
         # get dispatch layout from buffer as reference
         (
             ref_num_tokens_per_rank,
-            ref_num_tokens_per_rdma_rank,
+            _,  # ref_num_tokens_per_rdma_rank,
             ref_num_tokens_per_expert,
             ref_is_token_in_rank,
-            event_overlap,
+            _,  # event_overlap,
         ) = buffer.get_dispatch_layout(topk_idx, num_experts)
 
         # assert close to layout ref
