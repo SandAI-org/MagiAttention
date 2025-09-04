@@ -370,17 +370,6 @@ def build_magi_attn_comm_module(
     if len(nvcc_dlink) > 0:
         extra_compile_args["nvcc_dlink"] = nvcc_dlink
 
-    # Summary
-    print("Build summary:")
-    print(f" > Sources: {sources}")
-    print(f" > Includes: {include_dirs}")
-    print(f" > Libraries: {library_dirs}")
-    print(f" > Compilation flags: {extra_compile_args}")
-    print(f" > Link flags: {extra_link_args}")
-    print(f' > Arch list: {os.environ["TORCH_CUDA_ARCH_LIST"]}')
-    print(f" > NVSHMEM path: {nvshmem_dir}")
-    print()
-
     return CUDAExtension(
         name=to_full_ext_module_name(ext_module_name),
         include_dirs=include_dirs,

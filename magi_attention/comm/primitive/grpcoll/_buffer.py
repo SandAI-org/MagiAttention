@@ -35,7 +35,7 @@
 # SOFTWARE.
 
 import os
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -272,7 +272,7 @@ class Buffer:
         return tensor[: size.numel()].view(size)
 
     @staticmethod
-    def _unpack_bias(bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]):
+    def _unpack_bias(bias: Union[torch.Tensor, torch.Tensor | torch.Tensor]):
         bias_0, bias_1 = None, None
         if isinstance(bias, torch.Tensor):
             bias_0 = bias
@@ -344,7 +344,7 @@ class Buffer:
         previous_event: Optional[EventOverlap] = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> Tuple[
+    ) -> tuple[
         torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor, EventOverlap
     ]:
         """
@@ -389,8 +389,8 @@ class Buffer:
 
     def dispatch(
         self,
-        x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-        handle: Optional[Tuple] = None,
+        x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        handle: Optional[tuple] = None,
         num_tokens_per_rank: Optional[torch.Tensor] = None,
         num_tokens_per_rdma_rank: Optional[torch.Tensor] = None,
         is_token_in_rank: Optional[torch.Tensor] = None,
@@ -403,12 +403,12 @@ class Buffer:
         previous_event: Optional[EventOverlap] = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> Tuple[
-        Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor],
+    ) -> tuple[
+        tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
         Optional[torch.Tensor],
         Optional[torch.Tensor],
-        List[int],
-        Tuple,
+        list[int],
+        tuple,
         EventOverlap,
     ]:
         """
@@ -581,14 +581,14 @@ class Buffer:
     def combine(
         self,
         x: torch.Tensor,
-        handle: Tuple,
+        handle: tuple,
         topk_weights: Optional[torch.Tensor] = None,
-        bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
+        bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         config: Optional[Config] = None,
         previous_event: Optional[EventOverlap] = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
         """
         Combine (reduce) tokens (addition **without** weights) from different ranks, both intranode and internode
             settings are supported.
@@ -657,8 +657,8 @@ class Buffer:
 
     def internode_dispatch(
         self,
-        x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-        handle: Optional[Tuple] = None,
+        x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        handle: Optional[tuple] = None,
         num_tokens_per_rank: Optional[torch.Tensor] = None,
         num_tokens_per_rdma_rank: Optional[torch.Tensor] = None,
         is_token_in_rank: Optional[torch.Tensor] = None,
@@ -670,12 +670,12 @@ class Buffer:
         previous_event: Optional[EventOverlap] = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> Tuple[
-        Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor],
+    ) -> tuple[
+        Union[tuple[torch.Tensor, torch.Tensor], torch.Tensor],
         Optional[torch.Tensor],
         Optional[torch.Tensor],
-        List[int],
-        Tuple,
+        list[int],
+        tuple,
         EventOverlap,
     ]:
         """
@@ -816,12 +816,12 @@ class Buffer:
         x: torch.Tensor,
         handle: Union[tuple, list],
         topk_weights: Optional[torch.Tensor] = None,
-        bias: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
+        bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         config: Optional[Config] = None,
         previous_event: Optional[EventOverlap] = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], EventOverlap]:
         """
         Internode combine implementation, for more details, please refer to the `combine` docs.
         Normally, you should not directly call this function.
@@ -893,8 +893,8 @@ class Buffer:
         use_ue8m0: bool = False,
         async_finish: bool = False,
         return_recv_hook: bool = False,
-    ) -> Tuple[
-        Tuple[torch.Tensor, torch.Tensor], torch.Tensor, Tuple, EventOverlap, Callable
+    ) -> tuple[
+        tuple[torch.Tensor, torch.Tensor], torch.Tensor, tuple, EventOverlap, Callable
     ]:
         """
         A low-latency implementation for dispatching with IBGDA.
@@ -997,7 +997,7 @@ class Buffer:
         async_finish: bool = False,
         return_recv_hook: bool = False,
         out: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, EventOverlap, Callable]:
+    ) -> tuple[torch.Tensor, EventOverlap, Callable]:
         """
         A low-latency implementation for combining tokens (reduce **with weights**) with IBGDA.
         This kernel requires all the ranks (no matter intranode or internode) should be visible via RDMA

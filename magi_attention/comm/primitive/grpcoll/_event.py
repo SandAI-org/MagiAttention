@@ -34,7 +34,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 
@@ -55,7 +55,7 @@ class EventOverlap:
     def __init__(
         self,
         event: Optional[EventHandle] = None,
-        extra_tensors: Optional[Tuple[torch.Tensor]] = None,
+        extra_tensors: Optional[tuple[torch.Tensor]] = None,
     ) -> None:
         """
         Initialize the class.
