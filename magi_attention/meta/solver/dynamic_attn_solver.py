@@ -389,50 +389,60 @@ class DynamicAttnSolver:
         calc_local_range: bool = True,
     ) -> AttnCalcMeta:
         """Calculate flex-flash-attention calculation meta for this rank"""
-        local_attn_arg = AttnArg(
-            q_ranges=AttnRanges(),
-            k_ranges=AttnRanges(),
-            attn_type_map=[],
-            shard_seqlen_q=self.host_ranges_q[self.cp_rank].total_seqlen,
-            total_area=0,
-        )
+        local_attn_arg_q_ranges = AttnRanges()
+        local_attn_arg_k_ranges = AttnRanges()
+        local_attn_arg_attn_type_map = []
+        local_attn_arg_total_area = 0
         for rect in self.host_bucket_this_rank:
             qk_range_mask_type_list = rect.to_qk_range_mask_type()
             for q_range, k_range, mask_type in qk_range_mask_type_list:
-                local_attn_arg.q_ranges.append(q_range)
-                local_attn_arg.k_ranges.append(k_range)
-                local_attn_arg.attn_type_map.append(mask_type)
-            local_attn_arg.total_area += rect.area()
+                local_attn_arg_q_ranges.append(q_range)
+                local_attn_arg_k_ranges.append(k_range)
+                local_attn_arg_attn_type_map.append(mask_type)
+            local_attn_arg_total_area += rect.area()
 
-        remote_attn_arg = AttnArg(
-            q_ranges=AttnRanges(),
-            k_ranges=AttnRanges(),
-            attn_type_map=[],
-            shard_seqlen_q=self.total_seqlen_q,
-            total_area=0,
-        )
+        remote_attn_arg_q_ranges = AttnRanges()
+        remote_attn_arg_k_ranges = AttnRanges()
+        remote_attn_arg_attn_type_map = []
+        remote_attn_arg_total_area = 0
+
         for rect in self.remote_bucket_this_rank:
             qk_range_mask_type_list = rect.to_qk_range_mask_type()
             for q_range, k_range, mask_type in qk_range_mask_type_list:
-                remote_attn_arg.q_ranges.append(q_range)
-                remote_attn_arg.k_ranges.append(k_range)
-                remote_attn_arg.attn_type_map.append(mask_type)
-            remote_attn_arg.total_area += rect.area()
+                remote_attn_arg_q_ranges.append(q_range)
+                remote_attn_arg_k_ranges.append(k_range)
+                remote_attn_arg_attn_type_map.append(mask_type)
+            remote_attn_arg_total_area += rect.area()
 
         if calc_local_range:
-            local_attn_arg.q_ranges = local_attn_arg.q_ranges.make_ranges_local(
-                local_attn_arg.q_ranges
+            local_attn_arg_q_ranges = local_attn_arg_q_ranges.make_ranges_local(
+                local_attn_arg_q_ranges
             )
-            local_attn_arg.k_ranges = local_attn_arg.k_ranges.make_ranges_local(
-                local_attn_arg.k_ranges
+            local_attn_arg_k_ranges = local_attn_arg_k_ranges.make_ranges_local(
+                local_attn_arg_k_ranges
             )
-            remote_attn_arg.q_ranges = remote_attn_arg.q_ranges.make_ranges_local(
-                remote_attn_arg.q_ranges
+            remote_attn_arg_q_ranges = remote_attn_arg_q_ranges.make_ranges_local(
+                remote_attn_arg_q_ranges
             )
-            remote_attn_arg.k_ranges = remote_attn_arg.k_ranges.make_ranges_local(
-                remote_attn_arg.k_ranges
+            remote_attn_arg_k_ranges = remote_attn_arg_k_ranges.make_ranges_local(
+                remote_attn_arg_k_ranges
             )
 
+        local_attn_arg = AttnArg(
+            q_ranges=local_attn_arg_q_ranges,
+            k_ranges=local_attn_arg_k_ranges,
+            attn_type_map=local_attn_arg_attn_type_map,
+            shard_seqlen_q=self.host_ranges_q[self.cp_rank].total_seqlen,
+            total_area=local_attn_arg_total_area,
+        )
+
+        remote_attn_arg = AttnArg(
+            q_ranges=remote_attn_arg_q_ranges,
+            k_ranges=remote_attn_arg_k_ranges,
+            attn_type_map=remote_attn_arg_attn_type_map,
+            shard_seqlen_q=self.host_ranges_q[self.cp_rank].total_seqlen,
+            total_area=remote_attn_arg_total_area,
+        )
         remote_attn_args_list: list[AttnArg] = []
         remote_attn_args_list.append(remote_attn_arg)
 
