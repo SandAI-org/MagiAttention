@@ -815,7 +815,9 @@ class DistAttnFunc(torch.autograd.Function):
             partial_local_lse = torch.full(
                 (local_q.size(0), local_q.size(1)),
                 fill_value=float("-inf"),
-                dtype=torch.float32,
+                dtype=max_fp_dtype(
+                    local_q.dtype, torch.float32
+                ),  # lse always in high-precision
                 device=local_q.device,
             )
 

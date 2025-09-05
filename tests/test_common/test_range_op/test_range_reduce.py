@@ -433,8 +433,7 @@ class TestRangeReduce(TestCase):
                 f"in {deter_str} mode: {e}\nwhere {result=}\n{expected=}\n"
             )
 
-    @parameterize("reduce_dtype", [None, torch.float32, torch.float64])
-    def test_lse_range_reduce(self, reduce_dtype):
+    def test_lse_range_reduce(self):
         """Test range_reduce function with lse reduction"""
 
         # --- Test case 1: Basic functionality --- #
@@ -462,8 +461,37 @@ class TestRangeReduce(TestCase):
             input_ranges,
             output_ranges,
             dim=0,
-            reduce_dtype=reduce_dtype,
-            test_case="Basic functionality with lse reduce",
+            reduce_dtype=torch.float32,
+            test_case="Basic functionality with bf16 input/output and fp32 lse",
+        )
+
+        # --- Test case 2: Single Ranges with fp64 --- #
+
+        input_tensor = torch.randn(512, 2, 64, dtype=torch.float64, device=self.device)
+        output_tensor = torch.randn(512, 2, 64, dtype=torch.float64, device=self.device)
+        input_lse = torch.randn(512, 2, dtype=torch.float64, device=self.device)
+        output_lse = torch.randn(512, 2, dtype=torch.float64, device=self.device)
+        input_ranges = torch.tensor(
+            [[0, 512]],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        output_ranges = torch.tensor(
+            [[0, 512]],
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+        self.compare_lse_range_reudce(
+            input_tensor,
+            output_tensor,
+            input_lse,
+            output_lse,
+            input_ranges,
+            output_ranges,
+            dim=0,
+            reduce_dtype=None,
+            test_case="Single Ranges with fp64 input/output and fp64 lse",
         )
 
         # TODO: add more test cases

@@ -335,9 +335,10 @@ def range_lse_reduce_kernel(
         tl.store(curr_out_ptr + cols, out)
     else:
         tl.store(curr_out_ptr + cols, out, mask=cols < elem_in_last_block)
-
-    # store reduced output lse
-    tl.store(curr_out_lse_ptr, out_lse)
+        # NOTE: only last block need to store reduced output lse
+        # since lse is shared across all blocks in a row
+        # which also indicates the lse is reduced duplicately by N_BLOCK times
+        tl.store(curr_out_lse_ptr, out_lse)
 
 
 @nvtx.instrument_nvtx
