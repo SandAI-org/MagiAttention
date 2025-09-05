@@ -50,33 +50,55 @@ void set_params_fprop(
     float const softcap,
     int const sm_margin,
     bool const disable_fwd_atomic_reduction) {
+  // Reset the parameters
   params = {};
+
+  // Set the compute and output types for the kernel.
+  // Compute type is the type of the input tensors.
+  // Output type is the type of the output tensor.
   params.compute_type = q.scalar_type();
   params.out_type = kernel_out.scalar_type();
+
   params.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction;
+
+  // Set the pointers of Q, K, V
   params.q_ptr = q.data_ptr();
   params.k_ptr = k.data_ptr();
   params.v_ptr = v.data_ptr();
+  // Set the strides of Q, K, V
+  // All stride are in elements, not bytes.
   params.q_row_stride = q.stride(-3);
   params.k_row_stride = k.stride(-3);
   params.v_row_stride = v.stride(-3);
   params.q_head_stride = q.stride(-2);
   params.k_head_stride = k.stride(-2);
   params.v_head_stride = v.stride(-2);
+
+  // Set the pointer of O
   params.o_ptr = kernel_out.data_ptr();
+  // Set the strides of O
+  // All stride are in elements, not bytes.
   params.o_row_stride = kernel_out.stride(-3);
   params.o_head_stride = kernel_out.stride(-2);
-  params.q_ranges = static_cast<int*>(q_ranges_d);
-  params.k_ranges = static_cast<int*>(k_ranges_d);
+
+  // Set other pointers
+  params.q_ranges = static_cast<int2*>(q_ranges_d);
+  params.k_ranges = static_cast<int2*>(k_ranges_d);
   params.attn_type_map = static_cast<int*>(attn_type_map_d);
-  params.merge_q_ranges = static_cast<int*>(merge_q_ranges_d);
+  params.merge_q_ranges = static_cast<int2*>(merge_q_ranges_d);
   params.qk_map = static_cast<int*>(qk_map_d);
   params.unique_count = static_cast<int*>(unique_count_d);
+
+  // Set kernel utility pointers
   params.range_locks = static_cast<int*>(range_locks_d);
   params.tile_count_semaphore = static_cast<int*>(tile_count_semaphore_d);
+
+  // Set deterministic and it's pointers
   params.deterministic = deterministic;
   params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
   params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
+
+  // Softmax sum
   params.softmax_lse_ptr = softmax_lse_d;
   params.b = b;
   params.merge_batch_size = merge_batch_size;
@@ -90,8 +112,11 @@ void set_params_fprop(
   params.total_k = total_k;
   params.d = d;
   params.d_rounded = d_rounded;
+  // Set the different scale values.
   params.scale_softmax = softmax_scale;
   params.softcap = softcap;
+
+  // Set the architecture and number of SMs to used in the kernel.
   params.arch = at::cuda::getCurrentDeviceProperties()->major * 10 + at::cuda::getCurrentDeviceProperties()->minor;
   params.num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
 }
@@ -172,12 +197,17 @@ void set_params_dgrad(
       /*sm_margin*/ sm_margin,
       /*disable_fwd_atomic_reduction*/ false);
 
-  params.merge_k_ranges = static_cast<int*>(merge_k_ranges_d);
+  // Set backward-specific pointers and flags
+  params.merge_k_ranges = static_cast<int2*>(merge_k_ranges_d);
   params.bwd_kq_map = static_cast<int*>(bwd_kq_map_d);
   params.bwd_unique_count = static_cast<int*>(bwd_unique_count_d);
   params.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction;
+
+  // HACK: override compute_type
   params.compute_type = dout.scalar_type();
   params.dkv_type = dk.scalar_type();
+
+  // Set pointers and strides for dout, dq, dk, dv
   params.do_ptr = dout.data_ptr();
   params.do_row_stride = dout.stride(-3);
   params.do_head_stride = dout.stride(-2);
@@ -190,13 +220,18 @@ void set_params_dgrad(
   params.dq_head_stride = dq.stride(-2);
   params.dk_head_stride = dk.stride(-2);
   params.dv_head_stride = dv.stride(-2);
+
+  // Set softmax_lse_log2_ptr and dsoftmax_sum
   params.softmax_lse_log2_ptr = softmax_lse_log2_d;
   params.dsoftmax_sum = dsoftmax_sum_d;
+
+  // Set the deterministic flag for dq path
   params.dq_determin_conflict_state = static_cast<int*>(dq_determin_conflict_state_d);
   params.dq_determin_range_locks = static_cast<int*>(dq_determin_range_locks_d);
 }
 
 void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
+  // Fast zero-fill for output accumulator if needed by kernel configuration
   OUT_DTYPE_SWITCH(params.out_type, TOut, [&] {
 #ifndef FLASHATTENTION_DISABLE_HDIM64
     if (params.d <= 64) {
@@ -265,5 +300,6 @@ int round_up_headdim(int head_size) {
 // using UniquePairsFn = std::tuple<at::Tensor, at::Tensor, at::Tensor> (*)(at::Tensor);
 
 // PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-//   m.def("unique_consecutive_pairs", static_cast<UniquePairsFn>(&unique_consecutive_pairs_ext), "Finds unique (int, int) pairs from a pre-sorted tensor (CUDA extension)");
+//   m.def("unique_consecutive_pairs", static_cast<UniquePairsFn>(&unique_consecutive_pairs_ext), "Finds unique (int, int) pairs from a pre-sorted tensor (CUDA
+//   extension)");
 // }

@@ -27,15 +27,38 @@ namespace flash {
 // to compute various things like n_block_min, n_block_max, etc.
 // TODO: Add distributed offset to DistributedSeqlenInfo
 struct DistributedSeqlenInfo {
-  int const offset_q, offset_k;
-  int const seqlen_q, seqlen_k;
+  int offset_q, offset_k;
+  int seqlen_q, seqlen_k;
+  int2 const* q_ranges;
+  int2 const* k_ranges;
 
   CUTLASS_DEVICE
-  DistributedSeqlenInfo(int const bidb, int const* const q_ranges, int const* const k_ranges)
-      : offset_q(q_ranges[2 * bidb]),
-        offset_k(k_ranges[2 * bidb]),
-        seqlen_q(q_ranges[2 * bidb + 1] - q_ranges[2 * bidb]),
-        seqlen_k(k_ranges[2 * bidb + 1] - k_ranges[2 * bidb]) {}
+  DistributedSeqlenInfo() : offset_q(0), offset_k(0), seqlen_q(0), seqlen_k(0), q_ranges(nullptr), k_ranges(nullptr) {}
+
+  CUTLASS_DEVICE
+  DistributedSeqlenInfo(int const bidb, int2 const* q_ranges, int2 const* k_ranges)
+      : q_ranges(q_ranges), k_ranges(k_ranges) {
+    int2 q_range = q_ranges[bidb];
+    int2 k_range = k_ranges[bidb];
+    offset_q = q_range.x;
+    offset_k = k_range.x;
+    seqlen_q = q_range.y - q_range.x;
+    seqlen_k = k_range.y - k_range.x;
+  }
+
+  CUTLASS_DEVICE
+  void update_k(int const bidb) {
+    int2 k_range = k_ranges[bidb];
+    offset_k = k_range.x;
+    seqlen_k = k_range.y - k_range.x;
+  }
+
+  CUTLASS_DEVICE
+  void update_q(int const bidb) {
+    int2 q_range = q_ranges[bidb];
+    offset_q = q_range.x;
+    seqlen_q = q_range.y - q_range.x;
+  }
 };
 
 } // namespace flash

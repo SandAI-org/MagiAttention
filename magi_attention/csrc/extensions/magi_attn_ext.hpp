@@ -26,7 +26,4 @@
 #define TORCH_EXTENSION_NAME magi_attn_ext
 #endif
 
-
-namespace magi_attn_ext {
-
-} // namespace magi_attn_ext
+namespace magi_attn_ext {} // namespace magi_attn_ext

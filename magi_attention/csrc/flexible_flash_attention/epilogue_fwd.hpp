@@ -143,8 +143,8 @@ struct CollectiveEpilogueFwd {
     int32_t const nheads;
     int32_t const nheads_kv;
     int* range_locks = nullptr;
-    int const* q_ranges = nullptr;
-    int const* k_ranges = nullptr;
+    int2 const* q_ranges = nullptr;
+    int2 const* k_ranges = nullptr;
     int* determin_range_locks = nullptr;
   };
 
@@ -160,8 +160,8 @@ struct CollectiveEpilogueFwd {
     TMA_O tma_store_O;
     int const nheads;
     int* range_locks = nullptr;
-    int const* q_ranges = nullptr;
-    int const* k_ranges = nullptr;
+    int2 const* q_ranges = nullptr;
+    int2 const* k_ranges = nullptr;
     int* determin_range_locks = nullptr;
   };
 
@@ -327,14 +327,12 @@ struct CollectiveEpilogueFwd {
       SharedStorage& shared_storage,
       TiledMma tiled_mma,
       int thread_idx,
-      BlockCoordType const& block_coord) {
+      BlockCoordType const& block_coord,
+      flash::DistributedSeqlenInfo& seqlen_info) {
     // Get block coordinates for current job(tile)
     int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
-
-    // Get seqlen info for batch that current tile belongs to
-    flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
     // Get offset and seqlen for batch that current tile belongs to
     int offset_o = seqlen_info.offset_q;
@@ -632,7 +630,7 @@ struct CollectiveEpilogueFwd {
   }
 
   // Write 0 to output and -inf to LSE
-  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord) {
+  CUTLASS_DEVICE void store_zero(Params const& params, int thread_idx, BlockCoordType const& block_coord, flash::DistributedSeqlenInfo& seqlen_info) {
     static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
     static_assert(kBlockM <= NumEpilogueThreads);
 
@@ -640,8 +638,6 @@ struct CollectiveEpilogueFwd {
     int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
-    // Get seqlen info for batch that current tile belongs to
-    flash::DistributedSeqlenInfo seqlen_info{bidb, params.q_ranges, params.k_ranges};
     // Get offset and seqlen for batch that current tile belongs to
     int offset_o = seqlen_info.offset_q;
 
