@@ -345,8 +345,8 @@ struct CollectiveMainloopBwdSm90 {
     StrideLSE const stride_dPsum;
     float const softmax_scale;
     float const softcap_val;
-    int const* const q_ranges;
-    int const* const k_ranges;
+    int2 const* const q_ranges;
+    int2 const* const k_ranges;
     int* dq_determin_conflict_state;
     int* dq_determin_range_locks;
     int const* const attn_type_map = nullptr;

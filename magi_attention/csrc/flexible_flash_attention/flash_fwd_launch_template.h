@@ -55,7 +55,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   static constexpr bool MmaPV_is_RS = true;
   static constexpr bool IntraWGOverlap = true;
 
-  static constexpr int kStages = 4;
+  static constexpr int kStages = 2;
 
   // get tile shape
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;

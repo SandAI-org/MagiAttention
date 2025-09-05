@@ -364,7 +364,7 @@ class FlashAttnFwdSm90 {
 
         // Init attention output (GEMM-II, P@V) accumulator.
         Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_MNK_PV{}));
-        (tOrO);
+        clear(tOrO);
 
         BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
         // get block_coord without deterministic message
