@@ -163,7 +163,9 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         # initialize the row rank set, col rank set, rank calc area, and total area
         row: list[set] = [set() for _ in range(m)]
         col: list[set] = [set() for _ in range(n)]
-        rank_calc_area = [0 for _ in range(cp_size)]
+        # initialize the calc_area to 1 to avoid division by zero
+        # only use for load balance heuristic choices
+        rank_calc_area = [1 for _ in range(cp_size)]
         total_area = 0
         for i in range(m):
             for j in range(n):
