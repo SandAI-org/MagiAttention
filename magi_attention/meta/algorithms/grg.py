@@ -251,6 +251,9 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             num_heads_kv: The number of KV heads
             bucket_per_rank: The buckets of each rank
         """
+        # set the same random seed for dist devices
+        random.seed(42)
+
         qk_rate = num_heads_q / num_heads_kv
         # get the host rank list of Q and K
         cp_size = len(bucket_per_rank)
