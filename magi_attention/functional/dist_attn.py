@@ -462,7 +462,7 @@ class DistAttnRuntime:
                 # to reduce the error caused by the out correction
                 partial_dkv = torch.zeros_like(kv, dtype=torch.float32)
                 partial_dk, partial_dv = self.chunk_kv(partial_dkv)
-                partial_dq, partial_dk, partial_dv, *rest = _flex_flash_attn_backward(
+                partial_dq, partial_dk, partial_dv = _flex_flash_attn_backward(
                     dout=do,
                     q=q,
                     k=k,

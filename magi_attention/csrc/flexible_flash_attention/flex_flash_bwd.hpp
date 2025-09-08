@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
+std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
     const at::Tensor& k,
@@ -246,5 +246,5 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
       sm_margin,
       disable_bwd_dkv_atomic_reduction);
 
-  return {params, dq, dk, dv, softmax_d, softmax_lse_log2};
+  return {params, dq, dk, dv};
 }
