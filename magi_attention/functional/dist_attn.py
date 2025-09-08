@@ -82,7 +82,7 @@ class DistAttnRuntime:
         # NOTE: for now, we concat q, o, do when and only when qo comm is enabled
         self.concat_qo_do = magi_attention.comm.is_qo_comm_enable()
         # TODO: set this in a more thorough way
-        self.fwd_hp_reduce = self.fwd_use_acc
+        self.fwd_hp_reduce = False
 
     @nvtx.instrument_nvtx
     def fetch_remote_kv(
@@ -805,21 +805,25 @@ class DistAttnFunc(torch.autograd.Function):
             partial_out_list.append(partial_local_out)
             partial_lse_list.append(partial_local_lse)
 
-        if partial_local_out is None:
-            partial_local_out = torch.zeros_like(
-                local_q,
-                dtype=max_fp_dtype(local_q.dtype, torch.float32)
-                if dist_attn_runtime.fwd_use_acc
-                else local_q.dtype,
-            )
-            partial_local_lse = torch.full(
-                (local_q.size(0), local_q.size(1)),
-                fill_value=float("-inf"),
-                dtype=max_fp_dtype(
-                    local_q.dtype, torch.float32
-                ),  # lse always in high-precision
-                device=local_q.device,
-            )
+        # TODO: make this process more transparent
+        if magi_attention.comm.is_qo_comm_enable():
+            if partial_local_out is None:
+                partial_local_out = torch.zeros_like(
+                    local_q,
+                    dtype=max_fp_dtype(local_q.dtype, torch.float32)
+                    if dist_attn_runtime.fwd_hp_reduce
+                    else local_q.dtype,
+                )
+                partial_local_lse = torch.full(
+                    (local_q.size(0), local_q.size(1)),
+                    fill_value=float("-inf"),
+                    dtype=max_fp_dtype(
+                        local_q.dtype, torch.float32
+                    ),  # lse always in high-precision
+                    device=local_q.device,
+                )
+            elif not dist_attn_runtime.fwd_hp_reduce:
+                partial_local_out = partial_local_out.to(local_q.dtype)
 
         partial_remote_out, partial_remote_lse = (
             partial_local_out,
@@ -1022,6 +1026,9 @@ class DistAttnFunc(torch.autograd.Function):
             )
         elif not dist_attn_runtime.bwd_hp_reduce:
             partial_local_dkv = partial_local_dkv.to(local_kv.dtype)
+            # TODO: make this process more transparent
+            if magi_attention.comm.is_qo_comm_enable():
+                partial_local_dq = partial_local_dq.to(local_q.dtype)
 
         partial_dq_reduce_works = []
         partial_dkv_reduce_works = []
@@ -1088,7 +1095,7 @@ class DistAttnFunc(torch.autograd.Function):
                 qo_do=curr_remote_qo_do,
                 kv=curr_remote_kv,
                 lse=curr_remote_lse,
-                dq_acc=partial_local_dq,
+                dq_acc=partial_local_dq if dist_attn_runtime.bwd_use_acc else None,
                 overlap_stage=ith_overlap_stage,
                 deterministic=dist_attn_runtime.deterministic,
             )
