@@ -494,7 +494,79 @@ class TestRangeReduce(TestCase):
             test_case="Single Ranges with fp64 input/output and fp64 lse",
         )
 
-        # TODO: add more test cases
+        # --- Test case 3: Double Ranges with all -inf lse --- #
+
+        input_tensor = torch.randn(
+            (256, 3, 64), dtype=torch.float64, device=self.device
+        )
+        output_tensor = torch.randn(
+            (128, 3, 64), dtype=torch.float64, device=self.device
+        )
+        input_lse = torch.full(
+            (256, 3), fill_value=float("-inf"), dtype=torch.float64, device=self.device
+        )
+        output_lse = torch.full(
+            (128, 3), fill_value=float("-inf"), dtype=torch.float64, device=self.device
+        )
+        input_ranges = torch.tensor(
+            [[0, 128], [128, 256]],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        output_ranges = torch.tensor(
+            [[0, 128], [0, 128]],
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+        self.compare_lse_range_reudce(
+            input_tensor,
+            output_tensor,
+            input_lse,
+            output_lse,
+            input_ranges,
+            output_ranges,
+            dim=0,
+            reduce_dtype=None,
+            test_case="Double Ranges with all -inf lse",
+        )
+
+        # --- Test case 4: Incomplete Single Ranges with half -inf lse --- #
+
+        input_tensor = torch.randn(
+            (128, 6, 64), dtype=torch.float64, device=self.device
+        )
+        input_tensor[64:].zero_()
+        output_tensor = torch.zeros(
+            (256, 6, 64), dtype=torch.float64, device=self.device
+        )
+        input_lse = torch.randn((128, 6), dtype=torch.float64, device=self.device)
+        input_lse[64:].fill_(float("-inf"))
+        output_lse = torch.full(
+            (256, 6), fill_value=float("-inf"), dtype=torch.float64, device=self.device
+        )
+        input_ranges = torch.tensor(
+            [[0, 128]],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        output_ranges = torch.tensor(
+            [[0, 128]],
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+        self.compare_lse_range_reudce(
+            input_tensor,
+            output_tensor,
+            input_lse,
+            output_lse,
+            input_ranges,
+            output_ranges,
+            dim=0,
+            reduce_dtype=None,
+            test_case="Incomplete Single Ranges with half -inf lse",
+        )
 
     @staticmethod
     def compare_lse_range_reudce(

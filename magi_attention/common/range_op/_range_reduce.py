@@ -17,6 +17,7 @@ from typing import Literal, TypeAlias
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype, nvtx
 
@@ -321,11 +322,21 @@ def range_lse_reduce_kernel(
             # correct lse
             reduced_lse = tl.log(tl.exp(out_lse) + tl.exp(inp_lse))
 
-            # reduce output
-            out = (
-                tl.exp(out_lse - reduced_lse) * out
-                + tl.exp(inp_lse - reduced_lse) * inp
+            # get reduce weights
+            out_weight = tl.exp(out_lse - reduced_lse)
+            inp_weight = tl.exp(inp_lse - reduced_lse)
+
+            # resolve nan weight to zero weight
+            # causing by "-inf" lse - "-inf" lse
+            out_weight = (
+                tl.zeros_like(out_weight) if libdevice.isnan(out_weight) else out_weight
             )
+            inp_weight = (
+                tl.zeros_like(inp_weight) if libdevice.isnan(inp_weight) else inp_weight
+            )
+
+            # reduce output
+            out = out_weight * out + inp_weight * inp
 
             # reduce output lse
             out_lse = reduced_lse
