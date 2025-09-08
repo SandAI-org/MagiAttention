@@ -672,7 +672,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # TODO: make it as a environment variable
         use_dynamic_attn_solver = magi_attention.comm.is_qo_comm_enable()
-        use_grg_dynamic_alg = True  # TODO: test `True`
 
         # -----    skip for world size   ---- #
 
@@ -775,7 +774,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             dist_attn_config=dist_attn_config,
             cp_mesh=self.device_mesh,
             use_dynamic_attn_solver=use_dynamic_attn_solver,
-            use_grg_dynamic_alg=use_grg_dynamic_alg,
         )
         # HACK: seperate cp group for group-reduce
         dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]
