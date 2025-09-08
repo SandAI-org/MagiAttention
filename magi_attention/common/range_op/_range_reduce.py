@@ -320,7 +320,14 @@ def range_lse_reduce_kernel(
             inp_lse = tl.load(curr_inp_lse_ptr).to(reduce_dtype)
 
             # correct lse
-            reduced_lse = tl.log(tl.exp(out_lse) + tl.exp(inp_lse))
+            # formula derivation:
+            # reduced_lse = log(exp(lse1) + exp(lse2))
+            #             = lse1 + log(1 + exp(lse2 - lse1))
+            #             = max_lse + log(1 + exp(min_lse - max_lse))
+            #             = max_lse + log1p(exp(min_lse - max_lse))
+            min_lse = tl.minimum(inp_lse, out_lse)
+            max_lse = tl.maximum(inp_lse, out_lse)
+            reduced_lse = max_lse + libdevice.log1p(tl.exp(min_lse - max_lse))
 
             # get reduce weights
             out_weight = tl.exp(out_lse - reduced_lse)
