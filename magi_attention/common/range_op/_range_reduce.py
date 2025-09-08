@@ -416,7 +416,7 @@ def range_reduce(
         The output tensor with the corrected lse after reduction if reduce_op is "lse",
         otherwise only the output tensor after reduction
     """
-    # only sum-reduce has non-deterministic kernel by now
+    # NOTE: only sum-reduce has non-deterministic kernel by now
     deterministic |= reduce_op != "sum"
     is_lse_reduce = reduce_op == "lse"
 

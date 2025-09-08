@@ -672,7 +672,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # TODO: make it as a environment variable
         use_dynamic_attn_solver = magi_attention.comm.is_qo_comm_enable()
-        use_grg_dynamic_alg = False  # TODO: test `True`
+        use_grg_dynamic_alg = True  # TODO: test `True`
 
         # -----    skip for world size   ---- #
 

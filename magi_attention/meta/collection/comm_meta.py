@@ -34,7 +34,11 @@ from magi_attention.utils import format_dict_field, format_list_field
 
 @dataclass(repr=False)
 class GroupCollectiveArg:
-    """The native args for group cast/reduce collective"""
+    """The native args for group cast/reduce collective
+
+    NOTE: for now, we always use the sub-class `A2AVBasedGroupCollectiveArg`
+    since this parent class has incomplete attributes
+    """
 
     input_split_size_list: list[int]
     output_split_size_list: list[int]
@@ -97,6 +101,9 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
 
     def __post_init__(self):
         super().__post_init__()
+
+        # NOTE: only sum-reduce has non-deterministic kernel by now
+        self.deterministic |= self.reduce_op != "sum"
 
         # ----   group cast args dict for packed tensors  ---- #
 
