@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
+std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
     const at::Tensor& k,
