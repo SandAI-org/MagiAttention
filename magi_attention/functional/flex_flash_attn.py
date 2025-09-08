@@ -378,7 +378,7 @@ def _flex_flash_attn_backward_compilable(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-) -> torch.Tensor:
+) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
 
     mod = get_ffa_jit_mod(
@@ -399,10 +399,6 @@ def _flex_flash_attn_backward_compilable(
         dq,
         dk,
         dv,
-        # shape: (b, hq, max_seqlen_q)
-        # FIXME: softmax_d should be in the shape of (hq, sq) to save memory
-        softmax_d,
-        _,
     ) = mod.bwd(
         dout,
         q,
@@ -430,8 +426,6 @@ def _flex_flash_attn_backward_compilable(
         deterministic,
         sm_margin,
     )
-
-    return softmax_d
 
 
 @_torch_register_fake_wrapper("flex_flash_attn::_flex_flash_attn_backward_compilable")
@@ -461,14 +455,8 @@ def _flex_flash_attn_backward_compilable_fake(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-) -> torch.Tensor:
-    _, hq, _ = q.shape
-    b = q_ranges.shape[0]
-
-    # FIXME: softmax_d should be in the shape of (hq, sq) to save memory
-    softmax_d = torch.empty((b, hq, max_seqlen_q), dtype=torch.float32, device=q.device)
-
-    return softmax_d
+) -> None:
+    pass
 
 
 @nvtx.instrument_nvtx
@@ -498,14 +486,14 @@ def _flex_flash_attn_backward(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
     dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
 
     # NOTE: we can not directly compile `_flex_flash_attn_backward`
     # since torch.compile does not allow returning the mutated args (dq, dk, dv)
-    softmax_d = _flex_flash_attn_backward_compilable(
+    _flex_flash_attn_backward_compilable(
         dout=dout,
         q=q,
         k=k,
@@ -533,7 +521,7 @@ def _flex_flash_attn_backward(
         sm_margin=sm_margin,
     )
 
-    return dq, dk, dv, softmax_d
+    return dq, dk, dv
 
 
 # -------------------       ffa autograd   ------------------- #
@@ -686,7 +674,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_kq_map = None
             bwd_unique_count = None
 
-        dq, dk, dv, _ = _flex_flash_attn_backward(
+        dq, dk, dv = _flex_flash_attn_backward(
             dout,
             q,
             k,
