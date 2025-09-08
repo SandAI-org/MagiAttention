@@ -246,5 +246,5 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
       sm_margin,
       disable_bwd_dkv_atomic_reduction);
 
-  return {params, dq, dk, dv, softmax_d, softmax_lse_log2};
+  return {params, dq, dk, dv};
 }
