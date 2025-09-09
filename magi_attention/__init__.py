@@ -43,7 +43,7 @@ __all__ = [
 
 def is_sanity_check_enable() -> bool:
     """
-    Toggle this env variable to ``1`` can enable many sanity check codes inside magi_attention
+    Toggle this env variable to ``1`` to enable many sanity check codes inside magi_attention
 
     Default value is ``0``
 
@@ -55,8 +55,9 @@ def is_sanity_check_enable() -> bool:
 
 def is_sdpa_backend_enable() -> bool:
     """
-    Toggle this env variable to ``1`` can switch the attn kernel backend
-    from ffa to sdpa-math, to support higher precision like fp32 or fp64
+    Toggle this env variable to ``1`` to switch the attn kernel backend
+    from ffa to customized sdpa implementation,
+    to support higher precision like fp32 or fp64
 
     Default value is ``0``
 

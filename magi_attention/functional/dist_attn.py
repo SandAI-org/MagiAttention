@@ -55,34 +55,59 @@ class DistAttnRuntime:
         self.deterministic = magi_attention.is_deterministic_mode_enable()
         self.overlap_degree = comm_meta.overlap_degree
 
-        # NOTE: when enabling FFA fwd inplace correct w/o using sdpa backend nor qo comm
-        # we will use accumulative buffer for forward out and lse
-        # to avoid the storage of partial results and the memory-bound `result_correction`
-        self.fwd_use_acc = (
-            magi_attention.functional.is_ffa_fwd_inplace_correct_enable()
-            and not magi_attention.is_sdpa_backend_enable()
-            and not magi_attention.comm.is_qo_comm_enable()
+        # ----------    flags for fwd   --------- #
+
+        # NOTE: when enabling FFA fwd high precision reduce,
+        # we won't downcast partial out to q dtype before group-reduce comm,
+        # to trade-off double comm overhead for increased precision and less dtype-cast overhead
+        # and this works for out only when `is_qo_comm_enable` is ``True``
+        self.fwd_hp_reduce = (
+            magi_attention.comm.is_ffa_fwd_high_precision_reduce_enable()
         )
 
-        # NOTE: when not using sdpa backend nor qo comm
-        # we will use accumulative buffer for bwd dq
-        # to avoid the outside sum-reduce
-        self.bwd_use_acc = (
-            not magi_attention.is_sdpa_backend_enable()
-            and not magi_attention.comm.is_qo_comm_enable()
-        )
-
-        # NOTE: when enabling FFA bwd high precision reduce, we will no longer downcast partial dkv to kv dtype
-        # before reducing among ranks, increasing the precision at the cost of double comm overhead
-        self.bwd_hp_reduce = (
-            magi_attention.functional.is_ffa_bwd_high_precision_reduce_enable()
+        # NOTE: when neither using sdpa backend nor qo comm,
+        # we will use accumulative buffer for partial out and lse
+        # to avoid the storage of partial results
+        # and an additional explicit `correct_attn_fwd_result`
+        self.fwd_out_lse_use_acc = (
+            not magi_attention.comm.is_qo_comm_enable()
             and not magi_attention.is_sdpa_backend_enable()
         )
 
-        # NOTE: for now, we concat q, o, do when and only when qo comm is enabled
+        # NOTE: when enabling qo comm and disabling FFA fwd high precision reduce
+        # we're supposed to initialize the partial local out in low precision
+        self.fwd_local_out_lp_init = (
+            magi_attention.comm.is_qo_comm_enable() and not self.fwd_hp_reduce
+        )
+
+        # ----------    flags for bwd   --------- #
+
+        # NOTE: we concat q,o,do in dist-attn bwd when qo comm is enabled
         self.concat_qo_do = magi_attention.comm.is_qo_comm_enable()
-        # TODO: set this in a more thorough way
-        self.fwd_hp_reduce = False
+
+        # NOTE: when enabling FFA bwd high precision reduce,
+        # we won't downcast downcast partial dq,dk,dv to q,k,v dtype before group-reduce comm,
+        # to trade-off double comm overhead for increased precision and less dtype-cast overhead
+        # and this works for dq only when `is_qo_comm_enable` is ``True``
+        self.bwd_hp_reduce = (
+            magi_attention.comm.is_ffa_bwd_high_precision_reduce_enable()
+        )
+
+        # NOTE: when neither using sdpa backend nor qo comm
+        # we will use accumulative buffer for partial dq
+        # to avoid an additional explicit `add_`
+        self.bwd_dq_use_acc = (
+            not magi_attention.comm.is_qo_comm_enable()
+            and not magi_attention.is_sdpa_backend_enable()
+        )
+
+        # NOTE: when disabling FFA bwd high precision reduce
+        # we're supposed to initialize the partial local dk,dv in low precision
+        # and the same applies to dq if enabling qo comm
+        self.bwd_local_dkv_lp_init = not self.bwd_hp_reduce
+        self.bwd_local_dq_lp_init = (
+            magi_attention.comm.is_qo_comm_enable() and not self.bwd_hp_reduce
+        )
 
     @nvtx.instrument_nvtx
     def fetch_remote_kv(
@@ -341,7 +366,6 @@ class DistAttnRuntime:
 
         Returns:
             out (torch.Tensor | None): partial out, or None if skipped
-
             lse (torch.Tensor | None): partial log-sum-exp, or None if skipped
 
         Shape:
@@ -357,7 +381,7 @@ class DistAttnRuntime:
 
         # Calculate attention
         if attn_arg.can_skip(is_bwd=False):
-            out, lse = (out_acc, lse_acc) if self.fwd_use_acc else (None, None)
+            out, lse = None, None
         else:
             k, v = self.chunk_kv(kv)
             if magi_attention.is_sdpa_backend_enable():
@@ -422,7 +446,6 @@ class DistAttnRuntime:
 
         Returns:
             partial_dq (torch.Tensor | None): partial dq, or None if skipped
-
             partial_dkv (torch.Tensor | None): partial dkv, or None if skipped
 
         Shape:
@@ -440,8 +463,7 @@ class DistAttnRuntime:
             attn_arg = self.calc_meta.remote_attn_args_list[overlap_stage]
 
         if attn_arg.can_skip(is_bwd=True):
-            partial_dq = dq_acc if self.bwd_use_acc else None
-            partial_dkv = None
+            partial_dq, partial_dkv = None, None
         else:
             q, o, do = self.maybe_chunk_qo_do(qo_do)
             k, v = self.chunk_kv(kv)
@@ -517,47 +539,53 @@ class DistAttnRuntime:
         Returns:
             partial_out_lse_reduce_work (WorkWithPostProcessFn): partial out and lse group-reduce work
         """
+        if magi_attention.comm.is_qo_comm_enable():
+            # get the group-reduce args for out and lse
+            group_reduce_args = self.comm_meta.out_lse_group_collective_args_list[
+                overlap_stage
+            ].to_group_reduce_args()
 
-        if not magi_attention.comm.is_qo_comm_enable():
+            # init remote dkv buffer
+            if partial_remote_out is None:  # skipped
+                hp_init_dtype = max_fp_dtype(ref_remote_out.dtype, torch.float32)
+                partial_remote_out = torch.empty_like(
+                    ref_remote_out,
+                    dtype=hp_init_dtype if self.fwd_hp_reduce else ref_remote_out.dtype,
+                    device=ref_remote_out.device,
+                )
+                partial_remote_lse = torch.empty(
+                    (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
+                    dtype=hp_init_dtype,  # lse always in high-precision
+                    device=ref_remote_out.device,
+                )
+            elif not self.fwd_hp_reduce:
+                partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
+
+            # launch group-reduce kernel
+            partial_out_lse_reduce_work = group_reduce_collective(
+                input=partial_remote_out,
+                input_lse=partial_remote_lse,
+                output=partial_local_out,
+                output_lse=partial_local_lse,
+                **group_reduce_args,
+                group=self.cp_group_gr,
+                async_op=True,
+            )
+        else:
+            if not self.fwd_out_lse_use_acc and partial_remote_out is not None:
+                # the partial remote out and lse have NOT been reduced to
+                # partial local out and lse by neither ffa fwd kernel nor group-reduce
+                # thus we need to manually reduce here
+
+                correct_attn_fwd_result(
+                    out_list=[partial_local_out, partial_remote_out],
+                    lse_list=[partial_local_lse, partial_remote_lse],
+                    inplace=True,  # inplace reduce to the partial local (first) out and lse
+                )
+
             partial_out_lse_reduce_work = WorkWithPostProcessFn(
                 post_process_fn=lambda *x: x  # take out, lse and return out, lse
             )
-            return partial_out_lse_reduce_work
-
-        # get the group-reduce args for out and lse
-        group_reduce_args = self.comm_meta.out_lse_group_collective_args_list[
-            overlap_stage
-        ].to_group_reduce_args()
-
-        # init remote dkv buffer
-        if partial_remote_out is None:  # skipped
-            partial_remote_out = torch.empty_like(
-                ref_remote_out,
-                dtype=max_fp_dtype(ref_remote_out.dtype, torch.float32)
-                if self.fwd_hp_reduce
-                else ref_remote_out.dtype,
-                device=ref_remote_out.device,
-            )
-            partial_remote_lse = torch.empty(
-                (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
-                dtype=max_fp_dtype(
-                    ref_remote_out.dtype, torch.float32
-                ),  # lse always in high-precision
-                device=ref_remote_out.device,
-            )
-        elif not self.fwd_hp_reduce:
-            partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
-
-        # launch group-reduce kernel
-        partial_out_lse_reduce_work = group_reduce_collective(
-            input=partial_remote_out,
-            input_lse=partial_remote_lse,
-            output=partial_local_out,
-            output_lse=partial_local_lse,
-            **group_reduce_args,
-            group=self.cp_group_gr,
-            async_op=True,
-        )
 
         return partial_out_lse_reduce_work
 
@@ -592,7 +620,9 @@ class DistAttnRuntime:
         if partial_remote_dkv is None:  # skipped
             partial_remote_dkv = torch.empty_like(
                 ref_remote_dkv,
-                dtype=torch.float32 if self.bwd_hp_reduce else ref_remote_dkv.dtype,
+                dtype=max_fp_dtype(ref_remote_dkv.dtype, torch.float32)
+                if self.bwd_hp_reduce
+                else ref_remote_dkv.dtype,
             )
         elif not self.bwd_hp_reduce:
             partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)
@@ -630,16 +660,8 @@ class DistAttnRuntime:
         Returns:
             partial_dq_reduce_work (WorkWithPostProcessFn): partial dq group-reduce work
         """
-        # NOTE: no need to reduce partial_remote_dq for ffa backend
-        # since it is already reduced to partial_local_dq in the ffa bwd kernel
-        if self.bwd_use_acc:
-            # the local dq has already been reduced to partial_local_dq by ffa bwd
-            partial_dq_reduce_work = WorkWithPostProcessFn(post_process_fn=lambda x: x)
-        elif magi_attention.comm.is_qo_comm_enable():
+        if magi_attention.comm.is_qo_comm_enable():
             # get the group-reduce args for dq
-            # HACK: we concat q,o,do along seqlen dim,
-            # and the group_collective args for qo already handle this behind
-            # thus we have to borrow the args for lse, which is the same for dq only
             group_reduce_args = self.comm_meta.qo_group_collective_args_list[
                 overlap_stage
             ].to_group_reduce_args()
@@ -648,7 +670,9 @@ class DistAttnRuntime:
             if partial_remote_dq is None:  # skipped
                 partial_remote_dq = torch.empty_like(
                     ref_remote_dq,
-                    dtype=torch.float32 if self.bwd_hp_reduce else ref_remote_dq.dtype,
+                    dtype=max_fp_dtype(ref_remote_dq.dtype, torch.float32)
+                    if self.bwd_hp_reduce
+                    else ref_remote_dq.dtype,
                 )
             elif not self.bwd_hp_reduce:
                 partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
@@ -662,11 +686,15 @@ class DistAttnRuntime:
                 async_op=True,
             )
         else:
-            if partial_remote_dq is not None:
-                # the local dq is reduced by neither ffa bwd nor group-reduce
-                # thus we need to reduce manually from current partial_remote_dq
+            if not self.bwd_dq_use_acc and partial_remote_dq is not None:
+                # the partial remote dq has NOT been reduced to partial local dq
+                # by neither ffa bwd kernel nor group-reduce
+                # thus we need to manually reduce here
                 partial_local_dq.add_(partial_remote_dq)
-            partial_dq_reduce_work = WorkWithPostProcessFn(post_process_fn=lambda x: x)
+
+            partial_dq_reduce_work = WorkWithPostProcessFn(
+                post_process_fn=lambda x: x  # take dq and return dq
+            )
 
         return partial_dq_reduce_work
 
@@ -757,10 +785,6 @@ class DistAttnFunc(torch.autograd.Function):
             local_lse: [num_tokens_q_local, num_heads_q]
         """
 
-        if not dist_attn_runtime.fwd_use_acc:
-            partial_out_list = []
-            partial_lse_list = []
-
         # cat local k, v into a single coalesced kv
         local_kv = dist_attn_runtime.concat_kv(local_k, local_v)
 
@@ -801,34 +825,27 @@ class DistAttnFunc(torch.autograd.Function):
             overlap_stage=None,
             deterministic=dist_attn_runtime.deterministic,
         )
-        if not dist_attn_runtime.fwd_use_acc and partial_local_out is not None:
-            partial_out_list.append(partial_local_out)
-            partial_lse_list.append(partial_local_lse)
 
-        # TODO: make this process more transparent
-        if magi_attention.comm.is_qo_comm_enable():
-            if partial_local_out is None:
-                partial_local_out = torch.zeros_like(
-                    local_q,
-                    dtype=max_fp_dtype(local_q.dtype, torch.float32)
-                    if dist_attn_runtime.fwd_hp_reduce
-                    else local_q.dtype,
-                )
-                partial_local_lse = torch.full(
-                    (local_q.size(0), local_q.size(1)),
-                    fill_value=float("-inf"),
-                    dtype=max_fp_dtype(
-                        local_q.dtype, torch.float32
-                    ),  # lse always in high-precision
-                    device=local_q.device,
-                )
-            elif not dist_attn_runtime.fwd_hp_reduce:
-                partial_local_out = partial_local_out.to(local_q.dtype)
+        if partial_local_out is None:
+            hp_init_dtype = max_fp_dtype(local_q.dtype, torch.float32)
+            # NOTE: we cannot use empty_like here, though it is accurate in lse-reduce
+            # since when all attn computations are skipped, it might contain nan values
+            partial_local_out = torch.zeros_like(
+                local_q,
+                dtype=local_q.dtype
+                if dist_attn_runtime.fwd_local_out_lp_init
+                else hp_init_dtype,
+                device=local_q.device,
+            )
+            partial_local_lse = torch.full(
+                (local_q.size(0), local_q.size(1)),
+                fill_value=float("-inf"),
+                dtype=hp_init_dtype,  # lse always in high-precision
+                device=local_q.device,
+            )
+        elif dist_attn_runtime.fwd_local_out_lp_init:
+            partial_local_out = partial_local_out.to(local_q.dtype)
 
-        partial_remote_out, partial_remote_lse = (
-            partial_local_out,
-            partial_local_lse,
-        )  # init acc buffer if used
         partial_out_lse_reduce_works = []
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
             # wait for ith remote data prepared
@@ -872,8 +889,12 @@ class DistAttnFunc(torch.autograd.Function):
                 kv=curr_remote_kv,
                 overlap_stage=ith_overlap_stage,
                 deterministic=dist_attn_runtime.deterministic,
-                out_acc=partial_remote_out if dist_attn_runtime.fwd_use_acc else None,
-                lse_acc=partial_remote_lse if dist_attn_runtime.fwd_use_acc else None,
+                out_acc=partial_local_out
+                if dist_attn_runtime.fwd_out_lse_use_acc
+                else None,
+                lse_acc=partial_local_lse
+                if dist_attn_runtime.fwd_out_lse_use_acc
+                else None,
             )
 
             # reduce ith partial out with partial lse
@@ -887,10 +908,6 @@ class DistAttnFunc(torch.autograd.Function):
             )
             partial_out_lse_reduce_works.append(partial_out_lse_reduce_work)
 
-            if not dist_attn_runtime.fwd_use_acc and partial_remote_out is not None:
-                partial_out_list.append(partial_remote_out)
-                partial_lse_list.append(partial_remote_lse)
-
         # wait for all partial out reduced
         for partial_out_lse_reduce_work in partial_out_lse_reduce_works:
             (
@@ -900,36 +917,9 @@ class DistAttnFunc(torch.autograd.Function):
                 partial_local_out, partial_local_lse
             )
 
-        # do result correction to get final local out and lse
-        if dist_attn_runtime.fwd_use_acc:
-            # the final local out, lse has already been reduced into acc buffer by ffa fwd
-            local_out = partial_remote_out
-            local_lse = partial_remote_lse
-        elif magi_attention.comm.is_qo_comm_enable():
-            # the final local out, lse has already been reduced into local buffer by group reduce
-            local_out = partial_local_out
-            local_lse = partial_local_lse
-        else:  # the final local out, lse need to be reduced manually from all partial out, lse
-            local_out, local_lse = correct_attn_fwd_result(
-                out_list=partial_out_list,
-                lse_list=partial_lse_list,
-            )
-
-        if local_out is None:  # attn computation are all skipped
-            # NOTE: We cannot use torch.empty_like here, because empty_like may contain nan values,
-            # and once gradients between different tokens need to be reduced, the nan values
-            # from pad tokens would interfere with the gradients of other tokens
-            local_out = torch.zeros_like(local_q)
-            local_lse = torch.full(
-                (local_q.size(0), local_q.size(1)),
-                fill_value=float("-inf"),
-                dtype=torch.float32,
-                device=local_q.device,
-            )
-        else:
-            # NOTE: since we've increased the precision of partial out for correction
-            # here we need to downcast to q dtype to both return and save for backward
-            local_out = local_out.to(local_q.dtype)
+        # cast final local out to q dtype
+        local_out = partial_local_out.to(local_q.dtype)
+        local_lse = partial_local_lse  # lse always in high-precision
 
         ctx.save_for_backward(local_q, local_kv, local_out, local_lse)
         ctx.dist_attn_runtime = dist_attn_runtime
@@ -1011,24 +1001,25 @@ class DistAttnFunc(torch.autograd.Function):
 
         # NOTE: if local_dq and local_dkv calculation are skipped,
         # we need to zeros initialize them since they might be reduced later
-        if partial_local_dq is None or partial_local_dkv is None:
+        if partial_local_dq is None:
             partial_local_dq = torch.zeros_like(
                 local_q,
-                dtype=max_fp_dtype(local_q.dtype, torch.float32)
-                if dist_attn_runtime.bwd_hp_reduce
-                else local_q.dtype,
+                dtype=local_q.dtype
+                if dist_attn_runtime.bwd_local_dq_lp_init
+                else max_fp_dtype(local_q.dtype, torch.float32),
             )
+        elif dist_attn_runtime.bwd_local_dq_lp_init:
+            partial_local_dq = partial_local_dq.to(local_q.dtype)
+
+        if partial_local_dkv is None:
             partial_local_dkv = torch.zeros_like(
                 local_kv,
-                dtype=max_fp_dtype(local_kv.dtype, torch.float32)
-                if dist_attn_runtime.bwd_hp_reduce
-                else local_kv.dtype,
+                dtype=local_kv.dtype
+                if dist_attn_runtime.bwd_local_dkv_lp_init
+                else max_fp_dtype(local_kv.dtype, torch.float32),
             )
-        elif not dist_attn_runtime.bwd_hp_reduce:
+        elif dist_attn_runtime.bwd_local_dkv_lp_init:
             partial_local_dkv = partial_local_dkv.to(local_kv.dtype)
-            # TODO: make this process more transparent
-            if magi_attention.comm.is_qo_comm_enable():
-                partial_local_dq = partial_local_dq.to(local_q.dtype)
 
         partial_dq_reduce_works = []
         partial_dkv_reduce_works = []
@@ -1095,7 +1086,7 @@ class DistAttnFunc(torch.autograd.Function):
                 qo_do=curr_remote_qo_do,
                 kv=curr_remote_kv,
                 lse=curr_remote_lse,
-                dq_acc=partial_local_dq if dist_attn_runtime.bwd_use_acc else None,
+                dq_acc=partial_local_dq if dist_attn_runtime.bwd_dq_use_acc else None,
                 overlap_stage=ith_overlap_stage,
                 deterministic=dist_attn_runtime.deterministic,
             )
@@ -1125,7 +1116,7 @@ class DistAttnFunc(torch.autograd.Function):
                 partial_local_dq
             )
 
-        # downcast final local dq to q dtype
+        # cast final local dq to q dtype
         local_dq = partial_local_dq.to(local_q.dtype)
 
         # wait for all partial dkv reduced
@@ -1134,7 +1125,7 @@ class DistAttnFunc(torch.autograd.Function):
                 partial_local_dkv
             )
 
-        # downcast final local dkv to kv dtype
+        # cast final local dkv to kv dtype
         local_dkv = partial_local_dkv.to(local_kv.dtype)
 
         # chunk final local dkv into dk and dv

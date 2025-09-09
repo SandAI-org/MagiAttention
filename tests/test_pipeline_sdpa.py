@@ -670,7 +670,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         assert magi_attention.is_sanity_check_enable()
         assert magi_attention.is_sdpa_backend_enable()
 
-        # TODO: make it as a environment variable
+        # TODO: align it to dist attn config and runtime mgr
         use_dynamic_attn_solver = magi_attention.comm.is_qo_comm_enable()
 
         # -----    skip for world size   ---- #

@@ -475,7 +475,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         random_type_mapping: bool,
         run_bwd: bool = True,
     ):
-        # TODO: make it as a environment variable
+        # TODO: align it to dist attn config and runtime mgr
         use_dynamic_attn_solver = magi_attention.comm.is_qo_comm_enable()
 
         # -----    switch mode   ---- #
