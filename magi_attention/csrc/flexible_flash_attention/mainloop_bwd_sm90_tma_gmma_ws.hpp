@@ -1074,7 +1074,7 @@ struct CollectiveMainloopBwdSm90 {
       if (thread_idx == 0 && bidh == 0 && bidb == 1) {
         printf("sLSEMma\n");  print_tensor(sLSEMma);
         printf("sdPsumMma\n");  print_tensor(sdPsumMma);
-        printt("test JIT\n");
+        // printt("test JIT\n");
       }
       if (bidh == 0 && thread_idx == 0 && bidb == 1) {
         printf("score before softmax and mask:\n"); print_tensor(scores);
