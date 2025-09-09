@@ -45,13 +45,7 @@ class AttnArg:
 
     def __post_init__(self):
         # shape check
-        assert (
-            len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
-        ), f"{len(self.q_ranges)=}, {len(self.k_ranges)=}, {len(self.attn_type_map)=}"
-
-        # filter empty, and overwrite the original inputs
-        # REVIEW: whether this is still necessary
-        self._filter_out_empty_slice()
+        assert len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
 
         # init fwd ffa args dict
         # NOTE: we need to init fwd args first before bwd args
@@ -59,39 +53,6 @@ class AttnArg:
 
         # init ffa args for bwd
         self._init_ffa_bwd_args_dict()
-
-    def _filter_out_empty_slice(self) -> None:
-        filtered_q_ranges = AttnRanges()
-        filtered_k_ranges = AttnRanges()
-        filtered_attn_type_map: list[int] = []
-
-        # filter out k_ranges with seqlen == 0
-        for q_range, k_range, attn_type_map in zip(
-            self.q_ranges, self.k_ranges, self.attn_type_map
-        ):
-            if not k_range.is_empty():
-                filtered_q_ranges.append(q_range)
-                filtered_k_ranges.append(k_range)
-                filtered_attn_type_map.append(attn_type_map)
-
-        # overwrite the original inputs
-        (
-            self.q_ranges,
-            self.k_ranges,
-            self.attn_type_map,
-        ) = (
-            filtered_q_ranges,
-            filtered_k_ranges,
-            filtered_attn_type_map,
-        )
-
-        # sanity check
-        if magi_attention.is_sanity_check_enable():
-            # shape check
-            assert len(self.q_ranges) == len(self.k_ranges) == len(self.attn_type_map)
-            # check non-empty k ranges
-            for k_range in self.k_ranges:
-                assert not k_range.is_empty()
 
     def _init_ffa_fwd_args_dict(self) -> None:
         # init `skip_attn_fwd` flag

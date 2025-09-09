@@ -374,7 +374,7 @@ class TestFlexFlashAttn(DistTestBase):
             bwd_unique_count,
             softmax_scale=softmax_scale,
             softcap=0.0,
-            disable_bwd_dkv_atomic_reduction=False,
+            disable_bwd_dkv_atomic_reduction=False,  # TODO: test when it's `True`
             dq_type=torch.float32,
             dk_type=torch.float32,
             dv_type=torch.float32,
@@ -406,7 +406,7 @@ class TestFlexFlashAttn(DistTestBase):
             bwd_unique_count,
             softmax_scale=softmax_scale,
             softcap=0.0,
-            disable_bwd_dkv_atomic_reduction=False,
+            disable_bwd_dkv_atomic_reduction=False,  # TODO: test when it's `True`
             dq_type=torch.float32,
             dk_type=torch.float32,
             dv_type=torch.float32,
