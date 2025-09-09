@@ -232,6 +232,15 @@ def range_avg_reduce_kernel(
 
 
 @triton.jit
+def _safe_subtract_exp(a, b):
+    c = tl.exp(a - b)
+    # resolve nan to zero causing by "-inf" - "-inf"
+    c = tl.zeros_like(c) if libdevice.isnan(c) else c
+
+    return c
+
+
+@triton.jit
 def range_lse_reduce_kernel(
     input_ptr,
     input_lse_ptr,
@@ -327,20 +336,13 @@ def range_lse_reduce_kernel(
             #             = max_lse + log1p(exp(min_lse - max_lse))
             min_lse = tl.minimum(inp_lse, out_lse)
             max_lse = tl.maximum(inp_lse, out_lse)
-            reduced_lse = max_lse + libdevice.log1p(tl.exp(min_lse - max_lse))
+            reduced_lse = max_lse + libdevice.log1p(
+                _safe_subtract_exp(min_lse, max_lse)
+            )
 
             # get reduce weights
-            out_weight = tl.exp(out_lse - reduced_lse)
-            inp_weight = tl.exp(inp_lse - reduced_lse)
-
-            # resolve nan weight to zero weight
-            # causing by "-inf" lse - "-inf" lse
-            out_weight = (
-                tl.zeros_like(out_weight) if libdevice.isnan(out_weight) else out_weight
-            )
-            inp_weight = (
-                tl.zeros_like(inp_weight) if libdevice.isnan(inp_weight) else inp_weight
-            )
+            out_weight = _safe_subtract_exp(out_lse, reduced_lse)
+            inp_weight = _safe_subtract_exp(inp_lse, reduced_lse)
 
             # reduce output
             out = out_weight * out + inp_weight * inp
