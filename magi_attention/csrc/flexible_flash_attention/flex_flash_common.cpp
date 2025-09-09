@@ -25,6 +25,7 @@ void set_params_fprop(
     const size_t max_seqlen_k_rounded,
     const size_t total_q,
     const size_t total_k,
+    const size_t total_q_rounded,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -88,6 +89,7 @@ void set_params_fprop(
   params.max_seqlen_k_rounded = max_seqlen_k_rounded;
   params.total_q = total_q;
   params.total_k = total_k;
+  params.total_q_rounded = total_q_rounded;
   params.d = d;
   params.d_rounded = d_rounded;
   params.scale_softmax = softmax_scale;
@@ -105,6 +107,7 @@ void set_params_dgrad(
     const size_t max_seqlen_k_rounded,
     const size_t total_q,
     const size_t total_k,
+    const size_t total_q_rounded,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -146,6 +149,7 @@ void set_params_dgrad(
       max_seqlen_k_rounded,
       total_q,
       total_k,
+      total_q_rounded,
       h_qo,
       h_kv,
       d,
