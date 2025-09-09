@@ -87,7 +87,6 @@ class TestDistAttn(DistTestBase):
                 q_ranges=AttnRanges.from_ranges([[0, 128]]),
                 k_ranges=AttnRanges.from_ranges([[0, 128]]),
                 attn_type_map=[0],
-                shard_seqlen_q=128,
                 total_area=128 * 128,
             ),
             remote_attn_args_list=[
@@ -95,7 +94,6 @@ class TestDistAttn(DistTestBase):
                     q_ranges=AttnRanges.from_ranges([[0, 128]]),
                     k_ranges=AttnRanges.from_ranges([[0, 128 * 3]]),
                     attn_type_map=[0],
-                    shard_seqlen_q=128,
                     total_area=128 * 128 * 3,
                 ),
             ],

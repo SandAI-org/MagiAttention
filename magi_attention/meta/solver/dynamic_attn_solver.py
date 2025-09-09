@@ -432,7 +432,6 @@ class DynamicAttnSolver:
             q_ranges=local_attn_arg_q_ranges,
             k_ranges=local_attn_arg_k_ranges,
             attn_type_map=local_attn_arg_attn_type_map,
-            shard_seqlen_q=self.host_ranges_q[self.cp_rank].total_seqlen,
             total_area=local_attn_arg_total_area,
         )
 
@@ -440,7 +439,6 @@ class DynamicAttnSolver:
             q_ranges=remote_attn_arg_q_ranges,
             k_ranges=remote_attn_arg_k_ranges,
             attn_type_map=remote_attn_arg_attn_type_map,
-            shard_seqlen_q=self.host_ranges_q[self.cp_rank].total_seqlen,
             total_area=remote_attn_arg_total_area,
         )
         remote_attn_args_list: list[AttnArg] = []

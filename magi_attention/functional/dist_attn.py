@@ -837,7 +837,7 @@ class DistAttnFunc(torch.autograd.Function):
             local_lse: [num_tokens_q_local, num_heads_q]
         """
 
-        # cat local k, v into a single coalesced kv
+        # cat local k,v into a single coalesced kv
         local_kv = dist_attn_runtime.concat_kv(local_k, local_v)
 
         if magi_attention.is_cuda_device_max_connections_one():
@@ -964,11 +964,20 @@ class DistAttnFunc(torch.autograd.Function):
         local_q, local_kv, local_out, local_lse = ctx.saved_tensors
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
 
+        # maybe cat local q,o,do into a single coalesced qo_do
         local_qo_do = dist_attn_runtime.maybe_concat_qo_do(
             q=local_q, o=local_out, do=grad_output
         )
 
         if magi_attention.is_cuda_device_max_connections_one():
+            # pre-fetch 0th remote lse
+            (
+                remote_lse_work,
+                remote_lse_buffer,
+            ) = dist_attn_runtime.fetch_remote_lse(
+                local_lse=local_lse,
+                overlap_stage=0,
+            )
             # pre-fetch 0th remote kv
             (
                 remote_kv_work,
@@ -980,14 +989,6 @@ class DistAttnFunc(torch.autograd.Function):
                 remote_qo_do_buffer,
             ) = dist_attn_runtime.fetch_remote_qo_do(
                 local_qo_do=local_qo_do,
-                overlap_stage=0,
-            )
-            # pre-fetch 0th remote lse
-            (
-                remote_lse_work,
-                remote_lse_buffer,
-            ) = dist_attn_runtime.fetch_remote_lse(
-                local_lse=local_lse,
                 overlap_stage=0,
             )
         else:

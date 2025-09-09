@@ -69,8 +69,6 @@ class DistAttnSolver:
         self.cp_size = dist.get_world_size(cp_group)
         self.cp_group = cp_group
         self.cp_mesh = cp_mesh
-        self.shard_seqlen_q = dispatch_meta_q.shard_seqlen
-        self.shard_seqlen_k = dispatch_meta_k.shard_seqlen
         self.deterministic = magi_attention.is_deterministic_mode_enable()
 
         assert (
@@ -1510,7 +1508,6 @@ class DistAttnSolver:
                 masktype_to_idx_map[attn_slice.mask_type]  # type: ignore
                 for attn_slice in host_slice_local_list
             ],
-            shard_seqlen_q=self.shard_seqlen_q,
             total_area=sum(attn_slice.area for attn_slice in host_slice_local_list),
         )
 
@@ -1535,7 +1532,6 @@ class DistAttnSolver:
                         masktype_to_idx_map[attn_slice.mask_type]  # type: ignore
                         for attn_slice in remote_slice_local_list
                     ],
-                    shard_seqlen_q=self.shard_seqlen_q,
                     total_area=sum(
                         attn_slice.area for attn_slice in remote_slice_local_list
                     ),

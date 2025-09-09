@@ -27,9 +27,6 @@ class AttnArg:
     k_ranges: AttnRanges
     attn_type_map: list[int]
 
-    # REVIEW(xiaowu): Is shard_seqlen_q an appropriate name?
-    shard_seqlen_q: int  # FIXME: no use, thus remove this asap
-
     # total area of the attn arg, -1 means unknown
     total_area: int = -1
 
