@@ -374,54 +374,79 @@ class DistAttnRuntime:
             out: [num_tokens_q, num_heads_q, head_dim]
             lse: [num_tokens_q, num_heads_q]
         """
+
+        # fetch attn arg
         if overlap_stage is None:
             attn_arg = self.calc_meta.local_attn_arg
         else:
             attn_arg = self.calc_meta.remote_attn_args_list[overlap_stage]
 
-        # Calculate attention
+        # skipped case
         if attn_arg.can_skip(is_bwd=False):
-            out, lse = None, None
-        else:
-            k, v = self.chunk_kv(kv)
-            if magi_attention.is_sdpa_backend_enable():
-                out, lse = sdpa_fwd(
+            partial_out, partial_lse = None, None
+            if overlap_stage is None:
+                hp_init_dtype = max_fp_dtype(q.dtype, torch.float32)
+                # NOTE: we can NOT use empty_like here,
+                # since when all attn computations are skipped for certain q range
+                # we have nowhere to zero-fill it
+                partial_out = torch.zeros_like(
                     q,
-                    k,
-                    v,
+                    dtype=q.dtype if self.fwd_local_out_lp_init else hp_init_dtype,
+                    device=q.device,
+                )
+                partial_lse = torch.full(
+                    (q.size(0), q.size(1)),
+                    fill_value=float("-inf"),
+                    dtype=hp_init_dtype,  # lse always in high-precision
+                    device=q.device,
+                )
+            return partial_out, partial_lse
+
+        # attention forward pass
+        k, v = self.chunk_kv(kv)
+        with nvtx.add_nvtx_event(
+            f"attn-fwd: area={attn_arg.total_area} | "
+            f"qr={attn_arg.q_ranges} | "
+            f"kr={attn_arg.k_ranges}"
+        ):
+            if magi_attention.is_sdpa_backend_enable():
+                partial_out, partial_lse = sdpa_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
                     attn_arg=attn_arg,
                 )
             else:
-                with nvtx.add_nvtx_event(
-                    f"attn-fwd: area={attn_arg.total_area} | "
-                    f"qr={attn_arg.q_ranges} | kr={attn_arg.k_ranges}"
-                ):
-                    out, lse = _flex_flash_attn_forward(
-                        q=q,
-                        k=k,
-                        v=v,
-                        out=out_acc,  # directly reduce to out_acc
-                        lse=lse_acc,  # directly reduce to lse_acc
-                        **attn_arg.to_ffa_args(is_bwd=False),
-                        merge_q_ranges=None,
-                        qk_map=None,
-                        fwd_unique_count=None,
-                        ref_block_size=None,
-                        softmax_scale=q.shape[-1] ** -0.5,
-                        deterministic=deterministic,
-                        softcap=0.0,
-                        sm_margin=magi_attention.comm.ffa_fwd_sm_margin_save_for_comm(),
-                        # NOTE: increase the partial out precision temporarily,
-                        # to reduce the error caused by the out correction
-                        out_type=torch.float32,
-                        # NOTE: when using accumulative buffer, we need to always enable atomic reduction
-                        # unless it is the first call when accumulative buffer is still None
-                        disable_fwd_atomic_reduction=(
-                            attn_arg.disable_fwd_atomic_reduction and out_acc is None
-                        ),
-                    )
+                partial_out, partial_lse = _flex_flash_attn_forward(
+                    q=q,
+                    k=k,
+                    v=v,
+                    out=out_acc,  # directly reduce to out_acc
+                    lse=lse_acc,  # directly reduce to lse_acc
+                    **attn_arg.to_ffa_args(is_bwd=False),
+                    merge_q_ranges=None,
+                    qk_map=None,
+                    fwd_unique_count=None,
+                    ref_block_size=None,
+                    softmax_scale=q.shape[-1] ** -0.5,
+                    deterministic=deterministic,
+                    softcap=0.0,
+                    sm_margin=magi_attention.comm.ffa_fwd_sm_margin_save_for_comm(),
+                    # NOTE: increase the partial out precision temporarily,
+                    # to reduce the error caused by the out correction
+                    out_type=torch.float32,
+                    # NOTE: when using accumulative buffer, we need to always enable atomic reduction
+                    # unless it is the first call when accumulative buffer is still None
+                    disable_fwd_atomic_reduction=(
+                        attn_arg.disable_fwd_atomic_reduction and out_acc is None
+                    ),
+                )
 
-        return out, lse
+        # maybe downcast out to q dtype for the host stage
+        if overlap_stage is None and self.fwd_local_out_lp_init:
+            partial_out = partial_out.to(q.dtype)
+
+        return partial_out, partial_lse
 
     @nvtx.instrument_nvtx
     def attn_bwd_partial(
@@ -457,58 +482,85 @@ class DistAttnRuntime:
             partial_dkv: [num_tokens_kv*2, num_heads_kv, head_dim]
         """
 
+        # fetch attn arg
         if overlap_stage is None:
             attn_arg = self.calc_meta.local_attn_arg
         else:
             attn_arg = self.calc_meta.remote_attn_args_list[overlap_stage]
 
+        # skipped case
         if attn_arg.can_skip(is_bwd=True):
             partial_dq, partial_dkv = None, None
+            if overlap_stage is None:
+                q, _, _ = self.maybe_chunk_qo_do(qo_do)
+                # NOTE: if local_dq and local_dkv calculation are skipped,
+                # we need to zeros initialize them since they might be reduced later
+                partial_dq = torch.zeros_like(
+                    q,
+                    dtype=q.dtype
+                    if self.bwd_local_dq_lp_init
+                    else max_fp_dtype(q.dtype, torch.float32),
+                )
+                partial_dkv = torch.zeros_like(
+                    kv,
+                    dtype=kv.dtype
+                    if self.bwd_local_dkv_lp_init
+                    else max_fp_dtype(kv.dtype, torch.float32),
+                )
+            return partial_dq, partial_dkv
+
+        # attention backward pass
+        q, o, do = self.maybe_chunk_qo_do(qo_do)
+        k, v = self.chunk_kv(kv)
+        if magi_attention.is_sdpa_backend_enable():
+            partial_dq, partial_dk, partial_dv = sdpa_bwd(
+                do=do,
+                q=q,
+                k=k,
+                v=v,
+                o=o,
+                lse=lse,
+                attn_arg=attn_arg,
+            )
+            partial_dkv = self.concat_kv(partial_dk, partial_dv)
         else:
-            q, o, do = self.maybe_chunk_qo_do(qo_do)
-            k, v = self.chunk_kv(kv)
-            if magi_attention.is_sdpa_backend_enable():
-                partial_dq, partial_dk, partial_dv = sdpa_bwd(
-                    do=do,
-                    q=q,
-                    k=k,
-                    v=v,
-                    o=o,
-                    lse=lse,
-                    attn_arg=attn_arg,
-                )
-                partial_dkv = self.concat_kv(partial_dk, partial_dv)
-            else:
-                # NOTE: we need to zero-initialize partial_dkv since it needs to be reduced
-                # and also increase the partial dkv precision temporarily,
-                # to reduce the error caused by the out correction
-                partial_dkv = torch.zeros_like(kv, dtype=torch.float32)
-                partial_dk, partial_dv = self.chunk_kv(partial_dkv)
-                partial_dq, partial_dk, partial_dv = _flex_flash_attn_backward(
-                    dout=do,
-                    q=q,
-                    k=k,
-                    v=v,
-                    out=o,
-                    lse=lse,
-                    dq=dq_acc,  # directly reduce to dq_acc
-                    dk=partial_dk,
-                    dv=partial_dv,
-                    # NOTE: increase the partial dq, dkv precision temporarily,
-                    # to reduce the error caused by the atomic reduction inside the kernel
-                    dq_type=torch.float32,
-                    dk_type=torch.float32,
-                    dv_type=torch.float32,
-                    **attn_arg.to_ffa_args(is_bwd=True),
-                    merge_k_ranges=None,
-                    bwd_kq_map=None,
-                    bwd_unique_count=None,
-                    softmax_scale=q.shape[-1] ** -0.5,
-                    deterministic=deterministic,
-                    softcap=0.0,
-                    disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
-                    sm_margin=magi_attention.comm.ffa_bwd_sm_margin_save_for_comm(),
-                )
+            # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
+            # and we need to zero-initialize partial_dkv since it needs to be reduced
+            partial_dkv = torch.zeros_like(kv, dtype=torch.float32)
+            partial_dk, partial_dv = self.chunk_kv(partial_dkv)
+            partial_dq, partial_dk, partial_dv = _flex_flash_attn_backward(
+                dout=do,
+                q=q,
+                k=k,
+                v=v,
+                out=o,
+                lse=lse,
+                dq=dq_acc,  # directly reduce to dq_acc
+                dk=partial_dk,
+                dv=partial_dv,
+                # NOTE: increase the partial dq, dkv precision temporarily,
+                # to reduce the error caused by the atomic reduction inside the kernel
+                dq_type=torch.float32,
+                dk_type=torch.float32,
+                dv_type=torch.float32,
+                **attn_arg.to_ffa_args(is_bwd=True),
+                merge_k_ranges=None,
+                bwd_kq_map=None,
+                bwd_unique_count=None,
+                softmax_scale=q.shape[-1] ** -0.5,
+                deterministic=deterministic,
+                softcap=0.0,
+                disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
+                sm_margin=magi_attention.comm.ffa_bwd_sm_margin_save_for_comm(),
+            )
+
+        # maybe downcast dq,dkv to q,kv dtype for the host stage
+        if overlap_stage is None:
+            if self.bwd_local_dq_lp_init:
+                partial_dq = partial_dq.to(q.dtype)
+
+            if self.bwd_local_dkv_lp_init:
+                partial_dkv = partial_dkv.to(kv.dtype)
 
         return partial_dq, partial_dkv
 
@@ -825,26 +877,7 @@ class DistAttnFunc(torch.autograd.Function):
             overlap_stage=None,
             deterministic=dist_attn_runtime.deterministic,
         )
-
-        if partial_local_out is None:
-            hp_init_dtype = max_fp_dtype(local_q.dtype, torch.float32)
-            # NOTE: we cannot use empty_like here, though it is accurate in lse-reduce
-            # since when all attn computations are skipped, it might contain nan values
-            partial_local_out = torch.zeros_like(
-                local_q,
-                dtype=local_q.dtype
-                if dist_attn_runtime.fwd_local_out_lp_init
-                else hp_init_dtype,
-                device=local_q.device,
-            )
-            partial_local_lse = torch.full(
-                (local_q.size(0), local_q.size(1)),
-                fill_value=float("-inf"),
-                dtype=hp_init_dtype,  # lse always in high-precision
-                device=local_q.device,
-            )
-        elif dist_attn_runtime.fwd_local_out_lp_init:
-            partial_local_out = partial_local_out.to(local_q.dtype)
+        assert partial_local_out is not None and partial_local_lse is not None
 
         partial_out_lse_reduce_works = []
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
@@ -930,6 +963,7 @@ class DistAttnFunc(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
         local_q, local_kv, local_out, local_lse = ctx.saved_tensors
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
+
         local_qo_do = dist_attn_runtime.maybe_concat_qo_do(
             q=local_q, o=local_out, do=grad_output
         )
@@ -998,31 +1032,9 @@ class DistAttnFunc(torch.autograd.Function):
             overlap_stage=None,
             deterministic=dist_attn_runtime.deterministic,
         )
+        assert partial_local_dq is not None and partial_local_dkv is not None
 
-        # NOTE: if local_dq and local_dkv calculation are skipped,
-        # we need to zeros initialize them since they might be reduced later
-        if partial_local_dq is None:
-            partial_local_dq = torch.zeros_like(
-                local_q,
-                dtype=local_q.dtype
-                if dist_attn_runtime.bwd_local_dq_lp_init
-                else max_fp_dtype(local_q.dtype, torch.float32),
-            )
-        elif dist_attn_runtime.bwd_local_dq_lp_init:
-            partial_local_dq = partial_local_dq.to(local_q.dtype)
-
-        if partial_local_dkv is None:
-            partial_local_dkv = torch.zeros_like(
-                local_kv,
-                dtype=local_kv.dtype
-                if dist_attn_runtime.bwd_local_dkv_lp_init
-                else max_fp_dtype(local_kv.dtype, torch.float32),
-            )
-        elif dist_attn_runtime.bwd_local_dkv_lp_init:
-            partial_local_dkv = partial_local_dkv.to(local_kv.dtype)
-
-        partial_dq_reduce_works = []
-        partial_dkv_reduce_works = []
+        partial_dq_reduce_works, partial_dkv_reduce_works = [], []
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
             # wait for ith remote data prepared
             if magi_attention.is_cuda_device_max_connections_one():
