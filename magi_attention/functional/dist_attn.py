@@ -369,8 +369,10 @@ class DistAttnRuntime:
                 )
             else:
                 with nvtx.add_nvtx_event(
-                    f"attn-fwd: area={attn_arg.total_area} | "
-                    f"qr={attn_arg.q_ranges} | kr={attn_arg.k_ranges}"
+                    f"attn-fwd: "
+                    f"{attn_arg.total_area=} | "
+                    f"{attn_arg.q_ranges=} | "
+                    f"{attn_arg.k_ranges=}"
                 ):
                     out, lse = _flex_flash_attn_forward(
                         q=q,

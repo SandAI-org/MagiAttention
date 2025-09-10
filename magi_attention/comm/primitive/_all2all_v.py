@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Literal
+
 import torch
 import torch.distributed as dist
 
@@ -26,11 +28,21 @@ def _calculate_all2allv_comm_bytes(
     stride0: int,
     dtype: torch.dtype,
     rank: int,
+    reduce_op: Literal["sum", "max"] = "max",
 ) -> int:
     num_loads = sum(input_split_size_list) - input_split_size_list[rank]
     num_stores = sum(output_split_size_list) - output_split_size_list[rank]
 
-    return (num_loads + num_stores) * stride0 * dtype.itemsize
+    total_num = 0
+    match reduce_op:
+        case "sum":
+            total_num = num_loads + num_stores
+        case "max":
+            total_num = max(num_loads, num_stores)
+        case _:
+            raise ValueError(f"Invalid reduce_op: {reduce_op}")
+
+    return total_num * stride0 * dtype.itemsize
 
 
 @torch.no_grad()
@@ -74,11 +86,12 @@ def all2all_v(
 
     with nvtx.add_nvtx_event(
         (
+            f"a2av: "
+            f"{a2av_comm_bytes=} | "
             f"{input.shape=} | "
             f"{output.shape=} | "
             f"{input_split_size_list=} | "
-            f"{output_split_size_list=} | "
-            f"{a2av_comm_bytes=}"
+            f"{output_split_size_list=}"
         )
     ):
         work = dist.all_to_all_single(

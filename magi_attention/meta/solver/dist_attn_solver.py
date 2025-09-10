@@ -497,12 +497,11 @@ class DistAttnSolver:
         # all gather remote rank entry per stage from each rank
         remote_rank_entry_per_stage_per_rank = [None] * self.cp_size
 
-        with nvtx.add_nvtx_event("remote_rank_entry_ag"):
-            dist.all_gather_object(
-                remote_rank_entry_per_stage_per_rank,
-                remote_rank_entry_per_stage_this_rank,
-                group=self.cp_group,
-            )
+        dist.all_gather_object(
+            remote_rank_entry_per_stage_per_rank,
+            remote_rank_entry_per_stage_this_rank,
+            group=self.cp_group,
+        )
 
         # check shape to be [cp_size, overlap_degree]
         if magi_attention.is_sanity_check_enable():
@@ -627,18 +626,17 @@ class DistAttnSolver:
         elif self.overlap_config.mode is AttnOverlapMode.DYNAMIC:
             # if dynamic mode, the final overlap degree is the maximum one among ranks
             # so we need to reduce the best overlap degree among ranks
-            with nvtx.add_nvtx_event("dynamic_overlap_degree_ar_max"):
-                overlap_degree_reduce_tensor = torch.tensor(
-                    best_overlap_degree_this_rank,
-                    dtype=torch.int32,
-                    device=torch.cuda.current_device(),
-                )
-                dist.all_reduce(
-                    overlap_degree_reduce_tensor,
-                    op=dist.ReduceOp.MAX,
-                    group=self.cp_group,
-                )
-                final_overlap_degree = overlap_degree_reduce_tensor.item()
+            overlap_degree_reduce_tensor = torch.tensor(
+                best_overlap_degree_this_rank,
+                dtype=torch.int32,
+                device=torch.cuda.current_device(),
+            )
+            dist.all_reduce(
+                overlap_degree_reduce_tensor,
+                op=dist.ReduceOp.MAX,
+                group=self.cp_group,
+            )
+            final_overlap_degree = overlap_degree_reduce_tensor.item()
 
             for _ in range(best_overlap_degree_this_rank, final_overlap_degree):
                 # HACK: for the rank with the best overlap degree < final overlap degree
@@ -1249,12 +1247,11 @@ class DistAttnSolver:
 
         # all gather transfer info per stage from each rank
         transfer_info_per_stage_per_rank = [None] * self.cp_size
-        with nvtx.add_nvtx_event("transfer_info_ag"):
-            dist.all_gather_object(
-                transfer_info_per_stage_per_rank,
-                transfer_info_per_stage_this_rank,
-                group=self.cp_group,
-            )
+        dist.all_gather_object(
+            transfer_info_per_stage_per_rank,
+            transfer_info_per_stage_this_rank,
+            group=self.cp_group,
+        )
 
         # check shape to be [cp_size, overlap_degree]
         if magi_attention.is_sanity_check_enable():
