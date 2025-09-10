@@ -29,7 +29,7 @@ from magi_attention.comm.primitive.utils import (
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.meta.collection.calc_meta import AttnArg, AttnCalcMeta
+from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.meta.collection.dispatch_meta import DispatchMeta
 from magi_attention.meta.container.bucket import AttnBucket
@@ -63,11 +63,11 @@ class BaseDistAttnSolver(ABC):
         ...
 
     @abstractmethod
-    def calc_comm_meta(self) -> CommMeta:
+    def make_comm_meta(self) -> CommMeta:
         ...
 
     @abstractmethod
-    def calc_attn_calc_meta(self) -> AttnCalcMeta:
+    def make_calc_meta(self) -> CalcMeta:
         ...
 
     @property
@@ -1360,7 +1360,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         return transfer_info_per_rank_per_stage
 
     @nvtx.instrument_nvtx
-    def calc_comm_meta(self) -> CommMeta:
+    def make_comm_meta(self) -> CommMeta:
         """Calculate communication meta for kv and qo group collective"""
 
         num_remote_kv_tokens_per_stage: list[int] = []
@@ -1408,7 +1408,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         total_seqlen_host_k: int,
     ) -> GroupCollectiveArg:
         """Calculate group collective args from one transfer table
-        called in 'self.calc_comm_meta'
+        called in 'self.make_comm_meta'
         """
         # retrieve group cast ranges for local k ranges that this rank needs to send to
         # which splits the local ranges into non-overlapped local ranges
@@ -1523,7 +1523,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         return group_collective_arg
 
     @nvtx.instrument_nvtx
-    def calc_attn_calc_meta(self) -> AttnCalcMeta:
+    def make_calc_meta(self) -> CalcMeta:
         """Calculate flex-flash-attention calculation meta"""
 
         if magi_attention.is_sanity_check_enable():
@@ -1598,12 +1598,12 @@ class DistAttnSolver(BaseDistAttnSolver):
 
         # ---   build attn calc meta   --- #
 
-        attn_calc_meta = AttnCalcMeta(
+        calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,
         )
 
-        return attn_calc_meta
+        return calc_meta
 
     def __repr__(self, title_len: int = 50) -> str:  # pragma: no cover
         repr_contents = []

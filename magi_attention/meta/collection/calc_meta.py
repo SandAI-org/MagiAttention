@@ -150,7 +150,7 @@ class AttnArg:
 
 
 @dataclass(repr=False)
-class AttnCalcMeta:
+class CalcMeta:
     local_attn_arg: AttnArg
     remote_attn_args_list: list[AttnArg]
 
@@ -160,7 +160,7 @@ class AttnCalcMeta:
 
     def __repr__(self) -> str:
         indent = ""
-        repr_str = f"AttnCalcMeta(overlap_degree={self.overlap_degree},\n"
+        repr_str = f"CalcMeta(overlap_degree={self.overlap_degree},\n"
 
         # local_attn_arg
         local_attn_arg_repr_lines = repr(self.local_attn_arg).splitlines()

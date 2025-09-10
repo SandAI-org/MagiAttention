@@ -226,13 +226,13 @@ class TestDynamicAttnSolver(DistTestBase):
 
             # --------------      test calc_local_range meta generation      -------------- #
 
-            attn_calc_meta = solver.calc_attn_calc_meta()
+            calc_meta = solver.make_calc_meta()
 
-            comm_meta = solver.calc_comm_meta()
+            comm_meta = solver.make_comm_meta()
 
             # --------------      verify local calc meta generation      -------------- #
 
-            local_attn_arg = attn_calc_meta.local_attn_arg
+            local_attn_arg = calc_meta.local_attn_arg
             job_num = len(local_attn_arg.q_ranges)
             host_range_q_max_len = max(
                 [range_q.end for range_q in solver.host_ranges_q[rank]]
@@ -257,7 +257,7 @@ class TestDynamicAttnSolver(DistTestBase):
 
             # --------------      verify remote calc meta generation      -------------- #
 
-            remote_attn_args_list = attn_calc_meta.remote_attn_args_list
+            remote_attn_args_list = calc_meta.remote_attn_args_list
             stage = 0
             for remote_attn_arg in remote_attn_args_list:
                 job_num = len(remote_attn_arg.q_ranges)

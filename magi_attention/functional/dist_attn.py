@@ -20,7 +20,7 @@ import torch.distributed as dist
 import magi_attention
 from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
 from magi_attention.comm.work import WorkWithPostProcessFn
-from magi_attention.meta.collection import AttnCalcMeta, CommMeta
+from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
@@ -36,7 +36,7 @@ class DistAttnRuntime:
 
     Args:
         comm_meta (CommMeta): the communication metadata
-        calc_meta (AttnCalcMeta): the calculation metadata
+        calc_meta (CalcMeta): the calculation metadata
         cp_group_gc (dist.ProcessGroup): the cp process group for group-cast
         cp_group_gr (dist.ProcessGroup): the cp process group for group-reduce
     """
@@ -44,7 +44,7 @@ class DistAttnRuntime:
     def __init__(
         self,
         comm_meta: CommMeta,
-        calc_meta: AttnCalcMeta,
+        calc_meta: CalcMeta,
         cp_group_gc: dist.ProcessGroup,
         cp_group_gr: dist.ProcessGroup,
     ):

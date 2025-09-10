@@ -20,7 +20,7 @@ import magi_attention
 from magi_attention.common import AttnRange, AttnRanges, AttnRectangles
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta.algorithms import DynamicAttnAlgorithm
-from magi_attention.meta.collection.calc_meta import AttnArg, AttnCalcMeta
+from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.meta.collection.dispatch_meta import DispatchMeta
 from magi_attention.utils import nvtx
@@ -296,7 +296,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         return group_collective_arg
 
     @nvtx.instrument_nvtx
-    def calc_comm_meta(self) -> CommMeta:
+    def make_comm_meta(self) -> CommMeta:
         """Calculate communication meta for kv and qo group collective"""
 
         num_remote_kv_tokens_per_stage: list[int] = []
@@ -383,9 +383,9 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self.remote_bucket_this_rank.extend(rest_rects_q)
 
     @nvtx.instrument_nvtx
-    def calc_attn_calc_meta(
+    def make_calc_meta(
         self,
-    ) -> AttnCalcMeta:
+    ) -> CalcMeta:
         """Calculate flex-flash-attention calculation meta for this rank"""
         local_attn_arg_q_ranges = AttnRanges()
         local_attn_arg_k_ranges = AttnRanges()
@@ -442,9 +442,9 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         remote_attn_args_list: list[AttnArg] = []
         remote_attn_args_list.append(remote_attn_arg)
 
-        attn_calc_meta = AttnCalcMeta(
+        calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,
         )
 
-        return attn_calc_meta
+        return calc_meta

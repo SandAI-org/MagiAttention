@@ -22,7 +22,7 @@ from exps.dist_attn.benchmark.enums import MetricsType
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta._calc_dispatch_meta import _calc_self_attn_areas
-from magi_attention.meta.collection.calc_meta import AttnCalcMeta
+from magi_attention.meta.collection.calc_meta import CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.container.bucket import AttnBucket
 
@@ -67,7 +67,7 @@ COMM_MFU = 0.55
 @dataclass
 class MetricData:
     comm_meta_list: list[CommMeta]
-    calc_meta_list: list[AttnCalcMeta]
+    calc_meta_list: list[CalcMeta]
 
     q_heads: Optional[int] = None
     kv_heads: Optional[int] = None
@@ -358,7 +358,7 @@ class MetricDataCalculator:
     def calculate_computational_cost(
         metric_data: MetricData,
     ) -> MetricSet:
-        calc_meta_list: list[AttnCalcMeta] = metric_data.calc_meta_list
+        calc_meta_list: list[CalcMeta] = metric_data.calc_meta_list
         num_heads_q, head_dim, pass_type = (
             metric_data.q_heads,
             metric_data.head_dim,

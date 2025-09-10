@@ -19,7 +19,7 @@ import magi_attention
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta.algorithms import GRGDynamicAttnAlgorithm
-from magi_attention.meta.collection.calc_meta import AttnCalcMeta
+from magi_attention.meta.collection.calc_meta import CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.collection.dispatch_meta import DispatchMeta
 from magi_attention.meta.container.bucket import AttnBucket
@@ -43,7 +43,7 @@ def calc_attn_meta_from_dispatch_meta(
     cp_mesh: DeviceMesh | None = None,
     num_heads_q: int = 1,
     num_heads_kv: int = 1,
-) -> tuple[CommMeta, AttnCalcMeta, BaseDistAttnSolver]:
+) -> tuple[CommMeta, CalcMeta, BaseDistAttnSolver]:
     """Calculate the communication and calculation meta from the dispatch meta
 
     Args:
@@ -66,7 +66,7 @@ def calc_attn_meta_from_dispatch_meta(
         num_heads_kv (int): number of heads of key/value. Default: 1
 
     Returns:
-        tuple[CommMeta, AttnCalcMeta, BaseDistAttnSolver]:
+        tuple[CommMeta, CalcMeta, BaseDistAttnSolver]:
             the communication meta, calculation meta and the attn solver
     """
 
@@ -101,8 +101,8 @@ def calc_attn_meta_from_dispatch_meta(
         )
 
     assert attn_solver.is_solved
-    comm_meta = attn_solver.calc_comm_meta()
-    calc_meta = attn_solver.calc_attn_calc_meta()
+    comm_meta = attn_solver.make_comm_meta()
+    calc_meta = attn_solver.make_calc_meta()
 
     assert comm_meta.overlap_degree == calc_meta.overlap_degree, (
         "The overlap degree is inconsistent between "
