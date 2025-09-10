@@ -65,13 +65,16 @@ class WorkTileDivider {
 
   static Params to_underlying_arguments(Arguments const& args) {
     const int job_max_num_per_batch = (args.max_seqlen + kBlock - 1) / kBlock;
-    return {args.num_batches,
-            args.num_heads_kv,
-            args.num_heads_qo / args.num_heads_kv,
-            job_max_num_per_batch,
-            args.num_batches * args.num_heads_qo * job_max_num_per_batch,
-            args.tile_ranges, args.loop_ranges,
-            args.job_list, args.arrangement};
+    return {
+        args.num_batches,
+        args.num_heads_kv,
+        args.num_heads_qo / args.num_heads_kv,
+        job_max_num_per_batch,
+        args.num_batches * args.num_heads_qo * job_max_num_per_batch,
+        args.tile_ranges,
+        args.loop_ranges,
+        args.job_list,
+        args.arrangement};
   }
 
   // Computes the kernel launch grid shape based on runtime parameters
@@ -86,7 +89,8 @@ class WorkTileDivider {
   CUTLASS_DEVICE
   void operator()(Params const& params, char* smem_buf) {
     int job_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (job_id >= params.job_max_num) return;
+    if (job_id >= params.job_max_num)
+      return;
     int arrange[4] = {params.arrangement[0], params.arrangement[1], params.arrangement[2], params.arrangement[3]};
     int tmp[4] = {params.num_batches, params.num_heads_kv, params.num_heads_qo_per_kv, params.job_max_num_per_batch};
     int mod[4], id[4];

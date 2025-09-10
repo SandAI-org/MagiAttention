@@ -32,14 +32,13 @@
 using namespace cute;
 
 std::tuple<torch::Tensor> work_tile_divider_ext(
-  torch::Tensor q,
-  torch::Tensor k,
-  torch::Tensor tile_ranges,
-  torch::Tensor loop_ranges,
-  int max_seqlen_tile_ranges,
-  int max_seqlen_loop_ranges,
-  torch::Tensor arrangement
-) {
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor tile_ranges,
+    torch::Tensor loop_ranges,
+    int max_seqlen_tile_ranges,
+    int max_seqlen_loop_ranges,
+    torch::Tensor arrangement) {
   int const tile_size = 64;
   int const batch_size = tile_ranges.size(0);
   int const total_q = q.size(0);
@@ -57,14 +56,14 @@ std::tuple<torch::Tensor> work_tile_divider_ext(
 
   using WorkTileDivider = flash::WorkTileDivider<cutlass::arch::Sm90, tile_size>;
   typename WorkTileDivider::Arguments divider_args{
-    batch_size,
-    num_heads_qo,
-    num_heads_kv,
-    max_seqlen_tile_ranges,
-    static_cast<int*>(tile_ranges.data_ptr()),
-    static_cast<int*>(loop_ranges.data_ptr()),
-    static_cast<int*>(job_list.data_ptr()),
-    static_cast<int*>(arrangement.data_ptr()),
+      batch_size,
+      num_heads_qo,
+      num_heads_kv,
+      max_seqlen_tile_ranges,
+      static_cast<int*>(tile_ranges.data_ptr()),
+      static_cast<int*>(loop_ranges.data_ptr()),
+      static_cast<int*>(job_list.data_ptr()),
+      static_cast<int*>(arrangement.data_ptr()),
   };
   typename WorkTileDivider::Params divider_params = WorkTileDivider::to_underlying_arguments(divider_args);
 
