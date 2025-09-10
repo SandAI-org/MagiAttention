@@ -37,6 +37,7 @@ from magi_attention.meta.solver.dist_attn_solver import (
     BaseDistAttnSolver,
     DistAttnSolver,
 )
+from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_to_list
 
 
@@ -61,8 +62,8 @@ class DistAttnRuntimeMgr:
     def __init__(
         self,
         cp_group: dist.ProcessGroup,
-        q_dispatch_meta: DispatchMeta,
-        k_dispatch_meta: DispatchMeta,
+        dispatch_meta_q: DispatchMeta,
+        dispatch_meta_k: DispatchMeta,
         chunk_size: int,
         dist_attn_config: DistAttnConfig,
         attn_solver: BaseDistAttnSolver,
@@ -75,11 +76,12 @@ class DistAttnRuntimeMgr:
         is_k_permutable: bool,
     ):
         self.cp_group = cp_group
-        self.q_dispatch_meta = q_dispatch_meta
-        self.k_dispatch_meta = k_dispatch_meta
+        self.dispatch_meta_q = dispatch_meta_q
+        self.dispatch_meta_k = dispatch_meta_k
         self.chunk_size = chunk_size
         self.dist_attn_config = dist_attn_config
         self.attn_solver = attn_solver
+
         self.dist_attn_runtime = dist_attn_runtime
 
         self.ref_q_ranges = ref_q_ranges
@@ -95,7 +97,7 @@ class DistAttnRuntimeMgr:
         q_or_o = dispatch_func(
             x_global=q_or_o,
             group=self.cp_group,
-            meta=self.q_dispatch_meta,
+            meta=self.dispatch_meta_q,
         )
         return q_or_o
 
@@ -103,7 +105,7 @@ class DistAttnRuntimeMgr:
         k_or_v = dispatch_func(
             x_global=k_or_v,
             group=self.cp_group,
-            meta=self.k_dispatch_meta,
+            meta=self.dispatch_meta_k,
         )
         return k_or_v
 
@@ -111,7 +113,7 @@ class DistAttnRuntimeMgr:
         q_or_o = undispatch_func(
             x_local=q_or_o,
             group=self.cp_group,
-            meta=self.q_dispatch_meta,
+            meta=self.dispatch_meta_q,
         )
         return q_or_o
 
@@ -119,7 +121,7 @@ class DistAttnRuntimeMgr:
         k_or_v = undispatch_func(
             x_local=k_or_v,
             group=self.cp_group,
-            meta=self.k_dispatch_meta,
+            meta=self.dispatch_meta_k,
         )
         return k_or_v
 
@@ -150,14 +152,14 @@ class DistAttnRuntimeMgr:
         Returns:
             attn_arg(AttnArg): The attn arg for cross attention
         """
-        assert isinstance(
-            self.attn_solver, DistAttnSolver
-        ), "Only supports ``DistAttnSolver`` for cross-attn by now."
-
         attn_mask_type = wrap_to_list(attn_mask_type)
         assert is_list_value_all(
             attn_mask_type, AttnMaskType.FULL
         ), "Only supports all full attn mask for now."
+
+        assert isinstance(
+            self.attn_solver, (DistAttnSolver, DynamicAttnSolver)
+        ), "Only supports either `DistAttnSolver` or `DynamicAttnSolver` for cross-attn by now."
 
         host_global_perm_merged_q_ranges = self.attn_solver.host_q_ranges_global
         # HACK: ref_xattn_q_ranges cannot be merged, so we hack it by setting is_self_merged=True,
@@ -231,11 +233,11 @@ class DistAttnRuntimeMgr:
 
         if attn_role == AttnRole.QUERY:
             if self._q_position_ids is None:
-                self._q_position_ids = self.q_dispatch_meta.position_ids
+                self._q_position_ids = self.dispatch_meta_q.position_ids
             return self._q_position_ids
         elif attn_role == AttnRole.KEY or attn_role == AttnRole.VALUE:
             if self._k_position_ids is None:
-                self._k_position_ids = self.k_dispatch_meta.position_ids
+                self._k_position_ids = self.dispatch_meta_k.position_ids
             return self._k_position_ids
         else:
             raise ValueError(f"Invalid attn role: {attn_role}")
@@ -245,8 +247,8 @@ class DistAttnRuntimeMgr:
             return False
 
         return (
-            self.q_dispatch_meta,
-            self.k_dispatch_meta,
+            self.dispatch_meta_q,
+            self.dispatch_meta_k,
             self.chunk_size,
             self.dist_attn_config,
             self.attn_solver,
@@ -257,8 +259,8 @@ class DistAttnRuntimeMgr:
             self.is_q_permutable,
             self.is_k_permutable,
         ) == (
-            other.q_dispatch_meta,
-            other.k_dispatch_meta,
+            other.dispatch_meta_q,
+            other.dispatch_meta_k,
             other.chunk_size,
             other.dist_attn_config,
             other.attn_solver,
@@ -433,7 +435,7 @@ def init_dist_attn_runtime_mgr(
     cp_rank = dist.get_rank(cp_group)
 
     # calculate dispatch meta to determine which rank should hold which chunks of seqlen
-    q_dispatch_meta, k_dispatch_meta, attn_buckets = calc_dispatch_meta_from_qk_ranges(
+    dispatch_meta_q, dispatch_meta_k, attn_buckets = calc_dispatch_meta_from_qk_ranges(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
@@ -453,8 +455,8 @@ def init_dist_attn_runtime_mgr(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
-        dispatch_meta_q=q_dispatch_meta,
-        dispatch_meta_k=k_dispatch_meta,
+        dispatch_meta_q=dispatch_meta_q,
+        dispatch_meta_k=dispatch_meta_k,
         bucket_per_rank=attn_buckets,
         cp_group=cp_group,
         overlap_config=dist_attn_config.overlap_config,
@@ -474,8 +476,8 @@ def init_dist_attn_runtime_mgr(
     # init dist attn runtime mgr
     dist_attn_runtime_mgr = DistAttnRuntimeMgr(
         cp_group,
-        q_dispatch_meta,
-        k_dispatch_meta,
+        dispatch_meta_q,
+        dispatch_meta_k,
         chunk_size,
         dist_attn_config,
         attn_solver,
