@@ -198,7 +198,6 @@ def build_ffa_utils_ext_module(
         f"{utils_dir_rel}/bindings.cpp",
         f"{utils_dir_rel}/unique_consecutive_pairs.cu",
     ]
-
     include_dirs = [
         common_dir,
         utils_dir_abs,
@@ -297,6 +296,7 @@ if not SKIP_CUDA_BUILD:
 def prebuild_ffa_kernels() -> None:
     print(
         "\n# -------------------     Prebuilding FFA JIT kernels (ref_block_size=None)     ------------------- #\n"
+        "NOTE: this progress may take around 20~30 minute for the first time.\n"
     )
 
     # During build time, the package isn't installed yet. Fall back to source tree import.

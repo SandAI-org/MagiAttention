@@ -405,9 +405,10 @@ class DistAttnRuntime:
         # attention forward pass
         k, v = self.chunk_kv(kv)
         with nvtx.add_nvtx_event(
-            f"attn-fwd: area={attn_arg.total_area} | "
-            f"qr={attn_arg.q_ranges} | "
-            f"kr={attn_arg.k_ranges}"
+            f"attn-fwd: "
+            f"{attn_arg.total_area=} | "
+            f"{attn_arg.q_ranges=} | "
+            f"{attn_arg.k_ranges=}"
         ):
             if magi_attention.is_sdpa_backend_enable():
                 partial_out, partial_lse = sdpa_fwd(

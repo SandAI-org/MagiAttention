@@ -142,7 +142,10 @@ def merge_ranges(
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
     sorted_inner_ranges = inner_ranges[sorted_idx]
-    sorted_attn_type_map = attn_type_map[sorted_idx]
+    if attn_type_map is None:
+        sorted_attn_type_map = None
+    else:
+        sorted_attn_type_map = attn_type_map[sorted_idx]
     (
         merge_outer_ranges,
         range_map,

@@ -1,4 +1,4 @@
-pre-commit
+pre-commit==4.0.1
 coverage
 pytest-sugar
 build

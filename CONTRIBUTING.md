@@ -12,30 +12,41 @@ Please follow these steps to open a pull request:
 5. Open a Pull Request
 
 
-### Unit Tests
+## Requirements
 
-We use [PyTest](https://docs.pytest.org/en/latest/) to execute tests. You can install pytest by `pip install pytest`. As some of the tests require initialization of the distributed backend, GPUs are needed to execute these tests.
+First of all, please install the required packages specific for developers by running:
 
-To set up the environment for unit testing, first change your current directory to the root directory of your local ColossalAI repository, then run
 ```bash
 pip install -r requirements.txt
 pip install -r requirements_dev.txt
 ```
 
-Then, simply run:
+
+### Unit Tests
+
+We use [PyTest](https://docs.pytest.org/en/latest/) to execute tests. You can install pytest by `pip install pytest`. Then, simply run:
 
 ```bash
 pytest tests/
 ```
 
-<!-- Unit testing will be automatically conducted when you put up a pull request to the main branch. -->
+> [!NOTE]
+> As some of the tests require initialization of the distributed backend, GPUs are needed to execute these tests.
 
 
 ### Code Style
 
-We have some static checks when you commit your code change, please make sure you can pass all the tests and make sure the coding style follows our requirements. We use pre-commit hook to make sure the code is aligned with the writing standard. To set up the code style checking, you need to follow the steps below.
+We have some static checks when you commit your code change, please make sure you can pass all the tests and make sure the coding style follows our requirements. We use pre-commit hooks to make sure the code is aligned with the writing standard. To set up the code style checking, you need to follow the steps below.
+
+* clang-format:
+
+```bash
+# Install clang-format with llvm for csrc code format
+bash ./scripts/install_clang_format.sh
+```
 
 * pre-commit:
+
 ```bash
 # Install pre-commit
 pip install pre-commit
@@ -52,4 +63,5 @@ pre-commit run -a
 # you may check: https://pre-commit.com/
 ```
 
-Code format checking will be automatically executed when you commit your changes.
+> [!NOTE]
+> Code format checking will be automatically executed when you commit your changes.
