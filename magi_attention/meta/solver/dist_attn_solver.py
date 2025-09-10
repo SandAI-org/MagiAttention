@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from abc import ABC, abstractmethod
 from bisect import bisect_left
 from collections import defaultdict
 from itertools import chain
@@ -52,29 +53,72 @@ from .overlap_solver import OverlapConfig, OverlapSolver, OverlapStageCost
 from .slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
 
 
-class DistAttnSolver:
+class BaseDistAttnSolver(ABC):
+    """The base abstract dist-attn solver class to
+    provide necessary abstract methods as common interfaces for sub-classes to implement
+    """
+
+    @abstractmethod
+    def solve(self, *args, **kwargs) -> None:
+        ...
+
+    @abstractmethod
+    def calc_comm_meta(self) -> CommMeta:
+        ...
+
+    @abstractmethod
+    def calc_attn_calc_meta(self) -> AttnCalcMeta:
+        ...
+
+    @property
+    @abstractmethod
+    def is_solved(self) -> bool:
+        ...
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, BaseDistAttnSolver):
+            return False
+
+        for key in self.__dict__:
+            self_val = getattr(self, key)
+            other_val = getattr(other, key, object())
+
+            if isinstance(self_val, dist.ProcessGroup) or isinstance(
+                other_val, dist.ProcessGroup
+            ):
+                if not is_same_process_group(self_val, other_val):
+                    return False
+
+            elif isinstance(self_val, DeviceMesh) or isinstance(other_val, DeviceMesh):
+                if not is_same_device_mesh(self_val, other_val):
+                    return False
+
+            else:
+                if self_val != other_val:
+                    return False
+
+        return True
+
+
+class DistAttnSolver(BaseDistAttnSolver):
     """The dist-attn solver class to process dispatch meta for calc/comm meta"""
 
     @nvtx.instrument_nvtx
     def __init__(
         self,
-        bucket_per_rank: list[AttnBucket],
-        dispatch_meta_q: DispatchMeta,
-        dispatch_meta_k: DispatchMeta,
         cp_group: dist.ProcessGroup,
         overlap_config: OverlapConfig,
         cp_mesh: DeviceMesh | None = None,
     ):
+        assert (
+            not magi_attention.comm.is_qo_comm_enable()
+        ), "QO comm is not supported for this dist-attn solver"
+
         self.cp_rank = dist.get_rank(cp_group)
         self.cp_size = dist.get_world_size(cp_group)
         self.cp_group = cp_group
         self.cp_mesh = cp_mesh
         self.deterministic = magi_attention.is_deterministic_mode_enable()
-
-        assert (
-            not magi_attention.comm.is_qo_comm_enable()
-        ), "QO comm is not supported for this dist-attn solver"
-
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
 
@@ -91,8 +135,16 @@ class DistAttnSolver:
         self.overlap_chunk_size: int = -1
         self.overlap_num_chunks: int = -1
 
-        # init host / remote q/k ranges global for this rank
+        self._is_solved = False
+
+    def solve(
+        self,
+        bucket_per_rank: list[AttnBucket],
+        dispatch_meta_q: DispatchMeta,
+        dispatch_meta_k: DispatchMeta,
+    ) -> None:
         bucket_this_rank = bucket_per_rank[self.cp_rank]
+        # init host / remote q/k ranges global for this rank
         (
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
@@ -137,6 +189,12 @@ class DistAttnSolver:
         ] = self._init_transfer_table_per_stage(
             self.remote_rank_entry_per_rank_per_stage,
         )
+
+        self._is_solved = True
+
+    @property
+    def is_solved(self) -> bool:
+        return self._is_solved
 
     @nvtx.instrument_nvtx
     def _init_host_remote_ranges_global_this_rank(
@@ -1546,30 +1604,6 @@ class DistAttnSolver:
         )
 
         return attn_calc_meta
-
-    def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, DistAttnSolver):
-            return False
-
-        for key in self.__dict__:
-            self_val = getattr(self, key)
-            other_val = getattr(other, key, object())
-
-            if isinstance(self_val, dist.ProcessGroup) or isinstance(
-                other_val, dist.ProcessGroup
-            ):
-                if not is_same_process_group(self_val, other_val):
-                    return False
-
-            elif isinstance(self_val, DeviceMesh) or isinstance(other_val, DeviceMesh):
-                if not is_same_device_mesh(self_val, other_val):
-                    return False
-
-            else:
-                if self_val != other_val:
-                    return False
-
-        return True
 
     def __repr__(self, title_len: int = 50) -> str:  # pragma: no cover
         repr_contents = []

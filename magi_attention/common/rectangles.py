@@ -100,27 +100,27 @@ class AttnRectangles:
             for i in mask_types
         ]
 
-        if len(attn_q_ranges) != len(attn_k_ranges) or len(attn_q_ranges) != len(
-            attn_mask_type
-        ):
-            raise ValueError("q_ranges, k_ranges, mask_types length should be equal")
+        assert (
+            len(attn_q_ranges) == len(attn_k_ranges) == len(attn_mask_type)
+        ), "q_ranges, k_ranges, mask_types length should be equal"
 
-        rects_len = len(attn_mask_type)
         attn_rects = AttnRectangles()
-
         _rects = []
-        for i in range(rects_len):
-            # remove bi_causal invalid mask area
-            if (
-                attn_mask_type[i] == AttnMaskType.BICAUSAL
-                and attn_q_ranges[i].seqlen > attn_k_ranges[i].seqlen
-            ):
+        for q_range, k_range, mask_type in zip(
+            attn_q_ranges, attn_k_ranges, attn_mask_type
+        ):
+            # remove empty ranges
+            if q_range.is_empty() or k_range.is_empty():
                 continue
+            # remove bi_causal invalid mask area
+            if mask_type is AttnMaskType.BICAUSAL and q_range.seqlen > k_range.seqlen:
+                continue
+
             _rects.append(
                 AttnRectangle(
-                    q_range=attn_q_ranges[i],
-                    k_range=attn_k_ranges[i],
-                    mask_type=attn_mask_type[i],
+                    q_range=q_range,
+                    k_range=k_range,
+                    mask_type=mask_type,
                 )
             )
 

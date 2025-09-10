@@ -34,10 +34,7 @@ from magi_attention.config import (
     UniformOverlapAlg,
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
-from magi_attention.meta.solver.dispatch_solver import (
-    MinHeapDispatchAlg,
-    SequentialDispatchAlg,
-)
+from magi_attention.meta.solver.dispatch_solver import MinHeapDispatchAlg
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import (
     NAME,
@@ -381,7 +378,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         #   2. profile real comm/calc factors
         "overlap_config",
         [
-            # disable multi-stage overlap to roll back to the original code
+            # disable multi-stage overlap
             {
                 NAME: "disable_mso",
                 "enable": False,
@@ -475,9 +472,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         random_type_mapping: bool,
         run_bwd: bool = True,
     ):
-        # TODO: align it to dist attn config and runtime mgr
-        use_dynamic_attn_solver = magi_attention.comm.is_qo_comm_enable()
-
         # -----    switch mode   ---- #
 
         if self.profile_mode:  # [start_iter, end_iter)
@@ -502,8 +496,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         # -----    skip for mso   ---- #
 
-        if use_dynamic_attn_solver:
-            # TODO: support mso for dynamic attn solver
+        if magi_attention.comm.is_qo_comm_enable():
+            # TODO: support mso for qo comm
             if overlap_config[NAME] != "disable_mso":
                 return
 
@@ -550,11 +544,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         num_heads_q, num_heads_kv = num_heads
 
         dist_attn_config = DistAttnConfig(
-            # TODO: test other dispatch algs
             dispatch_config=DispatchConfig(
+                # TODO: test other dispatch algs
                 alg=MinHeapDispatchAlg()
-                if not use_dynamic_attn_solver
-                else SequentialDispatchAlg()
             ),
             overlap_config=OverlapConfig(
                 **{
@@ -623,7 +615,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 cp_mesh=self.device_mesh,
                 num_heads_q=num_heads_q,
                 num_heads_kv=num_heads_kv,
-                use_dynamic_attn_solver=use_dynamic_attn_solver,
             )
             # HACK: seperate cp group for group-reduce
             dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]

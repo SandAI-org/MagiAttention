@@ -15,51 +15,98 @@
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
+import magi_attention
+from magi_attention.common import AttnRanges
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.meta.algorithms import GRGDynamicAttnAlgorithm
 from magi_attention.meta.collection.calc_meta import AttnCalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.collection.dispatch_meta import DispatchMeta
 from magi_attention.meta.container.bucket import AttnBucket
-from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
+from magi_attention.meta.solver.dist_attn_solver import (
+    BaseDistAttnSolver,
+    DistAttnSolver,
+)
+from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.meta.solver.overlap_solver import OverlapConfig
 
 
 def calc_attn_meta_from_dispatch_meta(
+    q_ranges: AttnRanges,
+    k_ranges: AttnRanges,
+    attn_mask_type: AttnMaskType | list[AttnMaskType],
     dispatch_meta_q: DispatchMeta,
     dispatch_meta_k: DispatchMeta,
     bucket_per_rank: list[AttnBucket],
     cp_group: dist.ProcessGroup,
     overlap_config: OverlapConfig,
     cp_mesh: DeviceMesh | None = None,
-) -> tuple[CommMeta, AttnCalcMeta, DistAttnSolver]:
+    num_heads_q: int = 1,
+    num_heads_kv: int = 1,
+) -> tuple[CommMeta, AttnCalcMeta, BaseDistAttnSolver]:
     """Calculate the communication and calculation meta from the dispatch meta
 
     Args:
+        q_ranges (AttnRanges): global query ranges in the ref attn mask
+        k_ranges (AttnRanges): global key ranges in the ref attn mask
+        attn_mask_type (AttnMaskType | list[AttnMaskType]): attn mask type (list)
+
         dispatch_meta_q (DispatchMeta): The dispatch meta for query
         dispatch_meta_k (DispatchMeta): The dispatch meta for key
+
         bucket_per_rank (list[AttnBucket]): The bucket per rank
+
         cp_group (dist.ProcessGroup): The NCCL process group
+
         overlap_config (OverlapConfig): The overlap config, including the overlap mode, overlap degree, overlap chunk size, etc
-        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now.
+
+        cp_mesh (DeviceMesh): process mesh, only support 1D or 2D mesh for now
+
+        num_heads_q (int): number of heads of query. Default: 1
+        num_heads_kv (int): number of heads of key/value. Default: 1
 
     Returns:
-        tuple[CommMeta, AttnCalcMeta]: The communication and calculation meta
+        tuple[CommMeta, AttnCalcMeta, BaseDistAttnSolver]:
+            the communication meta, calculation meta and the attn solver
     """
 
-    attn_solver = DistAttnSolver(
-        bucket_per_rank=bucket_per_rank,
-        dispatch_meta_q=dispatch_meta_q,
-        dispatch_meta_k=dispatch_meta_k,
-        cp_group=cp_group,
-        overlap_config=overlap_config,
-        cp_mesh=cp_mesh,
-    )
+    # NOTE: for now, we use dynamic attn solver when and only when enabling qo comm
+    # however, we will unify the static/dynamic attn solver in the future
+    attn_solver: BaseDistAttnSolver
+    if magi_attention.comm.is_qo_comm_enable():
+        attn_solver = DynamicAttnSolver(
+            algorithm=GRGDynamicAttnAlgorithm(),
+            dispatch_meta_q=dispatch_meta_q,
+            dispatch_meta_k=dispatch_meta_k,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            cp_mesh=cp_mesh,
+        )
+        attn_solver.solve(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            mask_types=attn_mask_type,
+        )
+        # attn_solver.output_solve_result()
+    else:
+        attn_solver = DistAttnSolver(
+            cp_group=cp_group,
+            overlap_config=overlap_config,
+            cp_mesh=cp_mesh,
+        )
+        attn_solver.solve(
+            bucket_per_rank=bucket_per_rank,
+            dispatch_meta_q=dispatch_meta_q,
+            dispatch_meta_k=dispatch_meta_k,
+        )
 
+    assert attn_solver.is_solved
     comm_meta = attn_solver.calc_comm_meta()
     calc_meta = attn_solver.calc_attn_calc_meta()
 
     assert comm_meta.overlap_degree == calc_meta.overlap_degree, (
         "The overlap degree is inconsistent between "
-        f"comm meta ({comm_meta.overlap_degree}) and calc meta ({calc_meta.overlap_degree})."
+        f"comm meta ({comm_meta.overlap_degree=}) and calc meta ({calc_meta.overlap_degree=})."
     )
 
     return comm_meta, calc_meta, attn_solver

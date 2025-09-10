@@ -14,9 +14,9 @@
 
 from typing import Union
 
-# import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
+import magi_attention
 from magi_attention.common import AttnRange, AttnRanges, AttnRectangles
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.meta.algorithms import DynamicAttnAlgorithm
@@ -25,10 +25,10 @@ from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveAr
 from magi_attention.meta.collection.dispatch_meta import DispatchMeta
 from magi_attention.utils import nvtx
 
-# from magi_attention.meta.collection.dispatch_meta import DispatchMeta
+from .dist_attn_solver import BaseDistAttnSolver
 
 
-class DynamicAttnSolver:
+class DynamicAttnSolver(BaseDistAttnSolver):
     """The dynamic-attn solver class to process dispatch meta for calc/comm meta"""
 
     def __init__(
@@ -44,19 +44,13 @@ class DynamicAttnSolver:
         num_heads_kv: int = 1,
         cp_rank: int | None = None,
         cp_size: int | None = None,
-        # cp_group: dist.ProcessGroup,
         cp_mesh: DeviceMesh | None = None,
-        deterministic: bool = False,
+        calc_local_range: bool = True,
     ):
         self.algorithm = algorithm
-
-        # for dispatch solver
-        # self.cp_rank = dist.get_rank(cp_group)
-        # self.cp_size = dist.get_world_size(cp_group)
-        # self.cp_group = cp_group
         self.cp_mesh = cp_mesh
-
-        self.deterministic = deterministic
+        self.deterministic = magi_attention.is_deterministic_mode_enable()
+        self.calc_local_range = calc_local_range
 
         # Prefer values from dispatch meta if provided
         if dispatch_meta_q is not None and dispatch_meta_k is not None:
@@ -91,6 +85,8 @@ class DynamicAttnSolver:
 
         self.bucket_per_rank = [AttnRectangles() for _ in range(self.cp_size)]
 
+        self._is_solved = False
+
     def solve(
         self,
         q_ranges: AttnRanges,
@@ -113,6 +109,12 @@ class DynamicAttnSolver:
         )
 
         self.calc_host_and_remote_bucket_this_rank()
+
+        self._is_solved = True
+
+    @property
+    def is_solved(self) -> bool:
+        return self._is_solved
 
     def output_solve_result(self) -> None:
         for rank in range(self.cp_size):
@@ -294,10 +296,7 @@ class DynamicAttnSolver:
         return group_collective_arg
 
     @nvtx.instrument_nvtx
-    def calc_comm_meta(
-        self,
-        calc_local_range: bool = True,
-    ) -> CommMeta:
+    def calc_comm_meta(self) -> CommMeta:
         """Calculate communication meta for kv and qo group collective"""
 
         num_remote_kv_tokens_per_stage: list[int] = []
@@ -305,7 +304,7 @@ class DynamicAttnSolver:
 
         kv_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
             calc_kv=True,
-            calc_local_range=calc_local_range,
+            calc_local_range=self.calc_local_range,
         )
         kv_group_collective_args_list.append(kv_group_collective_arg)
         num_remote_kv_tokens_per_stage.append(
@@ -317,7 +316,7 @@ class DynamicAttnSolver:
 
         qo_group_collective_arg: GroupCollectiveArg = self._calc_group_collective_arg(
             calc_kv=False,
-            calc_local_range=calc_local_range,
+            calc_local_range=self.calc_local_range,
         )
         qo_group_collective_args_list.append(qo_group_collective_arg)
         num_remote_qo_tokens_per_stage.append(
@@ -386,7 +385,6 @@ class DynamicAttnSolver:
     @nvtx.instrument_nvtx
     def calc_attn_calc_meta(
         self,
-        calc_local_range: bool = True,
     ) -> AttnCalcMeta:
         """Calculate flex-flash-attention calculation meta for this rank"""
         local_attn_arg_q_ranges = AttnRanges()
@@ -414,7 +412,7 @@ class DynamicAttnSolver:
                 remote_attn_arg_attn_type_map.append(mask_type)
             remote_attn_arg_total_area += rect.area()
 
-        if calc_local_range:
+        if self.calc_local_range:
             local_attn_arg_q_ranges = self.host_q_ranges_global.make_ranges_local(
                 local_attn_arg_q_ranges
             )

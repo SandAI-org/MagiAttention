@@ -26,11 +26,8 @@ from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeDict,
     DistAttnRuntimeKey,
     DistAttnRuntimeMgr,
-)
-from magi_attention.functional.dist_attn import DistAttnRuntime
-from magi_attention.meta import (
-    calc_attn_meta_from_dispatch_meta,
-    calc_dispatch_meta_from_qk_ranges,
+    init_dist_attn_runtime_key,
+    init_dist_attn_runtime_mgr,
 )
 from magi_attention.utils import wrap_to_list
 from magi_attention.utils._utils import is_list_type_all
@@ -389,10 +386,10 @@ def magi_attn_flex_key(
         total_seqlen_k += pad_size
 
     # init dist attn runtime key
-    key = DistAttnRuntimeKey(
+    key = init_dist_attn_runtime_key(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
-        attn_mask_type=tuple(attn_mask_type),
+        attn_mask_type=attn_mask_type,
         total_seqlen_q=total_seqlen_q,
         total_seqlen_k=total_seqlen_k,
         pad_size=pad_size,
@@ -400,65 +397,24 @@ def magi_attn_flex_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
-        is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
-        is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
-        is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
     )
 
-    # Validate sequence length
-    cp_size = dist.get_world_size(cp_group)
-    cp_rank = dist.get_rank(cp_group)
-
-    q_dispatch_meta, k_dispatch_meta, attn_buckets = calc_dispatch_meta_from_qk_ranges(
-        q_ranges=q_ranges,
-        k_ranges=k_ranges,
-        attn_mask_type=attn_mask_type,
-        total_seqlen_q=total_seqlen_q,
-        total_seqlen_k=total_seqlen_k,
-        chunk_size=chunk_size,
-        cp_size=cp_size,
-        cp_rank=cp_rank,
-        dispatch_config=dist_attn_config.dispatch_config,
-        is_same_source=is_same_source,
-        is_q_permutable=is_q_permutable,
-        is_k_permutable=is_k_permutable,
-    )
-
+    # init dist attn runtime mgr and map it to the key
     if key not in dist_attn_runtime_dict.keys():
-        # calculate dist attn runtime key
-        comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
-            dispatch_meta_q=q_dispatch_meta,
-            dispatch_meta_k=k_dispatch_meta,
-            bucket_per_rank=attn_buckets,
+        dist_attn_runtime_dict[key] = init_dist_attn_runtime_mgr(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            chunk_size=chunk_size,
             cp_group=cp_group,
-            cp_mesh=cp_mesh,
-            overlap_config=dist_attn_config.overlap_config,
-        )
-
-        dist_attn_runtime = DistAttnRuntime(
-            comm_meta=comm_meta,
-            calc_meta=attn_calc_meta,
-            cp_group_gc=cp_group,
-            cp_group_gr=cp_group,  # TODO: support interface to set distinct cp group for group-reduce
-        )
-
-        # generate DistAttnRuntimeMgr
-        value = DistAttnRuntimeMgr(
-            cp_group,
-            q_dispatch_meta,
-            k_dispatch_meta,
-            chunk_size,
-            dist_attn_config,
-            attn_solver,
-            dist_attn_runtime,
-            ref_q_ranges=q_ranges,
-            ref_k_ranges=k_ranges,
             is_same_source=is_same_source,
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
+            dist_attn_config=dist_attn_config,
+            cp_mesh=cp_mesh,
         )
-
-        dist_attn_runtime_dict[key] = value
 
     return key
 

@@ -21,6 +21,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
+import magi_attention
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType, AttnRole
 from magi_attention.config import DistAttnConfig
@@ -30,14 +31,12 @@ from magi_attention.meta import (
     calc_attn_meta_from_dispatch_meta,
     calc_dispatch_meta_from_qk_ranges,
 )
-from magi_attention.meta.algorithms import (
-    GRGDynamicAttnAlgorithm,
-    NCQDynamicAttnAlgorithm,
-)
 from magi_attention.meta.collection import DispatchMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
-from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
-from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
+from magi_attention.meta.solver.dist_attn_solver import (
+    BaseDistAttnSolver,
+    DistAttnSolver,
+)
 from magi_attention.utils import is_list_value_all, is_same_process_group, wrap_to_list
 
 
@@ -66,7 +65,7 @@ class DistAttnRuntimeMgr:
         k_dispatch_meta: DispatchMeta,
         chunk_size: int,
         dist_attn_config: DistAttnConfig,
-        attn_solver: DistAttnSolver | DynamicAttnSolver,
+        attn_solver: BaseDistAttnSolver,
         dist_attn_runtime: DistAttnRuntime,
         *,
         ref_q_ranges: AttnRanges,
@@ -151,6 +150,9 @@ class DistAttnRuntimeMgr:
         Returns:
             attn_arg(AttnArg): The attn arg for cross attention
         """
+        assert isinstance(
+            self.attn_solver, DistAttnSolver
+        ), "Only supports ``DistAttnSolver`` for cross-attn by now."
 
         attn_mask_type = wrap_to_list(attn_mask_type)
         assert is_list_value_all(
@@ -308,6 +310,35 @@ class DistAttnRuntimeDict(OrderedDict):
         return next(reversed(self.keys()))
 
 
+def init_dist_attn_runtime_key(
+    q_ranges: AttnRanges,
+    k_ranges: AttnRanges,
+    attn_mask_type: list[AttnMaskType],
+    total_seqlen_q: int,
+    total_seqlen_k: int,
+    pad_size: int,
+    chunk_size: int,
+    cp_group: dist.ProcessGroup,
+    cp_mesh: DeviceMesh | None,
+    dist_attn_config: DistAttnConfig,
+) -> DistAttnRuntimeKey:
+    return DistAttnRuntimeKey(
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=tuple(attn_mask_type),
+        total_seqlen_q=total_seqlen_q,
+        total_seqlen_k=total_seqlen_k,
+        pad_size=pad_size,
+        chunk_size=chunk_size,
+        cp_group=cp_group,
+        cp_mesh=cp_mesh,
+        dist_attn_config=dist_attn_config,
+        is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
+        is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
+        is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
+    )
+
+
 def init_dist_attn_runtime_mgr(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
@@ -323,8 +354,6 @@ def init_dist_attn_runtime_mgr(
     cp_mesh: DeviceMesh | None = None,
     num_heads_q: int = 1,
     num_heads_kv: int = 1,
-    use_dynamic_attn_solver: bool = False,
-    use_grg_dynamic_alg: bool = True,
 ) -> DistAttnRuntimeMgr:
     """
 
@@ -360,9 +389,6 @@ def init_dist_attn_runtime_mgr(
 
         num_heads_q (int): number of heads of query. Default: 1
         num_heads_kv (int): number of heads of key/value. Default: 1
-
-        use_dynamic_attn_solver (bool): whether to use dynamic attn solver. Default: False
-        use_grg_dynamic_alg (bool): whether to use grg dynamic alg. Default: True
 
     Returns:
         DistAttnRuntimeMgr: dist attn runtime mgr
@@ -406,6 +432,7 @@ def init_dist_attn_runtime_mgr(
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
 
+    # calculate dispatch meta to determine which rank should hold which chunks of seqlen
     q_dispatch_meta, k_dispatch_meta, attn_buckets = calc_dispatch_meta_from_qk_ranges(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -421,36 +448,22 @@ def init_dist_attn_runtime_mgr(
         is_k_permutable=is_k_permutable,
     )
 
-    if use_dynamic_attn_solver:
-        dynamic_attn_solver = DynamicAttnSolver(
-            algorithm=GRGDynamicAttnAlgorithm()
-            if use_grg_dynamic_alg
-            else NCQDynamicAttnAlgorithm(),
-            dispatch_meta_q=q_dispatch_meta,
-            dispatch_meta_k=k_dispatch_meta,
-            num_heads_q=num_heads_q,
-            num_heads_kv=num_heads_kv,
-            cp_mesh=cp_mesh,
-            deterministic=False,
-        )
-        dynamic_attn_solver.solve(
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            mask_types=attn_mask_type,
-        )
-        # dynamic_attn_solver.output_solve_result()
-        comm_meta = dynamic_attn_solver.calc_comm_meta()
-        attn_calc_meta = dynamic_attn_solver.calc_attn_calc_meta()
-    else:
-        comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
-            dispatch_meta_q=q_dispatch_meta,
-            dispatch_meta_k=k_dispatch_meta,
-            bucket_per_rank=attn_buckets,
-            cp_group=cp_group,
-            overlap_config=dist_attn_config.overlap_config,
-            cp_mesh=cp_mesh,
-        )
+    # calculate comm meta and calc meta to organize the dist-attn calculation and communication
+    comm_meta, attn_calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        dispatch_meta_q=q_dispatch_meta,
+        dispatch_meta_k=k_dispatch_meta,
+        bucket_per_rank=attn_buckets,
+        cp_group=cp_group,
+        overlap_config=dist_attn_config.overlap_config,
+        cp_mesh=cp_mesh,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
+    )
 
+    # init dist attn runtime
     dist_attn_runtime = DistAttnRuntime(
         comm_meta=comm_meta,
         calc_meta=attn_calc_meta,
@@ -458,13 +471,14 @@ def init_dist_attn_runtime_mgr(
         cp_group_gr=cp_group,  # TODO: support interface to set distinct cp group for group-reduce
     )
 
-    return DistAttnRuntimeMgr(
+    # init dist attn runtime mgr
+    dist_attn_runtime_mgr = DistAttnRuntimeMgr(
         cp_group,
         q_dispatch_meta,
         k_dispatch_meta,
         chunk_size,
         dist_attn_config,
-        dynamic_attn_solver if use_dynamic_attn_solver else attn_solver,
+        attn_solver,
         dist_attn_runtime,
         ref_q_ranges=q_ranges,
         ref_k_ranges=k_ranges,
@@ -472,3 +486,5 @@ def init_dist_attn_runtime_mgr(
         is_q_permutable=is_q_permutable,
         is_k_permutable=is_k_permutable,
     )
+
+    return dist_attn_runtime_mgr

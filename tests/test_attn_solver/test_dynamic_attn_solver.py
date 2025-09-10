@@ -160,6 +160,7 @@ class TestDynamicAttnSolver(DistTestBase):
                 num_heads_kv=num_heads_kv,
                 cp_rank=rank,
                 cp_size=cp_size,
+                calc_local_range=True,
             )
 
             # --------------      solve      -------------- #
@@ -225,9 +226,9 @@ class TestDynamicAttnSolver(DistTestBase):
 
             # --------------      test calc_local_range meta generation      -------------- #
 
-            attn_calc_meta = solver.calc_attn_calc_meta(calc_local_range=True)
+            attn_calc_meta = solver.calc_attn_calc_meta()
 
-            comm_meta = solver.calc_comm_meta(calc_local_range=True)
+            comm_meta = solver.calc_comm_meta()
 
             # --------------      verify local calc meta generation      -------------- #
 
