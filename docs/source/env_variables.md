@@ -21,6 +21,9 @@ Set the value of this env variable to control the number of SMs of the ffa forwa
 
 Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels. The default value is `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`.
 
+**CUDA_DEVICE_MAX_CONNECTIONS**
+
+This environment variable defines the number of hardware queues that CUDA streams can utilize. Increasing this value can improve the overlap of communication and computation, but may also increase PCIe traffic.
 
 **MAGI_ATTENTION_FFA_FORWARD_INPLACE_CORRECT**
 
@@ -74,14 +77,13 @@ Toggle this env variable to `1` to enable deterministic mode to use deterministi
 
 Specifies the base directory for the Magi Attention workspace, which includes cache and generated source files. If not set, it defaults to the user's home directory (`~`).
 
-
 **MAGI_ATTENTION_BUILD_VERBOSE**
 
-If set to `1`, it enables verbose output during the JIT compilation process, showing the full ninja build commands being executed. The default value is `0`.
+Toggle this env variable to `1` to enable verbose output during the JIT compilation process, showing the full ninja build commands being executed. The default value is `0`.
 
 **MAGI_ATTENTION_BUILD_DEBUG**
 
-If set to `1`, it enables debug flags for the C++/CUDA compiler. This includes options like `-g` (debugging symbols) and other flags to get more detailed information, such as register usage. The default value is `0`.
+Toggle this env variable to `1` to enable debug flags for the C++/CUDA compiler. This includes options like `-g` (debugging symbols) and other flags to get more detailed information, such as register usage. The default value is `0`.
 
 **NVCC_THREADS**
 
