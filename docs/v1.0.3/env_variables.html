@@ -412,6 +412,8 @@
 <p>Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels. The default value is <code class="docutils literal notranslate"><span class="pre">4</span></code> if <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code>, otherwise <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <p><strong>MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN</strong></p>
 <p>Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels. The default value is <code class="docutils literal notranslate"><span class="pre">4</span></code> if <code class="docutils literal notranslate"><span class="pre">CUDA_DEVICE_MAX_CONNECTIONS</span></code> &gt; <code class="docutils literal notranslate"><span class="pre">1</span></code>, otherwise <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<p><strong>CUDA_DEVICE_MAX_CONNECTIONS</strong></p>
+<p>This environment variable defines the number of hardware queues that CUDA streams can utilize. Increasing this value can improve the overlap of communication and computation, but may also increase PCIe traffic.</p>
 <p><strong>MAGI_ATTENTION_FFA_FORWARD_INPLACE_CORRECT</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable inplace-correct for out and lse in ffa forward to avoid the storage of partial results and the memory-bound <code class="docutils literal notranslate"><span class="pre">correct_attn_fwd_result</span></code> as a forward post process. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
@@ -447,6 +449,19 @@ However, by default we will downcast it to kv dtype before reducing among ranks 
 </section>
 <section id="for-build">
 <h2>For Build<a class="headerlink" href="#for-build" title="Link to this heading">#</a></h2>
+<section id="jit">
+<h3>JIT<a class="headerlink" href="#jit" title="Link to this heading">#</a></h3>
+<p><strong>MAGI_ATTENTION_WORKSPACE_BASE</strong></p>
+<p>Specifies the base directory for the Magi Attention workspace, which includes cache and generated source files. If not set, it defaults to the user’s home directory (<code class="docutils literal notranslate"><span class="pre">~</span></code>).</p>
+<p><strong>MAGI_ATTENTION_BUILD_VERBOSE</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable verbose output during the JIT compilation process, showing the full ninja build commands being executed. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<p><strong>MAGI_ATTENTION_BUILD_DEBUG</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable debug flags for the C++/CUDA compiler. This includes options like <code class="docutils literal notranslate"><span class="pre">-g</span></code> (debugging symbols) and other flags to get more detailed information, such as register usage. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<p><strong>NVCC_THREADS</strong></p>
+<p>Sets the number of threads for <code class="docutils literal notranslate"><span class="pre">nvcc</span></code>’s <code class="docutils literal notranslate"><span class="pre">--split-compile</span></code> option, which can speed up the JIT compilation of CUDA kernels. The default value is <code class="docutils literal notranslate"><span class="pre">4</span></code>.</p>
+</section>
+<section id="aot">
+<h3>AOT<a class="headerlink" href="#aot" title="Link to this heading">#</a></h3>
 <p><strong>MAGI_ATTENTION_PREBUILD_FFA</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can enable pre-build ffa kernels for some common options with <code class="docutils literal notranslate"><span class="pre">ref_block_size=None</span></code> and leave others built in jit mode. The default value is <code class="docutils literal notranslate"><span class="pre">1</span></code>.</p>
 <p><strong>MAGI_ATTENTION_PREBUILD_FFA_JOBS</strong></p>
@@ -455,6 +470,7 @@ However, by default we will downcast it to kv dtype before reducing among ranks 
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">flexible_flash_attention_utils_cuda</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">magi_attn_ext</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+</section>
 </section>
 </section>
 
@@ -483,7 +499,11 @@ However, by default we will downcast it to kv dtype before reducing among ranks 
     <ul class="visible nav section-nav flex-column">
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-performance">For Performance</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-debug">For Debug</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-build">For Build</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-build">For Build</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#jit">JIT</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#aot">AOT</a></li>
+</ul>
+</li>
 </ul>
   </nav></div>
 
