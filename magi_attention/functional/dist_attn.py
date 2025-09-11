@@ -176,16 +176,19 @@ class DistAttnRuntime:
             lse_acc: [num_tokens_q, num_heads_q]
         """
 
+        is_host_stage = self.is_host_stage(overlap_stage)
+
         # fetch attn arg
-        if overlap_stage is None:
+        if is_host_stage:
             attn_arg = self.calc_meta.local_attn_arg
         else:
-            attn_arg = self.calc_meta.remote_attn_args_list[overlap_stage]
+            curr_remote_stage = self.get_curr_remote_stage(overlap_stage)
+            attn_arg = self.calc_meta.remote_attn_args_list[curr_remote_stage]
 
         # skipped case
         if attn_arg.can_skip(is_bwd=False):
             partial_out, partial_lse = None, None
-            if overlap_stage is None:
+            if is_host_stage:
                 hp_init_dtype = max_fp_dtype(q.dtype, torch.float32)
                 # NOTE: we can NOT use empty_like here,
                 # since when all attn computations are skipped for certain q range
@@ -245,7 +248,7 @@ class DistAttnRuntime:
                 )
 
         # maybe downcast out to q dtype for the host stage
-        if overlap_stage is None and self.fwd_local_out_lp_init:
+        if is_host_stage and self.fwd_local_out_lp_init:
             partial_out = partial_out.to(q.dtype)
 
         return partial_out, partial_lse
@@ -269,29 +272,26 @@ class DistAttnRuntime:
             curr_q (torch.Tensor): current q
             curr_kv (torch.Tensor): current kv
         """
-        next_stage = 0 if overlap_stage is None else overlap_stage + 1
-        is_host_stage = overlap_stage is None
-        is_last_remote_stage = next_stage == self.overlap_degree
+        next_stage = self.get_next_stage(overlap_stage)
+        is_host_stage = self.is_host_stage(overlap_stage)
+        is_last_remote_stage = self.is_last_remote_stage(overlap_stage)
 
         # wait for host/remote qkv prepared for current stage
         if is_host_stage:
             curr_q = local_q
             curr_kv = local_kv
         else:
+            curr_remote_stage = self.get_curr_remote_stage(overlap_stage)
             (
                 remote_q_work,
                 remote_q_buffer,
-            ) = self.remote_q_work_with_buffer_per_stage[
-                overlap_stage  # type: ignore[index]
-            ]  # type: ignore[index]
+            ) = self.remote_q_work_with_buffer_per_stage[curr_remote_stage]
             curr_q = remote_q_work.wait_post_process(remote_q_buffer)
 
             (
                 remote_kv_work,
                 remote_kv_buffer,
-            ) = self.remote_kv_work_with_buffer_per_stage[
-                overlap_stage  # type: ignore[index]
-            ]
+            ) = self.remote_kv_work_with_buffer_per_stage[curr_remote_stage]
             curr_kv = remote_kv_work.wait_post_process(remote_kv_buffer)
 
         # pre-fetch remote qkv for next stage(s)
@@ -432,16 +432,19 @@ class DistAttnRuntime:
             partial_dkv: [num_tokens_kv*2, num_heads_kv, head_dim]
         """
 
+        is_host_stage = self.is_host_stage(overlap_stage)
+
         # fetch attn arg
-        if overlap_stage is None:
+        if is_host_stage:
             attn_arg = self.calc_meta.local_attn_arg
         else:
-            attn_arg = self.calc_meta.remote_attn_args_list[overlap_stage]
+            curr_remote_stage = self.get_curr_remote_stage(overlap_stage)
+            attn_arg = self.calc_meta.remote_attn_args_list[curr_remote_stage]
 
         # skipped case
         if attn_arg.can_skip(is_bwd=True):
             partial_dq, partial_dkv = None, None
-            if overlap_stage is None:
+            if is_host_stage:
                 q, _, _ = self.maybe_chunk_qo_do(qo_do)
                 # NOTE: if local_dq and local_dkv calculation are skipped,
                 # we need to zeros initialize them since they might be reduced later
@@ -505,7 +508,7 @@ class DistAttnRuntime:
             )
 
         # maybe downcast dq,dkv to q,kv dtype for the host stage
-        if overlap_stage is None:
+        if is_host_stage:
             if self.bwd_local_dq_lp_init:
                 partial_dq = partial_dq.to(q.dtype)
 
@@ -536,9 +539,9 @@ class DistAttnRuntime:
             curr_kv (torch.Tensor): current kv
             curr_lse (torch.Tensor): current lse
         """
-        next_stage = 0 if overlap_stage is None else overlap_stage + 1
-        is_host_stage = overlap_stage is None
-        is_last_remote_stage = next_stage == self.overlap_degree
+        next_stage = self.get_next_stage(overlap_stage)
+        is_host_stage = self.is_host_stage(overlap_stage)
+        is_last_remote_stage = self.is_last_remote_stage(overlap_stage)
 
         # wait for host/remote qo_do,kv,lse prepared for current stage
         if is_host_stage:
@@ -546,28 +549,23 @@ class DistAttnRuntime:
             curr_kv = local_kv
             curr_lse = local_lse
         else:
+            curr_remote_stage = self.get_curr_remote_stage(overlap_stage)
             (
                 curr_remote_kv_work,
                 curr_remote_kv_buffer,
-            ) = self.remote_kv_work_with_buffer_per_stage[
-                overlap_stage  # type: ignore[index]
-            ]
+            ) = self.remote_kv_work_with_buffer_per_stage[curr_remote_stage]
             curr_kv = curr_remote_kv_work.wait_post_process(curr_remote_kv_buffer)
             (
                 curr_remote_qo_do_work,
                 curr_remote_qo_do_buffer,
-            ) = self.remote_qo_do_work_with_buffer_per_stage[
-                overlap_stage  # type: ignore[index]
-            ]
+            ) = self.remote_qo_do_work_with_buffer_per_stage[curr_remote_stage]
             curr_qo_do = curr_remote_qo_do_work.wait_post_process(
                 curr_remote_qo_do_buffer
             )
             (
                 curr_remote_lse_work,
                 curr_remote_lse_buffer,
-            ) = self.remote_lse_work_with_buffer_per_stage[
-                overlap_stage  # type: ignore[index]
-            ]
+            ) = self.remote_lse_work_with_buffer_per_stage[curr_remote_stage]
             curr_lse = curr_remote_lse_work.wait_post_process(curr_remote_lse_buffer)
 
         # pre-fetch remote qo_do,kv,lse for next stage(s)
@@ -762,6 +760,22 @@ class DistAttnRuntime:
         along the seqlen dim
         """
         return torch.chunk(qo_do, 3, dim=0) if self.concat_qo_do else qo_do
+
+    def is_host_stage(self, overlap_stage: int | None) -> bool:
+        return overlap_stage is None
+
+    def is_last_remote_stage(self, overlap_stage: int | None) -> bool:
+        return self.get_next_stage(overlap_stage) == self.overlap_degree
+
+    def get_next_stage(self, overlap_stage: int | None) -> int:
+        return 0 if overlap_stage is None else overlap_stage + 1
+
+    def get_curr_remote_stage(self, overlap_stage: int | None) -> int:
+        if overlap_stage is None:
+            raise ValueError(
+                "The overlap_stage is None, thus the current stage is the host stage."
+            )
+        return overlap_stage
 
     # ----------    internal API   --------- #
 

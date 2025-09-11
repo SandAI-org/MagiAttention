@@ -158,6 +158,11 @@ class CalcMeta:
     def overlap_degree(self) -> int:
         return len(self.remote_attn_args_list)
 
+    def __post_init__(self):
+        assert (
+            self.overlap_degree >= 1
+        ), f"Overlap degree must be >= 1, but got {self.overlap_degree=}"
+
     def __repr__(self) -> str:
         indent = ""
         repr_str = f"CalcMeta(overlap_degree={self.overlap_degree},\n"

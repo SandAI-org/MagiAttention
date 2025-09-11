@@ -337,6 +337,9 @@ class CommMeta:
             f"{len(self.num_remote_qo_tokens_per_stage)=}, "
             f"{len(self.qo_group_collective_args_list)=}, "
         )
+        assert (
+            self.overlap_degree >= 1
+        ), f"Overlap degree must be >= 1, but got {self.overlap_degree=}"
 
         # -----     init a2a-v based group collective args     ----- #
 
