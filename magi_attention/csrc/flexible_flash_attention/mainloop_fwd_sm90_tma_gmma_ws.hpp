@@ -337,8 +337,8 @@ struct CollectiveMainloopFwdSm90 {
 
     CUTLASS_DEVICE
     void prefetch() {
+      ++bidb;
       if constexpr (RangeMerge) {
-        ++bidb;
         if (!is_finish()) {
           seqlen_info.update_k(bidb);
           attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
@@ -1025,14 +1025,13 @@ struct CollectiveMainloopFwdSm90 {
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       n_block_min = block_meta.n_block_min;
       attn_type = block_meta.attn_type;
-      finish_boundary = [](){
-        if constexpr (RangeMerge){
+      finish_boundary = []() {
+        if constexpr (RangeMerge) {
           return false;
-        }
-        else {
+        } else {
           return true;
         }
-      }
+      }();
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
     cutlass::arch::NamedBarrier::arrive(

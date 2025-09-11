@@ -30,8 +30,9 @@ import dataclasses
 import importlib.machinery
 import logging
 import os
+import warnings
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from filelock import FileLock
 from torch.utils.cpp_extension import _import_module_from_library
@@ -85,7 +86,8 @@ class JitSpec:
     extra_cuda_cflags: Optional[List[str]]
     extra_ldflags: Optional[List[str]]
     extra_include_dirs: Optional[List[str]]
-    is_class: bool = False
+    extra_objects_cb: Optional[Callable[[], list[str]]]
+    extra_objects: Optional[list[str]] = None
     needs_device_linking: bool = False
 
     def __repr__(self):
@@ -109,7 +111,6 @@ class JitSpec:
             f"  extra_cuda_cflags={_fmt_list(self.extra_cuda_cflags, indent='  ')},\n"
             f"  extra_ldflags={_fmt_list(self.extra_ldflags, indent='  ')},\n"
             f"  extra_include_dirs={_fmt_list(self.extra_include_dirs, indent='  ')},\n"
-            f"  is_class={self.is_class},\n"
             f"  needs_device_linking={self.needs_device_linking}\n"
             ")"
         )
@@ -119,14 +120,14 @@ class JitSpec:
         return jit_env.MAGI_ATTENTION_JIT_DIR / self.name / "build.ninja"
 
     @property
-    def jit_library_path(self) -> Path:
+    def workspace_path(self) -> Path:
         return jit_env.MAGI_ATTENTION_JIT_DIR / self.name
 
     @property
     def aot_path(self) -> Path:
         return jit_env.MAGI_ATTENTION_AOT_DIR / self.name
 
-    def write_ninja(self) -> None:
+    def write_ninja_if_different(self) -> bool:
         ninja_path = self.ninja_path
         content = generate_ninja_build_for_op(
             name=self.name,
@@ -135,14 +136,28 @@ class JitSpec:
             extra_cuda_cflags=self.extra_cuda_cflags,
             extra_ldflags=self.extra_ldflags,
             extra_include_dirs=self.extra_include_dirs,
+            extra_objects=self.extra_objects,
             needs_device_linking=self.needs_device_linking,
         )
-        write_if_different(ninja_path, content)
+        is_write = write_if_different(ninja_path, content)
 
-    def build(self, verbose: bool) -> None:
+        if "common" in self.name and is_write:
+            warnings.warn(
+                f"{self.name} build.ninja file has been changed, and it is build for "
+                f"common files. Please check whether this behavior is correct."
+            )
+
+        return is_write
+
+    def build(self) -> None:
+        verbose = os.environ.get("MAGI_ATTENTION_BUILD_VERBOSE", "0") == "1"
         tmpdir = get_tmpdir()
+
+        if self.extra_objects_cb is not None:
+            self.extra_objects = self.extra_objects_cb()
+
         with FileLock(tmpdir / f"{self.name}.lock", thread_local=False):
-            self.write_ninja()
+            self.write_ninja_if_different()
             run_ninja(
                 jit_env.MAGI_ATTENTION_JIT_DIR / f"{self.name}",
                 self.ninja_path,
@@ -150,7 +165,6 @@ class JitSpec:
             )
 
     def build_and_load(self):
-        verbose = os.environ.get("MAGI_ATTENTION_BUILD_VERBOSE", "0") == "1"
         mod_name = self.name
 
         def _artifact_exists(lib_dir: Path, module_name: str) -> bool:
@@ -162,12 +176,23 @@ class JitSpec:
         if self.aot_path.exists() and _artifact_exists(self.aot_path, mod_name):
             lib_dir = self.aot_path
         else:
-            self.build(verbose)
-            lib_dir = self.jit_library_path
+            self.build()
+            lib_dir = self.workspace_path
 
         return _import_module_from_library(
             mod_name, str(lib_dir), is_python_module=True
         )
+
+    def build_and_get_objects(self) -> List[str]:
+        self.build()
+        objects = []
+
+        object_file_path = self.workspace_path
+
+        for common_obj in object_file_path.glob("*.o"):
+            objects.append(str(common_obj.resolve()))
+
+        return objects
 
 
 def gen_jit_spec(
@@ -177,6 +202,7 @@ def gen_jit_spec(
     extra_cuda_cflags: Optional[List[str]] = None,
     extra_ldflags: Optional[List[str]] = None,
     extra_include_paths: Optional[List[str]] = None,
+    extra_objects_cb: Optional[Callable[[], list[str]]] = None,
     needs_device_linking: bool = False,
 ) -> JitSpec:
     debug = os.environ.get("MAGI_ATTENTION_BUILD_DEBUG", "0") == "1"
@@ -217,6 +243,7 @@ def gen_jit_spec(
         extra_cuda_cflags=cuda_cflags,
         extra_ldflags=extra_ldflags,
         extra_include_dirs=extra_include_paths,
+        extra_objects_cb=extra_objects_cb,
         needs_device_linking=needs_device_linking,
     )
 
