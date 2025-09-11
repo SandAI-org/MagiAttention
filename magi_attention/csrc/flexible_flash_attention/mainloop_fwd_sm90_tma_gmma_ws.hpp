@@ -50,7 +50,8 @@ template <
     class ArchTag_,
     bool Has_softcap_,
     bool MmaPV_is_RS_,
-    bool IntraWGOverlap_>
+    bool IntraWGOverlap_,
+    bool SwapAB_>
 struct CollectiveMainloopFwdSm90 {
   static constexpr int kStages = Stages;
   using ClusterShape = ClusterShape_;
@@ -58,9 +59,15 @@ struct CollectiveMainloopFwdSm90 {
   // kBlockM, kBlockN, kHeadDim
   using TileShape_MNK = TileShape_MNK_;
 
+  static constexpr bool SwapAB = SwapAB_;
+
   // TileShapeMNK for mma qv: kBlockM, kBlockN, kHeadDim
   // (kBlockM, kHeadDim) @ (kHeadDim, kBlockN) -> (kBlockM, kBlockN)
   using TileShape_MNK_QV = Shape<decltype(get<0>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{})), decltype(get<2>(TileShape_MNK{}))>;
+
+  // (kBlockN, kHeadDim) @ (kHeadDim, kBlockM) -> (kBlockN, kBlockM)
+  using TileShape_MNK_SwapAB = Shape<decltype(get<2>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{})), decltype(get<0>(TileShape_MNK{}))>;
+
 
   // TileShapeMNK for mma pv: kBlockM, kHeadDim, kBlockN
   // (kBlockM, kBlockN) @ (kBlockN, kHeadDim) -> (kBlockM, kHeadDim)
@@ -104,6 +111,17 @@ struct CollectiveMainloopFwdSm90 {
           decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK>())>{},
       AtomLayoutQK{}));
 
+  using AtomLayoutQK_SwapAB = Layout<Shape<Int<kBlockN / 64>, _1, _1>>;
+  using TiledMmaQK_SwapAB = decltype(cute::make_tiled_mma(
+      std::conditional_t<
+          !MmaQK_is_RS,
+          decltype(cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK_SwapAB>()),
+          decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_SwapAB>())>{},
+      AtomLayoutQK_SwapAB{}));
+
+  // Use the active TiledMmaQK based on the SwapAB flag
+  using TiledMmaQK_Active = std::conditional_t<SwapAB, TiledMmaQK_SwapAB, TiledMmaQK>;
+
   // Atom layout for PV is the same as QK
   using AtomLayoutPV = AtomLayoutQK;
   using TiledMmaPV = decltype(cute::make_tiled_mma(
@@ -118,7 +136,7 @@ struct CollectiveMainloopFwdSm90 {
       decltype(cute::make_tiled_mma(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>(), AtomLayoutPV{}));
 
   // do pv must be larger than qk or not ?
-  static constexpr int NumMmaThreadsQK = size(TiledMmaQK{});
+  static constexpr int NumMmaThreadsQK = size(TiledMmaQK_Active{});
   static constexpr int NumMmaThreads = size(TiledMmaPV{});
   // use one warp to produce Q and KV
   static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp;
@@ -625,8 +643,8 @@ struct CollectiveMainloopFwdSm90 {
 
     if constexpr (!MmaQK_is_RS) {
       static_assert(
-          stride<0>(typename TiledMmaQK::ALayout{}) == 0 and stride<0>(typename TiledMmaQK::BLayout{}) == 0 and
-              size<0>(typename TiledMmaQK::ALayout{}) == cutlass::NumThreadsPerWarpGroup and size<0>(typename TiledMmaQK::BLayout{}) == cutlass::NumThreadsPerWarpGroup,
+          stride<0>(typename TiledMmaQK_Active::ALayout{}) == 0 and stride<0>(typename TiledMmaQK_Active::BLayout{}) == 0 and
+              size<0>(typename TiledMmaQK_Active::ALayout{}) == cutlass::NumThreadsPerWarpGroup and size<0>(typename TiledMmaQK_Active::BLayout{}) == cutlass::NumThreadsPerWarpGroup,
           "Stride of the first mode must be 0 and the size of the mode must be NumThreadsPerWarpGroup");
     }
     static constexpr int MmaWarpGroups = size(TiledMmaPV{}) / cutlass::NumThreadsPerWarpGroup;
@@ -635,17 +653,22 @@ struct CollectiveMainloopFwdSm90 {
     // Get the mma warp group index of the current thread, start from 0
     int warp_group_idx = __shfl_sync(0xFFFFFFFF, thread_idx / cutlass::NumThreadsPerWarpGroup, 0);
 
-    TiledMmaQK tiled_mma_qk;
+    TiledMmaQK_Active tiled_mma_qk;
+    TiledMmaQK tiled_mma_qk_original;
     TiledMmaPV tiled_mma_pv;
     auto wg_mma_qk = tiled_mma_qk.get_slice(warp_group_thread_layout(warp_group_idx));
     auto wg_mma_pv = tiled_mma_pv.get_slice(warp_group_thread_layout(warp_group_idx));
 
-    auto smem_tiled_copy_P = make_tiled_copy_C(SmemCopyAtomP{}, tiled_mma_qk);
+    auto smem_tiled_copy_P = make_tiled_copy_C(SmemCopyAtomP{}, tiled_mma_qk_original);
     auto smem_thr_copy_P = smem_tiled_copy_P.get_thread_slice(thread_idx);
 
     // Allocate "fragments/descriptors"
-    Tensor tSrQ = wg_mma_qk.partition_fragment_A(sQ);
-    Tensor tSrK = wg_mma_qk.partition_fragment_B(sK);
+    auto tSrQ = cute::conditional_return<!SwapAB>(
+        wg_mma_qk.partition_fragment_A(sQ),
+        wg_mma_qk.partition_fragment_B(sQ));
+    auto tSrK = cute::conditional_return<!SwapAB>(
+        wg_mma_qk.partition_fragment_B(sK),
+        wg_mma_qk.partition_fragment_A(sK));
     Tensor tOrV = wg_mma_pv.partition_fragment_B(sV);
     Tensor tOsP = wg_mma_pv.partition_fragment_A(sP);
     // if p is in registers, do we still need this step ?
@@ -695,27 +718,47 @@ struct CollectiveMainloopFwdSm90 {
     }
 
     if constexpr (IntraWGOverlap) {
-      Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
+      Tensor tSrS = cute::conditional_return<!SwapAB>(
+        partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{})),
+        partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK_SwapAB{})));
       consumer_wait(pipeline_k, smem_pipe_read);
 
-      // launch Q @ K of n_block and wait for it to finish
-      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
+      if constexpr (!SwapAB) {
+        // launch Q @ K of n_block and wait for it to finish
+        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
+      } else {
+        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrK(_, _, _, smem_pipe_read.index()), tSrQ, tSrS);
+      }
       warpgroup_wait<0>();
-
+      Tensor cS = cute::conditional_return<SwapAB>(
+        make_identity_tensor(Shape<Int<kBlockN>, Int<kBlockM>>{}),
+        make_identity_tensor(Shape<Int<kBlockM>, Int<kBlockN>>{}));
+      if (bidb == 0) {
+        auto thr_mma =  tiled_mma_qk.get_thread_slice(thread_idx);
+        Tensor tScS = thr_mma.partition_C(cS);
+        for (int i = 0; i < size(tSrS); ++i) {
+          if (int(get<0>(tScS(i))) >= 40 && int(get<0>(tScS(i))) < 44 && int(get<1>(tScS(i))) >= 40 && int(get<1>(tScS(i))) < 44) {
+            printf("SwapAB: %d bidb: %d m_block: %d tSrS(%d, %d) = %f\n", SwapAB, bidb, m_block, int(get<0>(tScS(i))), int(get<1>(tScS(i))), tSrS(i));
+          }
+        }
+      }
       // Signal that the current stage's K smem has been used up, can continue loading subsequent K
       pipeline_k.consumer_release(smem_pipe_read);
 
       // Apply score-modification-function(currently only support softcap) before mask
-      scoremod_premask_fn(tSrS);
+      // DEBUG note this
+      // scoremod_premask_fn(tSrS);
 
-      // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
-      //     printf("============================================ tSrS m_block: %d ==============================\n", m_block);
+      // if (bidb == 0 && bidh == 0 && thread_idx == 255 && m_block == 0) {
+      //     printf("============================================ tSrS SwapAB: %d ==============================\n", SwapAB);
       //     print_tensor(tSrS);
-      //     printf("============================================ tSrS m_block: %d ==============================\n", m_block);
+      //     printf("============================================ tSrS SwapAB: %d ==============================\n", SwapAB);
       // }
 
       // Apply mask
-      mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type);
+      // DEBUG note this
+      // mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type);
+
       // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
       //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
       //     print_tensor(tSrS);
@@ -723,6 +766,7 @@ struct CollectiveMainloopFwdSm90 {
       // }
 
       // Get row-max and row-sum of tSrS
+      // DEBUG note this
       if (!has_valid_tile) {
         cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true>(tSrS), scores_scale);
       } else {
@@ -736,6 +780,7 @@ struct CollectiveMainloopFwdSm90 {
       // Don't need to store scales to send to WG1 (in the case of LargeHeadDimV) since it's 1.f
 
       // Apply online softmax
+      // DEBUG note this
       if (!has_valid_tile) {
         softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
       } else {
@@ -744,6 +789,7 @@ struct CollectiveMainloopFwdSm90 {
         }
         softmax.template online_softmax</*Is_first=*/false, /*Check_inf=*/true>(tSrS);
       }
+
       // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
       //     printf("============================================ tSrS after online_softmax m_block: %d ==============================\n", m_block);
       //     print_tensor(tSrS);
@@ -785,7 +831,10 @@ struct CollectiveMainloopFwdSm90 {
         ++smem_pipe_read;
 
         // Partition the fragment C tensor into a new tensor tSrS, which is used to store the result of the Q@K matrix multiplication for n_block
-        Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
+        // Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
+        Tensor tSrS = cute::conditional_return<!SwapAB>(
+          partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{})),
+          partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK_SwapAB{})));
 
         // If UseSchedulerBarrier is not enabled, all threads need to call consumer_wait, otherwise only threads in the 0th mma warp group call consumer_wait
         if (!UseSchedulerBarrier || warp_group_idx == 0) {
@@ -795,8 +844,12 @@ struct CollectiveMainloopFwdSm90 {
         // Sync on the current mma warp group's named barrier, and wait for the previous mma warp group to finish
         warp_scheduler_barrier_sync();
 
-        // Do Q @ K of n_block
-        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
+        if constexpr (!SwapAB) {
+          // Do Q @ K of n_block
+          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read.index()), tSrS);
+        } else {
+          flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrK(_, _, _, smem_pipe_read.index()), tSrQ, tSrS);
+        }
         if constexpr (RescaleOBeforeGemm) {
           softmax.rescale_o(tOrO, scores_scale);
         }
@@ -820,10 +873,12 @@ struct CollectiveMainloopFwdSm90 {
         pipeline_k.consumer_release(smem_pipe_read);
 
         // Apply score-modification-function(currently only support softcap) before mask
-        scoremod_premask_fn(tSrS);
+        // DEBUG note this
+        // scoremod_premask_fn(tSrS);
 
         // Apply mask
-        mask_fn(tSrS, n_block);
+        // DEBUG note this
+        // mask_fn(tSrS, n_block);
 
         // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
         //     printf("============================================ tSrS fwd before online_softmax m_block: %d ==============================\n", m_block);
@@ -832,9 +887,11 @@ struct CollectiveMainloopFwdSm90 {
         // }
 
         // Get row-max and row-sum of tSrS
+        // DEBUG note this
         cute::copy(softmax.template max_get_scale</*Is_first=*/false, Check_inf>(tSrS), scores_scale);
 
         // Apply online softmax
+        // DEBUG note this
         softmax.template online_softmax</*Is_first=*/false, Check_inf>(tSrS);
         // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
         //     printf("============================================ tSrS fwd after online_softmax m_block: %d ==============================\n", m_block);

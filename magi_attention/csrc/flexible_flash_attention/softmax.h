@@ -105,7 +105,7 @@ __forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0>& tenso
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kNRows, int Max_offset = 0>
+template <int kNRows, int Max_offset = 0, bool SwapAB = false>
 struct Softmax {
   using TensorT = decltype(make_tensor<float>(Shape<Int<kNRows>>{}));
   TensorT row_max, row_sum;
@@ -116,7 +116,7 @@ struct Softmax {
   template <bool Is_first, bool Check_inf = false, typename Tensor0>
   __forceinline__ __device__ TensorT max_get_scale(Tensor0& acc_s) {
     // Reshape acc_s from ((2, 2, V), MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
-    Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
+    Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(acc_s.layout()));
     static_assert(CUTE_STATIC_V(size<0>(scores)) == kNRows);
     TensorT scores_scale;
     if constexpr (Is_first) {
@@ -139,7 +139,7 @@ struct Softmax {
   template <bool Is_first, bool Check_inf = false, typename Tensor0>
   __forceinline__ __device__ void online_softmax(Tensor0& acc_s) {
     // Reshape acc_s from ((2, 2, V), MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
-    Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
+    Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(acc_s.layout()));
     static_assert(CUTE_STATIC_V(size<0>(scores)) == kNRows);
     flash::template scale_apply_exp2</*Scale_max=*/true, Check_inf, Max_offset>(scores, row_max, softmax_scale_log2);
     // We don't do the reduce across threads here since we don't need to use the row_sum.
@@ -169,7 +169,7 @@ struct Softmax {
   template <typename Tensor1>
   __forceinline__ __device__ void rescale_o(Tensor1& acc_o, TensorT const& scores_scale) {
     // Reshape acc_o from (MMA=4, MMA_M, MMA_K) to (nrow=(2, MMA_M), ncol=(2, MMA_K))
-    Tensor acc_o_rowcol = make_tensor(acc_o.data(), flash::convert_layout_acc_rowcol(acc_o.layout()));
+    Tensor acc_o_rowcol = make_tensor(acc_o.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(acc_o.layout()));
     static_assert(CUTE_STATIC_V(size<0>(acc_o_rowcol)) == kNRows);
 #pragma unroll
     for (int mi = 0; mi < size<0>(acc_o_rowcol); ++mi) {

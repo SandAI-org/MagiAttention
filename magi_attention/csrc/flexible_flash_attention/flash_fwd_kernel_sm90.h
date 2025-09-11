@@ -56,6 +56,7 @@ class FlashAttnFwdSm90 {
   static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
   static constexpr int NumMmaThreadsQK = CollectiveMainloop::NumMmaThreadsQK;
   static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
+  static constexpr bool SwapAB = CollectiveMainloop::SwapAB;
 
   using SeqlenInfo_t = typename CollectiveMainloop::SeqlenInfo_t;
 
@@ -364,10 +365,12 @@ class FlashAttnFwdSm90 {
       ) {
         // If there's tanh softcap, the scaling will be done before tanh.
         float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
-        flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/0> softmax(softmax_scale_log2);
+        // TODO: support SwapAB
+        flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/0, /*SwapAB=*/false> softmax(softmax_scale_log2);
         typename flash::Softmax<
             2 * (2 * kBlockM / NumMmaThreads),
-            /*Max_offset=*/0>::TensorT scores_scale;
+            /*Max_offset=*/0,
+            /*SwapAB=*/false>::TensorT scores_scale;
         // Attention output (GEMM-II) accumulator.
         Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_MNK_PV{}));
         clear(tOrO);

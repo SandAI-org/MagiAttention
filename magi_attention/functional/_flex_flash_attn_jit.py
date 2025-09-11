@@ -70,6 +70,7 @@ def get_ffa_uri(
     disable_atomic_reduction: bool,
     kblock_m: int | None,
     kblock_n: int | None,
+    swap_ab: bool,
 ) -> str:
     def _dtype_name(dt: torch.dtype) -> str:
         return str(dt).split(".")[-1]
@@ -82,6 +83,7 @@ def get_ffa_uri(
         f"out_{_dtype_name(output_dtype)}_"
         f"{'softcap' if softcap else 'nosoftcap'}_"
         f"{'noatomic' if disable_atomic_reduction else 'atomic'}"
+        f"_{'swapab' if swap_ab else 'noswapab'}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -128,6 +130,7 @@ def get_ffa_jit_spec(
     softcap: bool,
     disable_atomic_reduction: bool,
     ref_block_size: tuple[int, int] | None = None,
+    swap_ab: bool = False,
 ) -> tuple[JitSpec, str]:
     sanity_check(arch, direction, head_dim, compute_dtype, output_dtype)
 
@@ -152,6 +155,7 @@ def get_ffa_jit_spec(
         disable_atomic_reduction,
         kblock_m,
         kblock_n,
+        swap_ab,
     )
 
     gen_directory = jit_env.MAGI_ATTENTION_GEN_SRC_DIR / uri
@@ -180,6 +184,7 @@ def get_ffa_jit_spec(
         disable_atomic=str(disable_atomic).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
+        swap_ab=str(swap_ab).lower(),
     )
 
     inst_cu = gen_directory / f"{direction}_inst.cu"
@@ -229,6 +234,7 @@ def get_ffa_jit_mod(
     softcap: bool,
     disable_atomic_reduction: bool,
     ref_block_size: tuple[int, int] | None = None,
+    swap_ab: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -243,6 +249,7 @@ def get_ffa_jit_mod(
         softcap,
         disable_atomic_reduction,
         ref_block_size,
+        swap_ab,
     )
 
     return spec.build_and_load()
