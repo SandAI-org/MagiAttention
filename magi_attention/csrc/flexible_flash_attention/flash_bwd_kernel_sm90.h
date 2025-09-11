@@ -229,6 +229,7 @@ class FlashAttnBwdSm90 {
         cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp,
                                           static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
 
+        CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler);
              work_tile_info.is_valid(params.scheduler);
              work_tile_info =
@@ -286,6 +287,7 @@ class FlashAttnBwdSm90 {
         mainloop.load_tail(pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do);
       } else if (warp_idx_in_warpgroup == 1) {
         int bidb_last = 0;
+        CUTLASS_PRAGMA_NO_UNROLL
         for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
              work_tile_info.is_valid(params.scheduler);
              work_tile_info =
