@@ -68,6 +68,27 @@ Toggle this env variable to `1` to enable deterministic mode to use deterministi
 
 ## For Build
 
+### JIT
+
+**MAGI_ATTENTION_WORKSPACE_BASE**
+
+Specifies the base directory for the Magi Attention workspace, which includes cache and generated source files. If not set, it defaults to the user's home directory (`~`).
+
+
+**MAGI_ATTENTION_BUILD_VERBOSE**
+
+If set to `1`, it enables verbose output during the JIT compilation process, showing the full ninja build commands being executed. The default value is `0`.
+
+**MAGI_ATTENTION_BUILD_DEBUG**
+
+If set to `1`, it enables debug flags for the C++/CUDA compiler. This includes options like `-g` (debugging symbols) and other flags to get more detailed information, such as register usage. The default value is `0`.
+
+**NVCC_THREADS**
+
+Sets the number of threads for `nvcc`'s `--split-compile` option, which can speed up the JIT compilation of CUDA kernels. The default value is `4`.
+
+### AOT
+
 **MAGI_ATTENTION_PREBUILD_FFA**
 
 Toggle this env variable to `1` can enable pre-build ffa kernels for some common options with `ref_block_size=None` and leave others built in jit mode. The default value is `1`.
