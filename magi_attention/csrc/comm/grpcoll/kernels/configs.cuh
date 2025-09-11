@@ -1,12 +1,12 @@
 /**********************************************************************************
  * Copyright (c) 2025 SandAI. All Rights Reserved.
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -83,9 +83,9 @@
 #undef __CUDA_NO_BFLOAT162_OPERATORS__
 #endif
 
-#include <cstdint>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <cstdint>
 
 #ifndef DISABLE_SM90_FEATURES
 #include <cuda_fp8.h>
@@ -99,9 +99,9 @@ typedef uint8_t __nv_fp8_storage_t;
 #endif
 
 #ifndef DISABLE_NVSHMEM
+#include <device_host_transport/nvshmem_common_ibgda.h>
+#include <infiniband/mlx5dv.h>
 #include <nvshmem.h>
 #include <nvshmemx.h>
-#include <infiniband/mlx5dv.h>
 #include <non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh>
-#include <device_host_transport/nvshmem_common_ibgda.h>
 #endif
