@@ -61,6 +61,8 @@ class DistAttnRuntime:
 
         # ----------    flags for fwd   --------- #
 
+        self.fwd_sm_margin = magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
+
         # NOTE: when enabling FFA fwd high precision reduce,
         # we won't downcast partial out to q dtype before group-reduce comm,
         # to trade-off double comm overhead for increased precision and less dtype-cast overhead
@@ -85,6 +87,8 @@ class DistAttnRuntime:
         )
 
         # ----------    flags for bwd   --------- #
+
+        self.bwd_sm_margin = magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
 
         # NOTE: we concat q,o,do in dist-attn bwd when qo comm is enabled
         self.concat_qo_do = magi_attention.comm.is_qo_comm_enable()
@@ -147,7 +151,6 @@ class DistAttnRuntime:
         out_acc: torch.Tensor | None = None,
         lse_acc: torch.Tensor | None = None,
         overlap_stage: int | None = None,
-        deterministic: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Apply forward partial attention with given q,kv for current overlap stage
@@ -159,7 +162,6 @@ class DistAttnRuntime:
             lse_acc (torch.Tensor, optional): accumulative buffer for lse
             overlap_stage (int, optional): Current overlap stage,
                 if None, it means local attention, otherwise it means remote attention
-            deterministic(bool): Whether to use deterministic algorithm
 
         Returns:
             out (torch.Tensor | None): partial out, or None if skipped
@@ -229,9 +231,9 @@ class DistAttnRuntime:
                     fwd_unique_count=None,
                     ref_block_size=None,
                     softmax_scale=q.shape[-1] ** -0.5,
-                    deterministic=deterministic,
+                    deterministic=self.deterministic,
                     softcap=0.0,
-                    sm_margin=magi_attention.comm.ffa_fwd_sm_margin_save_for_comm(),
+                    sm_margin=self.fwd_sm_margin,
                     # NOTE: increase the partial out precision temporarily,
                     # to reduce the error caused by the out correction
                     out_type=torch.float32,
@@ -406,7 +408,6 @@ class DistAttnRuntime:
         lse: torch.Tensor,
         dq_acc: torch.Tensor | None = None,
         overlap_stage: int | None = None,
-        deterministic: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Apply backward partial attention with given qo_do,kv,lse for current overlap stage
@@ -418,7 +419,6 @@ class DistAttnRuntime:
             dq_acc (torch.Tensor, optional): accumulative buffer for dq
             overlap_stage (int, optional): Current overlap stage,
                 if None, it means local attention, otherwise it means remote attention
-            deterministic (bool): Whether to use deterministic algorithm
 
         Returns:
             partial_dq (torch.Tensor | None): partial dq, or None if skipped
@@ -498,10 +498,10 @@ class DistAttnRuntime:
                 bwd_kq_map=None,
                 bwd_unique_count=None,
                 softmax_scale=q.shape[-1] ** -0.5,
-                deterministic=deterministic,
+                deterministic=self.deterministic,
                 softcap=0.0,
                 disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
-                sm_margin=magi_attention.comm.ffa_bwd_sm_margin_save_for_comm(),
+                sm_margin=self.bwd_sm_margin,
             )
 
         # maybe downcast dq,dkv to q,kv dtype for the host stage
@@ -540,7 +540,7 @@ class DistAttnRuntime:
         is_host_stage = overlap_stage is None
         is_last_remote_stage = next_stage == self.overlap_degree
 
-        # wait for host/remote qkv prepared for current stage
+        # wait for host/remote qo_do,kv,lse prepared for current stage
         if is_host_stage:
             curr_qo_do = local_qo_do
             curr_kv = local_kv
@@ -570,6 +570,7 @@ class DistAttnRuntime:
             ]
             curr_lse = curr_remote_lse_work.wait_post_process(curr_remote_lse_buffer)
 
+        # pre-fetch remote qo_do,kv,lse for next stage(s)
         if self.prefetch_stage_by_stage and not is_last_remote_stage:
             (
                 self.remote_lse_work_with_buffer_per_stage[next_stage]
@@ -1243,7 +1244,6 @@ class DistAttnFunc(torch.autograd.Function):
             q=local_q,
             kv=local_kv,
             overlap_stage=None,
-            deterministic=dist_attn_runtime.deterministic,
         )
         assert partial_local_out is not None and partial_local_lse is not None
 
@@ -1268,7 +1268,6 @@ class DistAttnFunc(torch.autograd.Function):
                 q=curr_remote_q,
                 kv=curr_remote_kv,
                 overlap_stage=ith_overlap_stage,
-                deterministic=dist_attn_runtime.deterministic,
                 out_acc=partial_local_out
                 if dist_attn_runtime.fwd_out_lse_use_acc
                 else None,
@@ -1288,7 +1287,8 @@ class DistAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
             )
 
-        # prepare reduced local out and lse before return and save for backward
+        # prepare reduced local out and lse
+        # before returning from forward and saving for backward
         local_out, local_lse = dist_attn_runtime.prepare_reduced_local_out_lse(
             partial_local_out=partial_local_out,
             partial_local_lse=partial_local_lse,
@@ -1310,6 +1310,7 @@ class DistAttnFunc(torch.autograd.Function):
             q=local_q, o=local_out, do=grad_output
         )
 
+        # get local qo_do,kv,lse and pre-fetch qo_do,kv,lse for remote stage(s)
         (
             local_qo_do,
             local_kv,
@@ -1321,8 +1322,8 @@ class DistAttnFunc(torch.autograd.Function):
             overlap_stage=None,
         )
 
-        # do attn bwd with local kv
-        # overlapped with 0th remote kv comm
+        # apply bwd partial attn with local qo_do,kv,lse
+        # overlapped with 0th pre-fetch
         (
             partial_local_dq,
             partial_local_dkv,
@@ -1331,13 +1332,13 @@ class DistAttnFunc(torch.autograd.Function):
             kv=local_kv,
             lse=local_lse,
             overlap_stage=None,
-            deterministic=dist_attn_runtime.deterministic,
         )
         assert partial_local_dq is not None and partial_local_dkv is not None
 
         # loop into remote stages
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
-            # wait for ith remote data prepared
+            # wait for ith remote qo_do,kv,lse prepared
+            # and pre-fetch (i+1)th remote qo_do,kv,lse
             (
                 curr_remote_qo_do,
                 curr_remote_kv,
@@ -1349,8 +1350,8 @@ class DistAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
             )
 
-            # do attn bwd with ith remote data
-            # overlapped with (i+1)th remote comm
+            # apply bwd partial attn with ith remote qo_do,kv,lse
+            # overlapped with (i+1)th pre-fetch
             (
                 partial_remote_dq,
                 partial_remote_dkv,
@@ -1360,9 +1361,10 @@ class DistAttnFunc(torch.autograd.Function):
                 lse=curr_remote_lse,
                 dq_acc=partial_local_dq if dist_attn_runtime.bwd_dq_use_acc else None,
                 overlap_stage=ith_overlap_stage,
-                deterministic=dist_attn_runtime.deterministic,
             )
 
+            # reduce ith partial dq,dkv
+            # overlapped with (i+1)th bwd partial attn and maybe (i+2)th pre-fetch
             curr_remote_q, _, _ = dist_attn_runtime.maybe_chunk_qo_do(curr_remote_qo_do)
             dist_attn_runtime.reduce_partial_dq_dkv(
                 partial_remote_dq=partial_remote_dq,
@@ -1374,6 +1376,8 @@ class DistAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
             )
 
+        # prepare reduced local dq,dkv
+        # before returning from backward
         local_dq, local_dkv = dist_attn_runtime.prepare_reduced_local_dq_dkv(
             partial_local_dq=partial_local_dq,
             partial_local_dkv=partial_local_dkv,
