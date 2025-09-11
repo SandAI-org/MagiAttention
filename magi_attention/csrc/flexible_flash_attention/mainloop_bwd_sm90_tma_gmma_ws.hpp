@@ -506,15 +506,17 @@ struct CollectiveMainloopBwdSm90 {
       cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum),
       make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})), // (4, kblockm)
       make_coord(_0{}, _)); // (4, M, _)
-
-    if (thread_idx == 0 && bidh == 0 && bidb == 1) {
+    /*
+    if (thread_idx == 0 && bidh == 7 && bidb == 1) {
       printf("gLSE:\n"); print_tensor(gLSE);
       printf("mLSE:\n"); print_tensor(mLSE);
+      printf("offset_q: %d\n", seqlen_info.offset_q);
+      printf("kblocm: %d\n", select<0>(TileShape_MNK{}));
     }
-    if (thread_idx == 0 && bidh == 0 && bidb == 1) {
+    if (thread_idx == 0 && bidh == 7 && bidb == 1) {
       printf("mdpsum:\n"); print_tensor(mdPsum);
       printf("gdpsum:\n"); print_tensor(gdPsum);
-    }
+    } */
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
@@ -894,7 +896,7 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
-    // if (bidh == 0 && thread_idx == 0) {
+    // if (bidh == 7 && thread_idx == 0) {
     //     printf("[BWD MMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n", bidb, kBlockM, kBlockN, n_block,
     //     m_block_min, m_block_max, attn_type);
     // }
@@ -1008,7 +1010,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
-    // if (thread_idx == 0 && bidh == 0 && n_block == 0){
+    // if (thread_idx == 0 && bidh == 7 && n_block == 0){
     //     printf("bidb: %d, offset_q: %d\n", bidb, seqlen_info.offset_q);
     //     printf("mdQaccum: "); print(mdQaccum); printf("\n");
     //     printf("gdQaccum_: "); print(gdQaccum_); printf("\n");
@@ -1067,19 +1069,19 @@ struct CollectiveMainloopBwdSm90 {
 
       // Reshape tSrS from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
       Tensor scores = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
-
-      if (thread_idx == 0 && bidh == 0 && bidb == 1) {
+      /*
+      if (thread_idx == 0 && bidh == 7 && bidb == 1) {
         printf("tLSEsLSE\n"); print_tensor(tLSEsLSE);
       }
-      if (thread_idx == 0 && bidh == 0 && bidb == 1) {
+      if (thread_idx == 0 && bidh == 7 && bidb == 1) {
         printf("sLSEMma\n");  print_tensor(sLSEMma);
         printf("sdPsumMma\n");  print_tensor(sdPsumMma);
         // printt("test JIT\n");
       }
-      if (bidh == 0 && thread_idx == 0 && bidb == 1) {
+      if (bidh == 7 && thread_idx == 0 && bidb == 1) {
         printf("score before softmax and mask:\n"); print_tensor(scores);
         printf("tSrS before mask:\n");  print_tensor(tSrS);
-      }
+      } */
 
       // dtanh needs to happen before masking, otherwise we get 1 - (-inf)^2 = NaN in the dtanh
       auto dtanh = [&] {
@@ -1090,11 +1092,11 @@ struct CollectiveMainloopBwdSm90 {
       }();
       mask_fn(tSrS, m_block);
       mask_q_fn(tSrS, m_block); // mask invalid scores along q_dim;
-
-      if (bidh == 0 && thread_idx == 0 && bidb == 1) {
+      /*
+      if (bidh == 7 && thread_idx == 0 && bidb == 1) {
         printf("score after mask:\n");  print_tensor(scores);
         printf("tSrS after mask:\n"); print_tensor(tSrS);
-      }
+      } */
       // Start debug print
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
@@ -1121,11 +1123,11 @@ struct CollectiveMainloopBwdSm90 {
           scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - lse_scaled);
         }
       }
-
-      if (bidh == 0 && thread_idx == 0 && bidb == 1) {
+      /*
+      if (bidh == 7 && thread_idx == 0 && bidb == 1) {
         printf("score after softmax and mask:\n");
         print_tensor(scores);
-      }
+      } */
       // Start debug print
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
@@ -1152,11 +1154,12 @@ struct CollectiveMainloopBwdSm90 {
       warpgroup_wait<0>();
       // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
       Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
-      if (bidb == 1 && bidh == 0 && thread_idx == 0) {
+      /*
+      if (bidb == 1 && bidh == 7 && thread_idx == 0) {
         printf("ds before compute\n");
         print_tensor(dS);
         printf("tLSErdPsum before\n"); print_tensor(tLSErdPsum);
-      }
+      } */
 #pragma unroll
       for (int mi = 0; mi < size<0>(dS); ++mi) {
         float const dP_sum_cur = [&] {
@@ -1173,11 +1176,11 @@ struct CollectiveMainloopBwdSm90 {
           }
         }
       }
-
-      if (bidb == 1 && bidh == 0 && thread_idx == 0) {
+      /*
+      if (bidb == 1 && bidh == 7 && thread_idx == 0) {
         printf("ds after compute\n"); print_tensor(dS);
         printf("tLSErdPsum\n"); print_tensor(tLSErdPsum);
-      }
+      } */
 
       // Convert scores from fp32 to fp16/bf16
       Tensor rP = make_tensor_like<Element>(tSrS);
@@ -1223,6 +1226,11 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
         pipeline_do.consumer_release(smem_pipe_read_do_cur); // release dO
+        /*
+        if (bidb == 1 && bidh == 7 && thread_idx == 0) {
+          printf("tdQrdQ");
+          print_tensor(tdQrdQ);
+        } */
 
         if constexpr (Mma_dKV_is_RS) {
           Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadKV>(tdPrdP.layout()));
@@ -1242,7 +1250,7 @@ struct CollectiveMainloopBwdSm90 {
             taccdQrdQ(dqi) *= params.softmax_scale;
           }
           cute::copy(r2s_tiled_copy_dQaccum, taccdQrdQ, tdQsdQaccum);
-          // if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
+          // if (thread_idx == 0 && bidh == 7 && bidb == 0 && n_block == 0) {
           //     printf("=================== before retile ===================\n");
           //     cute::print_tensor(tdQrdQ);
           //     printf("=================== after retile ===================\n");
@@ -1269,7 +1277,7 @@ struct CollectiveMainloopBwdSm90 {
           //             tdQsdQaccum(i) = 0;
           //         }
           //     }
-          //     if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
+          //     if (thread_idx == 0 && bidh == 7 && bidb == 0 && n_block == 0) {
           //         printf("=================== tdQsdQaccum ===================\n");
           //         cute::print_tensor(tdQsdQaccum);
           //         printf("=================== bound ===================\n");
@@ -1362,6 +1370,14 @@ struct CollectiveMainloopBwdSm90 {
     if constexpr (Q_dO_same_stages) {
       smem_pipe_read_do = smem_pipe_read;
     }
+    /*
+    if (bidb == 1 && bidh == 7 && thread_idx == 0) {
+      print("tdKrdK");
+      print_tensor(tdKrdK);
+      print("tdVrdV");
+      print_tensor(tdVrdV);
+    } */
+
     return true;
   }
 };

@@ -197,8 +197,14 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
   // add a new dimension(4) for TMA alignment(16bytes)
   // actually, we only use index 0 of dimension 4.
   int const total_q_rounded = round_multiple(total_q + kBlockM, kBlockM);
+
+  // printf("kBlockM: %d total_q_rounded: %d\n", kBlockM, total_q_rounded);
+  // at::Tensor softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+  // at::Tensor softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+
   at::Tensor softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
   at::Tensor softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+
 
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   at::Tensor determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));

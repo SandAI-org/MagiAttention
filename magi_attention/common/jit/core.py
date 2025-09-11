@@ -195,7 +195,7 @@ def gen_jit_spec(
             "-g",
             "--keep",
             "-lineinfo",
-            "--ftemplate-backtrace-limit=0"
+            "--ftemplate-backtrace-limit=0",
             "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage",
             "--resource-usage",  # printing out number of registers
             "-DCUTLASS_DEBUG_TRACE_LEVEL=2",

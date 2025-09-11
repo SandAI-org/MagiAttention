@@ -258,24 +258,24 @@ class FlashAttnBwdPreprocess {
     Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(0, _, bidh); // total_q
     Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
-
+    /*
     if (bidb == 1 && bidh == 0 && thread_idx == 0) {
       printf("dP_sum:\n");  print_tensor(dP_sum);
       printf("gdp_sum:\n"); print_tensor(gdPsum);
-    }
+    } */
 
     if (thread_idx < seqlen_rounded - m_block * kBlockM && thread_idx < kBlockM) {
       // gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
       // we should not write lse back if out of bound.
-      if (lse != -INFINITY)
+      if (lse != INFINITY)
         gLSElog2(thread_idx) = lse * float(M_LOG2E);
     }
 
-
+    /*
     if (bidb == 1 && bidh == 0 && thread_idx == 0) {
       printf("gLSElog2\n"); print_tensor(gLSElog2);
       printf("mLSElog2\n"); print_tensor(mLSElog2);
-    }
+    } */
 
     // if constexpr (Clear_dQ) {
     //     Tensor mdQaccum = make_tensor(make_gmem_ptr(params.ptr_dQaccum), params.shape_dQaccum, params.stride_dQaccum)(_, bidh, !is_varlen ? bidb : 0);
