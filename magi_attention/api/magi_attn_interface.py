@@ -93,7 +93,7 @@ def magi_attn_varlen_key(
         ...             degree=2,
         ...             min_chunk_size=512,
         ...             max_num_chunks=64,
-        ...             alg=OverlapAlgType.UNIFORM,
+        ...             alg=UniformOverlapAlg(),
         ...         ),
         ...     ),
         ... )
@@ -207,7 +207,7 @@ def magi_attn_varlen_dispatch(
         ...             degree=2,
         ...             min_chunk_size=512,
         ...             max_num_chunks=64,
-        ...             alg=OverlapAlgType.UNIFORM,
+        ...             alg=UniformOverlapAlg(),
         ...         ),
         ...     ),
         ... )
@@ -314,7 +314,7 @@ def magi_attn_flex_key(
         ...             degree=2,
         ...             min_chunk_size=512,
         ...             max_num_chunks=64,
-        ...             alg=OverlapAlgType.UNIFORM,
+        ...             alg=UniformOverlapAlg(),
         ...         ),
         ...     ),
         ... )
@@ -509,7 +509,7 @@ def magi_attn_flex_dispatch(
         ...             degree=2,
         ...             min_chunk_size=512,
         ...             max_num_chunks=64,
-        ...             alg=OverlapAlgType.UNIFORM,
+        ...             alg=UniformOverlapAlg(),
         ...         ),
         ...     ),
         ...     is_same_source=True,
