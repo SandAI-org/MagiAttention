@@ -113,7 +113,7 @@ class TestAttnRectangles(TestCase):
         self.assertEqual(len(rects_attn), 2)
 
         # test length mismatch exception
-        with self.assertRaises(ValueError):
+        with self.assertRaises(AssertionError):
             AttnRectangles.from_ranges(
                 [AttnRectRange(0, 10)], [AttnRectRange(0, 20)], [0, 1]
             )
