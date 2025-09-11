@@ -45,6 +45,14 @@ class DistAttnRuntime:
         cp_group_gr (dist.ProcessGroup): the cp process group for group-reduce
     """
 
+    remote_q_work_with_buffer_per_stage: list[WorkWithBuffer]
+    remote_kv_work_with_buffer_per_stage: list[WorkWithBuffer]
+    partial_out_lse_reduce_work_per_stage: list[WorkWithPostProcessFn]
+    remote_lse_work_with_buffer_per_stage: list[WorkWithBuffer]
+    remote_qo_do_work_with_buffer_per_stage: list[WorkWithBuffer]
+    partial_dq_reduce_work_per_stage: list[WorkWithPostProcessFn]
+    partial_dkv_reduce_work_per_stage: list[WorkWithPostProcessFn]
+
     def __init__(
         self,
         comm_meta: CommMeta,
@@ -123,29 +131,9 @@ class DistAttnRuntime:
             magi_attention.comm.is_qo_comm_enable() and not self.bwd_hp_reduce
         )
 
-        # ----------    internal temporary attributes   --------- #
+        # ----------    internal temporary work list   --------- #
 
-        self.remote_q_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
-        ] * self.overlap_degree  # fwd
-        self.remote_kv_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
-        ] * self.overlap_degree  # fwd + bwd
-        self.partial_out_lse_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
-            None  # type: ignore[list-item]
-        ] * self.overlap_degree  # fwd
-        self.remote_lse_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
-        ] * self.overlap_degree  # bwd
-        self.remote_qo_do_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
-        ] * self.overlap_degree  # bwd
-        self.partial_dq_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
-            None  # type: ignore[list-item]
-        ] * self.overlap_degree  # bwd
-        self.partial_dkv_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
-            None  # type: ignore[list-item]
-        ] * self.overlap_degree  # bwd
+        self._reset_work_list()
 
     # ----------    API for fwd   --------- #
 
@@ -211,7 +199,7 @@ class DistAttnRuntime:
             return partial_out, partial_lse
 
         # attention forward pass
-        k, v = self.maybe_chunk_kv(kv)
+        k, v = self._maybe_chunk_kv(kv)
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
             f"{attn_arg.total_area=} | "
@@ -282,7 +270,7 @@ class DistAttnRuntime:
 
         # wait for host/remote qkv prepared for current stage
         if is_host_stage:
-            local_kv = self.maybe_concat_kv(*local_kv)
+            local_kv = self._maybe_concat_kv(*local_kv)
             curr_q = local_q
             curr_kv = local_kv
         else:
@@ -396,10 +384,8 @@ class DistAttnRuntime:
         local_out = partial_local_out.to(ref_local_out.dtype)
         local_lse = partial_local_lse  # lse always in high-precision
 
-        # clear the temporary work list
-        self.remote_q_work_with_buffer_per_stage.clear()
-        self.remote_kv_work_with_buffer_per_stage.clear()
-        self.partial_out_lse_reduce_work_per_stage.clear()
+        # reset the temporary work list
+        self._reset_work_list()
 
         return local_out, local_lse
 
@@ -450,7 +436,7 @@ class DistAttnRuntime:
         if attn_arg.can_skip(is_bwd=True):
             partial_dq, partial_dkv = None, None
             if is_host_stage:
-                q, _, _ = self.maybe_chunk_qo_do(qo_do)
+                q, _, _ = self._maybe_chunk_qo_do(qo_do)
                 # NOTE: if local_dq and local_dkv calculation are skipped,
                 # we need to zeros initialize them since they might be reduced later
                 partial_dq = torch.zeros_like(
@@ -468,8 +454,8 @@ class DistAttnRuntime:
             return partial_dq, partial_dkv
 
         # attention backward pass
-        q, o, do = self.maybe_chunk_qo_do(qo_do)
-        k, v = self.maybe_chunk_kv(kv)
+        q, o, do = self._maybe_chunk_qo_do(qo_do)
+        k, v = self._maybe_chunk_kv(kv)
         if magi_attention.is_sdpa_backend_enable():
             partial_dq, partial_dk, partial_dv = sdpa_bwd(
                 do=do,
@@ -480,12 +466,12 @@ class DistAttnRuntime:
                 lse=lse,
                 attn_arg=attn_arg,
             )
-            partial_dkv = self.maybe_concat_kv(partial_dk, partial_dv)
+            partial_dkv = self._maybe_concat_kv(partial_dk, partial_dv)
         else:
             # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
             # and we need to zero-initialize partial_dkv since it needs to be reduced
             partial_dkv = torch.zeros_like(kv, dtype=torch.float32)
-            partial_dk, partial_dv = self.maybe_chunk_kv(partial_dkv)
+            partial_dk, partial_dv = self._maybe_chunk_kv(partial_dkv)
             partial_dq, partial_dk, partial_dv = _flex_flash_attn_backward(
                 dout=do,
                 q=q,
@@ -550,7 +536,7 @@ class DistAttnRuntime:
 
         # wait for host/remote qo_do,kv,lse prepared for current stage
         if is_host_stage:
-            local_qo_do = self.maybe_concat_qo_do(*local_qo_do)
+            local_qo_do = self._maybe_concat_qo_do(*local_qo_do)
             curr_qo_do = local_qo_do
             curr_kv = local_kv
             curr_lse = local_lse
@@ -663,7 +649,7 @@ class DistAttnRuntime:
         )
 
         # reduce ith partial dq
-        ref_remote_q, _, _ = self.maybe_chunk_qo_do(ref_remote_qo_do)
+        ref_remote_q, _, _ = self._maybe_chunk_qo_do(ref_remote_qo_do)
         (
             self.partial_dq_reduce_work_per_stage[overlap_stage]
         ) = self._reduce_partial_dq(
@@ -718,65 +704,14 @@ class DistAttnRuntime:
         local_dkv = partial_local_dkv.to(ref_local_dkv.dtype)
 
         # chunk final local dkv into dk and dv
-        local_dk, local_dv = self.maybe_chunk_kv(local_dkv)
+        local_dk, local_dv = self._maybe_chunk_kv(local_dkv)
 
-        # clear the temporary work list
-        self.remote_qo_do_work_with_buffer_per_stage.clear()
-        self.remote_kv_work_with_buffer_per_stage.clear()
-        self.remote_lse_work_with_buffer_per_stage.clear()
-        self.partial_dq_reduce_work_per_stage.clear()
-        self.partial_dkv_reduce_work_per_stage.clear()
+        # reset the temporary work list
+        self._reset_work_list()
 
         return local_dq, local_dk, local_dv
 
     # ----------    common API   --------- #
-
-    def maybe_concat_kv(
-        self,
-        k: torch.Tensor,
-        v: torch.Tensor,
-    ) -> FusedOrTupleTensor:
-        """
-        Maybe concatenate k, v tensors
-        into a fused or tupled kv along the seqlen dim
-        """
-        # TODO: whether can we pack kv togather along certain dim
-        # to enhance the performance of ffa kernel
-        return torch.cat([k, v], dim=0) if self.concat_kv else (k, v)
-
-    def maybe_chunk_kv(
-        self,
-        kv: FusedOrTupleTensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Maybe chunk the kv fused or tupled tensor
-        into k, v tensor views along the seqlen dim
-        """
-        return torch.chunk(kv, 2, dim=0) if self.concat_kv else kv
-
-    def maybe_concat_qo_do(
-        self,
-        q: torch.Tensor,
-        o: torch.Tensor,
-        do: torch.Tensor,
-    ) -> FusedOrTupleTensor:
-        """
-        Maybe concatenate q, o, do tensors
-        into a fused or tupled qo_do along the seqlen dim
-        """
-        # TODO: whether can we pack q, o, do togather along certain dim
-        # to enhance the performance of ffa kernel
-        return torch.cat([q, o, do], dim=0) if self.concat_qo_do else (q, o, do)
-
-    def maybe_chunk_qo_do(
-        self,
-        qo_do: FusedOrTupleTensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Maybe chunk the qo_do fused or tupled tensor
-        into q, o, do tensor views along the seqlen dim
-        """
-        return torch.chunk(qo_do, 3, dim=0) if self.concat_qo_do else qo_do
 
     def is_host_stage(self, overlap_stage: int | None) -> bool:
         """
@@ -1237,6 +1172,76 @@ class DistAttnRuntime:
             )
 
         return partial_dq_reduce_work
+
+    def _maybe_concat_kv(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> FusedOrTupleTensor:
+        """
+        Maybe concatenate k, v tensors
+        into a fused or tupled kv along the seqlen dim
+        """
+        # TODO: whether can we pack kv togather along certain dim
+        # to enhance the performance of ffa kernel
+        return torch.cat([k, v], dim=0) if self.concat_kv else (k, v)
+
+    def _maybe_chunk_kv(
+        self,
+        kv: FusedOrTupleTensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Maybe chunk the kv fused or tupled tensor
+        into k, v tensor views along the seqlen dim
+        """
+        return torch.chunk(kv, 2, dim=0) if self.concat_kv else kv
+
+    def _maybe_concat_qo_do(
+        self,
+        q: torch.Tensor,
+        o: torch.Tensor,
+        do: torch.Tensor,
+    ) -> FusedOrTupleTensor:
+        """
+        Maybe concatenate q, o, do tensors
+        into a fused or tupled qo_do along the seqlen dim
+        """
+        # TODO: whether can we pack q, o, do togather along certain dim
+        # to enhance the performance of ffa kernel
+        return torch.cat([q, o, do], dim=0) if self.concat_qo_do else (q, o, do)
+
+    def _maybe_chunk_qo_do(
+        self,
+        qo_do: FusedOrTupleTensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Maybe chunk the qo_do fused or tupled tensor
+        into q, o, do tensor views along the seqlen dim
+        """
+        return torch.chunk(qo_do, 3, dim=0) if self.concat_qo_do else qo_do
+
+    def _reset_work_list(self):
+        self.remote_q_work_with_buffer_per_stage: list[WorkWithBuffer] = [
+            None  # type: ignore[list-item]
+        ] * self.overlap_degree  # fwd
+        self.remote_kv_work_with_buffer_per_stage: list[WorkWithBuffer] = [
+            None  # type: ignore[list-item]
+        ] * self.overlap_degree  # fwd + bwd
+        self.partial_out_lse_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
+            None  # type: ignore[list-item]
+        ] * self.overlap_degree  # fwd
+        self.remote_lse_work_with_buffer_per_stage: list[WorkWithBuffer] = [
+            None  # type: ignore[list-item]
+        ] * self.overlap_degree  # bwd
+        self.remote_qo_do_work_with_buffer_per_stage: list[WorkWithBuffer] = [
+            None  # type: ignore[list-item]
+        ] * self.overlap_degree  # bwd
+        self.partial_dq_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
+            None  # type: ignore[list-item]
+        ] * self.overlap_degree  # bwd
+        self.partial_dkv_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
+            None  # type: ignore[list-item]
+        ] * self.overlap_degree  # bwd
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, DistAttnRuntime):
