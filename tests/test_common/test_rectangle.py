@@ -18,44 +18,32 @@ from unittest import TestCase
 
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
-from magi_attention.common.rect_range import AttnRectRange
 from magi_attention.common.rectangle import AttnRectangle
 
 
 class TestAttnRectangle(TestCase):
-    def test_init_with_attn_rect_range(self):
-        """test init with AttnRectRange"""
-        q_range = AttnRectRange(0, 10)
-        k_range = AttnRectRange(0, 20)
-        d_range = AttnRectRange(-5, 5)
-
-        rect = AttnRectangle(q_range, k_range, d_range)
-        self.assertEqual(rect.q_range, q_range)
-        self.assertEqual(rect.k_range, k_range)
-        self.assertEqual(rect.d_range, d_range)
-
     def test_init_with_attn_range(self):
         """test init with AttnRange"""
         q_range = AttnRange(0, 10)
         k_range = AttnRange(0, 20)
-        d_range = AttnRange(0, 10)
+        d_range = AttnRange(-5, 5)
 
         rect = AttnRectangle(q_range, k_range, d_range)
-        self.assertIsInstance(rect.q_range, AttnRectRange)
-        self.assertIsInstance(rect.k_range, AttnRectRange)
-        self.assertIsInstance(rect.d_range, AttnRectRange)
+        self.assertIsInstance(rect.q_range, AttnRange)
+        self.assertIsInstance(rect.k_range, AttnRange)
+        self.assertIsInstance(rect.d_range, AttnRange)
         self.assertEqual(rect.q_range.start, 0)
         self.assertEqual(rect.q_range.end, 10)
         self.assertEqual(rect.k_range.start, 0)
         self.assertEqual(rect.k_range.end, 20)
-        self.assertEqual(rect.d_range.start, 0)
-        self.assertEqual(rect.d_range.end, 10)
+        self.assertEqual(rect.d_range.start, -5)
+        self.assertEqual(rect.d_range.end, 5)
 
     def test_init_with_large_d_range(self):
         """test init with large d_range"""
-        q_range = AttnRectRange(0, 10)
-        k_range = AttnRectRange(0, 20)
-        d_range = AttnRectRange(-100, 100)
+        q_range = AttnRange(0, 10)
+        k_range = AttnRange(0, 20)
+        d_range = AttnRange(-100, 100)
 
         rect = AttnRectangle(q_range, k_range, d_range)
         self.assertEqual(rect.d_range.start, -9)
@@ -63,8 +51,8 @@ class TestAttnRectangle(TestCase):
 
     def test_causal_mask_d_range_adjustment(self):
         """test causal mask d_range adjustment"""
-        q_range = AttnRectRange(0, 10)
-        k_range = AttnRectRange(0, 20)
+        q_range = AttnRange(0, 10)
+        k_range = AttnRange(0, 20)
 
         rect = AttnRectangle(q_range, k_range, mask_type=AttnMaskType.CAUSAL)
         # causal mask: d_range.end should be limited to k_range.end - q_range.end
@@ -73,8 +61,8 @@ class TestAttnRectangle(TestCase):
 
     def test_bicausal_mask_d_range_adjustment(self):
         """test bicausal mask d_range adjustment"""
-        q_range = AttnRectRange(0, 10)
-        k_range = AttnRectRange(0, 20)
+        q_range = AttnRange(0, 10)
+        k_range = AttnRange(0, 20)
 
         rect = AttnRectangle(q_range, k_range, mask_type=AttnMaskType.BICAUSAL)
         # bicausal mask: d_range.start and d_range.end should be adjusted
@@ -85,8 +73,8 @@ class TestAttnRectangle(TestCase):
 
     def test_invcausal_mask_d_range_adjustment(self):
         """test invcausal mask d_range adjustment"""
-        q_range = AttnRectRange(0, 10)
-        k_range = AttnRectRange(0, 20)
+        q_range = AttnRange(0, 10)
+        k_range = AttnRange(0, 20)
 
         rect = AttnRectangle(q_range, k_range, mask_type=AttnMaskType.INVCAUSAL)
         # invcausal mask: d_range.start should be limited to k_range.start - q_range.start
@@ -95,39 +83,35 @@ class TestAttnRectangle(TestCase):
 
     def test_property_setters(self):
         """test property setters"""
-        rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
         # test q_range setter
-        new_q_range = AttnRectRange(5, 15)
+        new_q_range = AttnRange(5, 15)
         rect.q_range = new_q_range
         self.assertEqual(rect.q_range, new_q_range)
 
         # test k_range setter
-        new_k_range = AttnRectRange(5, 25)
+        new_k_range = AttnRange(5, 25)
         rect.k_range = new_k_range
         self.assertEqual(rect.k_range, new_k_range)
 
         # test d_range setter
-        new_d_range = AttnRectRange(-10, 10)
+        new_d_range = AttnRange(-10, 10)
         rect.d_range = new_d_range
         self.assertEqual(rect.d_range, new_d_range)
 
     def test_is_valid(self):
         """test validity check"""
         # valid rect
-        valid_rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        valid_rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
         self.assertTrue(valid_rect.is_valid())
 
         # invalid rect - create invalid state by directly modifying attributes
         invalid_rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
+            AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5)
         )
         # directly modify attributes to make it invalid - use an existing invalid range
-        existing_invalid_range = AttnRectRange(0, 1)
+        existing_invalid_range = AttnRange(0, 1)
         existing_invalid_range._start = 10
         existing_invalid_range._end = 0
         invalid_rect._q_range = existing_invalid_range
@@ -136,13 +120,11 @@ class TestAttnRectangle(TestCase):
     def test_check_valid(self):
         """test validity check (raise exception)"""
         # create a valid rect, then make it invalid by property setter
-        rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
         # set invalid value through property setter should raise exception
         # create an existing invalid range
-        existing_invalid_range = AttnRectRange(0, 1)
+        existing_invalid_range = AttnRange(0, 1)
         existing_invalid_range._start = 10
         existing_invalid_range._end = 0
 
@@ -151,17 +133,15 @@ class TestAttnRectangle(TestCase):
 
     def test_get_valid_or_none(self):
         """test get valid rect or None"""
-        valid_rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        valid_rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
         self.assertEqual(valid_rect.get_valid_or_none(), valid_rect)
 
         # create an invalid rect (by directly modifying attributes)
         invalid_rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
+            AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5)
         )
         # directly modify attributes to make it invalid - use an existing invalid range
-        existing_invalid_range = AttnRectRange(0, 1)
+        existing_invalid_range = AttnRange(0, 1)
         existing_invalid_range._start = 10
         existing_invalid_range._end = 0
         invalid_rect._q_range = existing_invalid_range
@@ -169,9 +149,7 @@ class TestAttnRectangle(TestCase):
 
     def test_shrink_d_range(self):
         """test d_range shrink"""
-        rect = AttnRectangle(
-            AttnRectRange(10, 20), AttnRectRange(10, 30), AttnRectRange(-100, 100)
-        )
+        rect = AttnRectangle(AttnRange(10, 20), AttnRange(10, 30), AttnRange(-100, 100))
 
         result = rect.shrink_d_range()
         self.assertTrue(result)
@@ -180,9 +158,7 @@ class TestAttnRectangle(TestCase):
 
     def test_shrink_q_range(self):
         """test q_range shrink"""
-        rect = AttnRectangle(
-            AttnRectRange(0, 20), AttnRectRange(10, 15), AttnRectRange(-4, 4)
-        )
+        rect = AttnRectangle(AttnRange(0, 20), AttnRange(10, 15), AttnRange(-4, 4))
 
         result = rect.shrink_q_range()
         self.assertTrue(result)
@@ -191,9 +167,7 @@ class TestAttnRectangle(TestCase):
 
     def test_shrink_k_range(self):
         """test k_range shrink"""
-        rect = AttnRectangle(
-            AttnRectRange(10, 15), AttnRectRange(0, 20), AttnRectRange(-4, 4)
-        )
+        rect = AttnRectangle(AttnRange(10, 15), AttnRange(0, 20), AttnRange(-4, 4))
 
         result = rect.shrink_k_range()
         self.assertTrue(result)
@@ -223,9 +197,9 @@ class TestAttnRectangle(TestCase):
 
             # will shrink d_range automatically
             rand_rect = AttnRectangle(
-                AttnRectRange(q_start, q_end),
-                AttnRectRange(k_start, k_end),
-                AttnRectRange(d_start, d_end),
+                AttnRange(q_start, q_end),
+                AttnRange(k_start, k_end),
+                AttnRange(d_start, d_end),
             )
 
             # calculate standard area
@@ -262,9 +236,9 @@ class TestAttnRectangle(TestCase):
             d_end = random.randint(max(d_mid_max, d_start), d_max)
 
             rand_rect = AttnRectangle(
-                AttnRectRange(q_start, q_end),
-                AttnRectRange(k_start, k_end),
-                AttnRectRange(d_start, d_end),
+                AttnRange(q_start, q_end),
+                AttnRange(k_start, k_end),
+                AttnRange(d_start, d_end),
             )
 
             # random cut in the middle (may at the boundary)
@@ -305,9 +279,9 @@ class TestAttnRectangle(TestCase):
             d_end = random.randint(max(d_mid_max, d_start), d_max)
 
             rand_rect = AttnRectangle(
-                AttnRectRange(q_start, q_end),
-                AttnRectRange(k_start, k_end),
-                AttnRectRange(d_start, d_end),
+                AttnRange(q_start, q_end),
+                AttnRange(k_start, k_end),
+                AttnRange(d_start, d_end),
             )
 
             # random cut in the middle (may at the boundary)
@@ -328,9 +302,7 @@ class TestAttnRectangle(TestCase):
 
     def test_get_rect_within_q_segment(self):
         """test get rect within q segment"""
-        rect = AttnRectangle(
-            AttnRectRange(0, 20), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        rect = AttnRectangle(AttnRange(0, 20), AttnRange(0, 20), AttnRange(-5, 5))
 
         # fully included segment
         segment_rect = rect.get_rect_within_q_segment(5, 15)
@@ -344,9 +316,7 @@ class TestAttnRectangle(TestCase):
 
     def test_get_rect_within_k_segment(self):
         """test get rect within k segment"""
-        rect = AttnRectangle(
-            AttnRectRange(0, 20), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        rect = AttnRectangle(AttnRange(0, 20), AttnRange(0, 20), AttnRange(-5, 5))
 
         # fully included segment
         segment_rect = rect.get_rect_within_k_segment(5, 15)
@@ -360,9 +330,7 @@ class TestAttnRectangle(TestCase):
 
     def test_intersection_boundary_methods(self):
         """test intersection boundary methods"""
-        rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
         # left boundary intersection
         q_id_left = rect.intersection_q_id_on_left_boundary()
@@ -382,13 +350,13 @@ class TestAttnRectangle(TestCase):
             k_start = random.randint(0, 99)
             k_end = random.randint(k_start + 1, 100)
 
-            q_range = AttnRectRange(q_start, q_end)
-            k_range = AttnRectRange(k_start, k_end)
+            q_range = AttnRange(q_start, q_end)
+            k_range = AttnRange(k_start, k_end)
 
             d_min_full = k_start - (q_end - 1)
             d_max_full = k_end - 1 - q_start
             rect_full = AttnRectangle(
-                q_range, k_range, AttnRectRange(d_min_full, d_max_full)
+                q_range, k_range, AttnRange(d_min_full, d_max_full)
             )
             self.assertTrue(rect_full.is_full())
 
@@ -409,7 +377,7 @@ class TestAttnRectangle(TestCase):
         """test convert to qk range and mask type"""
         # full mask
         full_rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-100, 100)
+            AttnRange(0, 10), AttnRange(0, 20), AttnRange(-100, 100)
         )
         result = full_rect.to_qk_range_mask_type()
         self.assertEqual(len(result), 1)
@@ -418,7 +386,7 @@ class TestAttnRectangle(TestCase):
 
         # causal mask
         causal_rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), mask_type=AttnMaskType.CAUSAL
+            AttnRange(0, 10), AttnRange(0, 20), mask_type=AttnMaskType.CAUSAL
         )
         result = causal_rect.to_qk_range_mask_type()
         self.assertEqual(len(result), 1)
@@ -444,9 +412,9 @@ class TestAttnRectangle(TestCase):
             d_end = random.randint(max(d_mid_max, d_start), d_max)
 
             rand_rect = AttnRectangle(
-                AttnRectRange(q_start, q_end),
-                AttnRectRange(k_start, k_end),
-                AttnRectRange(d_start, d_end),
+                AttnRange(q_start, q_end),
+                AttnRange(k_start, k_end),
+                AttnRange(d_start, d_end),
             )
 
             parts = rand_rect.to_qk_range_mask_type()
@@ -464,17 +432,11 @@ class TestAttnRectangle(TestCase):
 
     def test_equality_and_hash(self):
         """test equality and hash"""
-        rect1 = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        rect1 = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
-        rect2 = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        rect2 = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
-        rect3 = AttnRectangle(
-            AttnRectRange(1, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        rect3 = AttnRectangle(AttnRange(1, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
         self.assertEqual(rect1, rect2)
         self.assertNotEqual(rect1, rect3)
@@ -483,9 +445,7 @@ class TestAttnRectangle(TestCase):
 
     def test_repr(self):
         """test string representation"""
-        rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 5)
-        )
+        rect = AttnRectangle(AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 5))
 
         repr_str = repr(rect)
         # check if the string representation contains the correct range information

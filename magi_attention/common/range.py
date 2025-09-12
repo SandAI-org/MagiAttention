@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import Any, TypeAlias, Union
 
 NaiveRange: TypeAlias = tuple[int, int] | list[int]
@@ -22,7 +23,7 @@ class RangeError(Exception):
 
 
 class AttnRange:
-    """A dataclass to manage any indices range like [start, end) for attention computation"""
+    """A dataclass to manage any indices range for attention computation"""
 
     def __init__(self, start: int, end: int) -> None:
         self.check_valid(start=start, end=end)
@@ -36,7 +37,6 @@ class AttnRange:
 
     @start.setter
     def start(self, value) -> None:
-        self.check_valid(start=value)
         self._start = value
 
     @property
@@ -45,7 +45,6 @@ class AttnRange:
 
     @end.setter
     def end(self, value) -> None:
-        self.check_valid(end=value)
         self._end = value
 
     @property
@@ -62,8 +61,8 @@ class AttnRange:
         attn_range: Union[NaiveRange, list[int], "AttnRange"],
         check: bool = False,
     ) -> "AttnRange":
-        if isinstance(attn_range, AttnRange):  # just copy
-            res = attn_range
+        if isinstance(attn_range, AttnRange):
+            res = copy.deepcopy(attn_range)
         else:
             res = AttnRange(start=attn_range[0], end=attn_range[1])
 
@@ -147,16 +146,24 @@ class AttnRange:
     def is_empty(self) -> bool:
         return self._start == self._end
 
-    def is_valid(self, start: int | None = None, end: int | None = None) -> bool:
+    # range is [start, end] closed interval
+    def is_valid_close(self, start: int | None = None, end: int | None = None) -> bool:
         start = self._start if start is None else start
         end = self._end if end is None else end
 
-        return 0 <= start <= end
+        return start <= end
+
+    # range is [start, end) Left-closed and right-open intervals
+    def is_valid_open(self, start: int | None = None, end: int | None = None) -> bool:
+        start = self._start if start is None else start
+        end = self._end if end is None else end
+
+        return start < end
 
     def check_valid(self, start: int | None = None, end: int | None = None) -> None:
-        if not self.is_valid(start, end):
+        if not self.is_valid_close(start, end):
             raise RangeError(
-                f"The attn_range {(start, end)} is invalid against the rule: '0 <= start <= end'"
+                f"The attn_range {(start, end)} is invalid against the rule: 'start <= end'"
             )
 
     def __len__(self) -> int:

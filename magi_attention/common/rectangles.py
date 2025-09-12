@@ -17,8 +17,6 @@ from typing import Any, Iterator, Sequence, TypeAlias, Union
 from .enum import AttnMaskType
 from .range import AttnRange, NaiveRange
 from .ranges import AttnRanges
-from .rect_range import AttnRectRange
-from .rect_ranges import AttnRectRanges
 from .rectangle import AttnRectangle
 
 NaiveRanges: TypeAlias = Sequence[NaiveRange]
@@ -71,23 +69,19 @@ class AttnRectangles:
     def from_ranges(
         q_ranges: Union[
             NaiveRanges,
-            list[AttnRectRange],
             list[AttnRange],
             AttnRanges,
-            AttnRectRanges,
         ],
         k_ranges: Union[
             NaiveRanges,
-            list[AttnRectRange],
             list[AttnRange],
             AttnRanges,
-            AttnRectRanges,
         ],
         mask_types: Union[list[int], list[AttnMaskType]],
         check: bool = False,
     ) -> "AttnRectangles":
-        attn_q_ranges = AttnRectRanges.from_ranges(q_ranges, check)
-        attn_k_ranges = AttnRectRanges.from_ranges(k_ranges, check)
+        attn_q_ranges = AttnRanges.from_ranges(q_ranges, check)
+        attn_k_ranges = AttnRanges.from_ranges(k_ranges, check)
         attn_mask_type = [
             {
                 0: AttnMaskType.FULL,
@@ -134,13 +128,13 @@ class AttnRectangles:
     def get_qo_ranges_union(self) -> AttnRanges:
         qo_ranges = AttnRanges()
         for rect in self._rects:
-            qo_ranges.append(rect.q_range.to_parent())
+            qo_ranges.append(rect.q_range)
         return qo_ranges.merge()
 
     def get_kv_ranges_union(self) -> AttnRanges:
         kv_ranges = AttnRanges()
         for rect in self._rects:
-            kv_ranges.append(rect.k_range.to_parent())
+            kv_ranges.append(rect.k_range)
         return kv_ranges.merge()
 
     def total_seqlen_qo(self) -> int:
