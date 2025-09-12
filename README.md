@@ -340,13 +340,13 @@ For more information, you can refer to `example/transformers/README.md`.
 
 - [ ] Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*)
 - [ ] Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*)
-- [ ] Optimize `Distributed Attention Solver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
+- [ ] Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
+- [ ] Support `Dynamic DistAttnSolver` for dynamic masks such as sparse attention scenarios.
+- [ ] Support other attention patterns including cross-attention, sink tokens (*w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453)*) and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
+- [ ] Support Blackwell as well as other GPU architectures.
 - [ ] Provide a more comprehensive documentation with tutorials, and a more detailed technical blog.
 - [ ] Provide more example codes and recipes for various training scenarios.
-- [ ] Support Blackwell as well as other GPU architectures.
-- [ ] Better support other attention patterns like cross-attention.
-- [ ] Support inference scenarios involving KV cache and paged attention.
-- [ ] Upgrade MagiAttention to a distributed native Flex-Flash-Attention kernel (*as a major version update*).
+- [ ] Upgrade `MagiAttention` to a distributed native `Flex-Flash-Attention` kernel (*as a major version update*).
 - [x] Refactor `Distributed Attention Solver` to support all mask types with all kinds of overlap.
 - [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*).
 - [x] Build a comprehensive `CP Benchmark` to better compare the performance of different context parallel strategies under various mask patterns and other training configurations.

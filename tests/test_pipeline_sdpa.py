@@ -29,11 +29,11 @@ from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
     DistAttnConfig,
+    MinHeapDispatchAlg,
     OverlapConfig,
     UniformOverlapAlg,
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
-from magi_attention.meta.solver.dispatch_solver import MinHeapDispatchAlg
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import (
     NAME,

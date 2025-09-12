@@ -23,6 +23,7 @@ from magi_attention.meta.solver.dispatch_solver import (
     LBDispatchAlg,
     MinHeapDispatchAlg,
     SequentialDispatchAlg,
+    SortedSequentialSelectAlg,
 )
 from magi_attention.meta.solver.overlap_solver import (
     GreedyOverlapAlg,
@@ -40,6 +41,7 @@ __all__ = [
     "BSDispatchAlg",
     "MinHeapDispatchAlg",
     "SequentialDispatchAlg",
+    "SortedSequentialSelectAlg",
     "OverlapConfig",
     "OverlapAlg",
     "UniformOverlapAlg",
