@@ -19,14 +19,13 @@ import shutil
 import subprocess
 import sys
 import sysconfig
-import urllib.request
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import torch
 from packaging.version import Version, parse
-from setuptools import find_namespace_packages, setup
+from setuptools import Extension, find_namespace_packages, setup
 from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
@@ -34,7 +33,7 @@ with open("./README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 # Note: ninja build requires include_dirs to be absolute paths
-this_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_NAME = "magi_attention"
 NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
 exe_extension = sysconfig.get_config_var("EXE")
@@ -61,44 +60,44 @@ SKIP_MAGI_ATTN_EXT_BUILD = (
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
 
 
-class MagiAttnBuildExtension(BuildExtension):
-    """
-    A BuildExtension that switches its behavior based on the command.
+title_left_str = "\n\n# -------------------     "
+title_right_str = "     ------------------- #\n\n"
 
-    - For development installs (`pip install -e .`), it caches build artifacts
-      in the local `./build` directory for faster re-compilation.
 
-    - For building a distributable wheel (`python -m build --wheel`), it uses
-      the default temporary directory behavior of PyTorch's BuildExtension to
-      ensure robust and correct packaging.
-    """
+def is_in_info_stage() -> bool:
+    return "info" in sys.argv[1]
 
-    def initialize_options(self):
-        super().initialize_options()
 
-        # Before core extensions are built,
-        # optionally prebuild FFA JIT kernels (ref_block_size=None)
-        prebuild_ffa_kernels()
+def is_in_wheel_stage() -> bool:
+    return "wheel" in sys.argv[1]
 
-        # Core logic: check if wheel build is running. 'bdist_wheel' is triggered by `python -m build`.
-        if "bdist_wheel" not in sys.argv:
-            # If not building a wheel (i.e., dev install like `pip install -e .`), enable local caching
-            print("Development mode detected: Caching build artifacts in build/")
-            project_root = os.path.dirname(os.path.abspath(__file__))
-            self.build_temp = os.path.join(project_root, "build", "temp")
-            self.build_lib = os.path.join(project_root, "build", "lib")
 
-            # Ensure directories exist
-            os.makedirs(self.build_temp, exist_ok=True)
-            os.makedirs(self.build_lib, exist_ok=True)
+def is_in_bdist_wheel_stage() -> bool:
+    return "bdist_wheel" == sys.argv[1]
+
+
+def maybe_make_magi_cuda_extension(name, sources, *args, **kwargs) -> Extension | None:
+    name = f"{PACKAGE_NAME}.{name}"
+
+    is_skipped = kwargs.pop("is_skipped", False)
+
+    if is_in_wheel_stage():
+        build_repr_str = kwargs.pop(
+            "build_repr_str", f"{title_left_str}Building {name}{title_right_str}"
+        )
+        skip_build_repr_str = kwargs.pop(
+            "skip_build_repr_str",
+            f"{title_left_str}Skipping Building {name}{title_right_str}",
+        )
+        if is_skipped:
+            print(skip_build_repr_str)
         else:
-            # If building a wheel, rely on the default PyTorch behavior so .so files are correctly packaged
-            print(
-                "Wheel build mode detected: Using default temporary directories in /tmp/ for robust packaging."
-            )
+            print(build_repr_str)
 
-    def build_extensions(self):
-        super().build_extensions()
+    if is_skipped:
+        return None
+
+    return CUDAExtension(name, sources, *args, **kwargs)
 
 
 def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
@@ -123,40 +122,14 @@ def check_if_cuda_home_none(global_option: str) -> None:
     )
 
 
-# Copied from https://github.com/triton-lang/triton/blob/main/python/setup.py
-def get_magi_attention_cache_path() -> str:
-    user_home = USER_HOME
-    if not user_home:
-        user_home = (
-            os.getenv("HOME")
-            or os.getenv("USERPROFILE")
-            or os.getenv("HOMEPATH")
-            or None
-        )
-    if not user_home:
-        raise RuntimeError("Could not find user home directory")
-    return os.path.join(user_home, f".{PACKAGE_NAME}")
-
-
-def open_url(url):
-    user_agent = (
-        "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0"
-    )
-    headers = {
-        "User-Agent": user_agent,
-    }
-    request = urllib.request.Request(url, None, headers)
-    # Set timeout to 300 seconds to prevent the request from hanging forever.
-    return urllib.request.urlopen(request, timeout=300)
-
-
 def nvcc_threads_args() -> list[str]:
     nvcc_threads = os.getenv("NVCC_THREADS") or "2"
     return ["--threads", nvcc_threads]
 
 
 def init_ext_modules() -> None:
-    print(f"\n{torch.__version__=}\n")
+    if is_in_info_stage():
+        print(f"\n{torch.__version__=}\n")
 
     check_if_cuda_home_none(PACKAGE_NAME)
 
@@ -172,27 +145,11 @@ def init_ext_modules() -> None:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
 
 
-def to_full_ext_module_name(ext_module_name: str) -> str:
-    return f"{PACKAGE_NAME}.{ext_module_name}"
-
-
 def build_ffa_utils_ext_module(
     repo_dir: Path,
     csrc_dir: Path,
     common_dir: Path,
 ) -> CUDAExtension | None:
-    ext_module_name = "flexible_flash_attention_utils_cuda"
-
-    if SKIP_FFA_UTILS_BUILD:
-        print(
-            "\n# -------------------     Skipping Building flexible_flash_attention_utils_cuda     ------------------- #\n"
-        )
-        return None
-
-    print(
-        "\n# -------------------     Building flexible_flash_attention_utils_cuda     ------------------- #\n"
-    )
-
     utils_dir_abs = csrc_dir / "utils"
     utils_dir_rel = utils_dir_abs.relative_to(repo_dir)
 
@@ -219,11 +176,12 @@ def build_ffa_utils_ext_module(
         ],
     }
 
-    return CUDAExtension(
-        name=to_full_ext_module_name(ext_module_name),
+    return maybe_make_magi_cuda_extension(
+        name="flexible_flash_attention_utils_cuda",
         sources=sources,
         extra_compile_args=extra_compile_args,
         include_dirs=include_dirs,
+        is_skipped=SKIP_FFA_UTILS_BUILD,
     )
 
 
@@ -232,18 +190,6 @@ def build_magi_attn_ext_module(
     csrc_dir: Path,
     common_dir: Path,
 ) -> CUDAExtension | None:
-    ext_module_name = "magi_attn_ext"
-
-    if SKIP_MAGI_ATTN_EXT_BUILD:
-        print(
-            "\n# -------------------     Skipping Building magi_attn_ext     ------------------- #\n"
-        )
-        return None
-
-    print(
-        "\n# -------------------     Building magi_attn_ext     ------------------- #\n"
-    )
-
     magi_attn_ext_dir_abs = csrc_dir / "extensions"
 
     # init sources
@@ -256,16 +202,14 @@ def build_magi_attn_ext_module(
     # init extra compile args
     extra_compile_args = {"cxx": ["-O3", "-std=c++17"]}
 
-    return CUDAExtension(
-        name=to_full_ext_module_name(ext_module_name),
+    return maybe_make_magi_cuda_extension(
+        name="magi_attn_ext",
         sources=sources,
         extra_compile_args=extra_compile_args,
         include_dirs=include_dirs,
+        is_skipped=SKIP_MAGI_ATTN_EXT_BUILD,
     )
 
-
-# init cmdclass
-cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
 # build ext modules
 ext_modules = []
@@ -274,7 +218,7 @@ if not SKIP_CUDA_BUILD:
     init_ext_modules()
 
     # define some paths for the ext modules below
-    repo_dir = Path(this_dir)
+    repo_dir = Path(project_root)
     csrc_dir = repo_dir / PACKAGE_NAME / "csrc"
     common_dir = csrc_dir / "common"
     cutlass_dir = csrc_dir / "cutlass"
@@ -297,23 +241,67 @@ if not SKIP_CUDA_BUILD:
     if ffa_utils_ext_module is not None:
         ext_modules.append(ffa_utils_ext_module)
 else:
-    print("\n# -------------------     Skipping CUDA build     ------------------- #\n")
+    print(f"{title_left_str}Skipping CUDA build{title_right_str}")
+
+
+# init cmdclass
+
+
+class MagiAttnBuildExtension(BuildExtension):
+    """
+    A BuildExtension that switches its behavior based on the command.
+
+    - For development installs (`pip install -e .`), it caches build artifacts
+      in the local `./build` directory for faster re-compilation.
+
+    - For building a distributable wheel (`python -m build --wheel`), it uses
+      the default temporary directory behavior of PyTorch's BuildExtension to
+      ensure robust and correct packaging.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+    def initialize_options(self) -> None:
+        super().initialize_options()
+
+        # Core logic: check if wheel build is running. 'bdist_wheel' is triggered by `python -m build`.
+        if not is_in_bdist_wheel_stage():
+            # If not building a wheel (i.e., dev install like `pip install -e .`), enable local caching
+            print("Development mode detected: Caching build artifacts in build/")
+            self.build_temp = os.path.join(project_root, "build", "temp")
+            self.build_lib = os.path.join(project_root, "build", "lib")
+
+            # Ensure directories exist
+            os.makedirs(self.build_temp, exist_ok=True)
+            os.makedirs(self.build_lib, exist_ok=True)
+        else:
+            # If building a wheel, rely on the default PyTorch behavior so .so files are correctly packaged
+            print(
+                "Wheel build mode detected: Using default temporary directories in /tmp/ for robust packaging."
+            )
+
+    def build_extensions(self) -> None:
+        super().build_extensions()
+
+
+cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
 
 def prebuild_ffa_kernels() -> None:
-    if not SKIP_CUDA_BUILD and PREBUILD_FFA:
-        print(
-            "\n# -------------------     Skipping Prebuilding FFA JIT kernels     ------------------- #\n"
-        )
+    if not is_in_wheel_stage():
+        return
+
+    if not PREBUILD_FFA:
+        print(f"{title_left_str}Skipping Prebuilding FFA JIT kernels{title_right_str}")
         return
 
     print(
-        "\n# -------------------     Prebuilding FFA JIT kernels (ref_block_size=None)     ------------------- #\n"
+        f"{title_left_str}Prebuilding FFA JIT kernels (ref_block_size=None){title_right_str}"
         "NOTE: this progress may take around 20~30 minute for the first time.\n"
     )
 
     # During build time, the package isn't installed yet. Fall back to source tree import.
-    project_root = os.path.dirname(os.path.abspath(__file__))
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
     try:
@@ -360,6 +348,8 @@ def prebuild_ffa_kernels() -> None:
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
         if src_dir.exists():
             shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+            # if is_in_bdist_wheel_stage():
+            #     shutil.copytree(src_dir, bdist_dir, dirs_exist_ok=True)
         return uri
 
     with ThreadPoolExecutor(max_workers=PREBUILD_FFA_JOBS) as ex:
@@ -373,6 +363,11 @@ def prebuild_ffa_kernels() -> None:
                 print(f"Prebuild failed for {c}: {e}")
 
 
+# first optionally prebuild FFA JIT kernels (ref_block_size=None)
+prebuild_ffa_kernels()
+
+
+# setup
 setup(
     name=PACKAGE_NAME,
     packages=find_namespace_packages(
