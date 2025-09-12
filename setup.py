@@ -78,8 +78,7 @@ class MagiAttnBuildExtension(BuildExtension):
 
         # Before core extensions are built,
         # optionally prebuild FFA JIT kernels (ref_block_size=None)
-        if not SKIP_CUDA_BUILD and PREBUILD_FFA:
-            prebuild_ffa_kernels()
+        prebuild_ffa_kernels()
 
         # Core logic: check if wheel build is running. 'bdist_wheel' is triggered by `python -m build`.
         if "bdist_wheel" not in sys.argv:
@@ -185,6 +184,9 @@ def build_ffa_utils_ext_module(
     ext_module_name = "flexible_flash_attention_utils_cuda"
 
     if SKIP_FFA_UTILS_BUILD:
+        print(
+            "\n# -------------------     Skipping Building flexible_flash_attention_utils_cuda     ------------------- #\n"
+        )
         return None
 
     print(
@@ -233,6 +235,9 @@ def build_magi_attn_ext_module(
     ext_module_name = "magi_attn_ext"
 
     if SKIP_MAGI_ATTN_EXT_BUILD:
+        print(
+            "\n# -------------------     Skipping Building magi_attn_ext     ------------------- #\n"
+        )
         return None
 
     print(
@@ -291,9 +296,17 @@ if not SKIP_CUDA_BUILD:
     )
     if ffa_utils_ext_module is not None:
         ext_modules.append(ffa_utils_ext_module)
+else:
+    print("\n# -------------------     Skipping CUDA build     ------------------- #\n")
 
 
 def prebuild_ffa_kernels() -> None:
+    if not SKIP_CUDA_BUILD and PREBUILD_FFA:
+        print(
+            "\n# -------------------     Skipping Prebuilding FFA JIT kernels     ------------------- #\n"
+        )
+        return
+
     print(
         "\n# -------------------     Prebuilding FFA JIT kernels (ref_block_size=None)     ------------------- #\n"
         "NOTE: this progress may take around 20~30 minute for the first time.\n"
