@@ -281,9 +281,6 @@ class MagiAttnBuildExtension(BuildExtension):
                 "Wheel build mode detected: Using default temporary directories in /tmp/ for robust packaging."
             )
 
-    def build_extensions(self) -> None:
-        super().build_extensions()
-
 
 cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
@@ -348,8 +345,6 @@ def prebuild_ffa_kernels() -> None:
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
         if src_dir.exists():
             shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
-            # if is_in_bdist_wheel_stage():
-            #     shutil.copytree(src_dir, bdist_dir, dirs_exist_ok=True)
         return uri
 
     with ThreadPoolExecutor(max_workers=PREBUILD_FFA_JOBS) as ex:
@@ -378,6 +373,7 @@ setup(
             "docs",
             "tools",
             "assets",
+            "scripts",
         )
     ),
     # package data is defined in pyproject.toml
