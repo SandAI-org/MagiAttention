@@ -17,7 +17,6 @@ from typing import Any, Union
 
 from .enum import AttnMaskType
 from .range import AttnRange
-from .rect_range import AttnRectRange
 
 __all__ = [
     "AttnRectangle",
@@ -37,28 +36,16 @@ class AttnRectangle:
 
     def __init__(
         self,
-        q_range: AttnRectRange | AttnRange,
-        k_range: AttnRectRange | AttnRange,
-        d_range: AttnRectRange | AttnRange | None = None,
+        q_range: AttnRange,
+        k_range: AttnRange,
+        d_range: AttnRange | None = None,
         mask_type: AttnMaskType | int = AttnMaskType.FULL,
     ) -> None:
-        self._q_range = (
-            q_range
-            if isinstance(q_range, AttnRectRange)
-            else AttnRectRange.from_parent(q_range)
-        )
-        self._k_range = (
-            k_range
-            if isinstance(k_range, AttnRectRange)
-            else AttnRectRange.from_parent(k_range)
-        )
+        self._q_range = q_range
+        self._k_range = k_range
         # If there is no user-defined d_range, set it to -inf ~ inf
-        d_range = AttnRectRange(INT_MIN, INT_MAX) if d_range is None else d_range
-        self._d_range = (
-            d_range
-            if isinstance(d_range, AttnRectRange)
-            else AttnRectRange.from_parent(d_range)
-        )
+        d_range = AttnRange(INT_MIN, INT_MAX) if d_range is None else d_range
+        self._d_range = d_range
 
         # Get enum type mask_type for subsequent logic
         if isinstance(mask_type, AttnMaskType):
@@ -138,9 +125,9 @@ class AttnRectangle:
 
     def is_valid(
         self,
-        q_range: AttnRectRange | None = None,
-        k_range: AttnRectRange | None = None,
-        d_range: AttnRectRange | None = None,
+        q_range: AttnRange | None = None,
+        k_range: AttnRange | None = None,
+        d_range: AttnRange | None = None,
     ) -> bool:
         q_range = self.q_range if q_range is None else q_range
         k_range = self.k_range if k_range is None else k_range
@@ -155,9 +142,9 @@ class AttnRectangle:
 
     def check_valid(
         self,
-        q_range: AttnRectRange | None = None,
-        k_range: AttnRectRange | None = None,
-        d_range: AttnRectRange | None = None,
+        q_range: AttnRange | None = None,
+        k_range: AttnRange | None = None,
+        d_range: AttnRange | None = None,
     ) -> None:
         q_range = self.q_range if q_range is None else q_range
         k_range = self.k_range if k_range is None else k_range
@@ -307,19 +294,19 @@ class AttnRectangle:
         # Direct_return
         # case 1: Full Mask
         if self.is_full():
-            attn_arg.append((self.q_range.to_parent(), self.k_range.to_parent(), 0))
+            attn_arg.append((self.q_range, self.k_range, 0))
             return attn_arg
         # case 2: Causal Mask
         if self.is_causal():
-            attn_arg.append((self.q_range.to_parent(), self.k_range.to_parent(), 1))
+            attn_arg.append((self.q_range, self.k_range, 1))
             return attn_arg
         # case 3: Inv Causal Mask
         if self.is_inv_causal():
-            attn_arg.append((self.q_range.to_parent(), self.k_range.to_parent(), 2))
+            attn_arg.append((self.q_range, self.k_range, 2))
             return attn_arg
         # case 4: Bi Causal Mask
         if self.is_bi_causal():
-            attn_arg.append((self.q_range.to_parent(), self.k_range.to_parent(), 3))
+            attn_arg.append((self.q_range, self.k_range, 3))
             return attn_arg
 
         # left boundary (k_start): q_start ~ q_id_l is Full, q_id_l ~ q_end is Inv Causal

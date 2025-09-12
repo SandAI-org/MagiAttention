@@ -18,7 +18,6 @@ from unittest import TestCase
 
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
-from magi_attention.common.rect_range import AttnRectRange
 from magi_attention.common.rectangle import AttnRectangle
 from magi_attention.common.rectangles import AttnRectangles
 
@@ -27,13 +26,13 @@ class TestAttnRectangles(TestCase):
     def setUp(self):
         """setup test environment"""
         self.rect1 = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 15)
+            AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
         )
         self.rect2 = AttnRectangle(
-            AttnRectRange(10, 20), AttnRectRange(20, 30), AttnRectRange(5, 15)
+            AttnRange(10, 20), AttnRange(20, 30), AttnRange(5, 15)
         )
         self.rect3 = AttnRectangle(
-            AttnRectRange(5, 15), AttnRectRange(5, 25), AttnRectRange(-3, 17)
+            AttnRange(5, 15), AttnRange(5, 25), AttnRange(-3, 17)
         )
 
     def test_init(self):
@@ -59,7 +58,7 @@ class TestAttnRectangles(TestCase):
         # test append invalid rectangle (should raise exception)
         # create an invalid rectangle by directly modifying internal state
         invalid_rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 15)
+            AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
         )
         # directly modify internal state to make it invalid
         invalid_rect._q_range._start = 10
@@ -89,9 +88,9 @@ class TestAttnRectangles(TestCase):
 
     def test_from_ranges(self):
         """test from ranges"""
-        # test using AttnRectRange
-        q_ranges = [AttnRectRange(0, 10), AttnRectRange(10, 20)]
-        k_ranges = [AttnRectRange(0, 20), AttnRectRange(20, 40)]
+        # test using AttnRange
+        q_ranges = [AttnRange(0, 10), AttnRange(10, 20)]
+        k_ranges = [AttnRange(0, 20), AttnRange(20, 40)]
         mask_types = [AttnMaskType.FULL, AttnMaskType.CAUSAL]
 
         rects = AttnRectangles.from_ranges(q_ranges, k_ranges, mask_types)
@@ -99,8 +98,8 @@ class TestAttnRectangles(TestCase):
 
         # test using integer mask_types
         int_mask_types = [0, 1, 2, 3]
-        q_ranges_int = [AttnRectRange(0, 5)] * 4
-        k_ranges_int = [AttnRectRange(0, 10)] * 4
+        q_ranges_int = [AttnRange(0, 5)] * 4
+        k_ranges_int = [AttnRange(0, 10)] * 4
 
         rects_int = AttnRectangles.from_ranges(
             q_ranges_int, k_ranges_int, int_mask_types
@@ -114,9 +113,7 @@ class TestAttnRectangles(TestCase):
 
         # test length mismatch exception
         with self.assertRaises(AssertionError):
-            AttnRectangles.from_ranges(
-                [AttnRectRange(0, 10)], [AttnRectRange(0, 20)], [0, 1]
-            )
+            AttnRectangles.from_ranges([AttnRange(0, 10)], [AttnRange(0, 20)], [0, 1])
 
     def test_is_valid(self):
         """test validity check"""
@@ -128,7 +125,7 @@ class TestAttnRectangles(TestCase):
 
         # test invalid rectangle
         invalid_rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 15)
+            AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
         )
         # directly modify internal state to make it invalid
         invalid_rect._q_range._start = 10
@@ -146,7 +143,7 @@ class TestAttnRectangles(TestCase):
 
         # test invalid rectangle
         invalid_rect = AttnRectangle(
-            AttnRectRange(0, 10), AttnRectRange(0, 20), AttnRectRange(-5, 15)
+            AttnRange(0, 10), AttnRange(0, 20), AttnRange(-5, 15)
         )
         # directly modify internal state to make it invalid
         invalid_rect._q_range._start = 10
@@ -390,7 +387,7 @@ class TestAttnRectangles(TestCase):
 
         # test integer indexing assignment
         new_rect = AttnRectangle(
-            AttnRectRange(100, 110), AttnRectRange(100, 120), AttnRectRange(0, 20)
+            AttnRange(100, 110), AttnRange(100, 120), AttnRange(0, 20)
         )
         rects[0] = new_rect
         self.assertEqual(rects[0], new_rect)
@@ -489,9 +486,9 @@ class TestAttnRectangles(TestCase):
 
                     if d_start <= d_end:  # only create rectangle when d_range is valid
                         rect = AttnRectangle(
-                            AttnRectRange(q_start, q_end),
-                            AttnRectRange(k_start, k_end),
-                            AttnRectRange(d_start, d_end),
+                            AttnRange(q_start, q_end),
+                            AttnRange(k_start, k_end),
+                            AttnRange(d_start, d_end),
                         )
                         rects.append(rect)
 
