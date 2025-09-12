@@ -97,18 +97,6 @@ std::vector<at::Tensor> mha_fwd(
   return {out, softmax_lse};
 }
 
-// Forward declaration; implemented in work_tile_divider.cu
-std::tuple<torch::Tensor> 
-work_tile_divider_ext(
-  torch::Tensor q,
-  torch::Tensor k,
-  torch::Tensor tile_ranges,
-  torch::Tensor loop_ranges,
-  int max_seqlen_tile_ranges,
-  int max_seqlen_loop_ranges,
-  torch::Tensor arrangement
-);
-
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fwd", &mha_fwd, "Forward (single-variant JIT)");
 }
