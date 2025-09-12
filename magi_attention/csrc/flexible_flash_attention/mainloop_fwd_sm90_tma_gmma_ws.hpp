@@ -326,26 +326,6 @@ struct CollectiveMainloopFwdSm90 {
         }
       }();
 
-      // if constexpr (IsProducer) {
-      //   int lane = threadIdx.x % NumProducerThreads;
-      //   int loop_times = cute::ceil_div(BLOCK_SIZE, NumProducerThreads);
-
-      //   for(int i = 0; i < loop_times; ++i) {
-      //     int idx = i * NumProducerThreads + lane;
-      //     if (idx < BLOCK_SIZE) {
-      //       q_ranges[idx] = make_int2(params.q_ranges[2 * bidb + 2 * idx], params.q_ranges[2 * bidb + 2 * idx + 1]);
-      //       k_ranges[idx] = make_int2(params.k_ranges[2 * bidb + 2 * idx], params.k_ranges[2 * bidb + 2 * idx + 1]);
-      //       attn_type_map[idx] = params.attn_type_map ? params.attn_type_map[bidb + idx] : 0;
-      //     }
-      //   }
-      //   __syncwarp();
-      //   cutlass::arch::NamedBarrier::arrive(NumProducerThreads + NumMmaThreads, static_cast<uint32_t>(FwdNamedBarriers::Meta));
-      // }
-      // else {
-      //   cutlass::arch::NamedBarrier::sync(NumProducerThreads + NumMmaThreads, static_cast<uint32_t>(FwdNamedBarriers::Meta));
-      // }
-
-      // bidb = 0;
       if (!is_finish()) {
         seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
@@ -358,12 +338,14 @@ struct CollectiveMainloopFwdSm90 {
     CUTLASS_DEVICE
     void prefetch() {
       ++bidb;
-      if (!is_finish()) {
-        seqlen_info.update_k(bidb);
-        attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
-        auto [n_block_min_, n_block_max_] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
-        n_block_min = n_block_min_;
-        n_block_max = n_block_max_;
+      if constexpr (RangeMerge) {
+        if (!is_finish()) {
+          seqlen_info.update_k(bidb);
+          attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
+          auto [n_block_min_, n_block_max_] = BlockMN_t::get_n_block_min_max(seqlen_info, m_block, bidb, attn_type);
+          n_block_min = n_block_min_;
+          n_block_max = n_block_max_;
+        }
       }
     }
 
@@ -571,23 +553,6 @@ struct CollectiveMainloopFwdSm90 {
     do {
       // Prefetch the next block_meta
       block_meta.prefetch();
-
-      // Is it possible to load a group of k and v simultaneously?
-      if (n_block >= n_block_min) {
-        if constexpr (IntraWGOverlap) {
-          load_K(n_block, smem_pipe_write_k, offset_k);
-          load_V(prev_n_block, smem_pipe_write_v, prev_offset_k);
-        } else {
-          load_K(n_block, smem_pipe_write_k, offset_k);
-          load_V(n_block, smem_pipe_write_v, offset_k);
-        }
-
-        // Step the previous n_block and offset_k
-        prev_n_block = n_block;
-        prev_offset_k = offset_k;
-        // Decrement n_block
-        --n_block;
-      }
 
       // Loop until we reach the end of the current block
 #pragma unroll(Use_TMA_KV ? 2 : 1)
@@ -1060,7 +1025,13 @@ struct CollectiveMainloopFwdSm90 {
       seqlen_k = block_meta.seqlen_info.seqlen_k;
       n_block_min = block_meta.n_block_min;
       attn_type = block_meta.attn_type;
-      finish_boundary = false;
+      finish_boundary = []() {
+        if constexpr (RangeMerge) {
+          return false;
+        } else {
+          return true;
+        }
+      }();
     } while (!block_meta.is_finish() && block_meta.is_valid());
 
     cutlass::arch::NamedBarrier::arrive(

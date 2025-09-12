@@ -340,7 +340,7 @@ def prebuild_ffa_kernels() -> None:
             disable_atomic_reduction=da,
             ref_block_size=None,
         )
-        spec.build(verbose=True)
+        spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()
         dst_dir = (jit_env.MAGI_ATTENTION_AOT_DIR / uri).resolve()
         if src_dir.exists():

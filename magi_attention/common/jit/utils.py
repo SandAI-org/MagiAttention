@@ -31,15 +31,16 @@ import pathlib
 import torch
 
 
-def write_if_different(path: pathlib.Path, content: str) -> None:
+def write_if_different(path: pathlib.Path, content: str) -> bool:
     if path.exists():
         with open(path, "r") as f:
             if f.read() == content:
-                return
+                return False
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+    return True
 
 
 dtype_map = {

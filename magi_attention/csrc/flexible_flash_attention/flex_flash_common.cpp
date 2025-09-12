@@ -295,11 +295,3 @@ int round_up_headdim(int head_size) {
 #endif
   return 256;
 }
-
-// // utility kernel binding (declared in flash.h). Use explicit function type to avoid overload ambiguity.
-// using UniquePairsFn = std::tuple<at::Tensor, at::Tensor, at::Tensor> (*)(at::Tensor);
-
-// PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-//   m.def("unique_consecutive_pairs", static_cast<UniquePairsFn>(&unique_consecutive_pairs_ext), "Finds unique (int, int) pairs from a pre-sorted tensor (CUDA
-//   extension)");
-// }
