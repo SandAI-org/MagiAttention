@@ -211,80 +211,6 @@ def build_magi_attn_ext_module(
     )
 
 
-# build ext modules
-ext_modules = []
-if not SKIP_CUDA_BUILD:
-    # init before building any ext module
-    init_ext_modules()
-
-    # define some paths for the ext modules below
-    repo_dir = Path(project_root)
-    csrc_dir = repo_dir / PACKAGE_NAME / "csrc"
-    common_dir = csrc_dir / "common"
-    cutlass_dir = csrc_dir / "cutlass"
-
-    # build magi attn ext module
-    magi_attn_ext_module = build_magi_attn_ext_module(
-        repo_dir=repo_dir,
-        csrc_dir=csrc_dir,
-        common_dir=common_dir,
-    )
-    if magi_attn_ext_module is not None:
-        ext_modules.append(magi_attn_ext_module)
-
-    # build utils ext module
-    ffa_utils_ext_module = build_ffa_utils_ext_module(
-        repo_dir=repo_dir,
-        csrc_dir=csrc_dir,
-        common_dir=common_dir,
-    )
-    if ffa_utils_ext_module is not None:
-        ext_modules.append(ffa_utils_ext_module)
-else:
-    print(f"{title_left_str}Skipping CUDA build{title_right_str}")
-
-
-# init cmdclass
-
-
-class MagiAttnBuildExtension(BuildExtension):
-    """
-    A BuildExtension that switches its behavior based on the command.
-
-    - For development installs (`pip install -e .`), it caches build artifacts
-      in the local `./build` directory for faster re-compilation.
-
-    - For building a distributable wheel (`python -m build --wheel`), it uses
-      the default temporary directory behavior of PyTorch's BuildExtension to
-      ensure robust and correct packaging.
-    """
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-
-    def initialize_options(self) -> None:
-        super().initialize_options()
-
-        # Core logic: check if wheel build is running. 'bdist_wheel' is triggered by `python -m build`.
-        if not is_in_bdist_wheel_stage():
-            # If not building a wheel (i.e., dev install like `pip install -e .`), enable local caching
-            print("Development mode detected: Caching build artifacts in build/")
-            self.build_temp = os.path.join(project_root, "build", "temp")
-            self.build_lib = os.path.join(project_root, "build", "lib")
-
-            # Ensure directories exist
-            os.makedirs(self.build_temp, exist_ok=True)
-            os.makedirs(self.build_lib, exist_ok=True)
-        else:
-            # If building a wheel, rely on the default PyTorch behavior so .so files are correctly packaged
-            print(
-                "Wheel build mode detected: Using default temporary directories in /tmp/ for robust packaging."
-            )
-
-
-cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
-
-
 def prebuild_ffa_kernels() -> None:
     if not is_in_wheel_stage():
         return
@@ -358,8 +284,82 @@ def prebuild_ffa_kernels() -> None:
                 print(f"Prebuild failed for {c}: {e}")
 
 
-# first optionally prebuild FFA JIT kernels (ref_block_size=None)
+# optionally prebuild FFA JIT kernels (ref_block_size=None)
 prebuild_ffa_kernels()
+
+
+# build ext modules
+ext_modules = []
+if not SKIP_CUDA_BUILD:
+    # init before building any ext module
+    init_ext_modules()
+
+    # define some paths for the ext modules below
+    repo_dir = Path(project_root)
+    csrc_dir = repo_dir / PACKAGE_NAME / "csrc"
+    common_dir = csrc_dir / "common"
+    cutlass_dir = csrc_dir / "cutlass"
+
+    # build magi attn ext module
+    magi_attn_ext_module = build_magi_attn_ext_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+    )
+    if magi_attn_ext_module is not None:
+        ext_modules.append(magi_attn_ext_module)
+
+    # build utils ext module
+    ffa_utils_ext_module = build_ffa_utils_ext_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+    )
+    if ffa_utils_ext_module is not None:
+        ext_modules.append(ffa_utils_ext_module)
+else:
+    print(f"{title_left_str}Skipping CUDA build{title_right_str}")
+
+
+# init cmdclass
+
+
+class MagiAttnBuildExtension(BuildExtension):
+    """
+    A BuildExtension that switches its behavior based on the command.
+
+    - For development installs (`pip install -e .`), it caches build artifacts
+      in the local `./build` directory for faster re-compilation.
+
+    - For building a distributable wheel (`python -m build --wheel`), it uses
+      the default temporary directory behavior of PyTorch's BuildExtension to
+      ensure robust and correct packaging.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+    def initialize_options(self) -> None:
+        super().initialize_options()
+
+        # Core logic: check if wheel build is running. 'bdist_wheel' is triggered by `python -m build`.
+        if not is_in_bdist_wheel_stage():
+            # If not building a wheel (i.e., dev install like `pip install -e .`), enable local caching
+            print("Development mode detected: Caching build artifacts in build/")
+            self.build_temp = os.path.join(project_root, "build", "temp")
+            self.build_lib = os.path.join(project_root, "build", "lib")
+
+            # Ensure directories exist
+            os.makedirs(self.build_temp, exist_ok=True)
+            os.makedirs(self.build_lib, exist_ok=True)
+        else:
+            # If building a wheel, rely on the default PyTorch behavior so .so files are correctly packaged
+            print(
+                "Wheel build mode detected: Using default temporary directories in /tmp/ for robust packaging."
+            )
+
+
+cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
 
 # setup
