@@ -202,9 +202,14 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
   // at::Tensor softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
   // at::Tensor softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
 
-  at::Tensor softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
-  at::Tensor softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+  at::Tensor softmax_d = torch::zeros({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+  at::Tensor softmax_lse_log2 = torch::zeros({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+  // printf("test\n");
 
+  // softmax_d.slice(/*dim=*/1, /*start=*/total_q / 2).zero_();
+  // softmax_lse_log2.slice(/*dim=*/1, /*start=*/total_q / 2).zero_();
+  // std::cout << "softmax_d: " << softmax_d << std::endl;
+  // std::cout << "softmax_lse_log2: " << softmax_lse_log2 << std::endl;
 
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   at::Tensor determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));

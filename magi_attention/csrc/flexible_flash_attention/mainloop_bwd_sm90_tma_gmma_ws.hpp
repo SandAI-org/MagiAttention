@@ -1174,6 +1174,9 @@ struct CollectiveMainloopBwdSm90 {
           if constexpr (Has_softcap) {
             dS(mi, ni) *= dtanh(mi, ni);
           }
+          // if (isnan(dS(mi, ni))) {
+          //   printf("detect nan bidb: %d bidh: %d thread_idx: %d dP_sum_cur: %f\n", bidb, bidh, thread_idx, dP_sum_cur);
+          // }
         }
       }
       /*

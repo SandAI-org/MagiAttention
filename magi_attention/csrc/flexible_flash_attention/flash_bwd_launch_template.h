@@ -83,18 +83,21 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       // {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_LSE_log2
       {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2
       params.q_ranges,
-      params.k_ranges};
+      params.k_ranges,
+      params.b};
   typename PreprocessKernel::Params preprocess_params = PreprocessKernel::to_underlying_arguments(preprocess_args);
   int num_m_block = cute::ceil_div(params.max_seqlen_q, kBlockM);
+
   dim3 grid_m(params.b, num_m_block, params.h_qo);
   cutlass::kernel_launch<PreprocessKernel>(
-      grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, false /*launch_with_pdl*/);
+       grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, false /*launch_with_pdl*/);
   CHECK_CUDA_KERNEL_LAUNCH();
 
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
   using ClusterShape = cute::Shape<_1, Int<1>, _1>; // Currently doesn't not support cluster
 
   // Get Mainloop, TileScheduler, Epilogue and AttnKernel
+
   using CollectiveMainloop = flash::CollectiveMainloopBwdSm90<
       Stages,
       Stages_dO,
@@ -191,6 +194,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   dim3 grid_dims = AttnKernel::get_grid_shape(kernel_params);
   dim3 block_dims = AttnKernel::get_block_shape();
   int smem_size = AttnKernel::SharedStorageSize;
+
   // int smem_size_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));
   // int smem_size_do = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_do));
   // int smem_size_ds = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_ds));
@@ -207,6 +211,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   // int smem_size_dpsum = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_dpsum));
   // printf("smem_size = %d, q = %d, k = %d, v = %d, do = %d, ds = %d, dqacc = %d, lse = %d, dpsum = %d\n", smem_size, smem_size_q, smem_size_k, smem_size_v,
   // smem_size_do, smem_size_ds, smem_size_dqacc, smem_size_lse, smem_size_dpsum);
+
   if constexpr (size(ClusterShape{}) > 1) {
     void const* kernel = (void const*)cutlass::device_kernel<AttnKernel>;
     if (smem_size >= 48 * 1024) {
@@ -221,6 +226,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
     cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
   }
   CHECK_CUDA_KERNEL_LAUNCH();
+
 }
 
 template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction>
