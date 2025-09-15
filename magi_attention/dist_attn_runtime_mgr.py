@@ -435,7 +435,17 @@ def init_dist_attn_runtime_mgr(
     cp_rank = dist.get_rank(cp_group)
 
     # calculate dispatch meta to determine which rank should hold which chunks of seqlen
-    dispatch_meta_q, dispatch_meta_k, attn_buckets = calc_dispatch_meta_from_qk_ranges(
+    # NOTE: in final, the dispatch meta is NOT supposed to contain any meta info about the mask
+    # however, since in most of the distributed attention scenarios, the mask is static through the whole training pass
+    # we can take advantage of this information to offer a better dispatch solution if permutable
+    # so as to help reducing communication overhead while keep computation load-balance
+    # therefore here, we will also pass the actual or initial mask info to the dispatch solver
+    # as the arguments for some dispatch algorithms
+    (
+        dispatch_meta_q,
+        dispatch_meta_k,
+        buckets_per_rank,
+    ) = calc_dispatch_meta_from_qk_ranges(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
@@ -457,7 +467,7 @@ def init_dist_attn_runtime_mgr(
         attn_mask_type=attn_mask_type,
         dispatch_meta_q=dispatch_meta_q,
         dispatch_meta_k=dispatch_meta_k,
-        bucket_per_rank=attn_buckets,
+        bucket_per_rank=buckets_per_rank,
         cp_group=cp_group,
         overlap_config=dist_attn_config.overlap_config,
         cp_mesh=cp_mesh,

@@ -150,7 +150,6 @@ def calc_dispatch_meta_from_qk_ranges(
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,
                 attn_mask_type=attn_mask_type,
-                batch_size=batch_size,
                 total_seqlen_q=total_seqlen_q,
                 total_seqlen_k=total_seqlen_k,
                 shard_seqlen_q=shard_seqlen_q,
@@ -194,7 +193,6 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
     attn_mask_type: list[AttnMaskType],
-    batch_size: int,
     total_seqlen_q: int,
     total_seqlen_k: int,
     shard_seqlen_q: int,
@@ -215,11 +213,12 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
         k_ranges (AttnRanges): global key ranges in the ref attn mask
         attn_mask_type (list[AttnMaskType]): attn mask type list
 
-        batch_size (int): batch size
         total_seqlen_q (int): total sequence length of query
         total_seqlen_k (int): total sequence length of key
         shard_seqlen_q (int): sequence length of query per cp rank
         shard_seqlen_k (int): sequence length of key per cp rank
+        max_valid_ids_q (int): max valid ids for query, used to clamp position ids
+        max_valid_ids_k (int): max valid ids for key, used to clamp position ids
 
         num_chunks_q (int): number of chunks for query
         num_chunks_k (int): number of chunks for key
@@ -321,8 +320,6 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
 
     common_meta_kwargs = dict(
         attn_type=AttnType.SELF_ATTN,
-        attn_mask_type=attn_mask_type,
-        batch_size=batch_size,
         total_seqlen=total_seqlen,
         shard_seqlen=shard_seqlen,
         max_valid_ids=max_valid_ids,
@@ -333,22 +330,18 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
         partitions=partitions,
         partitions_perm_idxs=partitions_perm_idxs,
         partitions_unperm_idxs=partitions_unperm_idxs,
-        global_bucket=global_bucket,
-        buckets_per_rank=buckets_per_rank,
     )
 
-    meta_q = DispatchMeta(
+    dispatch_meta_q = DispatchMeta(
         attn_role=AttnRole.QUERY,
-        ranges=q_ranges,
         **common_meta_kwargs,  # type: ignore
     )
-    meta_k = DispatchMeta(
+    dispatch_meta_k = DispatchMeta(
         attn_role=AttnRole.KEY,
-        ranges=k_ranges,
         **common_meta_kwargs,  # type: ignore
     )
 
-    return meta_q, meta_k, buckets_per_rank
+    return dispatch_meta_q, dispatch_meta_k, buckets_per_rank
 
 
 @nvtx.instrument_nvtx
