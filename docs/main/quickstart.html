@@ -1,0 +1,683 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>QuickStart &#8212; MagiAttention main documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=9d37742d" />
+  
+  <!-- So that users can add custom icons -->
+  <script src="_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+
+    <script src="_static/documentation_options.js?v=a8da1a53"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=fd10adb8"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'quickstart';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = 'main';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/quickstart.html" />
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="API Reference" href="magi_api.html" />
+    <link rel="prev" title="Installation" href="install.html" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="_static/magi-black.png" class="logo__image only-light" alt=""/>
+    <img src="_static/magi-black.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="guide.html">
+    User Guide
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="guide.html">
+    User Guide
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<nav class="bd-docs-nav bd-links"
+     aria-label="Section Navigation">
+  <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
+  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="install.html">Installation</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">QuickStart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="magi_api.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="env_variables.html">Environment Variables</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="guide.html" class="nav-link">User Guide</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">QuickStart</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="quickstart">
+<h1>QuickStart<a class="headerlink" href="#quickstart" title="Link to this heading">#</a></h1>
+<nav class="contents local" id="contents">
+<ul class="simple">
+<li><p><a class="reference internal" href="#basic-usage-for-flex-flash-attention" id="id1">Basic Usage for Flex-Flash-Attention</a></p></li>
+<li><p><a class="reference internal" href="#basic-usage-for-magiattention" id="id2">Basic Usage for MagiAttention</a></p></li>
+</ul>
+</nav>
+<section id="basic-usage-for-flex-flash-attention">
+<h2><a class="toc-backref" href="#id1" role="doc-backlink">Basic Usage for Flex-Flash-Attention</a><a class="headerlink" href="#basic-usage-for-flex-flash-attention" title="Link to this heading">#</a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">flex_flash_attn_func</span>
+
+<span class="c1"># --- Define attention config --- #</span>
+
+<span class="n">total_seqlen</span> <span class="o">=</span> <span class="mi">2048</span>    <span class="c1"># 2k tokens</span>
+<span class="n">num_heads_q</span> <span class="o">=</span> <span class="mi">8</span>        <span class="c1"># number of attention (query) heads</span>
+<span class="n">num_heads_kv</span> <span class="o">=</span> <span class="mi">2</span>       <span class="c1"># number of key/value heads (GQA)</span>
+<span class="n">head_dim</span> <span class="o">=</span> <span class="mi">128</span>         <span class="c1"># dimension of each attention head</span>
+<span class="n">dtype</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span> <span class="c1"># attention activation / computation dtype (while the reduction dtype is always fp32 for ffa right now)</span>
+<span class="n">device</span> <span class="o">=</span> <span class="s2">&quot;cuda&quot;</span>
+
+<span class="c1"># --- Initialize QKV tensor --- #</span>
+
+<span class="n">q</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">total_seqlen</span><span class="p">,</span> <span class="n">num_heads_q</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">k</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">total_seqlen</span><span class="p">,</span> <span class="n">num_heads_kv</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">v</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">total_seqlen</span><span class="p">,</span> <span class="n">num_heads_kv</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+
+<span class="c1"># --- Initialize FFA meta args for customized attention mask --- #</span>
+
+<span class="c1"># the following customized attention mask looks like (`*` for unmasked, `0` for masked):</span>
+<span class="c1">#     - - - - - - - - -&gt; (k)</span>
+<span class="c1">#   | * * * * 0 0 0 0</span>
+<span class="c1">#   | * * * * 0 0 0 0</span>
+<span class="c1">#   | * * * * 0 0 0 0</span>
+<span class="c1">#   | * * * * 0 0 0 0</span>
+<span class="c1">#   | * * * * * 0 0 0</span>
+<span class="c1">#   | * * * * * * 0 0</span>
+<span class="c1">#   | * * * * * * * 0</span>
+<span class="c1">#   | * * * * * * * *</span>
+<span class="c1">#   V</span>
+<span class="c1">#  (q)</span>
+<span class="n">q_ranges_tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1024</span><span class="p">],</span> <span class="p">[</span><span class="mi">1024</span><span class="p">,</span> <span class="mi">2048</span><span class="p">]],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">k_ranges_tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1024</span><span class="p">],</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">]],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">attn_type_map_tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span> <span class="c1"># full mask for 1st slice, causal mask for 2nd</span>
+
+<span class="n">max_seqlen_q</span> <span class="o">=</span> <span class="mi">1024</span> <span class="c1"># Max length of all q_ranges (2048 - 1024 = 1024)</span>
+<span class="n">max_seqlen_k</span> <span class="o">=</span> <span class="mi">2048</span> <span class="c1"># Max length of all k_ranges (2048 - 0 = 2048)</span>
+
+<span class="c1"># --- Attention computation --- #</span>
+
+<span class="n">out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">flex_flash_attn_func</span><span class="p">(</span> <span class="c1"># the second return value is `lse` (log-sum-exp), known as the online-softmax correction factor</span>
+    <span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span>
+    <span class="n">q_ranges</span><span class="o">=</span><span class="n">q_ranges_tensor</span><span class="p">,</span>
+    <span class="n">k_ranges</span><span class="o">=</span><span class="n">k_ranges_tensor</span><span class="p">,</span>
+    <span class="n">max_seqlen_q</span><span class="o">=</span><span class="n">max_seqlen_q</span><span class="p">,</span>
+    <span class="n">max_seqlen_k</span><span class="o">=</span><span class="n">max_seqlen_k</span><span class="p">,</span>
+    <span class="n">attn_type_map</span><span class="o">=</span><span class="n">attn_type_map_tensor</span><span class="p">,</span>
+    <span class="n">softmax_scale</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="c1"># defaults to 1/sqrt(head_dim)</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="basic-usage-for-magiattention">
+<h2><a class="toc-backref" href="#id2" role="doc-backlink">Basic Usage for MagiAttention</a><a class="headerlink" href="#basic-usage-for-magiattention" title="Link to this heading">#</a></h2>
+<p><strong>NOTE</strong>: You should run the following examples in a distributed environment, e.g. using the common <code class="docutils literal notranslate"><span class="pre">torchrun</span></code> script</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">nn</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">magi_attn_flex_dispatch</span><span class="p">,</span> <span class="n">calc_attn</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="c1"># interface functions</span>
+    <span class="n">compute_pad_size</span><span class="p">,</span> <span class="c1"># helper functions</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnRanges</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnMaskType</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">setup_dist_env</span><span class="p">,</span> <span class="n">clearup_dist_env</span>
+
+<span class="c1"># --- Set up distributed environment --- #</span>
+
+<span class="n">rank</span><span class="p">,</span> <span class="n">local_rank</span><span class="p">,</span> <span class="n">world_size</span><span class="p">,</span> <span class="n">world_group</span><span class="p">,</span> <span class="n">device</span><span class="p">,</span> <span class="n">seed</span> <span class="o">=</span> <span class="n">setup_dist_env</span><span class="p">()</span>
+
+<span class="c1"># --- Define attention config --- #</span>
+
+<span class="n">total_seqlen</span> <span class="o">=</span> <span class="mi">32</span> <span class="o">*</span> <span class="mi">1024</span>   <span class="c1"># 32k tokens, if we dispatch it to 8 GPUs, then each GPU holds 4k tokens</span>
+<span class="n">num_heads_q</span> <span class="o">=</span> <span class="mi">48</span>           <span class="c1"># number of attention (query) heads</span>
+<span class="n">num_heads_kv</span> <span class="o">=</span> <span class="mi">8</span>           <span class="c1"># number of key/value heads (GQA)</span>
+<span class="n">head_dim</span> <span class="o">=</span> <span class="mi">128</span>             <span class="c1"># dimension of each attention head</span>
+<span class="n">dtype</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span>     <span class="c1"># attention activation / computation dtype (while the reduction dtype for partial attention outputs is always fp32 for magi_attention right now)</span>
+<span class="n">chunk_size</span> <span class="o">=</span> <span class="mi">512</span>           <span class="c1"># chunk size to chunk the input tensor x along the seqlen dim for dispatch to control the granularity of computation load-balance.</span>
+
+<span class="c1"># --- Initialize token embedding tensor --- #</span>
+
+<span class="n">embed_dim</span> <span class="o">=</span> <span class="mi">4096</span>
+<span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">total_seqlen</span><span class="p">,</span> <span class="n">embed_dim</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="c1"># --- Initialize MagiAttention meta configs for customized attention mask --- #</span>
+
+<span class="c1"># the following customized attention mask is known as `block-causal` mask where `block_size` = 4096 (4k),</span>
+<span class="c1"># which looks like (`*` for unmasked, `0` for masked):</span>
+<span class="c1">#     - - - - - - - - -&gt; (k)</span>
+<span class="c1">#   | * * 0 0 0 0 0 0</span>
+<span class="c1">#   | * * 0 0 0 0 0 0</span>
+<span class="c1">#   | * * * * 0 0 0 0</span>
+<span class="c1">#   | * * * * 0 0 0 0</span>
+<span class="c1">#   | * * * * * * 0 0</span>
+<span class="c1">#   | * * * * * * 0 0</span>
+<span class="c1">#   | * * * * * * * *</span>
+<span class="c1">#   | * * * * * * * *</span>
+<span class="c1">#   V</span>
+<span class="c1">#  (q)</span>
+<span class="n">q_ranges</span> <span class="o">=</span> <span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">(</span>
+    <span class="p">[</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">],</span> <span class="c1"># 0~4k</span>
+        <span class="p">[</span><span class="mi">4096</span><span class="p">,</span> <span class="mi">8192</span><span class="p">],</span> <span class="c1"># 4k~8k</span>
+        <span class="p">[</span><span class="mi">8192</span><span class="p">,</span> <span class="mi">12288</span><span class="p">],</span> <span class="c1"># 8k~12k</span>
+        <span class="p">[</span><span class="mi">12288</span><span class="p">,</span> <span class="mi">16384</span><span class="p">],</span> <span class="c1"># 12k~16k</span>
+        <span class="p">[</span><span class="mi">16384</span><span class="p">,</span> <span class="mi">20480</span><span class="p">],</span> <span class="c1"># 16k~20k</span>
+        <span class="p">[</span><span class="mi">20480</span><span class="p">,</span> <span class="mi">24576</span><span class="p">],</span> <span class="c1"># 20k~24k</span>
+        <span class="p">[</span><span class="mi">24576</span><span class="p">,</span> <span class="mi">28672</span><span class="p">],</span> <span class="c1"># 24k~28k</span>
+        <span class="p">[</span><span class="mi">28672</span><span class="p">,</span> <span class="mi">32768</span><span class="p">],</span> <span class="c1"># 28k~32k</span>
+    <span class="p">]</span>
+<span class="p">)</span>
+<span class="n">k_ranges</span> <span class="o">=</span> <span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">(</span>
+    <span class="p">[</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">],</span> <span class="c1"># 0~4k</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">8192</span><span class="p">],</span> <span class="c1"># 0~8k</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">12288</span><span class="p">],</span> <span class="c1"># 0~12k</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">16384</span><span class="p">],</span> <span class="c1"># 0~16k</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">20480</span><span class="p">],</span> <span class="c1"># 0~20k</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">24576</span><span class="p">],</span> <span class="c1"># 0~24k</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">28672</span><span class="p">],</span> <span class="c1"># 0~28k</span>
+        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">32768</span><span class="p">],</span> <span class="c1"># 0~32k</span>
+    <span class="p">]</span>
+<span class="p">)</span>
+<span class="n">attn_mask_type</span> <span class="o">=</span> <span class="p">[</span><span class="n">AttnMaskType</span><span class="o">.</span><span class="n">FULL</span><span class="p">]</span> <span class="o">*</span> <span class="nb">len</span><span class="p">(</span><span class="n">q_ranges</span><span class="p">)</span>
+<span class="n">total_seqlen_q</span> <span class="o">=</span> <span class="n">total_seqlen_k</span> <span class="o">=</span> <span class="n">total_seqlen</span>
+<span class="n">pad_size</span> <span class="o">=</span> <span class="n">compute_pad_size</span><span class="p">(</span> <span class="c1"># pad embeds along seqlen dim for better performance</span>
+    <span class="n">total_seqlen_q</span><span class="o">=</span><span class="n">total_seqlen_q</span><span class="p">,</span>
+    <span class="n">cp_size</span><span class="o">=</span><span class="n">world_size</span><span class="p">,</span> <span class="c1"># assuming we only have 1-dim context parallelism (cp)</span>
+    <span class="n">chunk_size</span><span class="o">=</span><span class="n">chunk_size</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># --- Dispatch token embedding tensor along seqlen dim to multiple ranks --- #</span>
+
+<span class="c1"># NOTE:</span>
+<span class="c1"># 1. the dispatched local token embedding may be shuffled along seqlen dim,</span>
+<span class="c1">#    so it&#39;s safe for token-wise operations such as matmul, layer-norm, etc</span>
+<span class="c1">#    while for sample-wise operations like RoPE, you might need to be more careful</span>
+<span class="c1"># 2. the `magi_runtime_key` holds some inner meta data as one argument for many other magi_attention APIs,</span>
+<span class="c1">#    about which the users may have no bother to care</span>
+<span class="n">local_x</span><span class="p">,</span> <span class="n">magi_attn_runtime_key</span> <span class="o">=</span> <span class="n">magi_attn_flex_dispatch</span><span class="p">(</span>
+    <span class="n">x</span><span class="p">,</span>
+    <span class="n">q_ranges</span><span class="o">=</span><span class="n">q_ranges</span><span class="p">,</span>
+    <span class="n">k_ranges</span><span class="o">=</span><span class="n">k_ranges</span><span class="p">,</span>
+    <span class="n">attn_mask_type</span><span class="o">=</span><span class="n">attn_mask_type</span><span class="p">,</span>
+    <span class="n">total_seqlen_q</span><span class="o">=</span><span class="n">total_seqlen_q</span><span class="p">,</span>
+    <span class="n">total_seqlen_k</span><span class="o">=</span><span class="n">total_seqlen_k</span><span class="p">,</span>
+    <span class="n">pad_size</span><span class="o">=</span><span class="n">pad_size</span><span class="p">,</span>
+    <span class="n">chunk_size</span><span class="o">=</span><span class="n">chunk_size</span><span class="p">,</span>
+    <span class="n">cp_group_or_mesh</span><span class="o">=</span><span class="n">world_group</span><span class="p">,</span> <span class="c1"># assuming we only have 1-dim context parallelism (cp)</span>
+<span class="p">)</span>
+
+<span class="c1"># --- Simulate QKV projection --- #</span>
+
+<span class="n">q_proj</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">embed_dim</span><span class="p">,</span> <span class="n">num_heads_q</span> <span class="o">*</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">k_proj</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">embed_dim</span><span class="p">,</span> <span class="n">num_heads_kv</span> <span class="o">*</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">v_proj</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">embed_dim</span><span class="p">,</span> <span class="n">num_heads_kv</span> <span class="o">*</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+
+<span class="n">local_q</span> <span class="o">=</span> <span class="n">q_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_heads_q</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">)</span>
+<span class="n">local_k</span> <span class="o">=</span> <span class="n">k_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_heads_kv</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">)</span>
+<span class="n">local_v</span> <span class="o">=</span> <span class="n">v_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_heads_kv</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">)</span>
+
+<span class="c1"># --- Distributed attention computation --- #</span>
+
+<span class="n">local_out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span> <span class="c1"># the second return value is `local_lse` (log-sum-exp), known as the online-softmax correction factor</span>
+    <span class="n">q</span><span class="o">=</span><span class="n">local_q</span><span class="p">,</span>
+    <span class="n">k</span><span class="o">=</span><span class="n">local_k</span><span class="p">,</span>
+    <span class="n">v</span><span class="o">=</span><span class="n">local_v</span><span class="p">,</span>
+    <span class="n">key</span><span class="o">=</span><span class="n">magi_attn_runtime_key</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># --- Undispatch the output tensor along seqlen dim from multiple ranks and unpad --- #</span>
+
+<span class="c1"># NOTE: the undispatch API may not be used until the moment you need the seqlen dimension to be compelete and ordered,</span>
+<span class="c1"># e.g. for either aforementioned sample-wise operations, or loss computation</span>
+<span class="n">total_out</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span>
+    <span class="n">x</span><span class="o">=</span><span class="n">local_out</span><span class="p">,</span>
+    <span class="n">key</span><span class="o">=</span><span class="n">magi_attn_runtime_key</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># --- Clear up distributed environment --- #</span>
+
+<span class="n">clearup_dist_env</span><span class="p">()</span>
+</pre></div>
+</div>
+</section>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-usage-for-flex-flash-attention">Basic Usage for Flex-Flash-Attention</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#basic-usage-for-magiattention">Basic Usage for MagiAttention</a></li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
+<script defer src="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>

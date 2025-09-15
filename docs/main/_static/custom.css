@@ -1,0 +1,5 @@
+/* control the size of the logo in the top left of the navigation bar */
+.navbar-brand img {
+    height: 32px !important;
+    width: auto !important;
+}
