@@ -3,5 +3,10 @@
         "name": "v1.0.3",
         "version": "1.0.3",
         "url": "https://sandai-org.github.io/MagiAttention/docs/v1.0.3/"
+    },
+    {
+        "name": "main",
+        "version": "main",
+        "url": "https://sandai-org.github.io/MagiAttention/docs/main/"
     }
 ]
