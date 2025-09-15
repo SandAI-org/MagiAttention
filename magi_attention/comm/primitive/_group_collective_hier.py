@@ -1069,7 +1069,7 @@ def hier_group_reduce_impl_with_a2av(
     src_indices_list: list[list[int]],
     group: dist.ProcessGroup | None = None,
     async_op: bool = False,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: Literal["sum", "avg", "gate", "lse"] = "sum",
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,

@@ -388,7 +388,7 @@ def range_reduce(
         reduce_op (Literal["sum", "avg", "weight", "lse"]): the reduce operation to use. Defaults to "sum"
             - "sum": sum reduction
             - "avg": average reduction
-            - "lse": log-sum-exp weighted average reduction, with lse correction
+            - "lse": log-sum-exp weighted reduction with lse correction, specific for online-softmax correction in attention
 
             NOTE:
                 1. if reduce_op is "avg", we will sum-reduce to the output tensor and apply average division afterwards,

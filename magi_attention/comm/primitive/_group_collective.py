@@ -157,7 +157,10 @@ def group_reduce_collective(
     src_indices_list: list[list[int]],
     group: dist.ProcessGroup | None = None,
     async_op: bool = False,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    accumulate_output: bool = True,
+    reduce_op: Literal["sum", "avg", "gate", "lse"] = "sum",
+    input_gate: torch.Tensor | None = None,
+    output_gate: torch.Tensor | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -180,18 +183,27 @@ def group_reduce_collective(
             to the same output split does not matter
         group (dist.ProcessGroup | None): the process group to use, if None, use the default group
         async_op (bool): whether to use async op. Defaults to False
+        accumulate_output (bool): whether to accumulate the output tensor. Defaults to True.
+
+            NOTE: if accumulate_output is False, we will ignore the initial value in the output tensor
+            and directly write the reduced value of the input tensor to it,
+
+            the same applied to the corr. "weight tensor" such as "gate tensor" when reduce_op is "gate",
+            or "lse tensor" when reduce_op is "lse"
         reduce_op (Literal["sum", "avg", "weight", "lse"]): the reduce operation to use. Defaults to "sum"
             - "sum": sum reduction
             - "avg": average reduction
-            - "lse": log-sum-exp weighted average reduction, with lse correction
+            - "gate": weighted average reduction with gating summation
+            - "lse": log-sum-exp weighted reduction with lse correction, specific for online-softmax correction in attention
 
             NOTE:
-                1. if reduce_op is "avg", we will sum-reduce to the output tensor and apply average division afterwards,
-                    so the user should guarantee that the output tensor is initialized to zero
-                    otherwise the semantics will be incorrect unless the user intentionally does this
-                2. if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
-                    and we only support input/output has shape [seqlen, num_heads, head_dim]
-                    while input_lse/output_lse has shape [seqlen, num_heads] for now
+                1. if reduce_op is "gate", the user is required to pass "input_gate"
+                    and also pass "output_gate" if accumulate_output is True,
+                    besides, we only support 1D gating tensor
+                2. if reduce_op is "lse", the user is required to pass "input_lse",
+                    and also pass "output_lse" if accumulate_output is True,
+                    besides, we only support 3D input/output tensor with shape [seqlen, num_heads, head_dim]
+                    while 2D input_lse/output_lse tensor with shape [seqlen, num_heads] for now
         input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
             only required and used if reduce_op is "lse"
         output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,

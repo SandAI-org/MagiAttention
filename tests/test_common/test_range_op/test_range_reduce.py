@@ -49,7 +49,7 @@ def range_reduce_ref(
         reduce_op (Literal["sum", "avg", "lse"]): the reduce operation to use. Defaults to "sum"
             - "sum": sum reduction
             - "avg": average reduction
-            - "lse": log-sum-exp weighted average reduction, with lse correction
+            - "lse": log-sum-exp weighted reduction with lse correction, specific for online-softmax correction in attention
         reduce_dtype (torch.dtype | None, optional): The dtype to use for the reduced tensor.
             Defaults to None to use the maximum precision between input/output and fp32.
         input_lse (torch.Tensor | None, optional): Log-sum-exp tensor for input. Defaults to None.
