@@ -20,7 +20,7 @@ import numpy as np
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
-from magi_attention.meta._calc_dispatch_meta import _calc_self_attn_areas
+from magi_attention.meta import make_global_bucket
 from magi_attention.meta.container import AttnBucket, AttnChunk, AttnSlice
 from magi_attention.testing import parameterize
 from magi_attention.utils import argsort
@@ -104,7 +104,7 @@ class TestCalcSelfAttnAreas(TestCase):
         num_chunks = 8
         chunk_size = 8
 
-        global_bucket = _calc_self_attn_areas(
+        global_bucket = make_global_bucket(
             q_ranges,
             k_ranges,
             attn_mask_type,
@@ -297,7 +297,7 @@ class TestCalcSelfAttnAreas(TestCase):
         num_chunks = 4
         chunk_size = 8
 
-        global_bucket = _calc_self_attn_areas(
+        global_bucket = make_global_bucket(
             q_ranges,
             k_ranges,
             attn_mask_type,
@@ -442,7 +442,7 @@ class TestCalcSelfAttnAreas(TestCase):
         num_chunks = 12
         chunk_size = 8
 
-        global_bucket = _calc_self_attn_areas(
+        global_bucket = make_global_bucket(
             q_ranges,
             k_ranges,
             attn_mask_type,
@@ -673,7 +673,7 @@ class TestCalcSelfAttnAreas(TestCase):
         num_chunks = 12
         chunk_size = 8
 
-        global_bucket = _calc_self_attn_areas(
+        global_bucket = make_global_bucket(
             q_ranges,
             k_ranges,
             attn_mask_type,
@@ -886,7 +886,7 @@ class TestCalcSelfAttnAreas(TestCase):
         num_chunks = 12
         chunk_size = 8
 
-        global_bucket = _calc_self_attn_areas(
+        global_bucket = make_global_bucket(
             q_ranges,
             k_ranges,
             attn_mask_type,
@@ -1066,7 +1066,7 @@ class TestCalcSelfAttnAreas(TestCase):
         num_chunks = 1
         chunk_size = 10
 
-        global_bucket = _calc_self_attn_areas(
+        global_bucket = make_global_bucket(
             q_ranges,
             k_ranges,
             attn_mask_type,
@@ -1317,7 +1317,7 @@ class TestCalcSelfAttnAreas(TestCase):
         k_ranges._ranges = [k_ranges[i] for i in sorted_indices]
         attn_mask_type = [attn_mask_type[i] for i in sorted_indices]
 
-        global_bucket = _calc_self_attn_areas(
+        global_bucket = make_global_bucket(
             q_ranges,
             k_ranges,
             attn_mask_type,

@@ -28,8 +28,8 @@ from magi_attention.config import DistAttnConfig
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta import (
-    calc_attn_meta_from_dispatch_meta,
-    calc_dispatch_meta_from_qk_ranges,
+    make_attn_meta_from_dispatch_meta,
+    make_dispatch_meta_from_qk_ranges,
 )
 from magi_attention.meta.collection import DispatchMeta
 from magi_attention.meta.collection.calc_meta import AttnArg
@@ -445,7 +445,7 @@ def init_dist_attn_runtime_mgr(
         dispatch_meta_q,
         dispatch_meta_k,
         buckets_per_rank,
-    ) = calc_dispatch_meta_from_qk_ranges(
+    ) = make_dispatch_meta_from_qk_ranges(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
@@ -461,7 +461,7 @@ def init_dist_attn_runtime_mgr(
     )
 
     # calculate comm meta and calc meta to organize the dist-attn calculation and communication
-    comm_meta, calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
+    comm_meta, calc_meta, attn_solver = make_attn_meta_from_dispatch_meta(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,

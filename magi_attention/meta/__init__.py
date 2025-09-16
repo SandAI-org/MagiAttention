@@ -12,10 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ._calc_attn_meta import calc_attn_meta_from_dispatch_meta
-from ._calc_dispatch_meta import calc_dispatch_meta_from_qk_ranges
+from . import collection, container, solver
+from ._make_attn_meta import make_attn_meta_from_dispatch_meta
+from ._make_dispatch_meta import make_dispatch_meta_from_qk_ranges, make_global_bucket
 
 __all__ = [
-    "calc_dispatch_meta_from_qk_ranges",
-    "calc_attn_meta_from_dispatch_meta",
+    "container",
+    "collection",
+    "solver",
+    "make_dispatch_meta_from_qk_ranges",
+    "make_attn_meta_from_dispatch_meta",
+    "make_global_bucket",
 ]

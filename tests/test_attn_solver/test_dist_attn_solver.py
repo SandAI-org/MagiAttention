@@ -24,7 +24,7 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.common import AttnRange, AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DispatchConfig, MinHeapDispatchAlg
-from magi_attention.meta import calc_dispatch_meta_from_qk_ranges
+from magi_attention.meta import make_dispatch_meta_from_qk_ranges
 from magi_attention.meta.container.rank_entry import HostRankEntry, RemoteRankEntry
 from magi_attention.meta.container.slice import AttnSlice, MultiKAttnSlice
 from magi_attention.meta.solver.dist_attn_solver import DistAttnSolver
@@ -531,7 +531,7 @@ class TestDistAttnSolver(DistTestBase):
             "remote_k_ranges_global_this_rank"
         )[rank]
 
-        meta_q, meta_k, buckets_per_rank = calc_dispatch_meta_from_qk_ranges(
+        meta_q, meta_k, buckets_per_rank = make_dispatch_meta_from_qk_ranges(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
@@ -1417,7 +1417,7 @@ class TestDistAttnSolver(DistTestBase):
 
         # --------------      compute meta       -------------- #
 
-        meta_q, meta_k, buckets_per_rank = calc_dispatch_meta_from_qk_ranges(
+        meta_q, meta_k, buckets_per_rank = make_dispatch_meta_from_qk_ranges(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
@@ -2472,7 +2472,7 @@ class TestDistAttnSolver(DistTestBase):
 
         # --------------      compute meta       -------------- #
 
-        meta_q, meta_k, buckets_per_rank = calc_dispatch_meta_from_qk_ranges(
+        meta_q, meta_k, buckets_per_rank = make_dispatch_meta_from_qk_ranges(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
@@ -2751,7 +2751,7 @@ class TestDistAttnSolver(DistTestBase):
 
         # --------------      compute meta       -------------- #
 
-        meta_q, meta_k, buckets_per_rank = calc_dispatch_meta_from_qk_ranges(
+        meta_q, meta_k, buckets_per_rank = make_dispatch_meta_from_qk_ranges(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,

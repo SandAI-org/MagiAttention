@@ -37,12 +37,12 @@ from magi_attention.utils import (
 from magi_attention.utils._utils import argsort
 
 __all__ = [
-    "calc_dispatch_meta_from_qk_ranges",
+    "make_dispatch_meta_from_qk_ranges",
 ]
 
 
 @nvtx.instrument_nvtx
-def calc_dispatch_meta_from_qk_ranges(
+def make_dispatch_meta_from_qk_ranges(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
     attn_mask_type: AttnMaskType | list[AttnMaskType],
@@ -146,7 +146,7 @@ def calc_dispatch_meta_from_qk_ranges(
     # they had better be merged in the future
     match is_same_source, is_q_permutable, is_k_permutable:
         case True, True, True:
-            return _calc_self_attn_dispatch_meta_from_qk_ranges(
+            return _make_self_attn_dispatch_meta_from_qk_ranges(
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,
                 attn_mask_type=attn_mask_type,
@@ -188,8 +188,7 @@ def calc_dispatch_meta_from_qk_ranges(
             )
 
 
-@nvtx.instrument_nvtx
-def _calc_self_attn_dispatch_meta_from_qk_ranges(
+def _make_self_attn_dispatch_meta_from_qk_ranges(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
     attn_mask_type: list[AttnMaskType],
@@ -255,16 +254,16 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
     k_ranges = AttnRanges.from_ranges([k_ranges[i] for i in sorted_indices])
     attn_mask_type = [attn_mask_type[i] for i in sorted_indices]
 
-    # -------    calculate attn areas to construct an undispatch bucket   ------- #
+    # -------    construct the global bucket   ------- #
 
-    global_bucket: AttnBucket = _calc_self_attn_areas(
+    global_bucket: AttnBucket = make_global_bucket(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         num_chunks=num_chunks,
         chunk_size=chunk_size,
         attn_mask_type=attn_mask_type,
     )
-    attn_areas = global_bucket.areas
+    attn_areas = global_bucket.areas  # and get the attn areas list for each chunk
 
     # -------    solve dispatch load balancing and get chunk partitions   ------- #
 
@@ -344,8 +343,7 @@ def _calc_self_attn_dispatch_meta_from_qk_ranges(
     return dispatch_meta_q, dispatch_meta_k, buckets_per_rank
 
 
-@nvtx.instrument_nvtx
-def _calc_self_attn_areas(
+def make_global_bucket(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
     attn_mask_type: list[AttnMaskType],
@@ -353,13 +351,13 @@ def _calc_self_attn_areas(
     chunk_size: int,
 ) -> AttnBucket:
     """Compute the self-attn areas, with constructing the global bucket,
-    which is mainly consists of a list of all the chunks in ascending order, with a length of `cp_size`
+    consisting all the chunks in seqlen ascending order, with a length of `cp_size`
 
     Args:
         q_ranges (AttnRanges): the query ranges
         k_ranges (AttnRanges): the key ranges
         attn_mask_type (list[AttnMaskType]): the attn mask type list
-        chunk_size (int | None): the chunk size, which should be divisible by `cp_size`
+        chunk_size (int): the chunk size, which should be divisible by `cp_size`
 
     Returns:
         global_bucket(AttnBucket): the global bucket

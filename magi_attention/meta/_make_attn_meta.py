@@ -31,7 +31,7 @@ from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.meta.solver.overlap_solver import OverlapConfig
 
 
-def calc_attn_meta_from_dispatch_meta(
+def make_attn_meta_from_dispatch_meta(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
     attn_mask_type: AttnMaskType | list[AttnMaskType],
