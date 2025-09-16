@@ -182,7 +182,7 @@ def infer_attn_mask_from_sliding_window(
     Args:
         q_range (AttnRange): q_range of this sliding window mask
         k_range (AttnRange): k_range of this sliding window mask
-        window_size (list[int]): window_size of sliding window mask
+        window_size (tuple[int, int]): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``
 
     Returns:
@@ -334,7 +334,7 @@ def infer_attn_mask_from_cu_seqlens(
 
     Args:
         cu_seqlens (list[int]): cu_seqlens for varlen masks
-        window_size (list[int]): window_size of sliding window mask
+        window_size (tuple[int, int]): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``
 
     Returns:
