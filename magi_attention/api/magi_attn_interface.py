@@ -701,7 +701,7 @@ def make_varlen_key_for_new_mask_after_dispatch(
     and the existing key used for dispatch
 
     NOTE: this API is useful when you want to apply more than one masks within the same training pass,
-    therefore, we can only use one of the masks to dispatch,
+    in which case, we can only use one of the masks to dispatch,
     while the others're supposed to reuse the same dispatch solution
     with different meta arguments for computation and communication
 
@@ -760,12 +760,13 @@ def make_flex_key_for_new_mask_after_dispatch(
     with the given new mask arguments and the existing key used for dispatch
 
     NOTE: this API is useful when you want to apply more than one masks within the same training pass,
-    therefore, we can only use one of the masks to dispatch,
+    in which case, we can only use one of the masks to dispatch,
     while the others're supposed to reuse the same dispatch solution
     with different meta arguments for computation and communication
 
     WARNING: in such case, we can not guarantee all the masks are load-balanced in computation
-    and optimized in communication.
+    and optimized in communication for now. However, we are working on it with the dynamic dist-attn solver
+    to optimize the computation and communication for each distinct mask with the same dispatch solution
 
     Args:
         q_ranges (AttnRanges): the global query ranges
@@ -809,10 +810,11 @@ def make_flex_key_for_new_mask_after_dispatch(
     chunk_size = key_for_dispatch.chunk_size
     cp_group = key_for_dispatch.cp_group
     cp_mesh = key_for_dispatch.cp_mesh
-    new_dist_attn_config = (
-        key_for_dispatch.dist_attn_config
-        if dist_attn_config is None
-        else dist_attn_config
+    new_dist_attn_config = DistAttnConfig(
+        dispatch_config=key_for_dispatch.dist_attn_config.dispatch_config,  # reuse the dispatch config
+        overlap_config=dist_attn_config.overlap_config
+        if dist_attn_config is not None
+        else key_for_dispatch.dist_attn_config.overlap_config,
     )
 
     # extract the common attributes from the mgr for dispatch

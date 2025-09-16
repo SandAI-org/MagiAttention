@@ -1569,14 +1569,6 @@ class DistAttnSolver(BaseDistAttnSolver):
                     for attn_slice in remote_rank_entry_this_stage_this_rank.attn_calc_remote_slice_local_list
                 )
 
-        # init masktype -> int map
-        masktype_to_idx_map = {
-            AttnMaskType.FULL: 0,
-            AttnMaskType.CAUSAL: 1,
-            AttnMaskType.INVCAUSAL: 2,
-            AttnMaskType.BICAUSAL: 3,
-        }
-
         # ---   build local attn args   --- #
 
         host_slice_local_list = (
@@ -1590,7 +1582,7 @@ class DistAttnSolver(BaseDistAttnSolver):
                 [attn_slice.k_range for attn_slice in host_slice_local_list]  # type: ignore[arg-type]
             ),
             attn_type_map=[
-                masktype_to_idx_map[attn_slice.mask_type]  # type: ignore
+                attn_slice.mask_type.to_int_type()  # type: ignore
                 for attn_slice in host_slice_local_list
             ],
             total_area=sum(attn_slice.area for attn_slice in host_slice_local_list),
@@ -1614,7 +1606,7 @@ class DistAttnSolver(BaseDistAttnSolver):
                         [attn_slice.k_range for attn_slice in remote_slice_local_list]  # type: ignore[arg-type]
                     ),
                     attn_type_map=[
-                        masktype_to_idx_map[attn_slice.mask_type]  # type: ignore
+                        attn_slice.mask_type.to_int_type()  # type: ignore
                         for attn_slice in remote_slice_local_list
                     ],
                     total_area=sum(

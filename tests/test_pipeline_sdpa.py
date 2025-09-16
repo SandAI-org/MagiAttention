@@ -49,7 +49,7 @@ from magi_attention.testing.precision import (
     H100_TFLOPS_16,
     torch_attn_ref,
 )
-from magi_attention.testing.utils import switch_envvar_decorator
+from magi_attention.testing.utils import enable_sdpa_backend_decorator
 from magi_attention.utils import (
     get_a2a_corr_factor,
     get_attn_mask_from_ffa_args,
@@ -57,11 +57,6 @@ from magi_attention.utils import (
     get_comm_cost_factor,
     str2seed,
     sync_rng,
-)
-
-# NOTE: this unitest will enable sdpa backend with fp64 dtype support
-enable_sdpa_backend_decorator = switch_envvar_decorator(
-    envvar_name="MAGI_ATTENTION_SDPA_BACKEND", enable=True
 )
 
 
@@ -740,15 +735,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----   init attn_mask_type ----- #
 
-        attn_mask_type = [
-            {
-                0: AttnMaskType.FULL,
-                1: AttnMaskType.CAUSAL,
-                2: AttnMaskType.INVCAUSAL,
-                3: AttnMaskType.BICAUSAL,
-            }[i]
-            for i in attn_type_mapping
-        ]
+        attn_mask_type: list[AttnMaskType] = list(
+            map(AttnMaskType.from_int_type, attn_type_mapping)
+        )
 
         # -----    init dist attn runtime mgr   ---- #
 
@@ -830,7 +819,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----   assert close to torch ref   ---- #
 
-        self.assert_close_to_torch_ref(
+        self._assert_close_to_torch_ref(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_mapping,
@@ -848,7 +837,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             test_case=test_case,
         )
 
-    def assert_close_to_torch_ref(
+    def _assert_close_to_torch_ref(
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,

@@ -52,18 +52,7 @@ class AttnRectangle:
             enum_mask_type = mask_type
         elif isinstance(mask_type, int):
             # Integer to enum mapping
-            mask_type_map = {
-                0: AttnMaskType.FULL,
-                1: AttnMaskType.CAUSAL,
-                2: AttnMaskType.INVCAUSAL,
-                3: AttnMaskType.BICAUSAL,
-            }
-            if mask_type in mask_type_map:
-                enum_mask_type = mask_type_map[mask_type]
-            else:
-                raise ValueError(
-                    f"Invalid integer mask type: {mask_type}, valid range is 0-3"
-                )
+            enum_mask_type = AttnMaskType.from_int_type(mask_type)
         else:
             raise TypeError(
                 f"mask_type must be AttnMaskType or int type, but got {type(mask_type)}"

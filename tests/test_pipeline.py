@@ -572,15 +572,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         # -----   init attn_mask_type ----- #
 
-        attn_mask_type = [
-            {
-                0: AttnMaskType.FULL,
-                1: AttnMaskType.CAUSAL,
-                2: AttnMaskType.INVCAUSAL,
-                3: AttnMaskType.BICAUSAL,
-            }[i]
-            for i in attn_type_mapping
-        ]
+        attn_mask_type: list[AttnMaskType] = list(
+            map(AttnMaskType.from_int_type, attn_type_mapping)
+        )
 
         # -----    run pipeline test   ---- #
 
@@ -696,7 +690,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if not self.profile_mode:
                 # -----   assert close to torch ref   ---- #
 
-                self.assert_close_to_torch_ref(
+                self._assert_close_to_torch_ref(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_mapping,
@@ -715,7 +709,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     test_case=test_case,
                 )
 
-    def assert_close_to_torch_ref(
+    def _assert_close_to_torch_ref(
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
