@@ -49,6 +49,7 @@ from magi_attention.utils import (
 )
 from magi_attention.utils._utils import argsort
 
+from .._make_dispatch_meta import make_bucket_per_rank_from_qk_ranges
 from .overlap_solver import OverlapConfig, OverlapSolver, OverlapStageCost
 from .slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
 
@@ -139,11 +140,23 @@ class DistAttnSolver(BaseDistAttnSolver):
 
     def solve(
         self,
-        bucket_per_rank: list[AttnBucket],
+        q_ranges: AttnRanges,
+        k_ranges: AttnRanges,
+        attn_mask_type: AttnMaskType | list[AttnMaskType],
         dispatch_meta_q: DispatchMeta,
         dispatch_meta_k: DispatchMeta,
     ) -> None:
-        bucket_this_rank = bucket_per_rank[self.cp_rank]
+        # init bucket this rank from dispatch_meta_q
+        # assuming it is self-attn scenarios and the partitions of q,k are the same
+        if magi_attention.is_sanity_check_enable():
+            assert dispatch_meta_q.partitions == dispatch_meta_k.partitions
+        bucket_this_rank = self._make_bucket_this_rank(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            dispatch_meta=dispatch_meta_q,
+        )
+
         # init host / remote q/k ranges global for this rank
         (
             host_q_ranges_global_this_rank,
@@ -195,6 +208,23 @@ class DistAttnSolver(BaseDistAttnSolver):
     @property
     def is_solved(self) -> bool:
         return self._is_solved
+
+    def _make_bucket_this_rank(
+        self,
+        q_ranges: AttnRanges,
+        k_ranges: AttnRanges,
+        attn_mask_type: AttnMaskType | list[AttnMaskType],
+        dispatch_meta: DispatchMeta,
+    ) -> AttnBucket:
+        bucket_per_rank = make_bucket_per_rank_from_qk_ranges(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            dispatch_meta=dispatch_meta,
+        )
+        bucket_this_rank = bucket_per_rank[self.cp_rank]
+
+        return bucket_this_rank
 
     @nvtx.instrument_nvtx
     def _init_host_remote_ranges_global_this_rank(

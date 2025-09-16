@@ -22,7 +22,6 @@ from magi_attention.meta.algorithms import GRGDynamicAttnAlgorithm
 from magi_attention.meta.collection.calc_meta import CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.collection.dispatch_meta import DispatchMeta
-from magi_attention.meta.container.bucket import AttnBucket
 from magi_attention.meta.solver.dist_attn_solver import (
     BaseDistAttnSolver,
     DistAttnSolver,
@@ -37,14 +36,13 @@ def make_attn_meta_from_dispatch_meta(
     attn_mask_type: AttnMaskType | list[AttnMaskType],
     dispatch_meta_q: DispatchMeta,
     dispatch_meta_k: DispatchMeta,
-    bucket_per_rank: list[AttnBucket],
     cp_group: dist.ProcessGroup,
     overlap_config: OverlapConfig,
     cp_mesh: DeviceMesh | None = None,
     num_heads_q: int = 1,
     num_heads_kv: int = 1,
 ) -> tuple[CommMeta, CalcMeta, BaseDistAttnSolver]:
-    """Calculate the communication and calculation meta from the dispatch meta
+    """Make the communication and calculation meta from the dispatch meta
 
     Args:
         q_ranges (AttnRanges): global query ranges in the ref attn mask
@@ -53,8 +51,6 @@ def make_attn_meta_from_dispatch_meta(
 
         dispatch_meta_q (DispatchMeta): The dispatch meta for query
         dispatch_meta_k (DispatchMeta): The dispatch meta for key
-
-        bucket_per_rank (list[AttnBucket]): The bucket per rank
 
         cp_group (dist.ProcessGroup): The NCCL process group
 
@@ -70,10 +66,10 @@ def make_attn_meta_from_dispatch_meta(
             the communication meta, calculation meta and the attn solver
     """
 
-    # NOTE: for now, we use dynamic attn solver when and only when enabling qo comm
-    # however, we will unify the static/dynamic attn solver in the future
     attn_solver: BaseDistAttnSolver
     if magi_attention.comm.is_qo_comm_enable():
+        # NOTE: for now, we use dynamic attn solver when and only when enabling qo comm
+        # however, we will unify the static/dynamic attn solver in the future
         attn_solver = DynamicAttnSolver(
             algorithm=GRGDynamicAttnAlgorithm(),
             dispatch_meta_q=dispatch_meta_q,
@@ -85,7 +81,7 @@ def make_attn_meta_from_dispatch_meta(
         attn_solver.solve(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
-            mask_types=attn_mask_type,
+            attn_mask_type=attn_mask_type,
         )
         # attn_solver.output_solve_result()
     else:
@@ -95,7 +91,9 @@ def make_attn_meta_from_dispatch_meta(
             cp_mesh=cp_mesh,
         )
         attn_solver.solve(
-            bucket_per_rank=bucket_per_rank,
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
             dispatch_meta_q=dispatch_meta_q,
             dispatch_meta_k=dispatch_meta_k,
         )

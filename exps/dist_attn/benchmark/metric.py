@@ -21,7 +21,7 @@ import torch
 from exps.dist_attn.benchmark.enums import MetricsType
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.meta import make_global_bucket
+from magi_attention.meta import make_global_bucket_from_qk_ranges
 from magi_attention.meta.collection.calc_meta import CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.container.bucket import AttnBucket
@@ -35,7 +35,7 @@ def calculate_attn_flops(
     num_heads_q: int,
     head_dim: int,
 ) -> dict[str, float]:
-    attn_area = make_global_bucket(
+    attn_area = make_global_bucket_from_qk_ranges(
         q_ranges,
         k_ranges,
         attn_mask_type,

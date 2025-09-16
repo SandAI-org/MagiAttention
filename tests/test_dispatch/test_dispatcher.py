@@ -95,7 +95,7 @@ class TestDispatcher(DistTestBase):
         # --------------      compute meta       -------------- #
 
         assert self.world_size % 2 == 0
-        meta_q, meta_k, buckets_per_rank = make_dispatch_meta_from_qk_ranges(
+        meta_q, meta_k = make_dispatch_meta_from_qk_ranges(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
@@ -109,8 +109,6 @@ class TestDispatcher(DistTestBase):
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
         )
-
-        self.assertEqual(len(buckets_per_rank), cp_size)
 
         # --------------      dispatch to get host q, k       -------------- #
 

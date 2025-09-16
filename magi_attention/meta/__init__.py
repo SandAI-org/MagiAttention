@@ -14,7 +14,11 @@
 
 from . import collection, container, solver
 from ._make_attn_meta import make_attn_meta_from_dispatch_meta
-from ._make_dispatch_meta import make_dispatch_meta_from_qk_ranges, make_global_bucket
+from ._make_dispatch_meta import (
+    make_bucket_per_rank_from_qk_ranges,
+    make_dispatch_meta_from_qk_ranges,
+    make_global_bucket_from_qk_ranges,
+)
 
 __all__ = [
     "container",
@@ -22,5 +26,6 @@ __all__ = [
     "solver",
     "make_dispatch_meta_from_qk_ranges",
     "make_attn_meta_from_dispatch_meta",
-    "make_global_bucket",
+    "make_global_bucket_from_qk_ranges",
+    "make_bucket_per_rank_from_qk_ranges",
 ]

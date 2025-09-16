@@ -444,7 +444,6 @@ def init_dist_attn_runtime_mgr(
     (
         dispatch_meta_q,
         dispatch_meta_k,
-        buckets_per_rank,
     ) = make_dispatch_meta_from_qk_ranges(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -467,7 +466,6 @@ def init_dist_attn_runtime_mgr(
         attn_mask_type=attn_mask_type,
         dispatch_meta_q=dispatch_meta_q,
         dispatch_meta_k=dispatch_meta_k,
-        bucket_per_rank=buckets_per_rank,
         cp_group=cp_group,
         overlap_config=dist_attn_config.overlap_config,
         cp_mesh=cp_mesh,

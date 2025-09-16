@@ -36,10 +36,6 @@ from magi_attention.utils import (
 )
 from magi_attention.utils._utils import argsort
 
-__all__ = [
-    "make_dispatch_meta_from_qk_ranges",
-]
-
 
 @nvtx.instrument_nvtx
 def make_dispatch_meta_from_qk_ranges(
@@ -55,16 +51,16 @@ def make_dispatch_meta_from_qk_ranges(
     is_same_source: bool,
     is_q_permutable: bool,
     is_k_permutable: bool,
-) -> tuple[DispatchMeta, DispatchMeta, list[AttnBucket]]:
-    """Calculate dispatch meta from query and key ranges
+) -> tuple[DispatchMeta, DispatchMeta]:
+    """Make dispatch meta from query and key ranges
 
     Args:
-        q_ranges (AttnRanges): global query ranges in the ref attn mask
-        k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (AttnMaskType | list[AttnMaskType]): attn mask type (list)
+        q_ranges (AttnRanges): the global query ranges
+        k_ranges (AttnRanges): the global key ranges
+        attn_mask_type (AttnMaskType | list[AttnMaskType]): the global attn mask type (list)
 
-        total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
-        total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
+        total_seqlen_q (int): the total seqlen of query
+        total_seqlen_k (int): the total seqlen of key
 
         chunk_size (int): chunk size to chunk the permutable tensor
 
@@ -76,21 +72,22 @@ def make_dispatch_meta_from_qk_ranges(
         is_same_source (bool): is query tensor and key tensor share the same source
         is_q_permutable (bool): is query tensor permutable
         is_k_permutable (bool): is key tensor permutable
-        NOTE: e.g.
-                1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
-                    a) is_same_source is True
-                    b) both q and k are permutable, as long as they are permuted in the same way.
-                2. for encoder-decoder transformer like t5, it applies 'cross-attn' as follows:
-                    a) is_same_source is False
-                    b) q is permutable but k is not
-                3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
-                    a) is_same_source is False
-                    b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
+        NOTE:
+            1. for decoder-only transformer like gpt, it applies 'self-attn' as follows:
+                a) is_same_source is True
+                b) both q and k are permutable, as long as they are permuted in the same way.
+
+            2. for encoder-decoder transformer like t5, it applies 'cross-attn' as follows:
+                a) is_same_source is False
+                b) q is permutable but k is not
+
+            3. for multi-modal transformer with external encoders, it applies 'cross-attn' as follows:
+                a) is_same_source is False
+                b) q is unpermutable cuz of self-attn, but k is permutable even in a different way
 
     Returns:
-        tuple[DispatchMeta, DispatchMeta]: dispatch_meta_q and dispatch_meta_k
-        NOTE: When is_same_source is True, dispatch_meta_k should contain attributes
-                that are mostly the same as those in dispatch_meta_q.
+        tuple[DispatchMeta, DispatchMeta]:
+            dispatch_meta_q and dispatch_meta_k
     """
 
     # --------------      pre-check args       -------------- #
@@ -115,16 +112,19 @@ def make_dispatch_meta_from_qk_ranges(
     batch_size = len(q_ranges)
 
     attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=batch_size)
-    assert (
-        len(attn_mask_type) == batch_size
-    ), f"If attn_mask_type is a list, its length ({len(attn_mask_type)}) should be equal to batch_size ({batch_size})."
+    assert len(attn_mask_type) == batch_size, (
+        f"If attn_mask_type is a list, "
+        f"its length ({len(attn_mask_type)}) should "
+        f"be equal to batch_size ({batch_size})."
+    )
 
     assert (
         dispatch_config.alg.is_partitions_returned
         and dispatch_config.alg.is_equal_num_workloads
     ), (
         "For now, only support dispatch config with "
-        "the algorithm that returns the partitions, each of which shares the equal number of workloads, "
+        "the algorithm that returns the partitions, "
+        "each of which shares the equal number of workloads, "
         f"bot got {dispatch_config.alg=}."
     )
 
@@ -132,18 +132,18 @@ def make_dispatch_meta_from_qk_ranges(
     max_valid_ids_q = max(
         q_range.end
         for q_range, k_range in zip(q_ranges, k_ranges)
-        if q_range.seqlen > 0 and k_range.seqlen > 0
+        if not (q_range.is_empty() or k_range.is_empty())
     )
     max_valid_ids_k = max(
         k_range.end
         for q_range, k_range in zip(q_ranges, k_ranges)
-        if q_range.seqlen > 0 and k_range.seqlen > 0
+        if not (q_range.is_empty() or k_range.is_empty())
     )
 
     # --------------      calculate dispatch meta   -------------- #
 
     # TODO: for now, we seperate different settings in different functions
-    # they had better be merged in the future
+    # they had better be unified together in the future
     match is_same_source, is_q_permutable, is_k_permutable:
         case True, True, True:
             return _make_self_attn_dispatch_meta_from_qk_ranges(
@@ -204,13 +204,13 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     cp_size: int,
     cp_rank: int,
     dispatch_config: DispatchConfig,
-) -> tuple[DispatchMeta, DispatchMeta, list[AttnBucket]]:
-    """Calculate dispatch meta from query and key ranges for self-attn settings
+) -> tuple[DispatchMeta, DispatchMeta]:
+    """Make dispatch meta from query and key ranges for self-attn settings
 
     Args:
-        q_ranges (AttnRanges): global query ranges in the ref attn mask
-        k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (list[AttnMaskType]): attn mask type list
+        q_ranges (AttnRanges): the global query ranges
+        k_ranges (AttnRanges): the global key ranges
+        attn_mask_type (list[AttnMaskType]): the global attn mask type list
 
         total_seqlen_q (int): total sequence length of query
         total_seqlen_k (int): total sequence length of key
@@ -230,8 +230,9 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
 
     Returns:
         tuple[DispatchMeta, DispatchMeta]: dispatch_meta_q and dispatch_meta_k
-        NOTE: When is_same_source is True, dispatch_meta_k should contain attributes
-                that are mostly the same as those in dispatch_meta_q.
+
+        NOTE: for self-attn, dispatch_meta_k should contain attributes
+            that are mostly the same as those in dispatch_meta_q.
     """
 
     # --------------      pre-check args       -------------- #
@@ -248,22 +249,23 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     shard_seqlen = shard_seqlen_q
     max_valid_ids = max_valid_ids_q
 
-    # sort (q_range, k_range, masktype) with (q_range.start, q_range.end)
-    sorted_indices = argsort(q_ranges, key=lambda x: (x.start, x.end))
-    q_ranges = AttnRanges.from_ranges([q_ranges[i] for i in sorted_indices])
-    k_ranges = AttnRanges.from_ranges([k_ranges[i] for i in sorted_indices])
-    attn_mask_type = [attn_mask_type[i] for i in sorted_indices]
+    # -------    make global bucket   ------- #
 
-    # -------    construct the global bucket   ------- #
+    q_ranges, k_ranges, attn_mask_type = _sort_qk_ranges_and_mask_type(
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+    )
 
-    global_bucket: AttnBucket = make_global_bucket(
+    global_bucket: AttnBucket = make_global_bucket_from_qk_ranges(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         num_chunks=num_chunks,
         chunk_size=chunk_size,
         attn_mask_type=attn_mask_type,
+        sort=False,  # already sorted
     )
-    attn_areas = global_bucket.areas  # and get the attn areas list for each chunk
+    attn_areas = global_bucket.areas  # get the attn areas list for each chunk
 
     # -------    solve dispatch load balancing and get chunk partitions   ------- #
 
@@ -305,16 +307,6 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
     partitions_perm_idxs = flatten_nested_list(partitions)
     partitions_unperm_idxs = perm_idxs2unperm_idxs(partitions_perm_idxs)
 
-    # --------------      construct buckets per rank       -------------- #
-
-    buckets_per_rank: list[AttnBucket] = [
-        AttnBucket(
-            cp_rank=rank,
-            q_chunks=[global_bucket.q_chunks[chunk_id] for chunk_id in partition],
-        )
-        for rank, partition in enumerate(partitions)
-    ]
-
     # --------------      construct meta q and meta k       -------------- #
 
     common_meta_kwargs = dict(
@@ -340,17 +332,18 @@ def _make_self_attn_dispatch_meta_from_qk_ranges(
         **common_meta_kwargs,  # type: ignore
     )
 
-    return dispatch_meta_q, dispatch_meta_k, buckets_per_rank
+    return dispatch_meta_q, dispatch_meta_k
 
 
-def make_global_bucket(
+def make_global_bucket_from_qk_ranges(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
     attn_mask_type: list[AttnMaskType],
     num_chunks: int,
     chunk_size: int,
+    sort: bool = True,
 ) -> AttnBucket:
-    """Compute the self-attn areas, with constructing the global bucket,
+    """Make the global bucket,
     consisting all the chunks in seqlen ascending order, with a length of `cp_size`
 
     Args:
@@ -358,10 +351,19 @@ def make_global_bucket(
         k_ranges (AttnRanges): the key ranges
         attn_mask_type (list[AttnMaskType]): the attn mask type list
         chunk_size (int): the chunk size, which should be divisible by `cp_size`
+        sort (bool): whether to sort (q_range, k_range, masktype) with (q_range.start, q_range.end) manually
+            Default: True, since we require the mask is sorted by q seqlen order
 
     Returns:
         global_bucket(AttnBucket): the global bucket
     """
+
+    if sort:
+        q_ranges, k_ranges, attn_mask_type = _sort_qk_ranges_and_mask_type(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+        )
 
     # -----------    init meta info and global bucket    ----------- #
 
@@ -510,3 +512,72 @@ def make_global_bucket(
         global_bucket.q_chunks.append(chunk)
 
     return global_bucket
+
+
+def make_bucket_per_rank_from_qk_ranges(
+    q_ranges: AttnRanges,
+    k_ranges: AttnRanges,
+    attn_mask_type: AttnMaskType | list[AttnMaskType],
+    dispatch_meta: DispatchMeta,
+    sort: bool = True,
+) -> list[AttnBucket]:
+    """Make buckets per rank list
+
+    Args:
+        q_ranges (AttnRanges): the query ranges
+        k_ranges (AttnRanges): the key ranges
+        attn_mask_type (AttnMaskType | list[AttnMaskType]): the attn mask type (list)
+        dispatch_meta (DispatchMeta): dispatch meta
+        sort (bool): whether to sort (q_range, k_range, masktype) with (q_range.start, q_range.end) manually
+            Default: True, since we require the mask is sorted by q seqlen order
+
+    Returns:
+        list[AttnBucket]: buckets per rank list
+    """
+
+    batch_size = len(q_ranges)
+    attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=batch_size)
+    assert len(attn_mask_type) == batch_size, (
+        f"If attn_mask_type is a list, "
+        f"its length ({len(attn_mask_type)}) should "
+        f"be equal to batch_size ({batch_size})."
+    )
+
+    # -------    make global bucket   ------- #
+
+    global_bucket = make_global_bucket_from_qk_ranges(
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        num_chunks=dispatch_meta.num_chunks,
+        chunk_size=dispatch_meta.chunk_size,
+        sort=sort,
+    )
+
+    # --------------      make buckets per rank       -------------- #
+
+    bucket_per_rank: list[AttnBucket] = [
+        AttnBucket(
+            cp_rank=rank,
+            q_chunks=[global_bucket.q_chunks[chunk_id] for chunk_id in partition],
+        )
+        for rank, partition in enumerate(dispatch_meta.partitions)
+    ]
+
+    return bucket_per_rank
+
+
+def _sort_qk_ranges_and_mask_type(
+    q_ranges: AttnRanges,
+    k_ranges: AttnRanges,
+    attn_mask_type: list[AttnMaskType],
+) -> tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
+    """
+    Sort (q_range, k_range, masktype) with (q_range.start, q_range.end)
+    """
+    sorted_indices = argsort(q_ranges, key=lambda x: (x.start, x.end))
+    q_ranges = AttnRanges.from_ranges([q_ranges[i] for i in sorted_indices])
+    k_ranges = AttnRanges.from_ranges([k_ranges[i] for i in sorted_indices])
+    attn_mask_type = [attn_mask_type[i] for i in sorted_indices]
+
+    return q_ranges, k_ranges, attn_mask_type

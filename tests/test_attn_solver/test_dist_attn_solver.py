@@ -510,6 +510,9 @@ class TestDistAttnSolver(DistTestBase):
 
         test_solver_class = SimpleNamespace()
         test_solver_class.cp_rank = rank
+        _make_bucket_this_rank = types.MethodType(
+            DistAttnSolver._make_bucket_this_rank, test_solver_class
+        )
         test_solver_class._init_host_remote_ranges_global_this_rank = types.MethodType(
             DistAttnSolver._init_host_remote_ranges_global_this_rank, test_solver_class
         )
@@ -531,7 +534,7 @@ class TestDistAttnSolver(DistTestBase):
             "remote_k_ranges_global_this_rank"
         )[rank]
 
-        meta_q, meta_k, buckets_per_rank = make_dispatch_meta_from_qk_ranges(
+        dispatch_meta_q, dispatch_meta_k = make_dispatch_meta_from_qk_ranges(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
@@ -548,14 +551,19 @@ class TestDistAttnSolver(DistTestBase):
 
         # ----------- compute host and remote ranges ------------ #
 
-        bucket_this_rank = buckets_per_rank[rank]
+        bucket_this_rank = _make_bucket_this_rank(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            dispatch_meta=dispatch_meta_q,  # only self-attn for now
+        )
         (
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
             remote_k_ranges_global_this_rank,
         ) = test_solver_class._init_host_remote_ranges_global_this_rank(
-            dispatch_meta_q=meta_q,
-            dispatch_meta_k=meta_k,
+            dispatch_meta_q=dispatch_meta_q,
+            dispatch_meta_k=dispatch_meta_k,
             bucket_this_rank=bucket_this_rank,
         )
 
@@ -1356,6 +1364,9 @@ class TestDistAttnSolver(DistTestBase):
 
         test_solver_class = SimpleNamespace()
         test_solver_class.cp_rank = rank
+        _make_bucket_this_rank = types.MethodType(
+            DistAttnSolver._make_bucket_this_rank, test_solver_class
+        )
         _init_host_remote_ranges_global_this_rank = types.MethodType(
             DistAttnSolver._init_host_remote_ranges_global_this_rank, test_solver_class
         )
@@ -1417,7 +1428,7 @@ class TestDistAttnSolver(DistTestBase):
 
         # --------------      compute meta       -------------- #
 
-        meta_q, meta_k, buckets_per_rank = make_dispatch_meta_from_qk_ranges(
+        dispatch_meta_q, dispatch_meta_k = make_dispatch_meta_from_qk_ranges(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
@@ -1434,14 +1445,19 @@ class TestDistAttnSolver(DistTestBase):
 
         # ----------- compute host and remote ranges ------------ #
 
-        bucket_this_rank = buckets_per_rank[rank]
+        bucket_this_rank = _make_bucket_this_rank(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            dispatch_meta=dispatch_meta_q,  # only self-attn for now
+        )
         (
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
             remote_k_ranges_global_this_rank,
         ) = _init_host_remote_ranges_global_this_rank(
-            dispatch_meta_q=meta_q,
-            dispatch_meta_k=meta_k,
+            dispatch_meta_q=dispatch_meta_q,
+            dispatch_meta_k=dispatch_meta_k,
             bucket_this_rank=bucket_this_rank,
         )
 
@@ -2456,6 +2472,10 @@ class TestDistAttnSolver(DistTestBase):
         random_costs = testcase.get("random_costs", False)
         random_seed = testcase.get("random_seed", None)
 
+        _make_bucket_this_rank = types.MethodType(
+            DistAttnSolver._make_bucket_this_rank, test_solver_class
+        )
+
         test_solver_class.overlap_config = OverlapConfig(
             min_chunk_size=min_chunk_size,
             max_num_chunks=max_num_chunks,
@@ -2472,7 +2492,7 @@ class TestDistAttnSolver(DistTestBase):
 
         # --------------      compute meta       -------------- #
 
-        meta_q, meta_k, buckets_per_rank = make_dispatch_meta_from_qk_ranges(
+        dispatch_meta_q, dispatch_meta_k = make_dispatch_meta_from_qk_ranges(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
@@ -2489,14 +2509,19 @@ class TestDistAttnSolver(DistTestBase):
 
         # ----------- compute host and remote ranges ------------ #
 
-        bucket_this_rank = buckets_per_rank[rank]
+        bucket_this_rank = _make_bucket_this_rank(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            dispatch_meta=dispatch_meta_q,  # only self-attn for now
+        )
         (
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
             remote_k_ranges_global_this_rank,
         ) = test_solver_class._init_host_remote_ranges_global_this_rank(
-            dispatch_meta_q=meta_q,
-            dispatch_meta_k=meta_k,
+            dispatch_meta_q=dispatch_meta_q,
+            dispatch_meta_k=dispatch_meta_k,
             bucket_this_rank=bucket_this_rank,
         )
 
@@ -2730,6 +2755,9 @@ class TestDistAttnSolver(DistTestBase):
             min_chunk_size=8, max_num_chunks=16, degree=2
         )
         test_solver_class.cp_rank = rank
+        _make_bucket_this_rank = types.MethodType(
+            DistAttnSolver._make_bucket_this_rank, test_solver_class
+        )
 
         # --------------      compute meta       -------------- #
 
@@ -2751,7 +2779,7 @@ class TestDistAttnSolver(DistTestBase):
 
         # --------------      compute meta       -------------- #
 
-        meta_q, meta_k, buckets_per_rank = make_dispatch_meta_from_qk_ranges(
+        dispatch_meta_q, dispatch_meta_k = make_dispatch_meta_from_qk_ranges(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
@@ -2768,14 +2796,19 @@ class TestDistAttnSolver(DistTestBase):
 
         # ----------- compute host and remote ranges ------------ #
 
-        bucket_this_rank = buckets_per_rank[rank]
+        bucket_this_rank = _make_bucket_this_rank(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            dispatch_meta=dispatch_meta_q,  # only self-attn for now
+        )
         (
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
             remote_k_ranges_global_this_rank,
         ) = test_solver_class._init_host_remote_ranges_global_this_rank(
-            dispatch_meta_q=meta_q,
-            dispatch_meta_k=meta_k,
+            dispatch_meta_q=dispatch_meta_q,
+            dispatch_meta_k=dispatch_meta_k,
             bucket_this_rank=bucket_this_rank,
         )
 
@@ -2849,7 +2882,7 @@ class TestDistAttnSolver(DistTestBase):
                         check=True,
                     )
 
-        partitions = meta_q.partitions[rank]
+        partitions = dispatch_meta_q.partitions[rank]
         mask = np.zeros(q_ranges.end, dtype=bool)
         for idx in partitions:
             mask[chunk_size * idx : chunk_size * (idx + 1)] = True
