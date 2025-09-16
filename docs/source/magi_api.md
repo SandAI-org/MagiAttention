@@ -194,3 +194,13 @@ In the design of `MagiAttention`, we use a (q_range, k_range, masktype) tuple to
 ```{eval-rst}
 .. autofunction:: infer_attn_mask_from_sliding_window
 ```
+
+Moreover, if you need to use varlen sliding window mask and all sliding window masks share the same `window_size`, we provide `infer_attn_mask_from_cu_seqlens` function. This function can convert the varlen sliding window mask into the form of (q_range, k_range, mask_type) triplets based on `cu_seqlens` and `window_size`.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.functools
+```
+
+```{eval-rst}
+.. autofunction:: infer_attn_mask_from_cu_seqlens
+```

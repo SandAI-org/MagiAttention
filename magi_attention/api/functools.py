@@ -174,7 +174,7 @@ def apply_padding(
 def infer_attn_mask_from_sliding_window(
     q_range: AttnRange,
     k_range: AttnRange,
-    window_size: list[int],
+    window_size: tuple[int, int],
 ) -> tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
     """Convert only one sliding window masks into representations using q_range, k_range, and mask type.
     The mask type is specified using window_size.
@@ -183,6 +183,7 @@ def infer_attn_mask_from_sliding_window(
         q_range (AttnRange): q_range of this sliding window mask
         k_range (AttnRange): k_range of this sliding window mask
         window_size (list[int]): window_size of sliding window mask
+            which represents ``[window_size_left, window_size_right]``
 
     Returns:
         tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
@@ -326,7 +327,7 @@ def infer_attn_mask_from_sliding_window(
 
 def infer_attn_mask_from_cu_seqlens(
     cu_seqlens: list[int],
-    window_size: list[int],
+    window_size: tuple[int, int],
 ) -> tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
     """Convert varlen sliding window masks into representations using q_range, k_range, and mask type.
     The mask type is specified using window_size and cu_seqlens.
@@ -334,6 +335,7 @@ def infer_attn_mask_from_cu_seqlens(
     Args:
         cu_seqlens (list[int]): cu_seqlens for varlen masks
         window_size (list[int]): window_size of sliding window mask
+            which represents ``[window_size_left, window_size_right]``
 
     Returns:
         tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:

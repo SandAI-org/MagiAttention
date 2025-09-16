@@ -76,7 +76,7 @@ def add_range_to_array(
 def generate_sliding_window_mask(
     q_seqlen: int,
     k_seqlen: int,
-    window_size: tuple[int, int] | list[int],
+    window_size: tuple[int, int],
 ) -> np.ndarray:
     left_window_size = window_size[0] if window_size[0] != -1 else k_seqlen - 1
     right_window_size = window_size[1] if window_size[1] != -1 else k_seqlen - 1
@@ -92,7 +92,7 @@ def generate_sliding_window_mask(
 def generate_sliding_window_mask_with_numpy(
     q_range: AttnRange,
     k_range: AttnRange,
-    window_size: tuple[int, int] | list[int],
+    window_size: tuple[int, int],
     array_size: int,
 ) -> np.ndarray:
     mask = np.zeros((array_size, array_size), dtype=np.int32)
@@ -112,7 +112,7 @@ def generate_sliding_window_mask_with_numpy(
 
 def generate_varlen_sliding_window_mask_with_numpy(
     cu_seqlens: list[int],
-    window_size: list[int],
+    window_size: tuple[int, int],
     total_seqlen: int,
 ) -> np.ndarray:
     mask = np.zeros((total_seqlen, total_seqlen), dtype=np.int32)
@@ -382,7 +382,7 @@ class TestFunctools(TestCase):
                 q_ranges, k_ranges, masktypes = infer_attn_mask_from_sliding_window(
                     q_range=q_range,
                     k_range=k_range,
-                    window_size=[i, j],
+                    window_size=(i, j),
                 )
 
                 # Accumulate all results into an array and perform validation.
@@ -451,7 +451,7 @@ class TestFunctools(TestCase):
                 mask = np.zeros((total_seqlen, total_seqlen))
                 q_ranges, k_ranges, masktypes = infer_attn_mask_from_cu_seqlens(
                     cu_seqlens=cu_seqlens,
-                    window_size=[i, j],
+                    window_size=(i, j),
                 )
 
                 # Accumulate all results into an array and perform validation.
@@ -469,7 +469,7 @@ class TestFunctools(TestCase):
                 # calculate ref answer
                 ref_mask = generate_varlen_sliding_window_mask_with_numpy(
                     cu_seqlens=cu_seqlens,
-                    window_size=[i, j],
+                    window_size=(i, j),
                     total_seqlen=total_seqlen,
                 )
 
