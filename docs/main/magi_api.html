@@ -620,8 +620,8 @@ In addition to the descriptions below, see our blog for a visual explanation:
 <dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.magi_attn_varlen_dispatch">
 <span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">magi_attn_varlen_dispatch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.magi_attn_varlen_dispatch" title="Link to this definition">#</a></dt>
 <dd><p>This is a flash_attn_varlen like interface, to
-generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k and causal flag,
-further caculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
+generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k, causal and window_size,
+further calculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
 finally pad and dispatch the input tensor to local tensor.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -635,7 +635,12 @@ to control the granularity of computation load-balance.</p></li>
 <li><p><strong>cp_group_or_mesh</strong> (<em>dist.ProcessGroup</em><em> | </em><em>DeviceMesh</em>) – process group or device mesh.
 <strong>NOTE</strong>: for process group, we only support nccl backend for now,
 and for device mesh, we only support 1D or 2D mesh for now.</p></li>
-<li><p><strong>causal</strong> (<em>bool</em>) – if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – if True, all attn_mask_type is CAUSAL. else, determine masktype with <code class="docutils literal notranslate"><span class="pre">window_size</span></code>.
+Defaults to False.</p></li>
+<li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
+which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
+when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.
+Defaults to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.</p></li>
 <li><p><strong>dist_attn_config</strong> (<em>DistAttnConfig</em>) – dist attn config.</p></li>
 </ul>
 </dd>
@@ -669,6 +674,7 @@ and for device mesh, we only support 1D or 2D mesh for now.</p></li>
 <span class="gp">... </span>    <span class="n">chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
 <span class="gp">... </span>    <span class="n">cp_group_or_mesh</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">)),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">),</span>
 <span class="gp">... </span>    <span class="n">causal</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">window_size</span><span class="o">=</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">),</span>
 <span class="gp">... </span>    <span class="n">dist_attn_config</span><span class="o">=</span><span class="n">DistAttnConfig</span><span class="p">(</span>
 <span class="gp">... </span>        <span class="n">dispatch_config</span><span class="o">=</span><span class="n">DispatchConfig</span><span class="p">(</span><span class="n">alg</span><span class="o">=</span><span class="n">MinHeapDispatchAlg</span><span class="p">()),</span>
 <span class="gp">... </span>        <span class="n">overlap_config</span><span class="o">=</span><span class="n">OverlapConfig</span><span class="p">(</span>
@@ -694,9 +700,10 @@ and for device mesh, we only support 1D or 2D mesh for now.</p></li>
 <dl class="py function">
 <dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.magi_attn_varlen_key">
 <span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">magi_attn_varlen_key</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.magi_attn_varlen_key" title="Link to this definition">#</a></dt>
-<dd><p>This is a flash_attn_varlen like interface, to
-generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k and causal,
-caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.</p>
+<dd><p>This is a flash-attn-varlen like interface,
+to generate q_ranges, k_ranges and attn_mask_type
+from cu_seqlens_q, cu_seqlens_k, causal and window_size,
+calculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -708,7 +715,12 @@ to control the granularity of computation load-balance.</p></li>
 <li><p><strong>cp_group_or_mesh</strong> (<em>dist.ProcessGroup</em><em> | </em><em>DeviceMesh</em>) – process group or device mesh.
 <strong>NOTE</strong>: for process group, we only support nccl backend for now,
 and for device mesh, we only support 1D or 2D mesh for now.</p></li>
-<li><p><strong>causal</strong> (<em>bool</em>) – if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – if True, all attn_mask_type is CAUSAL. else, determine masktype with <code class="docutils literal notranslate"><span class="pre">window_size</span></code>.
+Defaults to False.</p></li>
+<li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
+which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
+when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.
+Defaults to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.</p></li>
 <li><p><strong>dist_attn_config</strong> (<em>DistAttnConfig</em>) – dist attn config.</p></li>
 </ul>
 </dd>
@@ -731,6 +743,7 @@ and for device mesh, we only support 1D or 2D mesh for now.</p></li>
 <span class="go">...     chunk_size=512,</span>
 <span class="go">...     cp_group_or_mesh=dist.new_group(list(range(4)), backend=&quot;nccl&quot;),</span>
 <span class="go">...     causal=False,</span>
+<span class="go">...     window_size=(-1, -1),</span>
 <span class="go">...     dist_attn_config=DistAttnConfig(</span>
 <span class="go">...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),</span>
 <span class="go">...         overlap_config=OverlapConfig(</span>
@@ -766,7 +779,7 @@ and for device mesh, we only support 1D or 2D mesh for now.</p></li>
 <span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">magi_attn_flex_dispatch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.magi_attn_flex_dispatch" title="Link to this definition">#</a></dt>
 <dd><p>This is the most flexible interface,
 directly passing in q_ranges, k_ranges and attn_mask_type to
-caculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
+calculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
 finally pad and dispatch the input tensor to local tensor.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -877,7 +890,7 @@ and for device mesh, we only support 1D or 2D mesh for now.</p></li>
 <span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">magi_attn_flex_key</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.magi_attn_flex_key" title="Link to this definition">#</a></dt>
 <dd><p>This is the most flexible interface,
 directly passing in q_ranges, k_ranges and attn_mask_type to
-caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.</p>
+calculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -1265,6 +1278,34 @@ the batch and sequence dimensions into a single leading dimension.</p>
 </dl>
 </dd></dl>
 
+<p>Moreover, if you have already computed the <code class="docutils literal notranslate"><span class="pre">cu_seqlens</span></code> tensor and want to generate a varlen mask based on it, we provide the <code class="docutils literal notranslate"><span class="pre">infer_attn_mask_from_cu_seqlens</span></code> function. This function can create three types of masks—varlen full, varlen causal, and varlen sliding window—according to <code class="docutils literal notranslate"><span class="pre">cu_seqlens</span></code>, <code class="docutils literal notranslate"><span class="pre">causal</span></code>, and <code class="docutils literal notranslate"><span class="pre">window_size</span></code>, and returns the result in the form of a <code class="docutils literal notranslate"><span class="pre">(q_ranges,</span> <span class="pre">k_ranges,</span> <span class="pre">mask_types,</span> <span class="pre">total_seqlen_q,</span> <span class="pre">total_seqlen_k)</span></code>.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.functools.infer_attn_mask_from_cu_seqlens">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.functools.</span></span><span class="sig-name descname"><span class="pre">infer_attn_mask_from_cu_seqlens</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.functools.infer_attn_mask_from_cu_seqlens" title="Link to this definition">#</a></dt>
+<dd><p>Infer query ranges, key ranges and other arguments for flexible attn mask representation
+from cu_seqlens, widely used for varlen masks.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>cu_seqlens_q</strong> (<em>torch.Tensor</em>) – cumulative sequence lengths for queries</p></li>
+<li><p><strong>cu_seqlens_k</strong> (<em>torch.Tensor</em>) – cumulative sequence lengths for keys</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – whether the varlen attention mask is causal. Defaults to False.</p></li>
+<li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
+which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
+when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.
+Defaults to <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>query ranges, key ranges, attn mask type list,
+total seqlen of q, total seqlen of k</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple[AttnRanges, AttnRanges, list[AttnMaskType], int, int]</p>
+</dd>
+</dl>
+</dd></dl>
+
 </section>
 <section id="infer-sliding-window-masks">
 <h3><a class="toc-backref" href="#id14" role="doc-backlink">Infer Sliding Window Masks</a><a class="headerlink" href="#infer-sliding-window-masks" title="Link to this heading">#</a></h3>
@@ -1279,7 +1320,8 @@ The mask type is specified using window_size.</p>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>q_range</strong> (<em>AttnRange</em>) – q_range of this sliding window mask</p></li>
 <li><p><strong>k_range</strong> (<em>AttnRange</em>) – k_range of this sliding window mask</p></li>
-<li><p><strong>window_size</strong> (<em>list</em><em>[</em><em>int</em><em>]</em>) – window_size of sliding window mask</p></li>
+<li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em>) – window_size of sliding window mask
+which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code></p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1381,6 +1423,7 @@ with a window size of <code class="docutils literal notranslate"><span class="pr
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#infer-varlen-masks">Infer Varlen Masks</a><ul class="visible nav section-nav flex-column">
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.infer_varlen_mask_from_batch"><code class="docutils literal notranslate"><span class="pre">infer_varlen_mask_from_batch()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.squash_batch_dim"><code class="docutils literal notranslate"><span class="pre">squash_batch_dim()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.infer_attn_mask_from_cu_seqlens"><code class="docutils literal notranslate"><span class="pre">infer_attn_mask_from_cu_seqlens()</span></code></a></li>
 </ul>
 </li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#infer-sliding-window-masks">Infer Sliding Window Masks</a><ul class="visible nav section-nav flex-column">
