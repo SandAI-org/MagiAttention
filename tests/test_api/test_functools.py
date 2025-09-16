@@ -16,6 +16,7 @@ import unittest
 from unittest import TestCase
 
 import numpy as np
+import torch
 
 from magi_attention.api.functools import (
     apply_padding,
@@ -434,7 +435,7 @@ class TestFunctools(TestCase):
             },
         ],
     )
-    def test_infer_attn_mask_from_cu_seqlens(
+    def test_infer_attn_mask_from_cu_seqlens_sliding_window_part(
         self,
         testcase: dict,
     ):
@@ -445,12 +446,16 @@ class TestFunctools(TestCase):
 
         name = f"in {case_name}, when {cu_seqlens=} x {window_size_length=}"
 
+        cu_seqlens_tensor = torch.tensor(cu_seqlens, dtype=torch.int32, device="cpu")
+
         for i in range(-1, window_size_length):
             for j in range(-1, window_size_length):
                 # calculate function answer
                 mask = np.zeros((total_seqlen, total_seqlen))
-                q_ranges, k_ranges, masktypes = infer_attn_mask_from_cu_seqlens(
-                    cu_seqlens=cu_seqlens,
+                q_ranges, k_ranges, masktypes, _, _ = infer_attn_mask_from_cu_seqlens(
+                    cu_seqlens_q=cu_seqlens_tensor,
+                    cu_seqlens_k=cu_seqlens_tensor,
+                    causal=False,
                     window_size=(i, j),
                 )
 

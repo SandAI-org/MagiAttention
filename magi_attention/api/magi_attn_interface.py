@@ -32,7 +32,12 @@ from magi_attention.dist_attn_runtime_mgr import (
 from magi_attention.utils import wrap_to_list
 from magi_attention.utils._utils import is_list_type_all
 
-from .functools import apply_padding, pad_at_dim, unpad_at_dim
+from .functools import (
+    apply_padding,
+    infer_attn_mask_from_cu_seqlens,
+    pad_at_dim,
+    unpad_at_dim,
+)
 
 dist_attn_runtime_dict = DistAttnRuntimeDict(
     max_size=magi_attention.dist_attn_runtime_dict_size()
@@ -49,10 +54,12 @@ def magi_attn_varlen_key(
     chunk_size: int,
     cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     causal: bool = False,
+    window_size: tuple[int, int] = (-1, -1),
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ) -> DistAttnRuntimeKey:
-    """This is a flash_attn_varlen like interface, to
-    generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k and causal,
+    """This is a flash-attn-varlen like interface,
+    to generate q_ranges, k_ranges and attn_mask_type
+    from cu_seqlens_q, cu_seqlens_k and causal,
     caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
 
     Args:
@@ -67,7 +74,11 @@ def magi_attn_varlen_key(
             **NOTE**: for process group, we only support nccl backend for now,
             and for device mesh, we only support 1D or 2D mesh for now.
 
-        causal (bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
+        causal (bool, optional): whether the varlen attention mask is causal. Defaults to False.
+        window_size (tuple[int, int], optional): window_size of sliding window mask
+            which represents ``[window_size_left, window_size_right]``. The parameter is effective only
+            when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
+            Defaults to be ``(-1, -1)``.
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
@@ -85,6 +96,7 @@ def magi_attn_varlen_key(
         ...     chunk_size=512,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     causal=False,
+        ...     window_size=(-1, -1),
         ...     dist_attn_config=DistAttnConfig(
         ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
@@ -108,25 +120,23 @@ def magi_attn_varlen_key(
         >>> # Gather local attention results to global result
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
-    # generate q_ranges, k_ranges and attn_mask_type
-    # Note: the q_ranges and k_ranges must come from list.
-    q_ranges: AttnRanges = AttnRanges.from_ranges(
-        torch.stack([cu_seqlens_q[:-1], cu_seqlens_q[1:]], dim=1).tolist()
-    )
-    k_ranges: AttnRanges = AttnRanges.from_ranges(
-        torch.stack([cu_seqlens_k[:-1], cu_seqlens_k[1:]], dim=1).tolist()
-    )
-
-    total_seqlen_q: int = int(cu_seqlens_q[-1])
-    total_seqlen_k: int = int(cu_seqlens_k[-1])
-
-    attn_mask_type = [AttnMaskType.CAUSAL if causal else AttnMaskType.FULL] * len(
-        q_ranges
+    # infer q_ranges, k_ranges and others from cu_seqlens_q, cu_seqlens_k and causal
+    (
+        q_ranges,
+        k_ranges,
+        attn_mask_type,
+        total_seqlen_q,
+        total_seqlen_k,
+    ) = infer_attn_mask_from_cu_seqlens(
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        causal=causal,
+        window_size=window_size,
     )
 
     # call magi_attn_flex_key
-    # NOTE: for flash_attn_varlen:
-    #   is_same_source, is_q_permutable and is_k_permutable are all set to true.
+    # NOTE: for flash-attn-varlen, we assume
+    # is_same_source, is_q_permutable and is_k_permutable are all True.
     return magi_attn_flex_key(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -136,10 +146,10 @@ def magi_attn_varlen_key(
         pad_size=pad_size,
         chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
+        dist_attn_config=dist_attn_config,
         is_same_source=True,
         is_q_permutable=True,
         is_k_permutable=True,
-        dist_attn_config=dist_attn_config,
     )
 
 
@@ -151,6 +161,7 @@ def magi_attn_varlen_dispatch(
     chunk_size: int,
     cp_group_or_mesh: dist.ProcessGroup | DeviceMesh,
     causal: bool = False,
+    window_size: tuple[int, int] = (-1, -1),
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ):
     """This is a flash_attn_varlen like interface, to
@@ -172,7 +183,11 @@ def magi_attn_varlen_dispatch(
             **NOTE**: for process group, we only support nccl backend for now,
             and for device mesh, we only support 1D or 2D mesh for now.
 
-        causal (bool): if True, all attn_mask_type is CAUSAL. else, all attn_mask_type is FULL.
+        causal (bool): if True, all attn_mask_type is CAUSAL. else, determine masktype with ``window_size``.
+        window_size (tuple[int, int], optional): window_size of sliding window mask
+            which represents ``[window_size_left, window_size_right]``. The parameter is effective only
+            when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
+            Defaults to be (-1, -1).
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
@@ -199,6 +214,7 @@ def magi_attn_varlen_dispatch(
         ...     chunk_size=512,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     causal=False,
+        ...     window_size=(-1, -1),
         ...     dist_attn_config=DistAttnConfig(
         ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
         ...         overlap_config=OverlapConfig(
@@ -224,6 +240,7 @@ def magi_attn_varlen_dispatch(
         chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
         causal=causal,
+        window_size=window_size,
         dist_attn_config=dist_attn_config,
     )
 

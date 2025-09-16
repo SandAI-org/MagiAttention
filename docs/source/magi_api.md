@@ -183,6 +183,16 @@ During the use of varlen mask, it is often necessary to reshape a tensor of shap
 .. autofunction:: squash_batch_dim
 ```
 
+Moreover, if you have already computed the ``cu_seqlens`` tensor and want to generate a varlen mask based on it, we provide the ``infer_attn_mask_from_cu_seqlens`` function. This function can create three types of masks—varlen full, varlen causal, and varlen sliding window—according to `cu_seqlens`, `causal`, and `window_size`, and returns the result in the form of a `(q_ranges, k_ranges, mask_types, total_seqlen_q, total_seqlen_k)`.
+
+```{eval-rst}
+.. currentmodule:: magi_attention.api.functools
+```
+
+```{eval-rst}
+.. autofunction:: infer_attn_mask_from_cu_seqlens
+```
+
 ### Infer Sliding Window Masks
 
 In the design of `MagiAttention`, we use a (q_range, k_range, masktype) tuple to represent a slice. For sliding window masks, we do not provide a dedicated masktype to represent them directly. However, a sliding window mask can be decomposed into a combination of existing masktypes such as `full`, `causal`, `inv_causal`, and `bi_causal`. If you're unsure how to perform this decomposition, we provide `infer_attn_mask_from_sliding_window` function to handle this process for you.
@@ -193,14 +203,4 @@ In the design of `MagiAttention`, we use a (q_range, k_range, masktype) tuple to
 
 ```{eval-rst}
 .. autofunction:: infer_attn_mask_from_sliding_window
-```
-
-Moreover, if you need to use varlen sliding window mask and all sliding window masks share the same `window_size`, we provide `infer_attn_mask_from_cu_seqlens` function. This function can convert the varlen sliding window mask into the form of (q_range, k_range, mask_type) triplets based on `cu_seqlens` and `window_size`.
-
-```{eval-rst}
-.. currentmodule:: magi_attention.api.functools
-```
-
-```{eval-rst}
-.. autofunction:: infer_attn_mask_from_cu_seqlens
 ```

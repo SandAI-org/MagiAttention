@@ -326,49 +326,73 @@ def infer_attn_mask_from_sliding_window(
 
 
 def infer_attn_mask_from_cu_seqlens(
-    cu_seqlens: list[int],
-    window_size: tuple[int, int],
-) -> tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
-    """Convert varlen sliding window masks into representations using q_range, k_range, and mask type.
-    The mask type is specified using window_size and cu_seqlens.
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    causal: bool = False,
+    window_size: tuple[int, int] = (-1, -1),
+) -> tuple[AttnRanges, AttnRanges, list[AttnMaskType], int, int]:
+    """Infer query ranges, key ranges and other arguments for flexible attn mask representation
+    from cu_seqlens, widely used for varlen masks.
 
     Args:
-        cu_seqlens (list[int]): cu_seqlens for varlen masks
-        window_size (tuple[int, int]): window_size of sliding window mask
-            which represents ``[window_size_left, window_size_right]``
+        cu_seqlens_q (torch.Tensor): cumulative sequence lengths for queries
+        cu_seqlens_k (torch.Tensor): cumulative sequence lengths for keys
+        causal (bool, optional): whether the varlen attention mask is causal. Defaults to False.
+        window_size (tuple[int, int], optional): window_size of sliding window mask
+            which represents ``[window_size_left, window_size_right]``. The parameter is effective only
+            when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
 
     Returns:
-        tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
-            processed ``(q_ranges, k_ranges, masktypes)`` triple, sliding window mask have been cutted
-            into triple representation.
-
-    Example:
-        Here's an example of ``infer_attn_mask_from_cu_seqlens``::
-
-            >>> q_ranges, k_ranges, attn_mask_type = infer_attn_mask_from_cu_seqlens(
-            ...     cu_seqlens=[0, 5, 15],
-            ...     window_size=(2, 3),
-            ... )
-
-        The code above represents two sliding window mask within the ``[0, 5] x [0, 5]`` region and
-        ``[5, 15] x [5, 15]`` region with a window size of ``(2, 3)``.
+        tuple[AttnRanges, AttnRanges, list[AttnMaskType], int, int]:
+            query ranges, key ranges, attn mask type list,
+            total seqlen of q, total seqlen of k
     """
-    assert len(window_size) == 2, "window size must be of 2 int"
-    assert len(cu_seqlens) >= 2, "size of cu_seqlens must >= 2"
+    assert len(window_size) == 2, "window_size must be of 2 int"
+    if window_size == (-1, -1):
+        q_ranges: AttnRanges = AttnRanges.from_ranges(
+            torch.stack([cu_seqlens_q[:-1], cu_seqlens_q[1:]], dim=1).tolist()
+        )
+        k_ranges: AttnRanges = AttnRanges.from_ranges(
+            torch.stack([cu_seqlens_k[:-1], cu_seqlens_k[1:]], dim=1).tolist()
+        )
 
-    q_ranges: AttnRanges = AttnRanges()
-    k_ranges: AttnRanges = AttnRanges()
-    attn_mask_type: list[AttnMaskType] = []
+        total_seqlen_q: int = int(cu_seqlens_q[-1])
+        total_seqlen_k: int = int(cu_seqlens_k[-1])
 
-    for index in range(len(cu_seqlens) - 1):
-        varlen_range = AttnRange(start=cu_seqlens[index], end=cu_seqlens[index + 1])
+        attn_mask_type = [AttnMaskType.CAUSAL if causal else AttnMaskType.FULL] * len(
+            q_ranges
+        )
+
+        return q_ranges, k_ranges, attn_mask_type, total_seqlen_q, total_seqlen_k
+
+    assert not causal, (
+        f"causal must be False when window_size is not (-1, -1), "
+        f"but got {causal=} and {window_size=}"
+    )
+
+    cu_seqlens_q_list: list[int] = cu_seqlens_q.tolist()
+    cu_seqlens_k_list: list[int] = cu_seqlens_k.tolist()
+    total_seqlen_q = cu_seqlens_q_list[-1]
+    total_seqlen_k = cu_seqlens_k_list[-1]
+
+    q_ranges = AttnRanges()
+    k_ranges = AttnRanges()
+    attn_mask_type = []
+
+    for index in range(len(cu_seqlens_q_list) - 1):
+        varlen_range_q = AttnRange(
+            start=cu_seqlens_q_list[index], end=cu_seqlens_q_list[index + 1]
+        )
+        varlen_range_k = AttnRange(
+            start=cu_seqlens_k_list[index], end=cu_seqlens_k_list[index + 1]
+        )
         (
             q_ranges_this_varlen,
             k_ranges_this_varlen,
             attn_mask_type_this_varlen,
         ) = infer_attn_mask_from_sliding_window(
-            q_range=varlen_range,
-            k_range=varlen_range,
+            q_range=varlen_range_q,
+            k_range=varlen_range_k,
             window_size=window_size,
         )
 
@@ -376,4 +400,4 @@ def infer_attn_mask_from_cu_seqlens(
         k_ranges.extend(k_ranges_this_varlen)
         attn_mask_type.extend(attn_mask_type_this_varlen)
 
-    return q_ranges, k_ranges, attn_mask_type
+    return q_ranges, k_ranges, attn_mask_type, total_seqlen_q, total_seqlen_k
