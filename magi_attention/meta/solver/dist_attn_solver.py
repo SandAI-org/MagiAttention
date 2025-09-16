@@ -522,7 +522,7 @@ class DistAttnSolver(BaseDistAttnSolver):
     ) -> list[RemoteRankEntry]:
         """Initialize remote rank entry per overlap stage for this rank"""
 
-        # -------   caculate calc/comm cost pairs  ------ #
+        # -------   calculate calc/comm cost pairs  ------ #
 
         chunk_costs = self._calc_cost_pairs_per_chunk(
             host_rank_entry_this_rank=host_rank_entry_this_rank,
@@ -535,7 +535,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             chunk_costs=chunk_costs,
         )
 
-        # ------    caculate remote rank entry for each stage   ------ #
+        # ------    calculate remote rank entry for each stage   ------ #
 
         remote_rank_entry_per_stage_this_rank = self._calc_remote_rank_entry_per_stage(
             host_rank_entry_this_rank=host_rank_entry_this_rank,

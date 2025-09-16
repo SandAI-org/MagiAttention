@@ -59,8 +59,8 @@ def magi_attn_varlen_key(
 ) -> DistAttnRuntimeKey:
     """This is a flash-attn-varlen like interface,
     to generate q_ranges, k_ranges and attn_mask_type
-    from cu_seqlens_q, cu_seqlens_k and causal,
-    caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
+    from cu_seqlens_q, cu_seqlens_k, causal and window_size,
+    calculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
 
     Args:
         cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
@@ -166,8 +166,8 @@ def magi_attn_varlen_dispatch(
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ):
     """This is a flash_attn_varlen like interface, to
-    generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k and causal flag,
-    further caculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
+    generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k, causal and window_size,
+    further calculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
     finally pad and dispatch the input tensor to local tensor.
 
     Args:
@@ -267,7 +267,7 @@ def magi_attn_flex_key(
 ) -> DistAttnRuntimeKey:
     """This is the most flexible interface,
     directly passing in q_ranges, k_ranges and attn_mask_type to
-    caculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
+    calculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
 
     Args:
         x (torch.Tensor): input tensor
@@ -455,7 +455,7 @@ def magi_attn_flex_dispatch(
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
     """This is the most flexible interface,
     directly passing in q_ranges, k_ranges and attn_mask_type to
-    caculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
+    calculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
     finally pad and dispatch the input tensor to local tensor.
 
     Args:
