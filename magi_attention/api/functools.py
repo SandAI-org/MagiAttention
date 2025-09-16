@@ -202,10 +202,6 @@ def infer_attn_mask_from_sliding_window(
         with a window size of ``(2, 3)``.
     """
     assert len(window_size) == 2, "window size must be of 2 int"
-    assert window_size[0] < k_range.seqlen and window_size[1] < k_range.seqlen, (
-        "the num of window_size must be -1 or < k_range.seqlen",
-        f"but got {window_size=}",
-    )
 
     q_ranges_, k_ranges_ = AttnRanges(), AttnRanges()
     attn_mask_type_: list[AttnMaskType] = []
@@ -221,12 +217,12 @@ def infer_attn_mask_from_sliding_window(
     # When window_size is -1 or k_range.seqlen - 1, we increment it to avoid splitting the full mask in the result.
     left_window_size = (
         window_size[0]
-        if window_size[0] != -1 and window_size[0] != k_range.seqlen - 1
+        if window_size[0] != -1 and window_size[0] < k_range.seqlen - 1
         else k_range.seqlen
     )
     right_window_size = (
         window_size[1]
-        if window_size[1] != -1 and window_size[1] != k_range.seqlen - 1
+        if window_size[1] != -1 and window_size[1] < k_range.seqlen - 1
         else k_range.seqlen
     )
     # The principle of the algorithm is to first expand the sliding window mask into a bi-causal one,
@@ -326,3 +322,56 @@ def infer_attn_mask_from_sliding_window(
         attn_mask_type_.append(AttnMaskType.INVCAUSAL)
 
     return q_ranges_, k_ranges_, attn_mask_type_
+
+
+def infer_attn_mask_from_cu_seqlens(
+    cu_seqlens: list[int],
+    window_size: list[int],
+) -> tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
+    """Convert varlen sliding window masks into representations using q_range, k_range, and mask type.
+    The mask type is specified using window_size and cu_seqlens.
+
+    Args:
+        cu_seqlens (list[int]): cu_seqlens for varlen masks
+        window_size (list[int]): window_size of sliding window mask
+
+    Returns:
+        tuple[AttnRanges, AttnRanges, list[AttnMaskType]]:
+            processed ``(q_ranges, k_ranges, masktypes)`` triple, sliding window mask have been cutted
+            into triple representation.
+
+    Example:
+        Here's an example of ``infer_attn_mask_from_cu_seqlens``::
+
+            >>> q_ranges, k_ranges, attn_mask_type = infer_attn_mask_from_cu_seqlens(
+            ...     cu_seqlens=[0, 5, 15],
+            ...     window_size=(2, 3),
+            ... )
+
+        The code above represents two sliding window mask within the ``[0, 5] x [0, 5]`` region and
+        ``[5, 15] x [5, 15]`` region with a window size of ``(2, 3)``.
+    """
+    assert len(window_size) == 2, "window size must be of 2 int"
+    assert len(cu_seqlens) >= 2, "size of cu_seqlens must >= 2"
+
+    q_ranges: AttnRanges = AttnRanges()
+    k_ranges: AttnRanges = AttnRanges()
+    attn_mask_type: list[AttnMaskType] = []
+
+    for index in range(len(cu_seqlens) - 1):
+        varlen_range = AttnRange(start=cu_seqlens[index], end=cu_seqlens[index + 1])
+        (
+            q_ranges_this_varlen,
+            k_ranges_this_varlen,
+            attn_mask_type_this_varlen,
+        ) = infer_attn_mask_from_sliding_window(
+            q_range=varlen_range,
+            k_range=varlen_range,
+            window_size=window_size,
+        )
+
+        q_ranges.extend(q_ranges_this_varlen)
+        k_ranges.extend(k_ranges_this_varlen)
+        attn_mask_type.extend(attn_mask_type_this_varlen)
+
+    return q_ranges, k_ranges, attn_mask_type

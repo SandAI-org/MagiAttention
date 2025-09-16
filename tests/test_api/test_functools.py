@@ -20,6 +20,7 @@ import numpy as np
 from magi_attention.api.functools import (
     apply_padding,
     compute_pad_size,
+    infer_attn_mask_from_cu_seqlens,
     infer_attn_mask_from_sliding_window,
 )
 from magi_attention.common.enum import AttnMaskType
@@ -72,28 +73,29 @@ def add_range_to_array(
     return array
 
 
+def generate_sliding_window_mask(
+    q_seqlen: int,
+    k_seqlen: int,
+    window_size: tuple[int, int] | list[int],
+) -> np.ndarray:
+    left_window_size = window_size[0] if window_size[0] != -1 else k_seqlen - 1
+    right_window_size = window_size[1] if window_size[1] != -1 else k_seqlen - 1
+    q_idxs = (np.arange(q_seqlen) + (k_seqlen - q_seqlen))[:, None]  # [q_len, 1]
+    k_idxs = np.arange(k_seqlen)[None, :]  # [1, k_len]
+    mask = (k_idxs >= q_idxs - left_window_size) & (
+        k_idxs <= q_idxs + right_window_size
+    )
+
+    return mask.astype(np.int32)  # [q_len, k_len]
+
+
 def generate_sliding_window_mask_with_numpy(
     q_range: AttnRange,
     k_range: AttnRange,
-    window_size: tuple[int, int],
+    window_size: tuple[int, int] | list[int],
     array_size: int,
 ) -> np.ndarray:
     mask = np.zeros((array_size, array_size), dtype=np.int32)
-
-    def generate_sliding_window_mask(
-        q_seqlen: int,
-        k_seqlen: int,
-        window_size: tuple[int, int],
-    ) -> np.ndarray:
-        left_window_size = window_size[0] if window_size[0] != -1 else k_seqlen - 1
-        right_window_size = window_size[1] if window_size[1] != -1 else k_seqlen - 1
-        q_idxs = (np.arange(q_seqlen) + (k_seqlen - q_seqlen))[:, None]  # [q_len, 1]
-        k_idxs = np.arange(k_seqlen)[None, :]  # [1, k_len]
-        mask = (k_idxs >= q_idxs - left_window_size) & (
-            k_idxs <= q_idxs + right_window_size
-        )
-
-        return mask.astype(np.int32)  # [q_len, k_len]
 
     q_seqlen, k_seqlen = min(q_range.seqlen, k_range.seqlen), k_range.seqlen
 
@@ -104,6 +106,26 @@ def generate_sliding_window_mask_with_numpy(
         k_seqlen=k_seqlen,
         window_size=window_size,
     )
+
+    return mask
+
+
+def generate_varlen_sliding_window_mask_with_numpy(
+    cu_seqlens: list[int],
+    window_size: list[int],
+    total_seqlen: int,
+) -> np.ndarray:
+    mask = np.zeros((total_seqlen, total_seqlen), dtype=np.int32)
+
+    for i in range(len(cu_seqlens) - 1):
+        varlen_seqlen = cu_seqlens[i + 1] - cu_seqlens[i]
+        mask[
+            cu_seqlens[i] : cu_seqlens[i + 1], cu_seqlens[i] : cu_seqlens[i + 1]
+        ] = generate_sliding_window_mask(
+            q_seqlen=varlen_seqlen,
+            k_seqlen=varlen_seqlen,
+            window_size=window_size,
+        )
 
     return mask
 
@@ -381,6 +403,74 @@ class TestFunctools(TestCase):
                     k_range=k_range,
                     window_size=(i, j),
                     array_size=range_size,
+                )
+
+                assert np.array_equal(
+                    mask, ref_mask
+                ), f"There's wrong when {name=} with window_size=({i}, {j})"
+
+    @parameterize(
+        "testcase",
+        [
+            {
+                "name": "testcase1",
+                "cu_seqlens": [0, 10, 20, 40, 60, 100, 150, 170, 180, 185],
+                "window_size_length": 10,
+            },
+            {
+                "name": "testcase2",
+                "cu_seqlens": [0, 5, 16, 40, 56, 90, 150, 300, 800],
+                "window_size_length": 23,
+            },
+            {
+                "name": "testcase4",
+                "cu_seqlens": [0, 15, 30, 45, 60, 75, 90],
+                "window_size_length": 5,
+            },
+            {
+                "name": "testcase4",
+                "cu_seqlens": [0, 100, 146, 200, 221, 230, 234, 236],
+                "window_size_length": 41,
+            },
+        ],
+    )
+    def test_infer_attn_mask_from_cu_seqlens(
+        self,
+        testcase: dict,
+    ):
+        case_name: str = testcase["name"]
+        cu_seqlens: list[int] = testcase["cu_seqlens"]
+        window_size_length: int = testcase["window_size_length"]
+        total_seqlen = cu_seqlens[-1]
+
+        name = f"in {case_name}, when {cu_seqlens=} x {window_size_length=}"
+
+        for i in range(-1, window_size_length):
+            for j in range(-1, window_size_length):
+                # calculate function answer
+                mask = np.zeros((total_seqlen, total_seqlen))
+                q_ranges, k_ranges, masktypes = infer_attn_mask_from_cu_seqlens(
+                    cu_seqlens=cu_seqlens,
+                    window_size=[i, j],
+                )
+
+                # Accumulate all results into an array and perform validation.
+                for sw_q_range, sw_k_range, sw_mask_type in zip(
+                    q_ranges, k_ranges, masktypes
+                ):
+                    add_range_to_array(
+                        array=mask,
+                        q_range=sw_q_range,
+                        k_range=sw_k_range,
+                        masktype=sw_mask_type,
+                        check=True,
+                    )
+
+                # calculate ref answer
+                ref_mask = generate_varlen_sliding_window_mask_with_numpy(
+                    cu_seqlens=cu_seqlens,
+                    window_size=[i, j],
+                    total_seqlen=total_seqlen,
                 )
 
                 assert np.array_equal(
