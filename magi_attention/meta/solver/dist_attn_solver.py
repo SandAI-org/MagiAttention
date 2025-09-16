@@ -142,7 +142,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
-        attn_mask_type: AttnMaskType | list[AttnMaskType],
+        attn_mask_type: list[AttnMaskType],
         dispatch_meta_q: DispatchMeta,
         dispatch_meta_k: DispatchMeta,
     ) -> None:
@@ -213,7 +213,7 @@ class DistAttnSolver(BaseDistAttnSolver):
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
-        attn_mask_type: AttnMaskType | list[AttnMaskType],
+        attn_mask_type: list[AttnMaskType],
         dispatch_meta: DispatchMeta,
     ) -> AttnBucket:
         bucket_per_rank = make_bucket_per_rank_from_qk_ranges(

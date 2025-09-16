@@ -41,6 +41,8 @@ from .magi_attn_interface import (
     magi_attn_flex_key,
     magi_attn_varlen_dispatch,
     magi_attn_varlen_key,
+    make_flex_key_for_new_mask_after_dispatch,
+    make_varlen_key_for_new_mask_after_dispatch,
     undispatch,
 )
 
@@ -53,6 +55,8 @@ __all__ = [
     "magi_attn_varlen_key",
     "undispatch",
     "get_most_recent_key",
+    "make_varlen_key_for_new_mask_after_dispatch",
+    "make_flex_key_for_new_mask_after_dispatch",
     "flex_flash_attn_func",
     "get_position_ids",
     "compute_pad_size",

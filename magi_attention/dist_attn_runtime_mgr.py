@@ -61,13 +61,12 @@ class DistAttnRuntimeKey:
 class DistAttnRuntimeMgr:
     def __init__(
         self,
-        cp_group: dist.ProcessGroup,
         dispatch_meta_q: DispatchMeta,
         dispatch_meta_k: DispatchMeta,
-        chunk_size: int,
         dist_attn_config: DistAttnConfig,
         attn_solver: BaseDistAttnSolver,
         dist_attn_runtime: DistAttnRuntime,
+        cp_group: dist.ProcessGroup,
         *,
         ref_q_ranges: AttnRanges,
         ref_k_ranges: AttnRanges,
@@ -78,7 +77,6 @@ class DistAttnRuntimeMgr:
         self.cp_group = cp_group
         self.dispatch_meta_q = dispatch_meta_q
         self.dispatch_meta_k = dispatch_meta_k
-        self.chunk_size = chunk_size
         self.dist_attn_config = dist_attn_config
         self.attn_solver = attn_solver
 
@@ -249,7 +247,6 @@ class DistAttnRuntimeMgr:
         return (
             self.dispatch_meta_q,
             self.dispatch_meta_k,
-            self.chunk_size,
             self.dist_attn_config,
             self.attn_solver,
             self.dist_attn_runtime,
@@ -261,7 +258,6 @@ class DistAttnRuntimeMgr:
         ) == (
             other.dispatch_meta_q,
             other.dispatch_meta_k,
-            other.chunk_size,
             other.dist_attn_config,
             other.attn_solver,
             other.dist_attn_runtime,
@@ -344,7 +340,7 @@ def init_dist_attn_runtime_key(
 def init_dist_attn_runtime_mgr(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
-    attn_mask_type: AttnMaskType | list[AttnMaskType],
+    attn_mask_type: list[AttnMaskType],
     total_seqlen_q: int,
     total_seqlen_k: int,
     chunk_size: int,
@@ -356,16 +352,18 @@ def init_dist_attn_runtime_mgr(
     cp_mesh: DeviceMesh | None = None,
     num_heads_q: int = 1,
     num_heads_kv: int = 1,
+    ref_dispatch_meta_q: DispatchMeta | None = None,
+    ref_dispatch_meta_k: DispatchMeta | None = None,
 ) -> DistAttnRuntimeMgr:
     """
 
     Args:
-        q_ranges (AttnRanges): global query ranges in the ref attn mask
-        k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (AttnMaskType | list[AttnMaskType]): attn mask type (list)
+        q_ranges (AttnRanges): the global query ranges
+        k_ranges (AttnRanges): the global key ranges
+        attn_mask_type (list[AttnMaskType]): the global attn mask type list
 
-        total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
-        total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
+        total_seqlen_q (int): the total seqlen of query
+        total_seqlen_k (int): the total seqlen of key
 
         chunk_size (int): chunk size to chunk the permutable tensor
 
@@ -399,7 +397,7 @@ def init_dist_attn_runtime_mgr(
         >>> dist_attn_runtime_mgr = init_dist_attn_runtime_mgr(
         ...     q_ranges=AttnRanges.from_ranges([[0, 2048], [2048, 4096]]),
         ...     k_ranges=AttnRanges.from_ranges([[0, 2048], [0, 4096]]),
-        ...     attn_mask_type=AttnMaskType.FULL,
+        ...     attn_mask_type=[AttnMaskType.FULL, AttnMaskType.CAUSAL],
         ...     total_seqlen_q=4096,
         ...     total_seqlen_k=4096,
         ...     chunk_size=512,
@@ -434,30 +432,34 @@ def init_dist_attn_runtime_mgr(
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
 
-    # calculate dispatch meta to determine which rank should hold which chunks of seqlen
-    # NOTE: in final, the dispatch meta is NOT supposed to contain any meta info about the mask
-    # however, since in most of the distributed attention scenarios, the mask is static through the whole training pass
-    # we can take advantage of this information to offer a better dispatch solution if permutable
-    # so as to help reducing communication overhead while keep computation load-balance
-    # therefore here, we will also pass the actual or initial mask info to the dispatch solver
-    # as the arguments for some dispatch algorithms
-    (
-        dispatch_meta_q,
-        dispatch_meta_k,
-    ) = make_dispatch_meta_from_qk_ranges(
-        q_ranges=q_ranges,
-        k_ranges=k_ranges,
-        attn_mask_type=attn_mask_type,
-        total_seqlen_q=total_seqlen_q,
-        total_seqlen_k=total_seqlen_k,
-        chunk_size=chunk_size,
-        cp_size=cp_size,
-        cp_rank=cp_rank,
-        dispatch_config=dist_attn_config.dispatch_config,
-        is_same_source=is_same_source,
-        is_q_permutable=is_q_permutable,
-        is_k_permutable=is_k_permutable,
-    )
+    if ref_dispatch_meta_q is None or ref_dispatch_meta_k is None:
+        # calculate dispatch meta to determine which rank should hold which chunks of seqlen
+        # NOTE: in final, the dispatch meta is NOT supposed to contain any meta info about the mask
+        # however, since in most of the distributed attention scenarios, the mask is static through the whole training pass
+        # we can take advantage of this information to offer a better dispatch solution if permutable
+        # so as to help reducing communication overhead while keep computation load-balance
+        # therefore here, we will also pass the actual or initial mask info to the dispatch solver
+        # as the arguments for some dispatch algorithms
+        (
+            dispatch_meta_q,
+            dispatch_meta_k,
+        ) = make_dispatch_meta_from_qk_ranges(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            chunk_size=chunk_size,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+            dispatch_config=dist_attn_config.dispatch_config,
+            is_same_source=is_same_source,
+            is_q_permutable=is_q_permutable,
+            is_k_permutable=is_k_permutable,
+        )
+    else:
+        dispatch_meta_q = ref_dispatch_meta_q
+        dispatch_meta_k = ref_dispatch_meta_k
 
     # calculate comm meta and calc meta to organize the dist-attn calculation and communication
     comm_meta, calc_meta, attn_solver = make_attn_meta_from_dispatch_meta(
@@ -483,13 +485,12 @@ def init_dist_attn_runtime_mgr(
 
     # init dist attn runtime mgr
     dist_attn_runtime_mgr = DistAttnRuntimeMgr(
-        cp_group,
-        dispatch_meta_q,
-        dispatch_meta_k,
-        chunk_size,
-        dist_attn_config,
-        attn_solver,
-        dist_attn_runtime,
+        dispatch_meta_q=dispatch_meta_q,
+        dispatch_meta_k=dispatch_meta_k,
+        dist_attn_config=dist_attn_config,
+        attn_solver=attn_solver,
+        dist_attn_runtime=dist_attn_runtime,
+        cp_group=cp_group,
         ref_q_ranges=q_ranges,
         ref_k_ranges=k_ranges,
         is_same_source=is_same_source,

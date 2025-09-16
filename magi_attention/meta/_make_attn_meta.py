@@ -33,7 +33,7 @@ from magi_attention.meta.solver.overlap_solver import OverlapConfig
 def make_attn_meta_from_dispatch_meta(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
-    attn_mask_type: AttnMaskType | list[AttnMaskType],
+    attn_mask_type: list[AttnMaskType],
     dispatch_meta_q: DispatchMeta,
     dispatch_meta_k: DispatchMeta,
     cp_group: dist.ProcessGroup,
@@ -47,7 +47,7 @@ def make_attn_meta_from_dispatch_meta(
     Args:
         q_ranges (AttnRanges): global query ranges in the ref attn mask
         k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (AttnMaskType | list[AttnMaskType]): attn mask type (list)
+        attn_mask_type (list[AttnMaskType]): attn mask type (list)
 
         dispatch_meta_q (DispatchMeta): The dispatch meta for query
         dispatch_meta_k (DispatchMeta): The dispatch meta for key

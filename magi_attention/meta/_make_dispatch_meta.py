@@ -517,7 +517,7 @@ def make_global_bucket_from_qk_ranges(
 def make_bucket_per_rank_from_qk_ranges(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
-    attn_mask_type: AttnMaskType | list[AttnMaskType],
+    attn_mask_type: list[AttnMaskType],
     dispatch_meta: DispatchMeta,
     sort: bool = True,
 ) -> list[AttnBucket]:
@@ -526,7 +526,7 @@ def make_bucket_per_rank_from_qk_ranges(
     Args:
         q_ranges (AttnRanges): the query ranges
         k_ranges (AttnRanges): the key ranges
-        attn_mask_type (AttnMaskType | list[AttnMaskType]): the attn mask type (list)
+        attn_mask_type (list[AttnMaskType]): the attn mask type list
         dispatch_meta (DispatchMeta): dispatch meta
         sort (bool): whether to sort (q_range, k_range, masktype) with (q_range.start, q_range.end) manually
             Default: True, since we require the mask is sorted by q seqlen order
@@ -534,14 +534,6 @@ def make_bucket_per_rank_from_qk_ranges(
     Returns:
         list[AttnBucket]: buckets per rank list
     """
-
-    batch_size = len(q_ranges)
-    attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=batch_size)
-    assert len(attn_mask_type) == batch_size, (
-        f"If attn_mask_type is a list, "
-        f"its length ({len(attn_mask_type)}) should "
-        f"be equal to batch_size ({batch_size})."
-    )
 
     # -------    make global bucket   ------- #
 

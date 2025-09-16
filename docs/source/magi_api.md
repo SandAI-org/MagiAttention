@@ -41,6 +41,12 @@ The logic of the `magi_attn_varlen_dispatch` function mainly consists of two par
 .. autofunction:: magi_attn_varlen_key
 ```
 
+
+```{eval-rst}
+.. autofunction:: make_varlen_key_for_new_mask_after_dispatch
+```
+
+
 ### Flexible Dispatch
 
 If the masks you're using are not limited to varlen full or varlen causal, but also include sliding window masks or other more diverse types, we recommend using the following API. By calling `magi_attn_flex_dispatch`, you can obtain the dispatched x and key.
@@ -57,6 +63,10 @@ Similar to the logic of `magi_attn_varlen_dispatch`, `magi_attn_flex_dispatch` f
 
 ```{eval-rst}
 .. autofunction:: magi_attn_flex_key
+```
+
+```{eval-rst}
+.. autofunction:: make_flex_key_for_new_mask_after_dispatch
 ```
 
 ### Dispatch Function

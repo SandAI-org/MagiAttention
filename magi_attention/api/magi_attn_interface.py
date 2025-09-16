@@ -271,13 +271,14 @@ def magi_attn_flex_key(
 
     Args:
         x (torch.Tensor): input tensor
-        q_ranges (AttnRanges): global query ranges in the ref attn mask
-        k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]): attn mask type (list)
+        q_ranges (AttnRanges): the global query ranges
+        k_ranges (AttnRanges): the global key ranges
+        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]):
+            the global attn mask type (list)
             represented by str or enum ``AttnMaskType`` or their mixed combination
 
-        total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
-        total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
+        total_seqlen_q (int): the total seqlen of query
+        total_seqlen_k (int): the total seqlen of key
 
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
@@ -348,14 +349,14 @@ def magi_attn_flex_key(
         >>> # Gather local attention results to global result
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
-    # Validate total_seqlen
+    # validate total_seqlen
     assert q_ranges.end <= total_seqlen_q and k_ranges.end <= total_seqlen_k, (
         f"The maximum endpoint in ranges must be less than total_seqlen, "
         f"but got {q_ranges.end=} when {total_seqlen_q=}, "
         f"and got {k_ranges.end=} when {total_seqlen_k=}"
     )
 
-    # Validate and transform attn_mask_type
+    # validate and transform attn_mask_type
     attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
     assert is_list_type_all(attn_mask_type, (str, AttnMaskType)), (
         f"attn_mask_type must be a list of str or AttnMaskType or their mixed combination, "
@@ -391,8 +392,9 @@ def magi_attn_flex_key(
             f"but got {type(cp_group_or_mesh)=}"
         )
 
-    # Apply padding at seq_dim(dim 0）
+    # apply padding
     if pad_size > 0:
+        # apply padding to the mask with the empty slice
         q_ranges, k_ranges, attn_mask_type = apply_padding(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
@@ -400,7 +402,7 @@ def magi_attn_flex_key(
             total_seqlen=total_seqlen_q,
             pad_size=pad_size,
         )
-
+        # also apply padding to total_seqlen
         total_seqlen_q += pad_size
         total_seqlen_k += pad_size
 
@@ -460,13 +462,14 @@ def magi_attn_flex_dispatch(
 
     Args:
         x (torch.Tensor): input tensor
-        q_ranges (AttnRanges): global query ranges in the ref attn mask
-        k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]): attn mask type (list)
+        q_ranges (AttnRanges): the global query ranges
+        k_ranges (AttnRanges): the global key ranges
+        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]):
+            the global attn mask type (list)
             represented by str or enum ``AttnMaskType`` or their mixed combination
 
-        total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
-        total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
+        total_seqlen_q (int): the total seqlen of query
+        total_seqlen_k (int): the total seqlen of key
 
         pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
@@ -585,7 +588,7 @@ def dispatch(
     """
     mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
-        raise ValueError("The DistAttnRuntimeKey does not exist!")
+        raise ValueError("The dist attn runtime key does not exist!")
 
     pad_size = key.pad_size
     padded_x = pad_at_dim(x, 0, pad_size, value=pad_value)
@@ -613,7 +616,7 @@ def undispatch(
     """
     mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
-        raise ValueError("The DistAttnRuntimeKey does not exist!")
+        raise ValueError("The dist attn runtime key does not exist!")
 
     total_x = mgr.undispatch_qo(x)
     pad_size = key.pad_size
@@ -648,7 +651,7 @@ def calc_attn(
     """
     mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
-        raise ValueError("The DistAttnRuntimeKey does not exist!")
+        raise ValueError("The dist attn runtime key does not exist!")
 
     return mgr.calc_attn(q, k, v)
 
@@ -666,7 +669,7 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
     """
     mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
-        raise ValueError("The DistAttnRuntimeKey does not exist!")
+        raise ValueError("The dist attn runtime key does not exist!")
 
     return mgr.get_position_ids()
 
@@ -683,3 +686,185 @@ def get_most_recent_key() -> DistAttnRuntimeKey:
         DistAttnRuntimeKey: the most recent inserted key.
     """
     return dist_attn_runtime_dict.get_most_recent_key()
+
+
+def make_varlen_key_for_new_mask_after_dispatch(
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    key_for_dispatch: DistAttnRuntimeKey,
+    causal: bool = False,
+    window_size: tuple[int, int] = (-1, -1),
+    dist_attn_config: DistAttnConfig | None = None,
+) -> DistAttnRuntimeKey:
+    """Make a new dist attn runtime key for new mask after dispatch
+    with the given new mask arguments specific for varlen mask in flash-attn-varlen style
+    and the existing key used for dispatch
+
+    NOTE: this API is useful when you want to apply more than one masks within the same training pass,
+    therefore, we can only use one of the masks to dispatch,
+    while the others're supposed to reuse the same dispatch solution
+    with different meta arguments for computation and communication
+
+    WARNING: in such case, we can not guarantee all the masks are load-balanced in computation
+    and optimized in communication.
+
+    Args:
+        cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
+        cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
+        key_for_dispatch (DistAttnRuntimeKey): the key used for dispatch
+        causal (bool, optional): whether the varlen attention mask is causal. Defaults to False.
+        window_size (tuple[int, int], optional): window_size of sliding window mask
+            which represents ``[window_size_left, window_size_right]``. The parameter is effective only
+            when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
+            Defaults to be ``(-1, -1)``.
+        dist_attn_config (DistAttnConfig, optional): the optional new dist attn config,
+
+            NOTE: if not provided, we will use the same config as the ``key_for_dispatch``,
+            and if provided, the dispatch config of the new dist attn config won't be applied to the new mask
+
+    Returns:
+        DistAttnRuntimeKey: the new dist attn runtime key
+            for new mask with the same dispatch solution as the ``key_for_dispatch``
+    """
+    # infer q_ranges, k_ranges and others from cu_seqlens_q, cu_seqlens_k and causal
+    (
+        q_ranges,
+        k_ranges,
+        attn_mask_type,
+        _,  # total_seqlen_q
+        _,  # total_seqlen_k
+    ) = infer_attn_mask_from_cu_seqlens(
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        causal=causal,
+        window_size=window_size,
+    )
+
+    return make_flex_key_for_new_mask_after_dispatch(
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        key_for_dispatch=key_for_dispatch,
+        dist_attn_config=dist_attn_config,
+    )
+
+
+def make_flex_key_for_new_mask_after_dispatch(
+    q_ranges: AttnRanges,
+    k_ranges: AttnRanges,
+    attn_mask_type: GeneralAttnMaskType,
+    key_for_dispatch: DistAttnRuntimeKey,
+    dist_attn_config: DistAttnConfig | None = None,
+) -> DistAttnRuntimeKey:
+    """Make a new dist attn runtime key for new mask after dispatch
+    with the given new mask arguments and the existing key used for dispatch
+
+    NOTE: this API is useful when you want to apply more than one masks within the same training pass,
+    therefore, we can only use one of the masks to dispatch,
+    while the others're supposed to reuse the same dispatch solution
+    with different meta arguments for computation and communication
+
+    WARNING: in such case, we can not guarantee all the masks are load-balanced in computation
+    and optimized in communication.
+
+    Args:
+        q_ranges (AttnRanges): the global query ranges
+        k_ranges (AttnRanges): the global key ranges
+        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]):
+            the global attn mask type (list)
+            represented by str or enum ``AttnMaskType`` or their mixed combination
+        key_for_dispatch (DistAttnRuntimeKey): the key used for dispatch
+        dist_attn_config (DistAttnConfig, optional): the optional new dist attn config,
+
+            NOTE: if not provided, we will use the same config as the ``key_for_dispatch``,
+            and if provided, the dispatch config of the new dist attn config won't be applied to the new mask
+
+    Returns:
+        DistAttnRuntimeKey: the new dist attn runtime key
+            for new mask with the same dispatch solution as the ``key_for_dispatch``
+    """
+    # validate key_for_dispatch
+    assert (
+        key_for_dispatch in dist_attn_runtime_dict.keys()
+    ), "The key_for_dispatch does not exist!"
+
+    # validate and transform attn_mask_type
+    attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
+    assert is_list_type_all(attn_mask_type, (str, AttnMaskType)), (
+        f"attn_mask_type must be a list of str or AttnMaskType or their mixed combination, "
+        f"but got {attn_mask_type=}"
+    )
+    attn_mask_type = [  # transform str to AttnMaskType, might raise ValueError
+        AttnMaskType(type_name) for type_name in attn_mask_type
+    ]
+    assert len(attn_mask_type) == len(q_ranges), (
+        f"the length of attn_mask_type must be same as q_ranges, "
+        f"but got {len(attn_mask_type)=} and {len(q_ranges)=}"
+    )
+
+    # extract the common attributes from the key for dispatch
+    total_seqlen_q = key_for_dispatch.total_seqlen_q  # already padded
+    total_seqlen_k = key_for_dispatch.total_seqlen_k  # already padded
+    pad_size = key_for_dispatch.pad_size
+    chunk_size = key_for_dispatch.chunk_size
+    cp_group = key_for_dispatch.cp_group
+    cp_mesh = key_for_dispatch.cp_mesh
+    new_dist_attn_config = (
+        key_for_dispatch.dist_attn_config
+        if dist_attn_config is None
+        else dist_attn_config
+    )
+
+    # extract the common attributes from the mgr for dispatch
+    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict[key_for_dispatch]
+    ref_dispatch_meta_q = mgr.dispatch_meta_q
+    ref_dispatch_meta_k = mgr.dispatch_meta_k
+    is_same_source = mgr.is_same_source
+    is_q_permutable = mgr.is_q_permutable
+    is_k_permutable = mgr.is_k_permutable
+
+    # apply padding
+    if pad_size > 0:
+        # apply padding to the new mask with the empty slice
+        q_ranges, k_ranges, attn_mask_type = apply_padding(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            total_seqlen=total_seqlen_q - pad_size,
+            pad_size=pad_size,
+        )
+
+    # init new dist attn runtime key
+    new_key = init_dist_attn_runtime_key(
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        total_seqlen_q=total_seqlen_q,
+        total_seqlen_k=total_seqlen_k,
+        pad_size=pad_size,
+        chunk_size=chunk_size,
+        cp_group=cp_group,
+        cp_mesh=cp_mesh,
+        dist_attn_config=new_dist_attn_config,
+    )
+
+    # init new dist attn runtime mgr and map it to the new key
+    if new_key not in dist_attn_runtime_dict.keys():
+        dist_attn_runtime_dict[new_key] = init_dist_attn_runtime_mgr(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            chunk_size=chunk_size,
+            cp_group=cp_group,
+            is_same_source=is_same_source,
+            is_q_permutable=is_q_permutable,
+            is_k_permutable=is_k_permutable,
+            dist_attn_config=new_dist_attn_config,
+            cp_mesh=cp_mesh,
+            ref_dispatch_meta_q=ref_dispatch_meta_q,
+            ref_dispatch_meta_k=ref_dispatch_meta_k,
+        )
+
+    return new_key
