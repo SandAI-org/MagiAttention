@@ -74,7 +74,8 @@ def magi_attn_varlen_key(
             **NOTE**: for process group, we only support nccl backend for now,
             and for device mesh, we only support 1D or 2D mesh for now.
 
-        causal (bool, optional): whether the varlen attention mask is causal. Defaults to False.
+        causal (bool, optional): if True, all attn_mask_type is CAUSAL. else, determine masktype with ``window_size``.
+            Defaults to False.
         window_size (tuple[int, int], optional): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
@@ -188,7 +189,7 @@ def magi_attn_varlen_dispatch(
         window_size (tuple[int, int], optional): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
-            Defaults to be (-1, -1).
+            Defaults to be ``(-1, -1)``.
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:

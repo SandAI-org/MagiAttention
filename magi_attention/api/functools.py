@@ -341,6 +341,7 @@ def infer_attn_mask_from_cu_seqlens(
         window_size (tuple[int, int], optional): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
+            Defaults to ``(-1, -1)``.
 
     Returns:
         tuple[AttnRanges, AttnRanges, list[AttnMaskType], int, int]:
