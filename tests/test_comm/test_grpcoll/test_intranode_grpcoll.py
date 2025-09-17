@@ -47,6 +47,7 @@ from magi_attention.comm.primitive.grpcoll import (
 )
 from magi_attention.comm.primitive.grpcoll._buffer import Buffer
 from magi_attention.comm.primitive.grpcoll._config import Config
+from magi_attention.common.range_op import range_gather
 from magi_attention.testing.grpcoll_utils import (
     bench,
     calc_diff,
@@ -57,6 +58,7 @@ from magi_attention.testing.grpcoll_utils import (
     inplace_unique,
     per_token_cast_back,
     per_token_cast_to_fp8,
+    sim_gemm,
     transfer_group_cast_meta_to_dispatch_meta,
 )
 
@@ -80,6 +82,9 @@ def test_main(
     # Re-Settings for group-collective
     use_topk = False  # NOTE: disable topk to improve bandwidth by saving unused experts
     num_topk = num_ranks  # we can assume num_topk == num_ranks
+    distinct_token = True
+    random_permute_output = True
+    sim_gemm_weight = 2.0
     if use_topk:
         # if using topk, we can assume num_local_experts == num_ranks,
         # thus when we only need to send certain token to one rank,
@@ -122,7 +127,17 @@ def test_main(
     )
 
     # Random data
-    x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * rank
+    x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
+    if distinct_token:
+        x *= torch.arange(
+            rank * num_tokens,
+            (rank + 1) * num_tokens,
+            dtype=torch.bfloat16,
+            device="cuda",
+        ).view(-1, 1) / (num_ranks * num_tokens)
+        print(f"[RANK {rank}]: distinct_input: {x=}\n", flush=True)
+    else:
+        x *= rank
     x_pure_rand = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
     x_e4m3 = per_token_cast_to_fp8(x) if Buffer.is_sm90_compiled() else None
     x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T) if x_e4m3 is not None else None
@@ -144,7 +159,10 @@ def test_main(
         output_split_size_list,
         src_index_list,
     ) = get_output_split_size_list_and_src_index_list(
-        input_split_size_list, dst_indices_list, group
+        input_split_size_list=input_split_size_list,
+        dst_indices_list=dst_indices_list,
+        group=group,
+        random_permute=random_permute_output,
     )
 
     # get ref dispatch output by group-cast
@@ -164,9 +182,10 @@ def test_main(
     print(f"[RANK {rank}]: {recv_x_gc.shape=} | {recv_x_gc=}\n", flush=True)
 
     # get ref combine output by group-reduce
+    x_gr = sim_gemm(recv_x_gc, w=sim_gemm_weight)
     combined_x_gr = torch.zeros_like(x)
     work_with_pf_gr = group_reduce_collective(
-        input=recv_x_gc,
+        input=x_gr,
         output=combined_x_gr,
         input_split_size_list=output_split_size_list,
         dst_index_list=src_index_list,
@@ -187,14 +206,19 @@ def test_main(
         topk_idx,
         topk_weights,
         num_tokens_per_expert,
+        range_gather_post_dispatch_kwargs,
+        range_gather_pre_combine_kwargs,
     ) = transfer_group_cast_meta_to_dispatch_meta(
-        rank,
-        num_ranks,
-        num_local_experts,
-        input_split_size_list,
-        dst_indices_list,
-        device="cuda",
+        rank=rank,
+        num_ranks=num_ranks,
+        num_nodes=1,
+        num_local_experts=num_local_experts,
+        input_split_size_list=input_split_size_list,
+        dst_indices_list=dst_indices_list,
+        output_split_size_list=output_split_size_list,
+        src_index_list=src_index_list,
         use_topk=use_topk,
+        use_a2a_order_output=not random_permute_output,
     )
     if use_topk:
         topk_weights_pure_rand = torch.randn_like(topk_weights)
@@ -270,6 +294,9 @@ def test_main(
 
     # Test dispatch
     def check_data(check_x, rank_prefix_matrix):
+        if distinct_token:
+            # distinct token cannot use this check
+            return
         assert torch.allclose(check_x.amin(dim=1), check_x.amax(dim=1))
         check_start = 0
         for i in range(num_ranks):
@@ -371,6 +398,16 @@ def test_main(
 
                     # wait
                     event.current_stream_wait() if async_mode else ()
+
+                    # unpermute recv_x to the order indicated by
+                    # output_split_size_list and src_index_list
+                    if random_permute_output:
+                        recv_x_before_rg = recv_x.clone()  # type: ignore[union-attr]
+                        recv_x = range_gather(
+                            input=recv_x,
+                            **range_gather_post_dispatch_kwargs,
+                        )
+                        assert recv_x_before_rg.shape == recv_x.shape
 
                     # print
                     (
@@ -551,10 +588,22 @@ def test_main(
                             flush=True,
                         )
 
+                    # simulate gemm
+                    x_combine = sim_gemm(recv_x, w=sim_gemm_weight)
+
+                    # permute x to the rank order
+                    if random_permute_output:
+                        x_combine_before_rg = x_combine.clone()
+                        x_combine = range_gather(
+                            input=x_combine,
+                            **range_gather_pre_combine_kwargs,
+                        )
+                        assert x_combine_before_rg.shape == x_combine.shape
+
                     # prepare combine args
                     send_head_copy = send_head.clone()
                     combine_args = {
-                        "x": recv_x,
+                        "x": x_combine,
                         "handle": handle,
                         "config": config,
                         "async_finish": async_mode,
@@ -598,7 +647,7 @@ def test_main(
                     )
 
                     # check
-                    assert torch.equal(combined_x, combined_x_gr)
+                    torch.testing.assert_close(combined_x, combined_x_gr)
                     assert torch.equal(
                         send_head[send_head_copy != -1],
                         send_head_copy[send_head_copy != -1],
@@ -607,6 +656,7 @@ def test_main(
                         dim=1
                     ).unsqueeze(1)
                     ref_x = x_pure_rand if current_x is x_pure_rand else x
+                    ref_x = sim_gemm(ref_x, w=sim_gemm_weight)
                     assert calc_diff(check_x, ref_x) < 5e-6
                     if with_topk:
                         check_topk_weights = (

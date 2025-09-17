@@ -47,6 +47,7 @@ from magi_attention.comm.primitive.grpcoll import (
     group_reduce_collective,
 )
 from magi_attention.comm.primitive.grpcoll._buffer import Buffer
+from magi_attention.common.range_op import range_gather
 from magi_attention.testing.grpcoll_utils import (
     bench,
     bench_kineto,
@@ -57,6 +58,7 @@ from magi_attention.testing.grpcoll_utils import (
     hash_tensor,
     init_dist,
     per_token_cast_back,
+    sim_gemm,
     transfer_group_cast_meta_to_dispatch_meta,
 )
 
@@ -78,6 +80,9 @@ def test_main(
 
     assert num_experts % num_ranks == 0
     num_local_experts = num_experts // num_ranks
+    distinct_token = True
+    random_permute_output = True
+    sim_gemm_weight = 2.0
 
     # NOTES: the integers greater than 256 exceed the BF16 precision limit
     rank_offset = 128
@@ -88,7 +93,17 @@ def test_main(
     # Random data
     # x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda') * (rank - rank_offset)
     # x[:, -128:] = torch.arange(num_tokens, device='cuda').to(torch.bfloat16).view(-1, 1)
-    x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * rank
+    x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
+    if distinct_token:
+        x *= torch.arange(
+            rank * num_tokens,
+            (rank + 1) * num_tokens,
+            dtype=torch.bfloat16,
+            device="cuda",
+        ).view(-1, 1) / (num_ranks * num_tokens)
+        print(f"[RANK {rank}]: distinct_input: {x=}\n", flush=True)
+    else:
+        x *= rank
     x_pure_rand = (
         torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device="cuda") * 0.1
     )
@@ -107,7 +122,10 @@ def test_main(
         output_split_size_list,
         src_index_list,
     ) = get_output_split_size_list_and_src_index_list(
-        input_split_size_list, dst_indices_list, group
+        input_split_size_list=input_split_size_list,
+        dst_indices_list=dst_indices_list,
+        group=group,
+        random_permute=random_permute_output,
     )
 
     # get ref dispatch output by group-cast
@@ -127,9 +145,10 @@ def test_main(
     print(f"[RANK {rank}]: {recv_x_gc.shape=} | {recv_x_gc=}\n", flush=True)
 
     # get ref combine output by group-reduce
+    x_gr = sim_gemm(recv_x_gc, w=sim_gemm_weight)
     combined_x_gr = torch.zeros_like(x)
     work_with_pf_gr = group_reduce_collective(
-        input=recv_x_gc,
+        input=x_gr,
         output=combined_x_gr,
         input_split_size_list=output_split_size_list,
         dst_index_list=src_index_list,
@@ -142,22 +161,27 @@ def test_main(
 
     # transfer group-cast meta args to dispatch meta args
     (
-        _,
-        _,
-        _,
-        _,
-        _,
+        _,  # rank_idx
+        _,  # rdma_rank_idx
+        _,  # num_tokens_per_rank
+        _,  # num_tokens_per_rdma_rank
+        _,  # is_token_in_rank
         topk_idx,
         topk_weights,
-        _,
+        _,  # num_tokens_per_expert
+        range_gather_post_dispatch_kwargs,
+        _,  # range_gather_pre_combine_kwargs
     ) = transfer_group_cast_meta_to_dispatch_meta(
-        rank,
-        num_ranks,
-        num_local_experts,
-        input_split_size_list,
-        dst_indices_list,
-        device="cuda",
+        rank=rank,
+        num_ranks=num_ranks,
+        num_nodes=1,
+        num_local_experts=num_local_experts,
+        input_split_size_list=input_split_size_list,
+        dst_indices_list=dst_indices_list,
+        output_split_size_list=output_split_size_list,
+        src_index_list=src_index_list,
         use_topk=True,
+        use_a2a_order_output=not random_permute_output,
     )
     topk_weights = torch.ones(
         (num_tokens, num_topk), dtype=torch.float32, device="cuda"
@@ -253,6 +277,7 @@ def test_main(
                             if dispatch_use_fp8
                             else packed_recv_x.clone()  # type: ignore[attr-defined]
                         )
+                        simulated_gemm_x = sim_gemm(simulated_gemm_x, w=sim_gemm_weight)
 
                         # unpack
                         (
@@ -263,9 +288,18 @@ def test_main(
                             num_experts,
                         ) = handle
 
-                        recv_x = torch.sort(packed_recv_x[0], dim=0)[
-                            0
-                        ]  # HACK: only local expert 0 activated
+                        # HACK: only local expert 0 activated
+                        recv_x = torch.sort(packed_recv_x[0], dim=0)[0]
+
+                        # unpermute recv_x to the order indicated by
+                        # output_split_size_list and src_index_list
+                        if random_permute_output:
+                            recv_x_before_rg = recv_x.clone()
+                            recv_x = range_gather(
+                                input=recv_x,
+                                **range_gather_post_dispatch_kwargs,
+                            )
+                            assert recv_x_before_rg.shape == recv_x.shape
 
                         # print
                         print(
@@ -406,16 +440,16 @@ def test_main(
 
                             # checks
                             if do_check:
-                                assert torch.equal(combined_x, combined_x_gr)
+                                torch.testing.assert_close(combined_x, combined_x_gr)
                                 assert torch.equal(out, combined_x)
-                                assert torch.equal(simulated_gemm_x, packed_recv_x)
-                                diff = calc_diff(
+                                ref_x = sim_gemm(
                                     current_x
                                     * topk_weights.masked_fill(topk_idx == -1, 0)
                                     .sum(dim=1)
                                     .view(-1, 1),
-                                    combined_x,
+                                    w=sim_gemm_weight,
                                 )
+                                diff = calc_diff(ref_x, combined_x)
                                 assert torch.isnan(combined_x).sum().item() == 0
                                 assert diff < (
                                     7e-4 if dispatch_use_fp8 else 1e-5
