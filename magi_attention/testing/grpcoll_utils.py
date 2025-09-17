@@ -20,11 +20,16 @@ import random
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
 import torch.distributed as dist
+
+from magi_attention.comm.primitive.grpcoll.utils import (
+    _calc_group_cast_a2a_output_meta_args,
+    _calc_group_reduce_a2a_input_meta_args,
+)
 
 
 def get_random_split_size_list(
@@ -62,6 +67,7 @@ def get_output_split_size_list_and_src_index_list(
     input_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     group: dist.ProcessGroup,
+    random_permute: bool = False,
 ) -> tuple[list[int], list[int]]:
     my_rank = dist.get_rank(group)
     world_size = dist.get_world_size(group)
@@ -74,6 +80,8 @@ def get_output_split_size_list_and_src_index_list(
 
     output_split_size_list, src_index_list = [], []
 
+    # init the output split size list and src index list
+    # using rank order, just like a2a
     output_src_rank_map: dict[int, list[int]] = {}
     for src_rank in range(world_size):
         input_split_size_list_this_rank = input_split_size_list_per_rank[src_rank]
@@ -92,19 +100,29 @@ def get_output_split_size_list_and_src_index_list(
             output_split_size_list.extend(split_sizes)
             src_index_list.extend([src_rank] * len(split_sizes))
 
+    # random shuffle
+    if random_permute:
+        perm_idxs = list(range(len(output_split_size_list)))
+        random.shuffle(perm_idxs)
+        output_split_size_list = [output_split_size_list[i] for i in perm_idxs]
+        src_index_list = [src_index_list[i] for i in perm_idxs]
+
     return output_split_size_list, src_index_list
 
 
 def transfer_group_cast_meta_to_dispatch_meta(
     rank: int,
     num_ranks: int,
+    num_nodes: int,
     num_local_experts: int,
     input_split_size_list: list[int],
     dst_indices_list: list[list[int]],
-    num_nodes: int = 1,
+    output_split_size_list: list[int],
+    src_index_list: list[int],
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
     use_topk: bool = False,
+    use_a2a_order_output: bool = True,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor | None,
@@ -114,6 +132,8 @@ def transfer_group_cast_meta_to_dispatch_meta(
     torch.Tensor | None,
     torch.Tensor | None,
     torch.Tensor,
+    dict[str, Any],
+    dict[str, Any],
 ]:
     num_local_ranks = num_ranks // num_nodes
     num_experts = num_local_experts * num_ranks
@@ -238,6 +258,35 @@ def transfer_group_cast_meta_to_dispatch_meta(
     else:
         num_tokens_per_expert = num_tokens_per_rank
 
+    # construct post-permute args to transfer rank order
+    # to the order indicated by output_split_size_list and src_index_list
+    if use_a2a_order_output:
+        range_gather_post_dispatch_kwargs: dict[str, Any] = {}
+        range_gather_pre_combine_kwargs: dict[str, Any] = {}
+    else:
+        (
+            _,  # a2a_output_split_size
+            range_gather_post_dispatch_kwargs,
+        ) = _calc_group_cast_a2a_output_meta_args(
+            output_split_size_list=output_split_size_list,
+            src_index_list=src_index_list,
+            world_size=num_ranks,
+            device=device,
+            reorder_list=None,
+            calc_unperm_after_a2a_kwargs=True,
+            return_verbose=False,
+        )
+
+        (
+            _,  # a2a_input_split_size
+            range_gather_pre_combine_kwargs,
+        ) = _calc_group_reduce_a2a_input_meta_args(
+            input_split_size_list=output_split_size_list,
+            dst_index_list=src_index_list,
+            world_size=num_ranks,
+            device=device,
+        )
+
     return (
         rank_idx,
         rdma_rank_idx,
@@ -247,6 +296,8 @@ def transfer_group_cast_meta_to_dispatch_meta(
         topk_idx,
         topk_weights,
         num_tokens_per_expert,
+        range_gather_post_dispatch_kwargs,
+        range_gather_pre_combine_kwargs,
     )
 
 
@@ -490,3 +541,7 @@ def bench_kineto(
 
 def hash_tensor(t: torch.Tensor):
     return t.view(torch.int64).sum().item()
+
+
+def sim_gemm(x: torch.Tensor, w: float = 1.0) -> torch.Tensor:
+    return x * w
