@@ -49,7 +49,7 @@ template <int Arch,
           bool DisableFwdAtomicReduction,
           bool Deterministic,
           bool MergeRange,
-    bool SwapAB>
+          bool SwapAB>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
@@ -174,7 +174,7 @@ template <int Arch,
           typename T_out,
           int kHeadDim,
           bool Has_softcap,
-          bool DisableFwdAtomicReduction, 
+          bool DisableFwdAtomicReduction,
           bool SwapAB>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -194,7 +194,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
                       Has_softcap,
                       DisableFwdAtomicReduction,
                       Deterministic,
-                      MergeRange, 
+                      MergeRange,
                       SwapAB>(params, stream);
       });
     });

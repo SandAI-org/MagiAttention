@@ -71,7 +71,6 @@ struct CollectiveMainloopFwdSm90 {
   // (kBlockN, kHeadDim) @ (kHeadDim, kBlockM) -> (kBlockN, kBlockM)
   using TileShape_MNK_SwapAB = Shape<decltype(get<2>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{})), decltype(get<0>(TileShape_MNK{}))>;
 
-
   // TileShapeMNK for mma pv: kBlockM, kHeadDim, kBlockN
   // (kBlockM, kBlockN) @ (kBlockN, kHeadDim) -> (kBlockM, kHeadDim)
   using TileShape_MNK_PV = Shape<decltype(get<0>(TileShape_MNK{})), decltype(get<2>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{}))>;
@@ -715,7 +714,8 @@ struct CollectiveMainloopFwdSm90 {
     if constexpr (!MmaQK_is_RS) {
       static_assert(
           stride<0>(typename TiledMmaQK_Active::ALayout{}) == 0 and stride<0>(typename TiledMmaQK_Active::BLayout{}) == 0 and
-              size<0>(typename TiledMmaQK_Active::ALayout{}) == cutlass::NumThreadsPerWarpGroup and size<0>(typename TiledMmaQK_Active::BLayout{}) == cutlass::NumThreadsPerWarpGroup,
+              size<0>(typename TiledMmaQK_Active::ALayout{}) == cutlass::NumThreadsPerWarpGroup and
+              size<0>(typename TiledMmaQK_Active::BLayout{}) == cutlass::NumThreadsPerWarpGroup,
           "Stride of the first mode must be 0 and the size of the mode must be NumThreadsPerWarpGroup");
     }
 
@@ -732,12 +732,8 @@ struct CollectiveMainloopFwdSm90 {
     auto smem_thr_copy_P = smem_tiled_copy_P.get_thread_slice(thread_idx);
 
     // Allocate "fragments/descriptors"
-    auto tSrQ = cute::conditional_return<!SwapAB>(
-        wg_mma_qk.partition_fragment_A(sQ),
-        wg_mma_qk.partition_fragment_B(sQ));
-    auto tSrK = cute::conditional_return<!SwapAB>(
-        wg_mma_qk.partition_fragment_B(sK),
-        wg_mma_qk.partition_fragment_A(sK));
+    auto tSrQ = cute::conditional_return<!SwapAB>(wg_mma_qk.partition_fragment_A(sQ), wg_mma_qk.partition_fragment_B(sQ));
+    auto tSrK = cute::conditional_return<!SwapAB>(wg_mma_qk.partition_fragment_B(sK), wg_mma_qk.partition_fragment_A(sK));
     Tensor tOrV = wg_mma_pv.partition_fragment_B(sV);
     Tensor tOsP = wg_mma_pv.partition_fragment_A(sP);
     // if p is in registers, do we still need this step ?
@@ -745,8 +741,7 @@ struct CollectiveMainloopFwdSm90 {
 
     // Allocate S(Q@K) fragment
     Tensor tSrS = cute::conditional_return<!SwapAB>(
-      partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{})),
-      partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK_SwapAB{})));
+        partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{})), partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK_SwapAB{})));
 
     auto consumer_wait = [](auto& pipeline, auto& smem_pipe_read) {
       auto barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
@@ -857,25 +852,24 @@ struct CollectiveMainloopFwdSm90 {
     // Wait for first block of k to be loaded
     consumer_wait(pipeline_k, smem_pipe_read_k);
 
-      if constexpr (!SwapAB) {
+    if constexpr (!SwapAB) {
       // launch Q @ K of n_block and wait for it to finish
-        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
-      } else {
-        flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrK(_, _, _, smem_pipe_read_k.index()), tSrQ, tSrS);
-      }
+      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
+    } else {
+      flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrK(_, _, _, smem_pipe_read_k.index()), tSrQ, tSrS);
+    }
     warpgroup_wait<0>();
-      Tensor cS = cute::conditional_return<SwapAB>(
-        make_identity_tensor(Shape<Int<kBlockN>, Int<kBlockM>>{}),
-        make_identity_tensor(Shape<Int<kBlockM>, Int<kBlockN>>{}));
-      if (block_meta.bidb == 0) {
-        auto thr_mma =  tiled_mma_qk.get_thread_slice(thread_idx);
-        Tensor tScS = thr_mma.partition_C(cS);
-        for (int i = 0; i < size(tSrS); ++i) {
-          if (int(get<0>(tScS(i))) >= 40 && int(get<0>(tScS(i))) < 44 && int(get<1>(tScS(i))) >= 40 && int(get<1>(tScS(i))) < 44) {
-            printf("SwapAB: %d bidb: %d m_block: %d tSrS(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tScS(i))), int(get<1>(tScS(i))), tSrS(i));
-          }
+    Tensor cS = cute::conditional_return<SwapAB>(make_identity_tensor(Shape<Int<kBlockN>, Int<kBlockM>>{}), make_identity_tensor(Shape<Int<kBlockM>, Int<kBlockN>>{}));
+    if (block_meta.bidb == 0) {
+      auto thr_mma = tiled_mma_qk.get_thread_slice(thread_idx);
+      Tensor tScS = thr_mma.partition_C(cS);
+      for (int i = 0; i < size(tSrS); ++i) {
+        if (int(get<0>(tScS(i))) >= 40 && int(get<0>(tScS(i))) < 44 && int(get<1>(tScS(i))) >= 40 && int(get<1>(tScS(i))) < 44) {
+          printf(
+              "SwapAB: %d bidb: %d m_block: %d tSrS(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tScS(i))), int(get<1>(tScS(i))), tSrS(i));
         }
       }
+    }
     // The first block of k has been consumed, notify producer that this buffer can be reused
     consumer_release(pipeline_k, smem_pipe_read_k);
 
@@ -945,8 +939,7 @@ struct CollectiveMainloopFwdSm90 {
         // Partition the fragment C tensor into a new tensor tSrS, which is used to store the result of the Q@K matrix multiplication for n_block
         // Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
         Tensor tSrS = cute::conditional_return<!SwapAB>(
-          partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{})),
-          partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK_SwapAB{})));
+            partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{})), partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK_SwapAB{})));
 
         // If UseSchedulerBarrier is not enabled, all threads need to call consumer_wait, otherwise only threads in the 0th mma warp group call consumer_wait
         if (!UseSchedulerBarrier || warp_group_idx == 0) {

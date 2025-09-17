@@ -361,9 +361,11 @@ class FlashAttnFwdSm90 {
         float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
         // TODO: support SwapAB
 
-        flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/0, /*SwapAB=*/false> softmax(softmax_scale_log2);
-        typename flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/0,
-            /*SwapAB=*/false>::TensorT scores_scale;
+        flash::Softmax<2 * (2 * kBlockM / NumMmaThreads), /*Max_offset=*/0, /*SwapAB=*/false> softmax(
+            softmax_scale_log2);
+        typename flash::Softmax<2 * (2 * kBlockM / NumMmaThreads),
+                                /*Max_offset=*/0,
+                                /*SwapAB=*/false>::TensorT scores_scale;
 
         // Init attention output (GEMM-II, P@V) accumulator.
         Tensor tOrO = partition_fragment_C(tiled_mma_pv, select<0, 1>(TileShape_MNK_PV{}));
