@@ -92,7 +92,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   // dim3 grid_m(params.b, num_m_block, params.h_qo);
   dim3 grid_m(1, num_m_block, params.h_qo);
   cutlass::kernel_launch<PreprocessKernel>(
-       grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, false /*launch_with_pdl*/);
+      grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, false /*launch_with_pdl*/);
   CHECK_CUDA_KERNEL_LAUNCH();
 
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
@@ -228,7 +228,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
     cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
   }
   CHECK_CUDA_KERNEL_LAUNCH();
-
 }
 
 template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction>

@@ -499,13 +499,13 @@ struct CollectiveMainloopBwdSm90 {
     // Tensor gdPsum = local_tile(domain_offset(make_coord(0), mdPsum), select<0>(TileShape_MNK{}), make_coord(_)); // (M, _)
 
     Tensor gLSE = local_tile(
-      cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mLSE),
-      make_shape(get<0>(shape(mLSE)), select<0>(TileShape_MNK{})), // (4, kblockm)
-      make_coord(_0{}, _)); // (4, M, _)
+        cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mLSE),
+        make_shape(get<0>(shape(mLSE)), select<0>(TileShape_MNK{})), // (4, kblockm)
+        make_coord(_0{}, _)); // (4, M, _)
     Tensor gdPsum = local_tile(
-      cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum),
-      make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})), // (4, kblockm)
-      make_coord(_0{}, _)); // (4, M, _)
+        cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum),
+        make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})), // (4, kblockm)
+        make_coord(_0{}, _)); // (4, M, _)
     /*
     if (thread_idx == 0 && bidh == 7 && bidb == 1) {
       printf("gLSE:\n"); print_tensor(gLSE);
@@ -928,7 +928,7 @@ struct CollectiveMainloopBwdSm90 {
 
     Tensor sdPsumMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
     Tensor sLSEMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSEMma{});
-    Tensor sLSEMma = sLSEMma_full(_0{}, _, _, _);  // slice dim 0
+    Tensor sLSEMma = sLSEMma_full(_0{}, _, _, _); // slice dim 0
     Tensor sdPsumMma = sdPsumMma_full(_0{}, _, _, _); // slice dim 0
 
     static_assert(

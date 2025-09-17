@@ -170,14 +170,14 @@ class FlashAttnBwdPreprocess {
     int const bidb = blockIdx.x;
 
     // Initialize the seqlen info
-    //flash::DistributedSeqlenInfo seqlen_info(bidb, params.q_ranges, params.k_ranges);
-    //flash::DistributedSeqlenInfo seqlen_info_next(bidb + 1, params.q_ranges, params.k_ranges);
-    //int const seqlen_o = seqlen_info.seqlen_q;
-    //int const offset_this_batch = seqlen_info.offset_q;
-    //int const offset_next_batch = seqlen_info_next.offset_q;
+    // flash::DistributedSeqlenInfo seqlen_info(bidb, params.q_ranges, params.k_ranges);
+    // flash::DistributedSeqlenInfo seqlen_info_next(bidb + 1, params.q_ranges, params.k_ranges);
+    // int const seqlen_o = seqlen_info.seqlen_q;
+    // int const offset_this_batch = seqlen_info.offset_q;
+    // int const offset_next_batch = seqlen_info_next.offset_q;
 
     // Early return if the current block is out of range
-    //if (m_block * kBlockM >= seqlen_o) {
+    // if (m_block * kBlockM >= seqlen_o) {
     //  return;
     //}
 
@@ -186,7 +186,7 @@ class FlashAttnBwdPreprocess {
     int const offset = m_block * kBlockM;
     // Initialize the tensors for O, dO, and LSE
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
-    //Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+    // Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
     Tensor gO = local_tile(cute::domain_offset(make_coord(0, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
 
     Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh);
