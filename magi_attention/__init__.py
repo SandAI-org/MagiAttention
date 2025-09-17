@@ -17,7 +17,10 @@ import os
 import warnings
 
 from . import comm, config, functional
-from .dist_attn_runtime_mgr import init_dist_attn_runtime_mgr
+from .dist_attn_runtime_mgr import (
+    init_dist_attn_runtime_key,
+    init_dist_attn_runtime_mgr,
+)
 
 if importlib.util.find_spec("magi_attention._version") is None:
     warnings.warn(
@@ -32,6 +35,7 @@ else:
 __version__: str | None = version
 
 __all__ = [
+    "init_dist_attn_runtime_key",
     "init_dist_attn_runtime_mgr",
     "is_sanity_check_enable",
     "is_cuda_device_max_connections_one",
@@ -43,7 +47,7 @@ __all__ = [
 
 def is_sanity_check_enable() -> bool:
     """
-    Toggle this env variable to ``1`` can enable many sanity check codes inside magi_attention
+    Toggle this env variable to ``1`` to enable many sanity check codes inside magi_attention
 
     Default value is ``0``
 
@@ -55,8 +59,9 @@ def is_sanity_check_enable() -> bool:
 
 def is_sdpa_backend_enable() -> bool:
     """
-    Toggle this env variable to ``1`` can switch the attn kernel backend
-    from ffa to sdpa-math, to support higher precision like fp32 or fp64
+    Toggle this env variable to ``1`` to switch the attn kernel backend
+    from ffa to customized sdpa implementation,
+    to support higher precision like fp32 or fp64
 
     Default value is ``0``
 

@@ -24,7 +24,7 @@ from torch.testing._internal.common_utils import run_tests
 import magi_attention
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
-from magi_attention.meta.collection.calc_meta import AttnArg, AttnCalcMeta
+from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
@@ -82,12 +82,11 @@ class TestDistAttn(DistTestBase):
     def test_full_attn(self, dtype):
         device = torch.cuda.current_device()
 
-        attn_calc_meta = AttnCalcMeta(
+        calc_meta = CalcMeta(
             local_attn_arg=AttnArg(
                 q_ranges=AttnRanges.from_ranges([[0, 128]]),
                 k_ranges=AttnRanges.from_ranges([[0, 128]]),
                 attn_type_map=[0],
-                shard_seqlen_q=128,
                 total_area=128 * 128,
             ),
             remote_attn_args_list=[
@@ -95,7 +94,6 @@ class TestDistAttn(DistTestBase):
                     q_ranges=AttnRanges.from_ranges([[0, 128]]),
                     k_ranges=AttnRanges.from_ranges([[0, 128 * 3]]),
                     attn_type_map=[0],
-                    shard_seqlen_q=128,
                     total_area=128 * 128 * 3,
                 ),
             ],
@@ -125,7 +123,7 @@ class TestDistAttn(DistTestBase):
 
         dist_attn_runtime = DistAttnRuntime(
             comm_meta=comm_meta,
-            calc_meta=attn_calc_meta,
+            calc_meta=calc_meta,
             cp_group_gc=self.nccl_groups[0],
             cp_group_gr=self.nccl_groups[1],
         )

@@ -137,6 +137,44 @@ def clearup_dist_env() -> None:
 NestedIntList: TypeAlias = Union[list[int], tuple[int, ...], Sequence["NestedIntList"]]
 
 
+def format_list_field(name: str, data_list: list, indent: str) -> str:
+    """Helper to format a list field with tree-like structure."""
+    if not data_list:
+        return f"{indent}    {name}=[]\n"
+
+    list_repr = f"{indent}    {name}=[\n"
+    for i, item in enumerate(data_list):
+        prefix = "└── " if i == len(data_list) - 1 else "├── "
+        item_repr_lines = repr(item).splitlines()
+        list_repr += f"{indent}        {prefix}{item_repr_lines[0]}\n"
+        # If the item itself has a multi-line repr, indent it further
+        for line in item_repr_lines[1:]:
+            list_repr += f"{indent}        {' ' * len(prefix)}{line}\n"
+    list_repr += f"{indent}    ]\n"
+    return list_repr
+
+
+def format_dict_field(name: str, data_dict: dict, indent: str) -> str:
+    """Helper to format a dict field with tree-like structure."""
+    if not data_dict:
+        return f"{indent}    {name}={data_dict},\n"
+
+    dict_repr = f"{indent}    {name}={{\n"
+    keys = list(data_dict.keys())
+    for i, key in enumerate(keys):
+        value = data_dict[key]
+        prefix = "└── " if i == len(keys) - 1 else "├── "
+        value_repr_lines = repr(value).splitlines()
+        dict_repr += f"{indent}        {prefix}{repr(key)}: {value_repr_lines[0]}\n"
+        # Indent subsequent lines of a multi-line value's repr
+        for line in value_repr_lines[1:]:
+            dict_repr += (
+                f"{indent}        {' ' * (len(prefix) + len(repr(key)) + 2)}{line}\n"
+            )
+    dict_repr += f"{indent}    }},\n"
+    return dict_repr
+
+
 def seqlens2cu_seqlens(seqlens: list[int]) -> list[int]:
     cu_seqlens = [0]
     for seqlen in seqlens:
@@ -519,11 +557,18 @@ def get_attn_mask_from_ffa_args(
     return mask
 
 
+def is_fp_dtype_at_least(
+    tensor: torch.Tensor,
+    lowest_precision: torch.dtype,
+) -> bool:
+    return torch.finfo(tensor.dtype).bits >= torch.finfo(lowest_precision).bits
+
+
 def to_higher_fp_dtype(
     tensor: torch.Tensor,
     lowest_precision: torch.dtype,
 ) -> torch.Tensor:
-    if torch.finfo(tensor.dtype).bits < torch.finfo(lowest_precision).bits:
+    if not is_fp_dtype_at_least(tensor, lowest_precision):
         return tensor.to(lowest_precision)
     return tensor
 

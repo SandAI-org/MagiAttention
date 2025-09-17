@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from abc import ABC, abstractmethod
 from bisect import bisect_left
 from collections import defaultdict
 from itertools import chain
@@ -28,7 +29,7 @@ from magi_attention.comm.primitive.utils import (
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.meta.collection.calc_meta import AttnArg, AttnCalcMeta
+from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.meta.collection.dispatch_meta import DispatchMeta
 from magi_attention.meta.container.bucket import AttnBucket
@@ -52,31 +53,72 @@ from .overlap_solver import OverlapConfig, OverlapSolver, OverlapStageCost
 from .slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
 
 
-class DistAttnSolver:
+class BaseDistAttnSolver(ABC):
+    """The base abstract dist-attn solver class to
+    provide necessary abstract methods as common interfaces for sub-classes to implement
+    """
+
+    @abstractmethod
+    def solve(self, *args, **kwargs) -> None:
+        ...
+
+    @abstractmethod
+    def make_comm_meta(self) -> CommMeta:
+        ...
+
+    @abstractmethod
+    def make_calc_meta(self) -> CalcMeta:
+        ...
+
+    @property
+    @abstractmethod
+    def is_solved(self) -> bool:
+        ...
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, BaseDistAttnSolver):
+            return False
+
+        for key in self.__dict__:
+            self_val = getattr(self, key)
+            other_val = getattr(other, key, object())
+
+            if isinstance(self_val, dist.ProcessGroup) or isinstance(
+                other_val, dist.ProcessGroup
+            ):
+                if not is_same_process_group(self_val, other_val):
+                    return False
+
+            elif isinstance(self_val, DeviceMesh) or isinstance(other_val, DeviceMesh):
+                if not is_same_device_mesh(self_val, other_val):
+                    return False
+
+            else:
+                if self_val != other_val:
+                    return False
+
+        return True
+
+
+class DistAttnSolver(BaseDistAttnSolver):
     """The dist-attn solver class to process dispatch meta for calc/comm meta"""
 
     @nvtx.instrument_nvtx
     def __init__(
         self,
-        bucket_per_rank: list[AttnBucket],
-        dispatch_meta_q: DispatchMeta,
-        dispatch_meta_k: DispatchMeta,
         cp_group: dist.ProcessGroup,
         overlap_config: OverlapConfig,
         cp_mesh: DeviceMesh | None = None,
     ):
-        self.cp_rank = dist.get_rank(cp_group)
-        self.cp_size = dist.get_world_size(cp_group)
-        self.cp_group = cp_group
-        self.cp_mesh = cp_mesh
-        self.shard_seqlen_q = dispatch_meta_q.shard_seqlen
-        self.shard_seqlen_k = dispatch_meta_k.shard_seqlen
-        self.deterministic = magi_attention.is_deterministic_mode_enable()
-
         assert (
             not magi_attention.comm.is_qo_comm_enable()
         ), "QO comm is not supported for this dist-attn solver"
 
+        self.cp_rank = dist.get_rank(cp_group)
+        self.cp_size = dist.get_world_size(cp_group)
+        self.cp_group = cp_group
+        self.cp_mesh = cp_mesh
+        self.deterministic = magi_attention.is_deterministic_mode_enable()
         self.overlap_config = overlap_config
         self.overlap_solver = OverlapSolver(alg=self.overlap_config.alg)
 
@@ -93,8 +135,16 @@ class DistAttnSolver:
         self.overlap_chunk_size: int = -1
         self.overlap_num_chunks: int = -1
 
-        # init host / remote q/k ranges global for this rank
+        self._is_solved = False
+
+    def solve(
+        self,
+        bucket_per_rank: list[AttnBucket],
+        dispatch_meta_q: DispatchMeta,
+        dispatch_meta_k: DispatchMeta,
+    ) -> None:
         bucket_this_rank = bucket_per_rank[self.cp_rank]
+        # init host / remote q/k ranges global for this rank
         (
             host_q_ranges_global_this_rank,
             host_k_ranges_global_this_rank,
@@ -139,6 +189,12 @@ class DistAttnSolver:
         ] = self._init_transfer_table_per_stage(
             self.remote_rank_entry_per_rank_per_stage,
         )
+
+        self._is_solved = True
+
+    @property
+    def is_solved(self) -> bool:
+        return self._is_solved
 
     @nvtx.instrument_nvtx
     def _init_host_remote_ranges_global_this_rank(
@@ -466,7 +522,7 @@ class DistAttnSolver:
     ) -> list[RemoteRankEntry]:
         """Initialize remote rank entry per overlap stage for this rank"""
 
-        # -------   caculate calc/comm cost pairs  ------ #
+        # -------   calculate calc/comm cost pairs  ------ #
 
         chunk_costs = self._calc_cost_pairs_per_chunk(
             host_rank_entry_this_rank=host_rank_entry_this_rank,
@@ -479,7 +535,7 @@ class DistAttnSolver:
             chunk_costs=chunk_costs,
         )
 
-        # ------    caculate remote rank entry for each stage   ------ #
+        # ------    calculate remote rank entry for each stage   ------ #
 
         remote_rank_entry_per_stage_this_rank = self._calc_remote_rank_entry_per_stage(
             host_rank_entry_this_rank=host_rank_entry_this_rank,
@@ -497,12 +553,11 @@ class DistAttnSolver:
         # all gather remote rank entry per stage from each rank
         remote_rank_entry_per_stage_per_rank = [None] * self.cp_size
 
-        with nvtx.add_nvtx_event("remote_rank_entry_ag"):
-            dist.all_gather_object(
-                remote_rank_entry_per_stage_per_rank,
-                remote_rank_entry_per_stage_this_rank,
-                group=self.cp_group,
-            )
+        dist.all_gather_object(
+            remote_rank_entry_per_stage_per_rank,
+            remote_rank_entry_per_stage_this_rank,
+            group=self.cp_group,
+        )
 
         # check shape to be [cp_size, overlap_degree]
         if magi_attention.is_sanity_check_enable():
@@ -627,18 +682,17 @@ class DistAttnSolver:
         elif self.overlap_config.mode is AttnOverlapMode.DYNAMIC:
             # if dynamic mode, the final overlap degree is the maximum one among ranks
             # so we need to reduce the best overlap degree among ranks
-            with nvtx.add_nvtx_event("dynamic_overlap_degree_ar_max"):
-                overlap_degree_reduce_tensor = torch.tensor(
-                    best_overlap_degree_this_rank,
-                    dtype=torch.int32,
-                    device=torch.cuda.current_device(),
-                )
-                dist.all_reduce(
-                    overlap_degree_reduce_tensor,
-                    op=dist.ReduceOp.MAX,
-                    group=self.cp_group,
-                )
-                final_overlap_degree = overlap_degree_reduce_tensor.item()
+            overlap_degree_reduce_tensor = torch.tensor(
+                best_overlap_degree_this_rank,
+                dtype=torch.int32,
+                device=torch.cuda.current_device(),
+            )
+            dist.all_reduce(
+                overlap_degree_reduce_tensor,
+                op=dist.ReduceOp.MAX,
+                group=self.cp_group,
+            )
+            final_overlap_degree = overlap_degree_reduce_tensor.item()
 
             for _ in range(best_overlap_degree_this_rank, final_overlap_degree):
                 # HACK: for the rank with the best overlap degree < final overlap degree
@@ -1249,12 +1303,11 @@ class DistAttnSolver:
 
         # all gather transfer info per stage from each rank
         transfer_info_per_stage_per_rank = [None] * self.cp_size
-        with nvtx.add_nvtx_event("transfer_info_ag"):
-            dist.all_gather_object(
-                transfer_info_per_stage_per_rank,
-                transfer_info_per_stage_this_rank,
-                group=self.cp_group,
-            )
+        dist.all_gather_object(
+            transfer_info_per_stage_per_rank,
+            transfer_info_per_stage_this_rank,
+            group=self.cp_group,
+        )
 
         # check shape to be [cp_size, overlap_degree]
         if magi_attention.is_sanity_check_enable():
@@ -1304,7 +1357,7 @@ class DistAttnSolver:
         return transfer_info_per_rank_per_stage
 
     @nvtx.instrument_nvtx
-    def calc_comm_meta(self) -> CommMeta:
+    def make_comm_meta(self) -> CommMeta:
         """Calculate communication meta for kv and qo group collective"""
 
         num_remote_kv_tokens_per_stage: list[int] = []
@@ -1352,7 +1405,7 @@ class DistAttnSolver:
         total_seqlen_host_k: int,
     ) -> GroupCollectiveArg:
         """Calculate group collective args from one transfer table
-        called in 'self.calc_comm_meta'
+        called in 'self.make_comm_meta'
         """
         # retrieve group cast ranges for local k ranges that this rank needs to send to
         # which splits the local ranges into non-overlapped local ranges
@@ -1467,7 +1520,7 @@ class DistAttnSolver:
         return group_collective_arg
 
     @nvtx.instrument_nvtx
-    def calc_attn_calc_meta(self) -> AttnCalcMeta:
+    def make_calc_meta(self) -> CalcMeta:
         """Calculate flex-flash-attention calculation meta"""
 
         if magi_attention.is_sanity_check_enable():
@@ -1510,7 +1563,6 @@ class DistAttnSolver:
                 masktype_to_idx_map[attn_slice.mask_type]  # type: ignore
                 for attn_slice in host_slice_local_list
             ],
-            shard_seqlen_q=self.shard_seqlen_q,
             total_area=sum(attn_slice.area for attn_slice in host_slice_local_list),
         )
 
@@ -1535,7 +1587,6 @@ class DistAttnSolver:
                         masktype_to_idx_map[attn_slice.mask_type]  # type: ignore
                         for attn_slice in remote_slice_local_list
                     ],
-                    shard_seqlen_q=self.shard_seqlen_q,
                     total_area=sum(
                         attn_slice.area for attn_slice in remote_slice_local_list
                     ),
@@ -1544,36 +1595,12 @@ class DistAttnSolver:
 
         # ---   build attn calc meta   --- #
 
-        attn_calc_meta = AttnCalcMeta(
+        calc_meta = CalcMeta(
             local_attn_arg=local_attn_arg,
             remote_attn_args_list=remote_attn_args_list,
         )
 
-        return attn_calc_meta
-
-    def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, DistAttnSolver):
-            return False
-
-        for key in self.__dict__:
-            self_val = getattr(self, key)
-            other_val = getattr(other, key, object())
-
-            if isinstance(self_val, dist.ProcessGroup) or isinstance(
-                other_val, dist.ProcessGroup
-            ):
-                if not is_same_process_group(self_val, other_val):
-                    return False
-
-            elif isinstance(self_val, DeviceMesh) or isinstance(other_val, DeviceMesh):
-                if not is_same_device_mesh(self_val, other_val):
-                    return False
-
-            else:
-                if self_val != other_val:
-                    return False
-
-        return True
+        return calc_meta
 
     def __repr__(self, title_len: int = 50) -> str:  # pragma: no cover
         repr_contents = []

@@ -51,6 +51,7 @@ def generate_ninja_build_for_op(
     extra_cuda_cflags: Optional[List[str]],
     extra_ldflags: Optional[List[str]],
     extra_include_dirs: Optional[List[str]],
+    extra_objects: Optional[List[str]] = None,
     needs_device_linking: bool = False,
 ) -> str:
     system_includes = [
@@ -185,6 +186,10 @@ def generate_ninja_build_for_op(
         lines.append(f"build {obj}: {cmd} {source.resolve()}")
 
     lines.append("")
+
+    if extra_objects is not None:
+        objects.extend(extra_objects)
+
     link_rule = "nvcc_link" if needs_device_linking else "link"
     lines.append(f"build $name.so: {link_rule} " + " ".join(objects))
     lines.append("default $name.so")

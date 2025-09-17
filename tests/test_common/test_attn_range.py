@@ -32,18 +32,6 @@ class TestAttnRange(TestCase):
 
         # ---------    change its start     --------- #
 
-        with self.assertRaises(
-            RangeError,
-            msg="Against the rule: 'start >= 0'",
-        ):
-            attn_range.start = -1
-
-        with self.assertRaises(
-            RangeError,
-            msg="Against the rule: 'start <= end'",
-        ):
-            attn_range.start = 11
-
         attn_range.start = 4
         self.assertEqual(attn_range.start, 4)
         self.assertEqual(attn_range.end, 10)
@@ -52,12 +40,6 @@ class TestAttnRange(TestCase):
         self.assertEqual(len(attn_range), 6)
 
         # ---------    change its end     --------- #
-
-        with self.assertRaises(
-            RangeError,
-            msg="Against the rule: 'start <= end'",
-        ):
-            attn_range.end = 3
 
         attn_range.end = 12
         self.assertEqual(attn_range.start, 4)
@@ -227,6 +209,72 @@ class TestAttnRange(TestCase):
             end=trunc_end,
         )
         self.assertTrue(trunc_range.is_empty())
+
+    def test_validation_methods(self):
+        # ---------    test is_valid_close (closed interval)     --------- #
+        attn_range = AttnRange(5, 10)
+
+        # Valid cases for closed interval [start, end]
+        self.assertTrue(attn_range.is_valid_close())  # 5 <= 10
+        self.assertTrue(attn_range.is_valid_close(3, 8))  # 3 <= 8
+        self.assertTrue(attn_range.is_valid_close(7, 7))  # 7 <= 7
+
+        # Invalid cases for closed interval
+        self.assertFalse(attn_range.is_valid_close(8, 6))  # 8 > 6
+
+        # ---------    test is_valid_open (open interval)     --------- #
+
+        # Valid cases for open interval [start, end)
+        self.assertTrue(attn_range.is_valid_open())  # 5 < 10
+        self.assertTrue(attn_range.is_valid_open(3, 8))  # 3 < 8
+
+        # Invalid cases for open interval
+        self.assertFalse(attn_range.is_valid_open(7, 7))  # 7 >= 7
+        self.assertFalse(attn_range.is_valid_open(8, 6))  # 8 > 6
+
+        # ---------    test check_valid with closed interval rule     --------- #
+
+        # Valid cases
+        attn_range.check_valid()  # Should not raise
+        attn_range.check_valid(3, 8)  # Should not raise
+        attn_range.check_valid(7, 7)  # Should not raise
+
+        # Invalid cases
+        with self.assertRaises(RangeError):
+            attn_range.check_valid(8, 6)
+
+    def test_offset_and_operations(self):
+        attn_rect_range = AttnRange(3, 8)
+
+        # ---------    test offset     --------- #
+        offset_range = attn_rect_range.offset(5)
+        self.assertEqual(offset_range.start, 8)
+        self.assertEqual(offset_range.end, 13)
+        self.assertIsInstance(offset_range, AttnRange)
+
+        # ---------    test negative offset     --------- #
+        neg_offset_range = attn_rect_range.offset(-2)
+        self.assertEqual(neg_offset_range.start, 1)
+        self.assertEqual(neg_offset_range.end, 6)
+        self.assertIsInstance(neg_offset_range, AttnRange)
+
+        # ---------    test zero offset     --------- #
+        zero_offset_range = attn_rect_range.offset(0)
+        self.assertEqual(zero_offset_range, attn_rect_range)
+        self.assertIsInstance(zero_offset_range, AttnRange)
+
+    def test_edge_cases(self):
+        # ---------    test zero length range     --------- #
+        zero_range = AttnRange(5, 5)
+        self.assertTrue(zero_range.is_empty())
+        self.assertEqual(zero_range.seqlen, 0)
+        self.assertEqual(len(zero_range), 0)
+
+        # ---------    test single element range     --------- #
+        single_range = AttnRange(5, 6)
+        self.assertFalse(single_range.is_empty())
+        self.assertEqual(single_range.seqlen, 1)
+        self.assertEqual(len(single_range), 1)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from functools import lru_cache
 from typing import Any, Iterator, Sequence, TypeAlias, Union
 
@@ -141,7 +142,7 @@ class AttnRanges:
         if self.is_empty():  # empty ranges are always valid
             return True
 
-        if not all(attn_range.is_valid() for attn_range in self._ranges):
+        if not all(attn_range.is_valid_close() for attn_range in self._ranges):
             return False
 
         return True
@@ -151,7 +152,7 @@ class AttnRanges:
     ) -> None:
         if not self.is_valid():
             raise ValueError(
-                f"Some of the {self._ranges=} is invalid against the rule: '0 <= start <= end'"
+                f"Some of the {self._ranges=} is invalid against the rule: 'start <= end'"
             )
 
     # NOTE: Inplace Operation (append, insert, extend, pop)
@@ -605,8 +606,8 @@ class AttnRanges:
         ranges: Union[NaiveRanges, list[AttnRange], "AttnRanges"],
         check: bool = False,
     ) -> "AttnRanges":
-        if isinstance(ranges, AttnRanges):  # just copy
-            attn_ranges = ranges
+        if isinstance(ranges, AttnRanges):
+            attn_ranges = copy.deepcopy(ranges)
         else:
             attn_ranges = AttnRanges()
             _ranges = [AttnRange.from_range(attn_range) for attn_range in ranges]

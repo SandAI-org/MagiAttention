@@ -37,8 +37,8 @@ struct TileSchedulerArguments {
   int const num_heads;
   int const num_batches;
   int* const tile_count_semaphore = nullptr;
-  int* const ranges = nullptr;
-  int* const merge_ranges = nullptr;
+  int2* const ranges = nullptr;
+  int2* const merge_ranges = nullptr;
   int* const range_map = nullptr;
   int* determin_conflict_state = nullptr;
   int* const unique_count = nullptr;
@@ -58,8 +58,7 @@ class DynamicPersistentTileScheduler {
 
  public:
   using SharedStorage = std::conditional_t<Deterministic, thrust::pair<int4, int3>, int4>;
-  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>,
-                                                           cute::tuple<int32_t, int32_t, int32_t>>;
+  using BlockCoordType = std::conditional_t<Deterministic, cute::tuple<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>, cute::tuple<int32_t, int32_t, int32_t>>;
 
  protected:
   SharedStorage* const work_info_smem;
@@ -70,8 +69,8 @@ class DynamicPersistentTileScheduler {
     int num_heads;
     int num_batches;
     int* const tile_count_semaphore;
-    int* const ranges;
-    int* const merge_ranges;
+    int2* const ranges;
+    int2* const merge_ranges;
     int* const range_map;
     int* determin_conflict_state;
     int* const unique_count = nullptr;
@@ -80,7 +79,7 @@ class DynamicPersistentTileScheduler {
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
     assert(args.tile_count_semaphore != nullptr);
     assert(args.num_heads < (1 << 16));
-    int* const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
+    int2* const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
     return {args.num_heads, args.num_batches, args.tile_count_semaphore, ranges, args.merge_ranges, args.range_map, args.determin_conflict_state, args.unique_count};
   }
 
@@ -119,7 +118,7 @@ class DynamicPersistentTileScheduler {
   };
 
   CUTLASS_DEVICE
-  DynamicPersistentTileScheduler(SharedStorage* const smem_scheduler) : work_info_smem(smem_scheduler){};
+  DynamicPersistentTileScheduler(SharedStorage* const smem_scheduler) : work_info_smem(smem_scheduler) {};
 
   CUTLASS_DEVICE
   WorkTileInfo tile_idx_to_work_tile(Params const& params, int next_tile_idx, WorkTileInfo const& current_work) const {
@@ -129,7 +128,8 @@ class DynamicPersistentTileScheduler {
     int actual_num_batches = params.unique_count ? *params.unique_count : params.num_batches;
     auto get_num_m_blocks = [&](int bidb_start) {
       int batch_idx = lane + bidb_start;
-      int seqlen = batch_idx < actual_num_batches ? params.ranges[2 * batch_idx + 1] - params.ranges[2 * batch_idx] : 0;
+      int2 range = params.ranges[batch_idx];
+      int seqlen = batch_idx < actual_num_batches ? range.y - range.x : 0;
       return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen, kBlock) : 0;
     };
 
@@ -199,7 +199,8 @@ class DynamicPersistentTileScheduler {
         // update missed batch's conflict state, loop for bidb_last ~ bidb_now
         while (bidb_last < bidb_now) {
           // bidb_last_l ~ bidb_last_r is the range of bidb_last
-          int bidb_last_l = params.ranges[2 * bidb_last], bidb_last_r = params.ranges[2 * bidb_last + 1];
+          int2 bidb_last_lr = params.ranges[bidb_last];
+          int bidb_last_l = bidb_last_lr.x, bidb_last_r = bidb_last_lr.y;
           int l = bidb_last_l / kBlock + lane; // bidb_last_l / kBlock is first block id
           int block_num = cute::ceil_div(bidb_last_r - bidb_last_l, kBlock); // calc total block num of bidb_last
           int r = (bidb_last_l + block_num * kBlock - 1) / kBlock; // calc last block id
@@ -226,8 +227,9 @@ class DynamicPersistentTileScheduler {
         //     so that the arrive time can equal range_lock A
         //     batch block 5~15 should arrive left range_lock 0~10 twice, but right range_lock 10~20 once (l_arrive_twice == true)
         //     batch block 15~20 should arrive left range_lock 10~20 once, but right range_lock 20~30 twice (r_arrive_twice == true)
-        int l = params.ranges[2 * bidb_now];
-        int r = params.ranges[2 * bidb_now + 1];
+        int2 lr = params.ranges[bidb_now];
+        int l = lr.x;
+        int r = lr.y;
         bool l_arrive_twice = (l % kBlock != 0) && (block_now == 0);
         bool r_arrive_twice = (l % kBlock != 0) && (block_now == (r - l + kBlock - 1) / kBlock - 1);
         int left_conflict_index = l / kBlock + block_now;
@@ -256,10 +258,7 @@ class DynamicPersistentTileScheduler {
         } else {
           *work_info_smem = thrust::make_pair<int4, int3>(
               make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
-              make_int3(cute::get<0>(work_info.conflict_batch_msg),
-                        cute::get<1>(work_info.conflict_batch_msg),
-                        cute::get<2>(work_info.conflict_batch_msg))
-          );
+              make_int3(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg), cute::get<2>(work_info.conflict_batch_msg)));
         }
       }
       flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
@@ -303,10 +302,7 @@ class DynamicPersistentTileScheduler {
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
           *work_info_smem = thrust::make_pair(
               make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb),
-              make_int3(cute::get<0>(work_info.conflict_batch_msg),
-                        cute::get<1>(work_info.conflict_batch_msg),
-                        cute::get<2>(work_info.conflict_batch_msg))
-          );
+              make_int3(cute::get<0>(work_info.conflict_batch_msg), cute::get<1>(work_info.conflict_batch_msg), cute::get<2>(work_info.conflict_batch_msg)));
         }
         flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
         return work_info;

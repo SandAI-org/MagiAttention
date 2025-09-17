@@ -189,8 +189,11 @@ def get_ffa_jit_spec(
 
     inst_cu = gen_directory / f"{direction}_inst.cu"
     write_if_different(inst_cu, rendered)
-    sources = [
+    inst_sources = [
         inst_cu,
+    ]
+
+    common_sources = [
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flex_flash_common.cpp",
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "fast_zero_fill.cu",
     ]
@@ -213,13 +216,27 @@ def get_ffa_jit_spec(
         f"-gencode=arch=compute_{arch_sm_num_with_suffix},code=sm_{arch_sm_num_with_suffix}"
     )
 
+    def extra_objects_cb():
+        common_uri = f"{head_dim}hd_common"
+        common_spec = gen_jit_spec(
+            name=common_uri,
+            sources=[str(x) for x in common_sources],
+            extra_cflags=extra_cflags,
+            extra_cuda_cflags=extra_cuda_cflags,
+            extra_ldflags=None,
+            extra_include_paths=[str(x) for x in include_dirs],
+            needs_device_linking=False,
+        )
+        return common_spec.build_and_get_objects()
+
     spec = gen_jit_spec(
         name=uri,
-        sources=[str(x) for x in sources],
+        sources=[str(x) for x in inst_sources],
         extra_cflags=extra_cflags,
         extra_cuda_cflags=extra_cuda_cflags,
         extra_ldflags=None,
         extra_include_paths=[str(x) for x in include_dirs],
+        extra_objects_cb=extra_objects_cb,
         needs_device_linking=False,
     )
 

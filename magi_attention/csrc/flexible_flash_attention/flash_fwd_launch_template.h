@@ -38,18 +38,17 @@
 
 using namespace cute;
 
-template <
-    int Arch,
-    int kBlockM,
-    int kBlockN,
-    int kHeadDim,
-    int ClusterM,
-    typename Element,
-    typename ElementOut,
-    bool Has_softcap,
-    bool DisableFwdAtomicReduction,
-    bool Deterministic,
-    bool MergeRange,
+template <int Arch,
+          int kBlockM,
+          int kBlockN,
+          int kHeadDim,
+          int ClusterM,
+          typename Element,
+          typename ElementOut,
+          bool Has_softcap,
+          bool DisableFwdAtomicReduction,
+          bool Deterministic,
+          bool MergeRange,
     bool SwapAB>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -66,20 +65,32 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ClusterShape = cute::Shape<Int<ClusterM>, _1, _1>;
 
   // Get Mainloop, TileScheduler, Epilogue and AttnKernel
-  using CollectiveMainloop =
-      flash::CollectiveMainloopFwdSm90<kStages, ClusterShape, TileShape_MNK, Element, float, cutlass::arch::Sm90, Has_softcap, MmaPV_is_RS, IntraWGOverlap, SwapAB>;
-  using Scheduler = flash::
-      DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
-  using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
-      TileShape_MNK_PV,
-      ClusterShape,
-      ElementOut,
-      ArchTag,
-      typename Scheduler::BlockCoordType,
-      CollectiveMainloop::NumMmaThreads,
-      DisableFwdAtomicReduction,
-      Deterministic>;
-  using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
+  using CollectiveMainloop = flash::CollectiveMainloopFwdSm90<kStages,
+                                                              ClusterShape,
+                                                              TileShape_MNK,
+                                                              Element,
+                                                              float,
+                                                              cutlass::arch::Sm90,
+                                                              Has_softcap,
+                                                              MmaPV_is_RS,
+                                                              IntraWGOverlap,
+                                                              MergeRange,
+                                                              SwapAB>;
+  using Scheduler = flash::DynamicPersistentTileScheduler<kBlockM,
+                                                          CollectiveMainloop::NumMmaThreads,
+                                                          CollectiveMainloop::NumProducerThreads,
+                                                          Arch >= 90 /*WarpSpecialized*/,
+                                                          Deterministic>;
+  using CollectiveEpilogue = flash::CollectiveEpilogueFwd<TileShape_MNK_PV,
+                                                          ClusterShape,
+                                                          ElementOut,
+                                                          ArchTag,
+                                                          typename Scheduler::BlockCoordType,
+                                                          CollectiveMainloop::NumMmaThreads,
+                                                          DisableFwdAtomicReduction,
+                                                          Deterministic>;
+  using AttnKernel = flash::enable_sm90_or_later<
+      flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
   typename CollectiveMainloop::Arguments mainloop_args{
@@ -96,7 +107,9 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       params.softcap,
       params.q_ranges,
       params.k_ranges,
-      params.attn_type_map};
+      params.attn_type_map,
+      params.qk_map,
+  };
 
   typename CollectiveEpilogue::Arguments epilogue_args{
       static_cast<ElementOut*>(params.o_ptr), // O
@@ -112,19 +125,19 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       params.determin_range_locks,
   };
 
-  typename flash::TileSchedulerArguments scheduler_args{
-      /*num_heads*/ params.h_qo,
-      /*num_batches*/ params.merge_batch_size,
-      /*tile_count_semaphore*/ params.tile_count_semaphore,
-      /*ranges*/ params.q_ranges,
-      /*merge_ranges*/ params.merge_q_ranges,
-      /*range_map*/ params.qk_map,
-      /*determin_conflict_state*/ params.determin_conflict_state,
-      /*unique_count*/ params.unique_count};
+  typename flash::TileSchedulerArguments scheduler_args{/*num_heads*/ params.h_qo,
+                                                        /*num_batches*/ params.merge_batch_size,
+                                                        /*tile_count_semaphore*/ params.tile_count_semaphore,
+                                                        /*ranges*/ params.q_ranges,
+                                                        /*merge_ranges*/ params.merge_q_ranges,
+                                                        /*range_map*/ params.qk_map,
+                                                        /*determin_conflict_state*/ params.determin_conflict_state,
+                                                        /*unique_count*/ params.unique_count};
 
   int device;
   CHECK_CUDA(cudaGetDevice(&device));
-  typename AttnKernel::Params kernel_params = AttnKernel::to_underlying_arguments({mainloop_args, epilogue_args, {device, params.num_sm}, scheduler_args});
+  typename AttnKernel::Params kernel_params =
+      AttnKernel::to_underlying_arguments({mainloop_args, epilogue_args, {device, params.num_sm}, scheduler_args});
 
   dim3 grid_dims = AttnKernel::get_grid_shape(kernel_params);
   dim3 block_dims = AttnKernel::get_block_shape();
@@ -148,12 +161,21 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     }
     // kernel<<<grid_dims, block_dims, smem_size, stream>>>(kernel_params);
-    cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
+    cutlass::kernel_launch<AttnKernel>(
+        grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
   }
   CHECK_CUDA_KERNEL_LAUNCH();
 }
 
-template <int Arch, int kBlockM, int kBlockN, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction, bool SwapAB>
+template <int Arch,
+          int kBlockM,
+          int kBlockN,
+          typename T,
+          typename T_out,
+          int kHeadDim,
+          bool Has_softcap,
+          bool DisableFwdAtomicReduction, 
+          bool SwapAB>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // TODO: support cluster launch
@@ -162,7 +184,18 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
     static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
     BOOL_SWITCH(params.merge_q_ranges != nullptr, MergeRange, [&] {
       BOOL_SWITCH(params.deterministic, Deterministic, [&] {
-        run_flash_fwd<Arch, kBlockM, kBlockN, kHeadDim, ClusterM, T, T_out, Has_softcap, DisableFwdAtomicReduction, Deterministic, MergeRange, SwapAB>(params, stream);
+        run_flash_fwd<Arch,
+                      kBlockM,
+                      kBlockN,
+                      kHeadDim,
+                      ClusterM,
+                      T,
+                      T_out,
+                      Has_softcap,
+                      DisableFwdAtomicReduction,
+                      Deterministic,
+                      MergeRange, 
+                      SwapAB>(params, stream);
       });
     });
   });
