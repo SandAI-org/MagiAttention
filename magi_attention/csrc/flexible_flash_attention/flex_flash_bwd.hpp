@@ -191,25 +191,13 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
   if (dv_.has_value()) { TORCH_CHECK(dv.dtype() == dv_type); CHECK_DEVICE(dv); CHECK_SHAPE(dv, total_k, num_heads_kv, head_size); TORCH_CHECK(dv.stride(-1) == 1); }
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
-  // at::Tensor softmax_d = torch::empty({batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
-  // at::Tensor softmax_lse_log2 = torch::empty({batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
 
   // add a new dimension(4) for TMA alignment(16bytes)
   // actually, we only use index 0 of dimension 4.
-  int const total_q_rounded = round_multiple(total_q + kBlockM, kBlockM);
+  int const total_q_rounded = round_multiple(total_q + kBlockM - 1, kBlockM);
 
-  // printf("kBlockM: %d total_q_rounded: %d\n", kBlockM, total_q_rounded);
-  // at::Tensor softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
-  // at::Tensor softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
-
-  at::Tensor softmax_d = torch::zeros({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
-  at::Tensor softmax_lse_log2 = torch::zeros({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
-  // printf("test\n");
-
-  // softmax_d.slice(/*dim=*/1, /*start=*/total_q / 2).zero_();
-  // softmax_lse_log2.slice(/*dim=*/1, /*start=*/total_q / 2).zero_();
-  // std::cout << "softmax_d: " << softmax_d << std::endl;
-  // std::cout << "softmax_lse_log2: " << softmax_lse_log2 << std::endl;
+  at::Tensor softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+  at::Tensor softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
 
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   at::Tensor determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));

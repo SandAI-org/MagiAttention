@@ -84,11 +84,13 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2
       params.q_ranges,
       params.k_ranges,
-      params.b};
+      params.total_q,
+      params.total_q_rounded};
   typename PreprocessKernel::Params preprocess_params = PreprocessKernel::to_underlying_arguments(preprocess_args);
-  int num_m_block = cute::ceil_div(params.max_seqlen_q, kBlockM);
-
-  dim3 grid_m(params.b, num_m_block, params.h_qo);
+  // int num_m_block = cute::ceil_div(params.max_seqlen_q, kBlockM);
+  int num_m_block = cute::ceil_div(params.total_q_rounded, kBlockM);
+  // dim3 grid_m(params.b, num_m_block, params.h_qo);
+  dim3 grid_m(1, num_m_block, params.h_qo);
   cutlass::kernel_launch<PreprocessKernel>(
        grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, false /*launch_with_pdl*/);
   CHECK_CUDA_KERNEL_LAUNCH();

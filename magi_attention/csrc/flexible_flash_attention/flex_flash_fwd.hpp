@@ -128,7 +128,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
    int const head_size_rounded = round_up_headdim(head_size);
    int const max_seqlen_q_rounded = round_multiple(max_seqlen_q, 128);
    int const max_seqlen_k_rounded = round_multiple(max_seqlen_k, 128);
-   int const total_q_rounded = round_multiple(total_q + 128, 128);
+   int const total_q_rounded = round_multiple(total_q + 128 - 1, 128);
 
    at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 

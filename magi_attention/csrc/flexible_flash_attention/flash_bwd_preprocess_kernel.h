@@ -99,7 +99,8 @@ class FlashAttnBwdPreprocess {
     StridedPsum const stride_LSE_log2;
     int const* q_ranges;
     int const* k_ranges;
-    int const batch_size;
+    int const total_q;
+    int const total_q_rounded;
   };
 
   // Kernel entry point API
@@ -119,7 +120,8 @@ class FlashAttnBwdPreprocess {
     StridedPsum const stride_LSE_log2;
     int const* q_ranges = nullptr;
     int const* k_ranges = nullptr;
-    int const batch_size;
+    int const total_q;
+    int const total_q_rounded;
   };
 
   // Convert to underlying arguments. In this case, a simple copy for the aliased type.
@@ -140,7 +142,8 @@ class FlashAttnBwdPreprocess {
         args.stride_LSE_log2,
         args.q_ranges,
         args.k_ranges,
-        args.batch_size,
+        args.total_q,
+        args.total_q_rounded,
     };
   }
 
@@ -167,30 +170,32 @@ class FlashAttnBwdPreprocess {
     int const bidb = blockIdx.x;
 
     // Initialize the seqlen info
-    flash::DistributedSeqlenInfo seqlen_info(bidb, params.q_ranges, params.k_ranges);
+    //flash::DistributedSeqlenInfo seqlen_info(bidb, params.q_ranges, params.k_ranges);
     //flash::DistributedSeqlenInfo seqlen_info_next(bidb + 1, params.q_ranges, params.k_ranges);
-    int const seqlen_o = seqlen_info.seqlen_q;
+    //int const seqlen_o = seqlen_info.seqlen_q;
     //int const offset_this_batch = seqlen_info.offset_q;
     //int const offset_next_batch = seqlen_info_next.offset_q;
 
     // Early return if the current block is out of range
-    if (m_block * kBlockM >= seqlen_o) {
-      return;
-    }
+    //if (m_block * kBlockM >= seqlen_o) {
+    //  return;
+    //}
 
     // TODO: remove to params
     // auto shape_LSE = select<0, 2>(params.shape_O);
-
+    int const offset = m_block * kBlockM;
     // Initialize the tensors for O, dO, and LSE
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
-    Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+    //Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+    Tensor gO = local_tile(cute::domain_offset(make_coord(0, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+
     Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh);
-    Tensor gdO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+    Tensor gdO = local_tile(cute::domain_offset(make_coord(0, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
-    Tensor gLSE = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
+    Tensor gLSE = local_tile(cute::domain_offset(make_coord(0), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
     // REVIEW(littsk): why use infinity here, instead of -infinity ?
-    float lse = thread_idx < seqlen_o - m_block * kBlockM && thread_idx < kBlockM ? gLSE(thread_idx) : INFINITY;
+    float lse = thread_idx < params.total_q - m_block * kBlockM && thread_idx < kBlockM ? gLSE(thread_idx) : INFINITY;
 
     // Initialize the tiled copy for O and dO
     GmemTiledCopy gmem_tiled_copy_O;
@@ -214,9 +219,9 @@ class FlashAttnBwdPreprocess {
     Tensor tOrO = make_fragment_like(tOgO);
     Tensor tOrdO = make_fragment_like(tOgdO);
     flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true, /*Clearn_OOB_K=*/true>(
-        gmem_tiled_copy_O, tOgO, tOrO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
+        gmem_tiled_copy_O, tOgO, tOrO, tOcO, tOpO, params.total_q - m_block * kBlockM);
     flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true, /*Clearn_OOB_K=*/true>(
-        gmem_tiled_copy_O, tOgdO, tOrdO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
+        gmem_tiled_copy_O, tOgdO, tOrdO, tOcO, tOpO, params.total_q - m_block * kBlockM);
     // if (threadIdx.x == 222) { printf("bidx = %d, bidy = %d, bidz = %d, seqlen_o = %d, m_block = %d, seqlen_o - m_block * kBlockM = %d, tOgO addr = %p\n", blockIdx.x,
     // blockIdx.y, blockIdx.z, seqlen_o, m_block, seqlen_o - m_block * kBlockM, &tOgO(0));}
 
@@ -241,91 +246,24 @@ class FlashAttnBwdPreprocess {
       dP_sum(mi) = flash::Allreduce<kGmemThreadsPerRow>::run(dP_sum_cur, sum_op);
     }
 
-    // Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(_, bidh, bidb);
-    // Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block));
     Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(0, _, bidh); // total_q
-    Tensor gdPsum = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block));
-    int const seqlen_rounded = cute::round_up(seqlen_o, kBlockM);
+    Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
     if (get<1>(tOcO(_0{}, _0{}, _0{})) == 0) {
 #pragma unroll
       for (int mi = 0; mi < size(dP_sum); ++mi) {
         int const row = get<0>(tOcO(_0{}, mi, _0{}));
-        // gdPsum(row) = row < seqlen_o - m_block * kBlockM ? dP_sum(mi) : 0;
-        // we should not write gdPsum back if out of bound.
-        if (row < seqlen_o - m_block * kBlockM) {
-          //if (dP_sum(mi) == -INFINITY) {
-          //  printf("bidb: %d bidh: %d thread_idx: %d m_block: %d row: %d dp_sum: %f\n", bidb, bidh, thread_idx, m_block, row, dP_sum(mi));
-          //}
-          gdPsum(row) = dP_sum(mi);
-          //if (gdPsum(row) == -INFINITY) {
-          //  printf("bidb: %d bidh: %d thread_idx: %d m_block: %d row: %d dp_sum: %f gdPsum: %f\n", bidb, bidh, thread_idx, m_block, row, dP_sum(mi), gdPsum(row));
-          //}
-        }
-        /*
-        if (bidb != params.batch_size - 1) {
-          if (row < seqlen_o - m_block * kBlockM)
-            gdPsum(row) = dP_sum(mi);
-        }
-        else {
-          gdPsum(row) = row < seqlen_o - m_block * kBlockM ? dP_sum(mi) : 0;
-        } */
-
+        gdPsum(row) = row < params.total_q - m_block * kBlockM ? dP_sum(mi) : 0;
       }
     }
-
-    // int const seqlen_rounded = cute::round_up(seqlen_o, kBlockM);
-    // Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(_, bidh, bidb);
-    // Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
     Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(0, _, bidh); // total_q
-    Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
+    Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
-    /*
-    if (bidb == 1 && bidh == 0 && thread_idx == 0) {
-      printf("dP_sum:\n");  print_tensor(dP_sum);
-      printf("gdp_sum:\n"); print_tensor(gdPsum);
-    } */
-
-    //int const seqlen_rounded = cute::round_up(seqlen_o, kBlockM);
-
-    if (thread_idx < seqlen_o - m_block * kBlockM && thread_idx < kBlockM) {
+    if (thread_idx < params.total_q_rounded - m_block * kBlockM && thread_idx < kBlockM) {
       gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
-      // we should not write lse back if out of bound.
-      //if (lse != -INFINITY)
-      //   gLSElog2(thread_idx) = lse * float(M_LOG2E);
     }
-    /*
-    if (bidb != params.batch_size - 1) {
-      if (thread_idx < seqlen_o - m_block * kBlockM && thread_idx < kBlockM) {
-        gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
-        // we should not write lse back if out of bound.
-        //if (lse != -INFINITY)
-        //   gLSElog2(thread_idx) = lse * float(M_LOG2E);
-      }
-    }
-    else {
-      if(thread_idx < seqlen_rounded - m_block * kBlockM && thread_idx >= seqlen_o - m_block * kBlockM && bidh == 0) {
-        printf("thread_idx: %d lse: %f seqlen_rounded: %d, kblockm: %d\n", thread_idx, lse, seqlen_rounded, kBlockM);
-      }
 
-      if (thread_idx < seqlen_rounded - m_block * kBlockM && thread_idx < kBlockM) {
-        gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
-        // we should not write lse back if out of bound.
-        //if (lse != -INFINITY)
-        //   gLSElog2(thread_idx) = lse * float(M_LOG2E);
-      }
-    }
-    */
-
-    /*
-    if (bidb == 0 && bidh == 0 && thread_idx == 0) {
-      printf("gLSElog2\n"); print_tensor(gLSElog2);
-      printf("mLSElog2\n"); print_tensor(mLSElog2);
-      printf("mdPsum\n"); print_tensor(mdPsum);
-      printf("gdPsum"); print_tensor(gdPsum);
-    }
-    */
     // if constexpr (Clear_dQ) {
     //     Tensor mdQaccum = make_tensor(make_gmem_ptr(params.ptr_dQaccum), params.shape_dQaccum, params.stride_dQaccum)(_, bidh, !is_varlen ? bidb : 0);
     //     Tensor gdQaccum = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_padded * kHeadDim), mdQaccum), Shape<Int<kBlockM * kHeadDim>>{},
