@@ -380,15 +380,9 @@ class MetricDataCalculator:
             iter_attn_arg = [calc_meta.local_attn_arg] + calc_meta.remote_attn_args_list
 
             for attn_arg in iter_attn_arg:
-                attn_mask_type = [
-                    [
-                        AttnMaskType.FULL,
-                        AttnMaskType.CAUSAL,
-                        AttnMaskType.INVCAUSAL,
-                        AttnMaskType.BICAUSAL,
-                    ][mask_type]
-                    for mask_type in attn_arg.attn_type_map
-                ]
+                attn_mask_type = list(
+                    map(AttnMaskType.from_int_type, attn_arg.attn_type_map)
+                )
 
                 if len(attn_arg.q_ranges) > 0:
                     flops_dict = calculate_attn_flops(

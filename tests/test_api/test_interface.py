@@ -437,24 +437,11 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         # ------ calculate attn_mask_type ------ #
 
         if isinstance(attn_type_mapping, list):
-            attn_mask_type = [
-                [
-                    AttnMaskType.FULL,
-                    AttnMaskType.CAUSAL,
-                    AttnMaskType.INVCAUSAL,
-                    AttnMaskType.BICAUSAL,
-                ][attn_type]
-                for attn_type in attn_type_mapping
-            ]
+            attn_mask_type = list(map(AttnMaskType.from_int_type, attn_type_mapping))
         else:
-            attn_mask_type = [
-                [  # type: ignore[assignment]
-                    AttnMaskType.FULL,
-                    AttnMaskType.CAUSAL,
-                    AttnMaskType.INVCAUSAL,
-                    AttnMaskType.BICAUSAL,
-                ][attn_type_mapping]
-            ] * len(q_ranges)
+            attn_mask_type = [AttnMaskType.from_int_type(attn_type_mapping)] * len(
+                q_ranges
+            )
 
         # ------ test interface ------ #
 
