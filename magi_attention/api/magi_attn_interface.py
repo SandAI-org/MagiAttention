@@ -95,18 +95,18 @@ def magi_attn_varlen_key(
         ...     DispatchConfig,
         ...     OverlapConfig,
         ...     MinHeapDispatchAlg,
-        ...     AttnOverlapMode,
         ...     UniformOverlapAlg
         ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
         >>>
         >>> # Generate a DistAttnRuntimeKey to dispatch for flash-attn-varlen style mask
         >>> dist_attn_runtime_key = magi_attn_varlen_key(
         ...     cu_seqlen_q=torch.tensor(
-                    [0, 2048, 4096], dtype=torch.int32
-                ),
+        ...         [0, 2048, 4096], dtype=torch.int32
+        ...     ),
         ...     cu_seqlen_k=torch.tensor(
-                    [0, 2048, 4096], dtype=torch.int32
-                ),
+        ...         [0, 2048, 4096], dtype=torch.int32
+        ...     ),
         ...     pad_size=compute_pad_size(4096, 4, 512), # seqlen, cp_size, chunk_size
         ...     chunk_size=512,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
@@ -219,24 +219,24 @@ def magi_attn_varlen_dispatch(
     Example:
         >>> import torch
         >>> import torch.distributed as dist
-        >>> from magi_attention.api import magi_attn_varlen_key, dispatch, undispatch, calc_attn
+        >>> from magi_attention.api import magi_attn_varlen_dispatch, undispatch, calc_attn
         >>> from magi_attention.api.functools import compute_pad_size
         >>> from magi_attention.config import (
         ...     DistAttnConfig,
         ...     DispatchConfig,
         ...     OverlapConfig,
         ...     MinHeapDispatchAlg,
-        ...     AttnOverlapMode,
         ...     UniformOverlapAlg
         ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
         >>>
         >>> # Generate a DistAttnRuntimeKey and dispatch the input for flash-attn-varlen style mask
         >>> local_x, dist_attn_runtime_key = magi_attn_varlen_dispatch(
         ...     x=torch.randn(
         ...         4096,  # seqlen
         ...         2048,  # hidden_size
-        ...         device=device,
-        ...         dtype=dtype,
+        ...         device="cuda",
+        ...         dtype=torch.bfloat16,
         ...         requires_grad=True
         ...     ),
         ...     cu_seqlen_q=torch.tensor(
@@ -360,9 +360,10 @@ def magi_attn_flex_key(
         ...     DispatchConfig,
         ...     OverlapConfig,
         ...     MinHeapDispatchAlg,
-        ...     AttnOverlapMode,
         ...     UniformOverlapAlg
         ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
+        >>> from magi_attention.common import AttnRanges
         >>>
         >>> # Generate a DistAttnRuntimeKey to dispatch for arbitrary mask represented by attn-slices
         >>> dist_attn_runtime_key = magi_attn_flex_key(
@@ -565,24 +566,25 @@ def magi_attn_flex_dispatch(
     Example:
         >>> import torch
         >>> import torch.distributed as dist
-        >>> from magi_attention.api import magi_attn_flex_key, dispatch, undispatch, calc_attn
+        >>> from magi_attention.api import magi_attn_flex_dispatch, undispatch, calc_attn
         >>> from magi_attention.api.functools import compute_pad_size
         >>> from magi_attention.config import (
         ...     DistAttnConfig,
         ...     DispatchConfig,
         ...     OverlapConfig,
         ...     MinHeapDispatchAlg,
-        ...     AttnOverlapMode,
         ...     UniformOverlapAlg
         ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
+        >>> from magi_attention.common import AttnRanges
         >>>
         >>> # Generate a DistAttnRuntimeKey and dispatch the input for arbitrary mask represented by attn-slices
         >>> local_x, dist_attn_runtime_key = magi_attn_flex_dispatch(
         ...     x = torch.randn(
         ...         4096,   # seqlen
         ...         2048,   # hidden_size
-        ...         device=device,
-        ...         dtype=dtype,
+        ...         device="cuda",
+        ...         dtype=torch.bfloat16,
         ...         requires_grad=True
         ...     ),
         ...     q_ranges=AttnRanges.from_ranges([[0, 2048], [2048, 4096]]),
@@ -804,24 +806,25 @@ def make_varlen_key_for_new_mask_after_dispatch(
         >>> import torch
         >>> import torch.distributed as dist
         >>> from magi_attention.api import magi_attn_varlen_key, dispatch, undispatch, calc_attn
+        >>> from magi_attention.api import make_varlen_key_for_new_mask_after_dispatch
         >>> from magi_attention.api.functools import compute_pad_size
         >>> from magi_attention.config import (
         ...     DistAttnConfig,
         ...     DispatchConfig,
         ...     OverlapConfig,
         ...     MinHeapDispatchAlg,
-        ...     AttnOverlapMode,
         ...     UniformOverlapAlg
         ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
         >>>
         >>> # Generate a DistAttnRuntimeKey to dispatch for flash-attn-varlen style mask
         >>> key_for_dispatch = magi_attn_varlen_key(
         ...     cu_seqlen_q=torch.tensor(
-                    [0, 2048, 4096], dtype=torch.int32
-                ),
+        ...         [0, 2048, 4096], dtype=torch.int32
+        ...     ),
         ...     cu_seqlen_k=torch.tensor(
-                    [0, 2048, 4096], dtype=torch.int32
-                ),
+        ...         [0, 2048, 4096], dtype=torch.int32
+        ...     ),
         ...     pad_size=compute_pad_size(4096, 4, 512), # seqlen, cp_size, chunk_size
         ...     chunk_size=512,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
@@ -842,7 +845,7 @@ def make_varlen_key_for_new_mask_after_dispatch(
         >>>
         >>> # Dispatch several tensors with the same key_for_dispatch
         >>> local_x, local_label, local_rope = [
-        ...     dispatch(tensor, dist_attn_runtime_key)
+        ...     dispatch(tensor, key_for_dispatch)
         ...     for tensor in [total_x, total_label, total_rope]
         ... ]
         >>>
@@ -930,15 +933,17 @@ def make_flex_key_for_new_mask_after_dispatch(
         >>> import torch
         >>> import torch.distributed as dist
         >>> from magi_attention.api import magi_attn_flex_key, dispatch, undispatch, calc_attn
+        >>> from magi_attention.api import make_flex_key_for_new_mask_after_dispatch
         >>> from magi_attention.api.functools import compute_pad_size
         >>> from magi_attention.config import (
         ...     DistAttnConfig,
         ...     DispatchConfig,
         ...     OverlapConfig,
         ...     MinHeapDispatchAlg,
-        ...     AttnOverlapMode,
         ...     UniformOverlapAlg
         ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
+        >>> from magi_attention.common import AttnRanges
         >>>
         >>> # Generate a DistAttnRuntimeKey to dispatch for arbitrary mask represented by attn-slices
         >>> key_for_dispatch = magi_attn_flex_key(
@@ -968,7 +973,7 @@ def make_flex_key_for_new_mask_after_dispatch(
         >>>
         >>> # Dispatch several tensors with the same key_for_dispatch
         >>> local_x, local_label, local_rope = [
-        ...     dispatch(tensor, dist_attn_runtime_key)
+        ...     dispatch(tensor, key_for_dispatch)
         ...     for tensor in [total_x, total_label, total_rope]
         ... ]
         >>>
