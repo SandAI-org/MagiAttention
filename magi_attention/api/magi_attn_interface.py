@@ -427,7 +427,7 @@ def magi_attn_flex_key(
         f"but got {len(attn_mask_type)=} and {len(q_ranges)=}"
     )
 
-    # Validate process group (or device mesh)
+    # validate process group (or device mesh)
     if isinstance(cp_group_or_mesh, dist.ProcessGroup):
         assert not magi_attention.comm.is_hierarchical_comm_enable(), (
             "A 2D cp_mesh must be provided when hierarchical comm is enabled, "
@@ -653,7 +653,8 @@ def dispatch(
     Args:
         x (torch.Tensor): global input tensor.
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
-            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+            as one argument for many other magi_attention APIs,
+            about which the users may have no bother to care.
         pad_value (float): the specific value to pad to input tensor. Defaults to 0.
 
     Returns:
@@ -682,7 +683,8 @@ def undispatch(
     Args:
         x (torch.Tensor): local tensor
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
-            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+            as one argument for many other magi_attention APIs,
+            about which the users may have no bother to care.
 
     Returns:
         torch.Tensor: the undispatched and unpadded tensor.
@@ -711,16 +713,24 @@ def calc_attn(
     Apply attention computation.
 
     Args:
-        q (torch.Tensor): Query tensor of shape ``(num_tokens_q, num_heads, head_dim)``.
-        k (torch.Tensor): Key tensor of shape ``(num_tokens_k, num_heads, head_dim)``.
-        v (torch.Tensor): Value tensor of shape ``(num_tokens_v, num_heads, head_dim)``.
+        q (torch.Tensor): local query tensor.
+        k (torch.Tensor): local key tensor.
+        v (torch.Tensor): local value tensor.
         key (DistAttnRuntimeKey): the object that holds some inner meta data
-            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+            as one argument for many other magi_attention APIs,
+            about which the users may have no bother to care.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
-            - out (torch.Tensor): Attention output tensor of shape.
-            - lse (torch.Tensor): Log-sum-exp values for numerical stability.
+            - out (torch.Tensor): local output tensor.
+            - lse (torch.Tensor): local log-sum-exp tensor.
+
+    Shapes:
+        q: [num_tokens_q_local, num_heads_q, head_dim]
+        k: [num_tokens_kv_local, num_heads_kv, head_dim]
+        v: [num_tokens_kv_local, num_heads_kv, head_dim]
+        out: [num_tokens_q_local, num_heads_q, head_dim]
+        lse: [num_tokens_q_local, num_heads_q]
 
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
@@ -738,10 +748,14 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
 
     Args:
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
-            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+            as one argument for many other magi_attention APIs,
+            about which the users may have no bother to care.
 
     Returns:
         torch.Tensor: postion ids of local tensor w.r.t. global tensor.
+
+    Raises:
+        ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
     mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
