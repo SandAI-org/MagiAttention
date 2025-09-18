@@ -134,10 +134,10 @@ def magi_attn_varlen_key(
         >>> # Do QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
-        >>> # Calculate local attention result
+        >>> # Calculate local attention
         >>> local_out, _ = calc_attn(local_q, local_k, local_v, dist_attn_runtime_key)
         >>>
-        >>> # Gather local attention results to global result if needed
+        >>> # Gather local attention outputs to total output if needed
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
     # infer q_ranges, k_ranges and others from cu_seqlens_q, cu_seqlens_k and causal
@@ -266,10 +266,10 @@ def magi_attn_varlen_dispatch(
         >>> # Do QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
-        >>> # Calculate local attention result
+        >>> # Calculate local attention
         >>> local_out, _ = calc_attn(local_q, local_k, local_v, dist_attn_runtime_key)
         >>>
-        >>> # Gather local attention results to global result if needed
+        >>> # Gather local attention outputs to total output if needed
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
     key = magi_attn_varlen_key(
@@ -400,10 +400,10 @@ def magi_attn_flex_key(
         >>> # Do QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
-        >>> # Calculate local attention result
+        >>> # Calculate local attention
         >>> local_out, _ = calc_attn(local_q, local_k, local_v, dist_attn_runtime_key)
         >>>
-        >>> # Gather local attention results to global result if needed
+        >>> # Gather local attention outputs to total output if needed
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
     # validate total_seqlen
@@ -614,10 +614,10 @@ def magi_attn_flex_dispatch(
         >>> # Do QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
-        >>> # Calculate local attention result
+        >>> # Calculate local attention
         >>> local_out, _ = calc_attn(local_q, local_k, local_v, dist_attn_runtime_key)
         >>>
-        >>> # Gather local attention results to global result if needed
+        >>> # Gather local attention outputs to total output if needed
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
     key = magi_attn_flex_key(
@@ -772,12 +772,12 @@ def make_varlen_key_for_new_mask_after_dispatch(
     window_size: tuple[int, int] = (-1, -1),
     dist_attn_config: DistAttnConfig | None = None,
 ) -> DistAttnRuntimeKey:
-    """Make a new dist attn runtime key for new mask after dispatch
-    with the given new mask arguments specific for varlen mask in flash-attn-varlen style
-    and the existing key used for dispatch
+    """Make a new dist attn runtime key for a new mask after dispatch
+    with the given arguments for the new mask in flash-attn-varlen style and the key used for dispatch
 
-    NOTE: this API is useful when you want to apply more than one masks within the same training pass,
-    in which case, we can only use one of the masks to dispatch,
+    NOTE: this API is useful when you want to apply more than one masks
+    within the same training pass, if your model adopts hybrid-attn structure,
+    in which case, we can only choose one of the masks to dispatch,
     while the others're supposed to reuse the same dispatch solution
     with different meta arguments for computation and communication
 
@@ -818,12 +818,15 @@ def make_varlen_key_for_new_mask_after_dispatch(
         >>> from magi_attention.common.enum import AttnOverlapMode
         >>>
         >>> # Generate a DistAttnRuntimeKey to dispatch for flash-attn-varlen style mask
+        >>> # in the following case, we use a causal mask as the key for dispatch, thus it will consider
+        >>> # computation load-balance, communication optimization and computation-communication overlap
+        >>> # according to the causal mask pattern
         >>> key_for_dispatch = magi_attn_varlen_key(
         ...     cu_seqlen_q=torch.tensor(
-        ...         [0, 2048, 4096], dtype=torch.int32
+        ...         [0, 4096], dtype=torch.int32
         ...     ),
         ...     cu_seqlen_k=torch.tensor(
-        ...         [0, 2048, 4096], dtype=torch.int32
+        ...         [0, 4096], dtype=torch.int32
         ...     ),
         ...     pad_size=compute_pad_size(4096, 4, 512), # seqlen, cp_size, chunk_size
         ...     chunk_size=512,
@@ -849,8 +852,13 @@ def make_varlen_key_for_new_mask_after_dispatch(
         ...     for tensor in [total_x, total_label, total_rope]
         ... ]
         >>>
-        >>> # Make a new dist attn runtime key from key_for_dispatch only to call calc_attn for new mask
-        >>> new_key_for_new_mask = make_varlen_key_for_new_mask_after_dispatch(
+        >>> # Make a new dist attn runtime key from key_for_dispatch
+        >>> # for a new mask, such as a sliding window causal mask below,
+        >>> # with the same dispatch solution as the causal mask used for dispatch,
+        >>> # i.e. this new key share the same dispatch meta as key_for_dispatch
+        >>> # but it can handle the computation and communication of the new mask
+        >>> # and calculate attn correctly as well, though no optimization is applied
+        >>> new_key_for_swa_mask = make_varlen_key_for_new_mask_after_dispatch(
         ...     cu_seqlens_q=torch.tensor([0, 4096], dtype=torch.int32),
         ...     cu_seqlens_k=torch.tensor([0, 4096], dtype=torch.int32),
         ...     causal=False,
@@ -861,15 +869,15 @@ def make_varlen_key_for_new_mask_after_dispatch(
         >>> # Do QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
-        >>> # Calculate local attention result for the mask used to dispatch with key_for_dispatch
+        >>> # Calculate local attention for the mask used to dispatch with key_for_dispatch
         >>> local_out1, _ = calc_attn(local_q, local_k, local_v, key_for_dispatch)
         >>>
-        >>> # Calculate local attention result for the new mask with the new key
-        >>> local_out2, _ = calc_attn(local_q, local_k, local_v, new_key_for_new_mask)
+        >>> # Calculate local attention for the new mask with the new key
+        >>> local_out2, _ = calc_attn(local_q, local_k, local_v, new_key_for_swa_mask)
         >>>
-        >>> # Gather local attention results to global result if needed
+        >>> # Gather local attention outputs to total output if needed
         >>> total_out1 = undispatch(local_out1, key_for_dispatch)
-        >>> total_out2 = undispatch(local_out2, new_key_for_new_mask)
+        >>> total_out2 = undispatch(local_out2, new_key_for_swa_mask)
     """
     # infer q_ranges, k_ranges and others from cu_seqlens_q, cu_seqlens_k and causal
     (
@@ -901,11 +909,12 @@ def make_flex_key_for_new_mask_after_dispatch(
     key_for_dispatch: DistAttnRuntimeKey,
     dist_attn_config: DistAttnConfig | None = None,
 ) -> DistAttnRuntimeKey:
-    """Make a new dist attn runtime key for new mask after dispatch
-    with the given new mask arguments and the existing key used for dispatch
+    """Make a new dist attn runtime key for a new mask after dispatch
+    with the given arguments for the new mask and the key used for dispatch
 
-    NOTE: this API is useful when you want to apply more than one masks within the same training pass,
-    in which case, we can only use one of the masks to dispatch,
+    NOTE: this API is useful when you want to apply more than one masks
+    within the same training pass, if your model adopts hybrid-attn structure,
+    in which case, we can only choose one of the masks to dispatch,
     while the others're supposed to reuse the same dispatch solution
     with different meta arguments for computation and communication
 
@@ -946,10 +955,13 @@ def make_flex_key_for_new_mask_after_dispatch(
         >>> from magi_attention.common import AttnRanges
         >>>
         >>> # Generate a DistAttnRuntimeKey to dispatch for arbitrary mask represented by attn-slices
+        >>> # in the following case, we use a causal mask as the key for dispatch, thus it will consider
+        >>> # computation load-balance, communication optimization and computation-communication overlap
+        >>> # according to the causal mask pattern
         >>> key_for_dispatch = magi_attn_flex_key(
-        ...     q_ranges=AttnRanges.from_ranges([[0, 2048], [2048, 4096]]),
-        ...     k_ranges=AttnRanges.from_ranges([[0, 2048], [0, 4096]]),
-        ...     attn_mask_type="full",
+        ...     q_ranges=AttnRanges.from_ranges([[0, 4096]]),
+        ...     k_ranges=AttnRanges.from_ranges([[0, 4096]]),
+        ...     attn_mask_type="causal",
         ...     total_seqlen_q=4096,
         ...     total_seqlen_k=4096,
         ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chunk_size
@@ -977,8 +989,13 @@ def make_flex_key_for_new_mask_after_dispatch(
         ...     for tensor in [total_x, total_label, total_rope]
         ... ]
         >>>
-        >>> # Make a new dist attn runtime key from key_for_dispatch only to call calc_attn for new mask
-        >>> new_key_for_new_mask = make_flex_key_for_new_mask_after_dispatch(
+        >>> # Make a new dist attn runtime key from key_for_dispatch
+        >>> # for a new mask, such as a sliding window causal mask below,
+        >>> # with the same dispatch solution as the causal mask used for dispatch,
+        >>> # i.e. this new key share the same dispatch meta as key_for_dispatch
+        >>> # but it can handle the computation and communication of the new mask
+        >>> # and calculate attn correctly as well, though no optimization is applied
+        >>> new_key_for_swa_mask = make_flex_key_for_new_mask_after_dispatch(
         ...     q_ranges=AttnRanges.from_ranges([[0, 512], [512, 4096]]),
         ...     k_ranges=AttnRanges.from_ranges([[0, 512], [0, 4096]]),
         ...     attn_mask_type=["causal", "bi_causal"], # sliding window causal mask
@@ -988,15 +1005,16 @@ def make_flex_key_for_new_mask_after_dispatch(
         >>> # Do QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
-        >>> # Calculate local attention result for the mask used to dispatch with key_for_dispatch
+        >>> # Calculate local attention for the mask used to dispatch with key_for_dispatch
         >>> local_out1, _ = calc_attn(local_q, local_k, local_v, key_for_dispatch)
         >>>
-        >>> # Calculate local attention result for the new mask with the new key
-        >>> local_out2, _ = calc_attn(local_q, local_k, local_v, new_key_for_new_mask)
+        >>> # Calculate local attention for the new swa mask with the new key
+        >>> # w/o undispatching back and dispatching again
+        >>> local_out2, _ = calc_attn(local_q, local_k, local_v, new_key_for_swa_mask)
         >>>
-        >>> # Gather local attention results to global result if needed
+        >>> # Gather local attention outputs to total output if needed
         >>> total_out1 = undispatch(local_out1, key_for_dispatch)
-        >>> total_out2 = undispatch(local_out2, new_key_for_new_mask)
+        >>> total_out2 = undispatch(local_out2, new_key_for_swa_mask)
     """
     # validate key_for_dispatch
     assert (
