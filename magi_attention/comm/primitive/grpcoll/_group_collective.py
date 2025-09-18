@@ -18,7 +18,7 @@ import torch
 import torch.distributed as dist
 
 import magi_attention
-from magi_attention.comm.work import WorkWithPostProcessFn
+from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.utils import nvtx
 
 from .._all2all_v import all2all_v
@@ -140,9 +140,9 @@ def group_cast_collective(
     )
 
     return WorkWithPostProcessFn(
-        work=work,
+        work=GeneralWork(work=work),
         post_process_fn=post_process_fn,
-        sync=not async_op,
+        async_op=async_op,
     )
 
 
@@ -300,7 +300,7 @@ def group_reduce_collective(
         )
 
     return WorkWithPostProcessFn(
-        work=work,
+        work=GeneralWork(work=work),
         post_process_fn=post_process_fn,
-        sync=not async_op,
+        async_op=async_op,
     )

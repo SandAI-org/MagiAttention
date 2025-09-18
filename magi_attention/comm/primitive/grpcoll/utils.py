@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 
 import magi_attention
-from magi_attention.comm.work import WorkWithPostProcessFn
+from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.range import NaiveRange
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.common.range_op.utils import (
@@ -319,9 +319,9 @@ def group_cast_impl_with_batch_p2p(
     work_list = dist.batch_isend_irecv(p2p_op_list)
 
     return WorkWithPostProcessFn(
-        work=work_list,
+        work=GeneralWork(work=work_list),
         post_process_fn=lambda x: x,
-        sync=not async_op,
+        async_op=async_op,
     )
 
 

@@ -19,7 +19,7 @@ from typing import Callable, Literal
 import torch
 import torch.distributed as dist
 
-from magi_attention.comm.work import WorkWithPostProcessFn
+from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.utils import nvtx
 
@@ -714,10 +714,10 @@ def hier_group_cast_impl_with_a2av(
     # which is issued after work_pre_intra's completion
     # thus we only need to wait for side_stream
     work_with_post_process_fn = WorkWithPostProcessFn(
-        # work=[work_pre_intra, side_stream],
-        work=side_stream,
+        # work=GeneralWork([work_pre_intra, side_stream]),
+        work=GeneralWork(side_stream),
         post_process_fn=post_process_fn_hier,
-        sync=not async_op,
+        async_op=async_op,
     )
 
     return work_with_post_process_fn
@@ -1221,9 +1221,9 @@ def hier_group_reduce_impl_with_a2av(
     # since waiting for side_stream only guarantees
     # work_post_intra and work_inter is done
     work_with_post_process_fn = WorkWithPostProcessFn(
-        work=[work_pre_intra, side_stream],
+        work=GeneralWork([work_pre_intra, side_stream]),
         post_process_fn=post_process_fn_hier,
-        sync=not async_op,
+        async_op=async_op,
     )
 
     return work_with_post_process_fn
