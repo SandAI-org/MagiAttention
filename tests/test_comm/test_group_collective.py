@@ -80,6 +80,18 @@ class TestGroupCollective(DistTestBase):
     def world_size(self) -> int:
         return 4
 
+    @property
+    def num_heads(self) -> int:
+        return 4
+
+    @property
+    def head_dim(self) -> int:
+        return 16
+
+    @property
+    def hidden_size(self) -> int:
+        return self.num_heads * self.head_dim
+
     @skip_if_lt_x_gpu(4)
     @with_comms
     @parameterize(
@@ -262,6 +274,7 @@ class TestGroupCollective(DistTestBase):
 
         # skip for hier comm
         if use_hier_comm:
+            # TODO: support hier comm as a sync op
             if not async_op:
                 return
 
@@ -286,15 +299,23 @@ class TestGroupCollective(DistTestBase):
         src_index_list = src_index_list_per_rank[self.rank]
 
         # prepare buffers
-        send_buffer = torch.tensor(
-            test_case["send_buffer_per_rank"][self.rank],
-            dtype=self.dtype,
-            device=self.device,
+        send_buffer = (
+            torch.tensor(
+                test_case["send_buffer_per_rank"][self.rank],
+                dtype=self.dtype,
+                device=self.device,
+            )
+            .repeat_interleave(repeats=self.hidden_size, dim=0)
+            .reshape(-1, self.num_heads, self.head_dim)
         )
-        expected_recv_buffer = torch.tensor(
-            test_case["expected_recv_buffer_per_rank"][self.rank],
-            dtype=self.dtype,
-            device=self.device,
+        expected_recv_buffer = (
+            torch.tensor(
+                test_case["expected_recv_buffer_per_rank"][self.rank],
+                dtype=self.dtype,
+                device=self.device,
+            )
+            .repeat_interleave(repeats=self.hidden_size, dim=0)
+            .reshape(-1, self.num_heads, self.head_dim)
         )
         recv_buffer = torch.full_like(
             expected_recv_buffer,
@@ -495,8 +516,6 @@ class TestGroupCollective(DistTestBase):
                 "name": "normal_group_lse_reduce",
                 "world_size": 4,
                 "reduce_op": "lse",
-                "num_heads": 2,
-                "head_dim": 3,
                 "send_buffer_per_rank": [
                     [0, 1, 2, 3, 4],
                     [5, 6, 7, 8, 9, 10, 11],
@@ -607,46 +626,44 @@ class TestGroupCollective(DistTestBase):
         dst_index_list = dst_index_list_per_rank[self.rank]
         src_indices_list = src_indices_list_per_rank[self.rank]
 
-        # prepare buffers
-        send_buffer = torch.tensor(
-            test_case["send_buffer_per_rank"][self.rank],
-            dtype=self.dtype,
-            device=self.device,
+        # prepare buffers with shape [seqlen, num_heads, head_dim]
+        send_buffer = (
+            torch.tensor(
+                test_case["send_buffer_per_rank"][self.rank],
+                dtype=self.dtype,
+                device=self.device,
+            )
+            .repeat_interleave(repeats=self.hidden_size, dim=0)
+            .reshape(-1, self.num_heads, self.head_dim)
         )
-        recv_buffer_before_reduce = torch.tensor(
-            test_case["recv_buffer_before_reduce_per_rank"][self.rank],
-            dtype=self.dtype,
-            device=self.device,
+        recv_buffer_before_reduce = (
+            torch.tensor(
+                test_case["recv_buffer_before_reduce_per_rank"][self.rank],
+                dtype=self.dtype,
+                device=self.device,
+            )
+            .repeat_interleave(repeats=self.hidden_size, dim=0)
+            .reshape(-1, self.num_heads, self.head_dim)
         )
-        expected_recv_buffer = torch.tensor(
-            test_case["expected_recv_buffer_per_rank"][self.rank],
-            dtype=self.dtype,
-            device=self.device,
+        expected_recv_buffer = (
+            torch.tensor(
+                test_case["expected_recv_buffer_per_rank"][self.rank],
+                dtype=self.dtype,
+                device=self.device,
+            )
+            .repeat_interleave(repeats=self.hidden_size, dim=0)
+            .reshape(-1, self.num_heads, self.head_dim)
         )
         if is_lse_reduce:
-            # for now, lse-reduce requires strictly on shape:
-            # send/recv buffer: [seqlen, num_heads, head_dim]
-            # send/recv lse buffer: [seqlen, num_heads]
-            nh, hd = test_case["num_heads"], test_case["head_dim"]
-
-            send_buffer = send_buffer.repeat_interleave(repeats=nh * hd, dim=0).reshape(
-                -1, nh, hd
-            )
-            recv_buffer_before_reduce = recv_buffer_before_reduce.repeat_interleave(
-                repeats=nh * hd, dim=0
-            ).reshape(-1, nh, hd)
-            expected_recv_buffer = expected_recv_buffer.repeat_interleave(
-                repeats=nh * hd, dim=0
-            ).reshape(-1, nh, hd)
-
+            # prepare lse buffer with shape [seqlen, num_heads]
             send_lse_buffer = (
                 torch.tensor(
                     test_case["send_lse_buffer_per_rank"][self.rank],
                     dtype=torch.float32,
                     device=self.device,
                 )
-                .repeat_interleave(repeats=nh, dim=0)
-                .reshape(-1, nh)
+                .repeat_interleave(repeats=self.num_heads, dim=0)
+                .reshape(-1, self.num_heads)
             )
             recv_lse_buffer_before_reduce = (
                 torch.tensor(
@@ -654,8 +671,8 @@ class TestGroupCollective(DistTestBase):
                     dtype=torch.float32,
                     device=self.device,
                 )
-                .repeat_interleave(repeats=nh, dim=0)
-                .reshape(-1, nh)
+                .repeat_interleave(repeats=self.num_heads, dim=0)
+                .reshape(-1, self.num_heads)
             )
             expected_recv_lse_buffer = (
                 torch.tensor(
@@ -663,8 +680,8 @@ class TestGroupCollective(DistTestBase):
                     dtype=torch.float32,
                     device=self.device,
                 )
-                .repeat_interleave(repeats=nh, dim=0)
-                .reshape(-1, nh)
+                .repeat_interleave(repeats=self.num_heads, dim=0)
+                .reshape(-1, self.num_heads)
             )
             post_process_inputs = (
                 recv_buffer_before_reduce,
