@@ -146,17 +146,12 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0, "Number of heads in key/value must divide number of heads in query");
 
   auto opts = q.options();
-  auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
-  int const head_size_rounded = round_up_headdim(head_size);
-  int const max_seqlen_q_rounded = round_multiple(max_seqlen_q, 128);
-  int const max_seqlen_k_rounded = round_multiple(max_seqlen_k, 128);
-  int const total_q_rounded = round_multiple(total_q + 128 - 1, 128);
-  auto opts = q.options();
   // Define a helper function to round up to multiple of m
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
   int const head_size_rounded = round_up_headdim(head_size);
   int const max_seqlen_q_rounded = round_multiple(max_seqlen_q, 128);
   int const max_seqlen_k_rounded = round_multiple(max_seqlen_k, 128);
+  int const total_q_rounded = round_multiple(total_q + 128 - 1, 128);
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
@@ -244,23 +239,23 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       k,
       v,
       out,
-      q_ranges.data_ptr(),
-      k_ranges.data_ptr(),
-      range_locks.data_ptr(),
-      deterministic,
-      deterministic ? determin_range_locks.data_ptr() : nullptr,
-      deterministic ? determin_conflict_state.data_ptr() : nullptr,
-      has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
-      merge_batch_size,
-      has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
-      has_qk_map ? qk_map.data_ptr() : nullptr,
-      has_unique_count ? unique_count.data_ptr() : nullptr,
-      softmax_lse.data_ptr(),
-      softmax_scale,
-      tile_count_semaphore.data_ptr(),
-      softcap,
-      sm_margin,
-      disable_fwd_atomic_reduction);
+      /*q_ranges*/ q_ranges.data_ptr(),
+      /*k_ranges*/ k_ranges.data_ptr(),
+      /*range_locks*/ range_locks.data_ptr(),
+      /*deterministic*/ deterministic,
+      /*determin_range_locks*/ deterministic ? determin_range_locks.data_ptr() : nullptr,
+      /*determin_conflict_state*/ deterministic ? determin_conflict_state.data_ptr() : nullptr,
+      /*attn_type_map*/ has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
+      /*merge_batch_size*/ merge_batch_size,
+      /*merge_q_ranges*/ has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
+      /*qk_map*/ has_qk_map ? qk_map.data_ptr() : nullptr,
+      /*unique_count*/ has_unique_count ? unique_count.data_ptr() : nullptr,
+      /*softmax_lse*/ softmax_lse.data_ptr(),
+      /*softmax_scale*/ softmax_scale,
+      /*tile_count_semaphore*/ tile_count_semaphore.data_ptr(),
+      /*softcap*/ softcap,
+      /*sm_margin*/ sm_margin,
+      /*disable_fwd_atomic_reduction*/ disable_fwd_atomic_reduction);
 
   return {params, out, softmax_lse};
 }

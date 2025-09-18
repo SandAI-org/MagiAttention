@@ -128,8 +128,6 @@ class FlashAttnBwdPreprocess {
     StridedPsum const stride_LSE_log2;
     int2 const* q_ranges = nullptr;
     int2 const* k_ranges = nullptr;
-    int const* q_ranges = nullptr;
-    int const* k_ranges = nullptr;
     int const total_q;
     int const total_q_rounded;
   };

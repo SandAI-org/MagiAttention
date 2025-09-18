@@ -1369,8 +1369,8 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
-    auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type); };
-    auto mask_q_fn = [&](auto& tSrS, int m_block) { mask.template apply_q_mask<>(tSrS, m_block, bidb, bidh); };
+    auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
+    auto mask_q_fn = [&](auto& tSrS, int m_block) { mask.template apply_q_mask<>(tSrS, m_block, thread_idx, bidb, bidh, seqlen_q); };
 
     CUTLASS_PRAGMA_NO_UNROLL
     for (; m_block < m_block_max; ++m_block) {

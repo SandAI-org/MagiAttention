@@ -102,14 +102,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
                                            stream,
                                            preprocess_params,
                                            false /*launch_with_pdl*/);
-  int num_m_block = cute::ceil_div(params.max_seqlen_q, kBlockM);
-  dim3 grid_m(params.b, num_m_block, params.h_qo);
-  cutlass::kernel_launch<PreprocessKernel>(grid_m,
-                                           PreprocessKernel::MaxThreadsPerBlock,
-                                           PreprocessKernel::SharedStorageSize,
-                                           stream,
-                                           preprocess_params,
-                                           false /*launch_with_pdl*/);
   CHECK_CUDA_KERNEL_LAUNCH();
 
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;

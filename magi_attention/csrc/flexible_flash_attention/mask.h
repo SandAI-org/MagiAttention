@@ -161,8 +161,10 @@ struct Mask {
   template <typename Engine, typename Layout>
   CUTLASS_DEVICE void apply_q_mask(Tensor<Engine, Layout>& tSrS,
                                    const int m_block,
+                                   const int thread_idx,
                                    const int bidb,
-                                   const int bidh) const {
+                                   const int bidh,
+                                   const int seqlen_q) const {
     static_assert(Layout::rank == 3, "Only support 3D Tensor");
 
     auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
