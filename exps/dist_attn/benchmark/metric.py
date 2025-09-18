@@ -18,13 +18,41 @@ from typing import Optional
 
 import torch
 
-from exps.attn.baselines.utils import calculate_attn_flops
 from exps.dist_attn.benchmark.enums import MetricsType
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.meta.collection.calc_meta import AttnCalcMeta
+from magi_attention.meta._calc_dispatch_meta import _calc_self_attn_areas
+from magi_attention.meta.collection.calc_meta import CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.container.bucket import AttnBucket
+
+
+def calculate_attn_flops(
+    q_ranges: AttnRanges,
+    k_ranges: AttnRanges,
+    attn_mask_type: list[AttnMaskType],
+    total_seqlen_q: int,
+    num_heads_q: int,
+    head_dim: int,
+) -> dict[str, float]:
+    attn_area = _calc_self_attn_areas(
+        q_ranges,
+        k_ranges,
+        attn_mask_type,
+        num_chunks=1,
+        chunk_size=total_seqlen_q,
+    ).area
+
+    flops_fwd = 4 * attn_area * num_heads_q * head_dim
+    flops_bwd = flops_fwd * 2.5  # 2.0(bwd) + 0.5(recompute)
+    flops_1f1b = flops_fwd + flops_bwd
+
+    return {
+        "fwd": flops_fwd,
+        "bwd": flops_bwd,
+        "1f1b": flops_1f1b,
+    }
+
 
 NHQ = 48
 NHK = 8
@@ -39,7 +67,7 @@ COMM_MFU = 0.55
 @dataclass
 class MetricData:
     comm_meta_list: list[CommMeta]
-    calc_meta_list: list[AttnCalcMeta]
+    calc_meta_list: list[CalcMeta]
 
     q_heads: Optional[int] = None
     kv_heads: Optional[int] = None
@@ -330,7 +358,7 @@ class MetricDataCalculator:
     def calculate_computational_cost(
         metric_data: MetricData,
     ) -> MetricSet:
-        calc_meta_list: list[AttnCalcMeta] = metric_data.calc_meta_list
+        calc_meta_list: list[CalcMeta] = metric_data.calc_meta_list
         num_heads_q, head_dim, pass_type = (
             metric_data.q_heads,
             metric_data.head_dim,

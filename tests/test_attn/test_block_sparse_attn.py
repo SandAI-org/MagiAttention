@@ -223,7 +223,7 @@ class TestBlockSparseAttn(DistTestBase):
         dk_acc = torch.randn_like(k, dtype=torch.float32)
         dv_acc = torch.randn_like(v, dtype=torch.float32)
 
-        dq_ref, dk_ref, dv_ref, _ = _flex_flash_attn_backward(
+        dq_ref, dk_ref, dv_ref = _flex_flash_attn_backward(
             do,
             q,
             k,
@@ -243,7 +243,7 @@ class TestBlockSparseAttn(DistTestBase):
             bwd_unique_count,
             softmax_scale=softmax_scale,
             softcap=0.0,
-            disable_bwd_dkv_atomic_reduction=False,
+            disable_bwd_dkv_atomic_reduction=False,  # TODO: test when it's `True`
             dq_type=torch.float32,
             dk_type=torch.float32,
             dv_type=torch.float32,
@@ -253,7 +253,7 @@ class TestBlockSparseAttn(DistTestBase):
         dq_ref += dq_acc
         dk_ref += dk_acc
         dv_ref += dv_acc
-        dq_acc, dk_acc, dv_acc, _ = _flex_flash_attn_backward(
+        dq_acc, dk_acc, dv_acc = _flex_flash_attn_backward(
             do,
             q,
             k,
@@ -273,7 +273,7 @@ class TestBlockSparseAttn(DistTestBase):
             bwd_unique_count,
             softmax_scale=softmax_scale,
             softcap=0.0,
-            disable_bwd_dkv_atomic_reduction=False,
+            disable_bwd_dkv_atomic_reduction=False,  # TODO: test when it's `True`
             dq_type=torch.float32,
             dk_type=torch.float32,
             dv_type=torch.float32,

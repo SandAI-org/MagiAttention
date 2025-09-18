@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .calc_meta import AttnCalcMeta
+from .calc_meta import CalcMeta
 from .comm_meta import CommMeta
 from .dispatch_meta import DispatchMeta
 
-__all__ = ["DispatchMeta", "AttnCalcMeta", "CommMeta"]
+__all__ = ["DispatchMeta", "CalcMeta", "CommMeta"]

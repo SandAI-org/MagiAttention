@@ -66,3 +66,10 @@ class OverlapAlgType(Enum):
 
     UNIFORM = "uniform"
     GREEDY = "greedy"
+
+
+class DynamicAttnAlgType(Enum):
+    """The enum used to specify the algorithm type for dynamic attn mask dispatching"""
+
+    NON_COMMUNICATION_QO = "non_communication_qo"
+    GREEDY_RANDOM_GRID = "greedy_random_grid"

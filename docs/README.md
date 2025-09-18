@@ -1,20 +1,27 @@
-### install requirements
+## Instructions to build docs locally
+
+#### Step1: get into docs directory
 
 ```bash
-pip install sphinx
-pip install pydata-sphinx-theme myst_parser sphinx-copybutton
+cd docs
 ```
 
-### generate docs
+#### Step2: install requirements
 
 ```bash
-cd docs/
+pip install -r requirements.txt
+```
+
+#### Step3: generate docs
+
+```bash
 make clean
 make html
 ```
 
-Download build/html and view it locally.
+#### Step4: Download build/html and view it in your browser
 
-### pydata theme
 
-For more details, please refer to UserGuild https://pydata-sphinx-theme.readthedocs.io/en/stable/user_guide/index.html
+## PyData Theme
+
+For more details about pydata theme, please refer to the official [user guide](https://pydata-sphinx-theme.readthedocs.io/en/stable/user_guide/index.html).

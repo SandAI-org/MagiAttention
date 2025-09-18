@@ -34,17 +34,22 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQ, bool Clear_dK, bool Clear_dV>
+template <class TileShape_MK_,
+          class Element,
+          class ElementAccum,
+          class ArchTag_,
+          bool Clear_dQ,
+          bool Clear_dK,
+          bool Clear_dV>
 class FlashAttnBwdPreprocess {
  public:
   // Type Aliases
   using TileShape_MK = TileShape_MK_;
   using ArchTag = ArchTag_;
 
-  static_assert(
-      std::is_same_v<Element, cutlass::half_t> && ArchTag::kMinComputeCapability >= 75 ||
-      std::is_same_v<Element, cutlass::bfloat16_t> && ArchTag::kMinComputeCapability >= 80 ||
-      std::is_same_v<Element, cutlass::float_e4m3_t> && ArchTag::kMinComputeCapability >= 89);
+  static_assert(std::is_same_v<Element, cutlass::half_t> && ArchTag::kMinComputeCapability >= 75 ||
+                std::is_same_v<Element, cutlass::bfloat16_t> && ArchTag::kMinComputeCapability >= 80 ||
+                std::is_same_v<Element, cutlass::float_e4m3_t> && ArchTag::kMinComputeCapability >= 89);
 
   static constexpr uint32_t MaxThreadsPerBlock = 256;
   static constexpr uint32_t MinBlocksPerMultiprocessor = 2;
@@ -58,20 +63,23 @@ class FlashAttnBwdPreprocess {
   // it's just between threads in the same warp
   static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
   static constexpr int kGmemThreadsPerRow = kBlockKGmem / kGmemElemsPerLoad;
-  static_assert(MaxThreadsPerBlock % kGmemThreadsPerRow == 0, "MaxThreadsPerBlock must be a multiple of kGmemThreadsPerRow");
-  using GmemLayoutAtom = Layout<Shape<Int<MaxThreadsPerBlock / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
-  using GmemTiledCopy = decltype(make_tiled_copy(
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
-      GmemLayoutAtom{},
-      Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per load
+  static_assert(MaxThreadsPerBlock % kGmemThreadsPerRow == 0,
+                "MaxThreadsPerBlock must be a multiple of kGmemThreadsPerRow");
+  using GmemLayoutAtom = Layout<Shape<Int<MaxThreadsPerBlock / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+                                Stride<Int<kGmemThreadsPerRow>, _1>>;
+  using GmemTiledCopy =
+      decltype(make_tiled_copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
+                               GmemLayoutAtom{},
+                               Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per load
 
   static constexpr int kGmemElemsPerLoadAccum = sizeof(cute::uint128_t) / sizeof(ElementAccum);
-  static_assert((kBlockM * kHeadDim / kGmemElemsPerLoadAccum) % MaxThreadsPerBlock == 0, "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoadAccum");
+  static_assert((kBlockM * kHeadDim / kGmemElemsPerLoadAccum) % MaxThreadsPerBlock == 0,
+                "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoadAccum");
   using GmemLayoutAtomAccum = Layout<Shape<Int<MaxThreadsPerBlock>>>;
-  using GmemTiledCopyAccum = decltype(make_tiled_copy(
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
-      GmemLayoutAtomAccum{},
-      Layout<Shape<Int<kGmemElemsPerLoadAccum>>>{})); // Val layout, 4 vals per store
+  using GmemTiledCopyAccum =
+      decltype(make_tiled_copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
+                               GmemLayoutAtomAccum{},
+                               Layout<Shape<Int<kGmemElemsPerLoadAccum>>>{})); // Val layout, 4 vals per store
 
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen_q, d, head)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
@@ -97,8 +105,8 @@ class FlashAttnBwdPreprocess {
     StrideLSE const stride_LSE;
     float* ptr_LSE_log2;
     StridedPsum const stride_LSE_log2;
-    int const* q_ranges;
-    int const* k_ranges;
+    int2 const* q_ranges;
+    int2 const* k_ranges;
     int const total_q;
     int const total_q_rounded;
   };
@@ -118,6 +126,8 @@ class FlashAttnBwdPreprocess {
     StrideLSE const stride_LSE;
     float* ptr_LSE_log2;
     StridedPsum const stride_LSE_log2;
+    int2 const* q_ranges = nullptr;
+    int2 const* k_ranges = nullptr;
     int const* q_ranges = nullptr;
     int const* k_ranges = nullptr;
     int const total_q;
@@ -159,8 +169,9 @@ class FlashAttnBwdPreprocess {
 
     /**
      * NOTE: Here, we shift the batch size to the x-dimension because the z-dimension must be less than 65536.
-     *  Thus once the batch size is too large (>= 65536), the z-dimension may overflow, causing an implicit kernel-launch error.
-     *  What's worse, this error may not be explicitly raised, resulting in the kernel being skipped.
+     *  Thus once the batch size is too large (>= 65536), the z-dimension may overflow, causing an implicit
+     * kernel-launch error. What's worse, this error may not be explicitly raised, resulting in the kernel being
+     * skipped.
      */
     // int const m_block = blockIdx.x;
     // int const bidh = blockIdx.y;
@@ -186,11 +197,14 @@ class FlashAttnBwdPreprocess {
     int const offset = m_block * kBlockM;
     // Initialize the tensors for O, dO, and LSE
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
-    // Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
-    Tensor gO = local_tile(cute::domain_offset(make_coord(0, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+    // Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mO), TileShape_MK{},
+    // make_coord(m_block, _0{})); // (M, K)
+    Tensor gO =
+        local_tile(cute::domain_offset(make_coord(0, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
 
     Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh);
-    Tensor gdO = local_tile(cute::domain_offset(make_coord(0, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+    Tensor gdO =
+        local_tile(cute::domain_offset(make_coord(0, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(0), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
@@ -222,8 +236,9 @@ class FlashAttnBwdPreprocess {
         gmem_tiled_copy_O, tOgO, tOrO, tOcO, tOpO, params.total_q - m_block * kBlockM);
     flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true, /*Clearn_OOB_K=*/true>(
         gmem_tiled_copy_O, tOgdO, tOrdO, tOcO, tOpO, params.total_q - m_block * kBlockM);
-    // if (threadIdx.x == 222) { printf("bidx = %d, bidy = %d, bidz = %d, seqlen_o = %d, m_block = %d, seqlen_o - m_block * kBlockM = %d, tOgO addr = %p\n", blockIdx.x,
-    // blockIdx.y, blockIdx.z, seqlen_o, m_block, seqlen_o - m_block * kBlockM, &tOgO(0));}
+    // if (threadIdx.x == 222) { printf("bidx = %d, bidy = %d, bidz = %d, seqlen_o = %d, m_block = %d, seqlen_o -
+    // m_block * kBlockM = %d, tOgO addr = %p\n", blockIdx.x, blockIdx.y, blockIdx.z, seqlen_o, m_block, seqlen_o -
+    // m_block * kBlockM, &tOgO(0));}
 
     // Reshape from e.g. (8, kBlockM / 32, kHeadDim / 64) to (kBlockM / 32, (8, kHeadDim / 64))
     Layout l = make_layout(get<1>(tOrO.layout()), make_layout(get<0>(tOrO.layout()), get<2>(tOrO.layout())));
@@ -246,7 +261,8 @@ class FlashAttnBwdPreprocess {
       dP_sum(mi) = flash::Allreduce<kGmemThreadsPerRow>::run(dP_sum_cur, sum_op);
     }
 
-    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(0, _, bidh); // total_q
+    Tensor mdPsum =
+        make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(0, _, bidh); // total_q
     Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
     if (get<1>(tOcO(_0{}, _0{}, _0{})) == 0) {
@@ -257,18 +273,22 @@ class FlashAttnBwdPreprocess {
       }
     }
 
-    Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(0, _, bidh); // total_q
-    Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
+    Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(
+        0, _, bidh); // total_q
+    Tensor gLSElog2 =
+        local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
     if (thread_idx < params.total_q_rounded - m_block * kBlockM && thread_idx < kBlockM) {
       gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
     }
 
     // if constexpr (Clear_dQ) {
-    //     Tensor mdQaccum = make_tensor(make_gmem_ptr(params.ptr_dQaccum), params.shape_dQaccum, params.stride_dQaccum)(_, bidh, !is_varlen ? bidb : 0);
-    //     Tensor gdQaccum = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_padded * kHeadDim), mdQaccum), Shape<Int<kBlockM * kHeadDim>>{},
-    //     make_coord(m_block)); GmemTiledCopyAccum gmem_tiled_copy_dQaccum; auto gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_thread_slice(thread_idx); Tensor
-    //     tdQgdQaccum = gmem_thr_copy_dQaccum.partition_D(gdQaccum); Tensor zero = make_fragment_like(tdQgdQaccum); clear(zero);
+    //     Tensor mdQaccum = make_tensor(make_gmem_ptr(params.ptr_dQaccum), params.shape_dQaccum,
+    //     params.stride_dQaccum)(_, bidh, !is_varlen ? bidb : 0); Tensor gdQaccum =
+    //     local_tile(cute::domain_offset(make_coord(seqlen_info.offset_padded * kHeadDim), mdQaccum), Shape<Int<kBlockM
+    //     * kHeadDim>>{}, make_coord(m_block)); GmemTiledCopyAccum gmem_tiled_copy_dQaccum; auto gmem_thr_copy_dQaccum
+    //     = gmem_tiled_copy_dQaccum.get_thread_slice(thread_idx); Tensor tdQgdQaccum =
+    //     gmem_thr_copy_dQaccum.partition_D(gdQaccum); Tensor zero = make_fragment_like(tdQgdQaccum); clear(zero);
     //     cute::copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{}, zero, tdQgdQaccum);
     // }
   }

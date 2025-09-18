@@ -18,90 +18,103 @@
 
 #include <vector>
 
-
 namespace magi_attn_ext {
 
 struct AttnRange {
-    int start;
-    int end;
+  int start;
+  int end;
 
-    AttnRange(int start, int end): start(start), end(end) {
-        check_valid();
+  AttnRange(int start, int end) : start(start), end(end) {
+    check_valid();
+  }
+
+  bool is_valid() const {
+    return start >= 0 && start <= end;
+  }
+
+  void check_valid() const {
+    if (!is_valid()) {
+      throw std::runtime_error("AttnRange is invalid with start=" + std::to_string(start) + " and end=" + std::to_string(end));
     }
+  }
 
-    bool is_valid() const { return start >= 0 && start <= end; }
+  bool is_empty() const {
+    return seqlen() == 0;
+  }
 
-    void check_valid() const {
-        if (!is_valid()) {
-            throw std::runtime_error(
-                "AttnRange is invalid with start="
-                + std::to_string(start) + " and end=" + std::to_string(end)
-            );
-        }
-    }
-
-    bool is_empty() const { return seqlen() == 0; }
-
-    int seqlen() const { return end - start; }
+  int seqlen() const {
+    return end - start;
+  }
 };
 
 struct AttnRanges {
-    std::vector<AttnRange> ranges;
+  std::vector<AttnRange> ranges;
 
-    AttnRanges() = default;
+  AttnRanges() = default;
 
-    explicit AttnRanges(std::vector<AttnRange>&& other_ranges)
-        : ranges(std::move(other_ranges)) {}
+  explicit AttnRanges(std::vector<AttnRange>&& other_ranges) : ranges(std::move(other_ranges)) {}
 
-    void append(int start, int end) {
-        ranges.emplace_back(start, end);
+  void append(int start, int end) {
+    ranges.emplace_back(start, end);
+  }
+
+  void append(const AttnRange& range) {
+    ranges.push_back(range);
+  }
+
+  void append(AttnRange&& range) {
+    ranges.emplace_back(std::move(range));
+  }
+
+  void extend(const std::vector<AttnRange>& other_ranges) {
+    ranges.insert(ranges.end(), other_ranges.begin(), other_ranges.end());
+  }
+
+  const std::vector<AttnRange>& get() const {
+    return ranges;
+  }
+
+  std::vector<AttnRange>& get() {
+    return ranges;
+  }
+
+  AttnRange& at(size_t idx) {
+    if (idx >= ranges.size()) {
+      throw std::out_of_range("AttnRanges idx out of range");
     }
+    return ranges[idx];
+  }
 
-    void append(const AttnRange& range) {
-        ranges.push_back(range);
+  const AttnRange& at(size_t idx) const {
+    if (idx >= ranges.size()) {
+      throw std::out_of_range("AttnRanges idx out of range");
     }
+    return ranges[idx];
+  }
 
-    void append(AttnRange&& range) {
-        ranges.emplace_back(std::move(range));
-    }
+  AttnRange& operator[](size_t idx) {
+    return ranges[idx];
+  }
 
-    void extend(const std::vector<AttnRange>& other_ranges) {
-        ranges.insert(ranges.end(), other_ranges.begin(), other_ranges.end());
-    }
+  const AttnRange& operator[](size_t idx) const {
+    return ranges[idx];
+  }
 
-    const std::vector<AttnRange>& get() const { return ranges; }
+  size_t size() const {
+    return ranges.size();
+  }
 
-    std::vector<AttnRange>& get() { return ranges; }
+  bool is_empty() const {
+    return ranges.empty();
+  }
 
-    AttnRange& at(size_t idx) {
-        if (idx >= ranges.size()) {
-            throw std::out_of_range("AttnRanges idx out of range");
-        }
-        return ranges[idx];
-    }
+  void clear() {
+    ranges.clear();
+  }
 
-    const AttnRange& at(size_t idx) const {
-        if (idx >= ranges.size()) {
-            throw std::out_of_range("AttnRanges idx out of range");
-        }
-        return ranges[idx];
-    }
-
-    AttnRange& operator[](size_t idx) {
-        return ranges[idx];
-    }
-
-    const AttnRange& operator[](size_t idx) const {
-        return ranges[idx];
-    }
-
-    size_t size() const { return ranges.size(); }
-
-    bool is_empty() const { return ranges.empty(); }
-
-    void clear() { ranges.clear(); }
-
-    void reserve(size_t capacity) { ranges.reserve(capacity); }
+  void reserve(size_t capacity) {
+    ranges.reserve(capacity);
+  }
 };
 
 } // namespace magi_attn_ext

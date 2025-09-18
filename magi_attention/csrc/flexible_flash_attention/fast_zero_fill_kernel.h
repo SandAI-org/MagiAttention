@@ -68,7 +68,8 @@ class FastZeroFillKernel {
   static_assert(kBlockM % kGmemThreadsPerRow == 0, "kBlockM must be a multiple of kGmemThreadsPerRow");
 
   // Layout of Epilogue threads, named GmemLayoutAtom
-  using GmemLayoutAtom = cute::Layout<Shape<Int<kBlockM / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
+  using GmemLayoutAtom = cute::Layout<Shape<Int<kBlockM / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
+                                      Stride<Int<kGmemThreadsPerRow>, _1>>;
 
   using GmemTiledCopyO = decltype(make_tiled_copy(
       Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, T_out>{},
@@ -178,12 +179,12 @@ class FastZeroFillKernel {
 
     // Print debug info
     // if (thread_idx == 0 && block == 0 && bidh == 0) {
-    //     printf("kGmemElemsPerStore: %d. kBytePerRow: %d. kBlockKGmem: %d. kGmemThreadsPerRow: %d.\n", kGmemElemsPerStore, kBytePerRow, kBlockKGmem,
-    //     kGmemThreadsPerRow); printf("=================================== tLSErLSE ===================================\n"); print_tensor(tLSErLSE);
-    //     printf("=================================== tOcO ===================================\n");
-    //     print_tensor(tOcO);
-    //     printf("=================================== tOpOm ===================================\n");
-    //     print_tensor(tOpOm);
+    //     printf("kGmemElemsPerStore: %d. kBytePerRow: %d. kBlockKGmem: %d. kGmemThreadsPerRow: %d.\n",
+    //     kGmemElemsPerStore, kBytePerRow, kBlockKGmem, kGmemThreadsPerRow);
+    //     printf("=================================== tLSErLSE ===================================\n");
+    //     print_tensor(tLSErLSE); printf("=================================== tOcO
+    //     ===================================\n"); print_tensor(tOcO); printf("===================================
+    //     tOpOm ===================================\n"); print_tensor(tOpOm);
     //     printf("=================================== tOpOk ===================================\n");
     //     print_tensor(tOpOk);
     //     printf("=================================== tOrO ===================================\n");

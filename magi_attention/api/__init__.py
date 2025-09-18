@@ -27,6 +27,7 @@ from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOver
 
 from .functools import (
     compute_pad_size,
+    infer_attn_mask_from_cu_seqlens,
     infer_attn_mask_from_sliding_window,
     infer_varlen_mask_from_batch,
     squash_batch_dim,
@@ -58,6 +59,7 @@ __all__ = [
     "squash_batch_dim",
     "infer_varlen_mask_from_batch",
     "infer_attn_mask_from_sliding_window",
+    "infer_attn_mask_from_cu_seqlens",
     "AttnMaskType",
     "AttnOverlapMode",
     "AttnRanges",

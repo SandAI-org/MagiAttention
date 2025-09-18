@@ -16,6 +16,8 @@ from . import enum, jit, range_op
 from .mask import AttnMask
 from .range import AttnRange, RangeError
 from .ranges import AttnRanges
+from .rectangle import AttnRectangle
+from .rectangles import AttnRectangles
 
 __all__ = [
     "enum",
@@ -24,5 +26,7 @@ __all__ = [
     "AttnRange",
     "RangeError",
     "AttnRanges",
+    "AttnRectangle",
+    "AttnRectangles",
     "range_op",
 ]

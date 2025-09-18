@@ -367,7 +367,7 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             0,  # sm_margin
         ]
 
-        flatten_dq, flatten_dk, flatten_dv, _ = _flex_flash_attn_backward(
+        flatten_dq, flatten_dk, flatten_dv = _flex_flash_attn_backward(
             flatten_dout,
             flatten_q,
             flatten_k_ag,
@@ -510,7 +510,7 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             0,  # sm_margin
         ]
 
-        dq, dk, dv, _ = _flex_flash_attn_backward(
+        dq, dk, dv = _flex_flash_attn_backward(
             dout,
             q,
             k_ag,
@@ -718,7 +718,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             0,  # sm_margin
         ]
 
-        dq, dk, dv, _ = _flex_flash_attn_backward(
+        dq, dk, dv = _flex_flash_attn_backward(
             dout,
             q_cmp,
             k_ag_cmp,

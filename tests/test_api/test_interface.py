@@ -81,11 +81,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
 
         # init several pgs with all ranks
         self.nccl_groups = [
-            dist.new_group(list(range(self.world_size)), backend="nccl")
-            for _ in range(2)
-        ]
-        self.gloo_groups = [
-            dist.new_group(list(range(self.world_size)), backend="gloo")
+            dist.new_group(list(range(self.world_size)), backend=self.backend)
             for _ in range(1)
         ]
 
@@ -123,10 +119,6 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         return self.nccl_groups[0]
 
     @property
-    def gloo_group(self) -> dist.ProcessGroup:
-        return self.gloo_groups[0]
-
-    @property
     def world_size(self) -> int:
         return 1
 
@@ -138,7 +130,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
     @parameterize(
         "attn_config",
         [
-            # full attn with seqlen 1k and batchsize 2
+            # full attn with seqlen 1k and batch size 2
             {
                 NAME: "full_attn_1k_bs2",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
@@ -161,7 +153,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 2048,
                 "chunk_size": 1024,
             },
-            # full attn with seqlen 2k and batchsize 3
+            # full attn with seqlen 2k and batch size 3
             {
                 NAME: "full_attn_2k_bs3",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
@@ -322,7 +314,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         #   2. profile real comm/calc factors
         "overlap_config",
         [
-            # disable multi-stage overlap to roll back to the original code
+            # disable multi-stage overlap
             {
                 NAME: "disable_mso",
                 "enable": False,
@@ -408,6 +400,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         num_heads_q, num_heads_kv = num_heads
 
         dist_attn_config = DistAttnConfig(
+            # TODO: test other dispatch algs
             dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
             overlap_config=OverlapConfig(
                 **{k: v for k, v in overlap_config.items() if k not in (NAME,)},
@@ -616,7 +609,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
 
         assert (
             dist_attn_runtime_mgr == ref_attn_runtime_mgr
-        ), f"the answer is not correct when {test_case=}"
+        ), f"For {test_case=}, the {dist_attn_runtime_mgr=} is not equal to the {ref_attn_runtime_mgr=}."
 
         # -------   test position ids -------- #
 

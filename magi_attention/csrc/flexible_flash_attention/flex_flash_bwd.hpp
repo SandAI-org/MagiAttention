@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
+std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
     const at::Tensor& k,
@@ -110,8 +110,10 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
   TORCH_CHECK(false, "This flash attention build does not support backward.");
 #endif
 
+  // Check compute capability
   auto dprops = at::cuda::getCurrentDeviceProperties();
   bool is_sm9x = dprops->major >= 9;
+  // Check compute capability
   TORCH_CHECK(is_sm9x, "Flexible Flash Attention only supports Hopper GPUs or newer.");
 
   int batch_size = q_ranges.size(0);
@@ -121,10 +123,15 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
   int const num_heads_kv = k.size(1);
   int const head_size = q.size(2);
 
+  // Check q, k, v, out, dout (dtype, device, layout)
   auto q_type = q.scalar_type();
   TORCH_CHECK(q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16, "Flexible Flash Attention only supports fp16 and bf16 data type");
   TORCH_CHECK(k.dtype() == q_type && v.dtype() == q_type && out.dtype() == q_type && dout.dtype() == q_type);
-  CHECK_DEVICE(q); CHECK_DEVICE(k); CHECK_DEVICE(v); CHECK_DEVICE(out); CHECK_DEVICE(dout);
+  CHECK_DEVICE(q);
+  CHECK_DEVICE(k);
+  CHECK_DEVICE(v);
+  CHECK_DEVICE(out);
+  CHECK_DEVICE(dout);
   CHECK_SHAPE(q, total_q, num_heads_qo, head_size);
   CHECK_SHAPE(out, total_q, num_heads_qo, head_size);
   CHECK_SHAPE(dout, total_q, num_heads_qo, head_size);
@@ -132,37 +139,66 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
   CHECK_SHAPE(v, total_k, num_heads_kv, head_size);
   TORCH_CHECK(q.stride(-1) == 1 && k.stride(-1) == 1 && v.stride(-1) == 1 && out.stride(-1) == 1 && dout.stride(-1) == 1);
 
-  TORCH_CHECK(softmax_lse.dtype() == at::kFloat); CHECK_DEVICE(softmax_lse); CHECK_SHAPE(softmax_lse, total_q, num_heads_qo); TORCH_CHECK(softmax_lse.stride(-1) == 1);
+  // check softmax_lse (dtype, device, layout)
+  TORCH_CHECK(softmax_lse.dtype() == at::kFloat);
+  CHECK_DEVICE(softmax_lse);
+  CHECK_SHAPE(softmax_lse, total_q, num_heads_qo);
+  TORCH_CHECK(softmax_lse.stride(-1) == 1);
 
   TORCH_CHECK(q_ranges.dtype() == torch::kInt32 && k_ranges.dtype() == torch::kInt32);
-  CHECK_DEVICE(q_ranges); CHECK_DEVICE(k_ranges);
-  CHECK_SHAPE(q_ranges, batch_size, 2); CHECK_SHAPE(k_ranges, batch_size, 2);
-  CHECK_CONTIGUOUS(q_ranges); CHECK_CONTIGUOUS(k_ranges);
+  CHECK_DEVICE(q_ranges);
+  CHECK_DEVICE(k_ranges);
+  CHECK_SHAPE(q_ranges, batch_size, 2);
+  CHECK_SHAPE(k_ranges, batch_size, 2);
+  CHECK_CONTIGUOUS(q_ranges);
+  CHECK_CONTIGUOUS(k_ranges);
 
-  at::Tensor attn_type_map; bool const has_attn_type_map = attn_type_map_.has_value();
+  at::Tensor attn_type_map;
+  bool const has_attn_type_map = attn_type_map_.has_value();
   if (has_attn_type_map) {
     attn_type_map = attn_type_map_.value();
-    TORCH_CHECK(attn_type_map.dtype() == torch::kInt32); CHECK_DEVICE(attn_type_map); CHECK_SHAPE(attn_type_map, batch_size); CHECK_CONTIGUOUS(attn_type_map);
+    TORCH_CHECK(attn_type_map.dtype() == torch::kInt32);
+    CHECK_DEVICE(attn_type_map);
+    CHECK_SHAPE(attn_type_map, batch_size);
+    CHECK_CONTIGUOUS(attn_type_map);
   }
 
-  int merge_batch_size = batch_size; at::Tensor merge_k_ranges; at::Tensor bwd_kq_map; at::Tensor bwd_unique_count;
+  // Check merge_k_ranges, bwd_kq_map (dtype, device, layout) if given
+  int merge_batch_size = batch_size;
+  at::Tensor merge_k_ranges;
+  at::Tensor bwd_kq_map;
+  at::Tensor bwd_unique_count;
   bool const has_merge_k_ranges = merge_k_ranges_.has_value();
   bool const has_bwd_kq_map = bwd_kq_map_.has_value();
   bool const has_bwd_unique_count = bwd_unique_count_.has_value();
   if (has_merge_k_ranges) {
-    merge_k_ranges = merge_k_ranges_.value(); merge_batch_size = merge_k_ranges.size(0);
-    TORCH_CHECK(merge_k_ranges.dtype() == torch::kInt32); CHECK_DEVICE(merge_k_ranges); CHECK_SHAPE(merge_k_ranges, merge_batch_size, 2); CHECK_CONTIGUOUS(merge_k_ranges);
+    merge_k_ranges = merge_k_ranges_.value();
+    // HACK
+    merge_batch_size = merge_k_ranges.size(0);
+    // Check dtype, device and layout
+    TORCH_CHECK(merge_k_ranges.dtype() == torch::kInt32);
+    CHECK_DEVICE(merge_k_ranges);
+    CHECK_SHAPE(merge_k_ranges, merge_batch_size, 2);
+    CHECK_CONTIGUOUS(merge_k_ranges);
   }
   if (has_bwd_kq_map) {
     bwd_kq_map = bwd_kq_map_.value();
-    TORCH_CHECK(bwd_kq_map.dtype() == torch::kInt32); CHECK_DEVICE(bwd_kq_map); CHECK_SHAPE(bwd_kq_map, merge_batch_size);
+    // Check dtype, device and layout
+    TORCH_CHECK(bwd_kq_map.dtype() == torch::kInt32);
+    CHECK_DEVICE(bwd_kq_map);
+    CHECK_SHAPE(bwd_kq_map, merge_batch_size + 1);
   }
-  TORCH_CHECK(has_merge_k_ranges == has_bwd_kq_map);
+  TORCH_CHECK(has_merge_k_ranges == has_bwd_kq_map, "merge_k_ranges and bwd_kq_map must be both given or both not given");
   if (has_bwd_unique_count) {
     bwd_unique_count = bwd_unique_count_.value();
-    TORCH_CHECK(bwd_unique_count.dtype() == torch::kInt32); CHECK_DEVICE(bwd_unique_count); CHECK_SHAPE(bwd_unique_count);
+    // Check dtype, device and layout
+    TORCH_CHECK(bwd_unique_count.dtype() == torch::kInt32);
+    CHECK_DEVICE(bwd_unique_count);
+    CHECK_SHAPE(bwd_unique_count);
   }
-  TORCH_CHECK((has_merge_k_ranges == has_bwd_kq_map && has_bwd_kq_map == has_bwd_unique_count));
+  TORCH_CHECK(
+      (has_merge_k_ranges == has_bwd_kq_map && has_bwd_kq_map == has_bwd_unique_count),
+      "merge_k_ranges, bwd_kq_map, and bwd_unique_count must all be provided together or all be omitted");
 
   int const max_headdim = get_max_headdim();
   TORCH_CHECK(head_size % 8 == 0 && head_size <= max_headdim);
@@ -170,25 +206,69 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
   int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
   int const kBlockM = std::get<0>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
   int const kBlockN = std::get<1>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
+  // Get rounded max_seqlen
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
   int const max_seqlen_q_rounded = round_multiple(max_seqlen_q, kBlockM);
   int const max_seqlen_k_rounded = round_multiple(max_seqlen_k, kBlockN);
 
+  // Determine output dtype for dq
   at::ScalarType dq_type = dq_type_.has_value() ? dq_type_.value() : (dq_.has_value() ? dq_.value().scalar_type() : at::ScalarType::Float);
   TORCH_CHECK(dq_type == at::ScalarType::Float);
-  at::ScalarType dk_type = dk_type_.has_value() ? dk_type_.value() : (dk_.has_value() ? dk_.value().scalar_type() : (!disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type));
-  TORCH_CHECK(dk_type == at::kFloat || dk_type == at::kBFloat16 || dk_type == at::kHalf);
-  at::ScalarType dv_type = dv_type_.has_value() ? dv_type_.value() : (dv_.has_value() ? dv_.value().scalar_type() : (!disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type));
-  TORCH_CHECK(dv_type == at::kFloat || dv_type == at::kBFloat16 || dv_type == at::kHalf);
-  TORCH_CHECK(dk_type == dv_type);
+  if (dq_.has_value()) {
+    TORCH_CHECK(dq_.value().scalar_type() == dq_type, "dq must have the same dtype as dq_type (if given)");
+  }
+  // Determine output dtype for dk
+  at::ScalarType dk_type =
+      dk_type_.has_value() ? dk_type_.value() : (dk_.has_value() ? dk_.value().scalar_type() : (!disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type));
+  TORCH_CHECK(
+      dk_type == at::ScalarType::Float || dk_type == at::ScalarType::BFloat16 || dk_type == at::ScalarType::Half,
+      "Flexible Flash Attention only supports float, bf16 and fp16 for dk");
+  if (dk_.has_value()) {
+    TORCH_CHECK(dk_.value().scalar_type() == dk_type, "dk must have the same dtype as dk_type (if given)");
+  }
+  // Determine output dtype for dv
+  at::ScalarType dv_type =
+      dv_type_.has_value() ? dv_type_.value() : (dv_.has_value() ? dv_.value().scalar_type() : (!disable_bwd_dkv_atomic_reduction ? at::ScalarType::Float : q_type));
+  TORCH_CHECK(
+      dv_type == at::ScalarType::Float || dv_type == at::ScalarType::BFloat16 || dv_type == at::ScalarType::Half,
+      "Flexible Flash Attention only supports float, bf16 and fp16 for dv");
+  if (dv_.has_value()) {
+    TORCH_CHECK(dv_.value().scalar_type() == dv_type, "dv must have the same dtype as dv_type (if given)");
+  }
+  // Check dk_type is same as dv_type
+  TORCH_CHECK(dk_type == dv_type, "dk and dv must have the same dtype");
 
   auto opts = q.options();
-  at::Tensor dq = dq_.has_value() ? dq_.value() : torch::zeros_like(q, opts.dtype(dq_type));
-  if (dq_.has_value()) { TORCH_CHECK(dq.scalar_type() == dq_type); CHECK_DEVICE(dq); CHECK_SHAPE(dq, total_q, num_heads_qo, head_size); TORCH_CHECK(dq.stride(-1) == 1); }
-  at::Tensor dk = dk_.has_value() ? dk_.value() : torch::zeros_like(k, opts.dtype(dk_type));
-  if (dk_.has_value()) { TORCH_CHECK(dk.dtype() == dk_type); CHECK_DEVICE(dk); CHECK_SHAPE(dk, total_k, num_heads_kv, head_size); TORCH_CHECK(dk.stride(-1) == 1); }
-  at::Tensor dv = dv_.has_value() ? dv_.value() : torch::zeros_like(v, opts.dtype(dv_type));
-  if (dv_.has_value()) { TORCH_CHECK(dv.dtype() == dv_type); CHECK_DEVICE(dv); CHECK_SHAPE(dv, total_k, num_heads_kv, head_size); TORCH_CHECK(dv.stride(-1) == 1); }
+  // dq, dk, dv are output tensors, if they are not given, we will create them.
+  // If they are given, we will check dtype, device and layout.
+  at::Tensor dq, dk, dv;
+  if (dq_.has_value()) {
+    dq = dq_.value();
+    TORCH_CHECK(dq.scalar_type() == dq_type, "dq must have the same dtype as dq_type (if given)");
+    CHECK_DEVICE(dq);
+    CHECK_SHAPE(dq, total_q, num_heads_qo, head_size);
+    TORCH_CHECK(dq.stride(-1) == 1, "dq must have contiguous last dimension");
+  } else {
+    dq = torch::zeros_like(q, opts.dtype(dq_type));
+  }
+  if (dk_.has_value()) {
+    dk = dk_.value();
+    TORCH_CHECK(dk.dtype() == dk_type, "dk must have the same dtype as dk_type (if given)");
+    CHECK_DEVICE(dk);
+    CHECK_SHAPE(dk, total_k, num_heads_kv, head_size);
+    TORCH_CHECK(dk.stride(-1) == 1, "dk must have contiguous last dimension");
+  } else {
+    dk = torch::zeros_like(k, opts.dtype(dk_type));
+  }
+  if (dv_.has_value()) {
+    dv = dv_.value();
+    TORCH_CHECK(dv.dtype() == dv_type, "dv must have the same dtype as dv_type (if given)");
+    CHECK_DEVICE(dv);
+    CHECK_SHAPE(dv, total_k, num_heads_kv, head_size);
+    TORCH_CHECK(dv.stride(-1) == 1, "dv must have contiguous last dimension");
+  } else {
+    dv = torch::zeros_like(v, opts.dtype(dv_type));
+  }
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
@@ -202,11 +282,17 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   at::Tensor determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));
   at::Tensor dq_determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
+  // Initialize determin_conflict_state, num_sm rows, ceil_div(total_k, kBlockN) + 1 columns
   int const num_sm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin;
   at::Tensor determin_conflict_state = torch::empty({num_sm, (total_k + kBlockN - 1) / kBlockN + 1}, opts.dtype(torch::kInt32));
   at::Tensor dq_determin_conflict_state = torch::empty({num_sm, (total_q + kBlockM - 1) / kBlockM + 1}, opts.dtype(torch::kInt32));
+
+  // If deterministic is enabled, we need to zero out the out_accum tensor and conflict state
   if (deterministic) {
-    determin_range_locks.zero_(); determin_conflict_state.zero_(); dq_determin_range_locks.zero_(); dq_determin_conflict_state.zero_();
+    determin_range_locks.zero_();
+    determin_conflict_state.zero_();
+    dq_determin_range_locks.zero_();
+    dq_determin_conflict_state.zero_();
   }
 
   Flash_bwd_params params;
@@ -228,30 +314,30 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at:
       k,
       v,
       out,
-      dout,
+      dout, // input tensors
       dq,
       dk,
-      dv,
-      q_ranges.data_ptr(),
-      k_ranges.data_ptr(),
-      has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
-      merge_batch_size,
-      has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,
-      has_bwd_kq_map ? bwd_kq_map.data_ptr() : nullptr,
-      has_bwd_unique_count ? bwd_unique_count.data_ptr() : nullptr,
-      softmax_lse.data_ptr(),
-      softmax_lse_log2.data_ptr(),
-      softmax_d.data_ptr(),
-      softmax_scale,
-      tile_count_semaphore.data_ptr(),
-      softcap,
-      deterministic,
-      determin_range_locks.data_ptr(),
-      determin_conflict_state.data_ptr(),
-      dq_determin_conflict_state.data_ptr(),
-      dq_determin_range_locks.data_ptr(),
-      sm_margin,
-      disable_bwd_dkv_atomic_reduction);
+      dv, // output tensors
+      /*q_ranges*/ q_ranges.data_ptr(),
+      /*k_ranges*/ k_ranges.data_ptr(),
+      /*attn_type_map*/ has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
+      /*merge_batch_size*/ merge_batch_size,
+      /*merge_k_ranges*/ has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,
+      /*bwd_kq_map*/ has_bwd_kq_map ? bwd_kq_map.data_ptr() : nullptr,
+      /*bwd_unique_count*/ has_bwd_unique_count ? bwd_unique_count.data_ptr() : nullptr,
+      /*softmax_lse*/ softmax_lse.data_ptr(),
+      /*softmax_lse_log2*/ softmax_lse_log2.data_ptr(),
+      /*dsoftmax_sum*/ softmax_d.data_ptr(),
+      /*softmax_scale*/ softmax_scale,
+      /*tile_count_semaphore*/ tile_count_semaphore.data_ptr(),
+      /*softcap*/ softcap,
+      /*deterministic*/ deterministic,
+      /*determin_range_locks*/ determin_range_locks.data_ptr(),
+      /*determin_conflict_state*/ determin_conflict_state.data_ptr(),
+      /*dq_determin_conflict_state*/ dq_determin_conflict_state.data_ptr(),
+      /*dq_determin_range_locks*/ dq_determin_range_locks.data_ptr(),
+      /*sm_margin*/ sm_margin,
+      /*disable_bwd_dkv_atomic_reduction*/ disable_bwd_dkv_atomic_reduction);
 
-  return {params, dq, dk, dv, softmax_d, softmax_lse_log2};
+  return {params, dq, dk, dv};
 }
