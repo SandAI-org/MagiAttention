@@ -35,10 +35,7 @@
 # SOFTWARE.
 
 import argparse
-import os
-import random
 import time
-from typing import Callable
 
 import torch
 import torch.distributed as dist
@@ -63,54 +60,7 @@ from magi_attention.testing.grpcoll_utils import (
     sim_gemm,
     transfer_group_cast_meta_to_dispatch_meta,
 )
-
-
-def setup_dist_env(
-    backend: str = "nccl",
-    base_seed: int | None = None,
-    seed_bias: Callable = lambda rank: 0,
-) -> tuple[int, int, int, dist.ProcessGroup, int, int | None, int, int]:
-    """set up distributed environment with the specified process group backend,
-    NOTE: the test script using this func to set up should be executed through torchrun
-
-    Args:
-        backend (str, optional): the process group backend. Defaults to "nccl".
-        base_seed (int | None, optional): the base seed. Defaults to None to not set seed.
-        seed_bias (Callable, optional): the seed bias func for each rank. Defaults to lambda rank: 0, i.e., no bias.
-
-    Returns:
-        num_nodes, num_local_ranks, world_size, rank, local_rank, world_group, device, seed
-    """
-    num_nodes = int(os.getenv("NNODES"))  # type: ignore[arg-type]
-    num_local_ranks = int(os.getenv("NPROC_PER_NODE"))  # type: ignore[arg-type]
-    rank = int(os.environ["RANK"])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    torch.cuda.set_device(local_rank)
-    device = torch.cuda.current_device()
-
-    dist.init_process_group(
-        backend=backend,
-        rank=rank,
-        world_size=world_size,
-    )
-
-    seed = None
-    if base_seed is not None:
-        seed = base_seed + seed_bias(rank)
-        torch.manual_seed(seed)
-        random.seed(seed)
-
-    return (  # type: ignore[return-value]
-        num_nodes,
-        num_local_ranks,
-        world_size,  # num_ranks
-        rank,
-        local_rank,
-        dist.group.WORLD,
-        device,
-        seed,
-    )  # noqa: E231
+from magi_attention.utils import setup_dist_env
 
 
 def test_main(
@@ -828,11 +778,11 @@ def test_loop(args: argparse.Namespace):
 
     # init dist
     (
-        num_nodes,
-        num_local_ranks,
-        num_ranks,
         rank,
         local_rank,
+        num_ranks,
+        num_nodes,
+        num_local_ranks,
         group,
         device,
         seed,
