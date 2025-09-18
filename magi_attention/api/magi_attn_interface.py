@@ -872,7 +872,8 @@ def make_varlen_key_for_new_mask_after_dispatch(
         >>> # Calculate local attention for the mask used to dispatch with key_for_dispatch
         >>> local_out1, _ = calc_attn(local_q, local_k, local_v, key_for_dispatch)
         >>>
-        >>> # Calculate local attention for the new mask with the new key
+        >>> # Calculate local attention for the new swa mask with the new key
+        >>> # w/o undispatching back and dispatching again to avoid OOM
         >>> local_out2, _ = calc_attn(local_q, local_k, local_v, new_key_for_swa_mask)
         >>>
         >>> # Gather local attention outputs to total output if needed
@@ -1009,7 +1010,7 @@ def make_flex_key_for_new_mask_after_dispatch(
         >>> local_out1, _ = calc_attn(local_q, local_k, local_v, key_for_dispatch)
         >>>
         >>> # Calculate local attention for the new swa mask with the new key
-        >>> # w/o undispatching back and dispatching again
+        >>> # w/o undispatching back and dispatching again to avoid OOM
         >>> local_out2, _ = calc_attn(local_q, local_k, local_v, new_key_for_swa_mask)
         >>>
         >>> # Gather local attention outputs to total output if needed
