@@ -131,7 +131,7 @@ def magi_attn_varlen_key(
         ...     for tensor in [total_x, total_label, total_rope]
         ... ]
         >>>
-        >>> # Do QKV projection
+        >>> # Apply QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
         >>> # Calculate local attention
@@ -263,7 +263,7 @@ def magi_attn_varlen_dispatch(
         ...     ),
         ... )
         >>>
-        >>> # Do QKV projection
+        >>> # Apply QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
         >>> # Calculate local attention
@@ -397,7 +397,7 @@ def magi_attn_flex_key(
         ...     for tensor in [total_x, total_label, total_rope]
         ... ]
         >>>
-        >>> # Do QKV projection
+        >>> # Apply QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
         >>> # Calculate local attention
@@ -611,7 +611,7 @@ def magi_attn_flex_dispatch(
         ...     is_k_permutable=True,
         ... )
         >>>
-        >>> # Do QKV projection
+        >>> # Apply QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
         >>> # Calculate local attention
@@ -708,7 +708,7 @@ def calc_attn(
     key: DistAttnRuntimeKey,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Do attention computation.
+    Apply attention computation.
 
     Args:
         q (torch.Tensor): Query tensor of shape ``(num_tokens_q, num_heads, head_dim)``.
@@ -857,7 +857,7 @@ def make_varlen_key_for_new_mask_after_dispatch(
         >>> # with the same dispatch solution as the causal mask used for dispatch,
         >>> # i.e. this new key share the same dispatch meta as key_for_dispatch
         >>> # but it can handle the computation and communication of the new mask
-        >>> # and calculate attn correctly as well, though no optimization is applied
+        >>> # and calculate attn correctly as well, though no optimization is applied for now
         >>> new_key_for_swa_mask = make_varlen_key_for_new_mask_after_dispatch(
         ...     cu_seqlens_q=torch.tensor([0, 4096], dtype=torch.int32),
         ...     cu_seqlens_k=torch.tensor([0, 4096], dtype=torch.int32),
@@ -866,7 +866,7 @@ def make_varlen_key_for_new_mask_after_dispatch(
         ...     key_for_dispatch=key_for_dispatch,
         ... )
         >>>
-        >>> # Do QKV projection
+        >>> # Apply QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
         >>> # Calculate local attention for the mask used to dispatch with key_for_dispatch
@@ -995,7 +995,7 @@ def make_flex_key_for_new_mask_after_dispatch(
         >>> # with the same dispatch solution as the causal mask used for dispatch,
         >>> # i.e. this new key share the same dispatch meta as key_for_dispatch
         >>> # but it can handle the computation and communication of the new mask
-        >>> # and calculate attn correctly as well, though no optimization is applied
+        >>> # and calculate attn correctly as well, though no optimization is applied for now
         >>> new_key_for_swa_mask = make_flex_key_for_new_mask_after_dispatch(
         ...     q_ranges=AttnRanges.from_ranges([[0, 512], [512, 4096]]),
         ...     k_ranges=AttnRanges.from_ranges([[0, 512], [0, 4096]]),
@@ -1003,7 +1003,7 @@ def make_flex_key_for_new_mask_after_dispatch(
         ...     key_for_dispatch=key_for_dispatch,
         ... )
         >>>
-        >>> # Do QKV projection
+        >>> # Apply QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
         >>>
         >>> # Calculate local attention for the mask used to dispatch with key_for_dispatch
