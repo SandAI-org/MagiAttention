@@ -21,7 +21,9 @@ from torch.distributed import Work
 
 from magi_attention.utils import wrap_to_list
 
-GeneralWorkItem: TypeAlias = Work | Stream | Event | None
+from .primitive.grpcoll._event import EventOverlap
+
+GeneralWorkItem: TypeAlias = Work | Stream | Event | EventOverlap | None
 
 
 @dataclass
@@ -45,6 +47,8 @@ class GeneralWork:
                     # on the NCCL stream by default
                     # unless in blocking mode, in which it will block CPU as well
                     work.wait()
+                case EventOverlap():
+                    work.current_stream_wait()
                 case None:
                     pass
                 case _:
