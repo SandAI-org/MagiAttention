@@ -24,8 +24,8 @@ from magi_attention.testing.grpcoll_utils import (
 from magi_attention.utils import nvtx
 
 from ...work import GeneralWork, WorkWithPostProcessFn
-from ._buffer import Buffer
-from ._config import Config
+from ._buffer import GrpCollBuffer
+from ._config import GrpCollConfig
 from .utils import unpermute_tensor
 
 __all__ = [
@@ -48,8 +48,10 @@ def native_group_cast_impl(
 ) -> WorkWithPostProcessFn:
     """Native group-cast implementation"""
 
-    config: Config = kwargs.get("native_group_cast_config", None)
-    buffer: Buffer = kwargs.get("native_group_cast_buffer", None)
+    config: GrpCollConfig = kwargs.pop("native_grpcoll_config", None)
+    buffer: GrpCollBuffer = kwargs.pop("native_grpcoll_buffer", None)
+    handle_dict: dict[str, tuple] = kwargs.pop("native_grpcoll_handle_dict", {})
+    handle: tuple | None = handle_dict.pop("group_cast", None)
     assert config is not None and buffer is not None
 
     # XXX: a workaround to implement native group-cast
@@ -87,12 +89,12 @@ def native_group_cast_impl(
         _,  # recv_topk_idx
         _,  # recv_topk_weights
         _,  # recv_num_tokens_per_expert_list
-        _,  # handle
+        handle,
         event,
     ) = buffer.dispatch(
         x=input,
         recv_x=output,
-        handle=kwargs.pop("native_group_cast_handle", None),
+        handle=handle,
         num_tokens_per_rank=num_tokens_per_rank,
         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
         is_token_in_rank=is_token_in_rank,
@@ -101,6 +103,9 @@ def native_group_cast_impl(
         async_finish=async_op,
         allocate_on_comm_stream=False,
     )
+
+    # prepare handle for symmetric group-reduce
+    handle_dict["group_reduce"] = handle
 
     # prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(
@@ -135,9 +140,10 @@ def native_group_reduce_impl(
 
     assert reduce_op == "sum", "Only support sum-reduce for now"
 
-    config: Config = kwargs.get("native_group_reduce_config", None)
-    buffer: Buffer = kwargs.get("native_group_reduce_buffer", None)
-    handle: tuple = kwargs.pop("native_group_reduce_handle", None)
+    config: GrpCollConfig = kwargs.pop("native_grpcoll_config", None)
+    buffer: GrpCollBuffer = kwargs.pop("native_grpcoll_buffer", None)
+    handle_dict: dict[str, tuple] = kwargs.pop("native_grpcoll_handle_dict", {})
+    handle: tuple | None = handle_dict.pop("group_reduce", None)
     assert config is not None and buffer is not None and handle is not None
 
     # XXX: a workaround to implement native group-reduce

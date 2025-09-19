@@ -45,8 +45,8 @@ from magi_attention.comm.primitive.grpcoll import (
     group_cast_collective,
     group_reduce_collective,
 )
-from magi_attention.comm.primitive.grpcoll._buffer import Buffer
-from magi_attention.comm.primitive.grpcoll._config import Config
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
+from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.common.range_op import range_gather
 from magi_attention.testing.grpcoll_utils import (
     bench,
@@ -69,7 +69,7 @@ def test_main(
     local_rank: int,
     num_ranks: int,
     rank: int,
-    buffer: Buffer,
+    buffer: GrpCollBuffer,
     group: dist.ProcessGroup,
 ):
     # Settings
@@ -124,7 +124,7 @@ def test_main(
         )
 
     # Config
-    config = Config(
+    config = GrpCollConfig(
         num_sms,  # num_sms, default 20
         num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
         num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
@@ -145,7 +145,7 @@ def test_main(
     else:
         x *= rank
     x_pure_rand = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
-    x_e4m3 = per_token_cast_to_fp8(x) if Buffer.is_sm90_compiled() else None
+    x_e4m3 = per_token_cast_to_fp8(x) if GrpCollBuffer.is_sm90_compiled() else None
     x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T) if x_e4m3 is not None else None
 
     # Random score (transfered from group-cast meta args)
@@ -729,11 +729,11 @@ def test_main(
         )
         for nvl_chunk_size in tuple(range(4, 33, 2)) + (0,):
             if nvl_chunk_size > 0:
-                config = Config(num_sms, nvl_chunk_size, nvl_buffer_size)
+                config = GrpCollConfig(num_sms, nvl_chunk_size, nvl_buffer_size)
             else:
                 # Test default config as well
-                Buffer.set_num_sms(num_sms)
-                config = Buffer.get_dispatch_config(num_ranks)
+                GrpCollBuffer.set_num_sms(num_sms)
+                config = GrpCollBuffer.get_dispatch_config(num_ranks)
             tune_args = {"x": current_x, "handle": handle, "config": config}
             t = bench(lambda: buffer.dispatch(**tune_args))[0]
             if t < best_time and nvl_chunk_size > 0:
@@ -770,7 +770,7 @@ def test_main(
                 all_best_fp8_results_list, best_dispatch_results, group=group
             )
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
-    dispatch_config = Config(
+    dispatch_config = GrpCollConfig(
         best_dispatch_results[0],  # type: ignore[index]
         best_dispatch_results[1],  # type: ignore[index]
         nvl_buffer_size,
@@ -789,11 +789,11 @@ def test_main(
     best_time, best_results = 1e10, None
     for nvl_chunk_size in tuple(range(1, 17, 1)) + (0,):
         if nvl_chunk_size > 0:
-            config = Config(num_sms, nvl_chunk_size, nvl_buffer_size)
+            config = GrpCollConfig(num_sms, nvl_chunk_size, nvl_buffer_size)
         else:
             # Test default config as well
-            Buffer.set_num_sms(num_sms)
-            config = Buffer.get_combine_config(num_ranks)
+            GrpCollBuffer.set_num_sms(num_sms)
+            config = GrpCollBuffer.get_combine_config(num_ranks)
         tune_args = {
             "x": recv_x,
             "handle": handle,
@@ -832,7 +832,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     test_ll_compatibility, num_rdma_bytes = False, 0
     if test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
-        num_rdma_bytes = Buffer.get_low_latency_rdma_size_hint(
+        num_rdma_bytes = GrpCollBuffer.get_low_latency_rdma_size_hint(
             ll_num_tokens, ll_hidden, num_ranks, ll_num_experts
         )
         if local_rank == 0:
@@ -865,7 +865,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             flush=True,
         )
 
-    buffer = Buffer(
+    buffer = GrpCollBuffer(
         group,
         num_nvl_bytes=num_nvl_bytes,
         num_rdma_bytes=num_rdma_bytes,
