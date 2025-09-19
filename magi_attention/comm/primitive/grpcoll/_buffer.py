@@ -42,14 +42,14 @@ import torch.distributed as dist
 
 from magi_attention.magi_attn_comm import grpcoll
 
-from ._config import Config
+from ._config import GrpCollConfig
 from ._event import EventHandle, EventOverlap
 from .utils import check_nvlink_connections
 
-__all__ = ["Buffer"]
+__all__ = ["GrpCollBuffer"]
 
 
-class Buffer:
+class GrpCollBuffer:
     """
     The core expert-parallel (EP) communication buffers for Mixture of Experts (MoE) model, which supports:
         - high-throughput intranode all-to-all (dispatch and combine, using NVLink)
@@ -199,7 +199,7 @@ class Buffer:
         """
 
         assert new_num_sms % 2 == 0, "The SM count must be even"
-        Buffer.num_sms = new_num_sms
+        GrpCollBuffer.num_sms = new_num_sms
 
     @staticmethod
     def capture() -> EventOverlap:
@@ -282,7 +282,7 @@ class Buffer:
         return bias_0, bias_1
 
     @staticmethod
-    def get_dispatch_config(num_ranks: int) -> Config:
+    def get_dispatch_config(num_ranks: int) -> GrpCollConfig:
         """
         Get a recommended dispatch config.
 
@@ -295,22 +295,22 @@ class Buffer:
 
         # TODO: automatically tune
         config_map = {
-            2: Config(Buffer.num_sms, 24, 256, 6, 128),
-            4: Config(Buffer.num_sms, 6, 256, 6, 128),
-            8: Config(Buffer.num_sms, 6, 256, 6, 128),
-            16: Config(Buffer.num_sms, 36, 288, 20, 128),
-            24: Config(Buffer.num_sms, 8, 288, 32, 128),
-            32: Config(Buffer.num_sms, 32, 288, 32, 128),
-            64: Config(Buffer.num_sms, 20, 288, 28, 128),
-            128: Config(Buffer.num_sms, 20, 560, 32, 128),
-            144: Config(Buffer.num_sms, 32, 720, 12, 128),
-            160: Config(Buffer.num_sms, 28, 720, 12, 128),
+            2: GrpCollConfig(GrpCollBuffer.num_sms, 24, 256, 6, 128),
+            4: GrpCollConfig(GrpCollBuffer.num_sms, 6, 256, 6, 128),
+            8: GrpCollConfig(GrpCollBuffer.num_sms, 6, 256, 6, 128),
+            16: GrpCollConfig(GrpCollBuffer.num_sms, 36, 288, 20, 128),
+            24: GrpCollConfig(GrpCollBuffer.num_sms, 8, 288, 32, 128),
+            32: GrpCollConfig(GrpCollBuffer.num_sms, 32, 288, 32, 128),
+            64: GrpCollConfig(GrpCollBuffer.num_sms, 20, 288, 28, 128),
+            128: GrpCollConfig(GrpCollBuffer.num_sms, 20, 560, 32, 128),
+            144: GrpCollConfig(GrpCollBuffer.num_sms, 32, 720, 12, 128),
+            160: GrpCollConfig(GrpCollBuffer.num_sms, 28, 720, 12, 128),
         }
         assert num_ranks in config_map, f"Unsupported number of EP ranks: {num_ranks}"
         return config_map[num_ranks]
 
     @staticmethod
-    def get_combine_config(num_ranks: int) -> Config:
+    def get_combine_config(num_ranks: int) -> GrpCollConfig:
         """
         Get a recommended combine config.
 
@@ -323,16 +323,16 @@ class Buffer:
 
         # TODO: automatically tune
         config_map = {
-            2: Config(Buffer.num_sms, 10, 256, 6, 128),
-            4: Config(Buffer.num_sms, 9, 256, 6, 128),
-            8: Config(Buffer.num_sms, 4, 256, 6, 128),
-            16: Config(Buffer.num_sms, 4, 288, 12, 128),
-            24: Config(Buffer.num_sms, 1, 288, 8, 128),
-            32: Config(Buffer.num_sms, 1, 288, 8, 128),
-            64: Config(Buffer.num_sms, 1, 288, 20, 128),
-            128: Config(Buffer.num_sms, 1, 560, 12, 128),
-            144: Config(Buffer.num_sms, 2, 720, 8, 128),
-            160: Config(Buffer.num_sms, 2, 720, 8, 128),
+            2: GrpCollConfig(GrpCollBuffer.num_sms, 10, 256, 6, 128),
+            4: GrpCollConfig(GrpCollBuffer.num_sms, 9, 256, 6, 128),
+            8: GrpCollConfig(GrpCollBuffer.num_sms, 4, 256, 6, 128),
+            16: GrpCollConfig(GrpCollBuffer.num_sms, 4, 288, 12, 128),
+            24: GrpCollConfig(GrpCollBuffer.num_sms, 1, 288, 8, 128),
+            32: GrpCollConfig(GrpCollBuffer.num_sms, 1, 288, 8, 128),
+            64: GrpCollConfig(GrpCollBuffer.num_sms, 1, 288, 20, 128),
+            128: GrpCollConfig(GrpCollBuffer.num_sms, 1, 560, 12, 128),
+            144: GrpCollConfig(GrpCollBuffer.num_sms, 2, 720, 8, 128),
+            160: GrpCollConfig(GrpCollBuffer.num_sms, 2, 720, 8, 128),
         }
         assert num_ranks in config_map, f"Unsupported number of EP ranks: {num_ranks}"
         return config_map[num_ranks]
@@ -400,7 +400,7 @@ class Buffer:
         topk_weights: torch.Tensor | None = None,
         expert_alignment: int = 1,
         num_worst_tokens: int = 0,
-        config: Config | None = None,
+        config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
@@ -516,7 +516,7 @@ class Buffer:
                 channel_prefix_matrix,
                 expert_alignment,
                 num_worst_tokens,
-                config,
+                config.to_kernel_config(),
                 getattr(previous_event, "event", None),
                 async_finish,
                 allocate_on_comm_stream,
@@ -561,7 +561,7 @@ class Buffer:
                 None,
                 expert_alignment,
                 num_worst_tokens,
-                config,
+                config.to_kernel_config(),
                 getattr(previous_event, "event", None),
                 async_finish,
                 allocate_on_comm_stream,
@@ -590,7 +590,7 @@ class Buffer:
         combined_x: torch.Tensor | None = None,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
-        config: Config | None = None,
+        config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
@@ -650,7 +650,7 @@ class Buffer:
             is_recv_token_in_rank,
             send_head,
         ) = handle
-        bias_0, bias_1 = Buffer._unpack_bias(bias)
+        bias_0, bias_1 = GrpCollBuffer._unpack_bias(bias)
 
         # Launch the kernel
         combined_x, recv_topk_weights, event = self.runtime.intranode_combine(
@@ -663,7 +663,7 @@ class Buffer:
             rank_prefix_matrix,
             channel_prefix_matrix,
             send_head,
-            config,
+            config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,
@@ -683,7 +683,7 @@ class Buffer:
         topk_idx: torch.Tensor | None = None,
         topk_weights: torch.Tensor | None = None,
         expert_alignment: int = 1,
-        config: Config | None = None,
+        config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
@@ -752,7 +752,7 @@ class Buffer:
                 gbl_channel_prefix_matrix,
                 recv_gbl_rank_prefix_sum,
                 expert_alignment,
-                config,
+                config.to_kernel_config(),
                 getattr(previous_event, "event", None),
                 async_finish,
                 allocate_on_comm_stream,
@@ -804,7 +804,7 @@ class Buffer:
                 None,
                 None,
                 expert_alignment,
-                config,
+                config.to_kernel_config(),
                 getattr(previous_event, "event", None),
                 async_finish,
                 allocate_on_comm_stream,
@@ -837,7 +837,7 @@ class Buffer:
         handle: Union[tuple, list],
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
-        config: Config | None = None,
+        config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
@@ -862,7 +862,7 @@ class Buffer:
             send_rdma_head,
             send_nvl_head,
         ) = handle
-        bias_0, bias_1 = Buffer._unpack_bias(bias)
+        bias_0, bias_1 = GrpCollBuffer._unpack_bias(bias)
 
         # Launch the kernel
         combined_x, combined_topk_weights, event = self.runtime.internode_combine(
@@ -878,7 +878,7 @@ class Buffer:
             gbl_channel_prefix_matrix,
             send_rdma_head,
             send_nvl_head,
-            config,
+            config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,

@@ -12,6 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from magi_attention.magi_attn_comm.grpcoll import Config
+from dataclasses import dataclass
 
-__all__ = ["Config"]
+from magi_attention.magi_attn_comm import grpcoll
+
+__all__ = ["GrpCollConfig"]
+
+
+@dataclass(frozen=True)
+class GrpCollConfig:
+    num_sms: int = 24
+    nvl_chunk_size: int = 24
+    nvl_buffer_size: int = 256
+    rdma_chunk_size: int = 12
+    rdma_buffer_size: int = 128
+
+    def to_kernel_config(self) -> grpcoll.Config:
+        return grpcoll.Config(
+            self.num_sms,  # num_sms, default 20
+            self.nvl_chunk_size,  # num_max_nvl_chunked_send_tokens, default 6
+            self.nvl_buffer_size,  # num_max_nvl_chunked_recv_tokens, default 256
+            self.rdma_chunk_size,  # num_max_rdma_chunked_send_tokens, default 6
+            self.rdma_buffer_size,  # num_max_rdma_chunked_recv_tokens, default 256
+        )

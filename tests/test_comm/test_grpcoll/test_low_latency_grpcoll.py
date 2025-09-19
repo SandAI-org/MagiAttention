@@ -46,7 +46,7 @@ from magi_attention.comm.primitive.grpcoll import (
     group_cast_collective,
     group_reduce_collective,
 )
-from magi_attention.comm.primitive.grpcoll._buffer import Buffer
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.common.range_op import range_gather
 from magi_attention.testing.grpcoll_utils import (
     bench,
@@ -71,7 +71,7 @@ def test_main(
     rank: int,
     num_ranks: int,
     group: dist.ProcessGroup,
-    buffer: Buffer,
+    buffer: GrpCollBuffer,
     use_logfmt: bool = False,
     seed: int = 0,
 ):
@@ -558,7 +558,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_sms = (num_experts + num_warp_groups - 1) // num_warp_groups
 
     num_nvl_bytes = 0
-    num_rdma_bytes = Buffer.get_low_latency_rdma_size_hint(
+    num_rdma_bytes = GrpCollBuffer.get_low_latency_rdma_size_hint(
         num_tokens, hidden, num_ranks, num_experts
     )
     if local_rank == 0:
@@ -581,7 +581,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             flush=True,
         )
 
-    buffer = Buffer(
+    buffer = GrpCollBuffer(
         group,
         num_nvl_bytes=num_nvl_bytes,
         num_rdma_bytes=num_rdma_bytes,

@@ -44,8 +44,8 @@ from magi_attention.comm.primitive.grpcoll import (
     group_cast_collective,
     group_reduce_collective,
 )
-from magi_attention.comm.primitive.grpcoll._buffer import Buffer
-from magi_attention.comm.primitive.grpcoll._config import Config
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
+from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.common.range_op import range_gather
 from magi_attention.testing.grpcoll_utils import (
     bench,
@@ -71,7 +71,7 @@ def test_main(
     num_ranks: int,
     num_nodes: int,
     rank: int,
-    buffer: Buffer,
+    buffer: GrpCollBuffer,
     group: dist.ProcessGroup,
     use_topk: bool = True,
 ):
@@ -112,7 +112,7 @@ def test_main(
         )
 
     # Config
-    config = Config(
+    config = GrpCollConfig(
         num_sms,  # num_sms, default 20
         num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
         num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
@@ -688,7 +688,7 @@ def test_main(
         )
         for nvl_chunk_size in range(4, 45, 4):
             for rdma_chunk_size in range(4, 33, 4):
-                config = Config(
+                config = GrpCollConfig(
                     num_sms,
                     nvl_chunk_size,
                     nvl_buffer_size,
@@ -743,7 +743,7 @@ def test_main(
                 all_best_fp8_results_list, best_dispatch_results, group=group
             )
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
-    dispatch_config = Config(
+    dispatch_config = GrpCollConfig(
         best_dispatch_results[0],  # type: ignore[index]
         best_dispatch_results[1],  # type: ignore[index]
         nvl_buffer_size,
@@ -765,7 +765,7 @@ def test_main(
     best_time, best_results = 1e10, None
     for nvl_chunk_size in range(1, 8, 1):
         for rdma_chunk_size in range(12 if num_nodes == 2 else 8, 33, 4):
-            config = Config(
+            config = GrpCollConfig(
                 num_sms,
                 nvl_chunk_size,
                 nvl_buffer_size,
@@ -861,7 +861,7 @@ def test_loop(args: argparse.Namespace):
             flush=True,
         )
 
-    buffer = Buffer(
+    buffer = GrpCollBuffer(
         group,
         num_nvl_bytes,
         num_rdma_bytes,
