@@ -77,16 +77,31 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       static_cast<Element const*>(params.do_ptr),
       {params.do_row_stride, _1{}, params.do_head_stride}, // stride_dO
       static_cast<float*>(params.dsoftmax_sum),
-      {params.max_seqlen_q_rounded, params.h_qo, params.b}, // shape_dPsum
-      {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_dPsum
+      // {params.max_seqlen_q_rounded, params.h_qo, params.b}, // shape_dPsum
+      {_4{}, params.total_q_rounded, params.h_qo}, // shape_dPsum
+      //{_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_dPsum
+      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_dPsum
       {params.total_q, params.h_qo}, // shape_LSE
       static_cast<float*>(params.softmax_lse_ptr),
       {params.h_qo, _1{}}, // stride_LSE
       static_cast<float*>(params.softmax_lse_log2_ptr),
-      {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_LSE_log2
+      // {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_LSE_log2
+      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2
       params.q_ranges,
-      params.k_ranges};
+      params.k_ranges,
+      params.total_q,
+      params.total_q_rounded};
   typename PreprocessKernel::Params preprocess_params = PreprocessKernel::to_underlying_arguments(preprocess_args);
+  // int num_m_block = cute::ceil_div(params.max_seqlen_q, kBlockM);
+  int num_m_block = cute::ceil_div(params.total_q_rounded, kBlockM);
+  // dim3 grid_m(params.b, num_m_block, params.h_qo);
+  dim3 grid_m(1, num_m_block, params.h_qo);
+  cutlass::kernel_launch<PreprocessKernel>(grid_m,
+                                           PreprocessKernel::MaxThreadsPerBlock,
+                                           PreprocessKernel::SharedStorageSize,
+                                           stream,
+                                           preprocess_params,
+                                           false /*launch_with_pdl*/);
   int num_m_block = cute::ceil_div(params.max_seqlen_q, kBlockM);
   dim3 grid_m(params.b, num_m_block, params.h_qo);
   cutlass::kernel_launch<PreprocessKernel>(grid_m,
@@ -153,10 +168,13 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       {params.total_q, params.d, params.h_qo}, // shape_dQ
       {params.dq_row_stride, _1{}, params.dq_head_stride}, // stride_dQ
       static_cast<float*>(params.softmax_lse_log2_ptr),
-      {params.max_seqlen_q_rounded, params.h_qo, params.b}, // shape_LSE
-      {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_LSE_log2
+      // {params.max_seqlen_q_rounded, params.h_qo, params.b}, // shape_LSE
+      {_4{}, params.total_q_rounded, params.h_qo}, // shape_LSE
+      // {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_LSE_log2
+      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2
       static_cast<float*>(params.dsoftmax_sum),
-      {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_dPsum
+      // {_1{}, params.max_seqlen_q_rounded, params.h_qo * params.max_seqlen_q_rounded}, // stride_dPsum
+      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_dPsum
       params.scale_softmax,
       params.softcap,
       params.q_ranges,
@@ -197,6 +215,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   dim3 grid_dims = AttnKernel::get_grid_shape(kernel_params);
   dim3 block_dims = AttnKernel::get_block_shape();
   int smem_size = AttnKernel::SharedStorageSize;
+
   // int smem_size_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));
   // int smem_size_do = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_do));
   // int smem_size_ds = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_ds));
