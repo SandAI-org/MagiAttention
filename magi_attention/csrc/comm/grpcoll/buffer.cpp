@@ -677,7 +677,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     const Config& config,
     std::optional<EventHandle>& previous_event,
     bool async,
-    bool allocate_on_comm_stream) {
+    bool allocate_on_comm_stream,
+    bool allow_empty_init_out_buf) {
   EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
   EP_HOST_ASSERT(src_idx.dim() == 1 and src_idx.is_contiguous() and src_idx.scalar_type() == torch::kInt32);
   EP_HOST_ASSERT(send_head.dim() == 2 and send_head.is_contiguous() and send_head.scalar_type() == torch::kInt32);
@@ -742,14 +743,24 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       bias_ptrs[i] = bias.data_ptr();
     }
 
-  // Combine data
-  auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
+  // Allocate recv_x buffer
+  /** NOTE: different from ep, for group-reduce,
+   * some token in recv_x might not reduce anything,
+   * since the corr. token has no destination rank in the corr. group-cast
+   * so we have to zero-initialize recv_x, instead of empty initialization
+   * unless the user can guarantee that no such token exists
+   */
+  auto recv_x = allow_empty_init_out_buf ? torch::empty({num_recv_tokens, hidden}, x.options()) : torch::zeros({num_recv_tokens, hidden}, x.options());
+
+  // Check if the buffer size is enough
   EP_HOST_ASSERT(
       num_channels * num_ranks * sizeof(int) * 2 + // Queue head and tail
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * x.element_size() + // Data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // Source index buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) // Top-k weight buffer
       <= num_nvl_bytes);
+
+  // Launch combine kernel
   intranode::combine(
       at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
       recv_x.data_ptr(),
@@ -1198,7 +1209,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     const Config& config,
     std::optional<EventHandle>& previous_event,
     bool async,
-    bool allocate_on_comm_stream) {
+    bool allocate_on_comm_stream,
+    bool allow_empty_init_out_buf) {
 #ifndef DISABLE_NVSHMEM
   const int num_channels = config.num_sms / 2;
   EP_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -1295,8 +1307,16 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       bias_ptrs[i] = bias.data_ptr();
     }
 
+  // Allocate combined_x buffer
+  /** NOTE: different from ep, for group-reduce,
+   * some token in combined_x might not reduce anything,
+   * since the corr. token has no destination rank in the corr. group-cast
+   * so we have to zero-initialize combined_x, instead of empty initialization
+   * unless the user can guarantee that no such token exists
+   */
+  auto combined_x = allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden}, x.options()) : torch::zeros({num_combined_tokens, hidden}, x.options());
+
   // Launch data combine
-  auto combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
   internode::combine(
       at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
       combined_x.data_ptr(),

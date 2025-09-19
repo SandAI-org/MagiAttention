@@ -588,6 +588,7 @@ class Buffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
+        allow_empty_init_out_buf: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
         """
         Combine (reduce) tokens (addition **without** weights) from different ranks, both intranode and internode
@@ -605,6 +606,10 @@ class Buffer:
             previous_event: the event to wait before actually executing the kernel.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
+            allow_empty_init_out_buf: whether to allow empty initialize output buffers,
+                this is useful when the user knows that no token is missed to be reduced in the output buffer
+                such as during the ep communication scenario,
+                but it is unsafe to set it to True in the general group-reduce case
 
         Returns:
             recv_x: the reduced token from its dispatched ranks.
@@ -625,6 +630,7 @@ class Buffer:
                 previous_event,
                 async_finish,
                 allocate_on_comm_stream,
+                allow_empty_init_out_buf,
             )
 
         # NOTES: the second `_` is for the sending side, so we should use the third one
@@ -652,6 +658,7 @@ class Buffer:
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,
+            allow_empty_init_out_buf,
         )
         return recv_x, recv_topk_weights, EventOverlap(event)
 
@@ -821,6 +828,7 @@ class Buffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
+        allow_empty_init_out_buf: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
         """
         Internode combine implementation, for more details, please refer to the `combine` docs.
@@ -860,6 +868,7 @@ class Buffer:
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,
+            allow_empty_init_out_buf,
         )
         return combined_x, combined_topk_weights, EventOverlap(event)
 
