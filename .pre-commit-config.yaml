@@ -8,17 +8,23 @@ repos:
 -   repo: local
     hooks:
     -   id: copyright_checker
-        name: copyright_checker
+        name: check for copyright
         entry: python3 ./tools/codestyle/copyright.py
         language: system
         files: \.(c|cc|cxx|cpp|cu|cuh|h|hpp|hxx|proto|py|pyi|sh)$
-    -   id: check-for-chinese
+    -   id: chinese_checker
         name: check for Chinese characters
         entry: python3 ./tools/codestyle/check_for_chinese.py
         language: system
         pass_filenames: true
         always_run: true
-        files: \.(txt|md|yaml|c|cc|cxx|cpp|cu|h|hpp|hxx|proto|py|pyi|sh)$
+        files: \.(txt|md|yaml|c|cc|cxx|cpp|cu|cuh|h|hpp|hxx|proto|py|pyi|sh)$
+    -   id: csrc_code_formatter
+        name: check for csrc code format
+        entry: clang-format-21
+        language: system
+        files: ^magi_attention/csrc/.*\.(h|cuh|hpp|cpp|cu)$
+        args: ['-i']
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.4.0
     hooks:

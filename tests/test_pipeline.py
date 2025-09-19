@@ -30,11 +30,11 @@ from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
     DistAttnConfig,
+    MinHeapDispatchAlg,
     OverlapConfig,
     UniformOverlapAlg,
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
-from magi_attention.meta.solver.dispatch_solver import MinHeapDispatchAlg
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import (
     NAME,
@@ -378,7 +378,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         #   2. profile real comm/calc factors
         "overlap_config",
         [
-            # disable multi-stage overlap to roll back to the original code
+            # disable multi-stage overlap
             {
                 NAME: "disable_mso",
                 "enable": False,
@@ -494,6 +494,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         ):
             return
 
+        # -----    skip for mso   ---- #
+
+        if magi_attention.comm.is_qo_comm_enable():
+            # TODO: support mso for qo comm
+            if overlap_config[NAME] != "disable_mso":
+                return
+
         # -----    construct test case name   ---- #
 
         assert (
@@ -534,12 +541,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         chunk_size: int = attn_config["chunk_size"]
-
         num_heads_q, num_heads_kv = num_heads
 
         dist_attn_config = DistAttnConfig(
-            # TODO: test other dispatch algs
-            dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+            dispatch_config=DispatchConfig(
+                # TODO: test other dispatch algs
+                alg=MinHeapDispatchAlg()
+            ),
             overlap_config=OverlapConfig(
                 **{
                     k: v
@@ -605,6 +613,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 is_k_permutable=True,
                 dist_attn_config=dist_attn_config,
                 cp_mesh=self.device_mesh,
+                num_heads_q=num_heads_q,
+                num_heads_kv=num_heads_kv,
             )
             # HACK: seperate cp group for group-reduce
             dist_attn_runtime_mgr.dist_attn_runtime.cp_group_gr = self.nccl_groups[1]

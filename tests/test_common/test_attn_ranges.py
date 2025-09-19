@@ -20,6 +20,252 @@ from magi_attention.common.ranges import AttnRanges, is_valid_cu_seqlens
 
 
 class TestAttnRanges(TestCase):
+    def test_init(self):
+        """Test initialization"""
+        attn_ranges = AttnRanges()
+        self.assertEqual(len(attn_ranges), 0)
+        self.assertTrue(attn_ranges.is_empty())
+
+    def test_is_valid(self):
+        """Test validity check"""
+        # Empty ranges are always valid
+        attn_ranges = AttnRanges()
+        self.assertTrue(attn_ranges.is_valid())
+
+        # Add valid ranges
+        attn_ranges.append(AttnRange(0, 10))
+        self.assertTrue(attn_ranges.is_valid())
+
+    def test_check_valid(self):
+        """Test validity verification"""
+        attn_ranges = AttnRanges()
+        attn_ranges.append(AttnRange(0, 10))
+        attn_ranges.append(AttnRange(20, 30))
+
+        # All ranges are valid, should pass check
+        attn_ranges.check_valid()
+
+    def test_append(self):
+        """Test adding ranges"""
+        attn_ranges = AttnRanges()
+
+        # Test basic append
+        attn_ranges.append(AttnRange(0, 10))
+        self.assertEqual(len(attn_ranges), 1)
+        self.assertEqual(attn_ranges[0], AttnRange(0, 10))
+
+        # Test append with check
+        attn_ranges.append(AttnRange(10, 20), check=True)
+        self.assertEqual(len(attn_ranges), 2)
+
+    def test_from_ranges(self):
+        """Test creating AttnRanges from different types"""
+        # Create from AttnRanges
+        original = AttnRanges()
+        original.append(AttnRange(0, 10))
+        original.append(AttnRange(20, 30))
+
+        copied = AttnRanges.from_ranges(original)
+        self.assertEqual(copied, original)
+        self.assertIsNot(copied, original)  # Should be deep copy
+
+        # Create from AttnRange list
+        rect_range_list = [AttnRange(0, 10), AttnRange(20, 30)]
+        attn_ranges = AttnRanges.from_ranges(rect_range_list)
+        self.assertEqual(len(attn_ranges), 2)
+        self.assertEqual(attn_ranges[0], AttnRange(0, 10))
+        self.assertEqual(attn_ranges[1], AttnRange(20, 30))
+
+        # Create from NaiveRanges
+        naive_ranges = [(0, 10), (20, 30)]
+        attn_ranges = AttnRanges.from_ranges(naive_ranges)
+        self.assertEqual(len(attn_ranges), 2)
+        self.assertEqual(attn_ranges[0], AttnRange(0, 10))
+        self.assertEqual(attn_ranges[1], AttnRange(20, 30))
+
+        # Test creation with check
+        valid_ranges = [(0, 10), (20, 30)]
+        attn_ranges = AttnRanges.from_ranges(valid_ranges, check=True)
+        self.assertEqual(len(attn_ranges), 2)
+        self.assertEqual(attn_ranges[0], AttnRange(0, 10))
+        self.assertEqual(attn_ranges[1], AttnRange(20, 30))
+
+    def test_to_naive_ranges(self):
+        """Test conversion to naive ranges"""
+        attn_ranges = AttnRanges()
+        attn_ranges.append(AttnRange(0, 10))
+        attn_ranges.append(AttnRange(20, 30))
+
+        naive_ranges = attn_ranges.to_naive_ranges()
+        expected = [(0, 10), (20, 30)]
+        self.assertEqual(naive_ranges, expected)
+
+    def test_is_empty(self):
+        """Test empty check"""
+        attn_ranges = AttnRanges()
+        self.assertTrue(attn_ranges.is_empty())
+
+        attn_ranges.append(AttnRange(0, 10))
+        self.assertFalse(attn_ranges.is_empty())
+
+    def test_len(self):
+        """Test length"""
+        attn_ranges = AttnRanges()
+        self.assertEqual(len(attn_ranges), 0)
+
+        attn_ranges.append(AttnRange(0, 10))
+        self.assertEqual(len(attn_ranges), 1)
+
+        attn_ranges.append(AttnRange(20, 30))
+        self.assertEqual(len(attn_ranges), 2)
+
+    def test_getitem(self):
+        """Test index access"""
+        attn_ranges = AttnRanges()
+        attn_ranges.append(AttnRange(0, 10))
+        attn_ranges.append(AttnRange(20, 30))
+        attn_ranges.append(AttnRange(40, 50))
+
+        # Test single index
+        self.assertEqual(attn_ranges[0], AttnRange(0, 10))
+        self.assertEqual(attn_ranges[1], AttnRange(20, 30))
+        self.assertEqual(attn_ranges[2], AttnRange(40, 50))
+
+        # Test slicing
+        slice_result = attn_ranges[1:3]
+        self.assertIsInstance(slice_result, AttnRanges)
+        self.assertEqual(len(slice_result), 2)
+        self.assertEqual(slice_result[0], AttnRange(20, 30))
+        self.assertEqual(slice_result[1], AttnRange(40, 50))
+
+        # Test negative index
+        self.assertEqual(attn_ranges[-1], AttnRange(40, 50))
+        self.assertEqual(attn_ranges[-2], AttnRange(20, 30))
+
+    def test_setitem(self):
+        """Test index assignment"""
+        attn_ranges = AttnRanges()
+        attn_ranges.append(AttnRange(0, 10))
+        attn_ranges.append(AttnRange(20, 30))
+
+        # Test single index assignment
+        attn_ranges[0] = AttnRange(5, 15)
+        self.assertEqual(attn_ranges[0], AttnRange(5, 15))
+
+        # Test slice assignment
+        new_ranges = AttnRanges()
+        new_ranges.append(AttnRange(25, 35))
+        new_ranges.append(AttnRange(45, 55))
+
+        attn_ranges[1:3] = new_ranges
+        self.assertEqual(len(attn_ranges), 3)
+        self.assertEqual(attn_ranges[1], AttnRange(25, 35))
+        self.assertEqual(attn_ranges[2], AttnRange(45, 55))
+
+    def test_iter(self):
+        """Test iteration"""
+        attn_ranges = AttnRanges()
+        attn_ranges.append(AttnRange(0, 10))
+        attn_ranges.append(AttnRange(20, 30))
+
+        ranges_list = list(attn_ranges)
+        self.assertEqual(len(ranges_list), 2)
+        self.assertEqual(ranges_list[0], AttnRange(0, 10))
+        self.assertEqual(ranges_list[1], AttnRange(20, 30))
+
+    def test_eq(self):
+        """Test equality"""
+        attn_ranges1 = AttnRanges()
+        attn_ranges1.append(AttnRange(0, 10))
+        attn_ranges1.append(AttnRange(20, 30))
+
+        attn_ranges2 = AttnRanges()
+        attn_ranges2.append(AttnRange(0, 10))
+        attn_ranges2.append(AttnRange(20, 30))
+
+        self.assertEqual(attn_ranges1, attn_ranges2)
+
+        # Test different content
+        attn_ranges3 = AttnRanges()
+        attn_ranges3.append(AttnRange(0, 10))
+        attn_ranges3.append(AttnRange(25, 35))
+
+        self.assertNotEqual(attn_ranges1, attn_ranges3)
+
+        # Test different type objects
+        self.assertNotEqual(attn_ranges1, "not a rect ranges")
+
+    def test_hash(self):
+        """Test hashing"""
+        attn_ranges1 = AttnRanges()
+        attn_ranges1.append(AttnRange(0, 10))
+        attn_ranges1.append(AttnRange(20, 30))
+
+        attn_ranges2 = AttnRanges()
+        attn_ranges2.append(AttnRange(0, 10))
+        attn_ranges2.append(AttnRange(20, 30))
+
+        # Same content should have same hash value
+        self.assertEqual(hash(attn_ranges1), hash(attn_ranges2))
+
+        # Hash value should be hashable
+        hash_value = hash(attn_ranges1)
+        self.assertIsInstance(hash_value, int)
+
+    def test_repr(self):
+        """Test string representation"""
+        # Test empty ranges
+        empty_ranges = AttnRanges()
+        self.assertEqual(repr(empty_ranges), "[[,)]")
+
+        # Test non-empty ranges
+        attn_ranges = AttnRanges()
+        attn_ranges.append(AttnRange(0, 10))
+        attn_ranges.append(AttnRange(20, 30))
+
+        expected_repr = "[[0, 10), [20, 30)]"
+        self.assertEqual(repr(attn_ranges), expected_repr)
+
+    def test_edge_cases(self):
+        """Test edge cases"""
+        # Test various operations on empty ranges
+        empty_ranges = AttnRanges()
+
+        # Empty ranges should be valid
+        self.assertTrue(empty_ranges.is_valid())
+
+        # Empty ranges should have special string representation
+        self.assertEqual(repr(empty_ranges), "[[,)]")
+
+        # Empty ranges should have computable hash value
+        hash_value = hash(empty_ranges)
+        self.assertIsInstance(hash_value, int)
+
+        # Test single range
+        single_range = AttnRanges()
+        single_range.append(AttnRange(5, 10))
+
+        self.assertEqual(len(single_range), 1)
+        self.assertEqual(single_range[0], AttnRange(5, 10))
+        self.assertFalse(single_range.is_empty())
+
+    def test_invalid_operations(self):
+        """Test invalid operations"""
+        attn_ranges = AttnRanges()
+        attn_ranges.append(AttnRange(0, 10))
+        attn_ranges.append(AttnRange(20, 30))
+
+        # Test index out of bounds
+        with self.assertRaises(IndexError):
+            _ = attn_ranges[5]
+
+        # Test slice assignment length mismatch
+        new_ranges = AttnRanges()
+        new_ranges.append(AttnRange(25, 35))
+
+        with self.assertRaises(AssertionError):
+            attn_ranges[1:3] = new_ranges  # Length mismatch
+
     def test_make_ranges_local(self):
         # ---------    case1: w/o truncate     --------- #
         ranges = AttnRanges.from_ranges([(0, 10), (20, 30), (30, 35), (40, 50)])

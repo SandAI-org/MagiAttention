@@ -129,7 +129,7 @@ def sparse_attn_benchmark(
     max_seqlen_q = block_m
     max_seqlen_k = block_n
 
-    # prepare q, k ranges and caculate attn_flops
+    # prepare q, k ranges and calculate attn_flops
     # for now, we only do bench for block sparse mask.
     # block_mask, scores = generate_global_block_sparse_pattern(
     #    orig_head, num_q_blocks_orig, num_kv_blocks_orig, sparsity_ratio, device="cuda"

@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.abspath("../../"))
 project = "MagiAttention"
 copyright = "2025, Sandai"
 author = "Sandai"
-release = "v1.0.3"
+release = "main"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -118,7 +118,7 @@ html_theme_options = {
             "https://raw.githubusercontent.com/SandAI-org/MagiAttention/"
             "refs/heads/gh-pages/docs/versions.json"
         ),
-        "version_match": "1.0.3",
+        "version_match": "main",
     },
     "icon_links": [
         {

@@ -72,10 +72,53 @@ def ffa_bwd_sm_margin_save_for_comm() -> int:
 def is_qo_comm_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable query/output communication,
+    including fetching remote q (fwd), reducing partial out and lse (fwd),
+    fetching remote q,o,lse,do (bwd), reducing partial dq (bwd),
     to eliminate the restriction that communication is limited solely to key/value
 
     Default value is ``0``
 
-    NOTE: this feature is under development and not supported by now
+    NOTE: this feature is experimental and under development for now,
+    which dose NOT support neither multi-stage overlap nor hierarchical comm
     """
     return os.environ.get("MAGI_ATTENTION_QO_COMM", "0") == "1"
+
+
+def is_ffa_fwd_high_precision_reduce_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable high-precision (fp32) reduce
+    for partial out during dist-attn forward
+    to trade-off double comm overhead for increased precision and less dtype-cast overhead
+
+    Default value is ``0``
+
+    NOTE:
+    1. inside the ffa forward kernel, we always use high-precision (fp32) accumulation
+            for partial out
+
+    2. we always use high-precision (fp32) lse everywhere
+
+    3. this feature works for out only when enabling qo comm
+    """
+    return (
+        os.environ.get("MAGI_ATTENTION_FFA_FORWARD_HIGH_PRECISION_REDUCE", "0") == "1"
+    )
+
+
+def is_ffa_bwd_high_precision_reduce_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable high-precision (fp32) reduce
+    for partial dq,dk,dv during dist-attn backward
+    to trade-off double comm overhead for increased precision and less dtype-cast overhead
+
+    Default value is ``0``
+
+    NOTE:
+    1. inside the ffa backward kernel, we always use high-precision (fp32) accumulation
+        for partial dq,dk,dv
+
+    2. this feature works for dq only when enabling qo comm
+    """
+    return (
+        os.environ.get("MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE", "0") == "1"
+    )

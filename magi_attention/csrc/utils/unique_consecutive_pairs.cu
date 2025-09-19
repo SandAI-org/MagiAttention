@@ -62,6 +62,21 @@ __global__ void gather_uniques(const IntPair* sorted_pairs, const int* d_flags, 
   }
 }
 
+/**
+ * @brief Sets the last element of an array to a specific value.
+ * The index at which to write is provided by a pointer to a device integer.
+ * This kernel is intended to be launched with a single block and a single thread.
+ *
+ * @param d_array The device array to modify.
+ * @param d_index A device pointer to an integer that holds the index where the value should be written.
+ * @param value The integer value to write.
+ */
+__global__ void set_last_element(int* d_array, const int* d_index, int value) {
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    d_array[*d_index] = value;
+  }
+}
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs_ext(torch::Tensor sorted_input_tensor) {
   // check input tensor
   TORCH_CHECK(sorted_input_tensor.is_cuda(), "Input tensor must be a CUDA tensor");
@@ -73,7 +88,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
   if (n == 0) {
     return {
         torch::empty({0, 2}, sorted_input_tensor.options()),
-        torch::empty({0}, sorted_input_tensor.options().dtype(torch::kInt32)),
+        torch::empty({1}, sorted_input_tensor.options().dtype(torch::kInt32)).zero_(), // Return [0] for indices
         torch::empty({0}, sorted_input_tensor.options().dtype(torch::kInt32))};
   }
 
@@ -113,8 +128,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
 
   // d_unique_pairs_out: The unique out tensor, elements with index >= d_unique_count_out are undefined value.
   // d_unique_indices_out: Original indices of the unique items
+  // Allocate n+1 for d_unique_indices_out to hold the final element.
   auto d_unique_pairs_out = torch::empty({h_unique_n, 2}, sorted_input_tensor.options());
-  auto d_unique_indices_out = torch::empty({h_unique_n}, sorted_input_tensor.options().dtype(torch::kInt32));
+  auto d_unique_indices_out = torch::empty({h_unique_n + 1}, sorted_input_tensor.options().dtype(torch::kInt32));
 
   // ---  Pass 3: Gather the unique items and their original indices ---
   if (h_unique_n > 0) {
@@ -125,6 +141,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
         d_sorted_pairs_ptr, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), d_unique_out_ptr, d_unique_indices_out.data_ptr<int>(), n);
     CHECK_CUDA_KERNEL_LAUNCH();
   }
+
+  // --- Pass 4: Append the total length `n` to d_unique_indices_out ---
+  // This makes calculating the size of each consecutive group easier on the caller side.
+  // The size of group `i` is then `unique_indices[i+1] - unique_indices[i]`.
+  // The value of d_unique_count_out (on the device) is the index where we need to write `n`.
+  set_last_element<<<1, 1>>>(d_unique_indices_out.data_ptr<int>(), d_unique_count_out.data_ptr<int>(), n);
+  CHECK_CUDA_KERNEL_LAUNCH();
 
   return {d_unique_pairs_out, d_unique_indices_out, d_unique_count_out};
 }

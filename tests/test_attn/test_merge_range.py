@@ -57,11 +57,7 @@ class TestMergeRange(TestCase):
             sorted_outer_ranges
         )
 
-        left_shifted_part = range_map[1 : unique_count.item()]
-        n_tensor = torch.tensor(
-            [outer_ranges.size(0)], device=range_map.device, dtype=range_map.dtype
-        )
-        range_map = torch.cat([left_shifted_part, n_tensor])
+        range_map = range_map[1 : unique_count.item() + 1]
 
         return (
             merge_outer_ranges[: unique_count.item()],

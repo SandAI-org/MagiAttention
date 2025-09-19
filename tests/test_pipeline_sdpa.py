@@ -101,7 +101,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         return torch.cuda.current_device()
 
     @property
-    def process_group(self):
+    def process_group(self) -> dist.ProcessGroup:
         return dist.distributed_c10d._get_default_group()
 
     @property
@@ -589,7 +589,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         #   2. profile real comm/calc factors
         "overlap_config",
         [
-            # disable multi-stage overlap to roll back to the original code
+            # disable multi-stage overlap
             {
                 NAME: "disable_mso",
                 "enable": False,
@@ -675,6 +675,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         ):
             return
 
+        # -----    skip for mso   ---- #
+
+        if magi_attention.comm.is_qo_comm_enable():
+            # TODO: support mso for qo comm
+            if overlap_config[NAME] != "disable_mso":
+                return
+
         # -----    construct test case name   ---- #
 
         assert (
@@ -707,8 +714,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         num_heads_q, num_heads_kv = num_heads
 
         dist_attn_config = DistAttnConfig(
-            # TODO: test other dispatch algs
-            dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+            dispatch_config=DispatchConfig(
+                # TODO: test other dispatch algs
+                alg=MinHeapDispatchAlg()
+            ),
             overlap_config=OverlapConfig(
                 **{k: v for k, v in overlap_config.items() if k not in (NAME,)},
                 calc_cost_factor=get_calc_cost_factor(

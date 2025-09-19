@@ -76,13 +76,13 @@ struct Flash_fwd_params : public Qkv_params {
   float softcap;
 
   // Ranges params (The triplet determines the specific computation)
-  int* __restrict__ q_ranges;
-  int* __restrict__ k_ranges;
+  int2* __restrict__ q_ranges;
+  int2* __restrict__ k_ranges;
   int* __restrict__ attn_type_map;
 
   // RangeMerge params
   int merge_batch_size;
-  int* __restrict__ merge_q_ranges;
+  int2* __restrict__ merge_q_ranges;
   int* __restrict__ qk_map;
   int* __restrict__ unique_count;
 
@@ -111,7 +111,7 @@ struct Flash_bwd_params : public Flash_fwd_params {
   using index_t = int64_t;
 
   // RangeMerge params
-  int* __restrict__ merge_k_ranges;
+  int2* __restrict__ merge_k_ranges;
   int* __restrict__ bwd_kq_map;
   int* __restrict__ bwd_unique_count;
 

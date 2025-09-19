@@ -71,6 +71,7 @@ enum class FwdNamedBarriers {
   QueryRotated = 5,
   PFull = 6,
   PEmpty = 7,
+  Meta = 8,
 };
 
 enum class BwdNamedBarriers {

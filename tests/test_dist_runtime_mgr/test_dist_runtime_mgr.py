@@ -41,10 +41,6 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             dist.new_group(list(range(self.world_size)), backend="nccl")
             for _ in range(2)
         ]
-        self.gloo_groups = [
-            dist.new_group(list(range(self.world_size)), backend="gloo")
-            for _ in range(1)
-        ]
 
         # -----    set up for hier comm   ---- #
 
@@ -66,10 +62,6 @@ class TestDistAttnRuntimeMgr(DistTestBase):
     @property
     def nccl_group(self) -> dist.ProcessGroup:
         return self.nccl_groups[0]
-
-    @property
-    def gloo_group(self) -> dist.ProcessGroup:
-        return self.gloo_groups[0]
 
     @property
     def world_size(self) -> int:

@@ -126,8 +126,8 @@ struct CollectiveEpilogueBwd {
     StridedKV const stride_dV;
     int const num_heads_q;
     int const num_heads_kv;
-    int const* q_ranges;
-    int const* k_ranges;
+    int2 const* q_ranges;
+    int2 const* k_ranges;
     int* determin_range_locks = nullptr;
   };
 
@@ -139,8 +139,8 @@ struct CollectiveEpilogueBwd {
     Element* ptr_dV;
     StridedKV const stride_dV;
     TMA_dKV tma_store_dK, tma_store_dV;
-    int const* q_ranges;
-    int const* k_ranges;
+    int2 const* q_ranges;
+    int2 const* k_ranges;
     cutlass::FastDivmod qhead_per_khead_divmod;
     int const nheads;
     int* determin_range_locks = nullptr;
