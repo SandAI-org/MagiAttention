@@ -143,6 +143,7 @@ def transfer_group_cast_meta_to_dispatch_meta(
         input_split_size_list, dtype=dtype, device=device
     )
 
+    # construct topk_idx and topk_weights if use_topk
     if use_topk:
         assert num_local_experts == num_ranks
         topk_idx = torch.full(
@@ -193,7 +194,6 @@ def transfer_group_cast_meta_to_dispatch_meta(
     )
     for split_idx in range(num_splits):
         num_dst_ranks = len(dst_indices_list[split_idx])
-        assert num_dst_ranks > 0, "For now, we only support non-empty dst_indices_list"
         rank_idx[split_idx, :num_dst_ranks] = torch.tensor(
             sorted(dst_indices_list[split_idx], reverse=True)
         )
@@ -213,9 +213,9 @@ def transfer_group_cast_meta_to_dispatch_meta(
     # num_tokens_per_rank[r]: the number of tokens sent to rank r by this rank
     # num_tokens_per_rdma_rank[r]: the number of tokens sent to RDMA rank r by this rank
     # is_token_in_rank[j][r]: whether jth token is sent to rank r
-    num_tokens_per_rank = torch.empty((num_ranks,), dtype=torch.int, device="cuda")
+    num_tokens_per_rank = torch.empty((num_ranks,), dtype=torch.int, device=device)
     token_idx_in_rank = torch.full(
-        (num_ranks, num_tokens), -1, dtype=torch.long, device="cuda"
+        (num_ranks, num_tokens), -1, dtype=torch.long, device=device
     )
     for i in range(num_ranks):
         num_tokens_per_rank[i] = (
@@ -231,7 +231,7 @@ def transfer_group_cast_meta_to_dispatch_meta(
         tokens[:count] = torch.sort(tokens[:count])[0]
         # after this step, token_idx_in_rank[r][j]: for rank r, the order idx of jth token to send (-1 means not sent)
         token_idx_in_rank[i][tokens[:count]] = torch.arange(
-            count, dtype=torch.long, device="cuda"
+            count, dtype=torch.long, device=device
         )
     # after this step, token_idx_in_rank[j][r]: for jth token, its order idx to send to rank r (-1 means not sent)
     token_idx_in_rank = token_idx_in_rank.T.contiguous().to(torch.int)
@@ -240,7 +240,7 @@ def transfer_group_cast_meta_to_dispatch_meta(
 
     if num_nodes > 1:
         num_tokens_per_rdma_rank = torch.empty(
-            (num_nodes,), dtype=torch.int, device="cuda"
+            (num_nodes,), dtype=torch.int, device=device
         )
         for i in range(num_nodes):
             num_tokens_per_rdma_rank[i] = (rdma_rank_idx == i).sum()
@@ -251,7 +251,7 @@ def transfer_group_cast_meta_to_dispatch_meta(
     # num_tokens_per_expert[e]: the number of tokens sent to expert e by this rank
     if use_topk:
         num_tokens_per_expert = torch.zeros(
-            (num_experts,), dtype=torch.int, device="cuda"
+            (num_experts,), dtype=torch.int, device=device
         )
         for i in range(num_experts):
             num_tokens_per_expert[i] = (topk_idx == i).sum()

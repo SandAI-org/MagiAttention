@@ -94,6 +94,9 @@ def group_cast_collective(
     )
 
     if magi_attention.comm.is_hierarchical_comm_enable():
+        assert (
+            not magi_attention.comm.is_native_grpcoll_enable()
+        ), "Hierarchical group-cast is not compatible with native grpcoll implementation"
         # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-cast
         return hier_group_cast_impl_with_a2av(
             input_tensor=input,
@@ -106,6 +109,12 @@ def group_cast_collective(
             async_op=async_op,
             **kwargs,
         )
+
+    if magi_attention.comm.is_native_grpcoll_enable():
+        # XXX: a workaround to implement native group-cast
+        # by original deep-ep dispatch kernels
+        # with pre-meta-args processing and post-output processing
+        pass
 
     # ---------    calc group cast a2a args     --------- #
 
@@ -225,6 +234,10 @@ def group_reduce_collective(
     )
 
     if magi_attention.comm.is_hierarchical_comm_enable():
+        assert (
+            not magi_attention.comm.is_native_grpcoll_enable()
+        ), "Hierarchical group-reduce is not compatible with native grpcoll implementation"
+
         # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-reduce
         return hier_group_reduce_impl_with_a2av(
             input_tensor=input,
@@ -240,6 +253,12 @@ def group_reduce_collective(
             output_lse=output_lse,
             **kwargs,
         )
+
+    if magi_attention.comm.is_native_grpcoll_enable():
+        # XXX: a workaround to implement native group-reduce
+        # by original deep-ep combine kernels
+        # with pre-meta-args processing and pre-input processing
+        pass
 
     # ---------    calc group reduce a2a args     --------- #
 

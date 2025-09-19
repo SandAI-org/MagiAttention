@@ -122,3 +122,14 @@ def is_ffa_bwd_high_precision_reduce_enable() -> bool:
     return (
         os.environ.get("MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE", "0") == "1"
     )
+
+
+def is_native_grpcoll_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable native grpcoll comm kernel implementation
+
+    Default value is ``0``
+
+    NOTE: this feature for now is experimental and under early development
+    """
+    return os.environ.get("MAGI_ATTENTION_NATIVE_GRPCOLL", "0") == "1"

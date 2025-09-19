@@ -81,6 +81,10 @@ def test_main(
     distinct_token = True
     random_permute_output = True
     sim_gemm_weight = 2.0
+    min_num_dst_ranks = 0
+    allow_empty_init_out_buf = (
+        min_num_dst_ranks > 0
+    )  # if every token has at least one dst, we can empty-init
 
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     num_local_experts = num_experts // num_ranks
@@ -149,8 +153,11 @@ def test_main(
     num_input_splits = 10
     input_split_size_list = get_random_split_size_list(num_tokens, num_input_splits)
     dst_indices_list = get_random_dst_indices_list(
-        num_input_splits, num_ranks, min_num_dst_ranks=1
-    )  # HACK: for now, empty dst rank is not supported
+        num_splits=num_input_splits,
+        num_ranks=num_ranks,
+        min_num_dst_ranks=min_num_dst_ranks,
+        max_num_dst_ranks=None,
+    )
     (
         output_split_size_list,
         src_index_list,
@@ -551,6 +558,7 @@ def test_main(
                         "handle": handle,
                         "config": config,
                         "async_finish": async_mode,
+                        "allow_empty_init_out_buf": allow_empty_init_out_buf,
                     }
                     if with_topk:
                         combine_args.update({"topk_weights": recv_topk_weights})
@@ -600,12 +608,23 @@ def test_main(
                     # check_x =
                     #   (combined_x.float() - bias_0.float() - bias_1.float())
                     #   / is_token_in_rank.sum(dim=1).unsqueeze(1)
-                    check_x = (combined_x.float()) / is_token_in_rank.sum(
-                        dim=1
-                    ).unsqueeze(1)
+
+                    send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
+                    check_x = combined_x.float() / send_token_nums
                     ref_x = x_pure_rand if current_x is x_pure_rand else x
                     ref_x = sim_gemm(ref_x, w=sim_gemm_weight)
-                    assert calc_diff(check_x, ref_x) < 5e-6
+
+                    # if some token is not sent to any rank, the combined token should be 0
+                    if min_num_dst_ranks == 0:
+                        zero_num_dst_ranks_mask = (send_token_nums == 0.0).expand_as(
+                            combined_x
+                        )
+                        check_x[zero_num_dst_ranks_mask] = 0.0
+                        ref_x[zero_num_dst_ranks_mask] = 0.0
+
+                    diff = calc_diff(check_x, ref_x)
+                    assert diff < 5e-6, f"{check_x} != {ref_x} with ({diff=})"
+
                     if with_topk:
                         check_topk_weights = (
                             combined_topk_weights
@@ -738,7 +757,12 @@ def test_main(
                 rdma_chunk_size,
                 rdma_buffer_size,
             )
-            tune_args = {"x": recv_x, "handle": handle, "config": config}
+            tune_args = {
+                "x": recv_x,
+                "handle": handle,
+                "config": config,
+                "allow_empty_init_out_buf": allow_empty_init_out_buf,
+            }
             t, notify_t = bench_kineto(
                 lambda: buffer.combine(**tune_args), ("combine", "notify")
             )

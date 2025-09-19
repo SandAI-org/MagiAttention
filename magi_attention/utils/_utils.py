@@ -16,6 +16,7 @@ import functools
 import hashlib
 import os
 import random
+import socket
 import warnings
 from contextlib import contextmanager
 from random import getstate as python_get_rng_state
@@ -141,6 +142,47 @@ def setup_dist_env(
 
 def clearup_dist_env() -> None:
     dist.destroy_process_group()
+
+
+def are_all_ranks_on_same_host(group: dist.ProcessGroup = None) -> bool:
+    """
+    Checks if all ranks within a given ProcessGroup are running on the same host node.
+
+    This function works by having each rank gather its hostname and then comparing
+    these hostnames across the entire group.
+
+    Args:
+        group (dist.ProcessGroup, optional): The process group to check.
+                                             If None, the default process group is used.
+
+    Returns:
+        bool: True if all ranks are on the same host; False otherwise.
+
+    Raises:
+        RuntimeError: If torch.distributed has not been initialized.
+    """
+    if not dist.is_initialized():
+        raise RuntimeError(
+            "torch.distributed has not been initialized. Call dist.init_process_group first."
+        )
+
+    # Get the hostname of the current process
+    current_hostname = socket.gethostname()
+
+    # Create a list to store hostnames from all ranks in the group.
+    # all_gather_object requires a list as an output buffer,
+    # and its size must match the world size of the group.
+    world_size = dist.get_world_size(group)
+    gathered_hostnames = [None] * world_size
+
+    # Use all_gather_object to collect the current hostname from all ranks in the group.
+    # Note: all_gather_object is a blocking operation; all ranks must call it.
+    dist.all_gather_object(gathered_hostnames, current_hostname, group)
+
+    # Check if all gathered hostnames are identical.
+    # If the set of hostnames has only one unique element, it means all ranks
+    # are on the same host.
+    return len(set(gathered_hostnames)) == 1
 
 
 NestedIntList: TypeAlias = Union[list[int], tuple[int, ...], Sequence["NestedIntList"]]
