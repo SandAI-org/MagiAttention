@@ -371,6 +371,7 @@ std::tuple<
     std::optional<EventHandle>>
 Buffer::intranode_dispatch(
     const torch::Tensor& x,
+    std::optional<torch::Tensor>& recv_x_buf,
     const std::optional<torch::Tensor>& x_scales,
     const std::optional<torch::Tensor>& topk_idx,
     const std::optional<torch::Tensor>& topk_weights,
@@ -554,8 +555,16 @@ Buffer::intranode_dispatch(
     }
   }
 
+  // Allocate recv_x buffer
+  auto recv_x = torch::Tensor();
+  if (!recv_x_buf.has_value()) {
+    recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
+  } else {
+    EP_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens and recv_x_buf->size(1) == hidden);
+    recv_x = recv_x_buf.value();
+  }
+
   // Allocate new tensors
-  auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
   auto recv_src_idx = torch::empty({num_recv_tokens}, dtype(torch::kInt32).device(torch::kCUDA));
   auto recv_topk_idx = std::optional<torch::Tensor>(), recv_topk_weights = std::optional<torch::Tensor>(), recv_x_scales = std::optional<torch::Tensor>();
   auto recv_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -667,6 +676,7 @@ Buffer::intranode_dispatch(
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::intranode_combine(
     const torch::Tensor& x,
+    std::optional<torch::Tensor>& combined_x_buf,
     const std::optional<torch::Tensor>& topk_weights,
     const std::optional<torch::Tensor>& bias_0,
     const std::optional<torch::Tensor>& bias_1,
@@ -690,7 +700,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   int num_channels = config.num_sms / 2;
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1));
-  auto num_recv_tokens = static_cast<int>(send_head.size(0));
+  auto num_combined_tokens = static_cast<int>(send_head.size(0));
   EP_HOST_ASSERT(src_idx.size(0) == num_tokens);
   EP_HOST_ASSERT(send_head.size(1) == num_ranks);
   EP_HOST_ASSERT(rank_prefix_matrix.size(0) == num_ranks and rank_prefix_matrix.size(1) == num_ranks);
@@ -722,14 +732,22 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     EP_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
     num_topk = static_cast<int>(topk_weights->size(1));
     topk_weights_ptr = topk_weights->data_ptr<float>();
-    recv_topk_weights = torch::empty({num_recv_tokens, num_topk}, topk_weights->options());
+    recv_topk_weights = torch::empty({num_combined_tokens, num_topk}, topk_weights->options());
     recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
   }
 
   // Launch barrier and reset queue head and tail
   EP_HOST_ASSERT(num_channels * num_ranks * sizeof(int) * 2 <= num_nvl_bytes);
   intranode::cached_notify_combine(
-      buffer_ptrs_gpu, send_head.data_ptr<int>(), num_channels, num_recv_tokens, num_channels * num_ranks * 2, barrier_signal_ptrs_gpu, rank, num_ranks, comm_stream);
+      buffer_ptrs_gpu,
+      send_head.data_ptr<int>(),
+      num_channels,
+      num_combined_tokens,
+      num_channels * num_ranks * 2,
+      barrier_signal_ptrs_gpu,
+      rank,
+      num_ranks,
+      comm_stream);
 
   // Assign bias pointers
   auto bias_opts = std::vector<std::optional<torch::Tensor>>({bias_0, bias_1});
@@ -739,18 +757,24 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       auto bias = bias_opts[i].value();
       EP_HOST_ASSERT(bias.dim() == 2 and bias.is_contiguous());
       EP_HOST_ASSERT(bias.scalar_type() == x.scalar_type());
-      EP_HOST_ASSERT(bias.size(0) == num_recv_tokens and bias.size(1) == hidden);
+      EP_HOST_ASSERT(bias.size(0) == num_combined_tokens and bias.size(1) == hidden);
       bias_ptrs[i] = bias.data_ptr();
     }
 
-  // Allocate recv_x buffer
+  // Allocate combined_x buffer
   /** NOTE: different from ep, for group-reduce,
-   * some token in recv_x might not reduce anything,
+   * some token in combined_x might not reduce anything,
    * since the corr. token has no destination rank in the corr. group-cast
-   * so we have to zero-initialize recv_x, instead of empty initialization
+   * so we have to zero-initialize combined_x, instead of empty initialization
    * unless the user can guarantee that no such token exists
    */
-  auto recv_x = allow_empty_init_out_buf ? torch::empty({num_recv_tokens, hidden}, x.options()) : torch::zeros({num_recv_tokens, hidden}, x.options());
+  auto combined_x = torch::Tensor();
+  if (!combined_x_buf.has_value()) {
+    combined_x = allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden}, x.options()) : torch::zeros({num_combined_tokens, hidden}, x.options());
+  } else {
+    EP_HOST_ASSERT(combined_x_buf->size(0) == num_combined_tokens and combined_x_buf->size(1) == hidden);
+    combined_x = combined_x_buf.value();
+  }
 
   // Check if the buffer size is enough
   EP_HOST_ASSERT(
@@ -763,7 +787,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   // Launch combine kernel
   intranode::combine(
       at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
-      recv_x.data_ptr(),
+      combined_x.data_ptr(),
       recv_topk_weights_ptr,
       x.data_ptr(),
       topk_weights_ptr,
@@ -774,7 +798,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       channel_prefix_matrix.data_ptr<int>(),
       send_head.data_ptr<int>(),
       num_tokens,
-      num_recv_tokens,
+      num_combined_tokens,
       hidden,
       num_topk,
       buffer_ptrs_gpu,
@@ -789,7 +813,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   std::optional<EventHandle> event;
   if (async) {
     event = EventHandle(comm_stream);
-    for (auto& t : {x, src_idx, send_head, rank_prefix_matrix, channel_prefix_matrix, recv_x}) {
+    for (auto& t : {x, src_idx, send_head, rank_prefix_matrix, channel_prefix_matrix, combined_x}) {
       t.record_stream(comm_stream);
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
@@ -807,7 +831,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   if (allocate_on_comm_stream)
     at::cuda::setCurrentCUDAStream(compute_stream);
 
-  return {recv_x, recv_topk_weights, event};
+  return {combined_x, recv_topk_weights, event};
 }
 
 std::tuple<
@@ -828,6 +852,7 @@ std::tuple<
     std::optional<EventHandle>>
 Buffer::internode_dispatch(
     const torch::Tensor& x,
+    std::optional<torch::Tensor>& recv_x_buf,
     const std::optional<torch::Tensor>& x_scales,
     const std::optional<torch::Tensor>& topk_idx,
     const std::optional<torch::Tensor>& topk_weights,
@@ -1059,8 +1084,16 @@ Buffer::internode_dispatch(
     num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
   }
 
+  // Allocate recv_x buffer
+  auto recv_x = torch::Tensor();
+  if (!recv_x_buf.has_value()) {
+    recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
+  } else {
+    EP_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens and recv_x_buf->size(1) == hidden);
+    recv_x = recv_x_buf.value();
+  }
+
   // Allocate new tensors
-  auto recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
   auto recv_topk_idx = std::optional<torch::Tensor>(), recv_topk_weights = std::optional<torch::Tensor>(), recv_x_scales = std::optional<torch::Tensor>();
   auto recv_src_meta = std::optional<torch::Tensor>();
   auto recv_rdma_channel_prefix_matrix = std::optional<torch::Tensor>();
@@ -1196,6 +1229,7 @@ Buffer::internode_dispatch(
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::internode_combine(
     const torch::Tensor& x,
+    std::optional<torch::Tensor>& combined_x_buf,
     const std::optional<torch::Tensor>& topk_weights,
     const std::optional<torch::Tensor>& bias_0,
     const std::optional<torch::Tensor>& bias_1,
@@ -1314,7 +1348,13 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
    * so we have to zero-initialize combined_x, instead of empty initialization
    * unless the user can guarantee that no such token exists
    */
-  auto combined_x = allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden}, x.options()) : torch::zeros({num_combined_tokens, hidden}, x.options());
+  auto combined_x = torch::Tensor();
+  if (!combined_x_buf.has_value()) {
+    combined_x = allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden}, x.options()) : torch::zeros({num_combined_tokens, hidden}, x.options());
+  } else {
+    EP_HOST_ASSERT(combined_x_buf->size(0) == num_combined_tokens and combined_x_buf->size(1) == hidden);
+    combined_x = combined_x_buf.value();
+  }
 
   // Launch data combine
   internode::combine(

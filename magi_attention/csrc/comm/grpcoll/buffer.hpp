@@ -169,6 +169,7 @@ struct Buffer {
       std::optional<EventHandle>>
   intranode_dispatch(
       const torch::Tensor& x,
+      std::optional<torch::Tensor>& recv_x_buf,
       const std::optional<torch::Tensor>& x_scales,
       const std::optional<torch::Tensor>& topk_idx,
       const std::optional<torch::Tensor>& topk_weights,
@@ -187,6 +188,7 @@ struct Buffer {
 
   std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> intranode_combine(
       const torch::Tensor& x,
+      std::optional<torch::Tensor>& combined_x_buf,
       const std::optional<torch::Tensor>& topk_weights,
       const std::optional<torch::Tensor>& bias_0,
       const std::optional<torch::Tensor>& bias_1,
@@ -218,6 +220,7 @@ struct Buffer {
       std::optional<EventHandle>>
   internode_dispatch(
       const torch::Tensor& x,
+      std::optional<torch::Tensor>& recv_x_buf,
       const std::optional<torch::Tensor>& x_scales,
       const std::optional<torch::Tensor>& topk_idx,
       const std::optional<torch::Tensor>& topk_weights,
@@ -239,6 +242,7 @@ struct Buffer {
 
   std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> internode_combine(
       const torch::Tensor& x,
+      std::optional<torch::Tensor>& combined_x_buf,
       const std::optional<torch::Tensor>& topk_weights,
       const std::optional<torch::Tensor>& bias_0,
       const std::optional<torch::Tensor>& bias_1,

@@ -85,6 +85,7 @@ def test_main(
     allow_empty_init_out_buf = (
         min_num_dst_ranks > 0
     )  # if every token has at least one dst, we can empty-init
+    pass_out_buffer = True
 
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     num_local_experts = num_experts // num_ranks
@@ -172,6 +173,7 @@ def test_main(
     recv_x_gc = torch.empty(
         (sum(output_split_size_list), *x.shape[1:]), dtype=torch.bfloat16, device="cuda"
     )
+    recv_x_gc_buf = recv_x_gc.clone() if pass_out_buffer else None
     work_with_pf_gc = group_cast_collective(
         input=x,
         output=recv_x_gc,
@@ -187,6 +189,7 @@ def test_main(
     # get ref combine output by group-reduce
     x_gr = sim_gemm(recv_x_gc, w=sim_gemm_weight)
     combined_x_gr = torch.zeros_like(x)
+    combined_x_gr_buf = combined_x_gr.clone() if pass_out_buffer else None
     work_with_pf_gr = group_reduce_collective(
         input=x_gr,
         output=combined_x_gr,
@@ -331,6 +334,7 @@ def test_main(
                         )
                     dispatch_args = {
                         "x": current_x,
+                        "recv_x": recv_x_gc_buf,
                         "num_tokens_per_rank": num_tokens_per_rank,
                         "num_tokens_per_rdma_rank": num_tokens_per_rdma_rank,
                         "is_token_in_rank": is_token_in_rank,
@@ -409,6 +413,11 @@ def test_main(
 
                     # wait
                     event.current_stream_wait() if async_mode else ()
+
+                    # check in-place
+                    if pass_out_buffer:
+                        assert recv_x_gc_buf is not None
+                        assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()  # type: ignore[union-attr]
 
                     # unpermute recv_x to the order indicated by
                     # output_split_size_list and src_index_list
@@ -554,6 +563,7 @@ def test_main(
                     # bias_1 = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
                     combine_args = {
                         "x": x_combine,
+                        "combined_x": combined_x_gr_buf,
                         "bias": None,
                         "handle": handle,
                         "config": config,
@@ -588,6 +598,11 @@ def test_main(
 
                     # wait
                     event.current_stream_wait() if async_mode else ()
+
+                    # check in-place
+                    if pass_out_buffer:
+                        assert combined_x_gr_buf is not None
+                        assert combined_x_gr_buf.data_ptr() == combined_x.data_ptr()
 
                     # print
                     combined_topk_weights_shape = (

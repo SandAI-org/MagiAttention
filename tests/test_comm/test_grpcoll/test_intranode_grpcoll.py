@@ -89,6 +89,7 @@ def test_main(
     allow_empty_init_out_buf = (
         min_num_dst_ranks > 0
     )  # if every token has at least one dst, we can empty-init
+    pass_out_buffer = True
 
     if use_topk:
         # if using topk, we can assume num_local_experts == num_ranks,
@@ -177,6 +178,7 @@ def test_main(
     recv_x_gc = torch.empty(
         (sum(output_split_size_list), *x.shape[1:]), dtype=torch.bfloat16, device="cuda"
     )
+    recv_x_gc_buf = recv_x_gc.clone() if pass_out_buffer else None
     work_with_pf_gc = group_cast_collective(
         input=x,
         output=recv_x_gc,
@@ -192,6 +194,7 @@ def test_main(
     # get ref combine output by group-reduce
     x_gr = sim_gemm(recv_x_gc, w=sim_gemm_weight)
     combined_x_gr = torch.zeros_like(x)
+    combined_x_gr_buf = combined_x_gr.clone() if pass_out_buffer else None
     work_with_pf_gr = group_reduce_collective(
         input=x_gr,
         output=combined_x_gr,
@@ -207,9 +210,9 @@ def test_main(
     # transfer group-cast meta args to dispatch meta args
     (
         rank_idx,
-        _,  # rdma_rank_idx,
+        _,  # rdma_rank_idx
         num_tokens_per_rank,
-        _,  # num_tokens_per_rdma_rank,
+        _,  # num_tokens_per_rdma_rank
         is_token_in_rank,
         topk_idx,
         topk_weights,
@@ -338,6 +341,7 @@ def test_main(
                     #   but we don't have to pass the topk_idx into dispatch kernels
                     dispatch_args = {
                         "x": current_x,
+                        "recv_x": recv_x_gc_buf,
                         "is_token_in_rank": is_token_in_rank,
                         "num_tokens_per_rank": num_tokens_per_rank,
                         "num_tokens_per_expert": num_tokens_per_expert,
@@ -406,6 +410,11 @@ def test_main(
 
                     # wait
                     event.current_stream_wait() if async_mode else ()
+
+                    # check in-place
+                    if pass_out_buffer:
+                        assert recv_x_gc_buf is not None
+                        assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()  # type: ignore[union-attr]
 
                     # unpermute recv_x to the order indicated by
                     # output_split_size_list and src_index_list
@@ -612,6 +621,7 @@ def test_main(
                     send_head_copy = send_head.clone()
                     combine_args = {
                         "x": x_combine,
+                        "combined_x": combined_x_gr_buf,
                         "handle": handle,
                         "config": config,
                         "async_finish": async_mode,
@@ -641,6 +651,11 @@ def test_main(
 
                     # wait
                     event.current_stream_wait() if async_mode else ()
+
+                    # check in-place
+                    if pass_out_buffer:
+                        assert combined_x_gr_buf is not None
+                        assert combined_x_gr_buf.data_ptr() == combined_x.data_ptr()
 
                     # print
                     combined_topk_weights_shape = (
