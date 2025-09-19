@@ -390,6 +390,7 @@ class Buffer:
     def dispatch(
         self,
         x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        recv_x: torch.Tensor | None = None,
         handle: tuple | None = None,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
@@ -422,6 +423,7 @@ class Buffer:
                 and type must be `torch.bfloat16`; for the second type, the first element of the tuple must be shaped as
                 `[num_tokens, hidden]` with type `torch.float8_e4m3fn`, the second must be `[num_tokens, hidden // 128]`
                  (requiring divisible) with type `torch.float`.
+            recv_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
             handle: an optional communication handle, if set, the CPU will reuse the layout information to save some time.
             num_tokens_per_rank: `[num_ranks]` with `torch.int`, the number of tokens to be sent to each rank.
             num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
@@ -460,6 +462,7 @@ class Buffer:
             ), "Internode dispatch does not support `num_worst_tokens > 0`"
             return self.internode_dispatch(
                 x,
+                recv_x,
                 handle,
                 num_tokens_per_rank,
                 num_tokens_per_rdma_rank,
@@ -501,6 +504,7 @@ class Buffer:
                 event,
             ) = self.runtime.intranode_dispatch(
                 x,
+                recv_x,
                 x_scales,
                 None,
                 None,
@@ -545,6 +549,7 @@ class Buffer:
                 event,
             ) = self.runtime.intranode_dispatch(
                 x,
+                recv_x,
                 x_scales,
                 topk_idx,
                 topk_weights,
@@ -582,6 +587,7 @@ class Buffer:
         self,
         x: torch.Tensor,
         handle: tuple,
+        combined_x: torch.Tensor | None = None,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         config: Config | None = None,
@@ -600,6 +606,7 @@ class Buffer:
         Arguments:
             x: `[num_tokens, hidden]` with `torch.bfloat16`, the tokens to send for reducing to its original ranks.
             handle: a must-set communication handle, you can obtain this from the dispatch function.
+            combined_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
             topk_weights: `[num_tokens, num_topk]` with `torch.float`,
                 the tokens' top-k weights for reducing to its original ranks.
             config: the performance tuning config.
@@ -612,7 +619,7 @@ class Buffer:
                 but it is unsafe to set it to True in the general group-reduce case
 
         Returns:
-            recv_x: the reduced token from its dispatched ranks.
+            combined_x: the reduced token from its dispatched ranks.
             recv_topk_weights: the reduced top-k weights from its dispatch ranks.
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
@@ -623,6 +630,7 @@ class Buffer:
         if self.runtime.get_num_rdma_ranks() > 1:
             return self.internode_combine(
                 x,
+                combined_x,
                 handle,
                 topk_weights,
                 bias,
@@ -645,8 +653,9 @@ class Buffer:
         bias_0, bias_1 = Buffer._unpack_bias(bias)
 
         # Launch the kernel
-        recv_x, recv_topk_weights, event = self.runtime.intranode_combine(
+        combined_x, recv_topk_weights, event = self.runtime.intranode_combine(
             x,
+            combined_x,
             topk_weights,
             bias_0,
             bias_1,
@@ -660,11 +669,12 @@ class Buffer:
             allocate_on_comm_stream,
             allow_empty_init_out_buf,
         )
-        return recv_x, recv_topk_weights, EventOverlap(event)
+        return combined_x, recv_topk_weights, EventOverlap(event)
 
     def internode_dispatch(
         self,
         x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        recv_x: torch.Tensor | None,
         handle: tuple | None = None,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
@@ -727,6 +737,7 @@ class Buffer:
                 event,
             ) = self.runtime.internode_dispatch(
                 x,
+                recv_x,
                 x_scales,
                 topk_idx,
                 topk_weights,
@@ -778,6 +789,7 @@ class Buffer:
                 event,
             ) = self.runtime.internode_dispatch(
                 x,
+                recv_x,
                 x_scales,
                 topk_idx,
                 topk_weights,
@@ -821,6 +833,7 @@ class Buffer:
     def internode_combine(
         self,
         x: torch.Tensor,
+        combined_x: torch.Tensor | None,
         handle: Union[tuple, list],
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
@@ -854,6 +867,7 @@ class Buffer:
         # Launch the kernel
         combined_x, combined_topk_weights, event = self.runtime.internode_combine(
             x,
+            combined_x,
             topk_weights,
             bias_0,
             bias_1,

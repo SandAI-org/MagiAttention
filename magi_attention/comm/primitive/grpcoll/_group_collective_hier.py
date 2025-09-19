@@ -574,7 +574,7 @@ def hier_group_cast_impl_with_a2av(
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
-    group: dist.ProcessGroup | None = None,
+    group: dist.ProcessGroup,
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
@@ -1067,7 +1067,7 @@ def hier_group_reduce_impl_with_a2av(
     output_split_size_list: list[int],
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
-    group: dist.ProcessGroup | None = None,
+    group: dist.ProcessGroup,
     async_op: bool = False,
     reduce_op: Literal["sum", "avg", "lse"] = "sum",
     input_lse: torch.Tensor | None = None,

@@ -26,6 +26,7 @@ from ._group_collective_hier import (
     hier_group_cast_impl_with_a2av,
     hier_group_reduce_impl_with_a2av,
 )
+from ._native_grpcoll_impl import native_group_cast_impl, native_group_reduce_impl
 from .utils import calc_group_cast_a2a_args, calc_group_reduce_a2a_args
 
 __all__ = [
@@ -43,7 +44,7 @@ def group_cast_collective(
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
-    group: dist.ProcessGroup | None = None,
+    group: dist.ProcessGroup,
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
@@ -62,7 +63,7 @@ def group_cast_collective(
 
             NOTE: the order of the output splits are "stable", which means the ones from the same source
             will be in the same order as the input splits
-        group (dist.ProcessGroup | None): the process group to use, if None, use the default group
+        group (dist.ProcessGroup): the process group to comm
         async_op (bool): whether to use async op. Defaults to False
         kwargs: additional keyword arguments,
             this kernel is for now based on all2all-v,
@@ -111,10 +112,17 @@ def group_cast_collective(
         )
 
     if magi_attention.comm.is_native_grpcoll_enable():
-        # XXX: a workaround to implement native group-cast
-        # by original deep-ep dispatch kernels
-        # with pre-meta-args processing and post-output processing
-        pass
+        return native_group_cast_impl(
+            input=input,
+            output=output,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_indices_list=dst_indices_list,
+            src_index_list=src_index_list,
+            group=group,
+            async_op=async_op,
+            **kwargs,
+        )
 
     # ---------    calc group cast a2a args     --------- #
 
@@ -164,7 +172,7 @@ def group_reduce_collective(
     output_split_size_list: list[int],
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
-    group: dist.ProcessGroup | None = None,
+    group: dist.ProcessGroup,
     async_op: bool = False,
     reduce_op: Literal["sum", "avg", "lse"] = "sum",
     input_lse: torch.Tensor | None = None,
@@ -187,7 +195,7 @@ def group_reduce_collective(
 
             NOTE: since any reduce operation satisfies the commutative property, the order of the input splits to reduce
             to the same output split does not matter
-        group (dist.ProcessGroup | None): the process group to use, if None, use the default group
+        group (dist.ProcessGroup): the process group to comm
         async_op (bool): whether to use async op. Defaults to False
         reduce_op (Literal["sum", "avg", "weight", "lse"]): the reduce operation to use. Defaults to "sum"
             - "sum": sum reduction
@@ -255,10 +263,20 @@ def group_reduce_collective(
         )
 
     if magi_attention.comm.is_native_grpcoll_enable():
-        # XXX: a workaround to implement native group-reduce
-        # by original deep-ep combine kernels
-        # with pre-meta-args processing and pre-input processing
-        pass
+        return native_group_reduce_impl(
+            input=input,
+            output=output,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_index_list=dst_index_list,
+            src_indices_list=src_indices_list,
+            group=group,
+            async_op=async_op,
+            reduce_op=reduce_op,
+            input_lse=input_lse,
+            output_lse=output_lse,
+            **kwargs,
+        )
 
     # ---------    calc group reduce a2a args     --------- #
 
