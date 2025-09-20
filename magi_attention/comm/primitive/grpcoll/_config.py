@@ -21,11 +21,19 @@ __all__ = ["GrpCollConfig"]
 
 @dataclass(frozen=True)
 class GrpCollConfig:
+    # for kernel performance
     num_sms: int = 24
     nvl_chunk_size: int = 24
     nvl_buffer_size: int = 256
     rdma_chunk_size: int = 12
     rdma_buffer_size: int = 128
+
+    # for buffer initialization
+    num_nvl_bytes: int = 0
+    num_rdma_bytes: int = 0
+
+    def __post_init__(self):
+        pass
 
     def to_kernel_config(self) -> grpcoll.Config:
         return grpcoll.Config(
@@ -34,4 +42,17 @@ class GrpCollConfig:
             self.nvl_buffer_size,  # num_max_nvl_chunked_recv_tokens, default 256
             self.rdma_chunk_size,  # num_max_rdma_chunked_send_tokens, default 6
             self.rdma_buffer_size,  # num_max_rdma_chunked_recv_tokens, default 256
+        )
+
+    def to_buffer_args(self) -> dict:
+        assert self.num_nvl_bytes > 0, (
+            "num_nvl_bytes must be greater than 0, " f"but got {self.num_nvl_bytes=}"
+        )
+
+        return dict(
+            num_nvl_bytes=self.num_nvl_bytes,
+            num_rdma_bytes=self.num_rdma_bytes,
+            num_qps_per_rank=1 if self.num_rdma_bytes == 0 else self.num_sms,
+            low_latency_mode=False,
+            explicitly_destroy=True,
         )

@@ -125,9 +125,9 @@ def test_main(
 
     # Config
     config = GrpCollConfig(
-        num_sms,  # num_sms, default 20
-        num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
-        num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
+        num_sms=num_sms,  # num_sms, default 20
+        nvl_chunk_size=num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
+        nvl_buffer_size=num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
         # num_max_rdma_chunked_send_tokens, default 6
         # num_max_rdma_chunked_recv_tokens, default 256
     )
@@ -729,7 +729,11 @@ def test_main(
         )
         for nvl_chunk_size in tuple(range(4, 33, 2)) + (0,):
             if nvl_chunk_size > 0:
-                config = GrpCollConfig(num_sms, nvl_chunk_size, nvl_buffer_size)
+                config = GrpCollConfig(
+                    num_sms=num_sms,
+                    nvl_chunk_size=nvl_chunk_size,
+                    nvl_buffer_size=nvl_buffer_size,
+                )
             else:
                 # Test default config as well
                 GrpCollBuffer.set_num_sms(num_sms)
@@ -771,9 +775,9 @@ def test_main(
             )
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
     dispatch_config = GrpCollConfig(
-        best_dispatch_results[0],  # type: ignore[index]
-        best_dispatch_results[1],  # type: ignore[index]
-        nvl_buffer_size,
+        num_sms=best_dispatch_results[0],  # type: ignore[index]
+        nvl_chunk_size=best_dispatch_results[1],  # type: ignore[index]
+        nvl_buffer_size=nvl_buffer_size,
     )
 
     dispatch_args = {
@@ -789,7 +793,11 @@ def test_main(
     best_time, best_results = 1e10, None
     for nvl_chunk_size in tuple(range(1, 17, 1)) + (0,):
         if nvl_chunk_size > 0:
-            config = GrpCollConfig(num_sms, nvl_chunk_size, nvl_buffer_size)
+            config = GrpCollConfig(
+                num_sms=num_sms,
+                nvl_chunk_size=nvl_chunk_size,
+                nvl_buffer_size=nvl_buffer_size,
+            )
         else:
             # Test default config as well
             GrpCollBuffer.set_num_sms(num_sms)
@@ -854,6 +862,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     #    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_scales // FP8 scale buffer
     #    <= num_nvl_bytes
     num_nvl_bytes = int(2e9)
+
+    num_sms = 24
     num_qps_per_rank = ll_num_experts // num_ranks if test_ll_compatibility else 1
 
     if local_rank == 0:
@@ -865,26 +875,36 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             flush=True,
         )
 
-    buffer = GrpCollBuffer(
-        group,
+    buffer_config = GrpCollConfig(
+        num_sms=num_sms,
         num_nvl_bytes=num_nvl_bytes,
         num_rdma_bytes=num_rdma_bytes,
-        low_latency_mode=test_ll_compatibility,
-        num_qps_per_rank=num_qps_per_rank,
-        explicitly_destroy=True,
+    )
+
+    # NOTE: in buffer config, we auto set:
+    # low_latency_mode=False,
+    # num_qps_per_rank=1 if num_rdma_bytes == 0 else num_sms,
+    # explicitly_destroy=True,
+    buffer_args = buffer_config.to_buffer_args()
+    buffer_args["low_latency_mode"] = test_ll_compatibility
+    buffer_args["num_qps_per_rank"] = num_qps_per_rank
+    buffer_args["explicitly_destroy"] = True
+
+    buffer = GrpCollBuffer(
+        group,
+        **buffer_args,
     )
     torch.manual_seed(rank)
     random.seed(rank)
 
-    for num_sms in (24,):  # range(16, 33, 4): # [16, 20, 24, 28, 32]
-        if local_rank == 0:
-            print(
-                f"\n\n============================Testing with {num_sms=}============================\n\n",
-                flush=True,
-            )
-        test_main(args, num_sms, local_rank, num_ranks, rank, buffer, group)
-        if local_rank == 0:
-            print("", flush=True)
+    if local_rank == 0:
+        print(
+            f"\n\n============================Testing with {num_sms=}============================\n\n",
+            flush=True,
+        )
+    test_main(args, num_sms, local_rank, num_ranks, rank, buffer, group)
+    if local_rank == 0:
+        print("", flush=True)
 
     # Destroy the buffer runtime and communication group
     buffer.destroy()

@@ -113,11 +113,11 @@ def test_main(
 
     # Config
     config = GrpCollConfig(
-        num_sms,  # num_sms, default 20
-        num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
-        num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
-        num_max_rdma_chunked_send_tokens,  # num_max_rdma_chunked_send_tokens, default 6
-        num_max_rdma_chunked_recv_tokens,  # num_max_rdma_chunked_recv_tokens, default 256
+        num_sms=num_sms,  # num_sms, default 20
+        nvl_chunk_size=num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
+        nvl_buffer_size=num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
+        rdma_chunk_size=num_max_rdma_chunked_send_tokens,  # num_max_rdma_chunked_send_tokens, default 6
+        rdma_buffer_size=num_max_rdma_chunked_recv_tokens,  # num_max_rdma_chunked_recv_tokens, default 256
     )
 
     # Random data
@@ -689,11 +689,11 @@ def test_main(
         for nvl_chunk_size in range(4, 45, 4):
             for rdma_chunk_size in range(4, 33, 4):
                 config = GrpCollConfig(
-                    num_sms,
-                    nvl_chunk_size,
-                    nvl_buffer_size,
-                    rdma_chunk_size,
-                    rdma_buffer_size,
+                    num_sms=num_sms,
+                    nvl_chunk_size=nvl_chunk_size,
+                    nvl_buffer_size=nvl_buffer_size,
+                    rdma_chunk_size=rdma_chunk_size,
+                    rdma_buffer_size=rdma_buffer_size,
                 )
                 tune_args = {"x": current_x, "handle": handle, "config": config}
                 t, notify_t = bench_kineto(
@@ -744,11 +744,11 @@ def test_main(
             )
             best_dispatch_results = all_best_fp8_results_list[0].tolist()
     dispatch_config = GrpCollConfig(
-        best_dispatch_results[0],  # type: ignore[index]
-        best_dispatch_results[1],  # type: ignore[index]
-        nvl_buffer_size,
-        best_dispatch_results[2],  # type: ignore[index]
-        rdma_buffer_size,
+        num_sms=best_dispatch_results[0],  # type: ignore[index]
+        nvl_chunk_size=best_dispatch_results[1],  # type: ignore[index]
+        nvl_buffer_size=nvl_buffer_size,
+        rdma_chunk_size=best_dispatch_results[2],  # type: ignore[index]
+        rdma_buffer_size=rdma_buffer_size,
     )
 
     dispatch_args = {
@@ -766,11 +766,11 @@ def test_main(
     for nvl_chunk_size in range(1, 8, 1):
         for rdma_chunk_size in range(12 if num_nodes == 2 else 8, 33, 4):
             config = GrpCollConfig(
-                num_sms,
-                nvl_chunk_size,
-                nvl_buffer_size,
-                rdma_chunk_size,
-                rdma_buffer_size,
+                num_sms=num_sms,
+                nvl_chunk_size=nvl_chunk_size,
+                nvl_buffer_size=nvl_buffer_size,
+                rdma_chunk_size=rdma_chunk_size,
+                rdma_buffer_size=rdma_buffer_size,
             )
             tune_args = {
                 "x": recv_x,
@@ -861,32 +861,42 @@ def test_loop(args: argparse.Namespace):
             flush=True,
         )
 
+    buffer_config = GrpCollConfig(
+        num_sms=num_sms,
+        num_nvl_bytes=num_nvl_bytes,
+        num_rdma_bytes=num_rdma_bytes,
+    )
+
+    # NOTE: in buffer config, we auto set:
+    # low_latency_mode=False,
+    # num_qps_per_rank=1 if num_rdma_bytes == 0 else num_sms,
+    # explicitly_destroy=True,
+    buffer_args = buffer_config.to_buffer_args()
+    buffer_args["low_latency_mode"] = args.test_ll_compatibility
+    buffer_args["num_qps_per_rank"] = num_qps_per_rank
+    buffer_args["explicitly_destroy"] = True
+
     buffer = GrpCollBuffer(
         group,
-        num_nvl_bytes,
-        num_rdma_bytes,
-        low_latency_mode=args.test_ll_compatibility,
-        num_qps_per_rank=num_qps_per_rank,
-        explicitly_destroy=True,
+        **buffer_args,
     )
     assert num_local_ranks == 8 and num_ranks > 8
     torch.manual_seed(rank)
 
-    for i in (num_sms,):
-        test_main(
-            args,
-            i,
-            local_rank,
-            num_local_ranks,
-            num_ranks,
-            num_nodes,
-            rank,
-            buffer,
-            group,
-            use_topk=use_topk,
-        )
-        if local_rank == 0:
-            print("", flush=True)
+    test_main(
+        args,
+        num_sms,
+        local_rank,
+        num_local_ranks,
+        num_ranks,
+        num_nodes,
+        rank,
+        buffer,
+        group,
+        use_topk=use_topk,
+    )
+    if local_rank == 0:
+        print("", flush=True)
 
     # Destroy the buffer runtime and communication group
     buffer.destroy()
