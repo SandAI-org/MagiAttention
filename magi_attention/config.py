@@ -60,6 +60,8 @@ class DistAttnConfig:
     dispatch_config: DispatchConfig = DispatchConfig()
     # TODO: add distinct overlap config for fwd/bwd in the future
     overlap_config: OverlapConfig = OverlapConfig()
+    # NOTE: for now, grpcoll_config is only used when enabling native grpcoll
+    # by toggling the env variable ``MAGI_ATTENTION_NATIVE_GRPCOLL`` to ``1``
     grpcoll_config: GrpCollConfig = GrpCollConfig()
 
     def __post_init__(self):

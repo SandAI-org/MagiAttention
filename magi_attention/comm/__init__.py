@@ -130,6 +130,7 @@ def is_native_grpcoll_enable() -> bool:
 
     Default value is ``0``
 
-    NOTE: this feature for now is experimental and under early development
+    NOTE: this feature for now is experimental and under early development,
+    and please do NOT enable it unless you know what you are doing
     """
     return os.environ.get("MAGI_ATTENTION_NATIVE_GRPCOLL", "0") == "1"
