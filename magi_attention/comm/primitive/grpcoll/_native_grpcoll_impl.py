@@ -43,6 +43,29 @@ def _maybe_lazy_init_buffer(group: dist.ProcessGroup) -> None:
         )
 
 
+def _native_group_cast_post_process(
+    *args,
+    recv_x: torch.Tensor,
+    unperm_after_a2a_kwargs: dict,
+    output_shape: torch.Size,
+    **kwargs,
+) -> torch.Tensor:
+    return unpermute_tensor(
+        tensor=recv_x,
+        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
+    ).view(output_shape)
+
+
+def _native_group_reduce_post_process(
+    *args,
+    output: torch.Tensor,
+    combined_x: torch.Tensor,
+    output_shape: torch.Size,
+    **kwargs,
+) -> torch.Tensor:
+    return output.add_(combined_x.view(output_shape))
+
+
 @nvtx.instrument_nvtx
 def native_group_cast_impl(
     input: torch.Tensor,
@@ -95,6 +118,8 @@ def native_group_cast_impl(
     )
 
     # launch dispatch kernel
+    input_shape = input.shape
+    output_shape = output.shape
     (
         recv_x,
         _,  # recv_topk_idx
@@ -103,8 +128,8 @@ def native_group_cast_impl(
         handle,
         event,
     ) = buffer.dispatch(
-        x=input,
-        recv_x=output,
+        x=input.view(input_shape[0], -1),
+        recv_x=output.view(output_shape[0], -1),
         handle=handle,
         num_tokens_per_rank=num_tokens_per_rank,
         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
@@ -124,8 +149,10 @@ def native_group_cast_impl(
         # post_process_fn=lambda: recv_x,
         # XXX: remove this post-process
         post_process_fn=partial(
-            unpermute_tensor,
+            _native_group_cast_post_process,
+            recv_x=recv_x,
             unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
+            output_shape=output_shape,
         ),
     )
 
@@ -153,8 +180,8 @@ def native_group_reduce_impl(
 
     _maybe_lazy_init_buffer(group)
 
-    config: GrpCollConfig = kwargs.pop("native_grpcoll_config", None)
-    buffer: GrpCollBuffer = kwargs.pop("native_grpcoll_buffer", None)
+    config: GrpCollConfig = grpcoll_mgr.get_config(group)
+    buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
     handle_dict: dict[str, tuple] = kwargs.pop("native_grpcoll_handle_dict", {})
     handle: tuple | None = handle_dict.pop("group_reduce", None)
     assert config is not None and buffer is not None and handle is not None
@@ -196,10 +223,14 @@ def native_group_reduce_impl(
     )
 
     # launch combine kernel
-    (combined_x, _, event) = buffer.combine(  # combined_topk_weights
-        x=input,
+    input_shape = input.shape
+    output_shape = output.shape
+    combined_x, _, event = buffer.combine(  # combined_topk_weights
+        x=input.view(input_shape[0], -1),
         handle=handle,
-        combined_x=output,
+        # FIXME: since the combine kernel directly write to the buffer,
+        # we have to init a new buffer and reduce to the given output buffer later
+        combined_x=None,
         config=config,
         async_finish=async_op,
         allocate_on_comm_stream=False,
@@ -209,7 +240,12 @@ def native_group_reduce_impl(
     # prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(
         work=GeneralWork(event),
-        post_process_fn=lambda: combined_x,
+        post_process_fn=partial(
+            _native_group_reduce_post_process,
+            output=output,
+            combined_x=combined_x,
+            output_shape=output_shape,
+        ),
     )
 
     return work_with_post_process_fn
