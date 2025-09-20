@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from functools import partial
 from typing import Literal
 
@@ -23,12 +24,23 @@ from magi_attention.utils import nvtx
 from ...work import GeneralWork, WorkWithPostProcessFn
 from ._buffer import GrpCollBuffer
 from ._config import GrpCollConfig
+from ._mgr import grpcoll_mgr
 from .utils import transfer_group_cast_meta_to_dispatch_meta, unpermute_tensor
 
 __all__ = [
     "native_group_cast_impl",
     "native_group_reduce_impl",
 ]
+
+
+def _maybe_lazy_init_buffer(group: dist.ProcessGroup) -> None:
+    if not grpcoll_mgr.is_registered(group):
+        grpcoll_mgr.register_buffer(group=group)
+        warnings.warn(
+            f"Since the GrpCollBuffer is not registered for {group.group_name}, "
+            "we lazily register it here with the default config, "
+            "which might not be the best choice and cause performance/memory issue."
+        )
 
 
 @nvtx.instrument_nvtx
@@ -45,8 +57,10 @@ def native_group_cast_impl(
 ) -> WorkWithPostProcessFn:
     """Native group-cast implementation"""
 
-    config: GrpCollConfig = kwargs.pop("native_grpcoll_config", None)
-    buffer: GrpCollBuffer = kwargs.pop("native_grpcoll_buffer", None)
+    _maybe_lazy_init_buffer(group)
+
+    config: GrpCollConfig = grpcoll_mgr.get_config(group)
+    buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
     handle_dict: dict[str, tuple] = kwargs.pop("native_grpcoll_handle_dict", {})
     handle: tuple | None = handle_dict.pop("group_cast", None)
     assert config is not None and buffer is not None
@@ -136,6 +150,8 @@ def native_group_reduce_impl(
     """Native group-reduce implementation"""
 
     assert reduce_op == "sum", "Only support sum-reduce for now"
+
+    _maybe_lazy_init_buffer(group)
 
     config: GrpCollConfig = kwargs.pop("native_grpcoll_config", None)
     buffer: GrpCollBuffer = kwargs.pop("native_grpcoll_buffer", None)

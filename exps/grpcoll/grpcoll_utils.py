@@ -111,13 +111,15 @@ def init_dist(local_rank: int, num_local_ranks: int):
     port = int(os.getenv("MASTER_PORT", "8361"))
     num_nodes = int(os.getenv("WORLD_SIZE", 1))
     node_rank = int(os.getenv("RANK", 0))
+    global_rank = node_rank * num_local_ranks + local_rank
+    world_size = num_nodes * num_local_ranks
 
     sig = inspect.signature(dist.init_process_group)
     params = {
         "backend": "nccl",
         "init_method": f"tcp://{ip}:{port}",
-        "world_size": num_nodes * num_local_ranks,
-        "rank": node_rank * num_local_ranks + local_rank,
+        "world_size": world_size,
+        "rank": global_rank,
     }
     if "device_id" in sig.parameters:
         params["device_id"] = torch.device(f"cuda:{local_rank}")
@@ -126,10 +128,15 @@ def init_dist(local_rank: int, num_local_ranks: int):
     torch.set_default_device("cuda")
     torch.cuda.set_device(local_rank)
 
+    torch.manual_seed(global_rank)
+    random.seed(global_rank)
+
+    world_group = dist.new_group(list(range(world_size)), backend="nccl")
+
     return (
-        dist.get_rank(),
-        dist.get_world_size(),
-        dist.new_group(list(range(num_local_ranks * num_nodes))),
+        global_rank,
+        world_size,
+        world_group,
     )
 
 

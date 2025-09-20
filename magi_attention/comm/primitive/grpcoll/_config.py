@@ -29,8 +29,9 @@ class GrpCollConfig:
     rdma_buffer_size: int = 128
 
     # for buffer initialization
-    num_nvl_bytes: int = 0
-    num_rdma_bytes: int = 0
+    # TODO: set the best values automatically
+    num_nvl_bytes: int = int(2e9)  # default 2GB
+    num_rdma_bytes: int = 0  # FIXME: 0 for now since we don't support RDMA
 
     def __post_init__(self):
         pass

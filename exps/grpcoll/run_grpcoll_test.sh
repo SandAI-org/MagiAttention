@@ -15,7 +15,7 @@
 # limitations under the License.
 
 TEST_ROOT=.
-LOG_ROOT=${TEST_ROOT}/outs/
+LOG_ROOT=${TEST_ROOT}/outs
 
 export PYTHONPATH=$PYTHONPATH:.
 
@@ -33,9 +33,9 @@ export PYTHONPATH=$PYTHONPATH:.
 #   assert calc_diff(recv_x[:, -1], recv_src_info.view(-1)) < 0.007
 export GRPCOLL_TEST_INTRANODE_LOW_LATENCY=0
 
-LOG_PATH=${LOG_ROOT}/test_intranode_grpcoll.log
-echo "Logging to ${LOG_PATH} ..."
-python ${TEST_ROOT}/test_intranode_grpcoll.py > ${LOG_PATH} 2>&1; exit 0
+# LOG_PATH=${LOG_ROOT}/test_intranode_grpcoll.log
+# echo "Logging to ${LOG_PATH} ..."
+# python ${TEST_ROOT}/test_intranode_grpcoll.py > ${LOG_PATH} 2>&1; exit 0
 
 # ----- test-low-latency ----- #
 
@@ -59,12 +59,22 @@ else
 fi
 
 # init dist env vars
+
+if [[ -f .env ]]; then
+    source .env # maybe put your own master node IP here
+fi
+
 export OMP_NUM_THREADS=1
-export MASTER_ADDR=10.119.210.141 # replace with your own master node IP
+export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1} # replace with your own master node IP
 export MASTER_PORT=23457
 export NNODES=2 # in deepep internode kernels, it will check num_ranks > NUM_MAX_NVL_PEERS, which equals to 8 by default
 export NPROC_PER_NODE=8
 export RANK=$1
+
+if [[ $RANK -ge $NNODES ]]; then
+    echo "Error: RANK=$RANK, but NNODES=$NNODES"
+    exit 1
+fi
 
 # self-added env variable to control low-latency mode for test_internode.py
 export GRPCOLL_TEST_INTERNODE_LL_COMPATIBILITY=0

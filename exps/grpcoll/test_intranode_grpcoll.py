@@ -35,7 +35,6 @@
 # SOFTWARE.
 
 import argparse
-import random
 import time
 
 import torch
@@ -47,6 +46,7 @@ from magi_attention.comm.primitive.grpcoll import (
 )
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     transfer_group_cast_meta_to_dispatch_meta,
     unpermute_tensor,
@@ -838,6 +838,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     # num_ranks: number of ranks in default group
     # group: the default world group
 
+    use_grpcoll_mgr = True
+
     # init dist
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
 
@@ -879,27 +881,35 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             flush=True,
         )
 
+    # NOTE: in buffer config, we auto set:
+    # low_latency_mode=False,
+    # num_qps_per_rank=1 if num_rdma_bytes == 0 else num_sms,
+    # explicitly_destroy=True,
     buffer_config = GrpCollConfig(
         num_sms=num_sms,
         num_nvl_bytes=num_nvl_bytes,
         num_rdma_bytes=num_rdma_bytes,
     )
-
-    # NOTE: in buffer config, we auto set:
-    # low_latency_mode=False,
-    # num_qps_per_rank=1 if num_rdma_bytes == 0 else num_sms,
-    # explicitly_destroy=True,
-    buffer_args = buffer_config.to_buffer_args()
-    buffer_args["low_latency_mode"] = test_ll_compatibility
-    buffer_args["num_qps_per_rank"] = num_qps_per_rank
-    buffer_args["explicitly_destroy"] = True
-
-    buffer = GrpCollBuffer(
-        group,
-        **buffer_args,
+    extra_buffer_kwargs = dict(
+        low_latency_mode=test_ll_compatibility,
+        num_qps_per_rank=num_qps_per_rank,
+        explicitly_destroy=True,
     )
-    torch.manual_seed(rank)
-    random.seed(rank)
+
+    if use_grpcoll_mgr:
+        grpcoll_mgr.register_buffer(
+            group=group,
+            config=buffer_config,
+            **extra_buffer_kwargs,
+        )
+        buffer = grpcoll_mgr.get_buffer(group)
+    else:
+        buffer_args = buffer_config.to_buffer_args()
+        buffer_args.update(extra_buffer_kwargs)
+        buffer = GrpCollBuffer(
+            group,
+            **buffer_args,
+        )
 
     if local_rank == 0:
         print(
@@ -910,9 +920,14 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if local_rank == 0:
         print("", flush=True)
 
-    # Destroy the buffer runtime and communication group
-    buffer.destroy()
-    dist.barrier()
+    # Destroy the buffer runtime
+    if use_grpcoll_mgr:
+        grpcoll_mgr.release_buffer(group)
+    else:
+        buffer.destroy()
+        dist.barrier()
+
+    # Destroy the process group
     dist.destroy_process_group()
 
 
