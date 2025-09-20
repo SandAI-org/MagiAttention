@@ -21,7 +21,7 @@ import torch.distributed as dist
 
 from magi_attention.utils import str2seed
 
-from . import dist_common, grpcoll_utils, utils
+from . import dist_common, utils
 from .dist_common import RUN_IN_MP
 from .gt_dispatcher import GroundTruthDispatcher
 from .precision import assert_close, torch_attn_ref
@@ -29,7 +29,6 @@ from .precision import assert_close, torch_attn_ref
 __all__ = [
     "dist_common",
     "utils",
-    "grpcoll_utils",
     "GroundTruthDispatcher",
     "assert_close",
     "torch_attn_ref",
