@@ -47,8 +47,13 @@ from magi_attention.comm.primitive.grpcoll import (
     group_reduce_collective,
 )
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
-from magi_attention.common.range_op import range_gather
-from magi_attention.testing.grpcoll_utils import (
+from magi_attention.comm.primitive.grpcoll.utils import (
+    transfer_group_cast_meta_to_dispatch_meta,
+    unpermute_tensor,
+)
+
+# isort: split
+from grpcoll_utils import (
     bench,
     bench_kineto,
     calc_diff,
@@ -59,7 +64,6 @@ from magi_attention.testing.grpcoll_utils import (
     init_dist,
     per_token_cast_back,
     sim_gemm,
-    transfer_group_cast_meta_to_dispatch_meta,
 )
 
 
@@ -295,9 +299,9 @@ def test_main(
                         # output_split_size_list and src_index_list
                         if random_permute_output:
                             recv_x_before_rg = recv_x.clone()
-                            recv_x = range_gather(
-                                input=recv_x,
-                                **range_gather_post_dispatch_kwargs,
+                            recv_x = unpermute_tensor(
+                                tensor=recv_x,
+                                unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                             )
                             assert recv_x_before_rg.shape == recv_x.shape
 

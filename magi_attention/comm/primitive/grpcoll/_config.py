@@ -45,10 +45,6 @@ class GrpCollConfig:
         )
 
     def to_buffer_args(self) -> dict:
-        assert self.num_nvl_bytes > 0, (
-            "num_nvl_bytes must be greater than 0, " f"but got {self.num_nvl_bytes=}"
-        )
-
         return dict(
             num_nvl_bytes=self.num_nvl_bytes,
             num_rdma_bytes=self.num_rdma_bytes,

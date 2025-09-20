@@ -18,15 +18,12 @@ from typing import Literal
 import torch
 import torch.distributed as dist
 
-from magi_attention.testing.grpcoll_utils import (
-    transfer_group_cast_meta_to_dispatch_meta,
-)
 from magi_attention.utils import nvtx
 
 from ...work import GeneralWork, WorkWithPostProcessFn
 from ._buffer import GrpCollBuffer
 from ._config import GrpCollConfig
-from .utils import unpermute_tensor
+from .utils import transfer_group_cast_meta_to_dispatch_meta, unpermute_tensor
 
 __all__ = [
     "native_group_cast_impl",

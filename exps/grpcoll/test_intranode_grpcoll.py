@@ -47,19 +47,23 @@ from magi_attention.comm.primitive.grpcoll import (
 )
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
-from magi_attention.common.range_op import range_gather
-from magi_attention.testing.grpcoll_utils import (
+from magi_attention.comm.primitive.grpcoll.utils import (
+    transfer_group_cast_meta_to_dispatch_meta,
+    unpermute_tensor,
+)
+from magi_attention.utils import inplace_unique
+
+# isort: split
+from grpcoll_utils import (
     bench,
     calc_diff,
     get_output_split_size_list_and_src_index_list,
     get_random_dst_indices_list,
     get_random_split_size_list,
     init_dist,
-    inplace_unique,
     per_token_cast_back,
     per_token_cast_to_fp8,
     sim_gemm,
-    transfer_group_cast_meta_to_dispatch_meta,
 )
 
 
@@ -420,9 +424,9 @@ def test_main(
                     # output_split_size_list and src_index_list
                     if random_permute_output:
                         recv_x_before_rg = recv_x.clone()  # type: ignore[union-attr]
-                        recv_x = range_gather(
-                            input=recv_x,
-                            **range_gather_post_dispatch_kwargs,
+                        recv_x = unpermute_tensor(
+                            tensor=recv_x,
+                            unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                         )
                         assert recv_x_before_rg.shape == recv_x.shape
 
@@ -611,9 +615,9 @@ def test_main(
                     # permute x to the rank order
                     if random_permute_output:
                         x_combine_before_rg = x_combine.clone()
-                        x_combine = range_gather(
-                            input=x_combine,
-                            **range_gather_pre_combine_kwargs,
+                        x_combine = unpermute_tensor(
+                            tensor=x_combine,
+                            unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
                         )
                         assert x_combine_before_rg.shape == x_combine.shape
 
