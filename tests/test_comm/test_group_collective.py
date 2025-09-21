@@ -66,7 +66,7 @@ class TestGroupCollective(DistTestBase):
         self.intra_group = device_mesh.get_group("intra")
         self.inter_group = device_mesh.get_group("inter")
 
-        # -----    set up for native grpcoll buffer   ---- #
+        # -----    set up for native grpcoll   ---- #
 
         self._switch_native_grpcoll_context = partial(
             switch_envvar_context, envvar_name="MAGI_ATTENTION_NATIVE_GRPCOLL"

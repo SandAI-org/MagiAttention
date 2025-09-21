@@ -28,6 +28,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_output_meta_args,
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
+    transfer_group_cast_meta_to_dispatch_meta,
 )
 from magi_attention.utils import format_dict_field, format_list_field
 
@@ -137,6 +138,9 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
         # ----   additional kwargs  ---- #
 
         if magi_attention.comm.is_hierarchical_comm_enable():
+            assert (
+                not magi_attention.comm.is_native_grpcoll_enable()
+            ), "Hierarchical comm mode is not compatible with native grpcoll for now."
             assert self.device_mesh.ndim == 2, (  # type: ignore[union-attr]
                 f"The hierarchical comm is only supported for 2D device mesh, "
                 f"but got {self.device_mesh.ndim=}."  # type: ignore[union-attr]
@@ -151,10 +155,16 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             if self.init_group_reduce:
                 self._init_meta_kwargs_for_hier_group_reduce()
         else:
-            # init a2a meta kwargs for group-cast/reduce
-            self._init_a2a_meta_kwargs_for_group_cast()
-            if self.init_group_reduce:
-                self._init_a2a_meta_kwargs_for_group_reduce()
+            if magi_attention.comm.is_native_grpcoll_enable():
+                # init meta kwargs for native group-cast/reduce
+                self._init_meta_kwargs_for_native_group_cast()
+                if self.init_group_reduce:
+                    self._init_meta_kwargs_for_native_group_reduce()
+            else:
+                # init meta kwargs for a2av group-cast/reduce
+                self._init_meta_kwargs_for_a2av_group_cast()
+                if self.init_group_reduce:
+                    self._init_meta_kwargs_for_a2av_group_reduce()
 
     def _init_meta_kwargs_for_hier_group_cast(self):
         self._group_cast_args_dict_packed.update(
@@ -196,7 +206,68 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             deterministic=self.deterministic,
         )
 
-    def _init_a2a_meta_kwargs_for_group_cast(self):
+    def _init_meta_kwargs_for_native_group_cast(self):
+        # transfer group-cast meta args to dispatch meta args
+        (
+            _,  # rank_idx
+            _,  # rdma_rank_idx
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            is_token_in_rank,
+            _,  # topk_idx
+            _,  # topk_weights
+            num_tokens_per_expert,
+            range_gather_post_dispatch_kwargs,
+            range_gather_pre_combine_kwargs,
+        ) = transfer_group_cast_meta_to_dispatch_meta(
+            rank=self.rank,
+            num_ranks=self.world_size,
+            num_nodes=1,  # TODO: support num_nodes > 1
+            num_local_experts=1,
+            input_split_size_list=self._group_cast_args_dict_packed[
+                "input_split_size_list"
+            ],
+            output_split_size_list=self._group_cast_args_dict_packed[
+                "output_split_size_list"
+            ],
+            dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
+            src_index_list=self._group_cast_args_dict_packed["src_index_list"],
+            use_topk=False,
+            use_a2a_order_output=False,
+        )
+
+        self._group_cast_args_dict_packed["native_group_cast_meta_dict"] = dict(
+            num_tokens_per_rank=num_tokens_per_rank,
+            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+            is_token_in_rank=is_token_in_rank,
+            num_tokens_per_expert=num_tokens_per_expert,
+            range_gather_post_dispatch_kwargs=range_gather_post_dispatch_kwargs,
+        )
+        if self.init_group_reduce:
+            # HACK: temporarily store the range_gather_pre_combine_kwargs
+            # to pass to the symmetric group-reduce meta dict and then it will be removed
+            self._group_cast_args_dict_packed["native_group_cast_meta_dict"][
+                "range_gather_pre_combine_kwargs"
+            ] = range_gather_pre_combine_kwargs
+
+        self._group_cast_args_dict_packed["native_grpcoll_handle_dict"] = dict(
+            group_cast=None,
+        )
+
+    def _init_meta_kwargs_for_native_group_reduce(self):
+        range_gather_pre_combine_kwargs = self._group_cast_args_dict_packed[
+            "native_group_cast_meta_dict"
+        ].pop("range_gather_pre_combine_kwargs")
+        self._group_reduce_args_dict_packed["native_group_reduce_meta_dict"] = dict(
+            range_gather_pre_combine_kwargs=range_gather_pre_combine_kwargs,
+        )
+        # HACK: the symmetric group-cast handle dict is shared with symmetric group-reduce
+        # since the "group_reduce" handle is not known until the "group_cast" returns
+        self._group_reduce_args_dict_packed[
+            "native_grpcoll_handle_dict"
+        ] = self._group_cast_args_dict_packed["native_grpcoll_handle_dict"]
+
+    def _init_meta_kwargs_for_a2av_group_cast(self):
         (
             self._group_cast_args_dict_packed["a2a_input_split_size"],
             self._group_cast_args_dict_packed["perm_before_a2a_kwargs"],
@@ -221,7 +292,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             device=self.device,
         )
 
-    def _init_a2a_meta_kwargs_for_group_reduce(self):
+    def _init_meta_kwargs_for_a2av_group_reduce(self):
         (
             self._group_reduce_args_dict_packed["a2a_input_split_size"],
             self._group_reduce_args_dict_packed["perm_before_a2a_kwargs"],

@@ -63,6 +63,7 @@ class DistAttnRuntimeKey:
     is_deterministic_mode_enable: bool
     is_hierarchical_comm_enable: bool
     is_qo_comm_enable: bool
+    is_native_grpcoll_enable: bool
 
 
 class DistAttnRuntimeMgr:
@@ -353,9 +354,11 @@ def init_dist_attn_runtime_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        # auto set other flags that might influence the runtime behavior
         is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
         is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
         is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
+        is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
     )
 
 
@@ -375,8 +378,8 @@ def init_grpcoll_buffer(
             # TODO: in the future, we had better automatically decide
             # the config to register the buffer similar to nccl
             grpcoll_mgr.register_buffer(
-                cp_group,
-                grpcoll_config,
+                group=cp_group,
+                config=grpcoll_config,
             )
 
 
