@@ -40,10 +40,7 @@ import time
 import torch
 import torch.distributed as dist
 
-from magi_attention.comm.primitive.grpcoll import (
-    group_cast_collective,
-    group_reduce_collective,
-)
+from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
@@ -185,7 +182,7 @@ def test_main(
         (sum(output_split_size_list), *x.shape[1:]), dtype=torch.bfloat16, device="cuda"
     )
     recv_x_gc_buf = recv_x_gc.clone() if pass_out_buffer else None
-    work_with_pf_gc = group_cast_collective(
+    work_with_pf_gc = group_cast(
         input=x,
         output=recv_x_gc,
         input_split_size_list=input_split_size_list,
@@ -201,7 +198,7 @@ def test_main(
     x_gr = sim_gemm(recv_x_gc, w=sim_gemm_weight)
     combined_x_gr = torch.zeros_like(x)
     combined_x_gr_buf = combined_x_gr.clone() if pass_out_buffer else None
-    work_with_pf_gr = group_reduce_collective(
+    work_with_pf_gr = group_reduce(
         input=x_gr,
         output=combined_x_gr,
         input_split_size_list=output_split_size_list,

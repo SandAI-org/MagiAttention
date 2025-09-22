@@ -21,10 +21,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.comm.primitive.grpcoll import (
-    group_cast_collective,
-    group_reduce_collective,
-)
+from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
@@ -292,7 +289,7 @@ class TestGroupCollective(DistTestBase):
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
     @parameterize("async_op", [True])  # skip async_op=False to speed up
-    def test_group_cast_collective(
+    def test_group_cast(
         self,
         test_case: dict[str, Any],
         use_hier_comm: bool,
@@ -368,7 +365,7 @@ class TestGroupCollective(DistTestBase):
         with self._switch_hier_comm_context(
             enable=use_hier_comm
         ), self._switch_native_grpcoll_context(enable=use_native_grpcoll):
-            work = group_cast_collective(
+            work = group_cast(
                 input=send_buffer,
                 output=recv_buffer,
                 input_split_size_list=input_split_size_list,
@@ -627,7 +624,7 @@ class TestGroupCollective(DistTestBase):
     @parameterize("use_native_grpcoll", [False, True])
     @parameterize("deterministic", [False, True])
     @parameterize("async_op", [True])  # skip async_op=False to speed up
-    def test_group_reduce_collective(
+    def test_group_reduce(
         self,
         test_case: dict[str, Any],
         use_hier_comm: bool,
@@ -757,7 +754,7 @@ class TestGroupCollective(DistTestBase):
             with self._switch_hier_comm_context(
                 enable=use_hier_comm
             ), self._switch_native_grpcoll_context(enable=use_native_grpcoll):
-                sym_work_gc = group_cast_collective(
+                sym_work_gc = group_cast(
                     input=recv_buffer_before_reduce.clone(),
                     output=send_buffer.clone(),
                     input_split_size_list=output_split_size_list,
@@ -781,7 +778,7 @@ class TestGroupCollective(DistTestBase):
         with self._switch_hier_comm_context(
             enable=use_hier_comm
         ), self._switch_native_grpcoll_context(enable=use_native_grpcoll):
-            work = group_reduce_collective(
+            work = group_reduce(
                 input=send_buffer,
                 output=recv_buffer_before_reduce,
                 input_split_size_list=input_split_size_list,

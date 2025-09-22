@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ._group_collective import group_cast_collective, group_reduce_collective
+from ._group_collective import group_cast, group_reduce
 
 __all__ = [
-    "group_cast_collective",
-    "group_reduce_collective",
+    "group_cast",
+    "group_reduce",
 ]

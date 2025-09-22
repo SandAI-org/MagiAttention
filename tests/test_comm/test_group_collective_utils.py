@@ -387,7 +387,7 @@ class TestGroupCollectiveUtils(TestCase):
         unperm_index: torch.LongTensor,
     ) -> torch.Tensor:
         """unpermute a2a output to output (deprecated as reference)
-        as a post-processing func for group_cast_collective
+        as a post-processing func for group_cast
         """
 
         return input_tensor.index_select(
@@ -545,7 +545,7 @@ class TestGroupCollectiveUtils(TestCase):
         reduce_index: torch.LongTensor,
     ) -> torch.Tensor:
         """sum-reduce a2a output to output (deprecated as reference)
-        as a post-processing func for group_reduce_collective
+        as a post-processing func for group_reduce
         """
 
         return output.index_add_(

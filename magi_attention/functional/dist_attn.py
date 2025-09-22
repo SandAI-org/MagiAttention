@@ -18,10 +18,7 @@ import torch
 import torch.distributed as dist
 
 import magi_attention
-from magi_attention.comm.primitive.grpcoll import (
-    group_cast_collective,
-    group_reduce_collective,
-)
+from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
@@ -812,7 +809,7 @@ class DistAttnRuntime:
         )
 
         # launch group cast kernel
-        remote_kv_work = group_cast_collective(
+        remote_kv_work = group_cast(
             input=local_kv,
             output=remote_kv_buffer,
             **group_cast_args,
@@ -871,7 +868,7 @@ class DistAttnRuntime:
         )
 
         # launch group cast kernel
-        remote_q_work = group_cast_collective(
+        remote_q_work = group_cast(
             input=local_q,
             output=remote_q_buffer,
             **group_cast_args,
@@ -935,7 +932,7 @@ class DistAttnRuntime:
         )
 
         # launch group cast kernel
-        remote_qo_do_work = group_cast_collective(
+        remote_qo_do_work = group_cast(
             input=local_qo_do,
             output=remote_qo_do_buffer,
             **group_cast_args,
@@ -998,7 +995,7 @@ class DistAttnRuntime:
         )
 
         # launch group cast kernel
-        remote_lse_work = group_cast_collective(
+        remote_lse_work = group_cast(
             input=local_lse,
             output=remote_lse_buffer,
             **group_cast_args,
@@ -1059,7 +1056,7 @@ class DistAttnRuntime:
                 partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
 
             # launch group-reduce kernel
-            partial_out_lse_reduce_work = group_reduce_collective(
+            partial_out_lse_reduce_work = group_reduce(
                 input=partial_remote_out,
                 input_lse=partial_remote_lse,
                 output=partial_local_out,
@@ -1128,7 +1125,7 @@ class DistAttnRuntime:
             partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)  # type: ignore[union-attr]
 
         # launch group-reduce kernel
-        partial_dkv_reduce_work = group_reduce_collective(
+        partial_dkv_reduce_work = group_reduce(
             input=partial_remote_dkv,
             output=partial_local_dkv,
             **group_reduce_args,
@@ -1178,7 +1175,7 @@ class DistAttnRuntime:
                 partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
 
             # launch group-reduce kernel
-            partial_dq_reduce_work = group_reduce_collective(
+            partial_dq_reduce_work = group_reduce(
                 input=partial_remote_dq,
                 output=partial_local_dq,
                 **group_reduce_args,

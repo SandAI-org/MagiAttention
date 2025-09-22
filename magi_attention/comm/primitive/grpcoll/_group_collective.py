@@ -29,14 +29,14 @@ from ._group_collective_hier import (
 from ._native_grpcoll_impl import native_group_cast_impl, native_group_reduce_impl
 
 __all__ = [
-    "group_cast_collective",
-    "group_reduce_collective",
+    "group_cast",
+    "group_reduce",
 ]
 
 
 @torch.no_grad()
 @nvtx.instrument_nvtx
-def group_cast_collective(
+def group_cast(
     input: torch.Tensor,
     output: torch.Tensor | None,
     input_split_size_list: list[int],
@@ -118,7 +118,7 @@ def group_cast_collective(
 
 @torch.no_grad()
 @nvtx.instrument_nvtx
-def group_reduce_collective(
+def group_reduce(
     input: torch.Tensor,
     output: torch.Tensor | None,
     input_split_size_list: list[int],
