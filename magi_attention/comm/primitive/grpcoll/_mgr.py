@@ -41,13 +41,6 @@ class GrpCollMgr(metaclass=SingletonMeta):
         config: GrpCollConfig = GrpCollConfig(),
         **kwargs,
     ):
-        # TODO: support other group size
-        assert group.size() in (
-            2,
-            4,
-            8,
-        ), "For now, only support group size in (2, 4, 8)"
-
         self.check_released(group)
 
         self._group_to_config[group] = config

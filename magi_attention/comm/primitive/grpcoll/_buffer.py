@@ -68,6 +68,8 @@ class GrpCollBuffer:
     """
 
     num_sms: int = 20
+    hidden_size_alignment: int = 2 * 128
+    hidden_size_ub: int = 64 * 128  # upper bound
 
     def __init__(
         self,
@@ -466,9 +468,14 @@ class GrpCollBuffer:
         # FIXME: figure out the alignment requirement
         hidden_shape = x.shape[1:]  # type: ignore[union-attr]
         hidden_size = math.prod(hidden_shape)
-        assert (
-            hidden_size % 256 == 0
-        ), f"The hidden size should be a multiple of 256, but got {hidden_size=}."
+        assert hidden_size % GrpCollBuffer.hidden_size_alignment == 0, (
+            f"The hidden size should be a multiple of {GrpCollBuffer.hidden_size_alignment}, "
+            f"but got {hidden_size=}."
+        )
+        assert hidden_size < GrpCollBuffer.hidden_size_ub, (
+            f"The hidden size should be less than {GrpCollBuffer.hidden_size_ub}, "
+            f"but got {hidden_size=}."
+        )
         if is_out_buf_given:
             assert recv_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
                 "The hidden shape (except dim0) of input and output buffer should be the same, "
@@ -682,9 +689,14 @@ class GrpCollBuffer:
         # FIXME: figure out the alignment requirement
         hidden_shape = x.shape[1:]
         hidden_size = math.prod(hidden_shape)
-        assert (
-            hidden_size % 256 == 0
-        ), f"The hidden size should be a multiple of 256, but got {hidden_size=}."
+        assert hidden_size % GrpCollBuffer.hidden_size_alignment == 0, (
+            f"The hidden size should be a multiple of {GrpCollBuffer.hidden_size_alignment}, "
+            f"but got {hidden_size=}."
+        )
+        assert hidden_size < GrpCollBuffer.hidden_size_ub, (
+            f"The hidden size should be less than {GrpCollBuffer.hidden_size_ub}, "
+            f"but got {hidden_size=}."
+        )
         if is_out_buf_given:
             assert combined_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
                 "The hidden shape (except dim0) of input and output buffer should be the same, "

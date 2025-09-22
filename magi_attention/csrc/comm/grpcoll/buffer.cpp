@@ -387,6 +387,9 @@ Buffer::intranode_dispatch(
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream) {
+  // TODO: support other num_ranks
+  EP_HOST_ASSERT(num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
+
   bool cached_mode = cached_rank_prefix_matrix.has_value();
 
   // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
@@ -689,6 +692,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     bool async,
     bool allocate_on_comm_stream,
     bool allow_empty_init_out_buf) {
+  // TODO: support other num_ranks
+  EP_HOST_ASSERT(num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
   EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
   EP_HOST_ASSERT(src_idx.dim() == 1 and src_idx.is_contiguous() and src_idx.scalar_type() == torch::kInt32);
   EP_HOST_ASSERT(send_head.dim() == 2 and send_head.is_contiguous() and send_head.scalar_type() == torch::kInt32);

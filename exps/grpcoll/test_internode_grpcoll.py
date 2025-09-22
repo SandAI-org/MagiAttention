@@ -678,7 +678,7 @@ def test_main(
     # Tune dispatch performance
     best_dispatch_results = None
     fp8_factor = (1 + 4 / 128) / 2
-    for current_x in (x_e4m3, x):
+    for current_x in (x,):  # (x_e4m3, x):
         best_time, best_results = 1e10, None
         rdma_send_bytes = (
             (dispatch_bf16_rdma_send_bytes * fp8_factor)
@@ -732,21 +732,19 @@ def test_main(
             )
             print("", flush=True)
 
-        if isinstance(current_x, tuple):
-            # Gather FP8 the best config from rank 0
+        # Gather the best config from rank 0 and the first test setting
+        if best_dispatch_results is None:
             best_dispatch_results = torch.tensor(
                 [best_results[0], best_results[1], best_results[2]],  # type: ignore[index]
                 dtype=torch.int32,
                 device="cuda",
             )
-            all_best_fp8_results_list = [
+            all_best_results_list = [
                 torch.zeros_like(best_dispatch_results)
                 for _ in range(torch.distributed.get_world_size())
             ]
-            dist.all_gather(
-                all_best_fp8_results_list, best_dispatch_results, group=group
-            )
-            best_dispatch_results = all_best_fp8_results_list[0].tolist()
+            dist.all_gather(all_best_results_list, best_dispatch_results, group=group)
+            best_dispatch_results = all_best_results_list[0].tolist()
     dispatch_config = GrpCollConfig(
         num_sms=best_dispatch_results[0],  # type: ignore[index]
         nvl_chunk_size=best_dispatch_results[1],  # type: ignore[index]
@@ -938,7 +936,11 @@ if __name__ == "__main__":
         "--num-tokens", type=int, default=4096, help="Number of tokens (default: 4096)"
     )
     parser.add_argument(
-        "--hidden", type=int, default=7168, help="Hidden dimension size (default: 7168)"
+        # TODO: find out the relationship between hidden size and bandwidth
+        "--hidden",
+        type=int,
+        default=56 * 128,
+        help="Hidden dimension size (default: 56x128=7168)",
     )
     parser.add_argument(
         "--num-topk-groups",

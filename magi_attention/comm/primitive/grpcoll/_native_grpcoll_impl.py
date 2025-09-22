@@ -162,6 +162,7 @@ def native_group_cast_impl(
             recv_x=recv_x,
             unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
         ),
+        async_op=async_op,
     )
 
     return work_with_post_process_fn
@@ -266,6 +267,7 @@ def native_group_reduce_impl(
             output=output,
             combined_x=combined_x,
         ),
+        async_op=async_op,
     )
 
     return work_with_post_process_fn

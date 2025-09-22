@@ -61,10 +61,15 @@ __global__ void get_dispatch_layout(
   auto thread_id = static_cast<int>(threadIdx.x);
 
   // Count expert statistics
+  // by the first (num_experts // kNumExpertsPerSM) SMs
   __shared__ int num_tokens_per_expert_per_thread[kNumThreads][kNumExpertsPerSM];
   int expert_begin_idx = sm_id * kNumExpertsPerSM, expert_end_idx = min(expert_begin_idx + kNumExpertsPerSM, num_experts);
   if (expert_begin_idx < expert_end_idx) {
-// Per-thread count
+    /** Per-thread count
+     * 1. num_tokens_per_expert_per_thread[tid][local_eid]:
+     *    the num of tokens sent to expert local_eid by thread tid in this SM,
+     *    covering the token with idxs: [tid + i * kNumThreads], i=0,1,2,...
+     */
 #pragma unroll
     for (int i = 0; i < kNumExpertsPerSM; ++i)
       num_tokens_per_expert_per_thread[thread_id][i] = 0;
@@ -80,7 +85,11 @@ __global__ void get_dispatch_layout(
     }
     __syncthreads();
 
-    // Sum up
+    /** Sum up
+     * 1. for num_tokens_per_expert:
+     *  each thread tid in this SM will sum up the num of tokens sent to eid (expert_begin_idx + tid)
+     *  by looping over the partial results in num_tokens_per_expert_per_thread[:][tid]
+     */
     EP_STATIC_ASSERT(kNumExpertsPerSM <= kNumThreads, "Too many experts per SM");
     if (expert_begin_idx + thread_id < expert_end_idx) {
       int sum = 0;
@@ -96,6 +105,7 @@ __global__ void get_dispatch_layout(
     EP_DEVICE_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0 and num_ranks > NUM_MAX_NVL_PEERS);
 
   // Count rank statistics
+  // by the last (num_ranks // kNumRanksPerSM) SMs
   constexpr int kNumRDMARanksPerSM = kNumRanksPerSM / NUM_MAX_NVL_PEERS;
   __shared__ int num_tokens_per_rank_per_thread[kNumThreads][kNumRanksPerSM];
   __shared__ int num_tokens_per_rdma_rank_per_thread[kNumThreads][kNumRDMARanksPerSM];
@@ -107,7 +117,25 @@ __global__ void get_dispatch_layout(
     auto expert_begin = rank_begin_idx * num_expert_per_rank;
     auto expert_end = rank_end_idx * num_expert_per_rank;
 
-// Per-thread count
+    /** Per-thread count
+     * 1. num_tokens_per_rank_per_thread[tid][local_rid]:
+     *  the num of tokens sent to rank rid (local_rid + rank_begin_idx)
+     *  counted by thread tid in this SM,
+     *  covering the token with idxs: [tid + i * kNumThreads], i=0,1,2,...
+     *
+     * 2. num_tokens_per_rdma_rank_per_thread[tid][local_rid]:
+     *  the num of tokens sent to RDMA rank rid (local_rid + rdma_rank_begin_idx)
+     *  counted by thread tid in this SM,
+     *  covering the token with idxs: [tid + i * kNumThreads], i=0,1,2,...
+     *
+     * 3. is_in_rank[local_rid]:
+     *  whether the token is sent to rank rid (local_rid + rank_begin_idx)
+     *  for each token with idx: tid + i * kNumThreads, i=0,1,2,...
+     *
+     * 4. is_in_rdma_rank[local_rid]:
+     *  whether the token is sent to RDMA rank rid (local_rid + rdma_rank_begin_idx)
+     *  for each token with idx: tid + i * kNumThreads, i=0,1,2,...
+     */
 #pragma unroll
     for (int i = 0; i < kNumRanksPerSM; ++i)
       num_tokens_per_rank_per_thread[thread_id][i] = 0;
@@ -141,7 +169,18 @@ __global__ void get_dispatch_layout(
     }
     __syncthreads();
 
-    // Sum up
+    /** Sum up
+     * 1. for num_tokens_per_rank:
+     *  each thread tid in this SM will sum up the num of tokens sent to rid (rank_begin_idx + tid)
+     *  by looping over the partial results in num_tokens_per_rank_per_thread[:][tid]
+     *
+     * 2. for num_tokens_per_rdma_rank:
+     *  each thread tid in this SM will sum up the num of tokens sent to rid (rdma_rank_begin_idx + tid)
+     *  by looping over the partial results in num_tokens_per_rdma_rank_per_thread[:][tid]
+     *
+     * 3. for is_token_in_rank:
+     *  it has no need to sum up
+     */
     EP_STATIC_ASSERT(kNumRanksPerSM <= kNumThreads, "Too many ranks per SM");
     if (rank_begin_idx + thread_id < rank_end_idx) {
       int sum = 0;
@@ -173,7 +212,9 @@ void get_dispatch_layout(
     int num_experts,
     cudaStream_t stream) {
   constexpr int kNumThreads = 256, kNumExpertsPerSM = 4, kNumRanksPerSM = 8;
-  int num_sms = ((num_experts + kNumExpertsPerSM - 1) / kNumExpertsPerSM) + (num_ranks + kNumRanksPerSM - 1) / kNumRanksPerSM;
+  int num_sms_for_expert_stats = (num_experts + kNumExpertsPerSM - 1) / kNumExpertsPerSM;
+  int num_sms_for_rank_stats = (num_ranks + kNumRanksPerSM - 1) / kNumRanksPerSM;
+  int num_sms = num_sms_for_expert_stats + num_sms_for_rank_stats;
   EP_STATIC_ASSERT(kNumRanksPerSM % NUM_MAX_NVL_PEERS == 0, "Invalid number of ranks per SM");
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);

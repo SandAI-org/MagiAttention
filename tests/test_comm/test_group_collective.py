@@ -116,7 +116,7 @@ class TestGroupCollective(DistTestBase):
 
     @property
     def head_dim(self) -> int:
-        return 16
+        return 128
 
     @property
     def hidden_size(self) -> int:
