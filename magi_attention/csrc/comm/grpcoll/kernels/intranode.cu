@@ -746,7 +746,9 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
     void** buffer_ptrs,
     int rank,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens) {
+    int num_recv_buffer_tokens,
+    // TODO: make acc_reduce a template parameter
+    bool acc_reduce) {
   const auto num_sms = static_cast<int>(gridDim.x);
   const auto thread_id = static_cast<int>(threadIdx.x);
   const auto sm_id = static_cast<int>(blockIdx.x), lane_id = get_lane_id();
@@ -969,8 +971,11 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
         // Reduce data with pipeline
         constexpr int kNumStages = 8;
         EP_STATIC_ASSERT(kNumStages * 32 * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid count");
+
 #pragma unroll
         for (int i = lane_id; i < hidden_int4; i += 32) {
+          auto dst_buf_ptr_int4 = recv_int4 + token_idx * hidden_int4 + i;
+
           // Read bias
           // TODO: make it as a template
           int4 bias_0_value_int4 = bias_0_int4 != nullptr ? __ldg(bias_0_int4 + token_idx * hidden_int4 + i) : make_int4(0, 0, 0, 0);
@@ -978,6 +983,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
 
           // Read buffers
           int4 recv_value_int4[kNumRanks];
+
 #pragma unroll
           for (int j = 0; j < num_topk_ranks; ++j)
             recv_value_int4[j] = ld_nc_global(channel_x_buffers[topk_ranks[j]].buffer() + slot_indices[j] * hidden_int4 + i);
@@ -986,17 +992,30 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
           float values[kDtypePerInt4];
           auto bias_0_values = reinterpret_cast<const dtype_t*>(&bias_0_value_int4);
           auto bias_1_values = reinterpret_cast<const dtype_t*>(&bias_1_value_int4);
+
 #pragma unroll
           for (int j = 0; j < kDtypePerInt4; ++j)
             values[j] = static_cast<float>(bias_0_values[j]) + static_cast<float>(bias_1_values[j]);
+
+          // Read acc out buffers if needed
+          const dtype_t* acc_buf_dtypes = nullptr;
+          if (acc_reduce) {
+            acc_buf_dtypes = reinterpret_cast<const dtype_t*>(dst_buf_ptr_int4);
+          }
 
 // Reduce all-to-all results
 #pragma unroll
           for (int j = 0; j < num_topk_ranks; ++j) {
             auto recv_value_dtypes = reinterpret_cast<const dtype_t*>(&recv_value_int4[j]);
+
 #pragma unroll
             for (int k = 0; k < kDtypePerInt4; ++k)
               values[k] += static_cast<float>(recv_value_dtypes[k]);
+          }
+          if (acc_reduce) {
+#pragma unroll
+            for (int k = 0; k < kDtypePerInt4; ++k)
+              values[k] += static_cast<float>(acc_buf_dtypes[k]);
           }
 
           // Cast back to `dtype_t`
@@ -1021,7 +1040,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
           __syncwarp();
           if (lane_id == 0) {
             auto tma_bytes = min(32, hidden_int4 - i) * static_cast<int>(sizeof(int4));
-            tma_store_1d(reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * 32, recv_int4 + token_idx * hidden_int4 + i, tma_bytes, false);
+            tma_store_1d(reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * 32, dst_buf_ptr_int4, tma_bytes, false);
           }
           __syncwarp();
 #else
@@ -1079,7 +1098,8 @@ void combine(
     cudaStream_t stream,
     int num_sms,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens) {
+    int num_recv_buffer_tokens,
+    bool acc_reduce) {
   constexpr int kNumThreads = 768;
   constexpr int kNumTMABytesPerWarp = 4096;
 #ifndef DISABLE_SM90_FEATURES
@@ -1110,7 +1130,8 @@ void combine(
         buffer_ptrs,                                                       \
         rank,                                                              \
         num_max_send_tokens,                                               \
-        num_recv_buffer_tokens);                                           \
+        num_recv_buffer_tokens,                                            \
+        acc_reduce);                                                       \
   }                                                                        \
   break
 #define COMBINE_DTYPE_LAUNCH_CASE(dtype)               \

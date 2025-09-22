@@ -200,6 +200,8 @@ struct Buffer {
       std::optional<EventHandle>& previous_event,
       bool async,
       bool allocate_on_comm_stream,
+      int reduce_op,
+      bool acc_reduce,
       bool allow_empty_init_out_buf);
 
   std::tuple<
@@ -257,6 +259,8 @@ struct Buffer {
       std::optional<EventHandle>& previous_event,
       bool async,
       bool allocate_on_comm_stream,
+      int reduce_op,
+      bool acc_reduce,
       bool allow_empty_init_out_buf);
 
   void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);

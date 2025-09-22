@@ -89,6 +89,10 @@ def test_main(
         min_num_dst_ranks > 0
     )  # if every token has at least one dst, we can empty-init
     pass_out_buffer = True
+    acc_reduce_out_buffer = False  # TODO: support acc_reduce for internode_combine
+    acc_reduce_constant = rank
+    if acc_reduce_out_buffer:
+        assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"
 
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     num_local_experts = num_experts // num_ranks
@@ -192,6 +196,8 @@ def test_main(
     # get ref combine output by group-reduce
     x_gr = sim_gemm(recv_x_gc, w=sim_gemm_weight)
     combined_x_gr = torch.zeros_like(x)
+    if acc_reduce_out_buffer:
+        combined_x_gr += acc_reduce_constant
     combined_x_gr_buf = combined_x_gr.clone() if pass_out_buffer else None
     work_with_pf_gr = group_reduce(
         input=x_gr,
@@ -607,6 +613,8 @@ def test_main(
                         "handle": handle,
                         "config": config,
                         "async_finish": async_mode,
+                        "reduce_op": "sum",
+                        "acc_reduce": acc_reduce_out_buffer,
                         "allow_empty_init_out_buf": allow_empty_init_out_buf,
                     }
                     if with_topk:
@@ -667,14 +675,21 @@ def test_main(
                     check_x = combined_x.float() / send_token_nums
                     ref_x = x_pure_rand if current_x is x_pure_rand else x
                     ref_x = sim_gemm(ref_x, w=sim_gemm_weight)
+                    # if acc_reduce, the combined token should add with a constant rank bias
+                    if acc_reduce_out_buffer:
+                        ref_x += acc_reduce_constant / send_token_nums
 
                     # if some token is not sent to any rank, the combined token should be 0
                     if min_num_dst_ranks == 0:
                         zero_num_dst_ranks_mask = (send_token_nums == 0.0).expand_as(
                             combined_x
                         )
-                        check_x[zero_num_dst_ranks_mask] = 0.0
-                        ref_x[zero_num_dst_ranks_mask] = 0.0
+                        check_x[zero_num_dst_ranks_mask] = (
+                            acc_reduce_constant if acc_reduce_out_buffer else 0.0
+                        )
+                        ref_x[zero_num_dst_ranks_mask] = (
+                            acc_reduce_constant if acc_reduce_out_buffer else 0.0
+                        )
 
                     diff = calc_diff(check_x, ref_x)
                     assert diff < 5e-6, f"{check_x} != {ref_x} with ({diff=})"
@@ -800,6 +815,7 @@ def test_main(
 
     # Tune combine performance
     best_time, best_results = 1e10, None
+    combined_x_buf = torch.zeros_like(x) if pass_out_buffer else None
     for nvl_chunk_size in range(1, 8, 1):
         for rdma_chunk_size in range(12 if num_nodes == 2 else 8, 33, 4):
             config = GrpCollConfig(
@@ -811,8 +827,11 @@ def test_main(
             )
             tune_args = {
                 "x": recv_x,
+                "combined_x": combined_x_buf,
                 "handle": handle,
                 "config": config,
+                "reduce_op": "sum",
+                "acc_reduce": acc_reduce_out_buffer,
                 "allow_empty_init_out_buf": allow_empty_init_out_buf,
             }
             t, notify_t = bench_kineto(

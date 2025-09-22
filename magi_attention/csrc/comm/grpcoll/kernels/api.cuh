@@ -179,7 +179,8 @@ void combine(
     cudaStream_t stream,
     int num_sms,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens);
+    int num_recv_buffer_tokens,
+    bool acc_reduce);
 
 } // namespace intranode
 

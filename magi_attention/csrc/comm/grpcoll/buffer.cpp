@@ -691,7 +691,11 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream,
+    int reduce_op,
+    bool acc_reduce,
     bool allow_empty_init_out_buf) {
+  // TODO: support other reduce ops
+  EP_HOST_ASSERT(reduce_op == 0);
   // TODO: support other num_ranks
   EP_HOST_ASSERT(num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
   EP_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
@@ -775,6 +779,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
    */
   auto combined_x = torch::Tensor();
   if (!combined_x_buf.has_value()) {
+    EP_HOST_ASSERT(!acc_reduce);
     combined_x = allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden}, x.options()) : torch::zeros({num_combined_tokens, hidden}, x.options());
   } else {
     EP_HOST_ASSERT(combined_x_buf->size(0) == num_combined_tokens and combined_x_buf->size(1) == hidden);
@@ -812,7 +817,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       comm_stream,
       config.num_sms,
       config.num_max_nvl_chunked_send_tokens,
-      config.num_max_nvl_chunked_recv_tokens);
+      config.num_max_nvl_chunked_recv_tokens,
+      acc_reduce);
 
   // Wait streams
   std::optional<EventHandle> event;
@@ -1249,7 +1255,14 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream,
+    int reduce_op,
+    bool acc_reduce,
     bool allow_empty_init_out_buf) {
+  // TODO: support other reduce ops
+  EP_HOST_ASSERT(reduce_op == 0);
+  // TODO: support acc_reduce
+  EP_HOST_ASSERT(!acc_reduce);
+
 #ifndef DISABLE_NVSHMEM
   const int num_channels = config.num_sms / 2;
   EP_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -1355,6 +1368,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
    */
   auto combined_x = torch::Tensor();
   if (!combined_x_buf.has_value()) {
+    EP_HOST_ASSERT(!acc_reduce);
     combined_x = allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden}, x.options()) : torch::zeros({num_combined_tokens, hidden}, x.options());
   } else {
     EP_HOST_ASSERT(combined_x_buf->size(0) == num_combined_tokens and combined_x_buf->size(1) == hidden);

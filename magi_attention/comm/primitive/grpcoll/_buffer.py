@@ -50,6 +50,13 @@ from .utils import check_nvlink_connections
 __all__ = ["GrpCollBuffer"]
 
 
+reduce_op_str2int_map = {
+    "sum": 0,
+    "avg": 1,
+    "lse": 2,
+}
+
+
 class GrpCollBuffer:
     """
     The core expert-parallel (EP) communication buffers for Mixture of Experts (MoE) model, which supports:
@@ -665,7 +672,7 @@ class GrpCollBuffer:
             previous_event: the event to wait before actually executing the kernel.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
-            allow_empty_init_out_buf: whether to allow empty initialize output buffers,
+            allow_empty_init_out_buf: whether to allow empty-initialize the output buffer if not given,
                 this is useful when the user knows that no token is missed to be reduced in the output buffer
                 such as during the ep communication scenario,
                 but it is unsafe to set it to True in the general group-reduce case
@@ -678,8 +685,6 @@ class GrpCollBuffer:
         """
         is_out_buf_given = combined_x is not None
 
-        # TODO: support acc_reduce
-        assert not acc_reduce
         # TODO: support other dtypes
         assert (
             x.dtype == torch.bfloat16
@@ -722,6 +727,8 @@ class GrpCollBuffer:
                 combined_x=combined_x,
                 handle=handle,
                 hidden_shape=hidden_shape,
+                reduce_op=reduce_op,
+                acc_reduce=acc_reduce,
                 topk_weights=topk_weights,
                 bias=bias,
                 config=config,
@@ -757,6 +764,8 @@ class GrpCollBuffer:
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,
+            reduce_op_str2int_map[reduce_op],
+            acc_reduce,
             allow_empty_init_out_buf,
         )
 
@@ -939,6 +948,8 @@ class GrpCollBuffer:
         combined_x: torch.Tensor | None,
         handle: Union[tuple, list],
         hidden_shape: torch.Size,
+        reduce_op: Literal["sum", "avg", "lse"] = "sum",
+        acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         config: GrpCollConfig | None = None,
@@ -986,6 +997,8 @@ class GrpCollBuffer:
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,
+            reduce_op_str2int_map[reduce_op],
+            acc_reduce,
             allow_empty_init_out_buf,
         )
 

@@ -60,18 +60,6 @@ def _native_group_cast_post_process(
     )
 
 
-def _native_group_reduce_post_process(
-    *args,
-    output: torch.Tensor | None,
-    combined_x: torch.Tensor,
-    acc_reduce: bool,
-    **kwargs,
-) -> torch.Tensor:
-    if output is None or not acc_reduce:
-        return combined_x
-    return output.add_(combined_x)
-
-
 @nvtx.instrument_nvtx
 def native_group_cast_impl(
     input: torch.Tensor,
@@ -96,10 +84,6 @@ def native_group_cast_impl(
     # since the group_cast handle can be reused later
     handle: tuple | None = handle_dict.get("group_cast", None)
     assert config is not None and buffer is not None
-
-    # XXX: a workaround to implement native group-cast
-    # by original deep-ep dispatch kernels
-    # with pre-meta-args processing and post-output processing
 
     # transfer group-cast meta args to dispatch meta args
     if meta_dict:
@@ -207,10 +191,6 @@ def native_group_reduce_impl(
         "Please run symmetric group-cast to prepare handle first."
     )
 
-    # XXX: a workaround to implement native group-reduce
-    # by original deep-ep combine kernels
-    # with pre-meta-args processing and pre-input processing
-
     # transfer symmetric group-cast meta args to dispatch meta args
     if meta_dict:
         range_gather_pre_combine_kwargs = meta_dict["range_gather_pre_combine_kwargs"]
@@ -234,11 +214,9 @@ def native_group_reduce_impl(
     combined_x, _, event = buffer.combine(  # combined_topk_weights
         x=input,
         handle=handle,
-        # FIXME: since the combine kernel directly write to the buffer,
-        # we have to init a new buffer and reduce to the given output buffer later
-        combined_x=None,
+        combined_x=output,
         reduce_op=reduce_op,
-        acc_reduce=False,  # TODO: support acc_reduce
+        acc_reduce=acc_reduce,
         config=config,
         previous_event=None,
         async_finish=async_op,
@@ -251,13 +229,7 @@ def native_group_reduce_impl(
     # prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(
         work=GeneralWork(event),
-        # XXX: remove this post-process
-        post_process_fn=partial(
-            _native_group_reduce_post_process,
-            output=output,
-            combined_x=combined_x,
-            acc_reduce=acc_reduce,
-        ),
+        post_process_fn=lambda *args, **kwargs: combined_x,
         async_op=async_op,
     )
 
