@@ -18,16 +18,15 @@ import torch
 import torch.distributed as dist
 
 import magi_attention
-from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
+from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.utils import nvtx
 
-from .._all2all_v import all2all_v
+from ._a2av_grpcoll_impl import a2av_group_cast_impl, a2av_group_reduce_impl
 from ._group_collective_hier import (
     hier_group_cast_impl_with_a2av,
     hier_group_reduce_impl_with_a2av,
 )
 from ._native_grpcoll_impl import native_group_cast_impl, native_group_reduce_impl
-from .utils import calc_group_cast_a2a_args, calc_group_reduce_a2a_args
 
 __all__ = [
     "group_cast_collective",
@@ -39,7 +38,7 @@ __all__ = [
 @nvtx.instrument_nvtx
 def group_cast_collective(
     input: torch.Tensor,
-    output: torch.Tensor,
+    output: torch.Tensor | None,
     input_split_size_list: list[int],
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
@@ -77,27 +76,7 @@ def group_cast_collective(
         to transfer from a2a-v output tensor to group-cast output tensor
     """
 
-    assert len(input_split_size_list) == len(dst_indices_list), (
-        f"The length of input_split_size_list and dst_indices_list should be the same, "
-        f"but got {len(input_split_size_list)=} and {len(dst_indices_list)=}"
-    )
-    assert len(output_split_size_list) == len(src_index_list), (
-        f"The length of output_split_size_list and src_index_list should be the same, "
-        f"but got {len(output_split_size_list)=} and {len(src_index_list)=}"
-    )
-    assert input.shape[0] == sum(input_split_size_list), (
-        f"The sum of input_split_size_list should be equal to input_seqlen, "
-        f"but got {sum(input_split_size_list)=} and {input.shape[0]=}"
-    )
-    assert output.shape[0] == sum(output_split_size_list), (
-        f"The sum of output_split_size_list should be equal to output_seqlen, "
-        f"but got {sum(output_split_size_list)=} and {output.shape[0]=}"
-    )
-
     if magi_attention.comm.is_hierarchical_comm_enable():
-        assert (
-            not magi_attention.comm.is_native_grpcoll_enable()
-        ), "Hierarchical group-cast is not compatible with native grpcoll implementation"
         # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-cast
         return hier_group_cast_impl_with_a2av(
             input_tensor=input,
@@ -124,42 +103,16 @@ def group_cast_collective(
             **kwargs,
         )
 
-    # ---------    calc group cast a2a args     --------- #
-
-    world_size = dist.get_world_size(group)
-
-    (
-        a2a_output,
-        a2a_input,
-        a2a_output_split_size,
-        a2a_input_split_size,
-        post_process_fn,
-    ) = calc_group_cast_a2a_args(
+    return a2av_group_cast_impl(
         input=input,
         output=output,
         input_split_size_list=input_split_size_list,
         output_split_size_list=output_split_size_list,
         dst_indices_list=dst_indices_list,
         src_index_list=src_index_list,
-        world_size=world_size,
-        **kwargs,
-    )
-
-    # ---------    lauch a2a comm kernel     --------- #
-
-    work = all2all_v(
-        input=a2a_input,
-        output=a2a_output,
-        input_split_size_list=a2a_input_split_size,
-        output_split_size_list=a2a_output_split_size,
         group=group,
         async_op=async_op,
-    )
-
-    return WorkWithPostProcessFn(
-        work=GeneralWork(work=work),
-        post_process_fn=post_process_fn,
-        async_op=async_op,
+        **kwargs,
     )
 
 
@@ -167,7 +120,7 @@ def group_cast_collective(
 @nvtx.instrument_nvtx
 def group_reduce_collective(
     input: torch.Tensor,
-    output: torch.Tensor,
+    output: torch.Tensor | None,
     input_split_size_list: list[int],
     output_split_size_list: list[int],
     dst_index_list: list[int],
@@ -175,6 +128,7 @@ def group_reduce_collective(
     group: dist.ProcessGroup,
     async_op: bool = False,
     reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -183,7 +137,9 @@ def group_reduce_collective(
 
     Args:
         input (torch.Tensor): input tensor with shape [input_seqlen, ...] to reduce from
-        output (torch.Tensor): output tensor with shape [output_seqlen, ...] to reduce to
+        output (torch.Tensor | None): output tensor with shape [output_seqlen, ...] to reduce to
+
+            NOTE: if output is None, the output tensor will be allocated in this function
         input_split_size_list (list[int]): the size list to split the input tensor,
             where sum(input_split_size_list) == input_seqlen
         output_split_size_list (list[int]): the size list to split the output tensor,
@@ -203,12 +159,15 @@ def group_reduce_collective(
             - "lse": log-sum-exp weighted average reduction, with lse correction
 
             NOTE:
-                1. if reduce_op is "avg", we will sum-reduce to the output tensor and apply average division afterwards,
-                    so the user should guarantee that the output tensor is initialized to zero
-                    otherwise the semantics will be incorrect unless the user intentionally does this
-                2. if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
-                    and we only support input/output has shape [seqlen, num_heads, head_dim]
-                    while input_lse/output_lse has shape [seqlen, num_heads] for now
+                If reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
+                and we only support input/output has shape [seqlen, num_heads, head_dim]
+                while input_lse/output_lse has shape [seqlen, num_heads] for now
+        acc_reduce (bool): whether to accumulate the reduction to the given output buffer. Defaults to True.
+
+            NOTE:
+                If False, the output will be overwritten and the initial value will be ignored.
+                Otherwise, the output buffer must be given and the initial value will be accumulated
+                w.r.t. the reduction operation according to the ``reduce_op``.
         input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
             only required and used if reduce_op is "lse"
         output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
@@ -224,28 +183,8 @@ def group_reduce_collective(
         work_with_post_process_fn (WorkWithPostProcessFn): async work with the post-process function
         to transfer from a2a-v output tensor to group-reduce output tensor
     """
-    assert len(input_split_size_list) == len(dst_index_list), (
-        f"input_split_size_list and dst_index_list should have the same length, "
-        f"but got {len(input_split_size_list)=} and {len(dst_index_list)=}"
-    )
-    assert len(output_split_size_list) == len(src_indices_list), (
-        f"output_split_size_list and src_indices_list should have the same length, "
-        f"but got {len(output_split_size_list)=} and {len(src_indices_list)=}"
-    )
-    assert input.shape[0] == sum(input_split_size_list), (
-        f"The sum of input_split_size_list should be equal to input_seqlen, "
-        f"but got {sum(input_split_size_list)=} and {input.shape[0]=}"
-    )
-    assert output.shape[0] == sum(output_split_size_list), (
-        f"The sum of output_split_size_list should be equal to output_seqlen, "
-        f"but got {sum(output_split_size_list)=} and {output.shape[0]=}"
-    )
 
     if magi_attention.comm.is_hierarchical_comm_enable():
-        assert (
-            not magi_attention.comm.is_native_grpcoll_enable()
-        ), "Hierarchical group-reduce is not compatible with native grpcoll implementation"
-
         # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-reduce
         return hier_group_reduce_impl_with_a2av(
             input_tensor=input,
@@ -257,6 +196,7 @@ def group_reduce_collective(
             group=group,
             async_op=async_op,
             reduce_op=reduce_op,
+            acc_reduce=acc_reduce,
             input_lse=input_lse,
             output_lse=output_lse,
             **kwargs,
@@ -273,71 +213,24 @@ def group_reduce_collective(
             group=group,
             async_op=async_op,
             reduce_op=reduce_op,
+            acc_reduce=acc_reduce,
             input_lse=input_lse,
             output_lse=output_lse,
             **kwargs,
         )
 
-    # ---------    calc group reduce a2a args     --------- #
-
-    world_size = dist.get_world_size(group)
-
-    (
-        a2a_output,
-        a2a_input,
-        a2a_output_split_size,
-        a2a_input_split_size,
-        post_process_fn,
-    ) = calc_group_reduce_a2a_args(
+    return a2av_group_reduce_impl(
         input=input,
         output=output,
         input_split_size_list=input_split_size_list,
         output_split_size_list=output_split_size_list,
         dst_index_list=dst_index_list,
         src_indices_list=src_indices_list,
-        world_size=world_size,
+        group=group,
+        async_op=async_op,
         reduce_op=reduce_op,
+        acc_reduce=acc_reduce,
         input_lse=input_lse,
         output_lse=output_lse,
         **kwargs,
-    )
-
-    # ---------    lauch a2a comm kernel     --------- #
-
-    if reduce_op == "lse":
-        # FIXME: for now, we can not fuse lse comm with out comm
-        # due to different shape and dtype, which should be considered and fixed in the future
-        a2a_input, a2a_input_lse = a2a_input
-        a2a_output, a2a_output_lse = a2a_output
-        work_out = all2all_v(
-            input=a2a_input,
-            output=a2a_output,
-            input_split_size_list=a2a_input_split_size,
-            output_split_size_list=a2a_output_split_size,
-            group=group,
-            async_op=async_op,
-        )
-        work_lse = all2all_v(
-            input=a2a_input_lse,
-            output=a2a_output_lse,
-            input_split_size_list=a2a_input_split_size,
-            output_split_size_list=a2a_output_split_size,
-            group=group,
-            async_op=async_op,
-        )
-        work = [work_out, work_lse]
-    else:
-        work = all2all_v(
-            input=a2a_input,
-            output=a2a_output,
-            input_split_size_list=a2a_input_split_size,
-            output_split_size_list=a2a_output_split_size,
-            group=group,
-            async_op=async_op,
-        )
-
-    return WorkWithPostProcessFn(
-        work=GeneralWork(work=work),
-        post_process_fn=post_process_fn,
-        async_op=async_op,
     )

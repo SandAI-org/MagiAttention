@@ -633,6 +633,7 @@ class GrpCollBuffer:
         handle: tuple,
         combined_x: torch.Tensor | None = None,
         reduce_op: Literal["sum", "avg", "lse"] = "sum",
+        acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         config: GrpCollConfig | None = None,
@@ -657,6 +658,7 @@ class GrpCollBuffer:
                 - "sum": sum reduction
                 - "avg": average reduction
                 - "lse": log-sum-exp weighted average reduction, with lse correction
+            acc_reduce (bool): whether to accumulate the reduction to the given combined_x buffer. Defaults to False.
             topk_weights: `[num_tokens, num_topk]` with `torch.float`,
                 the tokens' top-k weights for reducing to its original ranks.
             config: the performance tuning config.
@@ -676,6 +678,8 @@ class GrpCollBuffer:
         """
         is_out_buf_given = combined_x is not None
 
+        # TODO: support acc_reduce
+        assert not acc_reduce
         # TODO: support other dtypes
         assert (
             x.dtype == torch.bfloat16

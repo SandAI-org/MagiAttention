@@ -19,6 +19,7 @@ from typing import Callable, Literal
 import torch
 import torch.distributed as dist
 
+import magi_attention
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.utils import nvtx
@@ -569,7 +570,7 @@ def init_hier_group_cast_meta_solver(
 @nvtx.instrument_nvtx
 def hier_group_cast_impl_with_a2av(
     input_tensor: torch.Tensor,
-    output_tensor: torch.Tensor,
+    output_tensor: torch.Tensor | None,
     input_split_size_list: list[int],
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
@@ -578,9 +579,37 @@ def hier_group_cast_impl_with_a2av(
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
+    """Hierarchical group-cast implementation based on all2all_v"""
+    # ----    check     ---- #
+
+    # check functionalities
+    assert (
+        not magi_attention.comm.is_native_grpcoll_enable()
+    ), "Hierarchical group-cast is not compatible with native grpcoll implementation"
     assert (
         async_op
     ), "async_op must be True for hierarchical group-cast collective by now"
+    assert (
+        output_tensor is not None
+    ), "A2A-based hierarchical group-cast only supports output is given"
+
+    # check shapes
+    assert len(input_split_size_list) == len(dst_indices_list), (
+        f"The length of input_split_size_list and dst_indices_list should be the same, "
+        f"but got {len(input_split_size_list)=} and {len(dst_indices_list)=}"
+    )
+    assert len(output_split_size_list) == len(src_index_list), (
+        f"The length of output_split_size_list and src_index_list should be the same, "
+        f"but got {len(output_split_size_list)=} and {len(src_index_list)=}"
+    )
+    assert input_tensor.shape[0] == sum(input_split_size_list), (
+        f"The sum of input_split_size_list should be equal to input_seqlen, "
+        f"but got {sum(input_split_size_list)=} and {input_tensor.shape[0]=}"
+    )
+    assert output_tensor.shape[0] == sum(output_split_size_list), (
+        f"The sum of output_split_size_list should be equal to output_seqlen, "
+        f"but got {sum(output_split_size_list)=} and {output_tensor.shape[0]=}"
+    )
 
     rank = kwargs.pop("rank", dist.get_rank(group))
     world_size = kwargs.pop("world_size", dist.get_world_size(group))
@@ -1062,7 +1091,7 @@ def init_hier_group_reduce_meta_solver(
 @nvtx.instrument_nvtx
 def hier_group_reduce_impl_with_a2av(
     input_tensor: torch.Tensor,
-    output_tensor: torch.Tensor,
+    output_tensor: torch.Tensor | None,
     input_split_size_list: list[int],
     output_split_size_list: list[int],
     dst_index_list: list[int],
@@ -1070,16 +1099,45 @@ def hier_group_reduce_impl_with_a2av(
     group: dist.ProcessGroup,
     async_op: bool = False,
     reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
+    """Hierarchical group-reduce implementation based on all2all_v"""
+    # ----    check     ---- #
+
+    # check functionalities
+    assert (
+        not magi_attention.comm.is_native_grpcoll_enable()
+    ), "Hierarchical group-reduce is not compatible with native grpcoll implementation"
+    assert (
+        acc_reduce and output_tensor is not None
+    ), "A2A-based hierarchical group-reduce only supports acc_reduce=True and output is given"
     assert (
         async_op
     ), "async_op must be True for hierarchical group-reduce collective by now"
     assert (
         reduce_op == "sum"
     ), "hierarchical group reduce only supports sum reduction by now"
+
+    # check shape
+    assert len(input_split_size_list) == len(dst_index_list), (
+        f"input_split_size_list and dst_index_list should have the same length, "
+        f"but got {len(input_split_size_list)=} and {len(dst_index_list)=}"
+    )
+    assert len(output_split_size_list) == len(src_indices_list), (
+        f"output_split_size_list and src_indices_list should have the same length, "
+        f"but got {len(output_split_size_list)=} and {len(src_indices_list)=}"
+    )
+    assert input_tensor.shape[0] == sum(input_split_size_list), (
+        f"The sum of input_split_size_list should be equal to input_seqlen, "
+        f"but got {sum(input_split_size_list)=} and {input_tensor.shape[0]=}"
+    )
+    assert output_tensor.shape[0] == sum(output_split_size_list), (
+        f"The sum of output_split_size_list should be equal to output_seqlen, "
+        f"but got {sum(output_split_size_list)=} and {output_tensor.shape[0]=}"
+    )
 
     rank = kwargs.pop("rank", dist.get_rank(group))
     world_size = kwargs.pop("world_size", dist.get_world_size(group))

@@ -62,17 +62,20 @@ def _native_group_cast_post_process(
 
 def _native_group_reduce_post_process(
     *args,
-    output: torch.Tensor,
+    output: torch.Tensor | None,
     combined_x: torch.Tensor,
+    acc_reduce: bool,
     **kwargs,
 ) -> torch.Tensor:
+    if output is None or not acc_reduce:
+        return combined_x
     return output.add_(combined_x)
 
 
 @nvtx.instrument_nvtx
 def native_group_cast_impl(
     input: torch.Tensor,
-    output: torch.Tensor,
+    output: torch.Tensor | None,
     input_split_size_list: list[int],
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
@@ -172,7 +175,7 @@ def native_group_cast_impl(
 @nvtx.instrument_nvtx
 def native_group_reduce_impl(
     input: torch.Tensor,
-    output: torch.Tensor,
+    output: torch.Tensor | None,
     input_split_size_list: list[int],
     output_split_size_list: list[int],
     dst_index_list: list[int],
@@ -180,6 +183,7 @@ def native_group_reduce_impl(
     group: dist.ProcessGroup,
     async_op: bool = False,
     reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -234,6 +238,7 @@ def native_group_reduce_impl(
         # we have to init a new buffer and reduce to the given output buffer later
         combined_x=None,
         reduce_op=reduce_op,
+        acc_reduce=False,  # TODO: support acc_reduce
         config=config,
         previous_event=None,
         async_finish=async_op,
@@ -251,6 +256,7 @@ def native_group_reduce_impl(
             _native_group_reduce_post_process,
             output=output,
             combined_x=combined_x,
+            acc_reduce=acc_reduce,
         ),
         async_op=async_op,
     )
