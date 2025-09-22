@@ -34,8 +34,9 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import math
 import os
-from typing import Callable, Union
+from typing import Callable, Literal, Union
 
 import torch
 import torch.distributed as dist
@@ -452,8 +453,35 @@ class GrpCollBuffer:
             handle: the returned communication handle.
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
+        is_out_buf_given = recv_x is not None
+
+        # TODO: support other dtypes
+        assert (
+            x.dtype == torch.bfloat16  # type: ignore[union-attr]
+        ), f"Only support bfloat16 input for now, but got {x.dtype=}."  # type: ignore[union-attr]
+        assert (
+            not is_out_buf_given or recv_x.dtype == torch.bfloat16  # type: ignore[union-attr]
+        ), f"Only support bfloat16 output buffer for now, but got {recv_x.dtype=}."  # type: ignore[union-attr]
+
+        # FIXME: figure out the alignment requirement
+        hidden_shape = x.shape[1:]  # type: ignore[union-attr]
+        hidden_size = math.prod(hidden_shape)
+        assert (
+            hidden_size % 256 == 0
+        ), f"The hidden size should be a multiple of 256, but got {hidden_size=}."
+        if is_out_buf_given:
+            assert recv_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
+                "The hidden shape (except dim0) of input and output buffer should be the same, "
+                f"but got {x.shape=}, {recv_x.shape=}."  # type: ignore[union-attr]
+            )
+
         # Default config
         config = self.get_dispatch_config(self.group_size) if config is None else config
+
+        # View input/output to 2D shape
+        x = x.view(-1, hidden_size)  # type: ignore[union-attr]
+        if is_out_buf_given:
+            recv_x = recv_x.view(-1, hidden_size)  # type: ignore[union-attr]
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
@@ -461,20 +489,21 @@ class GrpCollBuffer:
                 num_worst_tokens == 0
             ), "Internode dispatch does not support `num_worst_tokens > 0`"
             return self.internode_dispatch(
-                x,
-                recv_x,
-                handle,
-                num_tokens_per_rank,
-                num_tokens_per_rdma_rank,
-                is_token_in_rank,
-                num_tokens_per_expert,
-                topk_idx,
-                topk_weights,
-                expert_alignment,
-                config,
-                previous_event,
-                async_finish,
-                allocate_on_comm_stream,
+                x=x,
+                recv_x=recv_x,
+                hidden_shape=hidden_shape,
+                handle=handle,
+                num_tokens_per_rank=num_tokens_per_rank,
+                num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+                is_token_in_rank=is_token_in_rank,
+                num_tokens_per_expert=num_tokens_per_expert,
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+                expert_alignment=expert_alignment,
+                config=config,
+                previous_event=previous_event,
+                async_finish=async_finish,
+                allocate_on_comm_stream=allocate_on_comm_stream,
             )
 
         # Launch the kernel with cached or non-cached mode
@@ -521,6 +550,10 @@ class GrpCollBuffer:
                 async_finish,
                 allocate_on_comm_stream,
             )
+
+            # View output to hidden shape
+            recv_x = recv_x.view(-1, *hidden_shape)
+
             return (  # type: ignore[return-value]
                 (recv_x, recv_x_scales) if x_scales is not None else recv_x,
                 None,
@@ -574,6 +607,10 @@ class GrpCollBuffer:
                 is_token_in_rank,
                 send_head,
             )
+
+            # View output to hidden shape
+            recv_x = recv_x.view(-1, *hidden_shape)
+
             return (
                 (recv_x, recv_x_scales) if x_scales is not None else recv_x,
                 recv_topk_idx,
@@ -588,6 +625,7 @@ class GrpCollBuffer:
         x: torch.Tensor,
         handle: tuple,
         combined_x: torch.Tensor | None = None,
+        reduce_op: Literal["sum", "avg", "lse"] = "sum",
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         config: GrpCollConfig | None = None,
@@ -595,6 +633,7 @@ class GrpCollBuffer:
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
         allow_empty_init_out_buf: bool = False,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
         """
         Combine (reduce) tokens (addition **without** weights) from different ranks, both intranode and internode
@@ -607,6 +646,10 @@ class GrpCollBuffer:
             x: `[num_tokens, hidden]` with `torch.bfloat16`, the tokens to send for reducing to its original ranks.
             handle: a must-set communication handle, you can obtain this from the dispatch function.
             combined_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
+            reduce_op (Literal["sum", "avg", "weight", "lse"]): the reduce operation to use. Defaults to "sum"
+                - "sum": sum reduction
+                - "avg": average reduction
+                - "lse": log-sum-exp weighted average reduction, with lse correction
             topk_weights: `[num_tokens, num_topk]` with `torch.float`,
                 the tokens' top-k weights for reducing to its original ranks.
             config: the performance tuning config.
@@ -617,28 +660,59 @@ class GrpCollBuffer:
                 this is useful when the user knows that no token is missed to be reduced in the output buffer
                 such as during the ep communication scenario,
                 but it is unsafe to set it to True in the general group-reduce case
+            kwargs: additional arguments for the kernel.
 
         Returns:
             combined_x: the reduced token from its dispatched ranks.
             recv_topk_weights: the reduced top-k weights from its dispatch ranks.
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
+        is_out_buf_given = combined_x is not None
+
+        # TODO: support other dtypes
+        assert (
+            x.dtype == torch.bfloat16
+        ), f"Only support bfloat16 input for now, but got {x.dtype=}."
+        assert (
+            not is_out_buf_given or combined_x.dtype == torch.bfloat16  # type: ignore[union-attr]
+        ), f"Only support bfloat16 output buffer for now, but got {combined_x.dtype=}."  # type: ignore[union-attr]
+        # TODO: support other reduce ops
+        assert reduce_op == "sum", "Only support sum-reduce for now"
+
+        # FIXME: figure out the alignment requirement
+        hidden_shape = x.shape[1:]
+        hidden_size = math.prod(hidden_shape)
+        assert (
+            hidden_size % 256 == 0
+        ), f"The hidden size should be a multiple of 256, but got {hidden_size=}."
+        if is_out_buf_given:
+            assert combined_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
+                "The hidden shape (except dim0) of input and output buffer should be the same, "
+                f"but got {x.shape=}, {combined_x.shape=}."  # type: ignore[union-attr]
+            )
+
         # Default config
         config = self.get_combine_config(self.group_size) if config is None else config
+
+        # View input/output to 2D shape
+        x = x.view(-1, hidden_size)
+        if is_out_buf_given:
+            combined_x = combined_x.view(-1, hidden_size)  # type: ignore[union-attr]
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
             return self.internode_combine(
-                x,
-                combined_x,
-                handle,
-                topk_weights,
-                bias,
-                config,
-                previous_event,
-                async_finish,
-                allocate_on_comm_stream,
-                allow_empty_init_out_buf,
+                x=x,
+                combined_x=combined_x,
+                handle=handle,
+                hidden_shape=hidden_shape,
+                topk_weights=topk_weights,
+                bias=bias,
+                config=config,
+                previous_event=previous_event,
+                async_finish=async_finish,
+                allocate_on_comm_stream=allocate_on_comm_stream,
+                allow_empty_init_out_buf=allow_empty_init_out_buf,
             )
 
         # NOTES: the second `_` is for the sending side, so we should use the third one
@@ -669,12 +743,17 @@ class GrpCollBuffer:
             allocate_on_comm_stream,
             allow_empty_init_out_buf,
         )
+
+        # View output to hidden shape
+        combined_x = combined_x.view(-1, *hidden_shape)
+
         return combined_x, recv_topk_weights, EventOverlap(event)
 
     def internode_dispatch(
         self,
         x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         recv_x: torch.Tensor | None,
+        hidden_shape: torch.Size,
         handle: tuple | None = None,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
@@ -757,6 +836,10 @@ class GrpCollBuffer:
                 async_finish,
                 allocate_on_comm_stream,
             )
+
+            # View output to hidden shape
+            recv_x = recv_x.view(-1, *hidden_shape)
+
             return (  # type: ignore[return-value]
                 (recv_x, recv_x_scales) if x_scales is not None else recv_x,
                 None,
@@ -821,6 +904,10 @@ class GrpCollBuffer:
                 send_rdma_head,
                 send_nvl_head,
             )
+
+            # View output to hidden shape
+            recv_x = recv_x.view(-1, *hidden_shape)
+
             return (
                 (recv_x, recv_x_scales) if x_scales is not None else recv_x,
                 recv_topk_idx,
@@ -835,6 +922,7 @@ class GrpCollBuffer:
         x: torch.Tensor,
         combined_x: torch.Tensor | None,
         handle: Union[tuple, list],
+        hidden_shape: torch.Size,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         config: GrpCollConfig | None = None,
@@ -884,6 +972,10 @@ class GrpCollBuffer:
             allocate_on_comm_stream,
             allow_empty_init_out_buf,
         )
+
+        # View output to hidden shape
+        combined_x = combined_x.view(-1, *hidden_shape)
+
         return combined_x, combined_topk_weights, EventOverlap(event)
 
     def clean_low_latency_buffer(

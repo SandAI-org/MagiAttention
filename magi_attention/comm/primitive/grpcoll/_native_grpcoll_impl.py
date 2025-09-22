@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 import warnings
 from functools import partial
 from typing import Any, Literal
@@ -48,26 +47,21 @@ def _native_group_cast_post_process(
     *args,
     recv_x: torch.Tensor,
     unperm_after_a2a_kwargs: dict,
-    output_shape: torch.Size,
     **kwargs,
 ) -> torch.Tensor:
     return unpermute_tensor(
         tensor=recv_x,
         unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
-    ).view(output_shape)
+    )
 
 
 def _native_group_reduce_post_process(
     *args,
     output: torch.Tensor,
     combined_x: torch.Tensor,
-    output_shape: torch.Size,
     **kwargs,
 ) -> torch.Tensor:
-    return output.add_(
-        # TODO: move this view inside the buffer API
-        combined_x.view(output_shape)
-    )
+    return output.add_(combined_x)
 
 
 @nvtx.instrument_nvtx
@@ -83,19 +77,6 @@ def native_group_cast_impl(
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Native group-cast implementation"""
-    # TODO: move these checks inside of the buffer API
-    # check
-    # TODO: support other dtypes
-    assert (
-        input.dtype == output.dtype == torch.bfloat16
-    ), "Only support bfloat16 for now"
-    input_shape, output_shape = input.shape, output.shape
-    hidden_size = math.prod(input_shape[1:])
-    # FIXME: figure out the alignment requirement
-    assert hidden_size % 256 == 0, (
-        "The hidden size should be a multiple of 256, " f"but got {hidden_size=}."
-    )
-
     # maybe lazy init buffer
     _maybe_lazy_init_buffer(group)
 
@@ -155,9 +136,8 @@ def native_group_cast_impl(
         handle,
         event,
     ) = buffer.dispatch(
-        # TODO: move these view inside the buffer API
-        x=input.view(input_shape[0], hidden_size),
-        recv_x=output.view(output_shape[0], hidden_size),
+        x=input,
+        recv_x=output,
         handle=handle,
         num_tokens_per_rank=num_tokens_per_rank,
         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
@@ -181,7 +161,6 @@ def native_group_cast_impl(
             _native_group_cast_post_process,
             recv_x=recv_x,
             unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
-            output_shape=output_shape,
         ),
     )
 
@@ -204,20 +183,6 @@ def native_group_reduce_impl(
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Native group-reduce implementation"""
-    # TODO: move these checks inside of the buffer API
-    # check
-    assert reduce_op == "sum", "Only support sum-reduce for now"
-    # TODO: support other dtypes
-    assert (
-        input.dtype == output.dtype == torch.bfloat16
-    ), "Only support bfloat16 for now"
-    input_shape, output_shape = input.shape, output.shape
-    hidden_size = math.prod(input_shape[1:])
-    # FIXME: figure out the alignment requirement
-    assert hidden_size % 256 == 0, (
-        "The hidden size should be a multiple of 256, " f"but got {hidden_size=}."
-    )
-
     # maybe lazy init buffer
     _maybe_lazy_init_buffer(group)
 
@@ -277,17 +242,19 @@ def native_group_reduce_impl(
 
     # launch combine kernel
     combined_x, _, event = buffer.combine(  # combined_topk_weights
-        # TODO: move this view inside the buffer API
-        x=input.view(input_shape[0], hidden_size),
+        x=input,
         handle=handle,
         # FIXME: since the combine kernel directly write to the buffer,
         # we have to init a new buffer and reduce to the given output buffer later
         combined_x=None,
+        reduce_op=reduce_op,
         config=config,
         previous_event=None,
         async_finish=async_op,
         allocate_on_comm_stream=False,
         allow_empty_init_out_buf=kwargs.pop("allow_empty_init_out_buf", False),
+        input_lse=input_lse,
+        output_lse=output_lse,
     )
 
     # prepare work with post-process
@@ -298,7 +265,6 @@ def native_group_reduce_impl(
             _native_group_reduce_post_process,
             output=output,
             combined_x=combined_x,
-            output_shape=output_shape,
         ),
     )
 
