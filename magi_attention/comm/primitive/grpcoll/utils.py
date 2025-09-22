@@ -582,6 +582,39 @@ def transfer_group_cast_meta_to_dispatch_meta(
     )
 
 
+def transfer_splits_and_dst_idxs_to_topk_idx(
+    split_size_list: list[int],
+    dst_indices_list: list[list[int]],
+    num_ranks: int,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    num_tokens = sum(split_size_list)
+    num_splits = len(split_size_list)
+    split_size_tensor = torch.tensor(split_size_list, dtype=dtype, device=device)
+    dst_indices_tensor_list = [
+        torch.tensor(dst_indices, dtype=dtype, device=device)
+        for dst_indices in dst_indices_list
+    ]
+
+    topk_idx = torch.full(
+        (num_splits, num_ranks),  # assuming num_local_experts == 1
+        fill_value=-1,
+        dtype=dtype,
+        device=device,
+    )
+
+    for split_idx in range(num_splits):
+        dst_indices_tensor = dst_indices_tensor_list[split_idx]
+        topk_idx[split_idx][: len(dst_indices_tensor)] = dst_indices_tensor
+
+    topk_idx = topk_idx.to(device).repeat_interleave(
+        split_size_tensor, dim=0, output_size=num_tokens
+    )  # shape: (num_tokens, num_ranks)
+
+    return topk_idx
+
+
 @nvtx.instrument_nvtx
 def unpermute_tensor(
     tensor: torch.Tensor,

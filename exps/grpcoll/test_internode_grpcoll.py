@@ -49,6 +49,7 @@ from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     transfer_group_cast_meta_to_dispatch_meta,
+    transfer_splits_and_dst_idxs_to_topk_idx,
     unpermute_tensor,
 )
 from magi_attention.utils import inplace_unique, setup_dist_env
@@ -280,29 +281,47 @@ def test_main(
         f"[RANK {rank}]: {num_tokens_per_expert=} | {num_tokens_per_expert.shape=}\n",
         flush=True,
     )
-    if use_topk:
-        # get dispatch layout from buffer
-        (
-            ref_num_tokens_per_rank,
-            ref_num_tokens_per_rdma_rank,
-            ref_num_tokens_per_expert,
-            ref_is_token_in_rank,
-            _,  # event_overlap,
-        ) = buffer.get_dispatch_layout(topk_idx, num_experts)
 
-        # assert close to layout ref
-        assert torch.allclose(ref_num_tokens_per_rank, num_tokens_per_rank)
-        assert torch.allclose(ref_num_tokens_per_rdma_rank, num_tokens_per_rdma_rank)
-        assert torch.allclose(ref_num_tokens_per_expert, num_tokens_per_expert)
-        assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
+    # get dispatch layout from buffer as reference
+    if not use_topk:
+        layout_topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+            split_size_list=input_split_size_list,
+            dst_indices_list=dst_indices_list,
+            num_ranks=num_ranks,
+        )
+        assert num_experts == num_ranks
+    else:
+        layout_topk_idx = topk_idx
+    (
+        ref_num_tokens_per_rank,
+        ref_num_tokens_per_rdma_rank,
+        ref_num_tokens_per_expert,
+        ref_is_token_in_rank,
+        _,  # event_overlap,
+    ) = buffer.get_dispatch_layout(layout_topk_idx, num_experts)
 
-        # benchmark dispatch layout
-        t = bench(lambda: buffer.get_dispatch_layout(topk_idx, num_experts))[0]
-        if local_rank == 0:
-            print(f"[layout] Kernel performance: {t * 1000:.3f} ms", flush=True)
-            print("", flush=True)
-        group.barrier()
-        time.sleep(1)
+    print(
+        f"[RANK {rank}]: {layout_topk_idx.shape=} | {layout_topk_idx=}\n"
+        f"{ref_num_tokens_per_rank.shape=} | {ref_num_tokens_per_rank=}\n"
+        f"{ref_num_tokens_per_rdma_rank.shape=} | {ref_num_tokens_per_rdma_rank=}\n"  # type: ignore[union-attr]
+        f"{ref_num_tokens_per_expert.shape=} | {ref_num_tokens_per_expert=}\n"
+        f"{ref_is_token_in_rank.shape=} | {ref_is_token_in_rank=}\n",
+        flush=True,
+    )
+
+    # assert close to layout ref
+    assert torch.allclose(ref_num_tokens_per_rank, num_tokens_per_rank)
+    assert torch.allclose(ref_num_tokens_per_rdma_rank, num_tokens_per_rdma_rank)
+    assert torch.allclose(ref_num_tokens_per_expert, num_tokens_per_expert)
+    assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
+
+    # benchmark dispatch layout
+    t = bench(lambda: buffer.get_dispatch_layout(layout_topk_idx, num_experts))[0]
+    if local_rank == 0:
+        print(f"[layout] Kernel performance: {t * 1000:.3f} ms", flush=True)
+        print("", flush=True)
+    group.barrier()
+    time.sleep(1)
 
     # Test dispatch
     def check_data(check_x, recv_gbl_rank_prefix_sum):

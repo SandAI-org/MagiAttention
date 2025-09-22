@@ -33,9 +33,9 @@ export PYTHONPATH=$PYTHONPATH:.
 #   assert calc_diff(recv_x[:, -1], recv_src_info.view(-1)) < 0.007
 export GRPCOLL_TEST_INTRANODE_LOW_LATENCY=0
 
-LOG_PATH=${LOG_ROOT}/test_intranode_grpcoll.log
-echo "Logging to ${LOG_PATH} ..."
-python ${TEST_ROOT}/test_intranode_grpcoll.py > ${LOG_PATH} 2>&1; exit 0
+# LOG_PATH=${LOG_ROOT}/test_intranode_grpcoll.log
+# echo "Logging to ${LOG_PATH} ..."
+# python ${TEST_ROOT}/test_intranode_grpcoll.py > ${LOG_PATH} 2>&1; exit 0
 
 # ----- test-low-latency ----- #
 
