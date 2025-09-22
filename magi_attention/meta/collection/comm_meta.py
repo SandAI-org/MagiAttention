@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
@@ -28,6 +29,9 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_output_meta_args,
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
+    get_combine_pre_process_args_from_group_reduce_meta,
+    get_dispatch_layout_from_group_cast_meta,
+    get_dispatch_post_process_args_from_group_cast_meta,
     transfer_group_cast_meta_to_dispatch_meta,
 )
 from magi_attention.utils import format_dict_field, format_list_field
@@ -48,6 +52,7 @@ class GroupCollectiveArg:
 
     rank: int
     world_size: int
+    group: dist.ProcessGroup
     device_mesh: DeviceMesh | None = None
 
     deterministic: bool = False
@@ -208,33 +213,70 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
 
     def _init_meta_kwargs_for_native_group_cast(self):
         # transfer group-cast meta args to dispatch meta args
-        (
-            _,  # rank_idx
-            _,  # rdma_rank_idx
-            num_tokens_per_rank,
-            num_tokens_per_rdma_rank,
-            is_token_in_rank,
-            _,  # topk_idx
-            _,  # topk_weights
-            num_tokens_per_expert,
-            range_gather_post_dispatch_kwargs,
-            range_gather_pre_combine_kwargs,
-        ) = transfer_group_cast_meta_to_dispatch_meta(
-            rank=self.rank,
-            num_ranks=self.world_size,
-            num_nodes=1,  # TODO: support num_nodes > 1
-            num_local_experts=1,
-            input_split_size_list=self._group_cast_args_dict_packed[
-                "input_split_size_list"
-            ],
-            output_split_size_list=self._group_cast_args_dict_packed[
-                "output_split_size_list"
-            ],
-            dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
-            src_index_list=self._group_cast_args_dict_packed["src_index_list"],
-            use_topk=False,
-            use_a2a_order_output=False,
-        )
+        try:  # this method is faster but relying on the grpcoll buffer is registered for self.group
+            (
+                num_tokens_per_rank,
+                num_tokens_per_rdma_rank,
+                num_tokens_per_expert,
+                is_token_in_rank,
+            ) = get_dispatch_layout_from_group_cast_meta(
+                input_split_size_list=self._group_cast_args_dict_packed[
+                    "input_split_size_list"
+                ],
+                dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
+                group=self.group,
+            )
+
+            range_gather_post_dispatch_kwargs = (
+                get_dispatch_post_process_args_from_group_cast_meta(
+                    output_split_size_list=self._group_cast_args_dict_packed[
+                        "output_split_size_list"
+                    ],
+                    src_index_list=self._group_cast_args_dict_packed["src_index_list"],
+                    group=self.group,
+                )
+            )
+
+            if self.init_group_reduce:
+                range_gather_pre_combine_kwargs = (
+                    get_combine_pre_process_args_from_group_reduce_meta(
+                        input_split_size_list=self._group_reduce_args_dict_packed[
+                            "input_split_size_list"
+                        ],
+                        dst_index_list=self._group_reduce_args_dict_packed[
+                            "dst_index_list"
+                        ],
+                        group=self.group,
+                    )
+                )
+        except ValueError:
+            (
+                _,  # rank_idx
+                _,  # rdma_rank_idx
+                num_tokens_per_rank,
+                num_tokens_per_rdma_rank,
+                is_token_in_rank,
+                _,  # topk_idx
+                _,  # topk_weights
+                num_tokens_per_expert,
+                range_gather_post_dispatch_kwargs,
+                range_gather_pre_combine_kwargs,
+            ) = transfer_group_cast_meta_to_dispatch_meta(
+                rank=self.rank,
+                num_ranks=self.world_size,
+                num_nodes=1,  # TODO: support num_nodes > 1
+                num_local_experts=1,
+                input_split_size_list=self._group_cast_args_dict_packed[
+                    "input_split_size_list"
+                ],
+                output_split_size_list=self._group_cast_args_dict_packed[
+                    "output_split_size_list"
+                ],
+                dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
+                src_index_list=self._group_cast_args_dict_packed["src_index_list"],
+                use_topk=False,
+                use_a2a_order_output=False,
+            )
 
         self._group_cast_args_dict_packed["native_group_cast_meta_dict"] = dict(
             num_tokens_per_rank=num_tokens_per_rank,
@@ -243,6 +285,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             num_tokens_per_expert=num_tokens_per_expert,
             range_gather_post_dispatch_kwargs=range_gather_post_dispatch_kwargs,
         )
+
         if self.init_group_reduce:
             # HACK: temporarily store the range_gather_pre_combine_kwargs
             # to pass to the symmetric group-reduce meta dict and then it will be removed
@@ -258,6 +301,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
         range_gather_pre_combine_kwargs = self._group_cast_args_dict_packed[
             "native_group_cast_meta_dict"
         ].pop("range_gather_pre_combine_kwargs")
+
         self._group_reduce_args_dict_packed["native_group_reduce_meta_dict"] = dict(
             range_gather_pre_combine_kwargs=range_gather_pre_combine_kwargs,
         )
@@ -430,6 +474,7 @@ class CommMeta:
                 src_index_list=kv_group_collective_arg.src_index_list,
                 rank=kv_group_collective_arg.rank,
                 world_size=kv_group_collective_arg.world_size,
+                group=kv_group_collective_arg.group,
                 device_mesh=kv_group_collective_arg.device_mesh,
                 deterministic=kv_group_collective_arg.deterministic,
                 packed_times=2,  # pack kv along seqlen dim
@@ -448,6 +493,7 @@ class CommMeta:
                     src_index_list=qo_group_collective_arg.src_index_list,
                     rank=qo_group_collective_arg.rank,
                     world_size=qo_group_collective_arg.world_size,
+                    group=qo_group_collective_arg.group,
                     device_mesh=qo_group_collective_arg.device_mesh,
                     deterministic=qo_group_collective_arg.deterministic,
                     packed_times=1,  # q, lse, dq along
@@ -468,6 +514,7 @@ class CommMeta:
                         src_index_list=qo_group_collective_arg.src_index_list,
                         rank=qo_group_collective_arg.rank,
                         world_size=qo_group_collective_arg.world_size,
+                        group=qo_group_collective_arg.group,
                         device_mesh=qo_group_collective_arg.device_mesh,
                         deterministic=qo_group_collective_arg.deterministic,
                         packed_times=3,  # pack q, o, do along seqlen dim
@@ -489,6 +536,7 @@ class CommMeta:
                         src_index_list=qo_group_collective_arg.src_index_list,
                         rank=qo_group_collective_arg.rank,
                         world_size=qo_group_collective_arg.world_size,
+                        group=qo_group_collective_arg.group,
                         device_mesh=qo_group_collective_arg.device_mesh,
                         deterministic=qo_group_collective_arg.deterministic,
                         packed_times=1,  # out with lse along

@@ -1506,6 +1506,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             src_index_list=src_index_list,
             rank=self.cp_rank,
             world_size=self.cp_size,
+            group=self.cp_group,
             device_mesh=self.cp_mesh,
             deterministic=self.deterministic,
         )

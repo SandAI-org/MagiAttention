@@ -48,6 +48,7 @@ from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
+    get_dispatch_layout_from_group_cast_meta,
     transfer_group_cast_meta_to_dispatch_meta,
     transfer_splits_and_dst_idxs_to_topk_idx,
     unpermute_tensor,
@@ -285,6 +286,23 @@ def test_main(
         f"[RANK {rank}]: {num_tokens_per_expert=} | {num_tokens_per_expert.shape=}\n",
         flush=True,
     )
+
+    # test get dispatch layout from group cast meta
+    (
+        ref_num_tokens_per_rank,
+        _,  # ref_num_tokens_per_rdma_rank,
+        ref_num_tokens_per_expert,
+        ref_is_token_in_rank,
+    ) = get_dispatch_layout_from_group_cast_meta(
+        input_split_size_list=input_split_size_list,
+        dst_indices_list=dst_indices_list,
+        group=group,
+    )
+
+    # assert close to layout ref
+    assert torch.allclose(ref_num_tokens_per_rank, num_tokens_per_rank)
+    assert torch.allclose(ref_num_tokens_per_expert, num_tokens_per_expert)
+    assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
 
     # get dispatch layout from buffer as reference
     if not use_topk:

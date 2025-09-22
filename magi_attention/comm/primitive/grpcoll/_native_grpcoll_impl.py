@@ -25,7 +25,12 @@ from ...work import GeneralWork, WorkWithPostProcessFn
 from ._buffer import GrpCollBuffer
 from ._config import GrpCollConfig
 from ._mgr import grpcoll_mgr
-from .utils import transfer_group_cast_meta_to_dispatch_meta, unpermute_tensor
+from .utils import (
+    get_combine_pre_process_args_from_group_reduce_meta,
+    get_dispatch_layout_from_group_cast_meta,
+    get_dispatch_post_process_args_from_group_cast_meta,
+    unpermute_tensor,
+)
 
 __all__ = [
     "native_group_cast_impl",
@@ -104,27 +109,22 @@ def native_group_cast_impl(
         ]
     else:
         (
-            _,  # rank_idx
-            _,  # rdma_rank_idx
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            is_token_in_rank,
-            _,  # topk_idx
-            _,  # topk_weights
             num_tokens_per_expert,
-            range_gather_post_dispatch_kwargs,
-            _,  # range_gather_pre_combine_kwargs
-        ) = transfer_group_cast_meta_to_dispatch_meta(
-            rank=group.rank(),
-            num_ranks=group.size(),
-            num_nodes=kwargs.pop("num_nodes", 1),
-            num_local_experts=1,
+            is_token_in_rank,
+        ) = get_dispatch_layout_from_group_cast_meta(
             input_split_size_list=input_split_size_list,
-            output_split_size_list=output_split_size_list,
             dst_indices_list=dst_indices_list,
-            src_index_list=src_index_list,
-            use_topk=False,
-            use_a2a_order_output=False,
+            group=group,
+        )
+
+        range_gather_post_dispatch_kwargs = (
+            get_dispatch_post_process_args_from_group_cast_meta(
+                output_split_size_list=output_split_size_list,
+                src_index_list=src_index_list,
+                group=group,
+            )
         )
 
     # launch dispatch kernel
@@ -210,28 +210,12 @@ def native_group_reduce_impl(
     if meta_dict:
         range_gather_pre_combine_kwargs = meta_dict["range_gather_pre_combine_kwargs"]
     else:
-        (
-            _,  # rank_idx
-            _,  # rdma_rank_idx
-            _,  # num_tokens_per_rank
-            _,  # num_tokens_per_rdma_rank
-            _,  # is_token_in_rank
-            _,  # topk_idx
-            _,  # topk_weights
-            _,  # num_tokens_per_expert
-            _,  # range_gather_post_dispatch_kwargs
-            range_gather_pre_combine_kwargs,
-        ) = transfer_group_cast_meta_to_dispatch_meta(
-            rank=group.rank(),
-            num_ranks=group.size(),
-            num_nodes=kwargs.pop("num_nodes", 1),
-            num_local_experts=1,
-            input_split_size_list=output_split_size_list,
-            output_split_size_list=input_split_size_list,
-            dst_indices_list=src_indices_list,
-            src_index_list=dst_index_list,
-            use_topk=False,
-            use_a2a_order_output=False,
+        range_gather_pre_combine_kwargs = (
+            get_combine_pre_process_args_from_group_reduce_meta(
+                input_split_size_list=input_split_size_list,
+                dst_index_list=dst_index_list,
+                group=group,
+            )
         )
 
     # permute input

@@ -615,6 +615,93 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
     return topk_idx
 
 
+def get_dispatch_layout_from_group_cast_meta(
+    input_split_size_list: list[int],
+    dst_indices_list: list[list[int]],
+    group: dist.ProcessGroup,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    from ._buffer import GrpCollBuffer
+    from ._mgr import grpcoll_mgr
+
+    num_ranks = group.size()
+    buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
+
+    topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+        split_size_list=input_split_size_list,
+        dst_indices_list=dst_indices_list,
+        num_ranks=num_ranks,
+        device=device,
+        dtype=dtype,
+    )
+
+    (
+        num_tokens_per_rank,
+        num_tokens_per_rdma_rank,
+        num_tokens_per_expert,
+        is_token_in_rank,
+        _,  # event_overlap,
+    ) = buffer.get_dispatch_layout(
+        topk_idx=topk_idx,
+        num_experts=num_ranks,
+        previous_event=None,
+        async_finish=False,
+    )
+
+    return (
+        num_tokens_per_rank,
+        num_tokens_per_rdma_rank,
+        num_tokens_per_expert,
+        is_token_in_rank,
+    )
+
+
+def get_dispatch_post_process_args_from_group_cast_meta(
+    output_split_size_list: list[int],
+    src_index_list: list[int],
+    group: dist.ProcessGroup,
+    device: str = "cuda",
+) -> dict[str, Any]:
+    num_ranks = group.size()
+
+    (
+        _,  # a2a_output_split_size
+        range_gather_post_dispatch_kwargs,
+    ) = _calc_group_cast_a2a_output_meta_args(
+        output_split_size_list=output_split_size_list,
+        src_index_list=src_index_list,
+        world_size=num_ranks,
+        device=device,
+        reorder_list=None,
+        calc_unperm_after_a2a_kwargs=True,
+        return_verbose=False,
+    )
+
+    return range_gather_post_dispatch_kwargs
+
+
+def get_combine_pre_process_args_from_group_reduce_meta(
+    input_split_size_list: list[int],
+    dst_index_list: list[int],
+    group: dist.ProcessGroup,
+    device: str = "cuda",
+) -> dict[str, Any]:
+    num_ranks = group.size()
+
+    (
+        _,  # a2a_input_split_size
+        range_gather_pre_combine_kwargs,
+    ) = _calc_group_reduce_a2a_input_meta_args(
+        input_split_size_list=input_split_size_list,
+        dst_index_list=dst_index_list,
+        world_size=num_ranks,
+        device=device,
+    )
+
+    return range_gather_pre_combine_kwargs
+
+
 @nvtx.instrument_nvtx
 def unpermute_tensor(
     tensor: torch.Tensor,

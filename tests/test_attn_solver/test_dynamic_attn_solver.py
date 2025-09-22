@@ -152,6 +152,7 @@ class TestDynamicAttnSolver(DistTestBase):
 
             solver = DynamicAttnSolver(
                 algorithm=algorithm,
+                group=self.process_group,
                 total_seqlen_q=total_seqlen_q,
                 total_seqlen_k=total_seqlen_k,
                 host_ranges_q=host_q_ranges_global_this_rank,
