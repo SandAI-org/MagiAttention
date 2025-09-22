@@ -20,6 +20,8 @@ from typing import Any, Callable, Literal, TypeAlias
 
 import torch
 import torch.distributed as dist
+import triton
+import triton.language as tl
 
 import magi_attention
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
@@ -582,6 +584,66 @@ def transfer_group_cast_meta_to_dispatch_meta(
     )
 
 
+@triton.jit
+def _varlen_for_each_copy_kernel(
+    output_ptr,
+    input_flat_ptr,
+    num_dst_ptr,
+    offsets_ptr,
+    stride_output_row,
+    num_ranks,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    split_idx = tl.program_id(axis=0)
+    col_block_idx = tl.program_id(axis=1)
+
+    col_start = col_block_idx * BLOCK_SIZE_N
+
+    num_dst = tl.load(num_dst_ptr + split_idx)
+
+    offset_in_flat_input = tl.load(offsets_ptr + split_idx)
+
+    output_row_base_ptr = output_ptr + split_idx * stride_output_row
+    input_flat_base_ptr = input_flat_ptr + offset_in_flat_input
+
+    cols_in_block = col_start + tl.arange(0, BLOCK_SIZE_N)
+
+    write_mask = (cols_in_block < num_ranks) & (cols_in_block < num_dst)
+
+    values_to_write = tl.load(
+        input_flat_base_ptr + cols_in_block, mask=write_mask, other=-1
+    )
+
+    tl.store(output_row_base_ptr + cols_in_block, values_to_write, mask=write_mask)
+
+
+def _varlen_for_each_copy_triton(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+    num_dst: torch.Tensor,
+    cu_num_dst: torch.Tensor,
+) -> torch.Tensor:
+    num_splits, num_ranks = dst.shape
+
+    if num_splits == 0:
+        return dst
+
+    BLOCK_SIZE_N = triton.next_power_of_2(num_ranks)
+    grid = (num_splits, triton.cdiv(num_ranks, BLOCK_SIZE_N))
+
+    _varlen_for_each_copy_kernel[grid](
+        dst,
+        src,
+        num_dst,
+        cu_num_dst,
+        dst.stride(0),
+        num_ranks,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+    )
+
+    return dst
+
+
 def transfer_splits_and_dst_idxs_to_topk_idx(
     split_size_list: list[int],
     dst_indices_list: list[list[int]],
@@ -591,11 +653,31 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
 ) -> torch.Tensor:
     num_tokens = sum(split_size_list)
     num_splits = len(split_size_list)
-    split_size_tensor = torch.tensor(split_size_list, dtype=dtype, device=device)
-    dst_indices_tensor_list = [
-        torch.tensor(dst_indices, dtype=dtype, device=device)
-        for dst_indices in dst_indices_list
+
+    num_dst_list: list[int] = [len(dst_indices) for dst_indices in dst_indices_list]
+    cu_num_dst_list: list[int] = list(accumulate([0] + num_dst_list))
+    flatten_dst_indices_list: list[int] = list(chain(*dst_indices_list))
+    all_meta_list: list[list[int]] = [
+        num_dst_list,
+        cu_num_dst_list,
+        split_size_list,
+        flatten_dst_indices_list,
     ]
+    all_meta_size_list: list[int] = [len(meta) for meta in all_meta_list]
+    flatten_all_meta_list: list[int] = list(chain(*all_meta_list))
+
+    (
+        num_dst_tensor,
+        cu_num_dst_tensor,
+        split_size_tensor,
+        dst_indices_tensor,
+    ) = torch.tensor(
+        flatten_all_meta_list,
+        dtype=dtype,
+        device=device,
+    ).split(
+        all_meta_size_list
+    )
 
     topk_idx = torch.full(
         (num_splits, num_ranks),  # assuming num_local_experts == 1
@@ -604,9 +686,12 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
         device=device,
     )
 
-    for split_idx in range(num_splits):
-        dst_indices_tensor = dst_indices_tensor_list[split_idx]
-        topk_idx[split_idx][: len(dst_indices_tensor)] = dst_indices_tensor
+    _varlen_for_each_copy_triton(
+        dst=topk_idx,
+        src=dst_indices_tensor,
+        num_dst=num_dst_tensor,
+        cu_num_dst=cu_num_dst_tensor,
+    )
 
     topk_idx = topk_idx.repeat_interleave(
         split_size_tensor, dim=0, output_size=num_tokens
@@ -629,6 +714,7 @@ def get_dispatch_layout_from_group_cast_meta(
     num_ranks = group.size()
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
 
+    # TODO: fuse two functions into a single kernel
     if topk_idx is None:
         topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
             split_size_list=input_split_size_list,
