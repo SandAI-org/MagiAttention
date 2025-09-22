@@ -616,6 +616,7 @@ Buffer::intranode_dispatch(
       channel_prefix_matrix.data_ptr<int>(),
       num_tokens,
       num_worst_tokens,
+      // NOTE: hidden size should be aligned with int4
       static_cast<int>(hidden * recv_x.element_size() / sizeof(int4)),
       num_topk,
       num_experts,

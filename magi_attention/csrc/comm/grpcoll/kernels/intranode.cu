@@ -492,11 +492,13 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
       cached_channel_tail_idx = shared_channel_tail_idx[responsible_rank];
 
       // Copy data
+      // from the channel buffer to the recv_x
       int num_recv_tokens = cached_channel_tail_idx - cached_channel_head_idx;
       for (int chunk_idx = recv_warp_id_in_rank; chunk_idx < num_recv_tokens; chunk_idx += num_recv_warps_per_rank) {
+        auto token_idx_in_recv_x = static_cast<int64_t>(total_offset + chunk_idx);
         int token_idx_in_buffer = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
         auto shifted_buffer_x_int4 = channel_x_buffers.buffer() + token_idx_in_buffer * hidden_int4;
-        auto shifted_recv_x_int4 = recv_x + static_cast<int64_t>(total_offset + chunk_idx) * hidden_int4;
+        auto shifted_recv_x_int4 = recv_x + token_idx_in_recv_x * hidden_int4;
 #ifndef DISABLE_SM90_FEATURES
 #pragma unroll
         for (int i = 0; i < 2; ++i)
@@ -519,6 +521,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
         recv_src_idx[total_offset + chunk_idx - cached_channel_head_idx] = ld_nc_global(channel_src_idx_buffers.buffer() + chunk_idx % num_recv_buffer_tokens);
 
 // Copy `topk_idx` and `topk_weights`
+// TODO: remove this unused copy
 #pragma unroll 4
       for (int idx = recv_thread_id_in_rank; idx < num_recv_tokens * num_topk; idx += 32 * num_recv_warps_per_rank) {
         int chunk_idx = idx / num_topk, token_topk_idx = idx % num_topk;
@@ -530,6 +533,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
       }
 
 // Copy `x_scales`
+// TODO: remove this unused copy
 #pragma unroll 4
       for (int i = recv_thread_id_in_rank; i < num_recv_tokens * num_scales; i += 32 * num_recv_warps_per_rank) {
         int chunk_idx = i / num_scales, scales_idx = i % num_scales;

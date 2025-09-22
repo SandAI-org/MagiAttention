@@ -45,6 +45,7 @@ from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
+    get_a2av_perm_idxs_from_group_cast_meta,
     get_dispatch_layout_from_group_cast_meta,
     transfer_group_cast_meta_to_dispatch_meta,
     transfer_splits_and_dst_idxs_to_topk_idx,
@@ -97,6 +98,7 @@ def test_main(
     acc_reduce_constant = rank
     if acc_reduce_out_buffer:
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"
+    use_a2av_perm_idxs = True
 
     if use_topk:
         # if using topk, we can assume num_local_experts == num_ranks,
@@ -257,6 +259,21 @@ def test_main(
         f"{sum(output_split_size_list)=}\n",
         f"{topk_idx=} | {topk_weights=}\n",
         f"{rank_idx=}\n",
+        flush=True,
+    )
+
+    # get perm/unperm idxs to/from a2av through group-cast meta args
+    # which is used to replace the post-dispatch range_gather and pre-combine range_gather
+    (
+        unperm_from_a2av_idxs,
+        perm_to_a2av_idxs,
+    ) = get_a2av_perm_idxs_from_group_cast_meta(
+        output_split_size_list=output_split_size_list,
+        src_index_list=src_index_list,
+        group=group,
+    )
+    print(
+        f"[RANK {rank}]: {perm_to_a2av_idxs=}\n" f"{unperm_from_a2av_idxs=}\n",
         flush=True,
     )
 
@@ -462,12 +479,15 @@ def test_main(
                     # unpermute recv_x to the order indicated by
                     # output_split_size_list and src_index_list
                     if random_permute_output:
-                        recv_x_before_rg = recv_x.clone()  # type: ignore[union-attr]
-                        recv_x = unpermute_tensor(
-                            tensor=recv_x,
-                            unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
-                        )
-                        assert recv_x_before_rg.shape == recv_x.shape
+                        recv_x_from_a2av = recv_x.clone()  # type: ignore[union-attr]
+                        if use_a2av_perm_idxs:
+                            recv_x = recv_x[unperm_from_a2av_idxs]
+                        else:
+                            recv_x = unpermute_tensor(
+                                tensor=recv_x,
+                                unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
+                            )
+                        assert recv_x_from_a2av.shape == recv_x.shape
 
                     # print
                     (
@@ -653,12 +673,15 @@ def test_main(
 
                     # permute x to the rank order
                     if random_permute_output:
-                        x_combine_before_rg = x_combine.clone()
-                        x_combine = unpermute_tensor(
-                            tensor=x_combine,
-                            unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
-                        )
-                        assert x_combine_before_rg.shape == x_combine.shape
+                        x_combine_before_to_a2av = x_combine.clone()
+                        if use_a2av_perm_idxs:
+                            x_combine = x_combine[perm_to_a2av_idxs]
+                        else:
+                            x_combine = unpermute_tensor(
+                                tensor=x_combine,
+                                unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
+                            )
+                        assert x_combine_before_to_a2av.shape == x_combine.shape
 
                     # prepare combine args
                     send_head_copy = send_head.clone()

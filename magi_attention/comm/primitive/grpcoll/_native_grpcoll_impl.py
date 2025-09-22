@@ -104,6 +104,9 @@ def native_group_cast_impl(
             input_split_size_list=input_split_size_list,
             dst_indices_list=dst_indices_list,
             group=group,
+            # HACK: leave a slot for topk_idx
+            # since for now, we transfer the group_cast meta to it inside anyway
+            # which is helpful in the ep/nsa communication scenario
             topk_idx=kwargs.pop("topk_idx", None),
         )
 

@@ -33,7 +33,7 @@ from magi_attention.common.range_op.utils import (
     _calc_ranges_row_map,
 )
 from magi_attention.common.ranges import NaiveRanges
-from magi_attention.utils import inplace_unique, nvtx
+from magi_attention.utils import inplace_unique, nvtx, perm_idxs2unperm_idxs
 
 
 def check_nvlink_connections(group: dist.ProcessGroup):
@@ -715,6 +715,7 @@ def get_dispatch_layout_from_group_cast_meta(
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
 
     # TODO: fuse two functions into a single kernel
+    # and support input_split_size_list and dst_indices_list as tensors
     if topk_idx is None:
         topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
             split_size_list=input_split_size_list,
@@ -751,7 +752,7 @@ def get_dispatch_post_process_args_from_group_cast_meta(
     group: dist.ProcessGroup,
     device: str = "cuda",
 ) -> dict[str, Any]:
-    num_ranks = group.size()
+    world_size = group.size()
 
     (
         _,  # a2a_output_split_size
@@ -759,7 +760,7 @@ def get_dispatch_post_process_args_from_group_cast_meta(
     ) = _calc_group_cast_a2a_output_meta_args(
         output_split_size_list=output_split_size_list,
         src_index_list=src_index_list,
-        world_size=num_ranks,
+        world_size=world_size,
         device=device,
         reorder_list=None,
         calc_unperm_after_a2a_kwargs=True,
@@ -767,6 +768,58 @@ def get_dispatch_post_process_args_from_group_cast_meta(
     )
 
     return range_gather_post_dispatch_kwargs
+
+
+def get_a2av_perm_idxs_from_group_cast_meta(
+    output_split_size_list: list[int],
+    src_index_list: list[int],
+    group: dist.ProcessGroup,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    world_size = group.size()
+
+    # count the total split size of each rank
+    rank_accumulated_sizes = [0] * world_size
+    for i in range(len(output_split_size_list)):
+        rank_accumulated_sizes[src_index_list[i]] += output_split_size_list[i]
+
+    # count the global rank offset
+    initial_rank_offsets = list(accumulate([0] + rank_accumulated_sizes))
+
+    # a2a_output[unperm_from_a2av_idxs] => output
+    unperm_from_a2av_idxs: list[int] = []
+    current_offset_within_rank = [0] * world_size
+    for i in range(len(output_split_size_list)):
+        target_size = output_split_size_list[i]
+        target_rank = src_index_list[i]
+
+        # get the start offset of the target buffer sent from the target rank
+        global_start_offset_in_output = (
+            initial_rank_offsets[target_rank] + current_offset_within_rank[target_rank]
+        )
+        unperm_from_a2av_idxs.extend(
+            range(
+                global_start_offset_in_output,
+                global_start_offset_in_output + target_size,
+            )
+        )
+        current_offset_within_rank[target_rank] += target_size
+
+    # output[perm_to_a2av_idxs] => a2a_output
+    perm_to_a2av_idxs = perm_idxs2unperm_idxs(unperm_from_a2av_idxs)
+
+    # convert to tensor
+    (
+        unperm_from_a2av_idxs,
+        perm_to_a2av_idxs,
+    ) = torch.tensor(
+        unperm_from_a2av_idxs + perm_to_a2av_idxs,
+        dtype=dtype,
+        device=device,
+    ).chunk(2)
+
+    return unperm_from_a2av_idxs, perm_to_a2av_idxs
 
 
 def get_combine_pre_process_args_from_group_reduce_meta(
