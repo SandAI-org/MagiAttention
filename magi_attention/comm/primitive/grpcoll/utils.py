@@ -608,7 +608,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
         dst_indices_tensor = dst_indices_tensor_list[split_idx]
         topk_idx[split_idx][: len(dst_indices_tensor)] = dst_indices_tensor
 
-    topk_idx = topk_idx.to(device).repeat_interleave(
+    topk_idx = topk_idx.repeat_interleave(
         split_size_tensor, dim=0, output_size=num_tokens
     )  # shape: (num_tokens, num_ranks)
 
@@ -619,6 +619,7 @@ def get_dispatch_layout_from_group_cast_meta(
     input_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     group: dist.ProcessGroup,
+    topk_idx: torch.Tensor | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
@@ -628,13 +629,14 @@ def get_dispatch_layout_from_group_cast_meta(
     num_ranks = group.size()
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
 
-    topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
-        split_size_list=input_split_size_list,
-        dst_indices_list=dst_indices_list,
-        num_ranks=num_ranks,
-        device=device,
-        dtype=dtype,
-    )
+    if topk_idx is None:
+        topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+            split_size_list=input_split_size_list,
+            dst_indices_list=dst_indices_list,
+            num_ranks=num_ranks,
+            device=device,
+            dtype=dtype,
+        )
 
     (
         num_tokens_per_rank,

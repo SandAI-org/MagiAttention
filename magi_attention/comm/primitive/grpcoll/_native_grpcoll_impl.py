@@ -117,6 +117,7 @@ def native_group_cast_impl(
             input_split_size_list=input_split_size_list,
             dst_indices_list=dst_indices_list,
             group=group,
+            topk_idx=kwargs.pop("topk_idx", None),
         )
 
         range_gather_post_dispatch_kwargs = (
