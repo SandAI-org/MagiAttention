@@ -166,6 +166,7 @@ void combine(
     const float* topk_weights,
     const void* bias_0,
     const void* bias_1,
+    const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,

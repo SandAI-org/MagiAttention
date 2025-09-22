@@ -26,9 +26,7 @@ from ._config import GrpCollConfig
 from ._mgr import grpcoll_mgr
 from .utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
-    get_combine_pre_process_args_from_group_reduce_meta,
     get_dispatch_layout_from_group_cast_meta,
-    unpermute_tensor,
 )
 
 __all__ = [
@@ -176,30 +174,23 @@ def native_group_reduce_impl(
 
     # transfer symmetric group-cast meta args to dispatch meta args
     if meta_dict:
-        range_gather_pre_combine_kwargs = meta_dict["range_gather_pre_combine_kwargs"]
+        pre_perm_idx = meta_dict["pre_perm_idx"]
     else:
-        range_gather_pre_combine_kwargs = (
-            get_combine_pre_process_args_from_group_reduce_meta(
-                input_split_size_list=input_split_size_list,
-                dst_index_list=dst_index_list,
-                group=group,
-            )
+        # for group-reduce, perm_to_a2av_idx is the pre_perm_idx
+        _, pre_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
+            output_split_size_list=input_split_size_list,
+            src_index_list=dst_index_list,
+            group=group,
         )
 
-    # permute input
-    # XXX: remove this pre-process
-    input = unpermute_tensor(
-        tensor=input,
-        unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
-    )
-
     # launch combine kernel
-    combined_x, _, event = buffer.combine(  # combined_topk_weights
+    combined_x, _, event = buffer.combine(
         x=input,
         handle=handle,
         combined_x=output,
         reduce_op=reduce_op,
         acc_reduce=acc_reduce,
+        pre_perm_idx=pre_perm_idx,
         config=config,
         previous_event=None,
         async_finish=async_op,

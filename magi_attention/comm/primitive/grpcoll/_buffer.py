@@ -649,6 +649,7 @@ class GrpCollBuffer:
         acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
+        pre_perm_idx: torch.Tensor | None = None,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
@@ -737,6 +738,7 @@ class GrpCollBuffer:
                 acc_reduce=acc_reduce,
                 topk_weights=topk_weights,
                 bias=bias,
+                pre_perm_idx=pre_perm_idx,
                 config=config,
                 previous_event=previous_event,
                 async_finish=async_finish,
@@ -762,6 +764,7 @@ class GrpCollBuffer:
             topk_weights,
             bias_0,
             bias_1,
+            pre_perm_idx,
             src_idx,
             rank_prefix_matrix,
             channel_prefix_matrix,
@@ -962,6 +965,7 @@ class GrpCollBuffer:
         acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
+        pre_perm_idx: torch.Tensor | None = None,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
@@ -973,6 +977,9 @@ class GrpCollBuffer:
         Normally, you should not directly call this function.
         """
         assert config is not None
+
+        # TODO: Support pre_perm_idx for internode combine
+        assert pre_perm_idx is None
 
         # Unpack handle and bias
         (

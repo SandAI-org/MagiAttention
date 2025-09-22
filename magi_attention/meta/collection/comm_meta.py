@@ -30,7 +30,6 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
     get_a2av_perm_idxs_from_group_cast_meta,
-    get_combine_pre_process_args_from_group_reduce_meta,
     get_dispatch_layout_from_group_cast_meta,
     transfer_group_cast_meta_to_dispatch_meta,
 )
@@ -213,7 +212,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
 
     def _init_meta_kwargs_for_native_group_cast(self):
         # transfer group-cast meta args to dispatch meta args
-        try:  # this method is faster but relying on the grpcoll buffer is registered for self.group
+        try:  # this method is much faster but relying on the grpcoll buffer is registered for self.group
             (
                 num_tokens_per_rank,
                 num_tokens_per_rdma_rank,
@@ -226,19 +225,6 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
                 dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
                 group=self.group,
             )
-
-            if self.init_group_reduce:
-                range_gather_pre_combine_kwargs = (
-                    get_combine_pre_process_args_from_group_reduce_meta(
-                        input_split_size_list=self._group_reduce_args_dict_packed[
-                            "input_split_size_list"
-                        ],
-                        dst_index_list=self._group_reduce_args_dict_packed[
-                            "dst_index_list"
-                        ],
-                        group=self.group,
-                    )
-                )
         except ValueError:
             (
                 _,  # rank_idx
@@ -250,7 +236,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
                 _,  # topk_weights
                 num_tokens_per_expert,
                 _,  # range_gather_post_dispatch_kwargs,
-                range_gather_pre_combine_kwargs,
+                _,  # range_gather_pre_combine_kwargs,
             ) = transfer_group_cast_meta_to_dispatch_meta(
                 rank=self.rank,
                 num_ranks=self.world_size,
@@ -265,10 +251,10 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
                 dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
                 src_index_list=self._group_cast_args_dict_packed["src_index_list"],
                 use_topk=False,
-                use_a2a_order_output=False,
+                use_a2a_order_output=True,  # no need for range_gather kwargs anymore
             )
 
-        # for group-cast, perm_to_a2av_idx is the post_perm_idx
+        # for group-cast/group-reduce, perm_to_a2av_idx is the post_perm_idx/pre_perm_idx
         _, post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_size_list=self._group_cast_args_dict_packed[
                 "output_split_size_list"
@@ -285,24 +271,17 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             post_perm_idx=post_perm_idx,
         )
 
-        if self.init_group_reduce:
-            # HACK: temporarily store the range_gather_pre_combine_kwargs
-            # to pass to the symmetric group-reduce meta dict and then it will be removed
-            self._group_cast_args_dict_packed["native_group_cast_meta_dict"][
-                "range_gather_pre_combine_kwargs"
-            ] = range_gather_pre_combine_kwargs
-
         self._group_cast_args_dict_packed["native_grpcoll_handle_dict"] = dict(
             group_cast=None,
         )
 
     def _init_meta_kwargs_for_native_group_reduce(self):
-        range_gather_pre_combine_kwargs = self._group_cast_args_dict_packed[
-            "native_group_cast_meta_dict"
-        ].pop("range_gather_pre_combine_kwargs")
+        pre_perm_idx = self._group_cast_args_dict_packed["native_group_cast_meta_dict"][
+            "post_perm_idx"
+        ]
 
         self._group_reduce_args_dict_packed["native_group_reduce_meta_dict"] = dict(
-            range_gather_pre_combine_kwargs=range_gather_pre_combine_kwargs,
+            pre_perm_idx=pre_perm_idx,
         )
         # HACK: the symmetric group-cast handle dict is shared with symmetric group-reduce
         # since the "group_reduce" handle is not known until the "group_cast" returns

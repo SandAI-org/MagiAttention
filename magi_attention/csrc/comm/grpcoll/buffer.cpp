@@ -693,6 +693,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     const std::optional<torch::Tensor>& topk_weights,
     const std::optional<torch::Tensor>& bias_0,
     const std::optional<torch::Tensor>& bias_1,
+    const std::optional<torch::Tensor>& pre_perm_idx,
     const torch::Tensor& src_idx,
     const torch::Tensor& rank_prefix_matrix,
     const torch::Tensor& channel_prefix_matrix,
@@ -745,6 +746,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   auto recv_topk_weights = std::optional<torch::Tensor>();
   float* topk_weights_ptr = nullptr;
   float* recv_topk_weights_ptr = nullptr;
+  int64_t* pre_perm_idx_ptr = nullptr;
   if (topk_weights.has_value()) {
     EP_HOST_ASSERT(topk_weights->dim() == 2 and topk_weights->is_contiguous());
     EP_HOST_ASSERT(topk_weights->size(0) == num_tokens);
@@ -753,6 +755,12 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     topk_weights_ptr = topk_weights->data_ptr<float>();
     recv_topk_weights = torch::empty({num_combined_tokens, num_topk}, topk_weights->options());
     recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
+  }
+  if (pre_perm_idx.has_value()) {
+    EP_HOST_ASSERT(pre_perm_idx->scalar_type() == torch::kInt64);
+    EP_HOST_ASSERT(pre_perm_idx->dim() == 1);
+    EP_HOST_ASSERT(pre_perm_idx->size(0) == num_tokens);
+    pre_perm_idx_ptr = pre_perm_idx->data_ptr<int64_t>();
   }
 
   // Launch barrier and reset queue head and tail
@@ -813,6 +821,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       topk_weights_ptr,
       bias_ptrs[0],
       bias_ptrs[1],
+      pre_perm_idx_ptr,
       src_idx.data_ptr<int>(),
       rank_prefix_matrix.data_ptr<int>(),
       channel_prefix_matrix.data_ptr<int>(),

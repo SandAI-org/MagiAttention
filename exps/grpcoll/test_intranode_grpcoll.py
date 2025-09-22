@@ -714,6 +714,10 @@ def test_main(
                         "reduce_op": "sum",
                         "acc_reduce": acc_reduce_out_buffer,
                         "allow_empty_init_out_buf": allow_empty_init_out_buf,
+                        # NOTE: still perm_to_a2av_idxs, instead of unperm_to_a2av_idxs
+                        "pre_perm_idx": perm_to_a2av_idxs
+                        if use_a2av_perm_idxs == "inside"
+                        else None,
                     }
                     if with_topk:
                         combine_args.update({"topk_weights": recv_topk_weights})

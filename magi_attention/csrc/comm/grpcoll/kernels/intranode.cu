@@ -744,6 +744,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
     const float* topk_weights,
     const dtype_t* bias_0,
     const dtype_t* bias_1,
+    const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
@@ -845,8 +846,10 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
         int dst_slot_idx = (current_channel_tail_idx + i) % num_recv_buffer_tokens;
 
         // Copy data
+        auto token_idx_in_x = static_cast<int64_t>(token_idx + i);
+        token_idx_in_x = pre_perm_idx == nullptr ? token_idx_in_x : pre_perm_idx[token_idx_in_x];
         auto shifted_x_buffers = channel_x_buffers.buffer() + dst_slot_idx * hidden_int4;
-        auto shifted_x = x_int4 + (token_idx + i) * hidden_int4;
+        auto shifted_x = x_int4 + token_idx_in_x * hidden_int4;
         UNROLLED_WARP_COPY(4, lane_id, hidden_int4, shifted_x_buffers, shifted_x, ld_nc_global, st_na_global);
 
         // Send source index
@@ -1093,6 +1096,7 @@ void combine(
     const float* topk_weights,
     const void* bias_0,
     const void* bias_1,
+    const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
@@ -1128,6 +1132,7 @@ void combine(
         topk_weights,                                                      \
         reinterpret_cast<const dtype*>(bias_0),                            \
         reinterpret_cast<const dtype*>(bias_1),                            \
+        pre_perm_idx,                                                      \
         src_idx,                                                           \
         rank_prefix_matrix,                                                \
         channel_prefix_matrix,                                             \
