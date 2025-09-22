@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import warnings
-from functools import partial
 from typing import Any, Literal
 
 import torch
@@ -26,9 +25,9 @@ from ._buffer import GrpCollBuffer
 from ._config import GrpCollConfig
 from ._mgr import grpcoll_mgr
 from .utils import (
+    get_a2av_perm_idxs_from_group_cast_meta,
     get_combine_pre_process_args_from_group_reduce_meta,
     get_dispatch_layout_from_group_cast_meta,
-    get_dispatch_post_process_args_from_group_cast_meta,
     unpermute_tensor,
 )
 
@@ -46,18 +45,6 @@ def _maybe_lazy_init_buffer(group: dist.ProcessGroup) -> None:
             "we lazily register it here with the default config, "
             "which might not be the best choice and cause performance/memory issue."
         )
-
-
-def _native_group_cast_post_process(
-    *args,
-    recv_x: torch.Tensor,
-    unperm_after_a2a_kwargs: dict,
-    **kwargs,
-) -> torch.Tensor:
-    return unpermute_tensor(
-        tensor=recv_x,
-        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
-    )
 
 
 @nvtx.instrument_nvtx
@@ -91,9 +78,7 @@ def native_group_cast_impl(
         num_tokens_per_rdma_rank = meta_dict["num_tokens_per_rdma_rank"]
         is_token_in_rank = meta_dict["is_token_in_rank"]
         num_tokens_per_expert = meta_dict["num_tokens_per_expert"]
-        range_gather_post_dispatch_kwargs = meta_dict[
-            "range_gather_post_dispatch_kwargs"
-        ]
+        post_perm_idx = meta_dict["post_perm_idx"]
     else:
         (
             num_tokens_per_rank,
@@ -110,12 +95,11 @@ def native_group_cast_impl(
             topk_idx=kwargs.pop("topk_idx", None),
         )
 
-        range_gather_post_dispatch_kwargs = (
-            get_dispatch_post_process_args_from_group_cast_meta(
-                output_split_size_list=output_split_size_list,
-                src_index_list=src_index_list,
-                group=group,
-            )
+        # for group-cast, perm_to_a2av_idx is the post_perm_idx
+        _, post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
+            output_split_size_list=output_split_size_list,
+            src_index_list=src_index_list,
+            group=group,
         )
 
     # launch dispatch kernel
@@ -134,6 +118,7 @@ def native_group_cast_impl(
         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
         is_token_in_rank=is_token_in_rank,
         num_tokens_per_expert=num_tokens_per_expert,
+        post_perm_idx=post_perm_idx,
         config=config,
         previous_event=None,
         async_finish=async_op,
@@ -147,12 +132,7 @@ def native_group_cast_impl(
     # prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(
         work=GeneralWork(event),
-        # XXX: remove this post-process
-        post_process_fn=partial(
-            _native_group_cast_post_process,
-            recv_x=recv_x,
-            unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
-        ),
+        post_process_fn=lambda *args, **kwargs: recv_x,
         async_op=async_op,
     )
 

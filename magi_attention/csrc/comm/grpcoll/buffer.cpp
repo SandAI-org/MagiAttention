@@ -381,6 +381,7 @@ Buffer::intranode_dispatch(
     int cached_num_recv_tokens,
     const std::optional<torch::Tensor>& cached_rank_prefix_matrix,
     const std::optional<torch::Tensor>& cached_channel_prefix_matrix,
+    const std::optional<torch::Tensor>& post_perm_idx,
     int expert_alignment,
     int num_worst_tokens,
     const Config& config,
@@ -576,12 +577,19 @@ Buffer::intranode_dispatch(
   // Assign pointers
   int64_t* recv_topk_idx_ptr = nullptr;
   float* recv_topk_weights_ptr = nullptr;
+  int64_t* post_perm_idx_ptr = nullptr;
   float* recv_x_scales_ptr = nullptr;
   if (topk_idx.has_value()) {
     recv_topk_idx = torch::empty({num_recv_tokens, num_topk}, topk_idx->options());
     recv_topk_weights = torch::empty({num_recv_tokens, num_topk}, topk_weights->options());
     recv_topk_idx_ptr = recv_topk_idx->data_ptr<int64_t>();
     recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
+  }
+  if (post_perm_idx.has_value()) {
+    EP_HOST_ASSERT(post_perm_idx->scalar_type() == torch::kInt64);
+    EP_HOST_ASSERT(post_perm_idx->dim() == 1);
+    EP_HOST_ASSERT(post_perm_idx->size(0) == num_recv_tokens);
+    post_perm_idx_ptr = post_perm_idx->data_ptr<int64_t>();
   }
   if (x_scales.has_value()) {
     recv_x_scales = x_scales->dim() == 1 ? torch::empty({num_recv_tokens}, x_scales->options()) : torch::empty({num_recv_tokens, num_scales}, x_scales->options());
@@ -608,6 +616,7 @@ Buffer::intranode_dispatch(
       recv_topk_weights_ptr,
       recv_channel_prefix_matrix.data_ptr<int>(),
       send_head.data_ptr<int>(),
+      post_perm_idx_ptr,
       x.data_ptr(),
       x_scales_ptr,
       topk_idx_ptr,

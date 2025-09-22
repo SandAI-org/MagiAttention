@@ -124,6 +124,7 @@ void dispatch(
     float* recv_topk_weights,
     int* recv_channel_offset,
     int* send_head,
+    const int64_t* post_perm_idx,
     const void* x,
     const float* x_scales,
     const int64_t* topk_idx,

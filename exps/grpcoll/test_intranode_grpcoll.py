@@ -98,7 +98,8 @@ def test_main(
     acc_reduce_constant = rank
     if acc_reduce_out_buffer:
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"
-    use_a2av_perm_idxs = True
+    use_a2av_perm_idxs = "inside"  # choose from "no", "outside", "inside"
+    assert use_a2av_perm_idxs in ("no", "outside", "inside")
 
     if use_topk:
         # if using topk, we can assume num_local_experts == num_ranks,
@@ -276,6 +277,14 @@ def test_main(
         f"[RANK {rank}]: {perm_to_a2av_idxs=}\n" f"{unperm_from_a2av_idxs=}\n",
         flush=True,
     )
+    if not random_permute_output:
+        arange_idxs = torch.arange(
+            sum(output_split_size_list),
+            dtype=torch.int64,
+            device="cuda",
+        )
+        assert torch.equal(unperm_from_a2av_idxs, arange_idxs)
+        assert torch.equal(perm_to_a2av_idxs, arange_idxs)
 
     # Rank layout meta
     # num_tokens_per_rank[r]: the number of tokens sent to rank r by this rank
@@ -407,6 +416,9 @@ def test_main(
                         "num_tokens_per_expert": num_tokens_per_expert,
                         "config": config,
                         "async_finish": async_mode,
+                        "post_perm_idx": perm_to_a2av_idxs
+                        if use_a2av_perm_idxs == "inside"
+                        else None,
                     }
 
                     if with_topk:
@@ -479,15 +491,19 @@ def test_main(
                     # unpermute recv_x to the order indicated by
                     # output_split_size_list and src_index_list
                     if random_permute_output:
-                        recv_x_from_a2av = recv_x.clone()  # type: ignore[union-attr]
-                        if use_a2av_perm_idxs:
-                            recv_x = recv_x[unperm_from_a2av_idxs]
+                        if use_a2av_perm_idxs == "inside":
+                            # already permuted inside
+                            pass
                         else:
-                            recv_x = unpermute_tensor(
-                                tensor=recv_x,
-                                unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
-                            )
-                        assert recv_x_from_a2av.shape == recv_x.shape
+                            recv_x_from_a2av = recv_x.clone()  # type: ignore[union-attr]
+                            if use_a2av_perm_idxs == "outside":
+                                recv_x = recv_x[unperm_from_a2av_idxs]
+                            elif use_a2av_perm_idxs == "no":
+                                recv_x = unpermute_tensor(
+                                    tensor=recv_x,
+                                    unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
+                                )
+                            assert recv_x_from_a2av.shape == recv_x.shape  # type: ignore[union-attr]
 
                     # print
                     (
@@ -673,15 +689,19 @@ def test_main(
 
                     # permute x to the rank order
                     if random_permute_output:
-                        x_combine_before_to_a2av = x_combine.clone()
-                        if use_a2av_perm_idxs:
-                            x_combine = x_combine[perm_to_a2av_idxs]
+                        if use_a2av_perm_idxs == "inside":
+                            # will permute inside
+                            pass
                         else:
-                            x_combine = unpermute_tensor(
-                                tensor=x_combine,
-                                unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
-                            )
-                        assert x_combine_before_to_a2av.shape == x_combine.shape
+                            x_combine_before_to_a2av = x_combine.clone()
+                            if use_a2av_perm_idxs == "outside":
+                                x_combine = x_combine[perm_to_a2av_idxs]
+                            elif use_a2av_perm_idxs == "no":
+                                x_combine = unpermute_tensor(
+                                    tensor=x_combine,
+                                    unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
+                                )
+                            assert x_combine_before_to_a2av.shape == x_combine.shape
 
                     # prepare combine args
                     send_head_copy = send_head.clone()

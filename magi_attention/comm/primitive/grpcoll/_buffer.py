@@ -408,6 +408,7 @@ class GrpCollBuffer:
         num_tokens_per_expert: torch.Tensor | None = None,
         topk_idx: torch.Tensor | None = None,
         topk_weights: torch.Tensor | None = None,
+        post_perm_idx: torch.Tensor | None = None,
         expert_alignment: int = 1,
         num_worst_tokens: int = 0,
         config: GrpCollConfig | None = None,
@@ -443,6 +444,8 @@ class GrpCollBuffer:
             topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices selected by each token,
                 `-1` means no selections.
             topk_weights: `[num_tokens, num_topk]` with `torch.float`, the expert weights of each token to dispatch.
+            post_perm_idx: `[num_recv_tokens]` with `torch.int64`, the post-permutation indices of each token,
+                i.e. recv_x[post_perm_idx] can recover to the original recv_x in rank order.
             expert_alignment: align the number of tokens received by each local expert to this variable.
             num_worst_tokens: the worst number of tokens to receive, if specified, there will be no CPU sync, and it
                 will be CUDA-graph compatible. Please also notice that this flag is for intranode only.
@@ -513,6 +516,7 @@ class GrpCollBuffer:
                 num_tokens_per_expert=num_tokens_per_expert,
                 topk_idx=topk_idx,
                 topk_weights=topk_weights,
+                post_perm_idx=post_perm_idx,
                 expert_alignment=expert_alignment,
                 config=config,
                 previous_event=previous_event,
@@ -557,6 +561,7 @@ class GrpCollBuffer:
                 num_recv_tokens,
                 rank_prefix_matrix,
                 channel_prefix_matrix,
+                post_perm_idx,
                 expert_alignment,
                 num_worst_tokens,
                 config.to_kernel_config(),
@@ -606,6 +611,7 @@ class GrpCollBuffer:
                 0,
                 None,
                 None,
+                post_perm_idx,
                 expert_alignment,
                 num_worst_tokens,
                 config.to_kernel_config(),
@@ -786,6 +792,7 @@ class GrpCollBuffer:
         num_tokens_per_expert: torch.Tensor | None = None,
         topk_idx: torch.Tensor | None = None,
         topk_weights: torch.Tensor | None = None,
+        post_perm_idx: torch.Tensor | None = None,
         expert_alignment: int = 1,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
@@ -804,6 +811,9 @@ class GrpCollBuffer:
         Normally, you should not directly call this function.
         """
         assert config is not None
+
+        # TODO: support post-perm for internode dispatch
+        assert post_perm_idx is None
 
         # Launch the kernel with cached or non-cached mode
         x, x_scales = x if isinstance(x, tuple) else (x, None)

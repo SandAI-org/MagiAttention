@@ -248,6 +248,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
     float* recv_topk_weights,
     int* recv_channel_offset,
     int* send_head,
+    const int64_t* post_perm_idx,
     const int4* x,
     const float* x_scales,
     const int64_t* topk_idx,
@@ -403,6 +404,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
             channel_src_idx_buffers[dst_slot_idx] = static_cast<int>(token_idx);
 
           // Copy `topk_idx` and `topk_weights` with transformed index
+          // TODO: remove this unused copy
           if (lane_id < num_topk) {
             // Top-k index
             int recv_expert_begin = responsible_rank * num_experts_per_rank, recv_expert_end = (responsible_rank + 1) * num_experts_per_rank;
@@ -496,6 +498,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
       int num_recv_tokens = cached_channel_tail_idx - cached_channel_head_idx;
       for (int chunk_idx = recv_warp_id_in_rank; chunk_idx < num_recv_tokens; chunk_idx += num_recv_warps_per_rank) {
         auto token_idx_in_recv_x = static_cast<int64_t>(total_offset + chunk_idx);
+        token_idx_in_recv_x = post_perm_idx == nullptr ? token_idx_in_recv_x : post_perm_idx[token_idx_in_recv_x];
         int token_idx_in_buffer = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
         auto shifted_buffer_x_int4 = channel_x_buffers.buffer() + token_idx_in_buffer * hidden_int4;
         auto shifted_recv_x_int4 = recv_x + token_idx_in_recv_x * hidden_int4;
@@ -581,6 +584,7 @@ void dispatch(
     float* recv_topk_weights,
     int* recv_channel_offset,
     int* send_head,
+    const int64_t* post_perm_idx,
     const void* x,
     const float* x_scales,
     const int64_t* topk_idx,
@@ -625,6 +629,7 @@ void dispatch(
         recv_topk_weights,                                           \
         recv_channel_offset,                                         \
         send_head,                                                   \
+        post_perm_idx,                                               \
         reinterpret_cast<const int4*>(x),                            \
         x_scales,                                                    \
         topk_idx,                                                    \
