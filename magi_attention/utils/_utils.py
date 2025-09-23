@@ -784,6 +784,7 @@ def get_a2a_corr_factor(world_size: int) -> float:
     return (world_size - 1) / world_size if world_size > 1 else 1.0
 
 
+# TODO: put this function to exps/grpcoll/grpcoll_utils.py
 def inplace_unique(x: torch.Tensor, num_slots: int):
     assert x.dim() == 2
     mask = x < 0

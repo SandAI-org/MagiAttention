@@ -393,6 +393,7 @@ def sanity_check_for_group_cast_meta_args_per_rank(
         )
 
 
+# TODO: put this function to exps/grpcoll/grpcoll_utils.py
 def transfer_group_cast_meta_to_dispatch_meta(
     rank: int,
     num_ranks: int,
@@ -746,30 +747,6 @@ def get_dispatch_layout_from_group_cast_meta(
     )
 
 
-def get_dispatch_post_process_args_from_group_cast_meta(
-    output_split_size_list: list[int],
-    src_index_list: list[int],
-    group: dist.ProcessGroup,
-    device: str = "cuda",
-) -> dict[str, Any]:
-    world_size = group.size()
-
-    (
-        _,  # a2a_output_split_size
-        range_gather_post_dispatch_kwargs,
-    ) = _calc_group_cast_a2a_output_meta_args(
-        output_split_size_list=output_split_size_list,
-        src_index_list=src_index_list,
-        world_size=world_size,
-        device=device,
-        reorder_list=None,
-        calc_unperm_after_a2a_kwargs=True,
-        return_verbose=False,
-    )
-
-    return range_gather_post_dispatch_kwargs
-
-
 def get_a2av_perm_idxs_from_group_cast_meta(
     output_split_size_list: list[int],
     src_index_list: list[int],
@@ -820,27 +797,6 @@ def get_a2av_perm_idxs_from_group_cast_meta(
     ).chunk(2)
 
     return unperm_from_a2av_idxs, perm_to_a2av_idxs
-
-
-def get_combine_pre_process_args_from_group_reduce_meta(
-    input_split_size_list: list[int],
-    dst_index_list: list[int],
-    group: dist.ProcessGroup,
-    device: str = "cuda",
-) -> dict[str, Any]:
-    num_ranks = group.size()
-
-    (
-        _,  # a2a_input_split_size
-        range_gather_pre_combine_kwargs,
-    ) = _calc_group_reduce_a2a_input_meta_args(
-        input_split_size_list=input_split_size_list,
-        dst_index_list=dst_index_list,
-        world_size=num_ranks,
-        device=device,
-    )
-
-    return range_gather_pre_combine_kwargs
 
 
 @nvtx.instrument_nvtx

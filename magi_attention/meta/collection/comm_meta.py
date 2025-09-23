@@ -226,6 +226,8 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
                 group=self.group,
             )
         except ValueError:
+            # TODO: decouple layout kernels from the buffer
+            # and then remove this branch
             (
                 _,  # rank_idx
                 _,  # rdma_rank_idx

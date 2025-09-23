@@ -94,7 +94,7 @@ def test_main(
     acc_reduce_constant = rank
     if acc_reduce_out_buffer:
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"
-    use_a2av_perm_idxs = "no"  # TODO: support a2av_perm_idxs inside
+    use_a2av_perm_idxs = "outside"  # TODO: support a2av_perm_idxs inside
     assert use_a2av_perm_idxs in ("no", "outside", "inside")
 
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
