@@ -41,11 +41,13 @@ from magi_attention.api.magi_attn_interface import (
     make_varlen_key_for_new_mask_after_dispatch,
     undispatch,
 )
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
     DistAttnConfig,
+    GrpCollConfig,
     MinHeapDispatchAlg,
     OverlapConfig,
     UniformOverlapAlg,
@@ -109,13 +111,33 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         else:
             self.device_mesh = None
 
+        # -----    set up for native grpcoll   ---- #
+
+        if magi_attention.comm.is_native_grpcoll_enable():
+            for nccl_group in self.nccl_groups:
+                grpcoll_mgr.register_buffer(
+                    group=nccl_group,
+                    config=GrpCollConfig(
+                        num_nvl_bytes=int(2e9)
+                        * self.world_size
+                        // 8,  # 2GB for 8 ranks
+                    ),
+                )
+                grpcoll_mgr.check_registered(group=nccl_group)
+
+    def destroy_pg(self):
+        # -----    clean up for native grpcoll   ---- #
+
+        if magi_attention.comm.is_native_grpcoll_enable():
+            for nccl_group in self.nccl_groups:
+                grpcoll_mgr.release_buffer(group=nccl_group)
+                grpcoll_mgr.check_released(group=nccl_group)
+
+        super().destroy_pg()
+
     @property
     def device(self) -> int:
         return torch.cuda.current_device()
-
-    @property
-    def process_group(self):
-        return dist.distributed_c10d._get_default_group()
 
     @property
     def nccl_group(self) -> dist.ProcessGroup:
@@ -860,7 +882,7 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
         global_dout = torch.randn(
             total_seqlen, num_heads_q, head_dim, device=self.device, dtype=dtype
         )
-        dist.all_reduce(global_dout, group=self.process_group)
+        dist.all_reduce(global_dout, group=self.nccl_group)
 
         q_proj = nn.Linear(
             embed_dim, num_heads_q * head_dim, dtype=dtype, device=self.device
@@ -882,7 +904,7 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
             total_seqlen_k=total_seqlen_k,
             pad_size=pad_size,
             chunk_size=chunk_size,
-            cp_group_or_mesh=self.process_group,  # assuming we only have 1-dim context parallelism (cp)
+            cp_group_or_mesh=self.nccl_group,  # assuming we only have 1-dim context parallelism (cp)
         )
 
         total_out_ref, dx_ref = None, None
@@ -897,7 +919,7 @@ class TestInterfaceWithWorldSize8(TestInterfaceBaseWithWorldSize1):
                 dtype=dtype,
                 requires_grad=True,
             )
-            dist.all_reduce(x.data, group=self.process_group)
+            dist.all_reduce(x.data, group=self.nccl_group)
 
             # --- Dispatch and pad --- #
 

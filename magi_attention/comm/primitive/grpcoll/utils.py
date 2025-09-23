@@ -596,8 +596,8 @@ def get_a2av_perm_idxs_from_group_cast_meta(
     # count the global rank offset
     initial_rank_offsets = list(accumulate([0] + rank_accumulated_sizes))
 
-    # a2a_output[unperm_from_a2av_idxs] => output
-    unperm_from_a2av_idxs: list[int] = []
+    # a2a_output[unperm_from_a2av_idx] => output
+    unperm_from_a2av_idx: list[int] = []
     current_offset_within_rank = [0] * world_size
     for i in range(len(output_split_size_list)):
         target_size = output_split_size_list[i]
@@ -607,7 +607,7 @@ def get_a2av_perm_idxs_from_group_cast_meta(
         global_start_offset_in_output = (
             initial_rank_offsets[target_rank] + current_offset_within_rank[target_rank]
         )
-        unperm_from_a2av_idxs.extend(
+        unperm_from_a2av_idx.extend(
             range(
                 global_start_offset_in_output,
                 global_start_offset_in_output + target_size,
@@ -615,20 +615,20 @@ def get_a2av_perm_idxs_from_group_cast_meta(
         )
         current_offset_within_rank[target_rank] += target_size
 
-    # output[perm_to_a2av_idxs] => a2a_output
-    perm_to_a2av_idxs = perm_idxs2unperm_idxs(unperm_from_a2av_idxs)
+    # output[perm_to_a2av_idx] => a2a_output
+    perm_to_a2av_idx = perm_idxs2unperm_idxs(unperm_from_a2av_idx)
 
     # convert to tensor
     (
-        unperm_from_a2av_idxs,
-        perm_to_a2av_idxs,
+        unperm_from_a2av_idx,
+        perm_to_a2av_idx,
     ) = torch.tensor(
-        unperm_from_a2av_idxs + perm_to_a2av_idxs,
+        unperm_from_a2av_idx + perm_to_a2av_idx,
         dtype=dtype,
         device=device,
     ).chunk(2)
 
-    return unperm_from_a2av_idxs, perm_to_a2av_idxs
+    return unperm_from_a2av_idx, perm_to_a2av_idx
 
 
 @nvtx.instrument_nvtx

@@ -261,25 +261,25 @@ def test_main(
     # get perm/unperm idxs to/from a2av through group-cast meta args
     # which is used to replace the post-dispatch range_gather and pre-combine range_gather
     (
-        unperm_from_a2av_idxs,
-        perm_to_a2av_idxs,
+        unperm_from_a2av_idx,
+        perm_to_a2av_idx,
     ) = get_a2av_perm_idxs_from_group_cast_meta(
         output_split_size_list=output_split_size_list,
         src_index_list=src_index_list,
         group=group,
     )
     print(
-        f"[RANK {rank}]: {perm_to_a2av_idxs=}\n" f"{unperm_from_a2av_idxs=}\n",
+        f"[RANK {rank}]: {perm_to_a2av_idx=}\n" f"{unperm_from_a2av_idx=}\n",
         flush=True,
     )
     if not random_permute_output:
-        arange_idxs = torch.arange(
+        arange_idx = torch.arange(
             sum(output_split_size_list),
             dtype=torch.int64,
             device="cuda",
         )
-        assert torch.equal(unperm_from_a2av_idxs, arange_idxs)
-        assert torch.equal(perm_to_a2av_idxs, arange_idxs)
+        assert torch.equal(unperm_from_a2av_idx, arange_idx)
+        assert torch.equal(perm_to_a2av_idx, arange_idx)
 
     gbl_num_tokens_per_rank = num_tokens_per_rank.clone()
     dist.all_reduce(gbl_num_tokens_per_rank, group=group)
@@ -414,7 +414,7 @@ def test_main(
                         "num_tokens_per_expert": num_tokens_per_expert,
                         "config": config,
                         "async_finish": async_mode,
-                        "post_perm_idx": perm_to_a2av_idxs
+                        "post_perm_idx": perm_to_a2av_idx
                         if use_a2av_perm_idxs == "inside"
                         else None,
                     }
@@ -504,7 +504,7 @@ def test_main(
                         else:
                             recv_x_from_a2av = recv_x.clone()  # type: ignore[union-attr]
                             if use_a2av_perm_idxs == "outside":
-                                recv_x = recv_x[unperm_from_a2av_idxs]
+                                recv_x = recv_x[unperm_from_a2av_idx]
                             elif use_a2av_perm_idxs == "no":
                                 recv_x = unpermute_tensor(
                                     tensor=recv_x,
@@ -640,7 +640,7 @@ def test_main(
                         else:
                             x_combine_before_to_a2av = x_combine.clone()
                             if use_a2av_perm_idxs == "outside":
-                                x_combine = x_combine[perm_to_a2av_idxs]
+                                x_combine = x_combine[perm_to_a2av_idx]
                             elif use_a2av_perm_idxs == "no":
                                 x_combine = unpermute_tensor(
                                     tensor=x_combine,
@@ -661,8 +661,8 @@ def test_main(
                         "reduce_op": "sum",
                         "acc_reduce": acc_reduce_out_buffer,
                         "allow_empty_init_out_buf": allow_empty_init_out_buf,
-                        # NOTE: still perm_to_a2av_idxs, instead of unperm_to_a2av_idxs
-                        "pre_perm_idx": perm_to_a2av_idxs
+                        # NOTE: still perm_to_a2av_idx, instead of unperm_to_a2av_idx
+                        "pre_perm_idx": perm_to_a2av_idx
                         if use_a2av_perm_idxs == "inside"
                         else None,
                     }
