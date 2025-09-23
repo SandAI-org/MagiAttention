@@ -295,6 +295,8 @@ __global__ void get_a2av_perm_idx(
   }
   __syncthreads();
 
+// TODO: find a better way to parallelize
+// especially when all the split sizes are small thus the number of splits is too large
 // compute unperm_from_a2av_idx and perm_to_a2av_idx
 // a2a_output[unperm_from_a2av_idx] => output
 // output[perm_to_a2av_idx] => a2a_output
