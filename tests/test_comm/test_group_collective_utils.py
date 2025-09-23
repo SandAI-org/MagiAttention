@@ -22,9 +22,12 @@ import torch
 from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_input_args,
     _calc_group_reduce_a2a_input_args,
+    get_a2av_perm_idxs_from_group_cast_meta,
     sum_reduce_to_tensor,
     unpermute_tensor,
 )
+from magi_attention.testing import parameterize
+from magi_attention.utils import perm_idxs2unperm_idxs
 
 
 class TestGroupCollectiveUtils(TestCase):
@@ -197,7 +200,7 @@ class TestGroupCollectiveUtils(TestCase):
 
         # ---------    ref     --------- #
 
-        reduce_index_tensor = self._calc_reduce_index_tensor(
+        reduce_index_tensor = self._calc_reduce_index_tensor_ref(
             a2a_output_unpermute_index_list=a2a_output_unpermute_index_list,
             a2a_output_tensor_size_list=a2a_output_tensor_size_list,
             output_split_size_list=output_split_size_list,
@@ -370,6 +373,237 @@ class TestGroupCollectiveUtils(TestCase):
 
         self.assertTrue(torch.equal(a2a_input_ref, a2a_input))
         self.assertEqual(a2a_input_split_size_ref, a2a_input_split_size)
+
+    @parameterize(
+        "config",
+        [
+            {
+                "output_split_size_list": [10, 5, 20],
+                "src_index_list": [0, 1, 0],
+                "world_size": 2,
+            },
+            {
+                "output_split_size_list": [5, 10, 3],
+                "src_index_list": [0, 0, 0],
+                "world_size": 1,
+            },
+            {
+                "output_split_size_list": [10, 20, 30],
+                "src_index_list": [0, 1, 2],
+                "world_size": 3,
+            },
+            {
+                "output_split_size_list": [],
+                "src_index_list": [],
+                "world_size": 2,
+            },
+            {
+                "output_split_size_list": [0, 5, 0, 10],
+                "src_index_list": [0, 1, 0, 1],
+                "world_size": 2,
+            },
+            {
+                "output_split_size_list": [10, 5, 20, 15],
+                "src_index_list": [0, 1, 2, 1],
+                "world_size": 3,
+            },
+            {
+                "output_split_size_list": [
+                    117,
+                    577,
+                    288,
+                    188,
+                    985,
+                    53,
+                    127,
+                    414,
+                    46,
+                    202,
+                    344,
+                    235,
+                    198,
+                    212,
+                    302,
+                    1047,
+                    180,
+                    697,
+                    99,
+                    915,
+                    321,
+                    517,
+                    422,
+                    472,
+                    1103,
+                    55,
+                    354,
+                    624,
+                    308,
+                    729,
+                    259,
+                    364,
+                    2,
+                    372,
+                    1083,
+                    180,
+                ],
+                "src_index_list": [
+                    6,
+                    7,
+                    3,
+                    0,
+                    1,
+                    4,
+                    6,
+                    5,
+                    3,
+                    5,
+                    3,
+                    5,
+                    7,
+                    4,
+                    1,
+                    5,
+                    2,
+                    7,
+                    7,
+                    6,
+                    7,
+                    0,
+                    5,
+                    7,
+                    2,
+                    2,
+                    0,
+                    1,
+                    0,
+                    6,
+                    1,
+                    6,
+                    6,
+                    0,
+                    5,
+                    6,
+                ],
+                "world_size": 8,
+            },
+            {
+                "output_split_size_list": [
+                    185,
+                    302,
+                    354,
+                    517,
+                    127,
+                    55,
+                    915,
+                    519,
+                    1047,
+                    535,
+                    117,
+                    97,
+                    697,
+                    741,
+                    372,
+                    577,
+                    422,
+                    53,
+                    985,
+                    332,
+                    1944,
+                    1083,
+                    2,
+                    339,
+                    219,
+                    273,
+                    472,
+                    188,
+                    709,
+                    344,
+                    99,
+                    212,
+                    729,
+                    68,
+                    180,
+                    198,
+                    28,
+                    1189,
+                    46,
+                    321,
+                    347,
+                    224,
+                ],
+                "src_index_list": [
+                    1,
+                    1,
+                    0,
+                    0,
+                    6,
+                    2,
+                    6,
+                    7,
+                    5,
+                    3,
+                    6,
+                    4,
+                    7,
+                    6,
+                    0,
+                    7,
+                    5,
+                    4,
+                    1,
+                    4,
+                    2,
+                    5,
+                    6,
+                    4,
+                    5,
+                    4,
+                    7,
+                    0,
+                    7,
+                    3,
+                    7,
+                    4,
+                    6,
+                    1,
+                    6,
+                    7,
+                    2,
+                    3,
+                    3,
+                    7,
+                    2,
+                    1,
+                ],
+                "world_size": 8,
+            },
+        ],
+    )
+    def test_a2av_perm_idxs_from_group_cast_meta(self, config):
+        output_split_size_list = config["output_split_size_list"]
+        src_index_list = config["src_index_list"]
+        world_size = config["world_size"]
+
+        (
+            ref_unperm_from_a2av_idx,
+            ref_perm_to_a2av_idx,
+        ) = self._get_a2av_perm_idxs_from_group_cast_meta_ref(
+            output_split_size_list=output_split_size_list,
+            src_index_list=src_index_list,
+            world_size=world_size,
+        )
+
+        (
+            unperm_from_a2av_idx,
+            perm_to_a2av_idx,
+        ) = get_a2av_perm_idxs_from_group_cast_meta(
+            output_split_size_list=output_split_size_list,
+            src_index_list=src_index_list,
+            world_size=world_size,
+        )
+
+        assert torch.equal(unperm_from_a2av_idx, ref_unperm_from_a2av_idx)
+        assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
 
     def _seqlens2curanges(
         self,
@@ -554,7 +788,7 @@ class TestGroupCollectiveUtils(TestCase):
             source=a2a_output,
         )
 
-    def _calc_reduce_index_tensor(
+    def _calc_reduce_index_tensor_ref(
         self,
         a2a_output_unpermute_index_list: list[int],
         a2a_output_tensor_size_list: list[int],
@@ -726,6 +960,56 @@ class TestGroupCollectiveUtils(TestCase):
             a2a_output_reduce_ranges_list,
             output_size_ranges,
         )
+
+    def _get_a2av_perm_idxs_from_group_cast_meta_ref(
+        self,
+        output_split_size_list: list[int],
+        src_index_list: list[int],
+        world_size: int,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.int64,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # count the total split size of each rank
+        rank_split_sizes = [0] * world_size
+        for i in range(len(output_split_size_list)):
+            rank_split_sizes[src_index_list[i]] += output_split_size_list[i]
+
+        # count the global rank offset
+        a2av_rank_offsets = list(accumulate([0] + rank_split_sizes))[:-1]
+
+        # a2a_output[unperm_from_a2av_idx] => output
+        unperm_from_a2av_idx: list[int] = []
+        current_offset_within_rank = [0] * world_size
+        for i in range(len(output_split_size_list)):
+            target_size = output_split_size_list[i]
+            target_rank = src_index_list[i]
+
+            # get the start offset of the target buffer sent from the target rank
+            global_start_offset_in_output = (
+                a2av_rank_offsets[target_rank] + current_offset_within_rank[target_rank]
+            )
+            unperm_from_a2av_idx.extend(
+                range(
+                    global_start_offset_in_output,
+                    global_start_offset_in_output + target_size,
+                )
+            )
+            current_offset_within_rank[target_rank] += target_size
+
+        # output[perm_to_a2av_idx] => a2a_output
+        perm_to_a2av_idx = perm_idxs2unperm_idxs(unperm_from_a2av_idx)
+
+        # convert to tensor
+        (
+            unperm_from_a2av_idx,
+            perm_to_a2av_idx,
+        ) = torch.tensor(
+            unperm_from_a2av_idx + perm_to_a2av_idx,
+            dtype=dtype,
+            device=device,
+        ).chunk(2)
+
+        return unperm_from_a2av_idx, perm_to_a2av_idx
 
 
 if __name__ == "__main__":

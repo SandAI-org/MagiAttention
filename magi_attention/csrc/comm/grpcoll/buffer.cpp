@@ -1705,7 +1705,7 @@ bool is_sm90_compiled() {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "Magi Attention Communication Library";
 
-  /*    GrpColl Sub-module     */
+  /**********************     GrpColl Sub-module     **********************/
 
   py::module_ grpcoll_submodule = m.def_submodule("grpcoll", "Group-Collective Communication Sub-Library based on DeepEP");
   // Config class
@@ -1719,13 +1719,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("num_max_rdma_chunked_recv_tokens") = 256)
       .def("get_nvl_buffer_size_hint", &grpcoll::Config::get_nvl_buffer_size_hint)
       .def("get_rdma_buffer_size_hint", &grpcoll::Config::get_rdma_buffer_size_hint);
-  grpcoll_submodule.def("get_low_latency_rdma_size_hint", &grpcoll::get_low_latency_rdma_size_hint);
 
   // Eventhandle class
   py::class_<grpcoll::EventHandle>(grpcoll_submodule, "EventHandle").def(py::init<>()).def("current_stream_wait", &grpcoll::EventHandle::current_stream_wait);
 
   // Meta class
-  py::class_<grpcoll::Meta>(grpcoll_submodule, "Meta").def_static("get_dispatch_meta_from_topk_idx", &grpcoll::Meta::get_dispatch_meta_from_topk_idx);
+  py::class_<grpcoll::Meta>(grpcoll_submodule, "Meta")
+      .def_static("get_dispatch_meta_from_topk_idx", &grpcoll::Meta::get_dispatch_meta_from_topk_idx)
+      .def_static("get_a2av_perm_idx_from_src_idx", &grpcoll::Meta::get_a2av_perm_idx_from_src_idx);
 
   // Buffer class
   py::class_<grpcoll::Buffer>(grpcoll_submodule, "Buffer")
@@ -1752,5 +1753,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_next_low_latency_combine_buffer", &grpcoll::Buffer::get_next_low_latency_combine_buffer);
 
   // other functions
+  grpcoll_submodule.def("get_low_latency_rdma_size_hint", &grpcoll::get_low_latency_rdma_size_hint);
   grpcoll_submodule.def("is_sm90_compiled", grpcoll::is_sm90_compiled);
 }

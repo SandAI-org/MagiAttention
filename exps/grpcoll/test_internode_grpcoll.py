@@ -266,7 +266,7 @@ def test_main(
     ) = get_a2av_perm_idxs_from_group_cast_meta(
         output_split_size_list=output_split_size_list,
         src_index_list=src_index_list,
-        group=group,
+        world_size=num_ranks,
     )
     print(
         f"[RANK {rank}]: {perm_to_a2av_idx=}\n" f"{unperm_from_a2av_idx=}\n",

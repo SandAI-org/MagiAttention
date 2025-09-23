@@ -97,7 +97,7 @@ def native_group_cast_impl(
         _, post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_size_list=output_split_size_list,
             src_index_list=src_index_list,
-            group=group,
+            world_size=group.size(),
         )
 
     # launch dispatch kernel
@@ -180,7 +180,7 @@ def native_group_reduce_impl(
         _, pre_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_size_list=input_split_size_list,
             src_index_list=dst_index_list,
-            group=group,
+            world_size=group.size(),
         )
 
     # launch combine kernel

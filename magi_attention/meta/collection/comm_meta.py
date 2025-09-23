@@ -231,7 +231,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
                 "output_split_size_list"
             ],
             src_index_list=self._group_cast_args_dict_packed["src_index_list"],
-            group=self.group,
+            world_size=self.world_size,
         )
 
         self._group_cast_args_dict_packed["native_group_cast_meta_dict"] = dict(

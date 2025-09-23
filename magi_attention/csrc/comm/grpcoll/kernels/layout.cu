@@ -232,6 +232,115 @@ void get_dispatch_layout(
       num_experts);
 }
 
+template <int kNumThreads, int kMaxNumRanks>
+__global__ void get_a2av_perm_idx(
+    const int64_t* output_split_sizes,
+    const int* src_idx,
+    int64_t* unperm_from_a2av_idx,
+    int64_t* perm_to_a2av_idx,
+    int num_tokens, /* unused */
+    int num_ranks,
+    int num_splits) {
+  auto thread_id = static_cast<int>(threadIdx.x);
+
+  __shared__ int64_t rank_split_sizes[kNumThreads][kMaxNumRanks];
+  __shared__ int64_t curr_offset_per_rank[kMaxNumRanks + 1];
+
+// init rank_split_sizes
+#pragma unroll
+  for (int i = 0; i < num_ranks; ++i)
+    rank_split_sizes[thread_id][i] = 0;
+
+  // init curr_offset_per_rank
+  if (thread_id < num_ranks + 1)
+    curr_offset_per_rank[thread_id] = 0;
+
+  __syncthreads();
+
+// per-thread count partial rank_split_sizes
+// rank_split_sizes[tid][rid]: the partial sum of split sizes recved from rank rid
+// counted by thread tid
+#pragma unroll
+  for (int i = thread_id; i < num_splits; i += kNumThreads) {
+    auto rank = src_idx[i];
+    auto split_size = output_split_sizes[i];
+    rank_split_sizes[thread_id][rank] += split_size;
+  }
+  __syncthreads();
+
+  // sum up rank_split_sizes
+  // rank_split_sizes[rid][rid]: the total sum of split sizes recved from rank rid
+  if (thread_id < num_ranks) {
+    int64_t sum = 0;
+
+// sum up for partial results in each thread
+#pragma unroll
+    for (int i = 0; i < kNumThreads; ++i)
+      sum += rank_split_sizes[i][thread_id];
+    rank_split_sizes[thread_id][thread_id] = sum;
+  }
+  __syncthreads();
+
+  // prefix sum for each rank by thread 0
+  // rank_split_sizes[rid][rid]: the start offset of the a2av split buffer recved from rank rid
+  // NOTE: since num_ranks are usually small, we don't need to use Blelloch scan algorithm
+  if (thread_id == 0) {
+    int64_t prefix_sum = 0;
+#pragma unroll
+    for (int rid = 0; rid < num_ranks; ++rid) {
+      auto current = rank_split_sizes[rid][rid];
+      rank_split_sizes[rid][rid] = prefix_sum;
+      prefix_sum += current;
+    }
+  }
+  __syncthreads();
+
+// compute unperm_from_a2av_idx and perm_to_a2av_idx
+// a2a_output[unperm_from_a2av_idx] => output
+// output[perm_to_a2av_idx] => a2a_output
+#pragma unroll
+  for (int i = 0; i < num_splits; ++i) {
+    auto rank = src_idx[i];
+    auto split_size = output_split_sizes[i];
+    auto a2av_offset_this_rank = rank_split_sizes[rank][rank];
+    auto a2av_offset_this_split = a2av_offset_this_rank + curr_offset_per_rank[rank];
+    auto start_token_idx = curr_offset_per_rank[num_ranks];
+
+#pragma unroll
+    for (int j = thread_id; j < split_size; j += kNumThreads) {
+      auto token_idx = start_token_idx + j;
+      auto a2av_token_idx = a2av_offset_this_split + j;
+
+      unperm_from_a2av_idx[token_idx] = a2av_token_idx;
+      perm_to_a2av_idx[a2av_token_idx] = token_idx;
+    }
+
+    if (thread_id == 0) {
+      curr_offset_per_rank[num_ranks] += split_size; // start_token_idx
+      curr_offset_per_rank[rank] += split_size;
+    }
+    __syncthreads();
+  }
+}
+
+void get_a2av_perm_idx(
+    const int64_t* output_split_sizes,
+    const int* src_idx,
+    int64_t* unperm_from_a2av_idx,
+    int64_t* perm_to_a2av_idx,
+    int num_tokens, /* unused */
+    int num_ranks,
+    int num_splits,
+    cudaStream_t stream) {
+  constexpr int num_sms = 1, kNumThreads = 256, kMaxNumRanks = 16;
+  EP_STATIC_ASSERT(kNumThreads >= kMaxNumRanks, "kNumThreads should NOT less than kMaxNumRanks");
+  EP_HOST_ASSERT(num_ranks <= kMaxNumRanks);
+
+  SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
+  LAUNCH_KERNEL(
+      &cfg, (get_a2av_perm_idx<kNumThreads, kMaxNumRanks>), output_split_sizes, src_idx, unperm_from_a2av_idx, perm_to_a2av_idx, num_tokens, num_ranks, num_splits);
+}
+
 } // namespace layout
 
 } // namespace magi_attn_comm::grpcoll

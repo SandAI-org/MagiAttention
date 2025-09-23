@@ -396,6 +396,58 @@ class GrpCollBuffer:
             EventOverlap(event),
         )
 
+    @classmethod
+    def get_a2av_perm_idx_from_src_idx(
+        cls,
+        output_split_sizes: torch.Tensor,
+        src_idx: torch.Tensor,
+        num_tokens: int,
+        num_ranks: int,
+        previous_event: EventOverlap | None = None,
+        async_finish: bool = False,
+        allocate_on_meta_stream: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, EventOverlap]:
+        """
+        Calculate the permutation indices to transfer from/to all2all-v rank order
+        of the output buffer
+
+        Args:
+            output_split_sizes (torch.Tensor): output split sizes tensor
+            src_idx (torch.Tensor): src index tensor
+            num_tokens (int): the number of tokens of the output buffer
+            num_ranks (int): the number of ranks
+            previous_event (EventOverlap | None, optional):
+                the event to wait before actually executing the kernel. Defaults to None.
+            async_finish (bool, optional):
+                the current stream will not wait for the meta kernels to be finished if set. Defaults to False.
+            allocate_on_meta_stream (bool, optional):
+                control whether all the allocated tensors' ownership to be on the hidden meta stream. Defaults to False.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor, EventOverlap]: _description_
+        """
+
+        (
+            unperm_from_a2av_idx,
+            perm_to_a2av_idx,
+            event,
+        ) = grpcoll.Meta.get_a2av_perm_idx_from_src_idx(
+            output_split_sizes,
+            src_idx,
+            num_tokens,
+            num_ranks,
+            getattr(previous_event, "event", None),
+            async_finish,
+            allocate_on_meta_stream,
+            None,  # auto set hidden meta_stream
+        )
+
+        return (
+            unperm_from_a2av_idx,
+            perm_to_a2av_idx,
+            EventOverlap(event),
+        )
+
     def get_dispatch_layout(
         self,
         topk_idx: torch.Tensor,

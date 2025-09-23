@@ -33,7 +33,7 @@ from magi_attention.common.range_op.utils import (
     _calc_ranges_row_map,
 )
 from magi_attention.common.ranges import NaiveRanges
-from magi_attention.utils import nvtx, perm_idxs2unperm_idxs
+from magi_attention.utils import nvtx
 
 
 def check_nvlink_connections(group: dist.ProcessGroup):
@@ -453,6 +453,7 @@ def _varlen_for_each_copy_triton(
     return dst
 
 
+@nvtx.instrument_nvtx
 def transfer_splits_and_dst_idxs_to_topk_idx(
     split_size_list: list[int],
     dst_indices_list: list[list[int]],
@@ -509,6 +510,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
     return topk_idx
 
 
+@nvtx.instrument_nvtx
 def get_dispatch_layout_from_group_cast_meta(
     input_split_size_list: list[int],
     dst_indices_list: list[list[int]],
@@ -542,7 +544,7 @@ def get_dispatch_layout_from_group_cast_meta(
             num_tokens_per_rdma_rank,
             num_tokens_per_expert,
             is_token_in_rank,
-            _,  # event_overlap,
+            _,  # event_overlap
         ) = buffer.get_dispatch_layout(
             topk_idx=topk_idx,
             num_experts=num_ranks,
@@ -579,54 +581,39 @@ def get_dispatch_layout_from_group_cast_meta(
     )
 
 
+@nvtx.instrument_nvtx
 def get_a2av_perm_idxs_from_group_cast_meta(
     output_split_size_list: list[int],
     src_index_list: list[int],
-    group: dist.ProcessGroup,
+    world_size: int,
     device: str = "cuda",
-    dtype: torch.dtype = torch.int64,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    world_size = group.size()
+    from ._buffer import GrpCollBuffer
 
-    # count the total split size of each rank
-    rank_accumulated_sizes = [0] * world_size
-    for i in range(len(output_split_size_list)):
-        rank_accumulated_sizes[src_index_list[i]] += output_split_size_list[i]
+    output_split_sizes = torch.tensor(
+        output_split_size_list,
+        dtype=torch.int64,
+        device=device,
+    )
+    src_idx = torch.tensor(
+        src_index_list,
+        dtype=torch.int32,
+        device=device,
+    )
 
-    # count the global rank offset
-    initial_rank_offsets = list(accumulate([0] + rank_accumulated_sizes))
-
-    # a2a_output[unperm_from_a2av_idx] => output
-    unperm_from_a2av_idx: list[int] = []
-    current_offset_within_rank = [0] * world_size
-    for i in range(len(output_split_size_list)):
-        target_size = output_split_size_list[i]
-        target_rank = src_index_list[i]
-
-        # get the start offset of the target buffer sent from the target rank
-        global_start_offset_in_output = (
-            initial_rank_offsets[target_rank] + current_offset_within_rank[target_rank]
-        )
-        unperm_from_a2av_idx.extend(
-            range(
-                global_start_offset_in_output,
-                global_start_offset_in_output + target_size,
-            )
-        )
-        current_offset_within_rank[target_rank] += target_size
-
-    # output[perm_to_a2av_idx] => a2a_output
-    perm_to_a2av_idx = perm_idxs2unperm_idxs(unperm_from_a2av_idx)
-
-    # convert to tensor
     (
         unperm_from_a2av_idx,
         perm_to_a2av_idx,
-    ) = torch.tensor(
-        unperm_from_a2av_idx + perm_to_a2av_idx,
-        dtype=dtype,
-        device=device,
-    ).chunk(2)
+        _,  # event_overlap
+    ) = GrpCollBuffer.get_a2av_perm_idx_from_src_idx(
+        output_split_sizes=output_split_sizes,
+        src_idx=src_idx,
+        num_tokens=sum(output_split_size_list),
+        num_ranks=world_size,
+        previous_event=None,
+        async_finish=False,
+        allocate_on_meta_stream=False,
+    )
 
     return unperm_from_a2av_idx, perm_to_a2av_idx
 
