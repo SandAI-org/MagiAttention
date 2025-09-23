@@ -293,68 +293,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Te
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream) {
-  EP_HOST_ASSERT(topk_idx.dim() == 2);
-  EP_HOST_ASSERT(topk_idx.is_contiguous());
-  EP_HOST_ASSERT(num_experts > 0);
-
-  // Allocate all tensors on comm stream if set
-  // NOTES: do not allocate tensors upfront!
-  auto compute_stream = at::cuda::getCurrentCUDAStream();
-  if (allocate_on_comm_stream) {
-    EP_HOST_ASSERT(previous_event.has_value() and async);
-    at::cuda::setCurrentCUDAStream(comm_stream);
-  }
-
-  // Wait previous tasks to be finished
-  if (previous_event.has_value()) {
-    stream_wait(comm_stream, previous_event.value());
-  } else {
-    stream_wait(comm_stream, compute_stream);
-  }
-
-  auto num_tokens = static_cast<int>(topk_idx.size(0)), num_topk = static_cast<int>(topk_idx.size(1));
-  auto num_tokens_per_rank = torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
-  auto num_tokens_per_rdma_rank = std::optional<torch::Tensor>();
-  auto num_tokens_per_expert = torch::empty({num_experts}, dtype(torch::kInt32).device(torch::kCUDA));
-  auto is_token_in_rank = torch::empty({num_tokens, num_ranks}, dtype(torch::kBool).device(torch::kCUDA));
-  if (is_internode_available())
-    num_tokens_per_rdma_rank = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
-
-  layout::get_dispatch_layout(
-      topk_idx.data_ptr<int64_t>(),
-      num_tokens_per_rank.data_ptr<int>(),
-      num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
-      num_tokens_per_expert.data_ptr<int>(),
-      is_token_in_rank.data_ptr<bool>(),
-      num_tokens,
-      num_topk,
-      num_ranks,
-      num_experts,
-      comm_stream);
-
-  // Wait streams
-  std::optional<EventHandle> event;
-  if (async) {
-    event = EventHandle(comm_stream);
-    for (auto& t : {topk_idx, num_tokens_per_rank, num_tokens_per_expert, is_token_in_rank}) {
-      t.record_stream(comm_stream);
-      if (allocate_on_comm_stream)
-        t.record_stream(compute_stream);
-    }
-    for (auto& to : {num_tokens_per_rdma_rank}) {
-      to.has_value() ? to->record_stream(comm_stream) : void();
-      if (allocate_on_comm_stream)
-        to.has_value() ? to->record_stream(compute_stream) : void();
-    }
-  } else {
-    stream_wait(compute_stream, comm_stream);
-  }
-
-  // Switch back compute stream
-  if (allocate_on_comm_stream)
-    at::cuda::setCurrentCUDAStream(compute_stream);
-
-  return {num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank, event};
+  return Meta::get_dispatch_meta_from_topk_idx(
+      topk_idx, num_ranks, is_internode_available() ? 1 : num_rdma_ranks, num_experts, previous_event, async, allocate_on_comm_stream, comm_stream);
 }
 
 std::tuple<
@@ -1765,8 +1705,10 @@ bool is_sm90_compiled() {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "Magi Attention Communication Library";
 
-  py::module_ grpcoll_submodule = m.def_submodule("grpcoll", "Group-Collective Communication Sub-Library based on DeepEP");
+  /*    GrpColl Sub-module     */
 
+  py::module_ grpcoll_submodule = m.def_submodule("grpcoll", "Group-Collective Communication Sub-Library based on DeepEP");
+  // Config class
   py::class_<grpcoll::Config>(grpcoll_submodule, "Config")
       .def(
           py::init<int, int, int, int, int>(),
@@ -1779,8 +1721,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_rdma_buffer_size_hint", &grpcoll::Config::get_rdma_buffer_size_hint);
   grpcoll_submodule.def("get_low_latency_rdma_size_hint", &grpcoll::get_low_latency_rdma_size_hint);
 
+  // Eventhandle class
   py::class_<grpcoll::EventHandle>(grpcoll_submodule, "EventHandle").def(py::init<>()).def("current_stream_wait", &grpcoll::EventHandle::current_stream_wait);
 
+  // Meta class
+  py::class_<grpcoll::Meta>(grpcoll_submodule, "Meta").def_static("get_dispatch_meta_from_topk_idx", &grpcoll::Meta::get_dispatch_meta_from_topk_idx);
+
+  // Buffer class
   py::class_<grpcoll::Buffer>(grpcoll_submodule, "Buffer")
       .def(py::init<int, int, int64_t, int64_t, bool, bool>())
       .def("is_available", &grpcoll::Buffer::is_available)
@@ -1804,5 +1751,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("low_latency_combine", &grpcoll::Buffer::low_latency_combine)
       .def("get_next_low_latency_combine_buffer", &grpcoll::Buffer::get_next_low_latency_combine_buffer);
 
+  // other functions
   grpcoll_submodule.def("is_sm90_compiled", grpcoll::is_sm90_compiled);
 }

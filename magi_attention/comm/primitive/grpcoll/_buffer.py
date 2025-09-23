@@ -347,6 +347,55 @@ class GrpCollBuffer:
         assert num_ranks in config_map, f"Unsupported number of EP ranks: {num_ranks}"
         return config_map[num_ranks]
 
+    @classmethod
+    def get_dispatch_meta_from_topk_idx(
+        cls,
+        topk_idx: torch.Tensor,
+        num_ranks: int,
+        num_nodes: int,
+        num_experts: int,
+        previous_event: EventOverlap | None = None,
+        async_finish: bool = False,
+        allocate_on_meta_stream: bool = False,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, EventOverlap
+    ]:
+        """
+        Calculate the dispatch meta from the topk indices required for later communication.
+
+        NOTE:
+            1. this is for now a static replacement API for ``buffer.get_dispatch_layout``
+            when the buffer runtime is not available.
+
+            2. this API is excuted not on the buffer comm stream but on a hidden ``meta_stream``
+            since the buffer runtime is not available.
+        """
+
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            event,
+        ) = grpcoll.Meta.get_dispatch_meta_from_topk_idx(
+            topk_idx,
+            num_ranks,
+            num_nodes,
+            num_experts,
+            getattr(previous_event, "event", None),
+            async_finish,
+            allocate_on_meta_stream,
+            None,  # auto set hidden meta_stream
+        )
+
+        return (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            EventOverlap(event),
+        )
+
     def get_dispatch_layout(
         self,
         topk_idx: torch.Tensor,
@@ -389,6 +438,7 @@ class GrpCollBuffer:
             async_finish,
             allocate_on_comm_stream,
         )
+
         return (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,

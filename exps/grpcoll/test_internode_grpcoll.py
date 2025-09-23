@@ -47,11 +47,10 @@ from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_dispatch_layout_from_group_cast_meta,
-    transfer_group_cast_meta_to_dispatch_meta,
     transfer_splits_and_dst_idxs_to_topk_idx,
     unpermute_tensor,
 )
-from magi_attention.utils import inplace_unique, setup_dist_env
+from magi_attention.utils import setup_dist_env
 
 # isort: split
 from grpcoll_utils import (
@@ -61,9 +60,11 @@ from grpcoll_utils import (
     get_output_split_size_list_and_src_index_list,
     get_random_dst_indices_list,
     get_random_split_size_list,
+    inplace_unique,
     per_token_cast_back,
     per_token_cast_to_fp8,
     sim_gemm,
+    transfer_group_cast_meta_to_dispatch_meta,
 )
 
 
@@ -322,6 +323,7 @@ def test_main(
         input_split_size_list=input_split_size_list,
         dst_indices_list=dst_indices_list,
         group=group,
+        num_nodes=num_nodes,
     )
 
     # assert close to layout ref

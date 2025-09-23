@@ -782,19 +782,3 @@ def get_comm_cost_factor(
 
 def get_a2a_corr_factor(world_size: int) -> float:
     return (world_size - 1) / world_size if world_size > 1 else 1.0
-
-
-# TODO: put this function to exps/grpcoll/grpcoll_utils.py
-def inplace_unique(x: torch.Tensor, num_slots: int):
-    assert x.dim() == 2
-    mask = x < 0
-    x_padded = x.masked_fill(mask, num_slots)
-    bin_count = torch.zeros((x.size(0), num_slots + 1), dtype=x.dtype, device=x.device)
-    bin_count.scatter_add_(1, x_padded, torch.ones_like(x_padded))
-    bin_count = bin_count[:, :num_slots]
-    sorted_bin_count, sorted_bin_idx = torch.sort(bin_count, dim=-1, descending=True)
-    sorted_bin_idx.masked_fill_(sorted_bin_count == 0, -1)
-    sorted_bin_idx = torch.sort(sorted_bin_idx, descending=True, dim=-1).values
-    x[:, :].fill_(-1)
-    valid_len = min(num_slots, x.size(1))
-    x[:, :valid_len] = sorted_bin_idx[:, :valid_len]

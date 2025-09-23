@@ -55,6 +55,7 @@
 #include "event.hpp"
 #include "kernels/configs.cuh"
 #include "kernels/exception.cuh"
+#include "meta.hpp"
 
 #ifndef TORCH_EXTENSION_NAME
 #define TORCH_EXTENSION_NAME magi_attn_comm

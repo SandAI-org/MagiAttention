@@ -31,7 +31,6 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_reduce_a2a_output_meta_args,
     get_a2av_perm_idxs_from_group_cast_meta,
     get_dispatch_layout_from_group_cast_meta,
-    transfer_group_cast_meta_to_dispatch_meta,
 )
 from magi_attention.utils import format_dict_field, format_list_field
 
@@ -212,49 +211,19 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
 
     def _init_meta_kwargs_for_native_group_cast(self):
         # transfer group-cast meta args to dispatch meta args
-        try:  # this method is much faster but relying on the grpcoll buffer is registered for self.group
-            (
-                num_tokens_per_rank,
-                num_tokens_per_rdma_rank,
-                num_tokens_per_expert,
-                is_token_in_rank,
-            ) = get_dispatch_layout_from_group_cast_meta(
-                input_split_size_list=self._group_cast_args_dict_packed[
-                    "input_split_size_list"
-                ],
-                dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
-                group=self.group,
-            )
-        except ValueError:
-            # TODO: decouple layout kernels from the buffer
-            # and then remove this branch
-            (
-                _,  # rank_idx
-                _,  # rdma_rank_idx
-                num_tokens_per_rank,
-                num_tokens_per_rdma_rank,
-                is_token_in_rank,
-                _,  # topk_idx
-                _,  # topk_weights
-                num_tokens_per_expert,
-                _,  # range_gather_post_dispatch_kwargs,
-                _,  # range_gather_pre_combine_kwargs,
-            ) = transfer_group_cast_meta_to_dispatch_meta(
-                rank=self.rank,
-                num_ranks=self.world_size,
-                num_nodes=1,  # TODO: support num_nodes > 1
-                num_local_experts=1,
-                input_split_size_list=self._group_cast_args_dict_packed[
-                    "input_split_size_list"
-                ],
-                output_split_size_list=self._group_cast_args_dict_packed[
-                    "output_split_size_list"
-                ],
-                dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
-                src_index_list=self._group_cast_args_dict_packed["src_index_list"],
-                use_topk=False,
-                use_a2a_order_output=True,  # no need for range_gather kwargs anymore
-            )
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+        ) = get_dispatch_layout_from_group_cast_meta(
+            input_split_size_list=self._group_cast_args_dict_packed[
+                "input_split_size_list"
+            ],
+            dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
+            group=self.group,
+            num_nodes=1,  # TODO: support internode
+        )
 
         # for group-cast/group-reduce, perm_to_a2av_idx is the post_perm_idx/pre_perm_idx
         _, post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(

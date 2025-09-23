@@ -44,10 +44,7 @@ import torch.distributed as dist
 
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
-from magi_attention.comm.primitive.grpcoll.utils import (
-    transfer_group_cast_meta_to_dispatch_meta,
-    unpermute_tensor,
-)
+from magi_attention.comm.primitive.grpcoll.utils import unpermute_tensor
 
 # isort: split
 from grpcoll_utils import (
@@ -61,6 +58,7 @@ from grpcoll_utils import (
     init_dist,
     per_token_cast_back,
     sim_gemm,
+    transfer_group_cast_meta_to_dispatch_meta,
 )
 
 
