@@ -13,6 +13,9 @@
 # limitations under the License.
 
 from enum import Enum
+from typing import Literal, TypeAlias
+
+ReduceOp: TypeAlias = Literal["sum", "avg", "lse"]
 
 
 class AttnType(Enum):

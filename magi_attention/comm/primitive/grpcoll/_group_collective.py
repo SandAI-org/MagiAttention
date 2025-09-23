@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Literal
+from typing import overload
 
 import torch
 import torch.distributed as dist
 
 import magi_attention
 from magi_attention.comm.work import WorkWithPostProcessFn
+from magi_attention.common.enum import ReduceOp
 from magi_attention.utils import nvtx
 
 from ._a2av_grpcoll_impl import a2av_group_cast_impl, a2av_group_reduce_impl
@@ -34,8 +35,7 @@ __all__ = [
 ]
 
 
-@torch.no_grad()
-@nvtx.instrument_nvtx
+@overload
 def group_cast(
     input: torch.Tensor,
     output: torch.Tensor | None,
@@ -43,6 +43,37 @@ def group_cast(
     output_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    ...
+
+
+@overload
+def group_cast(
+    input: torch.Tensor,
+    output: torch.Tensor | None,
+    input_split_size_list: torch.Tensor,
+    output_split_size_list: torch.Tensor,
+    dst_indices_list: torch.Tensor,
+    src_index_list: torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    ...
+
+
+@torch.no_grad()
+@nvtx.instrument_nvtx
+def group_cast(
+    input: torch.Tensor,
+    output: torch.Tensor | None,
+    input_split_size_list: list[int] | torch.Tensor,
+    output_split_size_list: list[int] | torch.Tensor,
+    dst_indices_list: list[list[int]] | torch.Tensor,
+    src_index_list: list[int] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
     **kwargs,
@@ -116,8 +147,7 @@ def group_cast(
     )
 
 
-@torch.no_grad()
-@nvtx.instrument_nvtx
+@overload
 def group_reduce(
     input: torch.Tensor,
     output: torch.Tensor | None,
@@ -127,7 +157,46 @@ def group_reduce(
     src_indices_list: list[list[int]],
     group: dist.ProcessGroup,
     async_op: bool = False,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: ReduceOp = "sum",
+    acc_reduce: bool = True,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    ...
+
+
+@overload
+def group_reduce(
+    input: torch.Tensor,
+    output: torch.Tensor | None,
+    input_split_size_list: torch.Tensor,
+    output_split_size_list: torch.Tensor,
+    dst_index_list: torch.Tensor,
+    src_indices_list: torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    reduce_op: ReduceOp = "sum",
+    acc_reduce: bool = True,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    ...
+
+
+@torch.no_grad()
+@nvtx.instrument_nvtx
+def group_reduce(
+    input: torch.Tensor,
+    output: torch.Tensor | None,
+    input_split_size_list: list[int] | torch.Tensor,
+    output_split_size_list: list[int] | torch.Tensor,
+    dst_index_list: list[int] | torch.Tensor,
+    src_indices_list: list[list[int]] | torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    reduce_op: ReduceOp = "sum",
     acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,

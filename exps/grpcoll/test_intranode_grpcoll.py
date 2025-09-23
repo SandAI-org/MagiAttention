@@ -337,7 +337,7 @@ def test_main(
     # get dispatch layout from buffer as reference
     if not use_topk:
         layout_topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
-            split_size_list=input_split_size_list,
+            input_split_size_list=input_split_size_list,
             dst_indices_list=dst_indices_list,
             num_ranks=num_ranks,
         )

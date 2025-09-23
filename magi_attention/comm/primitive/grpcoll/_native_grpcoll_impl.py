@@ -13,11 +13,12 @@
 # limitations under the License.
 
 import warnings
-from typing import Any, Literal
+from typing import Any
 
 import torch
 import torch.distributed as dist
 
+from magi_attention.common.enum import ReduceOp
 from magi_attention.utils import nvtx
 
 from ...work import GeneralWork, WorkWithPostProcessFn
@@ -147,7 +148,7 @@ def native_group_reduce_impl(
     src_indices_list: list[list[int]],
     group: dist.ProcessGroup,
     async_op: bool = False,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: ReduceOp = "sum",
     acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,

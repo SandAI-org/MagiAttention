@@ -36,11 +36,12 @@
 
 import math
 import os
-from typing import Callable, Literal, Union
+from typing import Callable, Union
 
 import torch
 import torch.distributed as dist
 
+from magi_attention.common.enum import ReduceOp
 from magi_attention.magi_attn_comm import grpcoll
 
 from ._config import GrpCollConfig
@@ -747,7 +748,7 @@ class GrpCollBuffer:
         x: torch.Tensor,
         handle: tuple,
         combined_x: torch.Tensor | None = None,
-        reduce_op: Literal["sum", "avg", "lse"] = "sum",
+        reduce_op: ReduceOp = "sum",
         acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
@@ -1063,7 +1064,7 @@ class GrpCollBuffer:
         combined_x: torch.Tensor | None,
         handle: Union[tuple, list],
         hidden_shape: torch.Size,
-        reduce_op: Literal["sum", "avg", "lse"] = "sum",
+        reduce_op: ReduceOp = "sum",
         acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,

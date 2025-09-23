@@ -16,7 +16,7 @@ import os
 from collections import defaultdict
 from functools import partial
 from itertools import accumulate, chain, pairwise
-from typing import Any, Callable, Literal, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -25,6 +25,7 @@ import triton.language as tl
 
 import magi_attention
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
+from magi_attention.common.enum import ReduceOp
 from magi_attention.common.range import NaiveRange
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.common.range_op.utils import (
@@ -455,14 +456,14 @@ def _varlen_for_each_copy_triton(
 
 @nvtx.instrument_nvtx
 def transfer_splits_and_dst_idxs_to_topk_idx(
-    split_size_list: list[int],
+    input_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     num_ranks: int,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
 ) -> torch.Tensor:
-    num_tokens = sum(split_size_list)
-    num_splits = len(split_size_list)
+    num_tokens = sum(input_split_size_list)
+    num_splits = len(input_split_size_list)
 
     num_dst_list: list[int] = [len(dst_indices) for dst_indices in dst_indices_list]
     cu_num_dst_list: list[int] = list(accumulate([0] + num_dst_list))
@@ -470,7 +471,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
     all_meta_list: list[list[int]] = [
         num_dst_list,
         cu_num_dst_list,
-        split_size_list,
+        input_split_size_list,
         flatten_dst_indices_list,
     ]
     all_meta_size_list: list[int] = [len(meta) for meta in all_meta_list]
@@ -529,7 +530,7 @@ def get_dispatch_layout_from_group_cast_meta(
     # and support input_split_size_list and dst_indices_list as tensors
     if topk_idx is None:
         topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
-            split_size_list=input_split_size_list,
+            input_split_size_list=input_split_size_list,
             dst_indices_list=dst_indices_list,
             num_ranks=num_ranks,
             device=device,
@@ -1033,7 +1034,7 @@ def _calc_group_reduce_a2a_input_args(
     input_split_size_list: list[int],
     dst_index_list: list[int],
     world_size: int,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: ReduceOp = "sum",
     input_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[OutMaybeWithLSE, list[int]]:
@@ -1126,7 +1127,7 @@ def _calc_group_reduce_a2a_output_args(
     output_split_size_list: list[int],
     src_indices_list: list[list[int]],
     world_size: int,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: ReduceOp = "sum",
     output_lse: torch.Tensor | None = None,
     deterministic: bool = False,
     **kwargs,
@@ -1184,7 +1185,7 @@ def calc_group_reduce_a2a_args(
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
     world_size: int,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: ReduceOp = "sum",
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,

@@ -14,13 +14,14 @@
 
 from functools import partial
 from itertools import chain
-from typing import Callable, Literal
+from typing import Callable
 
 import torch
 import torch.distributed as dist
 
 import magi_attention
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
+from magi_attention.common.enum import ReduceOp
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.utils import nvtx
 
@@ -1098,7 +1099,7 @@ def hier_group_reduce_impl_with_a2av(
     src_indices_list: list[list[int]],
     group: dist.ProcessGroup,
     async_op: bool = False,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: ReduceOp = "sum",
     acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,

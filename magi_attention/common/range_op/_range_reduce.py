@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Literal, TypeAlias
+from typing import TypeAlias
 
 import torch
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
+from magi_attention.common.enum import ReduceOp
 from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype, nvtx
 
 from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
@@ -369,7 +370,7 @@ def range_reduce(
     output_ranges: torch.Tensor,
     dim: int = 0,
     deterministic: bool = False,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: ReduceOp = "sum",
     reduce_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
