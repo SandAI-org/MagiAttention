@@ -470,14 +470,22 @@ Buffer::intranode_dispatch(
         num_channels);
 
     if (num_worst_tokens > 0) {
-      // No CPU sync, just allocate the worst case
+      // if num_worst_tokens is given,
+      // just allocate the worst case to avoid CPU sync
       num_recv_tokens = num_worst_tokens;
 
       // Must be forward with top-k stuffs
       EP_HOST_ASSERT(topk_idx.has_value());
       EP_HOST_ASSERT(topk_weights.has_value());
+    } else if (recv_x_buf.has_value()) {
+      // if the recv buffer is given,
+      // use its dim0 size as num_recv_tokens to avoid CPU sync
+      EP_HOST_ASSERT(recv_x_buf->size(1) == hidden);
+      num_recv_tokens = recv_x_buf->size(0);
     } else {
-      // Synchronize total received tokens and tokens per expert
+      // otherwise, synchronize num_recv_tokens
+      // as well as tokens per expert as a statistic meta info to return
+      // but no use for now
       auto start_time = std::chrono::high_resolution_clock::now();
       while (true) {
         // Read total count
@@ -504,7 +512,6 @@ Buffer::intranode_dispatch(
   if (!recv_x_buf.has_value()) {
     recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
   } else {
-    EP_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens and recv_x_buf->size(1) == hidden);
     recv_x = recv_x_buf.value();
   }
 
@@ -618,7 +625,7 @@ Buffer::intranode_dispatch(
       recv_x_scales,
       recv_topk_idx,
       recv_topk_weights,
-      num_recv_tokens_per_expert_list,
+      num_recv_tokens_per_expert_list, /* unused */
       rank_prefix_matrix,
       channel_prefix_matrix,
       recv_channel_prefix_matrix,
@@ -703,6 +710,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     pre_perm_idx_ptr = pre_perm_idx->data_ptr<int64_t>();
   }
 
+  // TODO: support notify_combine when the combine kernel is individually used
+  // without relying on the symmetric dispatch called first and necessary handle given
   // Launch barrier and reset queue head and tail
   EP_HOST_ASSERT(num_channels * num_ranks * sizeof(int) * 2 <= num_nvl_bytes);
   intranode::cached_notify_combine(
@@ -1028,6 +1037,7 @@ Buffer::internode_dispatch(
         num_nvl_bytes,
         low_latency_mode);
 
+    // TODO: provide the args to let user provide num_recv_tokens and num_rdma_recv_tokens to avoid CPU sync here
     // Synchronize total received tokens and tokens per expert
     auto start_time = std::chrono::high_resolution_clock::now();
     while (true) {

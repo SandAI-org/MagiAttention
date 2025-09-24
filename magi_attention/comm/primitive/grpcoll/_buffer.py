@@ -644,14 +644,14 @@ class GrpCollBuffer:
             (
                 recv_x,
                 recv_x_scales,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
+                _,  # recv_topk_idx
+                _,  # recv_topk_weights
+                _,  # num_recv_tokens_per_expert_list
+                _,  # rank_prefix_matrix
+                _,  # channel_prefix_matrix
+                _,  # recv_channel_prefix_matrix
+                _,  # recv_src_idx
+                _,  # send_head
                 event,
             ) = self.runtime.intranode_dispatch(
                 x,
@@ -943,18 +943,18 @@ class GrpCollBuffer:
             (
                 recv_x,
                 recv_x_scales,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
-                _,
+                _,  # recv_topk_idx
+                _,  # recv_topk_weights
+                _,  # num_recv_tokens_per_expert_list
+                _,  # rdma_channel_prefix_matrix
+                _,  # gbl_channel_prefix_matrix
+                _,  # recv_rdma_channel_prefix_matrix
+                _,  # recv_rdma_rank_prefix_sum
+                _,  # recv_gbl_channel_prefix_matrix
+                _,  # recv_gbl_rank_prefix_sum
+                _,  # recv_src_meta
+                _,  # send_rdma_head
+                _,  # send_nvl_head
                 event,
             ) = self.runtime.internode_dispatch(
                 x,

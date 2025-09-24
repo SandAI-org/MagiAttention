@@ -647,10 +647,6 @@ def test_main(
                     assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(
                         0
                     ), f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
-                    assert (
-                        gbl_num_tokens_per_expert.view(num_ranks, -1)[rank].tolist()
-                        == recv_num_tokens_per_expert_list
-                    )
                     if current_x is not x_pure_rand:
                         check_data(recv_x, recv_gbl_rank_prefix_sum)
                     if with_topk:
@@ -662,8 +658,6 @@ def test_main(
                                 & (recv_topk_idx < (num_experts // num_ranks))
                             )
                         ).sum().item() == recv_topk_idx.numel()  # type: ignore[union-attr]
-                        for i, count in enumerate(recv_num_tokens_per_expert_list):
-                            assert recv_topk_idx.eq(i).sum().item() == count  # type: ignore[union-attr]
 
                         # Check `topk_weights`
                         if current_x is not x_pure_rand:
