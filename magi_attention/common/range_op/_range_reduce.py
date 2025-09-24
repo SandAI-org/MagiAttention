@@ -393,8 +393,8 @@ def range_reduce(
                     so the user should guarantee that the output tensor is initialized to zero
                     otherwise the semantics will be incorrect unless the user intentionally does this
                 2. if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
-                    and we only support input/output has shape [seqlen, num_heads, head_dim]
-                    while input_lse/output_lse has shape [seqlen, num_heads] for now
+                    and we only support input/output with shape [seqlen, num_heads, head_dim]
+                    while input_lse/output_lse with shape [seqlen, num_heads] for now
         reduce_dtype (torch.dtype): the dtype for the reduction.
             Defaults to None to use: maximum precision of the input/output and fp32
 

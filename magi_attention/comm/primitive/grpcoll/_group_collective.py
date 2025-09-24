@@ -35,6 +35,9 @@ __all__ = [
 ]
 
 
+# ------------------        group cast       ------------------ #
+
+
 # host meta interface
 @overload
 def group_cast(
@@ -80,33 +83,40 @@ def group_cast(
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
-    """
+    """Group cast interface
+
     Args:
         input (torch.Tensor): input tensor with shape [input_seqlen, ...]
-        output (torch.Tensor): output tensor with shape [output_seqlen, ...]
-        input_split_size_list (list[int]): the size list to split the input tensor,
-            where sum(input_split_size_list) == input_seqlen
-        output_split_size_list (list[int]): the size list to split the output tensor,
-            where sum(output_split_size_list) == output_seqlen
-        dst_indices_list (list[list[int]]): the destination indices list for each input split to broadcast to,
-            where len(dst_indices_list) == len(input_split_size_list)
-        src_index_list (list[int]): the source index list for each output split to receive from,
-            where len(src_index_list) == len(output_split_size_list)
+        output (torch.Tensor | None): output tensor buffer with shape [output_seqlen, ...]
+            or None to let the function allocate the output buffer itself
+        input_split_sizes (list[int] | torch.Tensor):
+            the 1D size list / tensor to split the input tensor,
+            where sum(input_split_sizes) == input_seqlen
+        output_split_sizes (list[int] | torch.Tensor):
+            the 1D size list / tensor to split the output tensor,
+            where sum(output_split_sizes) == output_seqlen
+        dst_indices (list[list[int]] | torch.Tensor):
+            the 2D destination rank indices list / tensor for each input split to send to,
 
-            NOTE: the order of the output splits are "stable", which means the ones from the same source
-            will be in the same order as the input splits
+            NOTE:
+                1. if dst_indices is a 2D list, then len(dst_indices) == len(input_split_sizes),
+                and dst_indices[i] is a list of distinct, valid destination ranks
+                for the i-th input split to send to
+                2. if dst_indices is a 2D tensor, then dst_indices.shape[0] == sum(input_split_sizes),
+                while dst_indices.shape[1] equals to the maximum length of 1D destination ranks for each input split,
+                and the padded entries should be filled with -1, no matter the padding order
+        src_index (list[int] | torch.Tensor):
+            the 1D source rank index list / tensor for each output split to receive from,
+            where len(src_index) == len(output_split_sizes)
+
+            NOTE: the order of the output splits are "stable",
+            i.e. the ones from the same source will be in the same order as the input splits
         group (dist.ProcessGroup): the process group to comm
         async_op (bool): whether to use async op. Defaults to False
-        kwargs: additional keyword arguments,
-            this kernel is for now based on all2all-v,
-            thus introducing pre-/post-processing overhead
-            on both tensor and meta info to be compatible with all2all-v input/output.
-            Therefore, we add `kwargs` since the processing of meta info
-            can be processed in advance, and just passed in through `kwargs` to reduce runtime overhead
+        kwargs: additional keyword arguments, varying from different implementations
 
     Returns:
         work_with_post_process_fn (WorkWithPostProcessFn): async work with the post-process function
-        to transfer from a2a-v output tensor to group-cast output tensor
     """
 
     if magi_attention.comm.is_hierarchical_comm_enable():
@@ -149,6 +159,9 @@ def group_cast(
         async_op=async_op,
         **kwargs,
     )
+
+
+# ------------------        group reduce       ------------------ #
 
 
 # host meta interface
@@ -208,24 +221,36 @@ def group_reduce(
     output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
-    """Group reduce collective
+    """Group reduce interface
 
     Args:
-        input (torch.Tensor): input tensor with shape [input_seqlen, ...] to reduce from
-        output (torch.Tensor | None): output tensor with shape [output_seqlen, ...] to reduce to
+        input (torch.Tensor): input tensor with shape [input_seqlen, ...]
+        output (torch.Tensor | None): output tensor buffer with shape [output_seqlen, ...]
+            or None to let the function allocate the output buffer itself
+        input_split_sizes (list[int] | torch.Tensor):
+            the 1D size list / tensor to split the input tensor,
+            where sum(input_split_sizes) == input_seqlen
+        output_split_sizes (list[int] | torch.Tensor):
+            the 1D size list / tensor to split the output tensor,
+            where sum(output_split_sizes) == output_seqlen
+        dst_index (list[int] | torch.Tensor):
+            the 1D destination rank index list / tensor for each input split to send to,
+            where len(dst_index) == len(input_split_sizes)
 
-            NOTE: if output is None, the output tensor will be allocated in this function
-        input_split_size_list (list[int]): the size list to split the input tensor,
-            where sum(input_split_size_list) == input_seqlen
-        output_split_size_list (list[int]): the size list to split the output tensor,
-            where sum(output_split_size_list) == output_seqlen
-        dst_index_list (list[int]): the destination index list for each input split to return to,
-            where len(dst_index_list) == len(input_split_size_list)
-        src_indices_list (list[list[int]]): the source indices list for each output split to reduce from,
-            where len(src_indices_list) == len(output_split_size_list)
+            NOTE: the order of the input splits are "stable",
+            i.e. the ones to the same destination will be in the same order as the input splits
+        src_indices (list[list[int]] | torch.Tensor):
+            the 2D source rank indices list / tensor for each output split to reduce from,
 
-            NOTE: since any reduce operation satisfies the commutative property, the order of the input splits to reduce
-            to the same output split does not matter
+            NOTE:
+                1. if src_indices is a 2D list, then len(src_indices) == len(output_split_sizes),
+                and src_indices[i] is a list of distinct, valid source ranks
+                for the i-th output split to reduce from
+                2. if src_indices is a 2D tensor, then src_indices.shape[0] == sum(output_split_sizes),
+                while src_indices.shape[1] equals to the maximum length of 1D source ranks for each output split,
+                and the padded entries should be filled with -1, no matter the padding order
+                3. since any reduce operation satisfies the commutative property,
+                the order to reduce to the same output split does not matter, except for numerical errors
         group (dist.ProcessGroup): the process group to comm
         async_op (bool): whether to use async op. Defaults to False
         reduce_op (Literal["sum", "avg", "weight", "lse"]): the reduce operation to use. Defaults to "sum"
@@ -234,29 +259,23 @@ def group_reduce(
             - "lse": log-sum-exp weighted average reduction, with lse correction
 
             NOTE:
-                If reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
-                and we only support input/output has shape [seqlen, num_heads, head_dim]
-                while input_lse/output_lse has shape [seqlen, num_heads] for now
+                if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
+                and we only support input/output with shape [seqlen, num_heads, head_dim]
+                while input_lse/output_lse with shape [seqlen, num_heads] for now
         acc_reduce (bool): whether to accumulate the reduction to the given output buffer. Defaults to True.
 
             NOTE:
-                If False, the output will be overwritten and the initial value will be ignored.
+                if False, the output will be overwritten and the initial value will be ignored.
                 Otherwise, the output buffer must be given and the initial value will be accumulated
                 w.r.t. the reduction operation according to the ``reduce_op``.
         input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
             only required and used if reduce_op is "lse"
         output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
             only required and used if reduce_op is "lse"
-        kwargs: additional keyword arguments,
-            this kernel is for now based on all2all-v,
-            thus introducing pre-/post-processing overhead
-            on both tensor and meta info to be compatible with all2all-v input/output.
-            Therefore, we add `kwargs` since the processing of meta info
-            can be processed in advance, and just passed in through `kwargs` to reduce runtime overhead
+        kwargs: additional keyword arguments, varying from different implementations
 
     Returns:
         work_with_post_process_fn (WorkWithPostProcessFn): async work with the post-process function
-        to transfer from a2a-v output tensor to group-reduce output tensor
     """
 
     if magi_attention.comm.is_hierarchical_comm_enable():
