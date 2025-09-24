@@ -27,6 +27,7 @@ from ._mgr import grpcoll_mgr
 from .utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_dispatch_layout_from_group_cast_meta,
+    get_group_reduce_handle_from_sym_group_cast,
     maybe_lazy_init_buffer,
 )
 
@@ -87,14 +88,17 @@ def native_group_cast_impl(
     # maybe lazy init buffer
     maybe_lazy_init_buffer(group)
 
+    # get grpcoll config and buffer
     config: GrpCollConfig = grpcoll_mgr.get_config(group)
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
+    assert config is not None and buffer is not None
+
+    # get meta dict and handle
     meta_dict: dict[str, Any] = kwargs.pop("native_group_cast_meta_dict", {})
     handle_dict: dict[str, tuple] = kwargs.pop("native_grpcoll_handle_dict", {})
     # NOTE: here we had better use "get"
     # since the group_cast handle can be reused later
     handle: tuple | None = handle_dict.get("group_cast", None)
-    assert config is not None and buffer is not None
 
     # transfer group-cast meta args to dispatch meta args
     if meta_dict:
@@ -226,20 +230,31 @@ def native_group_reduce_impl(
     # maybe lazy init buffer
     maybe_lazy_init_buffer(group)
 
+    # get grpcoll config and buffer
     config: GrpCollConfig = grpcoll_mgr.get_config(group)
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
+    assert config is not None and buffer is not None
+
+    # get meta dict and handle
     meta_dict: dict[str, Any] = kwargs.pop("native_group_reduce_meta_dict", {})
     handle_dict: dict[str, tuple] = kwargs.pop("native_grpcoll_handle_dict", {})
     # NOTE: here we had better use "pop"
     # since the group_reduce handle is always jit-prepared
     # by the symmetric group-cast
     handle: tuple | None = handle_dict.pop("group_reduce", None)
-    assert config is not None and buffer is not None
-    # FIXME: deal with the missing handle when only group-reduce is called
-    assert handle is not None, (
-        "No group-reduce handle given! "
-        "Please run symmetric group-cast to prepare handle first."
-    )
+    if handle is None:
+        # FIXME: for now, we don't support individual group-reduce
+        # since the necessary handle is not known until the symmetric group-cast returns
+        handle = get_group_reduce_handle_from_sym_group_cast(
+            input=input,
+            output=output,
+            input_split_sizes=input_split_sizes,
+            output_split_sizes=output_split_sizes,
+            dst_index=dst_index,
+            src_indices=src_indices,
+            group=group,
+            async_op=async_op,
+        )
 
     # transfer symmetric group-cast meta args to dispatch meta args
     if meta_dict:

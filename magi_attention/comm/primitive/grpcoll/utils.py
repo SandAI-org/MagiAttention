@@ -1051,6 +1051,63 @@ def maybe_lazy_init_buffer(group: dist.ProcessGroup) -> None:
         )
 
 
+def get_group_reduce_handle_from_sym_group_cast(
+    input: torch.Tensor,
+    output: torch.Tensor | None,
+    input_split_sizes: list[int] | torch.Tensor,
+    output_split_sizes: list[int] | torch.Tensor,
+    dst_index: list[int] | torch.Tensor,
+    src_indices: list[list[int]] | torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+) -> tuple:
+    from ._buffer import GrpCollBuffer
+    from ._native_grpcoll_impl import native_group_cast_impl
+
+    # prepare dummpy input/output for symmetric group-cast
+    sym_gc_input_seqlen = (
+        output.size(0)
+        if output is not None
+        else sum(output_split_sizes)  # FIXME: a gpu-cpu sync here
+    )
+    sym_gc_output_seqlen = input.size(0)
+    sym_gc_dummy_input = torch.empty(
+        (sym_gc_input_seqlen, GrpCollBuffer.hidden_size_alignment),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    sym_gc_dummy_output = (
+        torch.empty(
+            (sym_gc_output_seqlen, GrpCollBuffer.hidden_size_alignment),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        if output is not None
+        else None
+    )
+
+    # prepare native group-cast handle dict
+    # to receive the handle from symmetric group-cast
+    native_grpcoll_handle_dict: dict[str, Any] = {"group_cast": None}
+
+    sym_work_gc = native_group_cast_impl(
+        input=sym_gc_dummy_input,
+        output=sym_gc_dummy_output,
+        input_split_sizes=output_split_sizes,
+        output_split_sizes=input_split_sizes,
+        dst_indices=src_indices,
+        src_index=dst_index,
+        group=group,
+        async_op=async_op,
+        native_grpcoll_handle_dict=native_grpcoll_handle_dict,
+    )
+    sym_work_gc.wait_post_process()
+
+    handle: tuple = native_grpcoll_handle_dict["group_reduce"]
+
+    return handle
+
+
 @triton.jit
 def _varlen_for_each_copy_kernel(
     output_ptr,

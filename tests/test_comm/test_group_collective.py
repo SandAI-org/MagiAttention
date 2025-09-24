@@ -750,27 +750,7 @@ class TestGroupCollective(DistTestBase):
 
         # prepare for native grpcoll
         if use_native_grpcoll:
-            native_grpcoll_handle_dict = {"group_cast": None}
-            with self._switch_hier_comm_context(
-                enable=use_hier_comm
-            ), self._switch_native_grpcoll_context(enable=use_native_grpcoll):
-                sym_work_gc = group_cast(
-                    input=recv_buffer_before_reduce.clone(),
-                    output=send_buffer.clone(),
-                    input_split_sizes=output_split_size_list,
-                    output_split_sizes=input_split_size_list,
-                    dst_indices=src_indices_list,
-                    src_index=dst_index_list,
-                    group=self.process_group,
-                    async_op=async_op,
-                    # kwargs below for hier comm
-                    intra_group=self.intra_group,
-                    inter_group=self.inter_group,
-                    # kwargs below for native grpcoll
-                    native_grpcoll_handle_dict=native_grpcoll_handle_dict,
-                )
-                sym_work_gc.wait_post_process()
-                assert native_grpcoll_handle_dict["group_reduce"] is not None
+            native_grpcoll_handle_dict = {"group_reduce": None}
         else:
             native_grpcoll_handle_dict = {}
 
