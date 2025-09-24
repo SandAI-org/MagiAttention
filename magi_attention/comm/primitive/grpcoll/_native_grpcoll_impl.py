@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
-from typing import Any
+from typing import Any, overload
 
 import torch
 import torch.distributed as dist
@@ -28,6 +27,7 @@ from ._mgr import grpcoll_mgr
 from .utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_dispatch_layout_from_group_cast_meta,
+    maybe_lazy_init_buffer,
 )
 
 __all__ = [
@@ -36,31 +36,56 @@ __all__ = [
 ]
 
 
-def _maybe_lazy_init_buffer(group: dist.ProcessGroup) -> None:
-    if not grpcoll_mgr.is_registered(group):
-        grpcoll_mgr.register_buffer(group=group)
-        warnings.warn(
-            f"Since the GrpCollBuffer is not registered for {group.group_name}, "
-            "we lazily register it here with the default config, "
-            "which might not be the best choice and cause performance/memory issue."
-        )
+# ------------------        native group cast       ------------------ #
+
+
+# host meta interface
+@overload
+def native_group_cast_impl(
+    input: torch.Tensor,
+    output: torch.Tensor | None,
+    input_split_sizes: list[int],
+    output_split_sizes: list[int],
+    dst_indices: list[list[int]],
+    src_index: list[int],
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    ...
+
+
+# device meta interface
+@overload
+def native_group_cast_impl(
+    input: torch.Tensor,
+    output: torch.Tensor | None,
+    input_split_sizes: torch.Tensor,
+    output_split_sizes: torch.Tensor,
+    dst_indices: torch.Tensor,
+    src_index: torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    ...
 
 
 @nvtx.instrument_nvtx
 def native_group_cast_impl(
     input: torch.Tensor,
     output: torch.Tensor | None,
-    input_split_size_list: list[int],
-    output_split_size_list: list[int],
-    dst_indices_list: list[list[int]],
-    src_index_list: list[int],
+    input_split_sizes: list[int] | torch.Tensor,
+    output_split_sizes: list[int] | torch.Tensor,
+    dst_indices: list[list[int]] | torch.Tensor,
+    src_index: list[int] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Native group-cast implementation"""
     # maybe lazy init buffer
-    _maybe_lazy_init_buffer(group)
+    maybe_lazy_init_buffer(group)
 
     config: GrpCollConfig = grpcoll_mgr.get_config(group)
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
@@ -85,8 +110,8 @@ def native_group_cast_impl(
             num_tokens_per_expert,
             is_token_in_rank,
         ) = get_dispatch_layout_from_group_cast_meta(
-            input_split_size_list=input_split_size_list,
-            dst_indices_list=dst_indices_list,
+            input_split_size_list=input_split_sizes,
+            dst_indices_list=dst_indices,
             group=group,
             # HACK: leave a slot for topk_idx
             # since for now, we transfer the group_cast meta to it inside anyway
@@ -96,8 +121,8 @@ def native_group_cast_impl(
 
         # for group-cast, perm_to_a2av_idx is the post_perm_idx
         _, post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
-            output_split_size_list=output_split_size_list,
-            src_index_list=src_index_list,
+            output_split_size_list=output_split_sizes,
+            src_index_list=src_index,
             world_size=group.size(),
         )
 
@@ -138,14 +163,57 @@ def native_group_cast_impl(
     return work_with_post_process_fn
 
 
+# ------------------        native group reduce       ------------------ #
+
+
+# host meta interface
+@overload
+def native_group_reduce_impl(
+    input: torch.Tensor,
+    output: torch.Tensor | None,
+    input_split_sizes: list[int],
+    output_split_sizes: list[int],
+    dst_index: list[int],
+    src_indices: list[list[int]],
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    reduce_op: ReduceOp = "sum",
+    acc_reduce: bool = True,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    ...
+
+
+# device meta interface
+@overload
+def native_group_reduce_impl(
+    input: torch.Tensor,
+    output: torch.Tensor | None,
+    input_split_sizes: torch.Tensor,
+    output_split_sizes: torch.Tensor,
+    dst_index: torch.Tensor,
+    src_indices: torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    reduce_op: ReduceOp = "sum",
+    acc_reduce: bool = True,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    ...
+
+
 @nvtx.instrument_nvtx
 def native_group_reduce_impl(
     input: torch.Tensor,
     output: torch.Tensor | None,
-    input_split_size_list: list[int],
-    output_split_size_list: list[int],
-    dst_index_list: list[int],
-    src_indices_list: list[list[int]],
+    input_split_sizes: list[int] | torch.Tensor,
+    output_split_sizes: list[int] | torch.Tensor,
+    dst_index: list[int] | torch.Tensor,
+    src_indices: list[list[int]] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
     reduce_op: ReduceOp = "sum",
@@ -156,7 +224,7 @@ def native_group_reduce_impl(
 ) -> WorkWithPostProcessFn:
     """Native group-reduce implementation"""
     # maybe lazy init buffer
-    _maybe_lazy_init_buffer(group)
+    maybe_lazy_init_buffer(group)
 
     config: GrpCollConfig = grpcoll_mgr.get_config(group)
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
@@ -179,8 +247,8 @@ def native_group_reduce_impl(
     else:
         # for group-reduce, perm_to_a2av_idx is the pre_perm_idx
         _, pre_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
-            output_split_size_list=input_split_size_list,
-            src_index_list=dst_index_list,
+            output_split_size_list=input_split_sizes,
+            src_index_list=dst_index,
             world_size=group.size(),
         )
 

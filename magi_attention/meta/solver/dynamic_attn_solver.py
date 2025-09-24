@@ -281,10 +281,6 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                 dst_indices_list.append(list(dst_indices))
                 cur_start = cur_end
 
-        # print("local hold remote calc message")
-        # print(input_split_size_list)
-        # print(dst_indices_list)
-
         # build group collective arg
         group_collective_arg = GroupCollectiveArg(
             input_split_size_list=input_split_size_list,

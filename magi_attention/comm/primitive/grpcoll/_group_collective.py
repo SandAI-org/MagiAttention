@@ -35,14 +35,15 @@ __all__ = [
 ]
 
 
+# host meta interface
 @overload
 def group_cast(
     input: torch.Tensor,
     output: torch.Tensor | None,
-    input_split_size_list: list[int],
-    output_split_size_list: list[int],
-    dst_indices_list: list[list[int]],
-    src_index_list: list[int],
+    input_split_sizes: list[int],
+    output_split_sizes: list[int],
+    dst_indices: list[list[int]],
+    src_index: list[int],
     group: dist.ProcessGroup,
     async_op: bool = False,
     **kwargs,
@@ -50,14 +51,15 @@ def group_cast(
     ...
 
 
+# device meta interface
 @overload
 def group_cast(
     input: torch.Tensor,
     output: torch.Tensor | None,
-    input_split_size_list: torch.Tensor,
-    output_split_size_list: torch.Tensor,
-    dst_indices_list: torch.Tensor,
-    src_index_list: torch.Tensor,
+    input_split_sizes: torch.Tensor,
+    output_split_sizes: torch.Tensor,
+    dst_indices: torch.Tensor,
+    src_index: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
     **kwargs,
@@ -70,10 +72,10 @@ def group_cast(
 def group_cast(
     input: torch.Tensor,
     output: torch.Tensor | None,
-    input_split_size_list: list[int] | torch.Tensor,
-    output_split_size_list: list[int] | torch.Tensor,
-    dst_indices_list: list[list[int]] | torch.Tensor,
-    src_index_list: list[int] | torch.Tensor,
+    input_split_sizes: list[int] | torch.Tensor,
+    output_split_sizes: list[int] | torch.Tensor,
+    dst_indices: list[list[int]] | torch.Tensor,
+    src_index: list[int] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
     **kwargs,
@@ -112,49 +114,52 @@ def group_cast(
         return hier_group_cast_impl_with_a2av(
             input_tensor=input,
             output_tensor=output,
-            input_split_size_list=input_split_size_list,
-            output_split_size_list=output_split_size_list,
-            dst_indices_list=dst_indices_list,
-            src_index_list=src_index_list,
+            input_split_sizes=input_split_sizes,
+            output_split_sizes=output_split_sizes,
+            dst_indices=dst_indices,
+            src_index=src_index,
             group=group,
             async_op=async_op,
             **kwargs,
         )
 
     if magi_attention.comm.is_native_grpcoll_enable():
+        # NOTE: a feature under early development
         return native_group_cast_impl(
             input=input,
             output=output,
-            input_split_size_list=input_split_size_list,
-            output_split_size_list=output_split_size_list,
-            dst_indices_list=dst_indices_list,
-            src_index_list=src_index_list,
+            input_split_sizes=input_split_sizes,
+            output_split_sizes=output_split_sizes,
+            dst_indices=dst_indices,
+            src_index=src_index,
             group=group,
             async_op=async_op,
             **kwargs,
         )
 
+    # fall back to the a2a-v implementation
     return a2av_group_cast_impl(
         input=input,
         output=output,
-        input_split_size_list=input_split_size_list,
-        output_split_size_list=output_split_size_list,
-        dst_indices_list=dst_indices_list,
-        src_index_list=src_index_list,
+        input_split_sizes=input_split_sizes,
+        output_split_sizes=output_split_sizes,
+        dst_indices=dst_indices,
+        src_index=src_index,
         group=group,
         async_op=async_op,
         **kwargs,
     )
 
 
+# host meta interface
 @overload
 def group_reduce(
     input: torch.Tensor,
     output: torch.Tensor | None,
-    input_split_size_list: list[int],
-    output_split_size_list: list[int],
-    dst_index_list: list[int],
-    src_indices_list: list[list[int]],
+    input_split_sizes: list[int],
+    output_split_sizes: list[int],
+    dst_index: list[int],
+    src_indices: list[list[int]],
     group: dist.ProcessGroup,
     async_op: bool = False,
     reduce_op: ReduceOp = "sum",
@@ -166,14 +171,15 @@ def group_reduce(
     ...
 
 
+# device meta interface
 @overload
 def group_reduce(
     input: torch.Tensor,
     output: torch.Tensor | None,
-    input_split_size_list: torch.Tensor,
-    output_split_size_list: torch.Tensor,
-    dst_index_list: torch.Tensor,
-    src_indices_list: torch.Tensor,
+    input_split_sizes: torch.Tensor,
+    output_split_sizes: torch.Tensor,
+    dst_index: torch.Tensor,
+    src_indices: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
     reduce_op: ReduceOp = "sum",
@@ -190,10 +196,10 @@ def group_reduce(
 def group_reduce(
     input: torch.Tensor,
     output: torch.Tensor | None,
-    input_split_size_list: list[int] | torch.Tensor,
-    output_split_size_list: list[int] | torch.Tensor,
-    dst_index_list: list[int] | torch.Tensor,
-    src_indices_list: list[list[int]] | torch.Tensor,
+    input_split_sizes: list[int] | torch.Tensor,
+    output_split_sizes: list[int] | torch.Tensor,
+    dst_index: list[int] | torch.Tensor,
+    src_indices: list[list[int]] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
     reduce_op: ReduceOp = "sum",
@@ -258,10 +264,10 @@ def group_reduce(
         return hier_group_reduce_impl_with_a2av(
             input_tensor=input,
             output_tensor=output,
-            input_split_size_list=input_split_size_list,
-            output_split_size_list=output_split_size_list,
-            dst_index_list=dst_index_list,
-            src_indices_list=src_indices_list,
+            input_split_sizes=input_split_sizes,
+            output_split_sizes=output_split_sizes,
+            dst_index=dst_index,
+            src_indices=src_indices,
             group=group,
             async_op=async_op,
             reduce_op=reduce_op,
@@ -272,13 +278,14 @@ def group_reduce(
         )
 
     if magi_attention.comm.is_native_grpcoll_enable():
+        # NOTE: a feature under early development
         return native_group_reduce_impl(
             input=input,
             output=output,
-            input_split_size_list=input_split_size_list,
-            output_split_size_list=output_split_size_list,
-            dst_index_list=dst_index_list,
-            src_indices_list=src_indices_list,
+            input_split_sizes=input_split_sizes,
+            output_split_sizes=output_split_sizes,
+            dst_index=dst_index,
+            src_indices=src_indices,
             group=group,
             async_op=async_op,
             reduce_op=reduce_op,
@@ -288,13 +295,14 @@ def group_reduce(
             **kwargs,
         )
 
+    # fall back to the a2a-v implementation
     return a2av_group_reduce_impl(
         input=input,
         output=output,
-        input_split_size_list=input_split_size_list,
-        output_split_size_list=output_split_size_list,
-        dst_index_list=dst_index_list,
-        src_indices_list=src_indices_list,
+        input_split_sizes=input_split_sizes,
+        output_split_sizes=output_split_sizes,
+        dst_index=dst_index,
+        src_indices=src_indices,
         group=group,
         async_op=async_op,
         reduce_op=reduce_op,

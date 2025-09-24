@@ -120,6 +120,8 @@ class GrpCollBuffer:
         self.num_rdma_bytes = num_rdma_bytes
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
+
+        # TODO: make the runtime API torch compilable
         self.runtime = grpcoll.Buffer(
             self.rank,
             self.group_size,

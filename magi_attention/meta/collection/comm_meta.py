@@ -60,18 +60,18 @@ class GroupCollectiveArg:
 
     def to_group_cast_args(self) -> dict:
         return dict(
-            input_split_size_list=self.input_split_size_list,
-            output_split_size_list=self.output_split_size_list,
-            dst_indices_list=self.dst_indices_list,
-            src_index_list=self.src_index_list,
+            input_split_sizes=self.input_split_size_list,
+            output_split_sizes=self.output_split_size_list,
+            dst_indices=self.dst_indices_list,
+            src_index=self.src_index_list,
         )
 
     def to_group_reduce_args(self) -> dict:
         return dict(
-            input_split_size_list=self.output_split_size_list,
-            output_split_size_list=self.input_split_size_list,
-            dst_index_list=self.src_index_list,
-            src_indices_list=self.dst_indices_list,
+            input_split_sizes=self.output_split_size_list,
+            output_split_sizes=self.input_split_size_list,
+            dst_index=self.src_index_list,
+            src_indices=self.dst_indices_list,
         )
 
     def __repr__(self) -> str:
@@ -115,10 +115,10 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             # pack tensors along split dim by `self.packed_times` times
             k: v * self.packed_times  # type: ignore[operator]
             for k, v in {
-                "input_split_size_list": self.input_split_size_list,
-                "output_split_size_list": self.output_split_size_list,
-                "dst_indices_list": self.dst_indices_list,
-                "src_index_list": self.src_index_list,
+                "input_split_sizes": self.input_split_size_list,
+                "output_split_sizes": self.output_split_size_list,
+                "dst_indices": self.dst_indices_list,
+                "src_index": self.src_index_list,
             }.items()
         }
 
@@ -127,14 +127,14 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
         if self.init_group_reduce:
             # symmetric to group-cast
             self._group_reduce_args_dict_packed = dict(
-                input_split_size_list=self._group_cast_args_dict_packed[
-                    "output_split_size_list"
+                input_split_sizes=self._group_cast_args_dict_packed[
+                    "output_split_sizes"
                 ],
-                output_split_size_list=self._group_cast_args_dict_packed[
-                    "input_split_size_list"
+                output_split_sizes=self._group_cast_args_dict_packed[
+                    "input_split_sizes"
                 ],
-                dst_index_list=self._group_cast_args_dict_packed["src_index_list"],
-                src_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
+                dst_index=self._group_cast_args_dict_packed["src_index"],
+                src_indices=self._group_cast_args_dict_packed["dst_indices"],
                 reduce_op=self.reduce_op,
             )
 
@@ -218,9 +218,9 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             is_token_in_rank,
         ) = get_dispatch_layout_from_group_cast_meta(
             input_split_size_list=self._group_cast_args_dict_packed[
-                "input_split_size_list"
+                "input_split_sizes"
             ],
-            dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
+            dst_indices_list=self._group_cast_args_dict_packed["dst_indices"],
             group=self.group,
             num_nodes=1,  # TODO: support internode
         )
@@ -228,9 +228,9 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
         # for group-cast/group-reduce, perm_to_a2av_idx is the post_perm_idx/pre_perm_idx
         _, post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_size_list=self._group_cast_args_dict_packed[
-                "output_split_size_list"
+                "output_split_sizes"
             ],
-            src_index_list=self._group_cast_args_dict_packed["src_index_list"],
+            src_index_list=self._group_cast_args_dict_packed["src_index"],
             world_size=self.world_size,
         )
 
@@ -266,9 +266,9 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             self._group_cast_args_dict_packed["perm_before_a2a_kwargs"],
         ) = _calc_group_cast_a2a_input_meta_args(
             input_split_size_list=self._group_cast_args_dict_packed[
-                "input_split_size_list"
+                "input_split_sizes"
             ],
-            dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
+            dst_indices_list=self._group_cast_args_dict_packed["dst_indices"],
             world_size=self.world_size,
             device=self.device,
         )
@@ -278,9 +278,9 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             self._group_cast_args_dict_packed["unperm_after_a2a_kwargs"],
         ) = _calc_group_cast_a2a_output_meta_args(
             output_split_size_list=self._group_cast_args_dict_packed[
-                "output_split_size_list"
+                "output_split_sizes"
             ],
-            src_index_list=self._group_cast_args_dict_packed["src_index_list"],
+            src_index_list=self._group_cast_args_dict_packed["src_index"],
             world_size=self.world_size,
             device=self.device,
         )
@@ -291,9 +291,9 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             self._group_reduce_args_dict_packed["perm_before_a2a_kwargs"],
         ) = _calc_group_reduce_a2a_input_meta_args(
             input_split_size_list=self._group_reduce_args_dict_packed[
-                "input_split_size_list"
+                "input_split_sizes"
             ],
-            dst_index_list=self._group_reduce_args_dict_packed["dst_index_list"],
+            dst_index_list=self._group_reduce_args_dict_packed["dst_index"],
             world_size=self.world_size,
             device=self.device,
         )
@@ -303,9 +303,9 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             self._group_reduce_args_dict_packed["range_reduce_kwargs"],
         ) = _calc_group_reduce_a2a_output_meta_args(
             output_split_size_list=self._group_reduce_args_dict_packed[
-                "output_split_size_list"
+                "output_split_sizes"
             ],
-            src_indices_list=self._group_reduce_args_dict_packed["src_indices_list"],
+            src_indices_list=self._group_reduce_args_dict_packed["src_indices"],
             world_size=self.world_size,
             device=self.device,
             deterministic=self.deterministic,

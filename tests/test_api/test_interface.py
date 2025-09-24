@@ -41,13 +41,11 @@ from magi_attention.api.magi_attn_interface import (
     make_varlen_key_for_new_mask_after_dispatch,
     undispatch,
 )
-from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
     DistAttnConfig,
-    GrpCollConfig,
     MinHeapDispatchAlg,
     OverlapConfig,
     UniformOverlapAlg,
@@ -110,30 +108,6 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             )
         else:
             self.device_mesh = None
-
-        # -----    set up for native grpcoll   ---- #
-
-        if magi_attention.comm.is_native_grpcoll_enable():
-            for nccl_group in self.nccl_groups:
-                grpcoll_mgr.register_buffer(
-                    group=nccl_group,
-                    config=GrpCollConfig(
-                        num_nvl_bytes=int(2e9)
-                        * self.world_size
-                        // 8,  # 2GB for 8 ranks
-                    ),
-                )
-                grpcoll_mgr.check_registered(group=nccl_group)
-
-    def destroy_pg(self):
-        # -----    clean up for native grpcoll   ---- #
-
-        if magi_attention.comm.is_native_grpcoll_enable():
-            for nccl_group in self.nccl_groups:
-                grpcoll_mgr.release_buffer(group=nccl_group)
-                grpcoll_mgr.check_released(group=nccl_group)
-
-        super().destroy_pg()
 
     @property
     def device(self) -> int:

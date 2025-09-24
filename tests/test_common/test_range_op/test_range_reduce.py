@@ -14,18 +14,15 @@
 
 import unittest
 from collections import defaultdict
-from typing import TypeAlias
 from unittest import TestCase
 
 import torch
 
-from magi_attention.common.enum import ReduceOp
+from magi_attention.common.enum import OutMaybeWithLSE, ReduceOp
 from magi_attention.common.range_op import range_reduce
 from magi_attention.functional.utils import correct_attn_lse, correct_attn_out
 from magi_attention.testing import parameterize
 from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype
-
-OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 def range_reduce_ref(

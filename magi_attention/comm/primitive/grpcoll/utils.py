@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import warnings
 from collections import defaultdict
 from functools import partial
 from itertools import accumulate, chain, pairwise
@@ -25,7 +26,7 @@ import triton.language as tl
 
 import magi_attention
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
-from magi_attention.common.enum import ReduceOp
+from magi_attention.common.enum import OutMaybeWithLSE, ReduceOp
 from magi_attention.common.range import NaiveRange
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.common.range_op.utils import (
@@ -35,6 +36,10 @@ from magi_attention.common.range_op.utils import (
 )
 from magi_attention.common.ranges import NaiveRanges
 from magi_attention.utils import nvtx
+
+# ------------------        common helpers       ------------------ #
+
+RangesWithRank: TypeAlias = list[tuple[NaiveRange, int]]
 
 
 def check_nvlink_connections(group: dist.ProcessGroup):
@@ -127,9 +132,6 @@ def seqlens2curanges(
         NaiveRanges: the cumulative ranges, e.g. [(0, 4), (4, 6), (6, 13)]
     """
     return list(pairwise(accumulate([0] + seqlens)))
-
-
-RangesWithRank: TypeAlias = list[tuple[NaiveRange, int]]
 
 
 def _calc_range_gather_kwargs_from_ranges_with_rank(
@@ -394,231 +396,6 @@ def sanity_check_for_group_cast_meta_args_per_rank(
         )
 
 
-@triton.jit
-def _varlen_for_each_copy_kernel(
-    output_ptr,
-    input_flat_ptr,
-    num_dst_ptr,
-    offsets_ptr,
-    stride_output_row,
-    num_ranks,
-    BLOCK_SIZE_N: tl.constexpr,
-):
-    split_idx = tl.program_id(axis=0)
-    col_block_idx = tl.program_id(axis=1)
-
-    col_start = col_block_idx * BLOCK_SIZE_N
-
-    num_dst = tl.load(num_dst_ptr + split_idx)
-
-    offset_in_flat_input = tl.load(offsets_ptr + split_idx)
-
-    output_row_base_ptr = output_ptr + split_idx * stride_output_row
-    input_flat_base_ptr = input_flat_ptr + offset_in_flat_input
-
-    cols_in_block = col_start + tl.arange(0, BLOCK_SIZE_N)
-
-    write_mask = (cols_in_block < num_ranks) & (cols_in_block < num_dst)
-
-    values_to_write = tl.load(
-        input_flat_base_ptr + cols_in_block, mask=write_mask, other=-1
-    )
-
-    tl.store(output_row_base_ptr + cols_in_block, values_to_write, mask=write_mask)
-
-
-def _varlen_for_each_copy_triton(
-    dst: torch.Tensor,
-    src: torch.Tensor,
-    num_dst: torch.Tensor,
-    cu_num_dst: torch.Tensor,
-) -> torch.Tensor:
-    num_splits, num_ranks = dst.shape
-
-    if num_splits == 0:
-        return dst
-
-    BLOCK_SIZE_N = triton.next_power_of_2(num_ranks)
-    grid = (num_splits, triton.cdiv(num_ranks, BLOCK_SIZE_N))
-
-    _varlen_for_each_copy_kernel[grid](
-        dst,
-        src,
-        num_dst,
-        cu_num_dst,
-        dst.stride(0),
-        num_ranks,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-    )
-
-    return dst
-
-
-@nvtx.instrument_nvtx
-def transfer_splits_and_dst_idxs_to_topk_idx(
-    input_split_size_list: list[int],
-    dst_indices_list: list[list[int]],
-    num_ranks: int,
-    device: str = "cuda",
-    dtype: torch.dtype = torch.int64,
-) -> torch.Tensor:
-    num_tokens = sum(input_split_size_list)
-    num_splits = len(input_split_size_list)
-
-    num_dst_list: list[int] = [len(dst_indices) for dst_indices in dst_indices_list]
-    cu_num_dst_list: list[int] = list(accumulate([0] + num_dst_list))
-    flatten_dst_indices_list: list[int] = list(chain(*dst_indices_list))
-    all_meta_list: list[list[int]] = [
-        num_dst_list,
-        cu_num_dst_list,
-        input_split_size_list,
-        flatten_dst_indices_list,
-    ]
-    all_meta_size_list: list[int] = [len(meta) for meta in all_meta_list]
-    flatten_all_meta_list: list[int] = list(chain(*all_meta_list))
-
-    (
-        num_dst_tensor,
-        cu_num_dst_tensor,
-        split_size_tensor,
-        dst_indices_tensor,
-    ) = torch.tensor(
-        flatten_all_meta_list,
-        dtype=dtype,
-        device=device,
-    ).split(
-        all_meta_size_list
-    )
-
-    topk_idx = torch.full(
-        (num_splits, num_ranks),  # assuming num_local_experts == 1
-        fill_value=-1,
-        dtype=dtype,
-        device=device,
-    )
-
-    _varlen_for_each_copy_triton(
-        dst=topk_idx,
-        src=dst_indices_tensor,
-        num_dst=num_dst_tensor,
-        cu_num_dst=cu_num_dst_tensor,
-    )
-
-    topk_idx = topk_idx.repeat_interleave(
-        split_size_tensor, dim=0, output_size=num_tokens
-    )  # shape: (num_tokens, num_ranks)
-
-    return topk_idx
-
-
-@nvtx.instrument_nvtx
-def get_dispatch_layout_from_group_cast_meta(
-    input_split_size_list: list[int],
-    dst_indices_list: list[list[int]],
-    group: dist.ProcessGroup,
-    topk_idx: torch.Tensor | None = None,
-    num_nodes: int | None = None,
-    device: str = "cuda",
-    dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
-    from ._buffer import GrpCollBuffer
-    from ._mgr import grpcoll_mgr
-
-    num_ranks = group.size()
-
-    # TODO: fuse two functions into a single kernel
-    # and support input_split_size_list and dst_indices_list as tensors
-    if topk_idx is None:
-        topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
-            input_split_size_list=input_split_size_list,
-            dst_indices_list=dst_indices_list,
-            num_ranks=num_ranks,
-            device=device,
-            dtype=dtype,
-        )
-
-    buffer_registered = grpcoll_mgr.is_registered(group)
-    if buffer_registered:
-        buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
-        (
-            num_tokens_per_rank,
-            num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
-            is_token_in_rank,
-            _,  # event_overlap
-        ) = buffer.get_dispatch_layout(
-            topk_idx=topk_idx,
-            num_experts=num_ranks,
-            previous_event=None,
-            async_finish=False,
-            allocate_on_comm_stream=False,
-        )
-    else:
-        assert num_nodes is not None, (
-            "``num_nodes`` must be provided "
-            "since the grpcoll buffer is not registered for the given group"
-        )
-        (
-            num_tokens_per_rank,
-            num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
-            is_token_in_rank,
-            _,  # event_overlap,
-        ) = GrpCollBuffer.get_dispatch_meta_from_topk_idx(
-            topk_idx=topk_idx,
-            num_ranks=num_ranks,
-            num_nodes=num_nodes,
-            num_experts=num_ranks,
-            previous_event=None,
-            async_finish=False,
-            allocate_on_meta_stream=False,
-        )
-
-    return (
-        num_tokens_per_rank,
-        num_tokens_per_rdma_rank,
-        num_tokens_per_expert,
-        is_token_in_rank,
-    )
-
-
-@nvtx.instrument_nvtx
-def get_a2av_perm_idxs_from_group_cast_meta(
-    output_split_size_list: list[int],
-    src_index_list: list[int],
-    world_size: int,
-    device: str = "cuda",
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from ._buffer import GrpCollBuffer
-
-    output_split_sizes = torch.tensor(
-        output_split_size_list,
-        dtype=torch.int64,
-        device=device,
-    )
-    src_idx = torch.tensor(
-        src_index_list,
-        dtype=torch.int32,
-        device=device,
-    )
-
-    (
-        unperm_from_a2av_idx,
-        perm_to_a2av_idx,
-        _,  # event_overlap
-    ) = GrpCollBuffer.get_a2av_perm_idx_from_src_idx(
-        output_split_sizes=output_split_sizes,
-        src_idx=src_idx,
-        num_tokens=sum(output_split_size_list),
-        num_ranks=world_size,
-        previous_event=None,
-        async_finish=False,
-        allocate_on_meta_stream=False,
-    )
-
-    return unperm_from_a2av_idx, perm_to_a2av_idx
-
-
 @nvtx.instrument_nvtx
 def unpermute_tensor(
     tensor: torch.Tensor,
@@ -867,8 +644,6 @@ def calc_group_cast_a2a_args(
 
 
 # ------------------        utils for group reduce       ------------------ #
-
-OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 def sanity_check_for_group_reduce_meta_args_per_rank(
@@ -1259,3 +1034,243 @@ def calc_group_reduce_a2a_args(
         a2a_input_split_size,
         post_process_fn,
     )
+
+
+# ------------------        utils for native grpcoll       ------------------ #
+
+
+def maybe_lazy_init_buffer(group: dist.ProcessGroup) -> None:
+    from ._mgr import grpcoll_mgr
+
+    if not grpcoll_mgr.is_registered(group):
+        grpcoll_mgr.register_buffer(group=group)
+        warnings.warn(
+            f"Since the GrpCollBuffer is not registered for {group.group_name}, "
+            "we lazily register it here with the default config, "
+            "which might not be the best choice and cause performance/memory issue."
+        )
+
+
+@triton.jit
+def _varlen_for_each_copy_kernel(
+    output_ptr,
+    input_flat_ptr,
+    num_dst_ptr,
+    offsets_ptr,
+    stride_output_row,
+    num_ranks,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    split_idx = tl.program_id(axis=0)
+    col_block_idx = tl.program_id(axis=1)
+
+    col_start = col_block_idx * BLOCK_SIZE_N
+
+    num_dst = tl.load(num_dst_ptr + split_idx)
+
+    offset_in_flat_input = tl.load(offsets_ptr + split_idx)
+
+    output_row_base_ptr = output_ptr + split_idx * stride_output_row
+    input_flat_base_ptr = input_flat_ptr + offset_in_flat_input
+
+    cols_in_block = col_start + tl.arange(0, BLOCK_SIZE_N)
+
+    write_mask = (cols_in_block < num_ranks) & (cols_in_block < num_dst)
+
+    values_to_write = tl.load(
+        input_flat_base_ptr + cols_in_block, mask=write_mask, other=-1
+    )
+
+    tl.store(output_row_base_ptr + cols_in_block, values_to_write, mask=write_mask)
+
+
+def _varlen_for_each_copy_triton(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+    num_dst: torch.Tensor,
+    cu_num_dst: torch.Tensor,
+) -> torch.Tensor:
+    num_splits, num_ranks = dst.shape
+
+    if num_splits == 0:
+        return dst
+
+    BLOCK_SIZE_N = triton.next_power_of_2(num_ranks)
+    grid = (num_splits, triton.cdiv(num_ranks, BLOCK_SIZE_N))
+
+    _varlen_for_each_copy_kernel[grid](
+        dst,
+        src,
+        num_dst,
+        cu_num_dst,
+        dst.stride(0),
+        num_ranks,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+    )
+
+    return dst
+
+
+@nvtx.instrument_nvtx
+def transfer_splits_and_dst_idxs_to_topk_idx(
+    input_split_size_list: list[int],
+    dst_indices_list: list[list[int]],
+    num_ranks: int,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    num_tokens = sum(input_split_size_list)
+    num_splits = len(input_split_size_list)
+
+    num_dst_list: list[int] = [len(dst_indices) for dst_indices in dst_indices_list]
+    cu_num_dst_list: list[int] = list(accumulate([0] + num_dst_list))
+    flatten_dst_indices_list: list[int] = list(chain(*dst_indices_list))
+    all_meta_list: list[list[int]] = [
+        num_dst_list,
+        cu_num_dst_list,
+        input_split_size_list,
+        flatten_dst_indices_list,
+    ]
+    all_meta_size_list: list[int] = [len(meta) for meta in all_meta_list]
+    flatten_all_meta_list: list[int] = list(chain(*all_meta_list))
+
+    (
+        num_dst_tensor,
+        cu_num_dst_tensor,
+        split_size_tensor,
+        dst_indices_tensor,
+    ) = torch.tensor(
+        flatten_all_meta_list,
+        dtype=dtype,
+        device=device,
+    ).split(
+        all_meta_size_list
+    )
+
+    topk_idx = torch.full(
+        (num_splits, num_ranks),  # assuming num_local_experts == 1
+        fill_value=-1,
+        dtype=dtype,
+        device=device,
+    )
+
+    _varlen_for_each_copy_triton(
+        dst=topk_idx,
+        src=dst_indices_tensor,
+        num_dst=num_dst_tensor,
+        cu_num_dst=cu_num_dst_tensor,
+    )
+
+    topk_idx = topk_idx.repeat_interleave(
+        split_size_tensor, dim=0, output_size=num_tokens
+    )  # shape: (num_tokens, num_ranks)
+
+    return topk_idx
+
+
+@nvtx.instrument_nvtx
+def get_dispatch_layout_from_group_cast_meta(
+    input_split_size_list: list[int],
+    dst_indices_list: list[list[int]],
+    group: dist.ProcessGroup,
+    topk_idx: torch.Tensor | None = None,
+    num_nodes: int | None = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    from ._buffer import GrpCollBuffer
+    from ._mgr import grpcoll_mgr
+
+    num_ranks = group.size()
+
+    # TODO: fuse two functions into a single kernel
+    # and support input_split_size_list and dst_indices_list as tensors
+    if topk_idx is None:
+        topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+            input_split_size_list=input_split_size_list,
+            dst_indices_list=dst_indices_list,
+            num_ranks=num_ranks,
+            device=device,
+            dtype=dtype,
+        )
+
+    buffer_registered = grpcoll_mgr.is_registered(group)
+    if buffer_registered:
+        buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            _,  # event_overlap
+        ) = buffer.get_dispatch_layout(
+            topk_idx=topk_idx,
+            num_experts=num_ranks,
+            previous_event=None,
+            async_finish=False,
+            allocate_on_comm_stream=False,
+        )
+    else:
+        assert num_nodes is not None, (
+            "``num_nodes`` must be provided "
+            "since the grpcoll buffer is not registered for the given group"
+        )
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            _,  # event_overlap,
+        ) = GrpCollBuffer.get_dispatch_meta_from_topk_idx(
+            topk_idx=topk_idx,
+            num_ranks=num_ranks,
+            num_nodes=num_nodes,
+            num_experts=num_ranks,
+            previous_event=None,
+            async_finish=False,
+            allocate_on_meta_stream=False,
+        )
+
+    return (
+        num_tokens_per_rank,
+        num_tokens_per_rdma_rank,
+        num_tokens_per_expert,
+        is_token_in_rank,
+    )
+
+
+@nvtx.instrument_nvtx
+def get_a2av_perm_idxs_from_group_cast_meta(
+    output_split_size_list: list[int],
+    src_index_list: list[int],
+    world_size: int,
+    device: str = "cuda",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from ._buffer import GrpCollBuffer
+
+    output_split_sizes = torch.tensor(
+        output_split_size_list,
+        dtype=torch.int64,
+        device=device,
+    )
+    src_idx = torch.tensor(
+        src_index_list,
+        dtype=torch.int32,
+        device=device,
+    )
+
+    (
+        unperm_from_a2av_idx,
+        perm_to_a2av_idx,
+        _,  # event_overlap
+    ) = GrpCollBuffer.get_a2av_perm_idx_from_src_idx(
+        output_split_sizes=output_split_sizes,
+        src_idx=src_idx,
+        num_tokens=sum(output_split_size_list),
+        num_ranks=world_size,
+        previous_event=None,
+        async_finish=False,
+        allocate_on_meta_stream=False,
+    )
+
+    return unperm_from_a2av_idx, perm_to_a2av_idx

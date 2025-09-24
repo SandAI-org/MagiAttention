@@ -15,7 +15,11 @@
 from enum import Enum
 from typing import Literal, TypeAlias
 
+import torch
+
 ReduceOp: TypeAlias = Literal["sum", "avg", "lse"]
+
+OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 class AttnType(Enum):
