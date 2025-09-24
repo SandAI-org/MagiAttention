@@ -25,6 +25,7 @@
 #include <cutlass/cluster_launch.hpp> // For ClusterLauncher
 #include <cutlass/device_kernel.h> // For device_kernel
 #include <cutlass/kernel_launch.h> // For kernel_launch
+#include <nvtx3/nvToolsExt.h>
 
 #include "epilogue_bwd.hpp"
 #include "flash.h"
@@ -36,6 +37,12 @@
 #include "tile_size.h"
 
 using namespace cute;
+
+#define CUDA_CHECK(call)                                                                                       \
+  do {                                                                                                         \
+    cudaError_t err = call;                                                                                    \
+    TORCH_CHECK(err == cudaSuccess, "CUDA error in ", __FILE__, ":", __LINE__, ": ", cudaGetErrorString(err)); \
+  } while (0)
 
 template <int Arch,
           int kHeadDim,
@@ -58,7 +65,10 @@ template <int Arch,
           bool V_in_regs = false,
           bool RangeMerge = false,
           bool DisableBwdDkvAtomicReduction = false>
-void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
+void run_flash_bwd(Flash_bwd_params& params,
+                   cudaStream_t stream,
+                   const std::vector<cudaEvent_t>& start_events,
+                   const std::vector<cudaEvent_t>& end_events) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
 
@@ -70,6 +80,12 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
                                                          /*Clear_dQ=*/false,
                                                          /*Clear_dK=*/false,
                                                          /*Clear_dV=*/false>;
+
+  if (!start_events.empty()) {
+    CUDA_CHECK(cudaEventRecord(start_events[1], stream));
+    // std::cout << "start record for bwd 1" << std::endl;
+  }
+  nvtxRangePushA("preprocess");
   typename PreprocessKernel::Arguments preprocess_args{
       static_cast<Element const*>(params.o_ptr),
       {params.total_q, params.d, params.h_qo}, // shape_O
@@ -96,6 +112,15 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
                                            preprocess_params,
                                            false /*launch_with_pdl*/);
   CHECK_CUDA_KERNEL_LAUNCH();
+  nvtxRangePop();
+  nvtxRangePushA("backward run");
+  if (!end_events.empty()) {
+    CUDA_CHECK(cudaEventRecord(end_events[1], stream));
+  }
+
+  if (!start_events.empty()) {
+    CUDA_CHECK(cudaEventRecord(start_events[2], stream));
+  }
 
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
   using ClusterShape = cute::Shape<_1, Int<1>, _1>; // Currently doesn't not support cluster
@@ -231,10 +256,17 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
         grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
   }
   CHECK_CUDA_KERNEL_LAUNCH();
+  nvtxRangePop();
+  if (!end_events.empty()) {
+    CUDA_CHECK(cudaEventRecord(end_events[2], stream));
+  }
 }
 
 template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction>
-void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
+void run_mha_bwd_(Flash_bwd_params& params,
+                  cudaStream_t stream,
+                  const std::vector<cudaEvent_t>& start_events,
+                  const std::vector<cudaEvent_t>& end_events) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
   static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
@@ -279,7 +311,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
           /*AtomLayoutMdQ=*/AtomLayoutMdQ,
           /*V_in_regs=*/V_in_regs,
           /*RangeMerge=*/RangeMerge,
-          /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction>(params, stream);
+          /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction>(params, stream, start_events, end_events);
     });
   });
 }
