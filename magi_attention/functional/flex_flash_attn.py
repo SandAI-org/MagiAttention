@@ -193,6 +193,8 @@ def _flex_flash_attn_forward_compilable(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    fwd_start_events: list[int] | None,
+    fwd_stop_events: list[int] | None,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     q, k, v, q_ranges, k_ranges = [
@@ -231,6 +233,8 @@ def _flex_flash_attn_forward_compilable(
         out_type,
         deterministic,
         sm_margin,
+        fwd_start_events,
+        fwd_stop_events,
     )
 
 
@@ -279,6 +283,8 @@ def _flex_flash_attn_forward(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    fwd_start_events: list[int] | None,
+    fwd_stop_events: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
@@ -310,7 +316,6 @@ def _flex_flash_attn_forward(
     else:
         kblock_m = None
         kblock_n = None
-
     # NOTE: we can not directly compile `_flex_flash_attn_forward`
     # since torch.compile does not allow returning the mutated args (out, lse)
     _flex_flash_attn_forward_compilable(
@@ -333,6 +338,8 @@ def _flex_flash_attn_forward(
         out_type=out_type,
         deterministic=deterministic,
         sm_margin=sm_margin,
+        fwd_start_events=fwd_start_events,
+        fwd_stop_events=fwd_stop_events,
     )
 
     return out, lse
@@ -370,6 +377,8 @@ def _flex_flash_attn_backward_compilable(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    bwd_start_events: list[int] | None,
+    bwd_end_events: list[int] | None,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
 
@@ -416,6 +425,8 @@ def _flex_flash_attn_backward_compilable(
         dv_type,
         deterministic,
         sm_margin,
+        bwd_start_events,
+        bwd_end_events,
     )
 
 
@@ -473,6 +484,8 @@ def _flex_flash_attn_backward(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    bwd_start_events: list[int] | None,
+    bwd_end_events: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
@@ -504,6 +517,8 @@ def _flex_flash_attn_backward(
         dv_type=dv_type,
         deterministic=deterministic,
         sm_margin=sm_margin,
+        bwd_start_events=bwd_start_events,
+        bwd_end_events=bwd_end_events,
     )
 
     return dq, dk, dv
@@ -529,6 +544,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_fwd_atomic_reduction=False,
         auto_range_merge=False,
         ref_block_size=None,
+        fwd_start_events=None,
+        fwd_stop_events=None,
+        bwd_start_events=None,
+        bwd_end_events=None,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -583,6 +602,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
             deterministic,
             sm_margin,
+            fwd_start_events,
+            fwd_stop_events,
         )
 
         # Cast output to the same dtype as q
@@ -612,6 +633,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
         ctx.auto_range_merge = auto_range_merge
+        ctx.bwd_start_events = bwd_start_events
+        ctx.bwd_end_events = bwd_end_events
 
         return out, lse
 
@@ -670,6 +693,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dv_type=torch.float32,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
+            bwd_start_events=ctx.bwd_start_events,
+            bwd_end_events=ctx.bwd_end_events,
         )
 
         dq = dq.to(q.dtype)
@@ -690,6 +715,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
             None,  # ref_block_size
+            None,  # fwd_start_events
+            None,  # fwd_stop_events
+            None,  # bwd_start_events
+            None,  # bwd_stop_events
         )
 
 
@@ -710,6 +739,10 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: bool = False,
     auto_range_merge: bool = False,
     ref_block_size: tuple[int, int] | None = None,
+    fwd_start_events: list[int] | None = None,
+    fwd_stop_events: list[int] | None = None,
+    bwd_start_events: list[int] | None = None,
+    bwd_stop_events: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
@@ -864,7 +897,6 @@ def flex_flash_attn_func(
         "auto_range_merge and deterministic can't be True at the same time, "
         "due to some unresolved bug to be fixed as soon as possible."
     )
-
     return FlexFlashAttnFunc.apply(
         q,
         k,
@@ -879,4 +911,8 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         auto_range_merge,
         ref_block_size,
+        fwd_start_events,
+        fwd_stop_events,
+        bwd_start_events,
+        bwd_stop_events,
     )

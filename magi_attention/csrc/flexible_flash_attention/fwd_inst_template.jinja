@@ -6,6 +6,7 @@
 #include "flex_flash_common.hpp"
 #include "flash_fwd_launch_template.h"
 #include "flex_flash_fwd.hpp"
+#include <nvtx3/nvToolsExt.h>
 
 // Compile-time constants provided by Jinja arguments
 static constexpr int kArch = {{ arch_sm_num }};
@@ -23,6 +24,13 @@ static constexpr int kBlockN = {{ kblock_n }};
 static constexpr int kBlockM = std::get<0>(tile_size_fwd_sm90(kHeadDim, /*element_size*/2, kHasSoftcap));
 static constexpr int kBlockN = std::get<1>(tile_size_fwd_sm90(kHeadDim, /*element_size*/2, kHasSoftcap));
 {% endif %}
+
+#define CUDA_CHECK(call)                                                      \
+do {                                                                          \
+    cudaError_t err = call;                                                   \
+    TORCH_CHECK(err == cudaSuccess, "CUDA error in ", __FILE__, ":", __LINE__, \
+                ": ", cudaGetErrorString(err));                               \
+} while (0)
 
 // Runtime contract checks to ensure consistency with compile-time constraints
 static inline void _check_runtime_contract(
@@ -72,26 +80,61 @@ std::vector<at::Tensor> mha_fwd(
     bool const disable_fwd_atomic_reduction,
     std::optional<at::ScalarType> out_type_,
     bool const deterministic,
-    int const sm_margin) {
-
+    int const sm_margin,
+    std::optional<const std::vector<intptr_t>>& fwd_start_event_handles_,
+    std::optional<const std::vector<intptr_t>>& fwd_end_event_handles_) {
   _check_runtime_contract(q, out_type_, softcap, disable_fwd_atomic_reduction);
 
   // kBlockM/kBlockN are compile-time constants already determined
 
+  std::vector<cudaEvent_t> start_events;
+  std::vector<cudaEvent_t> end_events;
+  if (fwd_start_event_handles_.has_value() && fwd_end_event_handles_.has_value()) {
+    auto fwd_start_event_handles = fwd_start_event_handles_.value();
+    TORCH_CHECK(fwd_start_event_handles.size() == 3, 
+                "fwd_start_event_handles vector size must be 3, but got ", fwd_start_event_handles.size());
+    auto fwd_end_event_handles = fwd_end_event_handles_.value();
+    TORCH_CHECK(fwd_end_event_handles.size() == 3, 
+                "fwd_end_event_handles vector size must be 3, but got ", fwd_end_event_handles.size());
+    
+    for (size_t i = 0; i < 3; ++i) {
+            start_events.push_back(reinterpret_cast<cudaEvent_t>(fwd_start_event_handles[i]));
+            end_events.push_back(reinterpret_cast<cudaEvent_t>(fwd_end_event_handles[i]));
+    }
+  }
+
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
   // Parameter preparation
+  if (!start_events.empty())
+    CUDA_CHECK(cudaEventRecord(start_events[0], stream));
+  nvtxRangePushA("fwd prepare");
   auto [params, out, softmax_lse] = prepare_mha_fwd(
       q, k, v, out_, softmax_lse_, q_ranges, k_ranges,
       attn_type_map_, merge_q_ranges_, qk_map_,
       unique_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
       out_type_, deterministic, sm_margin);
-
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
+  nvtxRangePop();
+  if (!end_events.empty())
+    CUDA_CHECK(cudaEventRecord(end_events[0], stream));
 
   // Kernel launch (single variant)
+  if (!start_events.empty())
+    CUDA_CHECK(cudaEventRecord(start_events[1], stream));
+  nvtxRangePushA("fwd run");
   run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kDeterministic>(params, stream);
+  if (!end_events.empty())
+    CUDA_CHECK(cudaEventRecord(end_events[1], stream));
+  nvtxRangePop();
 
   // Post-processing: fast zero fill for uncovered regions (to match library interface)
+  if (!start_events.empty())
+    CUDA_CHECK(cudaEventRecord(start_events[2], stream));
+  nvtxRangePushA("fwd fill");
   run_fast_zero_fill(params, stream);
+  nvtxRangePop();
+  if (!end_events.empty())
+    CUDA_CHECK(cudaEventRecord(end_events[2], stream));
 
   return {out, softmax_lse};
 }
