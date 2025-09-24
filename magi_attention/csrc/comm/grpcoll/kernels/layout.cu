@@ -293,11 +293,13 @@ __global__ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64
 // compute perm_to_a2av_idx, where output[perm_to_a2av_idx] => a2a_output
 #pragma unroll
   for (int i = 0; i < num_splits; ++i) {
+    // all threads process one split together
     auto rank = src_idx[i];
     auto split_size = output_split_sizes[i];
     auto a2av_offset_this_rank = rank_split_sizes[rank][rank];
     auto a2av_offset_this_split = a2av_offset_this_rank + curr_offset_per_rank[rank];
     auto start_token_idx = curr_offset_per_rank[num_ranks];
+    __syncthreads(); // make sure each thread's read the same curr_offset_per_rank
 
 #pragma unroll
     for (int j = thread_id; j < split_size; j += kNumThreads) {
@@ -306,11 +308,12 @@ __global__ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64
       perm_to_a2av_idx[a2av_token_idx] = token_idx;
     }
 
+    // update the current offset by thread0
     if (thread_id == 0) {
       curr_offset_per_rank[num_ranks] += split_size; // start_token_idx
       curr_offset_per_rank[rank] += split_size;
     }
-    __syncthreads();
+    __syncthreads(); // make sure each thread'll read the latest curr_offset_per_rank in next iter
   }
 }
 
