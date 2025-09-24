@@ -1060,15 +1060,17 @@ def get_group_reduce_handle_from_sym_group_cast(
     src_indices: list[list[int]] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    output_seqlen: int | None = None,
 ) -> tuple:
     from ._buffer import GrpCollBuffer
     from ._native_grpcoll_impl import native_group_cast_impl
 
     # prepare dummpy input/output for symmetric group-cast
     sym_gc_input_seqlen = (
-        output.size(0)
-        if output is not None
-        else sum(output_split_sizes)  # FIXME: a gpu-cpu sync here
+        output_seqlen
+        # NOTE: had better pass output_seqlen to avoid gpu-cpu sync
+        if output_seqlen is not None
+        else (output.size(0) if output is not None else sum(output_split_sizes))
     )
     sym_gc_output_seqlen = input.size(0)
     sym_gc_dummy_input = torch.empty(
@@ -1173,7 +1175,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
     input_split_sizes: list[int],
     dst_indices: list[list[int]],
     num_ranks: int,
-    num_tokens: int | None = None,
+    input_seqlen: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
 ) -> torch.Tensor:
@@ -1185,7 +1187,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
     input_split_sizes: torch.Tensor,
     dst_indices: torch.Tensor,
     num_ranks: int,
-    num_tokens: int | None = None,
+    input_seqlen: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
 ) -> torch.Tensor:
@@ -1197,12 +1199,13 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
     input_split_sizes: list[int] | torch.Tensor,
     dst_indices: list[list[int]] | torch.Tensor,
     num_ranks: int,
-    num_tokens: int | None = None,
+    input_seqlen: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
 ) -> torch.Tensor:
     if is_list_type_all([input_split_sizes, dst_indices], list):
-        num_tokens = sum(input_split_sizes)
+        if input_seqlen is None:
+            input_seqlen = sum(input_split_sizes)
         num_splits = len(input_split_sizes)
 
         num_dst_list: list[int] = [len(dst_indices) for dst_indices in dst_indices]
@@ -1245,6 +1248,9 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
         )
     elif is_list_type_all([input_split_sizes, dst_indices], torch.Tensor):
         assert dst_indices.size(1) == num_ranks  # type: ignore[union-attr]
+        # NOTE: had better pass input_seqlen to avoid gpu-cpu sync
+        if input_seqlen is None:
+            input_seqlen = input_split_sizes.sum().item()  # type: ignore[union-attr]
         topk_idx = dst_indices.to(dtype=dtype, device=device)  # type: ignore[union-attr]
         split_size_tensor = input_split_sizes.to(device=device)  # type: ignore[union-attr]
     else:
@@ -1253,9 +1259,11 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
             "either all list or all torch.Tensor"
         )
 
-    # shape: (num_splits, num_ranks) -> (num_tokens, num_ranks)
+    # shape: (num_splits, num_ranks) -> (input_seqlen, num_ranks)
     topk_idx = topk_idx.repeat_interleave(
-        split_size_tensor, dim=0, output_size=num_tokens
+        split_size_tensor,
+        dim=0,
+        output_size=input_seqlen,
     )
 
     return topk_idx
@@ -1267,7 +1275,7 @@ def get_dispatch_layout_from_group_cast_meta(
     dst_indices: list[list[int]],
     group: dist.ProcessGroup,
     topk_idx: torch.Tensor | None = None,
-    num_tokens: int | None = None,
+    input_seqlen: int | None = None,
     num_nodes: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
@@ -1281,7 +1289,7 @@ def get_dispatch_layout_from_group_cast_meta(
     dst_indices: torch.Tensor,
     group: dist.ProcessGroup,
     topk_idx: torch.Tensor | None = None,
-    num_tokens: int | None = None,
+    input_seqlen: int | None = None,
     num_nodes: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
@@ -1295,7 +1303,7 @@ def get_dispatch_layout_from_group_cast_meta(
     dst_indices: list[list[int]] | torch.Tensor,
     group: dist.ProcessGroup,
     topk_idx: torch.Tensor | None = None,
-    num_tokens: int | None = None,
+    input_seqlen: int | None = None,
     num_nodes: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
@@ -1313,7 +1321,7 @@ def get_dispatch_layout_from_group_cast_meta(
             input_split_sizes=input_split_sizes,
             dst_indices=dst_indices,
             num_ranks=num_ranks,
-            num_tokens=num_tokens,
+            input_seqlen=input_seqlen,
             device=device,
             dtype=dtype,
         )
@@ -1368,9 +1376,10 @@ def get_a2av_perm_idxs_from_group_cast_meta(
     output_split_sizes: list[int],
     src_index: list[int],
     num_ranks: int,
+    output_seqlen: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     ...
 
 
@@ -1379,9 +1388,10 @@ def get_a2av_perm_idxs_from_group_cast_meta(
     output_split_sizes: torch.Tensor,
     src_index: torch.Tensor,
     num_ranks: int,
+    output_seqlen: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     ...
 
 
@@ -1390,12 +1400,15 @@ def get_a2av_perm_idxs_from_group_cast_meta(
     output_split_sizes: list[int] | torch.Tensor,
     src_index: list[int] | torch.Tensor,
     num_ranks: int,
+    output_seqlen: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     from ._buffer import GrpCollBuffer
 
     if is_list_type_all([output_split_sizes, src_index], list):
+        if output_seqlen is None:
+            output_seqlen = sum(output_split_sizes)
         output_split_sizes = torch.tensor(
             output_split_sizes,
             dtype=dtype,
@@ -1403,16 +1416,17 @@ def get_a2av_perm_idxs_from_group_cast_meta(
         )
         src_index = torch.tensor(
             src_index,
-            dtype=torch.int32,  # XXX: use int64 dtype
+            dtype=dtype,
             device=device,
         )
     elif is_list_type_all([output_split_sizes, src_index], torch.Tensor):
+        # NOTE: had better pass output_seqlen to avoid gpu-cpu sync
+        if output_seqlen is None:
+            output_seqlen = output_split_sizes.sum().item()  # type: ignore[union-attr]
         output_split_sizes = output_split_sizes.to(  # type: ignore[union-attr]
             dtype=dtype, device=device
         )
-        src_index = src_index.to(  # type: ignore[union-attr]
-            dtype=torch.int32, device=device
-        )  # XXX: use int64 dtype
+        src_index = src_index.to(dtype=dtype, device=device)  # type: ignore[union-attr]
     else:
         raise ValueError(
             "output_split_sizes and src_index must be "
@@ -1420,19 +1434,16 @@ def get_a2av_perm_idxs_from_group_cast_meta(
         )
 
     (
-        unperm_from_a2av_idx,  # XXX: no need to return/compute this
         perm_to_a2av_idx,
         _,  # event_overlap
     ) = GrpCollBuffer.get_a2av_perm_idx_from_src_idx(
         output_split_sizes=output_split_sizes,
         src_idx=src_index,
-        num_tokens=sum(
-            output_split_sizes
-        ),  # XXX: no need to pass this to avoid gpu-cpu sync
         num_ranks=num_ranks,
+        output_seqlen=output_seqlen,
         previous_event=None,
         async_finish=False,
         allocate_on_meta_stream=False,
     )
 
-    return unperm_from_a2av_idx, perm_to_a2av_idx
+    return perm_to_a2av_idx

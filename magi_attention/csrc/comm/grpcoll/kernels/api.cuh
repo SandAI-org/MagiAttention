@@ -83,15 +83,7 @@ void get_dispatch_layout(
     int num_experts,
     cudaStream_t stream);
 
-void get_a2av_perm_idx(
-    const int64_t* output_split_sizes,
-    const int* src_idx,
-    int64_t* unperm_from_a2av_idx,
-    int64_t* perm_to_a2av_idx,
-    int num_tokens,
-    int num_ranks,
-    int num_splits,
-    cudaStream_t stream);
+void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx, int64_t* perm_to_a2av_idx, int num_ranks, int num_splits, cudaStream_t stream);
 
 } // namespace layout
 

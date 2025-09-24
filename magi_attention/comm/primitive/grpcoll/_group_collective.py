@@ -100,11 +100,10 @@ def group_cast(
 
             NOTE:
                 1. if dst_indices is a 2D list, then len(dst_indices) == len(input_split_sizes),
-                and dst_indices[i] is a list of distinct, valid destination ranks
-                for the i-th input split to send to
-                2. if dst_indices is a 2D tensor, then dst_indices.shape[0] == sum(input_split_sizes),
-                while dst_indices.shape[1] equals to the maximum length of 1D destination ranks for each input split,
-                and the right-padded entries should be filled with -1
+                and dst_indices[i] is a list of distinct, valid destination ranks for the i-th input split to send to
+                2. if dst_indices is a 2D tensor, then dst_indices.shape == [len(input_split_sizes), world_size],
+                and dst_indices[i, :] indicates the distinct destination ranks for the i-th input split to send to
+                where the right-padded entries should be filled with ``-1``
         src_index (list[int] | torch.Tensor):
             the 1D source rank index list / tensor for each output split to receive from,
             where len(src_index) == len(output_split_sizes)
@@ -244,11 +243,10 @@ def group_reduce(
 
             NOTE:
                 1. if src_indices is a 2D list, then len(src_indices) == len(output_split_sizes),
-                and src_indices[i] is a list of distinct, valid source ranks
-                for the i-th output split to reduce from
-                2. if src_indices is a 2D tensor, then src_indices.shape[0] == sum(output_split_sizes),
-                while src_indices.shape[1] equals to the maximum length of 1D source ranks for each output split,
-                and the right-padded entries should be filled with -1
+                and src_indices[i] is a list of distinct, valid source ranks for the i-th output split to reduce from
+                2. if src_indices is a 2D tensor, then src_indices.shape == [len(output_split_sizes), world_size],
+                and src_indices[i, :] indicates the distinct source ranks for the i-th output split to reduce from
+                where the right-padded entries should be filled with ``-1``
                 3. since any reduce operation satisfies the commutative property,
                 the order to reduce to the same output split does not matter, except for numerical errors
         group (dist.ProcessGroup): the process group to comm

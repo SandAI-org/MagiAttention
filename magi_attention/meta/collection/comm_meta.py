@@ -224,7 +224,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
         )
 
         # for group-cast/group-reduce, perm_to_a2av_idx is the post_perm_idx/pre_perm_idx
-        _, post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
+        post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=self._group_cast_args_dict_packed["output_split_sizes"],
             src_index=self._group_cast_args_dict_packed["src_index"],
             num_ranks=self.world_size,

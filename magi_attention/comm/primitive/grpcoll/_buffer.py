@@ -404,20 +404,19 @@ class GrpCollBuffer:
         cls,
         output_split_sizes: torch.Tensor,
         src_idx: torch.Tensor,
-        num_tokens: int,
+        output_seqlen: int,
         num_ranks: int,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_meta_stream: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, EventOverlap]:
+    ) -> tuple[torch.Tensor, EventOverlap]:
         """
-        Calculate the permutation indices to transfer from/to all2all-v rank order
-        of the output buffer
+        Calculate the permutation indices to transfer the output buffer to all2all-v rank order
 
         Args:
             output_split_sizes (torch.Tensor): output split sizes tensor
             src_idx (torch.Tensor): src index tensor
-            num_tokens (int): the number of tokens of the output buffer
+            output_seqlen (int): the number of tokens of the output buffer
             num_ranks (int): the number of ranks
             previous_event (EventOverlap | None, optional):
                 the event to wait before actually executing the kernel. Defaults to None.
@@ -427,17 +426,18 @@ class GrpCollBuffer:
                 control whether all the allocated tensors' ownership to be on the hidden meta stream. Defaults to False.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor, EventOverlap]: _description_
+            perm_to_a2av_idxs (torch.Tensor): the permutation indices to transfer the output buffer to all2all-v rank order,
+                i.e. output[perm_to_a2av_idxs] => a2av_output
+            event (EventOverlap): the event after executing the kernel (valid only if `async_finish` is set).
         """
 
         (
-            unperm_from_a2av_idx,
             perm_to_a2av_idx,
             event,
         ) = grpcoll.Meta.get_a2av_perm_idx_from_src_idx(
             output_split_sizes,
             src_idx,
-            num_tokens,
+            output_seqlen,  # num_tokens
             num_ranks,
             getattr(previous_event, "event", None),
             async_finish,
@@ -446,7 +446,6 @@ class GrpCollBuffer:
         )
 
         return (
-            unperm_from_a2av_idx,
             perm_to_a2av_idx,
             EventOverlap(event),
         )

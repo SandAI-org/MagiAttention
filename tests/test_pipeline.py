@@ -106,33 +106,27 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         # -----    set up for native grpcoll   ---- #
 
-        if magi_attention.comm.is_native_grpcoll_enable() and self.world_size in (
-            2,
-            4,
-            8,
-        ):
-            for nccl_group in self.nccl_groups:
-                grpcoll_mgr.register_buffer(
-                    group=nccl_group,
-                    config=GrpCollConfig(
-                        num_nvl_bytes=int(2e9)
-                        * self.world_size
-                        // 8,  # 2GB for 8 ranks
-                    ),
-                )
-                grpcoll_mgr.check_registered(group=nccl_group)
+        if magi_attention.comm.is_native_grpcoll_enable():
+            if self.world_size in (2, 4, 8):
+                for nccl_group in self.nccl_groups:
+                    grpcoll_mgr.register_buffer(
+                        group=nccl_group,
+                        config=GrpCollConfig(
+                            num_nvl_bytes=int(2e9)
+                            * self.world_size
+                            // 8,  # 2GB for 8 ranks
+                        ),
+                    )
+                    grpcoll_mgr.check_registered(group=nccl_group)
 
     def destroy_pg(self):
         # -----    clean up for native grpcoll   ---- #
 
-        if magi_attention.comm.is_native_grpcoll_enable() and self.world_size in (
-            2,
-            4,
-            8,
-        ):
-            for nccl_group in self.nccl_groups:
-                grpcoll_mgr.release_buffer(group=nccl_group)
-                grpcoll_mgr.check_released(group=nccl_group)
+        if magi_attention.comm.is_native_grpcoll_enable():
+            if self.world_size in (2, 4, 8):
+                for nccl_group in self.nccl_groups:
+                    grpcoll_mgr.release_buffer(group=nccl_group)
+                    grpcoll_mgr.check_released(group=nccl_group)
 
         super().destroy_pg()
 

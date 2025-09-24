@@ -438,27 +438,19 @@ class TestGroupCollectiveUtils(TestCase):
         src_index_list = config["src_index_list"]
         world_size = config["world_size"]
 
-        (
-            ref_unperm_from_a2av_idx,
-            ref_perm_to_a2av_idx,
-        ) = self._get_a2av_perm_idxs_from_group_cast_meta_ref(
+        _, ref_perm_to_a2av_idx = self._get_a2av_perm_idxs_from_group_cast_meta_ref(
             output_split_size_list=output_split_size_list,
             src_index_list=src_index_list,
             world_size=world_size,
         )
 
         # use host meta
-
-        (
-            unperm_from_a2av_idx,
-            perm_to_a2av_idx,
-        ) = get_a2av_perm_idxs_from_group_cast_meta(
+        perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=output_split_size_list,
             src_index=src_index_list,
             num_ranks=world_size,
         )
 
-        assert torch.equal(unperm_from_a2av_idx, ref_unperm_from_a2av_idx)
         assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
 
         # use device meta
@@ -474,16 +466,12 @@ class TestGroupCollectiveUtils(TestCase):
             device="cuda",
         )
 
-        (
-            unperm_from_a2av_idx,
-            perm_to_a2av_idx,
-        ) = get_a2av_perm_idxs_from_group_cast_meta(
+        perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=output_split_sizes,
             src_index=src_index,
             num_ranks=world_size,
         )
 
-        assert torch.equal(unperm_from_a2av_idx, ref_unperm_from_a2av_idx)
         assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
 
     @parameterize(

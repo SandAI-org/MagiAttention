@@ -108,7 +108,7 @@ struct Meta {
     return {num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank, event};
   }
 
-  static std::tuple<torch::Tensor, torch::Tensor, std::optional<EventHandle>> get_a2av_perm_idx_from_src_idx(
+  static std::tuple<torch::Tensor, std::optional<EventHandle>> get_a2av_perm_idx_from_src_idx(
       const torch::Tensor& output_split_sizes,
       const torch::Tensor& src_idx,
       int num_tokens,
@@ -141,18 +141,15 @@ struct Meta {
     }
 
     auto num_splits = static_cast<int>(src_idx.size(0));
-    auto unperm_from_a2av_idx = torch::empty({num_tokens}, dtype(torch::kInt64).device(torch::kCUDA));
     auto perm_to_a2av_idx = torch::empty({num_tokens}, dtype(torch::kInt64).device(torch::kCUDA));
 
     layout::get_a2av_perm_idx(
         // input ptr
         output_split_sizes.data_ptr<int64_t>(),
-        src_idx.data_ptr<int>(),
+        src_idx.data_ptr<int64_t>(),
         // output ptr
-        unperm_from_a2av_idx.data_ptr<int64_t>(),
         perm_to_a2av_idx.data_ptr<int64_t>(),
         // meta
-        num_tokens,
         num_ranks,
         num_splits,
         // stream
@@ -162,7 +159,7 @@ struct Meta {
     std::optional<EventHandle> event;
     if (async) {
       event = EventHandle(meta_stream_);
-      for (auto& t : {output_split_sizes, src_idx, unperm_from_a2av_idx, perm_to_a2av_idx}) {
+      for (auto& t : {output_split_sizes, src_idx, perm_to_a2av_idx}) {
         t.record_stream(meta_stream_);
         if (allocate_on_meta_stream)
           t.record_stream(compute_stream);
@@ -175,7 +172,7 @@ struct Meta {
     if (allocate_on_meta_stream)
       at::cuda::setCurrentCUDAStream(compute_stream);
 
-    return {unperm_from_a2av_idx, perm_to_a2av_idx, event};
+    return {perm_to_a2av_idx, event};
   }
 };
 

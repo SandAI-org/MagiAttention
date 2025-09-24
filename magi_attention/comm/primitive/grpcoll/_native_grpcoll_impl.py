@@ -94,6 +94,10 @@ def native_group_cast_impl(
     assert config is not None and buffer is not None
 
     # get meta dict and handle
+    input_seqlen: int = input.size(0)
+    output_seqlen: int | None = (
+        output.size(0) if output is not None else kwargs.pop("output_seqlen", None)
+    )
     meta_dict: dict[str, Any] = kwargs.pop("native_group_cast_meta_dict", {})
     handle_dict: dict[str, tuple] = kwargs.pop("native_grpcoll_handle_dict", {})
     # NOTE: here we had better use "get"
@@ -117,17 +121,19 @@ def native_group_cast_impl(
             input_split_sizes=input_split_sizes,
             dst_indices=dst_indices,
             group=group,
+            input_seqlen=input_seqlen,
             # HACK: leave a slot for topk_idx
             # since for now, we transfer the group_cast meta to it inside anyway
-            # which is helpful in the ep/nsa communication scenario
+            # which is helpful in the ep/nsa communication scenarios
             topk_idx=kwargs.pop("topk_idx", None),
         )
 
         # for group-cast, perm_to_a2av_idx is the post_perm_idx
-        _, post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
+        post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=output_split_sizes,
             src_index=src_index,
             num_ranks=group.size(),
+            output_seqlen=output_seqlen,
         )
 
     # launch dispatch kernel
@@ -236,6 +242,10 @@ def native_group_reduce_impl(
     assert config is not None and buffer is not None
 
     # get meta dict and handle
+    input_seqlen: int = input.size(0)
+    output_seqlen: int | None = (
+        output.size(0) if output is not None else kwargs.pop("output_seqlen", None)
+    )
     meta_dict: dict[str, Any] = kwargs.pop("native_group_reduce_meta_dict", {})
     handle_dict: dict[str, tuple] = kwargs.pop("native_grpcoll_handle_dict", {})
     # NOTE: here we had better use "pop"
@@ -254,6 +264,7 @@ def native_group_reduce_impl(
             src_indices=src_indices,
             group=group,
             async_op=async_op,
+            output_seqlen=output_seqlen,
         )
 
     # transfer symmetric group-cast meta args to dispatch meta args
@@ -261,10 +272,12 @@ def native_group_reduce_impl(
         pre_perm_idx = meta_dict["pre_perm_idx"]
     else:
         # for group-reduce, perm_to_a2av_idx is the pre_perm_idx
-        _, pre_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
+        # the same as the post_perm_idx for symmetric group-cast
+        pre_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=input_split_sizes,
             src_index=dst_index,
             num_ranks=group.size(),
+            output_seqlen=input_seqlen,
         )
 
     # launch combine kernel

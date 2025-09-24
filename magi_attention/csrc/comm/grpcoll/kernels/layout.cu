@@ -233,14 +233,7 @@ void get_dispatch_layout(
 }
 
 template <int kNumThreads, int kMaxNumRanks>
-__global__ void get_a2av_perm_idx(
-    const int64_t* output_split_sizes,
-    const int* src_idx,
-    int64_t* unperm_from_a2av_idx,
-    int64_t* perm_to_a2av_idx,
-    int num_tokens, /* unused */
-    int num_ranks,
-    int num_splits) {
+__global__ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx, int64_t* perm_to_a2av_idx, int num_ranks, int num_splits) {
   auto thread_id = static_cast<int>(threadIdx.x);
 
   __shared__ int64_t rank_split_sizes[kNumThreads][kMaxNumRanks];
@@ -297,9 +290,7 @@ __global__ void get_a2av_perm_idx(
 
 // TODO: find a better way to parallelize
 // especially when all the split sizes are small thus the number of splits is too large
-// compute unperm_from_a2av_idx and perm_to_a2av_idx
-// a2a_output[unperm_from_a2av_idx] => output
-// output[perm_to_a2av_idx] => a2a_output
+// compute perm_to_a2av_idx, where output[perm_to_a2av_idx] => a2a_output
 #pragma unroll
   for (int i = 0; i < num_splits; ++i) {
     auto rank = src_idx[i];
@@ -312,8 +303,6 @@ __global__ void get_a2av_perm_idx(
     for (int j = thread_id; j < split_size; j += kNumThreads) {
       auto token_idx = start_token_idx + j;
       auto a2av_token_idx = a2av_offset_this_split + j;
-
-      unperm_from_a2av_idx[token_idx] = a2av_token_idx;
       perm_to_a2av_idx[a2av_token_idx] = token_idx;
     }
 
@@ -325,22 +314,13 @@ __global__ void get_a2av_perm_idx(
   }
 }
 
-void get_a2av_perm_idx(
-    const int64_t* output_split_sizes,
-    const int* src_idx,
-    int64_t* unperm_from_a2av_idx,
-    int64_t* perm_to_a2av_idx,
-    int num_tokens, /* unused */
-    int num_ranks,
-    int num_splits,
-    cudaStream_t stream) {
+void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx, int64_t* perm_to_a2av_idx, int num_ranks, int num_splits, cudaStream_t stream) {
   constexpr int num_sms = 1, kNumThreads = 256, kMaxNumRanks = 16;
   EP_STATIC_ASSERT(kNumThreads >= kMaxNumRanks, "kNumThreads should NOT less than kMaxNumRanks");
   EP_HOST_ASSERT(num_ranks <= kMaxNumRanks);
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  LAUNCH_KERNEL(
-      &cfg, (get_a2av_perm_idx<kNumThreads, kMaxNumRanks>), output_split_sizes, src_idx, unperm_from_a2av_idx, perm_to_a2av_idx, num_tokens, num_ranks, num_splits);
+  LAUNCH_KERNEL(&cfg, (get_a2av_perm_idx<kNumThreads, kMaxNumRanks>), output_split_sizes, src_idx, perm_to_a2av_idx, num_ranks, num_splits);
 }
 
 } // namespace layout

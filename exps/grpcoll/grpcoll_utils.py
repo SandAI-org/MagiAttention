@@ -30,6 +30,21 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_output_meta_args,
     _calc_group_reduce_a2a_input_meta_args,
 )
+from magi_attention.utils import perm_idxs2unperm_idxs as _perm_idxs2unperm_idxs
+
+
+def perm_idxs2unperm_idxs(perm_idxs: torch.Tensor) -> torch.Tensor:
+    perm_idxs_list = perm_idxs.tolist()
+
+    unperm_idxs_list = _perm_idxs2unperm_idxs(perm_idxs_list)
+
+    unperm_idxs = torch.tensor(
+        unperm_idxs_list,
+        dtype=perm_idxs.dtype,
+        device=perm_idxs.device,
+    )
+
+    return unperm_idxs
 
 
 def get_random_split_size_list(

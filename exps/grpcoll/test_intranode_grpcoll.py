@@ -63,6 +63,7 @@ from grpcoll_utils import (
     inplace_unique,
     per_token_cast_back,
     per_token_cast_to_fp8,
+    perm_idxs2unperm_idxs,
     sim_gemm,
     transfer_group_cast_meta_to_dispatch_meta,
 )
@@ -300,24 +301,20 @@ def test_main(
     # which is used to replace the post-dispatch range_gather and pre-combine range_gather
 
     # use host meta
-    (
-        unperm_from_a2av_idx,
-        perm_to_a2av_idx,
-    ) = get_a2av_perm_idxs_from_group_cast_meta(
+    perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
         output_split_sizes=output_split_size_list,
         src_index=src_index_list,
         num_ranks=num_ranks,
     )
+    unperm_from_a2av_idx = perm_idxs2unperm_idxs(perm_to_a2av_idx)
 
     # use device meta
-    (
-        unperm_from_a2av_idx_device,
-        perm_to_a2av_idx_device,
-    ) = get_a2av_perm_idxs_from_group_cast_meta(
+    perm_to_a2av_idx_device = get_a2av_perm_idxs_from_group_cast_meta(
         output_split_sizes=output_split_sizes,
         src_index=src_index,
         num_ranks=num_ranks,
     )
+    unperm_from_a2av_idx_device = perm_idxs2unperm_idxs(perm_to_a2av_idx_device)
 
     assert torch.equal(unperm_from_a2av_idx, unperm_from_a2av_idx_device)
     assert torch.equal(perm_to_a2av_idx, perm_to_a2av_idx_device)
