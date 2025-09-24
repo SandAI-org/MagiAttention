@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import socket
 import warnings
 from collections import defaultdict
 from functools import partial
@@ -40,54 +41,6 @@ from magi_attention.utils import is_list_type_all, nvtx
 # ------------------        common helpers       ------------------ #
 
 RangesWithRank: TypeAlias = list[tuple[NaiveRange, int]]
-
-
-def check_nvlink_connections(group: dist.ProcessGroup):
-    """
-    Check NVLink connection between every pair of GPUs.
-
-    Arguments:
-        group: the communication group.
-    """
-    # Check NVLink connection
-    # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
-    # TODO: check all cases, all local-node GPUs in the group should be connected via NVLink
-    if "PCIE" in torch.cuda.get_device_name():
-        assert group.size() <= 2, "PCIe GPUs only have pairwise NVLink connections"
-
-        import pynvml
-
-        pynvml.nvmlInit()
-
-        devices = (
-            os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
-            .strip(",")
-            .split(",")
-        )
-        physical_device_idx = int(devices[torch.cuda.current_device()])
-        physical_device_indices = [
-            0,
-        ] * group.size()
-        dist.all_gather_object(physical_device_indices, physical_device_idx, group)
-
-        # Check whether they are all connected via NVLink, Reference:
-        # https://github.com/vllm-project/vllm/blob/b8e809a057765c574726a6077fd124db5077ce1f/vllm/platforms/cuda.py#L438
-        handles = [
-            pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices
-        ]
-        for i, handle in enumerate(handles):
-            for j, peer_handle in enumerate(handles):
-                if i >= j:
-                    continue
-                status = pynvml.nvmlDeviceGetP2PStatus(
-                    handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK
-                )
-                assert (
-                    status == pynvml.NVML_P2P_STATUS_OK
-                ), f"GPU {physical_device_indices[i]} and GPU {physical_device_indices[j]} are not connected via NVLink"
-
-        # Close NVML
-        pynvml.nvmlShutdown()
 
 
 def get_pg_backend(pg: dist.ProcessGroup, device: str = "cuda") -> dist.Backend:
@@ -1039,6 +992,95 @@ def calc_group_reduce_a2a_args(
 # ------------------        utils for native grpcoll       ------------------ #
 
 
+def check_nvlink_connections(group: dist.ProcessGroup):
+    """
+    Check NVLink connection between every pair of GPUs.
+
+    Arguments:
+        group: the communication group.
+    """
+    # Check NVLink connection
+    # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
+    # TODO: check all cases, all local-node GPUs in the group should be connected via NVLink
+    if "PCIE" in torch.cuda.get_device_name():
+        assert group.size() <= 2, "PCIe GPUs only have pairwise NVLink connections"
+
+        import pynvml
+
+        pynvml.nvmlInit()
+
+        devices = (
+            os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+            .strip(",")
+            .split(",")
+        )
+        physical_device_idx = int(devices[torch.cuda.current_device()])
+        physical_device_indices = [
+            0,
+        ] * group.size()
+        dist.all_gather_object(physical_device_indices, physical_device_idx, group)
+
+        # Check whether they are all connected via NVLink, Reference:
+        # https://github.com/vllm-project/vllm/blob/b8e809a057765c574726a6077fd124db5077ce1f/vllm/platforms/cuda.py#L438
+        handles = [
+            pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices
+        ]
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i >= j:
+                    continue
+                status = pynvml.nvmlDeviceGetP2PStatus(
+                    handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK
+                )
+                assert (
+                    status == pynvml.NVML_P2P_STATUS_OK
+                ), f"GPU {physical_device_indices[i]} and GPU {physical_device_indices[j]} are not connected via NVLink"
+
+        # Close NVML
+        pynvml.nvmlShutdown()
+
+
+def are_all_ranks_on_same_host(group: dist.ProcessGroup = None) -> bool:
+    """
+    Checks if all ranks within a given ProcessGroup are running on the same host node.
+
+    This function works by having each rank gather its hostname and then comparing
+    these hostnames across the entire group.
+
+    Args:
+        group (dist.ProcessGroup, optional): The process group to check.
+                                             If None, the default process group is used.
+
+    Returns:
+        bool: True if all ranks are on the same host; False otherwise.
+
+    Raises:
+        RuntimeError: If torch.distributed has not been initialized.
+    """
+    if not dist.is_initialized():
+        raise RuntimeError(
+            "torch.distributed has not been initialized. Call dist.init_process_group first."
+        )
+
+    # Get the hostname of the current process
+    current_hostname = socket.gethostname()
+
+    # Create a list to store hostnames from all ranks in the group.
+    # all_gather_object requires a list as an output buffer,
+    # and its size must match the world size of the group.
+    world_size = dist.get_world_size(group)
+    gathered_hostnames = [None] * world_size
+
+    # Use all_gather_object to collect the current hostname from all ranks in the group.
+    # Note: all_gather_object is a blocking operation; all ranks must call it.
+    dist.all_gather_object(gathered_hostnames, current_hostname, group)
+
+    # Check if all gathered hostnames are identical.
+    # If the set of hostnames has only one unique element, it means all ranks
+    # are on the same host.
+    return len(set(gathered_hostnames)) == 1
+
+
 def maybe_lazy_init_buffer(group: dist.ProcessGroup) -> None:
     from ._mgr import grpcoll_mgr
 
@@ -1066,12 +1108,15 @@ def get_group_reduce_handle_from_sym_group_cast(
     from ._native_grpcoll_impl import native_group_cast_impl
 
     # prepare dummpy input/output for symmetric group-cast
-    sym_gc_input_seqlen = (
-        output_seqlen
+    if output is not None:
+        sym_gc_input_seqlen = output.size(0)
+    elif output_seqlen is not None:
+        sym_gc_input_seqlen = output_seqlen
+    elif isinstance(output_split_sizes, list):
+        sym_gc_input_seqlen = sum(output_split_sizes)
+    else:
         # NOTE: had better pass output_seqlen to avoid gpu-cpu sync
-        if output_seqlen is not None
-        else (output.size(0) if output is not None else sum(output_split_sizes))
-    )
+        sym_gc_input_seqlen = output_split_sizes.sum().item()
     sym_gc_output_seqlen = input.size(0)
     sym_gc_dummy_input = torch.empty(
         (sym_gc_input_seqlen, GrpCollBuffer.hidden_size_alignment),
