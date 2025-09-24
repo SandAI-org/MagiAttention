@@ -78,8 +78,9 @@ def is_qo_comm_enable() -> bool:
 
     Default value is ``0``
 
-    NOTE: this feature is experimental and under development for now,
-    which dose NOT support neither multi-stage overlap nor hierarchical comm
+    NOTE: this feature is experimental and under early development for now
+    and not compatible with many other features,
+    thus please do NOT enable it unless you know exactly what you are doing
     """
     return os.environ.get("MAGI_ATTENTION_QO_COMM", "0") == "1"
 
@@ -126,11 +127,12 @@ def is_ffa_bwd_high_precision_reduce_enable() -> bool:
 
 def is_native_grpcoll_enable() -> bool:
     """
-    Toggle this env variable to ``1`` to enable native grpcoll comm kernel implementation
+    Toggle this env variable to ``1`` to enable native kernel implementation for group collective comm
 
     Default value is ``0``
 
-    NOTE: this feature for now is experimental and under early development,
-    and please do NOT enable it unless you know what you are doing
+    NOTE: this feature is experimental and under early development for now
+    and not compatible with many other features,
+    thus please do NOT enable it unless you know exactly what you are doing
     """
     return os.environ.get("MAGI_ATTENTION_NATIVE_GRPCOLL", "0") == "1"

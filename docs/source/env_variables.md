@@ -30,7 +30,17 @@ This environment variable defines the number of hardware queues that CUDA stream
 Toggle this env variable to `1` to enable query/output communication, including fetching remote q (fwd), reducing partial out and lse (fwd), fetching remote q,o,lse,do (bwd), reducing partial dq (bwd), to eliminate the restriction that communication is limited solely to key/value. The default value is `0`.
 
 ```{note}
-This feature is experimental and under development for now, which dose NOT support neither multi-stage overlap nor hierarchical comm.
+This feature is experimental and under early development for now, and not compatible with many other features,
+thus please do NOT enable it unless you know exactly what you are doing.
+```
+
+**MAGI_ATTENTION_NATIVE_GRPCOLL**
+
+Toggle this env variable to `1` to enable native kernel implementation for group collective comm. The default value is `0`.
+
+```{note}
+This feature is experimental and under early development for now, and not compatible with many other features,
+thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
 
