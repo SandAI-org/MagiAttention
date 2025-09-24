@@ -134,10 +134,10 @@ def test_main(
     work_with_pf_gc = group_cast(
         input=x,
         output=recv_x_gc,
-        input_split_size_list=input_split_size_list,
-        dst_indices_list=dst_indices_list,
-        output_split_size_list=output_split_size_list,
-        src_index_list=src_index_list,
+        input_split_sizes=input_split_size_list,
+        output_split_sizes=output_split_size_list,
+        dst_indices=dst_indices_list,
+        src_index=src_index_list,
         group=group,
     )
     recv_x_gc = work_with_pf_gc.wait_post_process(recv_x_gc)
@@ -149,10 +149,10 @@ def test_main(
     work_with_pf_gr = group_reduce(
         input=x_gr,
         output=combined_x_gr,
-        input_split_size_list=output_split_size_list,
-        dst_index_list=src_index_list,
-        output_split_size_list=input_split_size_list,
-        src_indices_list=dst_indices_list,
+        input_split_sizes=output_split_size_list,
+        output_split_sizes=input_split_size_list,
+        dst_index=src_index_list,
+        src_indices=dst_indices_list,
         group=group,
     )
     combined_x_gr = work_with_pf_gr.wait_post_process(combined_x_gr)

@@ -627,8 +627,8 @@ def hier_group_cast_impl_with_a2av(
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_indices, src_index], list
     ), (
-        "This API only support host meta interface, "
-        "thus the input_split_sizes, output_split_sizes, dst_indices, src_index should be list type"
+        "This API only supports host meta interface, "
+        "thus the input_split_sizes, output_split_sizes, dst_indices, src_index should all be list type"
     )
 
     # check shapes
@@ -1200,8 +1200,8 @@ def hier_group_reduce_impl_with_a2av(
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_index, src_indices], list
     ), (
-        "This API only support host meta interface, "
-        "thus the input_split_sizes, output_split_sizes, dst_index, src_indice should be list type"
+        "This API only supports host meta interface, "
+        "thus the input_split_sizes, output_split_sizes, dst_index, src_indice should all be list type"
     )
 
     # check shape
