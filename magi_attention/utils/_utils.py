@@ -328,6 +328,66 @@ def is_list_type_all(
     return all(isinstance(x, _type) for x in _list)
 
 
+def pad_and_pack_tensors(
+    tensors: list[torch.Tensor],
+    target_length: int,
+    padding_value: float = 0.0,
+    dtype: torch.dtype = None,
+    device: torch.device = None,
+) -> torch.Tensor:
+    """
+    Right Pads a list of 1D tensors to a target length and packs them into a 2D tensor.
+
+    Args:
+        tensors: A list of 1D torch.Tensor objects.
+        target_length: The desired length for each padded tensor (e.g., num_ranks).
+        padding_value: The value to use for padding. Defaults to 0.0.
+        dtype: The desired data type of the output tensor. If None,
+               it will be inferred from the input tensors.
+        device: The desired device of the output tensor. If None,
+                it will be inferred from the input tensors.
+
+    Returns:
+        A 2D torch.Tensor where each row is a padded input tensor.
+        The shape will be (len(tensors), target_length).
+    """
+    if not tensors:
+        return torch.empty(0, target_length, dtype=dtype, device=device)
+
+    # Infer dtype and device if not provided
+    if dtype is None:
+        dtype = tensors[0].dtype
+    if device is None:
+        device = tensors[0].device
+
+    num_tensors = len(tensors)
+
+    # Create the output 2D tensor initialized with the padding value
+    packed_tensor = torch.full(
+        (num_tensors, target_length),
+        fill_value=padding_value,
+        dtype=dtype,
+        device=device,
+    )
+
+    for i, tensor in enumerate(tensors):
+        if tensor.dim() != 1:
+            raise ValueError(f"Input tensor at index {i} is not 1D: {tensor.dim()}D")
+
+        current_length = tensor.numel()
+        if current_length > target_length:
+            raise ValueError(
+                f"Tensor at index {i} has length {current_length}, "
+                f"which is greater than target_length {target_length}. "
+                "Cannot pad to a smaller length."
+            )
+
+        # Copy the original tensor into the corresponding row of the packed tensor
+        packed_tensor[i, :current_length] = tensor
+
+    return packed_tensor
+
+
 def transpose_matrix(matrix: list[list[Any]]) -> list[list[Any]]:
     """
     Transposes a 2D list (matrix) where each cell contains custom objects.

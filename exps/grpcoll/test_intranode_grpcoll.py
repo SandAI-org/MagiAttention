@@ -50,6 +50,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     transfer_splits_and_dst_idxs_to_topk_idx,
     unpermute_tensor,
 )
+from magi_attention.utils import pad_and_pack_tensors
 
 # isort: split
 from grpcoll_utils import (
@@ -184,6 +185,38 @@ def test_main(
         random_permute=random_permute_output,
     )
 
+    # to device meta
+    input_split_sizes = torch.tensor(
+        input_split_size_list,
+        dtype=torch.int64,
+        device="cuda",
+    )
+    output_split_sizes = torch.tensor(
+        output_split_size_list,
+        dtype=torch.int64,
+        device="cuda",
+    )
+    dst_indices_tensor_list: list[torch.Tensor] = [
+        torch.tensor(
+            dst_indices,
+            dtype=torch.int64,
+            device="cuda",
+        )
+        for dst_indices in dst_indices_list
+    ]
+    dst_indices = pad_and_pack_tensors(  # shape: [num_splits, num_ranks]
+        tensors=dst_indices_tensor_list,
+        target_length=num_ranks,
+        padding_value=-1,
+        dtype=torch.int64,
+        device="cuda",
+    )
+    src_index = torch.tensor(
+        src_index_list,
+        dtype=torch.int64,
+        device="cuda",
+    )
+
     # get ref dispatch output by group-cast
     recv_x_gc = torch.empty(
         (sum(output_split_size_list), *x.shape[1:]), dtype=torch.bfloat16, device="cuda"
@@ -265,18 +298,35 @@ def test_main(
 
     # get perm/unperm idxs to/from a2av through group-cast meta args
     # which is used to replace the post-dispatch range_gather and pre-combine range_gather
+
+    # use host meta
     (
         unperm_from_a2av_idx,
         perm_to_a2av_idx,
     ) = get_a2av_perm_idxs_from_group_cast_meta(
-        output_split_size_list=output_split_size_list,
-        src_index_list=src_index_list,
-        world_size=num_ranks,
+        output_split_sizes=output_split_size_list,
+        src_index=src_index_list,
+        num_ranks=num_ranks,
     )
+
+    # use device meta
+    (
+        unperm_from_a2av_idx_device,
+        perm_to_a2av_idx_device,
+    ) = get_a2av_perm_idxs_from_group_cast_meta(
+        output_split_sizes=output_split_sizes,
+        src_index=src_index,
+        num_ranks=num_ranks,
+    )
+
+    assert torch.equal(unperm_from_a2av_idx, unperm_from_a2av_idx_device)
+    assert torch.equal(perm_to_a2av_idx, perm_to_a2av_idx_device)
+
     print(
         f"[RANK {rank}]: {perm_to_a2av_idx=}\n" f"{unperm_from_a2av_idx=}\n",
         flush=True,
     )
+
     if not random_permute_output:
         arange_idx = torch.arange(
             sum(output_split_size_list),
@@ -317,14 +367,29 @@ def test_main(
     )
 
     # test get dispatch layout from group cast meta
+
+    # use host meta
     (
         ref_num_tokens_per_rank,
         _,  # ref_num_tokens_per_rdma_rank,
         ref_num_tokens_per_expert,
         ref_is_token_in_rank,
     ) = get_dispatch_layout_from_group_cast_meta(
-        input_split_size_list=input_split_size_list,
-        dst_indices_list=dst_indices_list,
+        input_split_sizes=input_split_size_list,
+        dst_indices=dst_indices_list,
+        group=group,
+        num_nodes=1,
+    )
+
+    # use device meta
+    (
+        ref_num_tokens_per_rank_device,
+        _,  # ref_num_tokens_per_rdma_rank_device,
+        ref_num_tokens_per_expert_device,
+        ref_is_token_in_rank_device,
+    ) = get_dispatch_layout_from_group_cast_meta(
+        input_split_sizes=input_split_sizes,
+        dst_indices=dst_indices,
         group=group,
         num_nodes=1,
     )
@@ -333,15 +398,29 @@ def test_main(
     assert torch.allclose(ref_num_tokens_per_rank, num_tokens_per_rank)
     assert torch.allclose(ref_num_tokens_per_expert, num_tokens_per_expert)
     assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
+    assert torch.allclose(ref_num_tokens_per_rank_device, num_tokens_per_rank)
+    assert torch.allclose(ref_num_tokens_per_expert_device, num_tokens_per_expert)
+    assert torch.allclose(ref_is_token_in_rank_device, is_token_in_rank)
 
     # get dispatch layout from buffer as reference
     if not use_topk:
+        assert num_experts == num_ranks
+
+        # use host meta
         layout_topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
-            input_split_size_list=input_split_size_list,
-            dst_indices_list=dst_indices_list,
+            input_split_sizes=input_split_size_list,
+            dst_indices=dst_indices_list,
             num_ranks=num_ranks,
         )
-        assert num_experts == num_ranks
+
+        # use device meta
+        layout_topk_idx_device = transfer_splits_and_dst_idxs_to_topk_idx(
+            input_split_sizes=input_split_sizes,
+            dst_indices=dst_indices,
+            num_ranks=num_ranks,
+        )
+
+        assert torch.equal(layout_topk_idx, layout_topk_idx_device)
     else:
         layout_topk_idx = topk_idx
     (

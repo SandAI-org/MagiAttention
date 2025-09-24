@@ -217,21 +217,17 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             num_tokens_per_expert,
             is_token_in_rank,
         ) = get_dispatch_layout_from_group_cast_meta(
-            input_split_size_list=self._group_cast_args_dict_packed[
-                "input_split_sizes"
-            ],
-            dst_indices_list=self._group_cast_args_dict_packed["dst_indices"],
+            input_split_sizes=self._group_cast_args_dict_packed["input_split_sizes"],
+            dst_indices=self._group_cast_args_dict_packed["dst_indices"],
             group=self.group,
             num_nodes=1,  # TODO: support internode
         )
 
         # for group-cast/group-reduce, perm_to_a2av_idx is the post_perm_idx/pre_perm_idx
         _, post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
-            output_split_size_list=self._group_cast_args_dict_packed[
-                "output_split_sizes"
-            ],
-            src_index_list=self._group_cast_args_dict_packed["src_index"],
-            world_size=self.world_size,
+            output_split_sizes=self._group_cast_args_dict_packed["output_split_sizes"],
+            src_index=self._group_cast_args_dict_packed["src_index"],
+            num_ranks=self.world_size,
         )
 
         self._group_cast_args_dict_packed["native_group_cast_meta_dict"] = dict(

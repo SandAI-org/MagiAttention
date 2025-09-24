@@ -104,7 +104,7 @@ def group_cast(
                 for the i-th input split to send to
                 2. if dst_indices is a 2D tensor, then dst_indices.shape[0] == sum(input_split_sizes),
                 while dst_indices.shape[1] equals to the maximum length of 1D destination ranks for each input split,
-                and the padded entries should be filled with -1, no matter the padding order
+                and the right-padded entries should be filled with -1
         src_index (list[int] | torch.Tensor):
             the 1D source rank index list / tensor for each output split to receive from,
             where len(src_index) == len(output_split_sizes)
@@ -248,7 +248,7 @@ def group_reduce(
                 for the i-th output split to reduce from
                 2. if src_indices is a 2D tensor, then src_indices.shape[0] == sum(output_split_sizes),
                 while src_indices.shape[1] equals to the maximum length of 1D source ranks for each output split,
-                and the padded entries should be filled with -1, no matter the padding order
+                and the right-padded entries should be filled with -1
                 3. since any reduce operation satisfies the commutative property,
                 the order to reduce to the same output split does not matter, except for numerical errors
         group (dist.ProcessGroup): the process group to comm

@@ -114,8 +114,8 @@ def native_group_cast_impl(
             num_tokens_per_expert,
             is_token_in_rank,
         ) = get_dispatch_layout_from_group_cast_meta(
-            input_split_size_list=input_split_sizes,
-            dst_indices_list=dst_indices,
+            input_split_sizes=input_split_sizes,
+            dst_indices=dst_indices,
             group=group,
             # HACK: leave a slot for topk_idx
             # since for now, we transfer the group_cast meta to it inside anyway
@@ -125,9 +125,9 @@ def native_group_cast_impl(
 
         # for group-cast, perm_to_a2av_idx is the post_perm_idx
         _, post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
-            output_split_size_list=output_split_sizes,
-            src_index_list=src_index,
-            world_size=group.size(),
+            output_split_sizes=output_split_sizes,
+            src_index=src_index,
+            num_ranks=group.size(),
         )
 
     # launch dispatch kernel
@@ -262,9 +262,9 @@ def native_group_reduce_impl(
     else:
         # for group-reduce, perm_to_a2av_idx is the pre_perm_idx
         _, pre_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
-            output_split_size_list=input_split_sizes,
-            src_index_list=dst_index,
-            world_size=group.size(),
+            output_split_sizes=input_split_sizes,
+            src_index=dst_index,
+            num_ranks=group.size(),
         )
 
     # launch combine kernel

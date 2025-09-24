@@ -818,6 +818,10 @@ class TestGroupCollective(DistTestBase):
         if err_msg_list:
             raise AssertionError("\n".join(err_msg_list))
 
+        # check for native grpcoll
+        if use_native_grpcoll:
+            assert "group_reduce" not in native_grpcoll_handle_dict
+
 
 if __name__ == "__main__":
     run_tests()

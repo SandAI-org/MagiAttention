@@ -24,10 +24,11 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_reduce_a2a_input_args,
     get_a2av_perm_idxs_from_group_cast_meta,
     sum_reduce_to_tensor,
+    transfer_splits_and_dst_idxs_to_topk_idx,
     unpermute_tensor,
 )
 from magi_attention.testing import parameterize
-from magi_attention.utils import perm_idxs2unperm_idxs
+from magi_attention.utils import pad_and_pack_tensors, perm_idxs2unperm_idxs
 
 
 class TestGroupCollectiveUtils(TestCase):
@@ -446,17 +447,115 @@ class TestGroupCollectiveUtils(TestCase):
             world_size=world_size,
         )
 
+        # use host meta
+
         (
             unperm_from_a2av_idx,
             perm_to_a2av_idx,
         ) = get_a2av_perm_idxs_from_group_cast_meta(
-            output_split_size_list=output_split_size_list,
-            src_index_list=src_index_list,
-            world_size=world_size,
+            output_split_sizes=output_split_size_list,
+            src_index=src_index_list,
+            num_ranks=world_size,
         )
 
         assert torch.equal(unperm_from_a2av_idx, ref_unperm_from_a2av_idx)
         assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
+
+        # use device meta
+
+        output_split_sizes = torch.tensor(
+            output_split_size_list,
+            dtype=torch.int64,
+            device="cuda",
+        )
+        src_index = torch.tensor(
+            src_index_list,
+            dtype=torch.int64,
+            device="cuda",
+        )
+
+        (
+            unperm_from_a2av_idx,
+            perm_to_a2av_idx,
+        ) = get_a2av_perm_idxs_from_group_cast_meta(
+            output_split_sizes=output_split_sizes,
+            src_index=src_index,
+            num_ranks=world_size,
+        )
+
+        assert torch.equal(unperm_from_a2av_idx, ref_unperm_from_a2av_idx)
+        assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
+
+    @parameterize(
+        "config",
+        [
+            {
+                "input_split_size_list": [10, 5, 20],
+                "dst_indices_list": [[0], [0, 1], [1]],
+                "world_size": 2,
+            },
+            # fmt: off
+            {
+                "input_split_size_list": [
+                    166, 895,   # group1
+                    517, 145,   # group2
+                    372, 1010,  # group3
+                    354, 188,   # group4
+                    308, 141,   # group5
+                ],
+                "dst_indices_list": [
+                    [2, 3, 7], [],                               # group1
+                    [0, 1, 2, 3, 4, 5, 7], [1, 2, 3, 4, 6, 7],   # group2
+                    [0, 1, 2, 3, 4, 5], [1, 2, 3, 4, 6, 7],      # group3
+                    [0, 2, 3, 4, 5, 6, 7], [0, 1, 3, 5, 6, 7],   # group4
+                    [2, 3, 5], [],                               # group5
+                ],
+                "world_size": 8,
+            },
+            # fmt: on
+        ],
+    )
+    def test_transfer_splits_and_dst_idxs_to_topk_idxs(self, config):
+        input_split_size_list = config["input_split_size_list"]
+        dst_indices_list = config["dst_indices_list"]
+        world_size = config["world_size"]
+
+        # use host meta as ref
+        ref_topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+            input_split_sizes=input_split_size_list,
+            dst_indices=dst_indices_list,
+            num_ranks=world_size,
+        )
+
+        # test device meta
+        input_split_sizes = torch.tensor(
+            input_split_size_list,
+            dtype=torch.int64,
+            device="cuda",
+        )
+        dst_indices_list: list[torch.Tensor] = [
+            torch.tensor(
+                dst_indices,
+                dtype=torch.int64,
+                device="cuda",
+            )
+            for dst_indices in dst_indices_list
+        ]
+        dst_indices = pad_and_pack_tensors(  # shape: [num_splits, num_ranks]
+            tensors=dst_indices_list,
+            target_length=world_size,
+            padding_value=-1,
+            dtype=torch.int64,
+            device="cuda",
+        )
+
+        topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+            input_split_sizes=input_split_sizes,
+            dst_indices=dst_indices,
+            num_ranks=world_size,
+        )
+
+        assert torch.equal(topk_idx, ref_topk_idx)
 
     def _seqlens2curanges(
         self,
