@@ -557,6 +557,13 @@ Buffer::intranode_dispatch(
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) + // Top-k weight buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_scales // FP8 scale buffer
       <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
+
+  // Launch dispatch kernel
+  // FIXME: we find out the dispatch kernel cannot be picked until the ffa kernel is finished,
+  // if the ffa kernel is picked first and the sm_margin is not large enough
+  // e.g. if the dispatch kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 48 SMs,
+  // otherwise the dispatch kernel will wait until the ffa kernel is finished,
+  // the same phenomenon happens with the combine kernel as well
   intranode::dispatch(
       recv_x.data_ptr(),
       recv_x_scales_ptr,
@@ -765,6 +772,11 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       <= num_nvl_bytes);
 
   // Launch combine kernel
+  // FIXME: we find out the combine kernel cannot be picked until the ffa kernel is finished,
+  // if the ffa kernel is picked first and the sm_margin is not large enough
+  // e.g. if the combine kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 48 SMs,
+  // otherwise the combine kernel will wait until the ffa kernel is finished
+  // the same phenomenon happens with the dispatch kernel as well
   intranode::combine(
       at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
       combined_x.data_ptr(),
