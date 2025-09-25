@@ -18,7 +18,7 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.common.enum import OutMaybeWithLSE, ReduceOp
+from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
 from magi_attention.common.range_op import range_reduce
 from magi_attention.functional.utils import correct_attn_lse, correct_attn_out
 from magi_attention.testing import parameterize
@@ -31,7 +31,7 @@ def range_reduce_ref(
     input_ranges: torch.Tensor,
     output_ranges: torch.Tensor,
     dim: int = 0,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     reduce_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
@@ -387,7 +387,7 @@ class TestRangeReduce(TestCase):
         output_ranges: torch.Tensor,
         dim: int = 0,
         deterministic: bool = False,
-        reduce_op: ReduceOp = "sum",
+        reduce_op: GroupReduceOp = "sum",
         reduce_dtype: torch.dtype | None = None,
         test_case: str = "",
     ):

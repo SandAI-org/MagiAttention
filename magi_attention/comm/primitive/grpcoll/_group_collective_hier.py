@@ -21,7 +21,7 @@ import torch.distributed as dist
 
 import magi_attention
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
-from magi_attention.common.enum import ReduceOp
+from magi_attention.common.enum import GroupReduceOp
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.utils import is_list_type_all, nvtx
 
@@ -1136,7 +1136,7 @@ def hier_group_reduce_impl_with_a2av(
     src_indices: list[list[int]],
     group: dist.ProcessGroup,
     async_op: bool = False,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
@@ -1156,7 +1156,7 @@ def hier_group_reduce_impl_with_a2av(
     src_indices: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
@@ -1175,7 +1175,7 @@ def hier_group_reduce_impl_with_a2av(
     src_indices: list[list[int]] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,

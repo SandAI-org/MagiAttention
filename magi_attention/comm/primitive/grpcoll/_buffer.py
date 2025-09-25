@@ -41,7 +41,7 @@ from typing import Callable, Union
 import torch
 import torch.distributed as dist
 
-from magi_attention.common.enum import ReduceOp
+from magi_attention.common.enum import GroupReduceOp
 from magi_attention.magi_attn_comm import grpcoll
 
 from ._config import GrpCollConfig
@@ -749,7 +749,7 @@ class GrpCollBuffer:
         x: torch.Tensor,
         handle: tuple,
         combined_x: torch.Tensor | None = None,
-        reduce_op: ReduceOp = "sum",
+        reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
@@ -772,7 +772,7 @@ class GrpCollBuffer:
             x: `[num_tokens, hidden]` with `torch.bfloat16`, the tokens to send for reducing to its original ranks.
             handle: a must-set communication handle, you can obtain this from the dispatch function.
             combined_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
-            reduce_op (Literal["sum", "avg", "weight", "lse"]): the reduce operation to use. Defaults to "sum"
+            reduce_op (GroupReduceOp): the reduce operation to use. Defaults to "sum"
                 - "sum": sum reduction
                 - "avg": average reduction
                 - "lse": log-sum-exp weighted average reduction, with lse correction
@@ -1065,7 +1065,7 @@ class GrpCollBuffer:
         combined_x: torch.Tensor | None,
         handle: Union[tuple, list],
         hidden_shape: torch.Size,
-        reduce_op: ReduceOp = "sum",
+        reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
         bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,

@@ -32,7 +32,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_dispatch_layout_from_group_cast_meta,
 )
-from magi_attention.common.enum import ReduceOp
+from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import format_dict_field, format_list_field
 
 
@@ -101,7 +101,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
     """The a2a-v based args for group cast/reduce collective"""
 
     packed_times: int = 1
-    reduce_op: ReduceOp = "sum"
+    reduce_op: GroupReduceOp = "sum"
     init_group_reduce: bool = True
 
     def __post_init__(self):

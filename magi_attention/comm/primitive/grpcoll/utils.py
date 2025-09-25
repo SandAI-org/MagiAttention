@@ -27,7 +27,7 @@ import triton.language as tl
 
 import magi_attention
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
-from magi_attention.common.enum import OutMaybeWithLSE, ReduceOp
+from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
 from magi_attention.common.range import NaiveRange
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.common.range_op.utils import (
@@ -762,7 +762,7 @@ def _calc_group_reduce_a2a_input_args(
     input_split_size_list: list[int],
     dst_index_list: list[int],
     world_size: int,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     input_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[OutMaybeWithLSE, list[int]]:
@@ -855,7 +855,7 @@ def _calc_group_reduce_a2a_output_args(
     output_split_size_list: list[int],
     src_indices_list: list[list[int]],
     world_size: int,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     output_lse: torch.Tensor | None = None,
     deterministic: bool = False,
     **kwargs,
@@ -913,7 +913,7 @@ def calc_group_reduce_a2a_args(
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
     world_size: int,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,

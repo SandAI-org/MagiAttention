@@ -19,7 +19,7 @@ import torch.distributed as dist
 
 import magi_attention
 from magi_attention.comm.work import WorkWithPostProcessFn
-from magi_attention.common.enum import ReduceOp
+from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import nvtx
 
 from ._a2av_grpcoll_impl import a2av_group_cast_impl, a2av_group_reduce_impl
@@ -174,7 +174,7 @@ def group_reduce(
     src_indices: list[list[int]],
     group: dist.ProcessGroup,
     async_op: bool = False,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
@@ -194,7 +194,7 @@ def group_reduce(
     src_indices: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
@@ -214,7 +214,7 @@ def group_reduce(
     src_indices: list[list[int]] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
@@ -251,7 +251,7 @@ def group_reduce(
                 the order to reduce to the same output split does not matter, except for numerical errors
         group (dist.ProcessGroup): the process group to comm
         async_op (bool): whether to use async op. Defaults to False
-        reduce_op (Literal["sum", "avg", "weight", "lse"]): the reduce operation to use. Defaults to "sum"
+        reduce_op (GroupReduceOp): the reduce operation to use. Defaults to "sum"
             - "sum": sum reduction
             - "avg": average reduction
             - "lse": log-sum-exp weighted average reduction, with lse correction

@@ -18,7 +18,7 @@ import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
-from magi_attention.common.enum import OutMaybeWithLSE, ReduceOp
+from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
 from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype, nvtx
 
 from .utils import _calc_cu_range_sizes, _calc_out2inp_range_map, _calc_ranges_row_map
@@ -367,7 +367,7 @@ def range_reduce(
     output_ranges: torch.Tensor,
     dim: int = 0,
     deterministic: bool = False,
-    reduce_op: ReduceOp = "sum",
+    reduce_op: GroupReduceOp = "sum",
     reduce_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
@@ -383,7 +383,7 @@ def range_reduce(
         output_ranges (torch.Tensor): Tensor of [start, end] ranges in the output
         dim (int, optional): Dimension along which to perform the reduction. Default is 0.
         deterministic(bool, optional): Whether to enable deterministic mode
-        reduce_op (Literal["sum", "avg", "weight", "lse"]): the reduce operation to use. Defaults to "sum"
+        reduce_op (GroupReduceOp): the reduce operation to use. Defaults to "sum"
             - "sum": sum reduction
             - "avg": average reduction
             - "lse": log-sum-exp weighted average reduction, with lse correction
