@@ -740,7 +740,7 @@ class GrpCollBuffer:
                 recv_topk_idx,
                 recv_topk_weights,
                 num_recv_tokens_per_expert_list,
-                handle,
+                handle,  # TODO: make the handle tuple as a dataclass
                 EventOverlap(event),
             )
 

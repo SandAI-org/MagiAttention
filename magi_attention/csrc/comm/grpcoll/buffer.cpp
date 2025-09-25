@@ -450,6 +450,8 @@ Buffer::intranode_dispatch(
     for (int i = 0; i < num_local_experts; ++i)
       moe_recv_expert_counter[i] = -1;
     EP_HOST_ASSERT(num_ranks * (num_ranks + num_local_experts) * sizeof(int) <= num_nvl_bytes);
+    // TODO: make notify_dispatch an individual buffer API
+    // to allow notifying in advance to enable cache mode amap
     intranode::notify_dispatch(
         num_tokens_per_rank->data_ptr<int>(),
         moe_recv_counter_mapped,
@@ -554,7 +556,7 @@ Buffer::intranode_dispatch(
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(int64_t) + // Top-k index buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) + // Top-k weight buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_scales // FP8 scale buffer
-      <= num_nvl_bytes);
+      <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
   intranode::dispatch(
       recv_x.data_ptr(),
       recv_x_scales_ptr,
@@ -604,6 +606,7 @@ Buffer::intranode_dispatch(
           num_tokens_per_expert,
           cached_channel_prefix_matrix,
           cached_rank_prefix_matrix,
+          post_perm_idx,
           recv_topk_idx,
           recv_topk_weights,
           recv_x_scales}) {
@@ -797,7 +800,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
     }
-    for (auto& to : {topk_weights, recv_topk_weights, bias_0, bias_1}) {
+    for (auto& to : {topk_weights, recv_topk_weights, bias_0, bias_1, pre_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
