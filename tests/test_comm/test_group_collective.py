@@ -288,7 +288,7 @@ class TestGroupCollective(DistTestBase):
     )
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
-    @parameterize("async_op", [True])  # skip async_op=False to speed up
+    @parameterize("async_op", [False, True])
     def test_group_cast(
         self,
         test_case: dict[str, Any],
@@ -623,7 +623,7 @@ class TestGroupCollective(DistTestBase):
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
     @parameterize("deterministic", [False, True])
-    @parameterize("async_op", [True])  # skip async_op=False to speed up
+    @parameterize("async_op", [False, True])
     def test_group_reduce(
         self,
         test_case: dict[str, Any],

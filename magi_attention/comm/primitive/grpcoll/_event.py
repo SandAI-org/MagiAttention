@@ -75,8 +75,8 @@ class EventOverlap:
         """
         The current stream `torch.cuda.current_stream()` waits for the event to be finished.
         """
-        assert self.event is not None
-        self.event.current_stream_wait()
+        if self.event is not None:
+            self.event.current_stream_wait()
 
     def __enter__(self) -> Any:
         """
