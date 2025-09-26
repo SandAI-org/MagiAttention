@@ -21,7 +21,7 @@ from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import nvtx
 
 from ...work import GeneralWork, WorkWithPostProcessFn
-from ._buffer import GrpCollBuffer
+from ._buffer import GrpCollBuffer, GrpCollHandle
 from ._config import GrpCollConfig
 from ._mgr import grpcoll_mgr
 from .utils import (
@@ -99,10 +99,8 @@ def native_group_cast_impl(
         output.size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
     meta_dict: dict[str, Any] = kwargs.pop("native_group_cast_meta_dict", {})
-    handle_dict: dict[str, tuple] = kwargs.pop("native_grpcoll_handle_dict", {})
-    # NOTE: here we had better use "get"
-    # since the group_cast handle can be reused later
-    handle: tuple | None = handle_dict.get("group_cast", None)
+    handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
+    handle: GrpCollHandle | None = handle_dict.get("group_cast", None)
 
     # transfer group-cast meta args to dispatch meta args
     if meta_dict:
@@ -159,8 +157,8 @@ def native_group_cast_impl(
         allocate_on_comm_stream=False,
     )
 
-    # HACK: prepare handle for symmetric group-reduce
-    # by inserting an item into the handle dict
+    # HACK: prepare handle for symmetric group-reduce or cached group-cast
+    handle_dict["group_cast"] = handle
     handle_dict["group_reduce"] = handle
 
     # prepare work with post-process
@@ -247,11 +245,8 @@ def native_group_reduce_impl(
         output.size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
     meta_dict: dict[str, Any] = kwargs.pop("native_group_reduce_meta_dict", {})
-    handle_dict: dict[str, tuple] = kwargs.pop("native_grpcoll_handle_dict", {})
-    # NOTE: here we had better use "pop"
-    # since the group_reduce handle is always jit-prepared
-    # by the symmetric group-cast
-    handle: tuple | None = handle_dict.pop("group_reduce", None)
+    handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
+    handle: GrpCollHandle | None = handle_dict.get("group_reduce", None)
     if handle is None:
         # FIXME: for now, we don't support individual group-reduce
         # since the necessary handle is not known until the symmetric group-cast returns
@@ -265,6 +260,7 @@ def native_group_reduce_impl(
             group=group,
             async_op=async_op,
             output_seqlen=output_seqlen,
+            topk_idx=kwargs.pop("topk_idx", None),
         )
 
     # transfer symmetric group-cast meta args to dispatch meta args
@@ -296,6 +292,10 @@ def native_group_reduce_impl(
         input_lse=input_lse,
         output_lse=output_lse,
     )
+
+    # HACK: prepare handle for symmetric group-cast or cached group-reduce
+    handle_dict["group_cast"] = handle
+    handle_dict["group_reduce"] = handle
 
     # prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(

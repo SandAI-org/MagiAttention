@@ -36,6 +36,7 @@
 
 import math
 import os
+from dataclasses import dataclass
 from typing import Callable, Union
 
 import torch
@@ -48,7 +49,7 @@ from ._config import GrpCollConfig
 from ._event import EventHandle, EventOverlap
 from .utils import check_nvlink_connections
 
-__all__ = ["GrpCollBuffer"]
+__all__ = ["GrpCollBuffer", "GrpCollHandle", "GrpCollIntraHandle", "GrpCollInterHandle"]
 
 
 reduce_op_str2int_map = {
@@ -56,6 +57,136 @@ reduce_op_str2int_map = {
     "avg": 1,
     "lse": 2,
 }
+
+
+@dataclass
+class GrpCollHandle:
+    """This is a base dataclass for some meta tensors for symmetric group collective
+    that will be passed to the group-reduce from the symmetric group-cast
+    or directly passed to the cached group-cast to avoid notifying
+    """
+
+
+@dataclass
+class GrpCollIntraHandle(GrpCollHandle):
+    """Some meta tensors for intranode group collective
+    that will be passed to the group-reduce from the symmetric group-cast
+    or directly passed to the cached group-cast to avoid notifying
+
+    rank_prefix_matrix: shape=[num_ranks, num_ranks]:
+        rank_prefix_matrix[:, r]: the prefix sum of number of tokens (i.e. end idxs)
+        sent by each rank to rank r calculated in notify_dispatch
+
+    channel_prefix_matrix: shape=[num_ranks, num_channels]:
+        channel_prefix_matrix[r, :]: the prefix sum of send token end idxs
+        sent by each send-channel to rank r calculated in notify_dispatch
+
+    recv_channel_prefix_matrix: shape=[num_ranks, num_channels]:
+        recv_channel_prefix_matrix[r, :]: the prefix sum of recv token start idxs
+        recv by each recv-channel from rank r
+
+    recv_src_idx: shape=[num_recv_tokens,]:
+        the original token idx in the sender's buffer of each recv token
+        so this is used in combine stage to indicate the original token position
+        that each recv token should be reduced to
+
+    is_token_in_rank: shape=[num_tokens, num_ranks]
+        is_token_in_rank[i][r]: whether ith token is sent to rank r (bool values)
+
+    send_head: shape=[num_tokens, num_ranks]:
+        send_head[i, r]: the offset in the corr. channel of send token i
+        if it needs to be sent to rank r since the cached_channel_tail_idx starts at 0
+        when token_idx == token_start_idx for the corr. channel
+        thus the send_head[:, r] will be several cu_seqlens like:
+            [0, 1, ... channel0_size, 0, 1, ... channel1_size, ...]
+        and if is_token_in_rank[i, r] == -1, then send_head[i, r] == -1
+        as well (and should be ignored in the cu_seqlens above)
+    """
+
+    rank_prefix_matrix: torch.Tensor
+    channel_prefix_matrix: torch.Tensor
+    recv_channel_prefix_matrix: torch.Tensor
+    recv_src_idx: torch.Tensor
+    is_token_in_rank: torch.Tensor
+    send_head: torch.Tensor
+
+    @property
+    def num_recv_tokens(self) -> int:
+        return self.recv_src_idx.size(0)
+
+
+@dataclass
+class GrpCollInterHandle(GrpCollHandle):
+    """Some meta tensors for internode group collective
+    that will be passed to the group-reduce from the symmetric group-cast
+    or directly passed to the cached group-cast to avoid notifying
+
+    is_token_in_rank: shape=[num_tokens, num_ranks]
+        is_token_in_rank[i][r]: whether ith token is sent to rank r (bool values)
+
+    rdma_channel_prefix_matrix: shape=[num_rdma_ranks, num_channels]:
+        rdma_channel_prefix_matrix[r, :]: the prefix sum of send token end idxs sent by
+        each send-channel to rdma rank r calculated in notify_dispatch
+
+    gbl_channel_prefix_matrix: shape=[num_ranks, num_channels]:
+        gbl_channel_prefix_matrix[r, :]: the prefix sum of send token end idxs sent by
+        each send-channel to rank r calculated in notify_dispatch
+
+    recv_rdma_channel_prefix_matrix: shape=[num_rdma_ranks, num_channels]:
+        recv_rdma_channel_prefix_matrix[r, :]: the prefix sum of recv token end idxs recv by
+        each recv-channel from rdma rank r
+
+    recv_rdma_rank_prefix_sum: shape=[num_rdma_ranks,]:
+        the prefix sum of the number of tokens to recv from each rdma rank calculated in notify_dispatch
+
+    recv_gbl_channel_prefix_matrix: shape=[num_ranks, num_channels]:
+        recv_gbl_channel_prefix_matrix[r, :]: the prefix sum of recv token start idxs recv by
+        each recv-channel from global rank r
+        NOTE: the start idx is a global idx with rank prefix offsets,
+        i.e. recv_gbl_channel_prefix_matrix[r, 0] does not start from 0 except for r == 0
+
+    recv_gbl_rank_prefix_sum: shape=[num_ranks,]:
+        the prefix sum of the number of tokens to recv from each global rank,
+        thus recv_gbl_rank_prefix_sum[-1] == num_recv_tokens calculated in notify_dispatch
+
+    recv_src_meta: shape=[num_recv_tokens, sizeof(internode::SourceMeta)=8]:
+        the source meta for each recv token,
+        where a SourceMeta struct object stores the src_rdma_rank
+        and the is_token_in_nvl_rank_bits map of this recv token
+        where the j-bit of is_token_in_nvl_rank_bits indicates
+        whether this recv token needs to be sent to the j-th local rank of this node
+
+    send_rdma_head: shape=[num_tokens, num_rdma_ranks]: send_rdma_head[i, r]:
+        the offset in the corr. channel of send token i if it needs to be sent to rdma rank r
+        since the rdma_tail_idx starts at 0 when token_idx == token_start_idx for the corr. channel
+        thus the send_rdma_head[:, r] will be several cu_seqlens like:
+            [0, 1, ... channel0_size, 0, 1, ... channel1_size, ...]
+        and if all is_token_in_rank[i, r*8:(r+1)*8] == -1, then send_rdma_head[i, r] == -1 as well
+        (and should be ignored in the cu_seqlens above)
+
+    send_nvl_head: shape=[num_rdma_recv_tokens, num_local_ranks]:
+        send_nvl_head[i, r]: the token offset of the ith recv token in the nvl forward "list" for local rank r
+        and if this recv token won't be sent to local rank r, then send_nvl_head[i, r] == -1 as well
+    """
+
+    is_token_in_rank: torch.Tensor
+    rdma_channel_prefix_matrix: torch.Tensor
+    gbl_channel_prefix_matrix: torch.Tensor
+    recv_rdma_channel_prefix_matrix: torch.Tensor
+    recv_rdma_rank_prefix_sum: torch.Tensor
+    recv_gbl_channel_prefix_matrix: torch.Tensor
+    recv_gbl_rank_prefix_sum: torch.Tensor
+    recv_src_meta: torch.Tensor
+    send_rdma_head: torch.Tensor
+    send_nvl_head: torch.Tensor
+
+    @property
+    def num_recv_tokens(self) -> int:
+        return self.recv_src_meta.size(0)
+
+    @property
+    def num_rdma_recv_tokens(self) -> int:
+        return self.send_nvl_head.size(0)
 
 
 class GrpCollBuffer:
@@ -503,9 +634,11 @@ class GrpCollBuffer:
 
     def dispatch(
         self,
-        x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        x: Union[
+            torch.Tensor, tuple[torch.Tensor, torch.Tensor]
+        ],  # TODO: remove scales
         recv_x: torch.Tensor | None = None,
-        handle: tuple | None = None,
+        handle: GrpCollHandle | None = None,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
@@ -520,11 +653,11 @@ class GrpCollBuffer:
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> tuple[
-        tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
+        tuple[torch.Tensor, torch.Tensor] | torch.Tensor,  # TODO: remove scales
         torch.Tensor | None,
         torch.Tensor | None,
         list[int],
-        tuple,
+        GrpCollHandle,
         EventOverlap,
     ]:
         """
@@ -628,19 +761,15 @@ class GrpCollBuffer:
                 allocate_on_comm_stream=allocate_on_comm_stream,
             )
 
+        # Intranode
+        # TODO: make the process below an inner function `intranode_dispatch` to call
+
         # Launch the kernel with cached or non-cached mode
         x, x_scales = x if isinstance(x, tuple) else (x, None)
         if handle is not None:
             assert topk_idx is None and topk_weights is None
-            (
-                rank_prefix_matrix,
-                channel_prefix_matrix,
-                recv_channel_prefix_matrix,
-                recv_src_idx,
-                is_token_in_rank,
-                send_head,
-            ) = handle
-            num_recv_tokens = recv_src_idx.size(0)
+            assert isinstance(handle, GrpCollIntraHandle)
+
             (
                 recv_x,
                 recv_x_scales,
@@ -657,14 +786,14 @@ class GrpCollBuffer:
                 x,
                 recv_x,
                 x_scales,
-                None,
-                None,
-                None,
-                is_token_in_rank,
-                None,
-                num_recv_tokens,
-                rank_prefix_matrix,
-                channel_prefix_matrix,
+                None,  # topk_idx
+                None,  # topk_weights
+                None,  # num_tokens_per_rank
+                handle.is_token_in_rank,
+                None,  # num_tokens_per_expert
+                handle.num_recv_tokens,
+                handle.rank_prefix_matrix,
+                handle.channel_prefix_matrix,
                 post_perm_idx,
                 expert_alignment,
                 num_worst_tokens,
@@ -679,10 +808,10 @@ class GrpCollBuffer:
 
             return (  # type: ignore[return-value]
                 (recv_x, recv_x_scales) if x_scales is not None else recv_x,
-                None,
-                None,
-                None,
-                None,
+                None,  # recv_topk_idx
+                None,  # recv_topk_weights
+                None,  # num_recv_tokens_per_expert_list
+                handle,
                 EventOverlap(event),
             )
         else:
@@ -691,6 +820,7 @@ class GrpCollBuffer:
                 and is_token_in_rank is not None
                 and num_tokens_per_expert is not None
             )
+
             (
                 recv_x,
                 recv_x_scales,
@@ -712,9 +842,9 @@ class GrpCollBuffer:
                 num_tokens_per_rank,
                 is_token_in_rank,
                 num_tokens_per_expert,
-                0,
-                None,
-                None,
+                0,  # num_recv_tokens
+                None,  # rank_prefix_matrix
+                None,  # channel_prefix_matrix
                 post_perm_idx,
                 expert_alignment,
                 num_worst_tokens,
@@ -723,13 +853,14 @@ class GrpCollBuffer:
                 async_finish,
                 allocate_on_comm_stream,
             )
-            handle = (
-                rank_prefix_matrix,
-                channel_prefix_matrix,
-                recv_channel_prefix_matrix,
-                recv_src_idx,
-                is_token_in_rank,
-                send_head,
+
+            handle = GrpCollIntraHandle(
+                rank_prefix_matrix=rank_prefix_matrix,
+                channel_prefix_matrix=channel_prefix_matrix,
+                recv_channel_prefix_matrix=recv_channel_prefix_matrix,
+                recv_src_idx=recv_src_idx,
+                is_token_in_rank=is_token_in_rank,
+                send_head=send_head,
             )
 
             # View output to hidden shape
@@ -740,14 +871,14 @@ class GrpCollBuffer:
                 recv_topk_idx,
                 recv_topk_weights,
                 num_recv_tokens_per_expert_list,
-                handle,  # TODO: make the handle tuple as a dataclass
+                handle,
                 EventOverlap(event),
             )
 
     def combine(
         self,
         x: torch.Tensor,
-        handle: tuple,
+        handle: GrpCollHandle,
         combined_x: torch.Tensor | None = None,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
@@ -850,15 +981,10 @@ class GrpCollBuffer:
                 allow_empty_init_out_buf=allow_empty_init_out_buf,
             )
 
-        # NOTES: the second `_` is for the sending side, so we should use the third one
-        (
-            rank_prefix_matrix,
-            _,
-            channel_prefix_matrix,
-            src_idx,
-            is_recv_token_in_rank,
-            send_head,
-        ) = handle
+        # Intranode
+        # TODO: make the process below an inner function `intranode_combine` to call
+        assert isinstance(handle, GrpCollIntraHandle)
+
         bias_0, bias_1 = GrpCollBuffer._unpack_bias(bias)
 
         # Launch the kernel
@@ -869,10 +995,10 @@ class GrpCollBuffer:
             bias_0,
             bias_1,
             pre_perm_idx,
-            src_idx,
-            rank_prefix_matrix,
-            channel_prefix_matrix,
-            send_head,
+            handle.recv_src_idx,  # src_idx
+            handle.rank_prefix_matrix,  # rank_prefix_matrix
+            handle.recv_channel_prefix_matrix,  # channel_prefix_matrix
+            handle.send_head,  # send_head
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_finish,
@@ -889,10 +1015,12 @@ class GrpCollBuffer:
 
     def internode_dispatch(
         self,
-        x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        x: Union[
+            torch.Tensor, tuple[torch.Tensor, torch.Tensor]
+        ],  # TODO: remove scales
         recv_x: torch.Tensor | None,
         hidden_shape: torch.Size,
-        handle: tuple | None = None,
+        handle: GrpCollHandle | None = None,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
@@ -910,7 +1038,7 @@ class GrpCollBuffer:
         torch.Tensor | None,
         torch.Tensor | None,
         list[int],
-        tuple,
+        GrpCollHandle,
         EventOverlap,
     ]:
         """
@@ -918,28 +1046,15 @@ class GrpCollBuffer:
         Normally, you should not directly call this function.
         """
         assert config is not None
-
-        # TODO: support post-perm for internode dispatch
-        assert post_perm_idx is None
+        assert post_perm_idx is None  # TODO: support post-perm for internode dispatch
 
         # Launch the kernel with cached or non-cached mode
         x, x_scales = x if isinstance(x, tuple) else (x, None)
         if handle is not None:
+            assert isinstance(handle, GrpCollInterHandle)
+
             assert topk_idx is None and topk_weights is None
-            (
-                is_token_in_rank,
-                rdma_channel_prefix_matrix,
-                gbl_channel_prefix_matrix,
-                recv_rdma_channel_prefix_matrix,
-                recv_rdma_rank_prefix_sum,
-                recv_gbl_channel_prefix_matrix,
-                recv_gbl_rank_prefix_sum,
-                recv_src_meta,
-                send_rdma_head,
-                send_nvl_head,
-            ) = handle
-            num_recv_tokens = recv_src_meta.size(0)
-            num_rdma_recv_tokens = send_nvl_head.size(0)
+
             (
                 recv_x,
                 recv_x_scales,
@@ -960,18 +1075,18 @@ class GrpCollBuffer:
                 x,
                 recv_x,
                 x_scales,
-                topk_idx,
-                topk_weights,
-                None,
-                None,
-                is_token_in_rank,
-                None,
-                num_recv_tokens,
-                num_rdma_recv_tokens,
-                rdma_channel_prefix_matrix,
-                recv_rdma_rank_prefix_sum,
-                gbl_channel_prefix_matrix,
-                recv_gbl_rank_prefix_sum,
+                None,  # topk_idx
+                None,  # topk_weights
+                None,  # num_tokens_per_rank
+                None,  # num_tokens_per_rdma_rank
+                handle.is_token_in_rank,
+                None,  # num_tokens_per_expert
+                handle.num_recv_tokens,
+                handle.num_rdma_recv_tokens,
+                handle.rdma_channel_prefix_matrix,
+                handle.recv_rdma_rank_prefix_sum,
+                handle.gbl_channel_prefix_matrix,
+                handle.recv_gbl_rank_prefix_sum,
                 expert_alignment,
                 config.to_kernel_config(),
                 getattr(previous_event, "event", None),
@@ -984,10 +1099,10 @@ class GrpCollBuffer:
 
             return (  # type: ignore[return-value]
                 (recv_x, recv_x_scales) if x_scales is not None else recv_x,
-                None,
-                None,
-                None,
-                None,
+                None,  # recv_topk_idx
+                None,  # recv_topk_weights
+                None,  # num_recv_tokens_per_expert_list
+                handle,
                 EventOverlap(event),
             )
         else:
@@ -996,6 +1111,7 @@ class GrpCollBuffer:
                 and is_token_in_rank is not None
                 and num_tokens_per_expert is not None
             )
+
             (
                 recv_x,
                 recv_x_scales,
@@ -1034,17 +1150,18 @@ class GrpCollBuffer:
                 async_finish,
                 allocate_on_comm_stream,
             )
-            handle = (
-                is_token_in_rank,
-                rdma_channel_prefix_matrix,
-                gbl_channel_prefix_matrix,
-                recv_rdma_channel_prefix_matrix,
-                recv_rdma_rank_prefix_sum,
-                recv_gbl_channel_prefix_matrix,
-                recv_gbl_rank_prefix_sum,
-                recv_src_meta,
-                send_rdma_head,
-                send_nvl_head,
+
+            handle = GrpCollInterHandle(
+                is_token_in_rank=is_token_in_rank,
+                rdma_channel_prefix_matrix=rdma_channel_prefix_matrix,
+                gbl_channel_prefix_matrix=gbl_channel_prefix_matrix,
+                recv_rdma_channel_prefix_matrix=recv_rdma_channel_prefix_matrix,
+                recv_rdma_rank_prefix_sum=recv_rdma_rank_prefix_sum,
+                recv_gbl_channel_prefix_matrix=recv_gbl_channel_prefix_matrix,
+                recv_gbl_rank_prefix_sum=recv_gbl_rank_prefix_sum,
+                recv_src_meta=recv_src_meta,
+                send_rdma_head=send_rdma_head,
+                send_nvl_head=send_nvl_head,
             )
 
             # View output to hidden shape
@@ -1063,7 +1180,7 @@ class GrpCollBuffer:
         self,
         x: torch.Tensor,
         combined_x: torch.Tensor | None,
-        handle: Union[tuple, list],
+        handle: GrpCollHandle,
         hidden_shape: torch.Size,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
@@ -1081,23 +1198,10 @@ class GrpCollBuffer:
         Normally, you should not directly call this function.
         """
         assert config is not None
-
-        # TODO: Support pre_perm_idx for internode combine
-        assert pre_perm_idx is None
+        assert pre_perm_idx is None  # TODO: Support pre_perm_idx for internode combine
+        assert isinstance(handle, GrpCollInterHandle)
 
         # Unpack handle and bias
-        (
-            is_combined_token_in_rank,
-            _,
-            _,
-            rdma_channel_prefix_matrix,
-            rdma_rank_prefix_sum,
-            gbl_channel_prefix_matrix,
-            gbl_rank_prefix_sum,
-            src_meta,
-            send_rdma_head,
-            send_nvl_head,
-        ) = handle
         bias_0, bias_1 = GrpCollBuffer._unpack_bias(bias)
 
         # Launch the kernel
@@ -1107,13 +1211,13 @@ class GrpCollBuffer:
             topk_weights,
             bias_0,
             bias_1,
-            src_meta,
-            is_combined_token_in_rank,
-            rdma_channel_prefix_matrix,
-            rdma_rank_prefix_sum,
-            gbl_channel_prefix_matrix,
-            send_rdma_head,
-            send_nvl_head,
+            handle.recv_src_meta,  # src_meta
+            handle.is_token_in_rank,  # is_combined_token_in_rank
+            handle.recv_rdma_channel_prefix_matrix,  # rdma_channel_prefix_matrix
+            handle.recv_rdma_rank_prefix_sum,  # rdma_rank_prefix_sum
+            handle.recv_gbl_channel_prefix_matrix,  # gbl_channel_prefix_matrix
+            handle.send_rdma_head,  # send_rdma_head
+            handle.send_nvl_head,  # send_nvl_head
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_finish,

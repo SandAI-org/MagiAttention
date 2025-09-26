@@ -41,7 +41,10 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
-from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
+from magi_attention.comm.primitive.grpcoll._buffer import (
+    GrpCollBuffer,
+    GrpCollIntraHandle,
+)
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
@@ -583,18 +586,20 @@ def test_main(
                             assert recv_x_from_a2av.shape == recv_x.shape  # type: ignore[union-attr]
 
                     # print
-                    (
-                        rank_prefix_matrix,  # handle[0]
-                        channel_prefix_matrix,  # handle[1]
-                        recv_channel_prefix_matrix,  # handle[2]
-                        recv_src_idx,  # handle[3]
-                        is_token_in_rank_handle,  # handle[4]
-                        send_head,  # handle[5]
-                    ) = handle
+                    assert isinstance(handle, GrpCollIntraHandle)
+
+                    rank_prefix_matrix = handle.rank_prefix_matrix
+                    channel_prefix_matrix = handle.channel_prefix_matrix
+                    recv_channel_prefix_matrix = handle.recv_channel_prefix_matrix
+                    recv_src_idx = handle.recv_src_idx
+                    is_token_in_rank_handle = handle.is_token_in_rank
+                    send_head = handle.send_head
+
                     recv_topk_idx_shape = recv_topk_idx.shape if with_topk else None  # type: ignore[union-attr]
                     recv_topk_weights_shape = (
                         recv_topk_weights.shape if with_topk else None  # type: ignore[union-attr]
                     )
+
                     print(
                         (
                             f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
@@ -955,7 +960,7 @@ def test_main(
         "num_tokens_per_expert": num_tokens_per_expert,
         "config": dispatch_config if dispatch_config is not None else config,
     }
-    recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)
+    recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)  # type: ignore[assignment]
 
     # Tune combine performance
     best_time, best_results = 1e10, None

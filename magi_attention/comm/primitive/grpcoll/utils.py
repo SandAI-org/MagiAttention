@@ -26,6 +26,7 @@ import triton
 import triton.language as tl
 
 import magi_attention
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollHandle
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
 from magi_attention.common.range import NaiveRange
@@ -1103,7 +1104,8 @@ def get_group_reduce_handle_from_sym_group_cast(
     group: dist.ProcessGroup,
     async_op: bool = False,
     output_seqlen: int | None = None,
-) -> tuple:
+    topk_idx: torch.Tensor | None = None,
+) -> GrpCollHandle:
     from ._buffer import GrpCollBuffer
     from ._native_grpcoll_impl import native_group_cast_impl
 
@@ -1135,7 +1137,7 @@ def get_group_reduce_handle_from_sym_group_cast(
 
     # prepare native group-cast handle dict
     # to receive the handle from symmetric group-cast
-    native_grpcoll_handle_dict: dict[str, Any] = {"group_cast": None}
+    native_grpcoll_handle_dict: dict[str, GrpCollHandle] = {}
 
     sym_work_gc = native_group_cast_impl(
         input=sym_gc_dummy_input,
@@ -1146,11 +1148,14 @@ def get_group_reduce_handle_from_sym_group_cast(
         src_index=dst_index,
         group=group,
         async_op=async_op,
+        # additional kwargs
         native_grpcoll_handle_dict=native_grpcoll_handle_dict,
+        topk_idx=topk_idx,
+        output_seqlen=sym_gc_output_seqlen,
     )
     sym_work_gc.wait_post_process()
 
-    handle: tuple = native_grpcoll_handle_dict["group_reduce"]
+    handle: GrpCollHandle = native_grpcoll_handle_dict["group_reduce"]
 
     return handle
 

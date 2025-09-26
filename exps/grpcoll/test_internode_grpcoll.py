@@ -41,7 +41,10 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
-from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
+from magi_attention.comm.primitive.grpcoll._buffer import (
+    GrpCollBuffer,
+    GrpCollInterHandle,
+)
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
@@ -588,22 +591,28 @@ def test_main(
                             assert recv_x_from_a2av.shape == recv_x.shape  # type: ignore[union-attr]
 
                     # print
-                    (
-                        is_token_in_rank_handle,  # handle[0]
-                        rdma_channel_prefix_matrix,  # handle[1]
-                        gbl_channel_prefix_matrix,  # handle[2]
-                        recv_rdma_channel_prefix_matrix,  # handle[3]
-                        recv_rdma_rank_prefix_sum,  # handle[4]
-                        recv_gbl_channel_prefix_matrix,  # handle[5]
-                        recv_gbl_rank_prefix_sum,  # handle[6]
-                        recv_src_meta,  # handle[7]
-                        send_rdma_head,  # handle[8]
-                        send_nvl_head,  # handle[9]
-                    ) = handle
+                    assert isinstance(handle, GrpCollInterHandle)
+
+                    is_token_in_rank_handle = handle.is_token_in_rank
+                    rdma_channel_prefix_matrix = handle.rdma_channel_prefix_matrix
+                    gbl_channel_prefix_matrix = handle.gbl_channel_prefix_matrix
+                    recv_rdma_channel_prefix_matrix = (
+                        handle.recv_rdma_channel_prefix_matrix
+                    )
+                    recv_rdma_rank_prefix_sum = handle.recv_rdma_rank_prefix_sum
+                    recv_gbl_channel_prefix_matrix = (
+                        handle.recv_gbl_channel_prefix_matrix
+                    )
+                    recv_gbl_rank_prefix_sum = handle.recv_gbl_rank_prefix_sum
+                    recv_src_meta = handle.recv_src_meta
+                    send_rdma_head = handle.send_rdma_head
+                    send_nvl_head = handle.send_nvl_head
+
                     recv_topk_idx_shape = recv_topk_idx.shape if with_topk else None  # type: ignore[union-attr]
                     recv_topk_weights_shape = (
                         recv_topk_weights.shape if with_topk else None  # type: ignore[union-attr]
                     )
+
                     print(
                         (
                             f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
@@ -929,7 +938,7 @@ def test_main(
         "num_tokens_per_expert": num_tokens_per_expert,
         "config": dispatch_config if dispatch_config is not None else config,
     }
-    recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)
+    recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)  # type: ignore[assignment]
 
     # Tune combine performance
     best_time, best_results = 1e10, None

@@ -22,6 +22,7 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollHandle
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
@@ -32,6 +33,7 @@ from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import assert_close
 from magi_attention.testing.utils import switch_envvar_context
+from magi_attention.utils import is_list_type_all
 
 
 # TODO: add test cases for world size > 4
@@ -405,7 +407,9 @@ class TestGroupCollective(DistTestBase):
 
         # check for native grpcoll
         if use_native_grpcoll:
-            assert "group_reduce" in native_grpcoll_handle_dict
+            assert is_list_type_all(
+                list(native_grpcoll_handle_dict.values()), GrpCollHandle
+            )
 
     @skip_if_lt_x_gpu(4)
     @with_comms
@@ -820,7 +824,9 @@ class TestGroupCollective(DistTestBase):
 
         # check for native grpcoll
         if use_native_grpcoll:
-            assert "group_reduce" not in native_grpcoll_handle_dict
+            assert is_list_type_all(
+                list(native_grpcoll_handle_dict.values()), GrpCollHandle
+            )
 
 
 if __name__ == "__main__":
