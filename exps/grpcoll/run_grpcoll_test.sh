@@ -17,6 +17,8 @@
 TEST_ROOT=.
 LOG_ROOT=${TEST_ROOT}/outs
 
+mkdir -p ${LOG_ROOT}
+
 export PYTHONPATH=$PYTHONPATH:.
 
 # grpcoll test will set the env vars in the script

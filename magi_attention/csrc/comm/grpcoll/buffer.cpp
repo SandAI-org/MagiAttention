@@ -294,7 +294,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Te
     bool async,
     bool allocate_on_comm_stream) {
   return Meta::get_dispatch_meta_from_topk_idx(
-      topk_idx, num_ranks, is_internode_available() ? 1 : num_rdma_ranks, num_experts, previous_event, async, allocate_on_comm_stream, comm_stream);
+      topk_idx, num_ranks, is_internode_available() ? num_rdma_ranks : 1, num_experts, previous_event, async, allocate_on_comm_stream, comm_stream);
 }
 
 std::tuple<

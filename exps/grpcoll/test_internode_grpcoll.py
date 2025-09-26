@@ -383,7 +383,7 @@ def test_main(
         input_split_sizes=input_split_sizes,
         dst_indices=dst_indices,
         group=group,
-        num_nodes=1,
+        num_nodes=num_nodes,
     )
 
     # assert close to layout ref
@@ -408,14 +408,6 @@ def test_main(
         )
 
         # use device meta
-        dst_indices = pad_and_pack_tensors(  # shape: [num_splits, num_ranks]
-            tensors=dst_indices_list,
-            target_length=num_ranks,
-            padding_value=-1,
-            dtype=torch.int64,
-            device="cuda",
-        )
-
         layout_topk_idx_device = transfer_splits_and_dst_idxs_to_topk_idx(
             input_split_sizes=input_split_sizes,
             dst_indices=dst_indices,
