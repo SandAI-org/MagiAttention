@@ -126,9 +126,6 @@ def sparse_attn_benchmark(
     elif attn_mode == "GQA":
         nhk = nhq // num_group
 
-    max_seqlen_q = block_m
-    max_seqlen_k = block_n
-
     # prepare q, k ranges and calculate attn_flops
     # for now, we only do bench for block sparse mask.
     # block_mask, scores = generate_global_block_sparse_pattern(
@@ -216,8 +213,6 @@ def sparse_attn_benchmark(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
                 )
 

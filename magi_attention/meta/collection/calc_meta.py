@@ -83,20 +83,10 @@ class AttnArg:
                 assert k_ranges_tensor_fwd.shape == torch.Size([batch_size_fwd, 2])
                 assert mask_type_tensor_fwd.shape == torch.Size([batch_size_fwd])
 
-        # init max seqlen
-        if self.skip_attn_fwd:  # no calc needed
-            max_seqlen_q_fwd = 0
-            max_seqlen_k_fwd = 0
-        else:
-            max_seqlen_q_fwd = self.q_ranges.max_seqlen
-            max_seqlen_k_fwd = self.k_ranges.max_seqlen
-
         self.ffa_fwd_args_dict = dict(
             q_ranges=q_ranges_tensor_fwd,
             k_ranges=k_ranges_tensor_fwd,
             attn_type_map=mask_type_tensor_fwd,
-            max_seqlen_q=max_seqlen_q_fwd,
-            max_seqlen_k=max_seqlen_k_fwd,
         )
 
     def _init_ffa_bwd_args_dict(self) -> None:
