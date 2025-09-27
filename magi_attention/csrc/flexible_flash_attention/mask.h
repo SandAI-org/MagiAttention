@@ -157,5 +157,5 @@ struct Mask {
       }
     }
   };
-
+};
 } // namespace flash
