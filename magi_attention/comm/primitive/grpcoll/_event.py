@@ -38,7 +38,20 @@ from typing import Any, Optional
 
 import torch
 
-from magi_attention.magi_attn_comm.grpcoll import EventHandle
+
+class EventHandle:
+    ...
+
+
+is_magi_attn_comm_installed = False
+try:
+    from magi_attention.magi_attn_comm.grpcoll import (  # type: ignore[no-redef] # noqa
+        EventHandle,
+    )
+
+    is_magi_attn_comm_installed = True
+except ImportError:
+    pass
 
 __all__ = ["EventOverlap", "EventHandle"]
 
@@ -64,6 +77,9 @@ class EventOverlap:
             event: the CUDA event captured.
             extra_tensors: an easier way to simulate PyTorch tensor `record_stream`, may be useful with CUDA graph.
         """
+        assert (
+            is_magi_attn_comm_installed
+        ), "The `magi_attn_comm` extension module is not installed."
 
         self.event = event
 
@@ -76,7 +92,7 @@ class EventOverlap:
         The current stream `torch.cuda.current_stream()` waits for the event to be finished.
         """
         if self.event is not None:
-            self.event.current_stream_wait()
+            self.event.current_stream_wait()  # type: ignore[attr-defined]
 
     def __enter__(self) -> Any:
         """
@@ -99,4 +115,4 @@ class EventOverlap:
         Please follow the example in the `__enter__` function.
         """
         if self.event is not None:
-            self.event.current_stream_wait()
+            self.event.current_stream_wait()  # type: ignore[attr-defined]

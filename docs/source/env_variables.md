@@ -141,3 +141,11 @@ Toggle this env variable to `1` can skip building `magi_attn_ext`. The default v
 **MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD**
 
 Toggle this env variable to `1` can skip building `magi_attn_comm`. The default value is `0`.
+
+**NVSHMEM_DIR**
+
+Set this env variable to the path of the custom `nvshmem` installation directory.
+
+If not set, it defaults to find the system module `nvidia-nvshmem-cu12` as listed in `requirements.txt`.
+
+If not found anywhere, all relative features used in native group collective comm kernels are disabled.

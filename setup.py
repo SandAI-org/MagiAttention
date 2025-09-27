@@ -247,13 +247,21 @@ def build_magi_attn_comm_module(
             ).submodule_search_locations[0]
             nvshmem_host_lib = get_nvshmem_host_lib_name()
             import nvidia.nvshmem as nvshmem  # noqa: F401
+
+            if is_in_info_stage():
+                print(
+                    f"`NVSHMEM_DIR` is not specified, thus found from system module: {nvshmem_dir}"
+                )
         except (ModuleNotFoundError, AttributeError, IndexError):
-            warnings.warn(
-                "`NVSHMEM_DIR` is not specified, and the NVSHMEM module is not installed. "
-                "All internode and low-latency features are disabled\n"
-            )
+            if is_in_info_stage():
+                warnings.warn(
+                    "Since `NVSHMEM_DIR` is not specified, and the system nvshmem module is not installed, "
+                    "then all relative features used in native group collective comm kernels are disabled\n"
+                )
             disable_nvshmem = True
     else:
+        if is_in_info_stage():
+            print(f"Found specified `NVSHMEM_DIR`: {nvshmem_dir}")
         disable_nvshmem = False
 
     if not disable_nvshmem:

@@ -14,7 +14,21 @@
 
 from dataclasses import dataclass
 
-from magi_attention.magi_attn_comm import grpcoll
+
+class Config:
+    ...
+
+
+is_magi_attn_comm_installed = False
+try:
+    from magi_attention.magi_attn_comm.grpcoll import (  # type: ignore[no-redef] # noqa
+        Config,
+    )
+
+    is_magi_attn_comm_installed = True
+except ImportError:
+    pass
+
 
 __all__ = ["GrpCollConfig"]
 
@@ -37,8 +51,11 @@ class GrpCollConfig:
     def __post_init__(self):
         pass
 
-    def to_kernel_config(self) -> grpcoll.Config:
-        return grpcoll.Config(
+    def to_kernel_config(self) -> Config:
+        assert (
+            is_magi_attn_comm_installed
+        ), "The `magi_attn_comm` extension module is not installed."
+        return Config(  # type: ignore[call-arg]
             self.num_sms,  # num_sms, default 20
             self.nvl_chunk_size,  # num_max_nvl_chunked_send_tokens, default 6
             self.nvl_buffer_size,  # num_max_nvl_chunked_recv_tokens, default 256

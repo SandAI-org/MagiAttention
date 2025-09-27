@@ -42,12 +42,19 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.common.enum import GroupReduceOp
-from magi_attention.magi_attn_comm import grpcoll
 
 from ._config import GrpCollConfig
 from ._event import EventHandle, EventOverlap
 from ._handle import GrpCollHandle, GrpCollInterHandle, GrpCollIntraHandle
 from .utils import check_nvlink_connections
+
+is_magi_attn_comm_installed = False
+try:
+    from magi_attention.magi_attn_comm import grpcoll
+
+    is_magi_attn_comm_installed = True
+except ImportError:
+    pass
 
 __all__ = ["GrpCollBuffer"]
 
@@ -108,6 +115,10 @@ class GrpCollBuffer:
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
         """
+
+        assert (
+            is_magi_attn_comm_installed
+        ), "The `magi_attn_comm` extension module is not installed."
 
         check_nvlink_connections(group)
 
