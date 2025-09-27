@@ -61,8 +61,6 @@ class TestBlockSparseAttn(DistTestBase):
         do: torch.Tensor,
         q_ranges_tensor,
         k_ranges_tensor,
-        max_seqlen_q,
-        max_seqlen_k,
         attn_type_map_tensor,
         auto_range_merge,
         test_case,
@@ -83,8 +81,6 @@ class TestBlockSparseAttn(DistTestBase):
             v,
             q_ranges_tensor,
             k_ranges_tensor,
-            max_seqlen_q,
-            max_seqlen_k,
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
             deterministic=True,
@@ -116,8 +112,6 @@ class TestBlockSparseAttn(DistTestBase):
         do,
         q_ranges_tensor,
         k_ranges_tensor,
-        max_seqlen_q,
-        max_seqlen_k,
         attn_type_map_tensor,
         auto_range_merge,
         deterministic,
@@ -162,8 +156,6 @@ class TestBlockSparseAttn(DistTestBase):
             lse=None,
             q_ranges=fwd_q_ranges,
             k_ranges=fwd_k_ranges,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
             attn_type_map=fwd_attn_type_map,
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
@@ -187,8 +179,6 @@ class TestBlockSparseAttn(DistTestBase):
             lse=lse_acc,
             q_ranges=fwd_q_ranges,
             k_ranges=fwd_k_ranges,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
             attn_type_map=fwd_attn_type_map,
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
@@ -235,8 +225,6 @@ class TestBlockSparseAttn(DistTestBase):
             lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
-            max_seqlen_q,
-            max_seqlen_k,
             bwd_attn_type_map,
             merge_k_ranges,
             bwd_kq_map,
@@ -265,8 +253,6 @@ class TestBlockSparseAttn(DistTestBase):
             lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
-            max_seqlen_q,
-            max_seqlen_k,
             bwd_attn_type_map,
             merge_k_ranges,
             bwd_kq_map,
@@ -367,8 +353,6 @@ class TestBlockSparseAttn(DistTestBase):
                 do=grad_output,
                 q_ranges_tensor=q_ranges_tensor,
                 k_ranges_tensor=k_ranges_tensor,
-                max_seqlen_q=block_size,
-                max_seqlen_k=block_size,
                 attn_type_map_tensor=attn_type_map,
                 auto_range_merge=True,
                 deterministic=deterministic,
@@ -380,13 +364,6 @@ class TestBlockSparseAttn(DistTestBase):
         v.grad = None
         """
 
-        if uniform:
-            max_seqlen_q = block_size
-            max_seqlen_k = block_size
-        else:
-            max_seqlen_q = block_row_sz.max().item()
-            max_seqlen_k = block_col_sz.max().item()
-
         o, _ = flex_flash_attn_func(
             q,
             k,
@@ -394,8 +371,6 @@ class TestBlockSparseAttn(DistTestBase):
             q_ranges=q_ranges_tensor,
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
             auto_range_merge=True,
         )
 
@@ -411,8 +386,6 @@ class TestBlockSparseAttn(DistTestBase):
                     do=grad_output,
                     q_ranges_tensor=q_ranges_tensor,
                     k_ranges_tensor=k_ranges_tensor,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k,
                     attn_type_map_tensor=attn_type_map_tensor,
                     auto_range_merge=True,
                     test_case=test_case,

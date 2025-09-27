@@ -92,8 +92,6 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
     const at::Tensor& softmax_lse,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
-    int max_seqlen_q,
-    int max_seqlen_k,
     std::optional<const at::Tensor>& attn_type_map_,
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
@@ -208,8 +206,6 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   int const kBlockN = std::get<1>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
   // Get rounded max_seqlen
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
-  int const max_seqlen_q_rounded = round_multiple(max_seqlen_q, kBlockM);
-  int const max_seqlen_k_rounded = round_multiple(max_seqlen_k, kBlockN);
 
   // Determine output dtype for dq
   at::ScalarType dq_type = dq_type_.has_value() ? dq_type_.value() : (dq_.has_value() ? dq_.value().scalar_type() : at::ScalarType::Float);
@@ -299,10 +295,6 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   set_params_dgrad(
       params,
       batch_size,
-      max_seqlen_q,
-      max_seqlen_k,
-      max_seqlen_q_rounded,
-      max_seqlen_k_rounded,
       total_q,
       total_k,
       total_q_rounded,

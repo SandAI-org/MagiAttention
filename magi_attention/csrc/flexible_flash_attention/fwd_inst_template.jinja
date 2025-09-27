@@ -62,8 +62,6 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<at::Tensor>& softmax_lse_,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
-    int max_seqlen_q,
-    int max_seqlen_k,
     std::optional<const at::Tensor>& attn_type_map_,
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
@@ -82,7 +80,7 @@ std::vector<at::Tensor> mha_fwd(
   // Parameter preparation
   auto [params, out, softmax_lse] = prepare_mha_fwd(
       q, k, v, out_, softmax_lse_, q_ranges, k_ranges,
-      max_seqlen_q, max_seqlen_k, attn_type_map_, merge_q_ranges_, qk_map_,
+      attn_type_map_, merge_q_ranges_, qk_map_,
       unique_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
       out_type_, deterministic, sm_margin);
 

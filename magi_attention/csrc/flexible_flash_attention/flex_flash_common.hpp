@@ -41,10 +41,6 @@ void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream);
 void set_params_fprop(
     Flash_fwd_params& params,
     const size_t b,
-    const size_t max_seqlen_q,
-    const size_t max_seqlen_k,
-    const size_t max_seqlen_q_rounded,
-    const size_t max_seqlen_k_rounded,
     const size_t total_q,
     const size_t total_k,
     const size_t total_q_rounded,
@@ -77,10 +73,6 @@ void set_params_fprop(
 void set_params_dgrad(
     Flash_bwd_params& params,
     const size_t b,
-    const size_t max_seqlen_q,
-    const size_t max_seqlen_k,
-    const size_t max_seqlen_q_rounded,
-    const size_t max_seqlen_k_rounded,
     const size_t total_q,
     const size_t total_k,
     const size_t total_q_rounded,

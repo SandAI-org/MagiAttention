@@ -176,8 +176,6 @@ class TestFlexFlashAttn(DistTestBase):
         do: torch.Tensor,
         q_ranges_tensor,
         k_ranges_tensor,
-        max_seqlen_q,
-        max_seqlen_k,
         attn_type_map_tensor,
         auto_range_merge,
         test_case,
@@ -200,8 +198,6 @@ class TestFlexFlashAttn(DistTestBase):
             v,
             q_ranges_tensor,
             k_ranges_tensor,
-            max_seqlen_q,
-            max_seqlen_k,
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
             deterministic=True,
@@ -237,8 +233,6 @@ class TestFlexFlashAttn(DistTestBase):
         do,
         q_ranges_tensor,
         k_ranges_tensor,
-        max_seqlen_q,
-        max_seqlen_k,
         attn_type_map_tensor,
         auto_range_merge,
         deterministic,
@@ -289,8 +283,6 @@ class TestFlexFlashAttn(DistTestBase):
             lse=None,
             q_ranges=fwd_q_ranges,
             k_ranges=fwd_k_ranges,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
             attn_type_map=fwd_attn_type_map,
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
@@ -318,8 +310,6 @@ class TestFlexFlashAttn(DistTestBase):
             lse=lse_acc,
             q_ranges=fwd_q_ranges,
             k_ranges=fwd_k_ranges,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
             attn_type_map=fwd_attn_type_map,
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
@@ -366,8 +356,6 @@ class TestFlexFlashAttn(DistTestBase):
             lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
-            max_seqlen_q,
-            max_seqlen_k,
             bwd_attn_type_map,
             merge_k_ranges,
             bwd_kq_map,
@@ -398,8 +386,6 @@ class TestFlexFlashAttn(DistTestBase):
             lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
-            max_seqlen_q,
-            max_seqlen_k,
             bwd_attn_type_map,
             merge_k_ranges,
             bwd_kq_map,
@@ -736,8 +722,6 @@ class TestFlexFlashAttn(DistTestBase):
         do = torch.randn_like(q)
 
         # construct meta args
-        max_seqlen_q = q_ranges.max_seqlen
-        max_seqlen_k = k_ranges.max_seqlen
         q_ranges_tensor = q_ranges.to_tensor(device=self.device)
         k_ranges_tensor = k_ranges.to_tensor(device=self.device)
         attn_type_map_tensor = torch.tensor(
@@ -753,8 +737,6 @@ class TestFlexFlashAttn(DistTestBase):
                 do=do,
                 q_ranges_tensor=q_ranges_tensor,
                 k_ranges_tensor=k_ranges_tensor,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
                 attn_type_map_tensor=attn_type_map_tensor,
                 auto_range_merge=auto_range_merge,
                 deterministic=deterministic,
@@ -769,8 +751,6 @@ class TestFlexFlashAttn(DistTestBase):
             v,
             q_ranges_tensor,
             k_ranges_tensor,
-            max_seqlen_q,
-            max_seqlen_k,
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
@@ -788,8 +768,6 @@ class TestFlexFlashAttn(DistTestBase):
                 do=do,
                 q_ranges_tensor=q_ranges_tensor,
                 k_ranges_tensor=k_ranges_tensor,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
                 attn_type_map_tensor=attn_type_map_tensor,
                 auto_range_merge=auto_range_merge,
                 test_case=test_case,
@@ -1310,8 +1288,6 @@ class TestFlexFlashAttn(DistTestBase):
         q_ranges = AttnRanges.from_ranges([[0, s // 2], [s // 2, s]])
         k_ranges = AttnRanges.from_ranges([[0, s // 2], [s // 2, s]])
         attn_type_map = [0, 1]
-        max_seqlen_q = s // 2
-        max_seqlen_k = s // 2
 
         compiled_ffa_func = torch.compile(fullgraph=True)(flex_flash_attn_func)
 
@@ -1321,8 +1297,6 @@ class TestFlexFlashAttn(DistTestBase):
             v=v,
             q_ranges=q_ranges.to_tensor("cuda"),
             k_ranges=k_ranges.to_tensor("cuda"),
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
             attn_type_map=torch.tensor(attn_type_map, dtype=torch.int32, device="cuda"),
             # FIXME: compiling does not support auto_range_merge
             # due to custom unique_consecutive_pairs kernel with dynamic output shape
