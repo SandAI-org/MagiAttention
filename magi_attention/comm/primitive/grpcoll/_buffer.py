@@ -52,13 +52,6 @@ from .utils import check_nvlink_connections
 __all__ = ["GrpCollBuffer"]
 
 
-reduce_op_str2int_map = {
-    "sum": 0,
-    "avg": 1,
-    "lse": 2,
-}
-
-
 class GrpCollBuffer:
     """
     The core group collective buffer class with several group-collective comm kernel implementations:
@@ -79,6 +72,11 @@ class GrpCollBuffer:
     num_sms: int = 20
     hidden_size_alignment: int = 2 * 128
     hidden_size_ub: int = 64 * 128  # upper bound
+    reduce_op_str2int_map = {
+        "sum": 0,
+        "avg": 1,
+        "lse": 2,
+    }
 
     def __init__(
         self,
@@ -921,7 +919,7 @@ class GrpCollBuffer:
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,
-            reduce_op_str2int_map[reduce_op],
+            GrpCollBuffer.reduce_op_str2int_map[reduce_op],
             acc_reduce,
             allow_empty_init_out_buf,
         )
@@ -1138,7 +1136,7 @@ class GrpCollBuffer:
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,
-            reduce_op_str2int_map[reduce_op],
+            GrpCollBuffer.reduce_op_str2int_map[reduce_op],
             acc_reduce,
             allow_empty_init_out_buf,
         )

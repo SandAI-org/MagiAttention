@@ -559,11 +559,17 @@ Buffer::intranode_dispatch(
       <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
 
   // Launch dispatch kernel
-  // FIXME: we find out the dispatch kernel cannot be picked until the ffa kernel is finished,
-  // if the ffa kernel is picked first and the sm_margin is not large enough
-  // e.g. if the dispatch kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 48 SMs,
-  // otherwise the dispatch kernel will wait until the ffa kernel is finished,
-  // the same phenomenon happens with the combine kernel as well
+  /** FIXME: we find out the dispatch kernel cannot be picked until the ffa kernel is finished,
+   * if the ffa kernel is picked first and the sm_margin is not large enough
+   * e.g. if the dispatch kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 33 SMs,
+   * otherwise the dispatch kernel will wait until the ffa kernel is finished,
+   * the same phenomenon happens with the combine kernel as well
+   *
+   * later, we've already figured out this phenomenon is due to
+   * both cooperative launch pattern (which at least requires 24 SMs to be launched at the same time),
+   * and also cluster launch pattern (which requires the SMs in one cluster to belong to the same TPC or GPC),
+   * but we don't know how to exactly fix this issue by now
+   */
   intranode::dispatch(
       recv_x.data_ptr(),
       recv_x_scales_ptr,
@@ -772,11 +778,17 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       <= num_nvl_bytes);
 
   // Launch combine kernel
-  // FIXME: we find out the combine kernel cannot be picked until the ffa kernel is finished,
-  // if the ffa kernel is picked first and the sm_margin is not large enough
-  // e.g. if the combine kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 48 SMs,
-  // otherwise the combine kernel will wait until the ffa kernel is finished
-  // the same phenomenon happens with the dispatch kernel as well
+  /** FIXME: we find out the combine kernel cannot be picked until the ffa kernel is finished,
+   * if the ffa kernel is picked first and the sm_margin is not large enough
+   * e.g. if the combine kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 33 SMs,
+   * otherwise the combine kernel will wait until the ffa kernel is finished,
+   * the same phenomenon happens with the dispatch kernel as well
+   *
+   * later, we've already figured out this phenomenon is due to
+   * both cooperative launch pattern (which at least requires 24 SMs to be launched at the same time),
+   * and also cluster launch pattern (which requires the SMs in one cluster to belong to the same TPC or GPC),
+   * but we don't know how to exactly fix this issue by now
+   */
   intranode::combine(
       at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
       combined_x.data_ptr(),
@@ -1430,6 +1442,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
 #endif
 }
 
+// TODO: deal with low latency mode
 void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
 #ifndef DISABLE_NVSHMEM
   EP_HOST_ASSERT(low_latency_mode);
