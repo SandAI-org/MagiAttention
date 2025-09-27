@@ -160,8 +160,6 @@ def sparse_attn_benchmark(
     repeats = nhq // nhk
     block_mask = torch.repeat_interleave(block_mask, repeats=repeats, dim=1)
     """
-    max_seqlen_q = block_row_sz.max().item()
-    max_seqlen_k = block_col_sz.max().item()
 
     attn_flops = 4 * orig_seq_len_q * orig_seq_len_k * orig_head * hd * sparsity_ratio
 
@@ -228,8 +226,6 @@ def sparse_attn_benchmark(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
                 )
 
