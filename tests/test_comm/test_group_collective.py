@@ -22,8 +22,8 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
-from magi_attention.comm.primitive.grpcoll._buffer import GrpCollHandle
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
+from magi_attention.comm.primitive.grpcoll._handle import GrpCollHandle
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,

@@ -26,7 +26,7 @@ import triton
 import triton.language as tl
 
 import magi_attention
-from magi_attention.comm.primitive.grpcoll._buffer import GrpCollHandle
+from magi_attention.comm.primitive.grpcoll._handle import GrpCollHandle
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
 from magi_attention.common.range import NaiveRange

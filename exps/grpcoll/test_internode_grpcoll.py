@@ -41,11 +41,9 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
-from magi_attention.comm.primitive.grpcoll._buffer import (
-    GrpCollBuffer,
-    GrpCollInterHandle,
-)
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
+from magi_attention.comm.primitive.grpcoll._handle import GrpCollInterHandle
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     get_a2av_perm_idxs_from_group_cast_meta,

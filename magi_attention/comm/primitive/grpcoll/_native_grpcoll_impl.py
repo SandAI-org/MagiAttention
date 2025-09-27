@@ -21,8 +21,9 @@ from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import nvtx
 
 from ...work import GeneralWork, WorkWithPostProcessFn
-from ._buffer import GrpCollBuffer, GrpCollHandle
+from ._buffer import GrpCollBuffer
 from ._config import GrpCollConfig
+from ._handle import GrpCollHandle
 from ._mgr import grpcoll_mgr
 from .utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
