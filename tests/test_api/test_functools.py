@@ -292,24 +292,12 @@ class TestFunctools(TestCase):
         ref_k_ranges: AttnRanges = AttnRanges.from_ranges(testcase["ref_k_ranges"])
         ref_attn_type_map: list[int] = testcase["ref_attn_type_map"]
 
-        attn_mask_type: list[AttnMaskType] = [
-            [
-                AttnMaskType.FULL,
-                AttnMaskType.CAUSAL,
-                AttnMaskType.INVCAUSAL,
-                AttnMaskType.BICAUSAL,
-            ][attn_type]
-            for attn_type in attn_type_map
-        ]
-        ref_attn_mask_type: list[AttnMaskType] = [
-            [
-                AttnMaskType.FULL,
-                AttnMaskType.CAUSAL,
-                AttnMaskType.INVCAUSAL,
-                AttnMaskType.BICAUSAL,
-            ][attn_type]
-            for attn_type in ref_attn_type_map
-        ]
+        attn_mask_type: list[AttnMaskType] = list(
+            map(AttnMaskType.from_int_type, attn_type_map)
+        )
+        ref_attn_mask_type: list[AttnMaskType] = list(
+            map(AttnMaskType.from_int_type, ref_attn_type_map)
+        )
 
         q_ranges_padded, k_ranges_padded, attn_mask_type_padded = apply_padding(
             q_ranges=q_ranges,

@@ -91,12 +91,12 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
-        mask_types: Union[list[int], list[AttnMaskType], AttnMaskType],
+        attn_mask_type: Union[list[int], list[AttnMaskType], AttnMaskType],
     ):
-        if isinstance(mask_types, AttnMaskType):
-            mask_types = [mask_types] * len(q_ranges)
+        if isinstance(attn_mask_type, AttnMaskType):
+            attn_mask_type = [attn_mask_type] * len(q_ranges)
         self.rect = AttnRectangles.from_ranges(
-            q_ranges=q_ranges, k_ranges=k_ranges, mask_types=mask_types
+            q_ranges=q_ranges, k_ranges=k_ranges, mask_types=attn_mask_type
         )
 
         self.algorithm.solve(

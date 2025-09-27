@@ -37,6 +37,8 @@ from magi_attention.api.magi_attn_interface import (
     magi_attn_flex_dispatch,
     magi_attn_flex_key,
     magi_attn_varlen_dispatch,
+    make_flex_key_for_new_mask_after_dispatch,
+    make_varlen_key_for_new_mask_after_dispatch,
     undispatch,
 )
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
@@ -49,6 +51,7 @@ from magi_attention.config import (
     UniformOverlapAlg,
 )
 from magi_attention.dist_attn_runtime_mgr import (
+    DistAttnRuntimeKey,
     DistAttnRuntimeMgr,
     init_dist_attn_runtime_mgr,
 )
@@ -130,9 +133,9 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
     @parameterize(
         "attn_config",
         [
-            # full attn with seqlen 1k and batch size 2
+            # full attn with seqlen 2k
             {
-                NAME: "full_attn_1k_bs2",
+                NAME: "full_attn_2k_bs2",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
                 INTERFACE: "magi_attn",
                 "batch_size": 2,
@@ -148,14 +151,14 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                         [1024, 2048],
                     ]
                 ),
-                "attn_type_mapping": 1,
+                "attn_type_mapping": 0,
                 "total_seqlen_q": 2048,
                 "total_seqlen_k": 2048,
                 "chunk_size": 1024,
             },
-            # full attn with seqlen 2k and batch size 3
+            # full attn with seqlen 6k and batch size 3
             {
-                NAME: "full_attn_2k_bs3",
+                NAME: "full_attn_6k_bs3",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
                 INTERFACE: "magi_attn",
                 "batch_size": 3,
@@ -180,7 +183,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
             },
             # varlen full attn with total seqlen 1050
             {
-                NAME: "flex_full_attn_1050",
+                NAME: "flex_varlen_full_attn_1050",
                 SKIP_WORLD_SIZE: [4, 8],
                 INTERFACE: "magi_attn_flex",
                 "q_ranges": AttnRanges.from_ranges(
@@ -215,6 +218,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 NAME: "varlen_full_attn_1050",
                 SKIP_WORLD_SIZE: [4, 8],
                 INTERFACE: "magi_attn_varlen",
+                "test_make_new_key": True,
                 "cu_seqlens_q": torch.tensor(
                     [0, 128, 256, 384, 512, 640, 768, 1050], dtype=torch.int32
                 ),
@@ -244,6 +248,21 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     ]
                 ),
                 "attn_type_mapping": [0] * 7,
+                "new_cu_seqlens_q": torch.tensor([0, 512, 1050], dtype=torch.int32),
+                "new_cu_seqlens_k": torch.tensor([0, 512, 1050], dtype=torch.int32),
+                "new_q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 512],
+                        [512, 1050],
+                    ]
+                ),
+                "new_k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 512],
+                        [512, 1050],
+                    ]
+                ),
+                "new_attn_type_mapping": 0,
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
                 "chunk_size": 568,
@@ -253,6 +272,7 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                 NAME: "varlen_block_causal_960",
                 SKIP_WORLD_SIZE: [7, 8],
                 INTERFACE: "magi_attn_flex",
+                "test_make_new_key": True,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 128],
@@ -276,6 +296,19 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     ]
                 ),
                 "attn_type_mapping": [0, 1, 2, 3, 1, 2, 3],
+                "new_q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 512],
+                        [512, 960],
+                    ]
+                ),
+                "new_k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 512],
+                        [512, 960],
+                    ]
+                ),
+                "new_attn_type_mapping": 1,
                 "total_seqlen_q": 960,
                 "total_seqlen_k": 960,
                 "chunk_size": 568,
@@ -437,29 +470,16 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
         # ------ calculate attn_mask_type ------ #
 
         if isinstance(attn_type_mapping, list):
-            attn_mask_type = [
-                [
-                    AttnMaskType.FULL,
-                    AttnMaskType.CAUSAL,
-                    AttnMaskType.INVCAUSAL,
-                    AttnMaskType.BICAUSAL,
-                ][attn_type]
-                for attn_type in attn_type_mapping
-            ]
+            attn_mask_type = list(map(AttnMaskType.from_int_type, attn_type_mapping))
         else:
-            attn_mask_type = [
-                [  # type: ignore[assignment]
-                    AttnMaskType.FULL,
-                    AttnMaskType.CAUSAL,
-                    AttnMaskType.INVCAUSAL,
-                    AttnMaskType.BICAUSAL,
-                ][attn_type_mapping]
-            ] * len(q_ranges)
+            attn_mask_type = [AttnMaskType.from_int_type(attn_type_mapping)] * len(
+                q_ranges
+            )
 
         # ------ test interface ------ #
 
         match interface:
-            case "magi_attn":
+            case "magi_attn":  # [b, s, nh, hd]
                 assert is_list_value_all(
                     attn_mask_type, AttnMaskType.FULL
                 ) or is_list_value_all(
@@ -572,6 +592,8 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                         dist_attn_config=dist_attn_config,
                     )
                 return
+            case _:
+                raise ValueError(f"Invalid interface: {interface}")
 
         # -----    compute dist attn runtime mgr   ---- #
 
@@ -629,6 +651,93 @@ class TestInterfaceBaseWithWorldSize1(DistTestBase):
                     local_x_padded[:valid_length], global_x_padded[position_ids]
                 )
             )
+
+        # -------   test make new key -------- #
+
+        if attn_config.get("test_make_new_key", False):
+            new_q_ranges: AttnRanges = attn_config["new_q_ranges"]
+            new_k_ranges: AttnRanges = attn_config["new_k_ranges"]
+            new_attn_type_mapping: int | list[int] = attn_config[
+                "new_attn_type_mapping"
+            ]
+            if isinstance(new_attn_type_mapping, list):
+                new_attn_mask_type = list(
+                    map(AttnMaskType.from_int_type, new_attn_type_mapping)
+                )
+            else:
+                new_attn_mask_type = [
+                    AttnMaskType.from_int_type(new_attn_type_mapping)
+                ] * len(new_q_ranges)
+
+            new_dist_attn_config = DistAttnConfig()
+
+            match interface:
+                case "magi_attn_varlen":
+                    new_cu_seqlens_q = attn_config["new_cu_seqlens_q"]
+                    new_cu_seqlens_k = attn_config["new_cu_seqlens_k"]
+
+                    new_key: DistAttnRuntimeKey = (
+                        make_varlen_key_for_new_mask_after_dispatch(
+                            cu_seqlens_q=new_cu_seqlens_q,
+                            cu_seqlens_k=new_cu_seqlens_k,
+                            key_for_dispatch=dist_attn_runtime_key,
+                            dist_attn_config=new_dist_attn_config,
+                        )
+                    )
+                case "magi_attn_flex":
+                    new_key: DistAttnRuntimeKey = (  # type: ignore[no-redef]
+                        make_flex_key_for_new_mask_after_dispatch(
+                            q_ranges=new_q_ranges,
+                            k_ranges=new_k_ranges,
+                            attn_mask_type=new_attn_mask_type,
+                            key_for_dispatch=dist_attn_runtime_key,
+                            dist_attn_config=new_dist_attn_config,
+                        )
+                    )
+                case _:
+                    raise ValueError(
+                        f"Invalid interface for make_new_key test: {interface}"
+                    )
+
+            if pad_size > 0:
+                new_q_ranges, new_k_ranges, new_attn_mask_type = apply_padding(
+                    q_ranges=new_q_ranges,
+                    k_ranges=new_k_ranges,
+                    attn_mask_type=new_attn_mask_type,
+                    total_seqlen=total_seqlen_q,
+                    pad_size=pad_size,
+                )
+
+            # check new key
+            assert new_key.q_ranges == new_q_ranges
+            assert new_key.k_ranges == new_k_ranges
+            assert new_key.attn_mask_type == tuple(new_attn_mask_type)
+            assert new_key.total_seqlen_q == total_seqlen_q + pad_size
+            assert new_key.total_seqlen_k == total_seqlen_k + pad_size
+            assert new_key.pad_size == pad_size
+            assert new_key.chunk_size == chunk_size
+            assert new_key.dist_attn_config == new_dist_attn_config
+
+            new_mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict[new_key]
+            ref_new_mgr = init_dist_attn_runtime_mgr(
+                q_ranges=new_q_ranges,
+                k_ranges=new_k_ranges,
+                attn_mask_type=new_attn_mask_type,
+                total_seqlen_q=total_seqlen_q + pad_size,
+                total_seqlen_k=total_seqlen_k + pad_size,
+                chunk_size=chunk_size,
+                cp_group=self.nccl_group,
+                is_same_source=True,
+                is_q_permutable=True,
+                is_k_permutable=True,
+                dist_attn_config=new_dist_attn_config,
+                cp_mesh=self.device_mesh,
+                ref_dispatch_meta_q=dist_attn_runtime_mgr.dispatch_meta_q,
+                ref_dispatch_meta_k=dist_attn_runtime_mgr.dispatch_meta_k,
+            )
+            assert (
+                new_mgr == ref_new_mgr
+            ), f"For {test_case=}, the {new_mgr=} is not equal to the {ref_new_mgr=}."
 
 
 class TestInterfaceWithWorldSize2(TestInterfaceBaseWithWorldSize1):

@@ -24,7 +24,7 @@ from torch.nn.attention.flex_attention import create_block_mask, create_mask
 
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
-from magi_attention.meta._calc_dispatch_meta import _calc_self_attn_areas
+from magi_attention.meta import make_global_bucket_from_qk_ranges
 
 
 def seed_everything(seed=42):
@@ -71,7 +71,7 @@ def calculate_attn_flops(
     num_heads_q: int,
     head_dim: int,
 ) -> dict[str, float]:
-    attn_area = _calc_self_attn_areas(
+    attn_area = make_global_bucket_from_qk_ranges(
         q_ranges,
         k_ranges,
         attn_mask_type,

@@ -341,7 +341,7 @@ For more information, you can refer to `example/transformers/README.md`.
 - [ ] Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*)
 - [ ] Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*)
 - [ ] Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
-- [ ] Support `Dynamic DistAttnSolver` for dynamic masks such as sparse attention scenarios.
+- [ ] Support `Dynamic DistAttnSolver` with query/output communication pattern, one for either hybrid attention model or dynamic mask scenarios like sparse attention, the other for reducing communication overhead for many cases when only communicating key/value is not the best choice.
 - [ ] Support other attention patterns including cross-attention, sink tokens (*w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453)*) and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
 - [ ] Support Blackwell as well as other GPU architectures.
 - [ ] Provide a more comprehensive documentation with tutorials, and a more detailed technical blog.
