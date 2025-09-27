@@ -481,9 +481,7 @@ class GrpCollBuffer:
 
     def dispatch(
         self,
-        x: Union[
-            torch.Tensor, tuple[torch.Tensor, torch.Tensor]
-        ],  # TODO: remove scales
+        x: torch.Tensor,
         recv_x: torch.Tensor | None = None,
         handle: GrpCollHandle | None = None,
         num_tokens_per_rank: torch.Tensor | None = None,
@@ -500,7 +498,7 @@ class GrpCollBuffer:
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> tuple[
-        tuple[torch.Tensor, torch.Tensor] | torch.Tensor,  # TODO: remove scales
+        torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
         list[int],
@@ -752,9 +750,7 @@ class GrpCollBuffer:
 
     def _intranode_dispatch(
         self,
-        x: Union[
-            torch.Tensor, tuple[torch.Tensor, torch.Tensor]
-        ],  # TODO: remove scales
+        x: torch.Tensor,
         recv_x: torch.Tensor | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
@@ -771,7 +767,7 @@ class GrpCollBuffer:
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> tuple[
-        tuple[torch.Tensor, torch.Tensor] | torch.Tensor,  # TODO: remove scales
+        torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
         list[int],
@@ -779,14 +775,13 @@ class GrpCollBuffer:
         EventOverlap,
     ]:
         # Launch the kernel with cached or non-cached mode
-        x, x_scales = x if isinstance(x, tuple) else (x, None)
         if handle is not None:
             assert topk_idx is None and topk_weights is None
             assert isinstance(handle, GrpCollIntraHandle)
 
             (
                 recv_x,
-                recv_x_scales,
+                _,  # recv_x_scales
                 _,  # recv_topk_idx
                 _,  # recv_topk_weights
                 _,  # num_recv_tokens_per_expert_list
@@ -799,7 +794,7 @@ class GrpCollBuffer:
             ) = self.runtime.intranode_dispatch(
                 x,
                 recv_x,
-                x_scales,
+                None,  # x_scales
                 None,  # topk_idx
                 None,  # topk_weights
                 None,  # num_tokens_per_rank
@@ -821,7 +816,7 @@ class GrpCollBuffer:
             recv_x = recv_x.view(-1, *hidden_shape)
 
             return (  # type: ignore[return-value]
-                (recv_x, recv_x_scales) if x_scales is not None else recv_x,
+                recv_x,
                 None,  # recv_topk_idx
                 None,  # recv_topk_weights
                 None,  # num_recv_tokens_per_expert_list
@@ -837,7 +832,7 @@ class GrpCollBuffer:
 
             (
                 recv_x,
-                recv_x_scales,
+                _,  # recv_x_scales
                 recv_topk_idx,
                 recv_topk_weights,
                 num_recv_tokens_per_expert_list,
@@ -850,7 +845,7 @@ class GrpCollBuffer:
             ) = self.runtime.intranode_dispatch(
                 x,
                 recv_x,
-                x_scales,
+                None,  # x_scales
                 topk_idx,
                 topk_weights,
                 num_tokens_per_rank,
@@ -881,7 +876,7 @@ class GrpCollBuffer:
             recv_x = recv_x.view(-1, *hidden_shape)
 
             return (
-                (recv_x, recv_x_scales) if x_scales is not None else recv_x,
+                recv_x,
                 recv_topk_idx,
                 recv_topk_weights,
                 num_recv_tokens_per_expert_list,
@@ -938,9 +933,7 @@ class GrpCollBuffer:
 
     def _internode_dispatch(
         self,
-        x: Union[
-            torch.Tensor, tuple[torch.Tensor, torch.Tensor]
-        ],  # TODO: remove scales
+        x: torch.Tensor,
         recv_x: torch.Tensor | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
@@ -958,7 +951,7 @@ class GrpCollBuffer:
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> tuple[
-        Union[tuple[torch.Tensor, torch.Tensor], torch.Tensor],
+        torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
         list[int],
@@ -975,15 +968,13 @@ class GrpCollBuffer:
         ), "Internode dispatch does not support `num_worst_tokens > 0`"
 
         # Launch the kernel with cached or non-cached mode
-        x, x_scales = x if isinstance(x, tuple) else (x, None)
         if handle is not None:
             assert isinstance(handle, GrpCollInterHandle)
-
             assert topk_idx is None and topk_weights is None
 
             (
                 recv_x,
-                recv_x_scales,
+                _,  # recv_x_scales
                 _,  # recv_topk_idx
                 _,  # recv_topk_weights
                 _,  # num_recv_tokens_per_expert_list
@@ -1000,7 +991,7 @@ class GrpCollBuffer:
             ) = self.runtime.internode_dispatch(
                 x,
                 recv_x,
-                x_scales,
+                None,  # x_scales
                 None,  # topk_idx
                 None,  # topk_weights
                 None,  # num_tokens_per_rank
@@ -1024,7 +1015,7 @@ class GrpCollBuffer:
             recv_x = recv_x.view(-1, *hidden_shape)
 
             return (  # type: ignore[return-value]
-                (recv_x, recv_x_scales) if x_scales is not None else recv_x,
+                recv_x,
                 None,  # recv_topk_idx
                 None,  # recv_topk_weights
                 None,  # num_recv_tokens_per_expert_list
@@ -1040,7 +1031,7 @@ class GrpCollBuffer:
 
             (
                 recv_x,
-                recv_x_scales,
+                _,  # recv_x_scales
                 recv_topk_idx,
                 recv_topk_weights,
                 num_recv_tokens_per_expert_list,
@@ -1057,7 +1048,7 @@ class GrpCollBuffer:
             ) = self.runtime.internode_dispatch(
                 x,
                 recv_x,
-                x_scales,
+                None,  # x_scales
                 topk_idx,
                 topk_weights,
                 num_tokens_per_rank,
@@ -1094,7 +1085,7 @@ class GrpCollBuffer:
             recv_x = recv_x.view(-1, *hidden_shape)
 
             return (
-                (recv_x, recv_x_scales) if x_scales is not None else recv_x,
+                recv_x,
                 recv_topk_idx,
                 recv_topk_weights,
                 num_recv_tokens_per_expert_list,
