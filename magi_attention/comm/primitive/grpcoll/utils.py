@@ -1483,6 +1483,14 @@ def get_a2av_perm_idxs_from_group_cast_meta(
             "either all list or all torch.Tensor"
         )
 
+    # A shortcut corner case when num_splits == output_seqlen
+    # where output_split_sizes will be a all-ones tensor
+    # and src_index indicates the source rank for each token
+    # then the perm_to_a2av_idx is just the sorted indices
+    # of sorting src_index stably and acscendingly
+    if output_split_sizes.size(0) == output_seqlen:
+        return torch.sort(src_index, stable=True).indices
+
     (
         perm_to_a2av_idx,
         _,  # event_overlap
