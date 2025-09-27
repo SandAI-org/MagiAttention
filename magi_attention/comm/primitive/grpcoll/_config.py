@@ -22,14 +22,15 @@ __all__ = ["GrpCollConfig"]
 @dataclass(frozen=True)
 class GrpCollConfig:
     # for kernel performance
+    # TODO: add maximal performance tuning guide
     num_sms: int = 24
-    nvl_chunk_size: int = 24
+    nvl_chunk_size: int = 8
     nvl_buffer_size: int = 256
-    rdma_chunk_size: int = 12
+    rdma_chunk_size: int = 4
     rdma_buffer_size: int = 128
 
     # for buffer initialization
-    # TODO: set the best values automatically
+    # TODO: add minimal buffer size hint
     num_nvl_bytes: int = int(2e9)  # default 2GB
     num_rdma_bytes: int = 0  # FIXME: 0 for now since we don't support RDMA
 
