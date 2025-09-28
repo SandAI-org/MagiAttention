@@ -474,8 +474,6 @@ class TestDistAttnRuntimeMgr(DistTestBase):
                 dtype=torch.int32,
                 device=torch.cuda.current_device(),
             ),
-            max_seqlen_q=xattn_q_ranges.max_seqlen,
-            max_seqlen_k=xattn_k_ranges.max_seqlen,
         )
 
         local_o, _ = flex_flash_attn_func(
