@@ -236,9 +236,7 @@ struct CollectiveMainloopBwdSm90 {
 
   using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (total_q, d, head)
   using StrideQKV = cute::Stride<int64_t, _1, int64_t>;
-  // using ShapeLSE = cute::Shape<int32_t, int32_t, int32_t>; // (max_seqlen_q, head, batch)
   using ShapeLSE = cute::Shape<_4, int32_t, int32_t>; // (4, total_seqlen, head)
-  // using StrideLSE = cute::Stride<_1, int64_t, int64_t>; // (max_seqlen_q, head, batch)
   using StrideLSE = cute::Stride<_1, _4, int64_t>; // (4, total_seqlen, head)
 
   using GmemTiledCopydQaccum = cute::SM90_TMA_REDUCE_ADD;
@@ -290,7 +288,7 @@ struct CollectiveMainloopBwdSm90 {
   static constexpr uint32_t TmaTransactionBytesQ = static_cast<uint32_t>(size(take<0, 2>(SmemLayoutQ{})) * cutlass::sizeof_bits_v<Element> / 8);
   static constexpr uint32_t TmaTransactionBytesK = static_cast<uint32_t>(size(SmemLayoutK{}) * cutlass::sizeof_bits_v<Element> / 8);
   static constexpr uint32_t TmaTransactionBytesV = static_cast<uint32_t>(size(SmemLayoutV{}) * cutlass::sizeof_bits_v<Element> / 8);
-  // static constexpr uint32_t TmaTransactionBytesLSE = static_cast<uint32_t>(size(select<0>(SmemLayoutLSE{})) * cutlass::sizeof_bits_v<ElementAccum> / 8);
+  // 4 * kblockm bytes
   static constexpr uint32_t TmaTransactionBytesLSE = static_cast<uint32_t>(4 * size(select<1>(SmemLayoutLSE{})) * cutlass::sizeof_bits_v<ElementAccum> / 8);
   // These are tuned for speed. They don't affect correctness.
   // We have separate iterations with causal masking. Not necessary for hdim 128 but for hdim 64
@@ -479,8 +477,6 @@ struct CollectiveMainloopBwdSm90 {
       return false;
     }
 
-    int const thread_idx = threadIdx.x % NumProducerThreads;
-
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
     Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
@@ -498,17 +494,13 @@ struct CollectiveMainloopBwdSm90 {
     Tensor mdO = params.tma_load_dO.get_tma_tensor(params.shape_Q)(_, _, bidh);
     Tensor mK = params.tma_load_K.get_tma_tensor(params.shape_K)(_, _, bidh_kv);
     Tensor mV = params.tma_load_V.get_tma_tensor(params.shape_K)(_, _, bidh_kv);
-    // Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSE, params.stride_LSE_log2)(_, bidh, bidb);
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSE, params.stride_LSE_log2)(_, _, bidh); // (4, total_seqlen)
-    // Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSE, params.stride_dPsum)(_, bidh, bidb);
     Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSE, params.stride_dPsum)(_, _, bidh); // (4, total_seqlen)
 
     Tensor gQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
     Tensor gdO = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdO), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
     Tensor gK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
     Tensor gV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
-    // Tensor gLSE = local_tile(domain_offset(make_coord(0), mLSE), select<0>(TileShape_MNK{}), make_coord(_)); // (M, _)
-    // Tensor gdPsum = local_tile(domain_offset(make_coord(0), mdPsum), select<0>(TileShape_MNK{}), make_coord(_)); // (M, _)
 
     Tensor gLSE = local_tile(
         cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mLSE),
@@ -518,17 +510,6 @@ struct CollectiveMainloopBwdSm90 {
         cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum),
         make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})), // (4, kblockm)
         make_coord(_0{}, _)); // (4, M, _)
-    /*
-    if (thread_idx == 0 && bidh == 7 && bidb == 1) {
-      printf("gLSE:\n"); print_tensor(gLSE);
-      printf("mLSE:\n"); print_tensor(mLSE);
-      printf("offset_q: %d\n", seqlen_info.offset_q);
-      printf("kblocm: %d\n", select<0>(TileShape_MNK{}));
-    }
-    if (thread_idx == 0 && bidh == 7 && bidb == 1) {
-      printf("mdpsum:\n"); print_tensor(mdPsum);
-      printf("gdpsum:\n"); print_tensor(gdPsum);
-    } */
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
@@ -571,7 +552,6 @@ struct CollectiveMainloopBwdSm90 {
           params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
           tQgQ(_, m_block),
           tQsQ(_, smem_pipe_write.index()));
-      // copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, m_block), sLSE(_, smem_pipe_write.index()));
       copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write.index()));
     }
 
@@ -599,7 +579,6 @@ struct CollectiveMainloopBwdSm90 {
             params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
             tdOgdO(_, m_block),
             tdOsdO(_, smem_pipe_write_do_cur.index()));
-        // copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, m_block), sdPsum(_, smem_pipe_write_do_cur.index()));
         copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_do_cur.index()));
         if constexpr (!Q_dO_same_stages) {
           ++smem_pipe_write_do;
@@ -610,7 +589,6 @@ struct CollectiveMainloopBwdSm90 {
             params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
             tQgQ(_, m_block + 1),
             tQsQ(_, smem_pipe_write.index()));
-        // copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, m_block + 1), sLSE(_, smem_pipe_write.index()));
         copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block + 1), sLSE(_, _, smem_pipe_write.index()));
       }
     }
@@ -1012,7 +990,6 @@ struct CollectiveMainloopBwdSm90 {
     int const seqlen_q = seqlen_info.seqlen_q;
     int const seqlen_k = seqlen_info.seqlen_k;
 
-    // int const thread_idx = threadIdx.x % NumProducerThreads;
     // For the case where we do atomicAdd directly to gdQaccum instead of using TMA
     Tensor mdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dQ)), params.shape_dQ, params.stride_dQ)(_, _, bidh);
     Tensor gdQaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)
@@ -1056,10 +1033,10 @@ struct CollectiveMainloopBwdSm90 {
       cute::copy(smem_tiled_copy_V, tdPsV_copy_view, tdPrV_copy_view);
     }
 
-    auto bwd_step = [&](int m_block, auto mask_fn, auto check_mask_q_type) {
+    auto bwd_step = [&](int m_block, auto mask_fn, auto check_mask_lse_type) {
       Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
       consumer_wait(pipeline_q, smem_pipe_read);
-      static constexpr bool check_mask_q = decltype(check_mask_q_type)::value;
+      static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/SdP_swapAB>(tiled_mma_SdP, tSrQ(_, _, _, smem_pipe_read.index()), tSrK, tSrS);
       Tensor tLSErLSE = cute::conditional_return<!ShuffleLSE>(make_fragment_like(tLSEsLSE(_, _0{})), make_tensor<ElementAccum>(Int<kStatsPerThread>{}));
       if constexpr (!ShuffleLSE) {
@@ -1092,8 +1069,9 @@ struct CollectiveMainloopBwdSm90 {
       }();
       mask_fn(tSrS, m_block);
 
-      // Create identity tensor for block shape
-      if constexpr (check_mask_q_type) {
+      // we need to mask out the LSE values that might be read from other batch at each batch's last block.
+      if constexpr (check_mask_lse) {
+        // Create identity tensor for block shape
         auto thread_mma = TiledMmaSdP{}.get_thread_slice(thread_idx);
         auto thread0_mma = TiledMmaSdP{}.get_thread_slice(_0{});
 
@@ -1120,17 +1098,11 @@ struct CollectiveMainloopBwdSm90 {
 
 #pragma unroll
           for (int ni = 0; ni < size<1>(scores); ++ni) {
-            // mask invalid row value;
+            // mask invalid lse value;
             scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - (is_oob ? cutlass::platform::numeric_limits<float>::infinity() : lse_scaled));
-            // scores(mi, ni) = exp2f(scores(mi, ni) * params.softmax_scale_log2 - lse_scaled);
           }
         }
       }
-      /*
-      if (bidh == 7 && thread_idx == 0 && bidb == 1) {
-        printf("score after mask:\n");  print_tensor(scores);
-        printf("tSrS after mask:\n"); print_tensor(tSrS);
-      } */
       // Start debug print
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
@@ -1143,6 +1115,8 @@ struct CollectiveMainloopBwdSm90 {
       //   );
       // }
       // End debug print
+
+      // other blocks
       else {
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
@@ -1159,11 +1133,6 @@ struct CollectiveMainloopBwdSm90 {
         }
       }
 
-      /*
-      if (bidh == 7 && thread_idx == 0 && bidb == 1) {
-        printf("score after softmax and mask:\n");
-        print_tensor(scores);
-      } */
       // Start debug print
       // Tensor scores_16 = make_tensor_like<Element>(tSrS);
       // flash::convert_type_out(tSrS, scores_16);
@@ -1190,12 +1159,7 @@ struct CollectiveMainloopBwdSm90 {
       warpgroup_wait<0>();
       // Reshape tdPrdP from ((2, 2, V), MMA_N, MMA_M) to (nrow=(2, V, MMA_M), ncol=(2, MMA_N))
       Tensor dS = make_tensor(tdPrdP.data(), scores.layout());
-      /*
-      if (bidb == 1 && bidh == 7 && thread_idx == 0) {
-        printf("ds before compute\n");
-        print_tensor(dS);
-        printf("tLSErdPsum before\n"); print_tensor(tLSErdPsum);
-      } */
+
 #pragma unroll
       for (int mi = 0; mi < size<0>(dS); ++mi) {
         float const dP_sum_cur = [&] {
@@ -1210,16 +1174,8 @@ struct CollectiveMainloopBwdSm90 {
           if constexpr (Has_softcap) {
             dS(mi, ni) *= dtanh(mi, ni);
           }
-          // if (isnan(dS(mi, ni))) {
-          //   printf("detect nan bidb: %d bidh: %d thread_idx: %d dP_sum_cur: %f\n", bidb, bidh, thread_idx, dP_sum_cur);
-          // }
         }
       }
-      /*
-      if (bidb == 1 && bidh == 7 && thread_idx == 0) {
-        printf("ds after compute\n"); print_tensor(dS);
-        printf("tLSErdPsum\n"); print_tensor(tLSErdPsum);
-      } */
 
       // Convert scores from fp32 to fp16/bf16
       Tensor rP = make_tensor_like<Element>(tSrS);
@@ -1265,11 +1221,6 @@ struct CollectiveMainloopBwdSm90 {
         Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
         pipeline_do.consumer_release(smem_pipe_read_do_cur); // release dO
-        /*
-        if (bidb == 1 && bidh == 7 && thread_idx == 0) {
-          printf("tdQrdQ");
-          print_tensor(tdQrdQ);
-        } */
 
         if constexpr (Mma_dKV_is_RS) {
           Tensor tdKrdS = make_tensor(rdS.data(), convert_layout_acc_Aregs<TiledMmadKV>(tdPrdP.layout()));
@@ -1399,7 +1350,7 @@ struct CollectiveMainloopBwdSm90 {
     for (; m_block < m_block_max - 1; ++m_block) {
       bwd_step(m_block, mask_fn, cute::false_type{});
     }
-    // only the last block need to check mask_q_block
+    // only the last block need to mask_lse;
     bwd_step(m_block, mask_fn, cute::true_type{});
 
     if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {

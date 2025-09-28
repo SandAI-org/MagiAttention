@@ -83,9 +83,7 @@ class FlashAttnBwdPreprocess {
 
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen_q, d, head)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
-  // using ShapedPsum = cute::Shape<int32_t, int32_t, int32_t>; // (max_seqlen_q, head, batch)
   using ShapedPsum = cute::Shape<_4, int32_t, int32_t>; // (4, total_seqlen, head)
-  // using StridedPsum = cute::Stride<_1, int64_t, int64_t>;
   using StridedPsum = cute::Stride<_1, _4, int64_t>;
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (total_q, head)
   using StrideLSE = cute::Stride<int64_t, _1>;
@@ -179,12 +177,7 @@ class FlashAttnBwdPreprocess {
     int const bidb = blockIdx.x;
 
     // Initialize the seqlen info
-    // flash::DistributedSeqlenInfo seqlen_info(bidb, params.q_ranges, params.k_ranges);
-    // flash::DistributedSeqlenInfo seqlen_info_next(bidb + 1, params.q_ranges, params.k_ranges);
     // int const seqlen_o = seqlen_info.seqlen_q;
-    // int const offset_this_batch = seqlen_info.offset_q;
-    // int const offset_next_batch = seqlen_info_next.offset_q;
-
     // Early return if the current block is out of range
     // if (m_block * kBlockM >= seqlen_o) {
     //  return;
@@ -192,11 +185,8 @@ class FlashAttnBwdPreprocess {
 
     // TODO: remove to params
     // auto shape_LSE = select<0, 2>(params.shape_O);
-    int const offset = m_block * kBlockM;
     // Initialize the tensors for O, dO, and LSE
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
-    // Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mO), TileShape_MK{},
-    // make_coord(m_block, _0{})); // (M, K)
     Tensor gO =
         local_tile(cute::domain_offset(make_coord(0, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
 
@@ -206,7 +196,7 @@ class FlashAttnBwdPreprocess {
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(0), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
-    // REVIEW(littsk): why use infinity here, instead of -infinity ?
+    // mask the lse oob as INFINITY.
     float lse = thread_idx < params.total_q - m_block * kBlockM && thread_idx < kBlockM ? gLSE(thread_idx) : INFINITY;
 
     // Initialize the tiled copy for O and dO
@@ -276,6 +266,8 @@ class FlashAttnBwdPreprocess {
     Tensor gLSElog2 =
         local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
+    // We should not write back -inf because the subsequent calculation of scores would involve -inf - (-inf), which
+    // results in NaN.
     if (thread_idx < params.total_q_rounded - m_block * kBlockM && thread_idx < kBlockM) {
       gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
     }
