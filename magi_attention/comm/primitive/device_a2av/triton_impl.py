@@ -106,8 +106,9 @@ def on_device_a2av_kernel(
     UNROLL_FACTOR: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    # Ensures that all writes to symm_mem buffers from previous
-    # kernels across all devices are visible to the current kernel
+    # All matching blocks from all devices barrier here to ensure
+    # all writes to symm_mem buffers from previous kernels across all devices
+    # are visible to the current kernel
     blockwise_barrier(signal_pad_ptrs, None, rank, world_size, sem="relaxed")
     sync_threads()
 
@@ -190,8 +191,9 @@ def on_device_a2av_kernel(
         data = tl.load(remote_input_ptr + offsets, mask=mask)
         tl.store(output_ptr + offsets, data, mask=mask)
 
-    # Ensures that symm_mem buffers read by the current kernel are safe
-    # for writing by subsequent kernels across all devices.
+    # All matching blocks from all devices barrier here to ensure
+    # symm_mem buffers read by the current kernel are safe
+    # from been writing by subsequent kernels across all devices.
     sync_threads()
     blockwise_barrier(signal_pad_ptrs, None, rank, world_size, sem="relaxed")
 
