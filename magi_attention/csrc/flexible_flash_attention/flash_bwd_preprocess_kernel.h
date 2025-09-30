@@ -177,6 +177,7 @@ class FlashAttnBwdPreprocess {
     int const bidb = blockIdx.x;
 
     // Initialize the seqlen info
+    // flash::DistributedSeqlenInfo seqlen_info(bidb, params.q_ranges, params.k_ranges);
     // int const seqlen_o = seqlen_info.seqlen_q;
     // Early return if the current block is out of range
     // if (m_block * kBlockM >= seqlen_o) {
@@ -196,7 +197,7 @@ class FlashAttnBwdPreprocess {
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(0), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
-    // mask the lse oob as INFINITY.
+    // mask the oob lse as INFINITY.
     float lse = thread_idx < params.total_q - m_block * kBlockM && thread_idx < kBlockM ? gLSE(thread_idx) : INFINITY;
 
     // Initialize the tiled copy for O and dO
