@@ -25,23 +25,19 @@ import torch.distributed._symmetric_memory as symm_mem
 from .triton_impl import on_device_a2av_triton_impl
 
 
-class OnDeviceA2AV(torch.autograd.Function):
+class OnDeviceA2AVMgr:
     # A symmetric memory holding the maximum input buffer to send
     input_send_buf = None
-    # A symmetric memory holding the grad_output during backward
-    grad_output_buf = None
     # A symmetric memory for exchanges split sizes during both forward and backward
     splits_buf = None
-
     # Maximum output length (need to be set before use of OnDeviceA2AV)
     max_output_seqlen = None
-
     # Whether the symmetric memory buffers are all initialized
     is_initialized = False
 
-    @staticmethod
-    def forward(
-        ctx,
+    @classmethod
+    def apply(
+        cls,
         input: torch.Tensor,
         input_splits: torch.Tensor | list[int],
         output: torch.Tensor | None = None,
@@ -55,7 +51,7 @@ class OnDeviceA2AV(torch.autograd.Function):
             group: process group to scope the collective.
         """
 
-        assert OnDeviceA2AV.is_initialized
+        assert cls.is_initialized
 
         # Initialize input splits buffer (one time only)
         if isinstance(input_splits, list):
@@ -64,11 +60,11 @@ class OnDeviceA2AV(torch.autograd.Function):
             )
 
         if (
-            OnDeviceA2AV.splits_buf is None
-            or OnDeviceA2AV.splits_buf.shape != input_splits.shape  # type: ignore[unreachable]
+            cls.splits_buf is None
+            or cls.splits_buf.shape != input_splits.shape  # type: ignore[unreachable]
         ):
             # NOTE: for a2a-v, the shape of input_splits/output_splits is constant to (world_size,)
-            OnDeviceA2AV.splits_buf = symm_mem.empty(
+            cls.splits_buf = symm_mem.empty(
                 *input_splits.shape,
                 dtype=input_splits.dtype,
                 device=input_splits.device,
@@ -77,17 +73,17 @@ class OnDeviceA2AV(torch.autograd.Function):
         # Copy input to the symmetric buffer
         # TODO: is there a way to tell autograd
         # to feed input directly to our symm_mem buffer?
-        OnDeviceA2AV.input_send_buf.narrow(  # type: ignore[attr-defined]
+        cls.input_send_buf.narrow(  # type: ignore[attr-defined]
             dim=0, start=0, length=input.shape[0]
         ).copy_(input.view(input.shape[0], -1))
 
         # Copy input splits to the symmetric buffer
-        OnDeviceA2AV.splits_buf.copy_(input_splits)
+        cls.splits_buf.copy_(input_splits)
 
         # Allocate output buffer
         if output is None:
             if received_num_tokens == -1:
-                output = input.new_empty(OnDeviceA2AV.max_output_seqlen, *input.shape[1:])  # type: ignore[unreachable]
+                output = input.new_empty(cls.max_output_seqlen, *input.shape[1:])  # type: ignore[unreachable]
             else:
                 output = input.new_empty(received_num_tokens, *input.shape[1:])
         elif received_num_tokens == -1:
@@ -101,8 +97,8 @@ class OnDeviceA2AV(torch.autograd.Function):
         on_device_a2av_triton_impl(
             output=output.view(output.shape[0], -1),
             output_splits=output_splits,
-            input=OnDeviceA2AV.input_send_buf,
-            input_splits=OnDeviceA2AV.splits_buf,
+            input=cls.input_send_buf,
+            input_splits=cls.splits_buf,
             group=group,
         )
 
@@ -110,59 +106,7 @@ class OnDeviceA2AV(torch.autograd.Function):
             received_num_tokens = output_splits.sum().item()
             output = output.narrow(dim=0, start=0, length=received_num_tokens)
 
-        # Output splits in forward is the input splits in backward
-        ctx.save_for_backward(output_splits)
-        ctx.group = group
-        ctx.input_shape = input.shape
-        ctx.received_num_tokens = received_num_tokens
-
         return output, output_splits
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor, *args):
-        """
-        Backward is implemented as a shuffle of the output's gradients to the input.
-        Args:
-            `grad_output`: output's gradients passed from the downstream.
-            `grad_splits`: unused.
-        """
-
-        assert OnDeviceA2AV.is_initialized
-
-        # Initialize grad_output buffer (one time only)
-        if OnDeviceA2AV.grad_output_buf is None:
-            assert (
-                OnDeviceA2AV.max_output_seqlen is not None
-            ), "`max_output_seqlen` not set"
-            OnDeviceA2AV.grad_output_buf = symm_mem.empty(  # type: ignore[unreachable]
-                OnDeviceA2AV.max_output_seqlen,
-                *grad_output.shape[1:],
-                dtype=grad_output.dtype,
-                device=grad_output.device,
-            )
-
-        # Copy grad_output to the symmetric buffer
-        # TODO: is there a way to tell autograd to feed grad_output directly to
-        # our symm_mem buffer?
-        OnDeviceA2AV.grad_output_buf.narrow(  # type: ignore[unreachable]
-            dim=0, start=0, length=grad_output.shape[0]
-        ).copy_(grad_output.view(grad_output.shape[0], -1))
-
-        # Size info
-        (grad_output_splits,) = ctx.saved_tensors
-        OnDeviceA2AV.splits_buf.copy_(grad_output_splits)
-        grad_input_splits = torch.empty_like(grad_output_splits)  # unused
-        grad_input = grad_output.new_empty(*ctx.input_shape)
-
-        # Shuffle gradients back to the input
-        on_device_a2av_triton_impl(
-            grad_input.view(grad_input.shape[0], -1),
-            grad_input_splits,
-            OnDeviceA2AV.grad_output_buf,
-            OnDeviceA2AV.splits_buf,
-            group=ctx.group,
-        )
-        return grad_input, None, None
 
     @classmethod
     def initialize(
@@ -205,7 +149,7 @@ def on_device_a2av(
     received_num_tokens: int = -1,
     group: dist.ProcessGroup = dist.group.WORLD,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return OnDeviceA2AV.apply(
+    return OnDeviceA2AVMgr.apply(
         input,
         input_splits,
         output,

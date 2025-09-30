@@ -18,9 +18,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from .interface import OnDeviceA2AV, on_device_a2av
+from .interface import OnDeviceA2AVMgr, on_device_a2av
 
 __all__ = [
-    "OnDeviceA2AV",
+    "OnDeviceA2AVMgr",
     "on_device_a2av",
 ]
