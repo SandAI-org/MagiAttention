@@ -16,8 +16,8 @@ import os
 
 import torch
 import torch.distributed._symmetric_memory as symm_mem
-from triton_device_a2av import OnDeviceA2AV, on_device_a2av
 
+from magi_attention.comm.primitive.device_a2av import OnDeviceA2AVMgr, on_device_a2av
 from magi_attention.comm.primitive.grpcoll.utils import are_all_ranks_on_same_host
 from magi_attention.utils import clearup_dist_env, rprint_rank, setup_dist_env
 
@@ -183,7 +183,7 @@ rprint_rank(f"{recv_buffer=}\n")
 
 # ---- initialize the OnDeviceA2AV ---- #
 
-OnDeviceA2AV.initialize(
+OnDeviceA2AVMgr.initialize(
     max_input_seqlen=max_seqlen * topk,
     hidden_size=hidden_size,
     dtype=dtype,
@@ -247,7 +247,7 @@ except AssertionError:
 
 # ---- finalize the OnDeviceA2AV ---- #
 
-OnDeviceA2AV.finalize()
+OnDeviceA2AVMgr.finalize()
 
 
 # --------------      clearup env       -------------- #
