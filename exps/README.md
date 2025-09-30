@@ -69,3 +69,16 @@ cd exps/grpcoll
 
 bash run_grpcoll_test.sh
 ```
+
+
+### Device All-to-All-V PoC Test
+
+TODO ... (add more instructions to reproduce the experiments)
+
+basic running command:
+
+```bash
+cd exps/device_a2av
+
+bash run.sh
+```
