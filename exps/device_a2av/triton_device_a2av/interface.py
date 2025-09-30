@@ -26,18 +26,18 @@ from .triton_impl import on_device_a2av_triton_impl
 
 
 class OnDeviceA2AV(torch.autograd.Function):
-    # A symmetric memory holding the maximum input buffer
-    token_send_buf = None
+    # A symmetric memory holding the maximum input buffer to send
+    input_send_buf = None
     # A symmetric memory holding the grad_output during backward
     grad_output_buf = None
     # A symmetric memory for exchanges split sizes during both forward and backward
     splits_buf = None
-    # Maximum output length (need to be set before use of OnDeviceAllToAllV)
-    max_output_len = None
 
+    # Maximum output length (need to be set before use of OnDeviceA2AV)
+    max_output_seqlen = None
+
+    # Whether the symmetric memory buffers are all initialized
     is_initialized = False
-
-    a2av_stream: torch.cuda.Stream
 
     @staticmethod
     def forward(
@@ -77,7 +77,7 @@ class OnDeviceA2AV(torch.autograd.Function):
         # Copy input to the symmetric buffer
         # TODO: is there a way to tell autograd
         # to feed input directly to our symm_mem buffer?
-        OnDeviceA2AV.token_send_buf.narrow(  # type: ignore[attr-defined]
+        OnDeviceA2AV.input_send_buf.narrow(  # type: ignore[attr-defined]
             dim=0, start=0, length=input.shape[0]
         ).copy_(input.view(input.shape[0], -1))
 
@@ -87,7 +87,7 @@ class OnDeviceA2AV(torch.autograd.Function):
         # Allocate output buffer
         if output is None:
             if received_num_tokens == -1:
-                output = input.new_empty(OnDeviceA2AV.max_output_len, *input.shape[1:])  # type: ignore[unreachable]
+                output = input.new_empty(OnDeviceA2AV.max_output_seqlen, *input.shape[1:])  # type: ignore[unreachable]
             else:
                 output = input.new_empty(received_num_tokens, *input.shape[1:])
         elif received_num_tokens == -1:
@@ -99,9 +99,9 @@ class OnDeviceA2AV(torch.autograd.Function):
         # Shuffle input to output
         # TODO: for now, we only support triton implementation
         on_device_a2av_triton_impl(
-            output=output.view(received_num_tokens, -1),
+            output=output.view(output.shape[0], -1),
             output_splits=output_splits,
-            input=OnDeviceA2AV.token_send_buf,
+            input=OnDeviceA2AV.input_send_buf,
             input_splits=OnDeviceA2AV.splits_buf,
             group=group,
         )
@@ -119,7 +119,7 @@ class OnDeviceA2AV(torch.autograd.Function):
         return output, output_splits
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor, grad_splits):
+    def backward(ctx, grad_output: torch.Tensor, *args):
         """
         Backward is implemented as a shuffle of the output's gradients to the input.
         Args:
@@ -131,9 +131,11 @@ class OnDeviceA2AV(torch.autograd.Function):
 
         # Initialize grad_output buffer (one time only)
         if OnDeviceA2AV.grad_output_buf is None:
-            assert OnDeviceA2AV.max_output_len is not None, "`max_output_len` not set"
+            assert (
+                OnDeviceA2AV.max_output_seqlen is not None
+            ), "`max_output_seqlen` not set"
             OnDeviceA2AV.grad_output_buf = symm_mem.empty(  # type: ignore[unreachable]
-                OnDeviceA2AV.max_output_len,
+                OnDeviceA2AV.max_output_seqlen,
                 *grad_output.shape[1:],
                 dtype=grad_output.dtype,
                 device=grad_output.device,
@@ -144,7 +146,7 @@ class OnDeviceA2AV(torch.autograd.Function):
         # our symm_mem buffer?
         OnDeviceA2AV.grad_output_buf.narrow(  # type: ignore[unreachable]
             dim=0, start=0, length=grad_output.shape[0]
-        ).copy_(grad_output)
+        ).copy_(grad_output.view(grad_output.shape[0], -1))
 
         # Size info
         (grad_output_splits,) = ctx.saved_tensors
@@ -154,7 +156,7 @@ class OnDeviceA2AV(torch.autograd.Function):
 
         # Shuffle gradients back to the input
         on_device_a2av_triton_impl(
-            grad_input,
+            grad_input.view(grad_input.shape[0], -1),
             grad_input_splits,
             OnDeviceA2AV.grad_output_buf,
             OnDeviceA2AV.splits_buf,
@@ -165,7 +167,7 @@ class OnDeviceA2AV(torch.autograd.Function):
     @classmethod
     def initialize(
         cls,
-        max_seqlen: int,
+        max_input_seqlen: int,
         hidden_size: int,
         dtype: torch.dtype,
         device: torch.device,
@@ -176,26 +178,22 @@ class OnDeviceA2AV(torch.autograd.Function):
             not async_op
         ), "async mode is not supported now due to some buffer is allocated in self's a2av stream"
 
-        cls.max_output_len = max_seqlen * overflow
-        cls.token_send_buf = symm_mem.empty(
-            max_seqlen,
+        cls.max_output_seqlen = max_input_seqlen * overflow
+        cls.input_send_buf = symm_mem.empty(
+            max_input_seqlen,
             hidden_size,  # hidden dim
             dtype=dtype,
             device=device,
-        )
-
-        cls.a2av_stream = (
-            torch.cuda.Stream() if async_op else torch.cuda.current_stream()
         )
 
         cls.is_initialized = True
 
     @classmethod
     def finalize(cls):
-        cls.max_output_len = None
+        cls.max_output_seqlen = None
+        cls.input_send_buf = None
         cls.splits_buf = None
         cls.grad_output_buf = None
-        cls.token_send_buf = None
 
         cls.is_initialized = False
 

@@ -50,7 +50,7 @@ symm_mem.enable_symm_mem_for_group(world_group_name)
 assert symm_mem.is_symm_mem_enabled_for_group(world_group_name)
 
 hidden_size = 8
-max_seq_len = 16
+max_seqlen = 16
 topk = 2
 overflow = 2  # Assuming worst case, 2x tokens are routed to one EP rank
 dtype = torch.bfloat16
@@ -184,7 +184,7 @@ rprint_rank(f"{recv_buffer=}\n")
 # ---- initialize the OnDeviceA2AV ---- #
 
 OnDeviceA2AV.initialize(
-    max_seqlen=max_seq_len * topk,
+    max_input_seqlen=max_seqlen * topk,
     hidden_size=hidden_size,
     dtype=dtype,
     device=device,
