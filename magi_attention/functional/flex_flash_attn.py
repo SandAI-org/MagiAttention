@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
+
 import torch
 from packaging import version
 
@@ -81,6 +83,8 @@ def merge_ranges(
         inner_ranges (torch.Tensor): A tensor of shape `[num_ranges, 2]`,
             where each row is paired with the corresponding row in
             `outer_ranges`, representing the inner ranges (e.g., K-block ranges).
+        attn_type_map (torch.Tensor): A tensor of shape `[num_ranges]`,
+            representing the attn_type of each range.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -108,7 +112,7 @@ def merge_ranges(
         ...     sorted_attn_type_map,
         ...     range_map,
         ...     unique_count,
-        ... ) = merge_ranges(outer_ranges, inner_ranges)
+        ... ) = merge_ranges(outer_ranges, inner_ranges, attn_type_map)
         >>> print("Unique Merged Outer Ranges:", merge_outer_ranges)
         Unique Merged Outer Ranges:
          tensor([[10, 20],
@@ -194,7 +198,7 @@ def _flex_flash_attn_forward_compilable(
     deterministic: bool,
     sm_margin: int,
     fwd_start_events: list[int] | None,
-    fwd_stop_events: list[int] | None,
+    fwd_end_events: list[int] | None,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     q, k, v, q_ranges, k_ranges = [
@@ -234,7 +238,7 @@ def _flex_flash_attn_forward_compilable(
         deterministic,
         sm_margin,
         fwd_start_events,
-        fwd_stop_events,
+        fwd_end_events,
     )
 
 
@@ -259,6 +263,8 @@ def _flex_flash_attn_forward_compilable_fake(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    fwd_start_events: list[int] | None,
+    fwd_end_events: list[int] | None,
 ) -> None:
     pass
 
@@ -284,7 +290,7 @@ def _flex_flash_attn_forward(
     deterministic: bool,
     sm_margin: int,
     fwd_start_events: list[int] | None,
-    fwd_stop_events: list[int] | None,
+    fwd_end_events: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
@@ -339,7 +345,7 @@ def _flex_flash_attn_forward(
         deterministic=deterministic,
         sm_margin=sm_margin,
         fwd_start_events=fwd_start_events,
-        fwd_stop_events=fwd_stop_events,
+        fwd_end_events=fwd_end_events,
     )
 
     return out, lse
@@ -381,7 +387,7 @@ def _flex_flash_attn_backward_compilable(
     bwd_end_events: list[int] | None,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
-
+    # print(f"{type(q_ranges)=}")
     mod = get_ffa_jit_mod(
         direction="bwd",
         head_dim=q.shape[-1],
@@ -455,6 +461,8 @@ def _flex_flash_attn_backward_compilable_fake(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    bwd_start_events: list[int] | None,
+    bwd_end_events: list[int] | None,
 ) -> None:
     pass
 
@@ -527,6 +535,35 @@ def _flex_flash_attn_backward(
 # -------------------       ffa autograd   ------------------- #
 
 
+def _prepare_events(
+    start_events: list[int] | None,
+    end_events: list[int] | None,
+) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+    """Helper function to parse and prepare CUDA event lists."""
+    if start_events is None or end_events is None:
+        return None, None, None, None
+
+    # Ensure event lists are either provided together or not at all.
+    assert (
+        len(start_events) == 5
+    ), f"Expected start_events to have length 5, but got {len(start_events)}"
+    assert (
+        len(end_events) == 5
+    ), f"Expected end_events to have length 5, but got {len(end_events)}"
+
+    merge_range_start_event = start_events.pop(0)
+    to_op_start_event = start_events.pop(-1)
+    merge_range_end_event = end_events.pop(0)
+    to_op_end_event = end_events.pop(-1)
+
+    return (
+        merge_range_start_event,
+        to_op_start_event,
+        merge_range_end_event,
+        to_op_end_event,
+    )
+
+
 class FlexFlashAttnFunc(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -545,14 +582,33 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         auto_range_merge=False,
         ref_block_size=None,
         fwd_start_events=None,
-        fwd_stop_events=None,
+        fwd_end_events=None,
         bwd_start_events=None,
         bwd_end_events=None,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
+        assert isinstance(
+            max_seqlen_q, int
+        ), "max_seqlen_q must be an int, otherwise would lead to performance degradation"
+        assert isinstance(
+            max_seqlen_k, int
+        ), "max_seqlen_k must be an int, otherwise would lead to performance degradation"
+
+        merge_range_start_event, to_op_start_event = None, None
+        merge_range_end_event, to_op_end_event = None, None
+
+        (
+            merge_range_start_event,
+            to_op_start_event,
+            merge_range_end_event,
+            to_op_end_event,
+        ) = _prepare_events(fwd_start_events, fwd_end_events)
+
         if auto_range_merge:
+            if merge_range_start_event:
+                merge_range_start_event.record()
             (
                 merge_q_ranges,
                 fwd_q_ranges,
@@ -561,27 +617,15 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 fwd_qk_map,
                 fwd_unique_count,
             ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
-            (
-                merge_k_ranges,
-                bwd_k_ranges,
-                bwd_q_ranges,
-                bwd_attn_type_map,
-                bwd_kq_map,
-                bwd_unique_count,
-            ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
+            if merge_range_end_event:
+                merge_range_end_event.record()
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
             fwd_attn_type_map = attn_type_map
-            bwd_q_ranges = q_ranges
-            bwd_k_ranges = k_ranges
-            bwd_attn_type_map = attn_type_map
             merge_q_ranges = None
-            merge_k_ranges = None
             fwd_qk_map = None
-            bwd_kq_map = None
             fwd_unique_count = None
-            bwd_unique_count = None
 
         out, lse = _flex_flash_attn_forward(
             q,
@@ -603,11 +647,15 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             deterministic,
             sm_margin,
             fwd_start_events,
-            fwd_stop_events,
+            fwd_end_events,
         )
 
+        if to_op_start_event:
+            to_op_start_event.record()
         # Cast output to the same dtype as q
         out = out.to(q.dtype)
+        if to_op_end_event:
+            to_op_end_event.record()
 
         if auto_range_merge:
             ctx.save_for_backward(
@@ -616,16 +664,27 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 v,
                 out,
                 lse,
-                bwd_q_ranges,
-                bwd_k_ranges,
-                bwd_attn_type_map,
-                merge_k_ranges,
-                bwd_kq_map,
-                bwd_unique_count,
+                q_ranges,
+                k_ranges,
+                attn_type_map,
+                # bwd_q_ranges,
+                # bwd_k_ranges,
+                # bwd_attn_type_map,
+                # merge_k_ranges,
+                # bwd_kq_map,
+                # bwd_unique_count,
             )
         else:
             ctx.save_for_backward(
-                q, k, v, out, lse, bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map
+                q,
+                k,
+                v,
+                out,
+                lse,
+                q_ranges,
+                k_ranges,
+                attn_type_map
+                # bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map
             )
 
         ctx.softmax_scale = softmax_scale
@@ -640,34 +699,47 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
+        (
+            q,
+            k,
+            v,
+            out,
+            lse,
+            q_ranges,
+            k_ranges,
+            attn_type_map,
+            # bwd_q_ranges,
+            # bwd_k_ranges,
+            # bwd_attn_type_map,
+        ) = ctx.saved_tensors
+
+        (
+            merge_range_start_event,
+            to_op_start_event,
+            merge_range_end_event,
+            to_op_end_event,
+        ) = _prepare_events(ctx.bwd_start_events, ctx.bwd_end_events)
+
         if ctx.auto_range_merge:
+            if merge_range_start_event:
+                merge_range_start_event.record()
             (
-                q,
-                k,
-                v,
-                out,
-                lse,
-                bwd_q_ranges,
-                bwd_k_ranges,
-                bwd_attn_type_map,
                 merge_k_ranges,
+                bwd_k_ranges,
+                bwd_q_ranges,
+                bwd_attn_type_map,
                 bwd_kq_map,
                 bwd_unique_count,
-            ) = ctx.saved_tensors
+            ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
+            if merge_range_end_event:
+                merge_range_end_event.record()
         else:
-            (
-                q,
-                k,
-                v,
-                out,
-                lse,
-                bwd_q_ranges,
-                bwd_k_ranges,
-                bwd_attn_type_map,
-            ) = ctx.saved_tensors
-            merge_k_ranges = None
-            bwd_kq_map = None
-            bwd_unique_count = None
+            bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
+                q_ranges,
+                k_ranges,
+                attn_type_map,
+            )
+            merge_k_ranges, bwd_kq_map, bwd_unique_count = None, None, None
 
         dq, dk, dv = _flex_flash_attn_backward(
             dout,
@@ -697,9 +769,12 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_end_events=ctx.bwd_end_events,
         )
 
-        dq = dq.to(q.dtype)
-        dk = dk.to(k.dtype)
-        dv = dv.to(v.dtype)
+        if to_op_start_event:
+            to_op_start_event.record()
+            dq = dq.to(q.dtype)
+            dk = dk.to(k.dtype)
+            dv = dv.to(v.dtype)
+            to_op_end_event.record()
 
         return (
             dq,  # q
@@ -716,7 +791,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # auto_range_merge
             None,  # ref_block_size
             None,  # fwd_start_events
-            None,  # fwd_stop_events
+            None,  # fwd_end_events
             None,  # bwd_start_events
             None,  # bwd_stop_events
         )
@@ -740,7 +815,7 @@ def flex_flash_attn_func(
     auto_range_merge: bool = False,
     ref_block_size: tuple[int, int] | None = None,
     fwd_start_events: list[int] | None = None,
-    fwd_stop_events: list[int] | None = None,
+    fwd_end_events: list[int] | None = None,
     bwd_start_events: list[int] | None = None,
     bwd_stop_events: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -781,7 +856,7 @@ def flex_flash_attn_func(
             Defaults to ``False``.
 
             **Note:** This flag is usually used in sparse attention cases but still under development.
-
+        fwd_start_events
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
             - out (torch.Tensor): Attention output tensor
@@ -912,7 +987,7 @@ def flex_flash_attn_func(
         auto_range_merge,
         ref_block_size,
         fwd_start_events,
-        fwd_stop_events,
+        fwd_end_events,
         bwd_start_events,
         bwd_stop_events,
     )
