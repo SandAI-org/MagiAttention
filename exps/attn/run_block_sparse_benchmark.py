@@ -89,6 +89,7 @@ attn_flops_configs = [
             "wd": wd,
             "block_size": block_size,
             "seqlen": seqlen,
+            "num_group": num_group,
             "attn_mode": attn_mode,
             "nhq": nhq,
         },
@@ -97,6 +98,7 @@ attn_flops_configs = [
     for wd in wds
     for block_size in block_sizes
     for seqlen in seqlens
+    for num_group in num_groups
     for attn_mode in attn_modes
     for nhq in nhqs
 ]
@@ -106,7 +108,7 @@ seed_everything()
 
 @perf_report(attn_flops_configs)
 def sparse_attn_benchmark(
-    sparsity_ratio, hd, wd, block_size, seqlen, attn_mode, nhq, attn_impl
+    sparsity_ratio, hd, wd, block_size, seqlen, num_group, attn_mode, nhq, attn_impl
 ):
     assert b == 1, "for now, we only supports b=1 for ffa"
     is_attn_impl_support_this_mask = True
@@ -359,25 +361,54 @@ def sparse_attn_benchmark(
             )
 
             # allocate 128MB workspace buffer
+            kv_lens_buffer_size = nhk * block_row_sz.shape[-1] + 1024
             workspace_buffer = torch.empty(
                 128 * 1024 * 1024, dtype=torch.uint8, device=block_mask.device
             )
             wrapper = flashinfer.sparse.VariableBlockSparseAttentionWrapper(
-                workspace_buffer, backend="fa3"
+                workspace_buffer, backend="fa3", kv_lens_buffer_size=kv_lens_buffer_size
             )
-
-            wrapper.plan(
-                block_mask_map=block_mask_cpu,
-                block_row_sz=block_row_sz,
-                block_col_sz=block_col_sz,
-                num_qo_heads=nhq,
-                num_kv_heads=nhk,
-                head_dim=hd,
-                q_data_type=q.dtype,
-            )
+            try:
+                wrapper.plan(
+                    block_mask_map=block_mask_cpu,
+                    block_row_sz=block_row_sz,
+                    block_col_sz=block_col_sz,
+                    num_qo_heads=nhq,
+                    num_kv_heads=nhk,
+                    head_dim=hd,
+                    q_data_type=q.dtype,
+                )
+            except Exception as e:
+                print(
+                    f"Error occured when running {attn_impl} with {block_size} block_size "
+                    f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                )
+                is_attn_impl_support_this_mask = False
 
             def fn():
                 return wrapper.run(q, k, v)
+        
+        elif attn_impl == "fa2_sparse":
+            try:
+                from block_sparse_attn import block_sparse_attn_func
+            except ImportError:
+                raise ImportError(
+                    "Please install FA2 sparse attention following https://github.com/mit-han-lab/Block-Sparse-Attention/blob/main/README.md.")
+
+            cu_seqlens = torch.arange(0, (b + 1) * seqlen, step=seqlen, dtype=torch.int32, device=device)
+            q = q.reshape(b * orig_seq_len_q, nhq, hd).contiguous()
+            k = k.reshape(b * orig_seq_len_k, nhk, hd).contiguous()
+            v = v.reshape(b * orig_seq_len_k, nhk, hd).contiguous()
+            head_mask_type = torch.tensor([1] * nhq, device=q.device, dtype=torch.int32)
+            streaming_info = None
+
+            def fn():
+                return block_sparse_attn_func(
+                    q, k, v, cu_seqlens, cu_seqlens, head_mask_type, streaming_info, block_mask,
+                    orig_seq_len_q, orig_seq_len_k, p_dropout=dropout_p, softmax_scale=softmax_scale,
+                    sparse_block_size=block_size
+                )
+
 
         elif attn_impl == "flex":
             try:
@@ -461,7 +492,7 @@ def sparse_attn_benchmark(
             # -1 indicates oom
             perf_dict = {
                 "flops": [-1, -1, -1],
-                # "mem": [-1, -1, -1],
+                "mem": [-1, -1, -1],
             }
         else:
             try:
@@ -481,21 +512,25 @@ def sparse_attn_benchmark(
                 perf_dict["flops"] = list(map(ms_to_tflops, perf_dict["flops"]))
 
                 # disable mem test
-                # def gb(m):
-                #     return m / 1024**3
+                def gb(m):
+                    return m / 1024**3
 
-                # perf_dict["mem"] = list(map(gb, perf_dict["mem"]))
+                #perf_dict["mem"] = list(map(gb, perf_dict["mem"]))
             except Exception as e:
                 if "CUDA out of memory" not in str(e):
                     print(
                         f"Error occured when running {attn_impl} with {block_size} block_size "
                         f"when {seqlen=}, {hd=} during {wd}: {e=}"
                     )
-                    raise e
+                    perf_dict = {
+                        "flops": [-2, -2, -2],
+                        "mem": [-2, -2, -2],
+                    }
+                    # raise e
                 # -1 indicates oom
                 perf_dict = {
                     "flops": [-1, -1, -1],
-                    # "mem": [-1, -1, -1],
+                    "mem": [-1, -1, -1],
                 }
                 print(
                     f"OOM error occured when running for {attn_impl} with {block_size} block_size "
@@ -505,7 +540,7 @@ def sparse_attn_benchmark(
         # -2 indicates not support
         perf_dict = {
             "flops": [-2, -2, -2],
-            # "mem": [-2, -2, -2],
+            "mem": [-2, -2, -2],
         }
 
     return perf_dict
