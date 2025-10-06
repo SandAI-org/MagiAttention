@@ -81,7 +81,7 @@ std::vector<at::Tensor> mha_bwd(
     int const sm_margin,
     std::optional<const std::vector<intptr_t>>& bwd_start_event_handles_,
     std::optional<const std::vector<intptr_t>>& bwd_end_event_handles_) {
-
+  nvtxRangePushA("fwd prepare");
   _check_runtime_contract_bwd(q, dk_type_, dv_type_, softcap, disable_bwd_dkv_atomic_reduction);
 
   std::vector<cudaEvent_t> start_events;
@@ -104,16 +104,16 @@ std::vector<at::Tensor> mha_bwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation (including output tensor allocation)
-  if (!start_events.empty()) {
-    CUDA_CHECK(cudaEventRecord(start_events[0], stream));
-  }
-
+  // if (!start_events.empty()) {
+  //   CUDA_CHECK(cudaEventRecord(start_events[0], stream));
+  // }
+  
   auto [params, dq, dk, dv] = prepare_mha_bwd(
       dout, q, k, v, out, dq_, dk_, dv_, softmax_lse, q_ranges, k_ranges,
       attn_type_map_, merge_k_ranges_, bwd_kq_map_,
       bwd_unique_count_, softmax_scale, softcap, disable_bwd_dkv_atomic_reduction,
       dq_type_, dk_type_, dv_type_, deterministic, sm_margin);
-
+  nvtxRangePop();
   if (!end_events.empty()) {
     CUDA_CHECK(cudaEventRecord(end_events[0], stream));
   }

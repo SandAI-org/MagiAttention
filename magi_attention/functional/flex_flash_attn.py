@@ -263,8 +263,8 @@ def _flex_flash_attn_forward_compilable_fake(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    fwd_start_events: list[int] | None,
-    fwd_end_events: list[int] | None,
+    fwd_start_events: list[torch.cuda.Event] | None,
+    fwd_end_events: list[torch.cuda.Event] | None,
 ) -> None:
     pass
 
@@ -461,8 +461,8 @@ def _flex_flash_attn_backward_compilable_fake(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    bwd_start_events: list[int] | None,
-    bwd_end_events: list[int] | None,
+    bwd_start_events: list[torch.cuda.Event] | None,
+    bwd_end_events: list[torch.cuda.Event] | None,
 ) -> None:
     pass
 
@@ -492,8 +492,8 @@ def _flex_flash_attn_backward(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    bwd_start_events: list[int] | None,
-    bwd_end_events: list[int] | None,
+    bwd_start_cuda_events: list[int] | None,
+    bwd_end_cuda_events: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
@@ -525,8 +525,8 @@ def _flex_flash_attn_backward(
         dv_type=dv_type,
         deterministic=deterministic,
         sm_margin=sm_margin,
-        bwd_start_events=bwd_start_events,
-        bwd_end_events=bwd_end_events,
+        bwd_start_events=bwd_start_cuda_events,
+        bwd_end_events=bwd_end_cuda_events,
     )
 
     return dq, dk, dv
@@ -536,31 +536,66 @@ def _flex_flash_attn_backward(
 
 
 def _prepare_events(
-    start_events: list[int] | None,
-    end_events: list[int] | None,
-) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+    start_events: Optional[list[torch.cuda.Event]],
+    end_events: Optional[list[torch.cuda.Event]],
+) -> tuple[
+    Optional[int],
+    Optional[int],
+    Optional[int],
+    Optional[int],
+    Optional[list[int]],
+    Optional[list[int]],
+]:
     """Helper function to parse and prepare CUDA event lists."""
     if start_events is None or end_events is None:
-        return None, None, None, None
+        return None, None, None, None, None, None
 
     # Ensure event lists are either provided together or not at all.
+    expected_length = 5
     assert (
-        len(start_events) == 5
-    ), f"Expected start_events to have length 5, but got {len(start_events)}"
+        len(start_events) == expected_length
+    ), f"Expected start_events to have length {expected_length}, but got {len(start_events)}"
     assert (
-        len(end_events) == 5
-    ), f"Expected end_events to have length 5, but got {len(end_events)}"
-
+        len(end_events) == expected_length
+    ), f"Expected end_events to have length {expected_length}, but got {len(end_events)}"
+    """
     merge_range_start_event = start_events.pop(0)
     to_op_start_event = start_events.pop(-1)
     merge_range_end_event = end_events.pop(0)
     to_op_end_event = end_events.pop(-1)
+    """
+    merge_range_start_event = start_events[0]
+    to_op_start_event = start_events[-1]
+    merge_range_end_event = end_events[0]
+    to_op_end_event = end_events[-1]
+
+    # 2. Use slicing to get a new list of the middle events.
+    # The original lists (start_events, end_events) are not modified.
+    middle_start_events = start_events[1:-1]
+    middle_end_events = end_events[1:-1]
+
+    # --- In-place modification of the lists ---
+    # Iterate over the remaining Events, record them, and then
+    # replace the Event objects with their integer cuda_event handles.
+    start_cuda_events = []
+    for i in range(len(middle_start_events)):
+        middle_start_events[i].record()
+        start_cuda_events.append(middle_start_events[i].cuda_event)
+        # start_events[i] = start_events[i].cuda_event
+
+    end_cuda_events = []
+    for i in range(len(middle_end_events)):
+        middle_end_events[i].record()
+        # end_events[i] = end_events[i].cuda_event
+        end_cuda_events.append(middle_end_events[i].cuda_event)
 
     return (
         merge_range_start_event,
         to_op_start_event,
         merge_range_end_event,
         to_op_end_event,
+        start_cuda_events,
+        end_cuda_events,
     )
 
 
@@ -604,11 +639,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             to_op_start_event,
             merge_range_end_event,
             to_op_end_event,
+            fwd_start_cuda_events,
+            fwd_end_cuda_events,
         ) = _prepare_events(fwd_start_events, fwd_end_events)
 
         if auto_range_merge:
             if merge_range_start_event:
                 merge_range_start_event.record()
+            torch.cuda.nvtx.range_push("merge_range")
             (
                 merge_q_ranges,
                 fwd_q_ranges,
@@ -617,6 +655,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 fwd_qk_map,
                 fwd_unique_count,
             ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
+            torch.cuda.nvtx.range_pop()
             if merge_range_end_event:
                 merge_range_end_event.record()
         else:
@@ -626,7 +665,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges = None
             fwd_qk_map = None
             fwd_unique_count = None
-
+        # print(f"{fwd_start_events=}")
+        # print(f"{fwd_end_events=}")
         out, lse = _flex_flash_attn_forward(
             q,
             k,
@@ -646,8 +686,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
             deterministic,
             sm_margin,
-            fwd_start_events,
-            fwd_end_events,
+            fwd_start_cuda_events,
+            fwd_end_cuda_events,
         )
 
         if to_op_start_event:
@@ -657,35 +697,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if to_op_end_event:
             to_op_end_event.record()
 
-        if auto_range_merge:
-            ctx.save_for_backward(
-                q,
-                k,
-                v,
-                out,
-                lse,
-                q_ranges,
-                k_ranges,
-                attn_type_map,
-                # bwd_q_ranges,
-                # bwd_k_ranges,
-                # bwd_attn_type_map,
-                # merge_k_ranges,
-                # bwd_kq_map,
-                # bwd_unique_count,
-            )
-        else:
-            ctx.save_for_backward(
-                q,
-                k,
-                v,
-                out,
-                lse,
-                q_ranges,
-                k_ranges,
-                attn_type_map
-                # bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map
-            )
+        ctx.save_for_backward(
+            q,
+            k,
+            v,
+            out,
+            lse,
+            q_ranges,
+            k_ranges,
+            attn_type_map
+            # bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map
+        )
 
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
@@ -708,9 +730,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q_ranges,
             k_ranges,
             attn_type_map,
-            # bwd_q_ranges,
-            # bwd_k_ranges,
-            # bwd_attn_type_map,
         ) = ctx.saved_tensors
 
         (
@@ -718,11 +737,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             to_op_start_event,
             merge_range_end_event,
             to_op_end_event,
+            bwd_start_cuda_events,
+            bwd_ent_cuda_events,
         ) = _prepare_events(ctx.bwd_start_events, ctx.bwd_end_events)
 
         if ctx.auto_range_merge:
             if merge_range_start_event:
                 merge_range_start_event.record()
+            torch.cuda.nvtx.range_push("range_merge")
             (
                 merge_k_ranges,
                 bwd_k_ranges,
@@ -731,6 +753,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 bwd_kq_map,
                 bwd_unique_count,
             ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
+            torch.cuda.nvtx.range_pop()
             if merge_range_end_event:
                 merge_range_end_event.record()
         else:
@@ -740,6 +763,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 attn_type_map,
             )
             merge_k_ranges, bwd_kq_map, bwd_unique_count = None, None, None
+        if merge_range_start_event:
+            ctx.bwd_start_events[1].record()
 
         dq, dk, dv = _flex_flash_attn_backward(
             dout,
@@ -765,8 +790,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dv_type=torch.float32,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
-            bwd_start_events=ctx.bwd_start_events,
-            bwd_end_events=ctx.bwd_end_events,
+            bwd_start_cuda_events=bwd_start_cuda_events,
+            bwd_end_cuda_events=bwd_ent_cuda_events,
         )
 
         if to_op_start_event:
@@ -814,10 +839,10 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: bool = False,
     auto_range_merge: bool = False,
     ref_block_size: tuple[int, int] | None = None,
-    fwd_start_events: list[int] | None = None,
-    fwd_end_events: list[int] | None = None,
-    bwd_start_events: list[int] | None = None,
-    bwd_stop_events: list[int] | None = None,
+    fwd_start_events: list[torch.cuda.Event] | None = None,
+    fwd_end_events: list[torch.cuda.Event] | None = None,
+    bwd_start_events: list[torch.cuda.Event] | None = None,
+    bwd_end_events: list[torch.cuda.Event] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
@@ -989,5 +1014,5 @@ def flex_flash_attn_func(
         fwd_start_events,
         fwd_end_events,
         bwd_start_events,
-        bwd_stop_events,
+        bwd_end_events,
     )
