@@ -366,7 +366,10 @@ def sparse_attn_benchmark(
             try:
                 import flashinfer
             except ImportError:
-                raise ImportError("Please install FlashInfer first.")
+                raise ImportError(
+                    "Please install FlashInfer v0.2.9 with this bug-fixed PR: \n"
+                    "https://github.com/flashinfer-ai/flashinfer/pull/1383"
+                )
 
             q = q.view(b * nhq, orig_seq_len_q, hd).contiguous()
             k = k.view(b * nhk, orig_seq_len_k, hd).contiguous()
