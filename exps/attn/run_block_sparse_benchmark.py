@@ -37,7 +37,7 @@ from magi_attention.utils.sparse_utils import (
 impls = ["ffa"]
 
 # actual seqlen
-seqlens = [32768 * (i + 1) for i in range(1)]
+seqlens = [32768 * (i + 1) for i in range(0, 4)]
 
 # current block sparse attention always has low sparsity
 sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
@@ -47,8 +47,12 @@ wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
 nhqs = [8]
 num_groups = [1]
+# compare variable QK block size
 q_block_sizes = [64, 64, 64, 64, 64]
 k_block_sizes = [64, 32, 16, 8, 1]
+# compare same QK block size
+# q_block_sizes = [64, 128]
+# k_block_sizes = [64, 128]
 
 assert len(q_block_sizes) == len(k_block_sizes)
 
@@ -84,7 +88,7 @@ attn_flops_configs = [
         },
         plot_name=(
             f"block sparse attn-{wd} attn_mode-{attn_mode} "
-            f"{'n_head-' + str(nhq) if attn_mode == 'MHA' else f'n_head-{nhq}:{nhq // num_group}'} "
+            f"{'n_head-' + str(nhq) if attn_mode == 'MHA' else f'n_head-{nhq}:{nhq // num_group}'}\n"
             f"block_size-{q_block_size}:{k_block_size} seq_len {seqlen}"
         ),
         # Name for the plot. Used also as a file name for saving the plot.
