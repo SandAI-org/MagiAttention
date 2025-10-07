@@ -812,24 +812,24 @@ class TestFlexFlashAttn(DistTestBase):
             "num_heads_kv": 8,
             "head_dim": 128,
         },
-        # {
-        #    "name": "gqa_nhq16_nhkv4_hd128",
-        #    "num_heads_q": 16,
-        #    "num_heads_kv": 4,
-        #    "head_dim": 128,
-        # },
-        # {
-        #    "name": "mha_nh1_hd64",
-        #    "num_heads_q": 1,
-        #    "num_heads_kv": 1,
-        #    "head_dim": 64,
-        # },
-        # {
-        #    "name": "gqa_nhq4_nhkv2_hd64",
-        #    "num_heads_q": 4,
-        #    "num_heads_kv": 2,
-        #    "head_dim": 64,
-        # },
+        {
+            "name": "gqa_nhq16_nhkv4_hd128",
+            "num_heads_q": 16,
+            "num_heads_kv": 4,
+            "head_dim": 128,
+        },
+        {
+            "name": "mha_nh1_hd64",
+            "num_heads_q": 1,
+            "num_heads_kv": 1,
+            "head_dim": 64,
+        },
+        {
+            "name": "gqa_nhq4_nhkv2_hd64",
+            "num_heads_q": 4,
+            "num_heads_kv": 2,
+            "head_dim": 64,
+        },
     ]
 
     @with_run_in_mp
@@ -1092,7 +1092,7 @@ class TestFlexFlashAttn(DistTestBase):
         ],
     )
     @parameterize("model_config", MODEL_CONFIGS)
-    @parameterize("dtype", [torch.bfloat16])
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
     @parameterize("auto_range_merge", [False, True])
     @parameterize("deterministic", [False, True])
@@ -1208,7 +1208,7 @@ class TestFlexFlashAttn(DistTestBase):
         ],
     )
     @parameterize("num_pairs", [10, 100, 1000])  # the max qk range pairs to generate
-    @parameterize("dtype", [torch.bfloat16])
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize(
         "attn_type", [0, 1, 2, 3, 4]
     )  # 0 - 3 means attn type are all 0/1/2/3, 4 means random attn type.
