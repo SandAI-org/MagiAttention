@@ -19,8 +19,12 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 import torch
-from baselines.utils import calculate_attn_flops, generate_seqlens, seqlens2curanges
 
+from exps.attn.baselines.utils import (
+    calculate_attn_flops,
+    generate_seqlens,
+    seqlens2curanges,
+)
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
 
@@ -33,6 +37,9 @@ from magi_attention.utils.sparse_utils import (
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
 )
+
+# import sys
+# sys.path.append("..")
 
 
 # -----------------------------------------------------------------------------
