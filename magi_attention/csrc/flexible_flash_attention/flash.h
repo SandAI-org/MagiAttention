@@ -157,7 +157,10 @@ template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, 
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
 
 template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction>
-void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
+void run_mha_bwd_(Flash_bwd_params& params,
+                  cudaStream_t stream,
+                  const std::vector<cudaEvent_t>& start_events,
+                  const std::vector<cudaEvent_t>& end_events);
 
 template <typename T_out, uint32_t kHeadDim>
 void run_fast_zero_fill_(Flash_fwd_params& params, cudaStream_t stream);

@@ -302,6 +302,8 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            fwd_start_events=None,
+            fwd_end_events=None,
         )
 
         o_ref, lse_ref = correct_attn_fwd_result(
@@ -331,6 +333,8 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            fwd_start_events=None,
+            fwd_end_events=None,
         )
 
         assert_close(
@@ -380,6 +384,8 @@ class TestFlexFlashAttn(DistTestBase):
             dv_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            bwd_start_events=None,
+            bwd_end_events=None,
         )
 
         dq_ref += dq_acc
@@ -412,6 +418,8 @@ class TestFlexFlashAttn(DistTestBase):
             dv_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            bwd_start_events=None,
+            bwd_end_events=None,
         )
 
         assert_close(
