@@ -1333,17 +1333,57 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
-    auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
+    // auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
+    auto bypass_fn = [&](auto& tSrS, int m_block) {};
+    auto boundary_mask_fn = [&](auto& tSrS, int m_block) {
+      mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+    };
+    auto regular_mask_fn = [&](auto& tSrS, int m_block) {
+      mask.template apply<false /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+    };
 
-    CUTLASS_PRAGMA_NO_UNROLL
-    for (; m_block < m_block_max - 1; ++m_block) {
-      bwd_step(m_block, mask_fn, cute::false_type{});
-    }
-    // only the last block need to mask_lse;
-    bwd_step(m_block, mask_fn, cute::true_type{});
+    int const last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
 
-    if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-      // TODO: Handle inv causal part, can be optimized
+    if (n_block == last_n_block) {
+      // for last n_block, we can skip all mask mask.
+      if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (; m_block < m_block_max; ++m_block) {
+          bwd_step(m_block, bypass_fn);
+        }
+      }
+      // otherwise we need boundary mask.
+      else {
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (; m_block < m_block_max; ++m_block) {
+          bwd_step(m_block, boundary_mask_fn);
+        }
+      }
+    } else {
+      // for Causal and BiCausal, we need to do regular mask for some block at the begining;
+      if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
+        int n_idx_max = (n_block + 1) * kBlockN;
+        int m_block_idx_for_casual = std::max(m_block_min, (n_idx_max + seqlen_k - seqlen_q) / kBlockM);
+        CUTLASS_PRAGMA_NO_UNROLL
+        for (; m_block < m_block_idx_for_casual; ++m_block) {
+          bwd_step(m_block, regular_mask_fn);
+        }
+      }
+
+      int const n_idx_min = n_block * kBlockM;
+      int const m_block_idx_for_inv_casual =
+          attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? m_block_max : cute::ceil_div(n_idx_min, kBlockN) - 1;
+
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (; m_block < m_block_idx_for_inv_casual; ++m_block) {
+        bwd_step(m_block, bypass_fn);
+      }
+
+      // for Invcausal and BiCausal, we need to do regular mask for some block at the end;
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (; m_block < m_block_max; ++m_block) {
+        bwd_step(m_block, regular_mask_fn);
+      }
     }
 
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
