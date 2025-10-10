@@ -187,13 +187,7 @@ struct CollectiveMainloopBwdSm90 {
   // Need stride to be multiple of 32, otherwise we get error (misaligned address) when doing TMA if e.g. kBlockM=80
   // We set stride to be multiple of 64 so that if ShuffleLSE, even if threads read from sLSE but out of bounds,
   // it's still a valid smem address.
-  // using SmemLayoutLSE = cute::Layout<cute::Shape<Int<kBlockM>, Int<kStages>>, cute::Stride<_1, Int<cute::round_up(kBlockM, 64)>>>;
   using SmemLayoutLSE = cute::Layout<cute::Shape<_4, Int<kBlockM>, Int<kStages>>, cute::Stride<_1, _4, Int<4 * cute::round_up(kBlockM, 64)>>>;
-
-  /*using SmemLayoutLSEMma = std::conditional_t<
-      SdP_swapAB,
-      cute::Layout<cute::Shape<Int<kBlockN>, Int<kBlockM>, Int<kStages>>, cute::Stride<_0, _1, Int<cute::round_up(kBlockM, 64)>>>,
-      cute::Layout<cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kStages>>, cute::Stride<_1, _0, Int<cute::round_up(kBlockM, 64)>>>>; */
 
   using SmemLayoutLSEMma = std::conditional_t<
       SdP_swapAB,
@@ -600,7 +594,6 @@ struct CollectiveMainloopBwdSm90 {
           params.tma_load_dO.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
           tdOgdO(_, m_block),
           tdOsdO(_, smem_pipe_write_do_cur.index()));
-      // copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, m_block), sdPsum(_, smem_pipe_write_do_cur.index()));
       copy(bulk_copy.with(*pipeline_do.producer_get_barrier(smem_pipe_write_do_cur)), gdPsum(_, _, m_block), sdPsum(_, _, smem_pipe_write_do_cur.index()));
       if constexpr (!Q_dO_same_stages) {
         ++smem_pipe_write_do;
@@ -886,7 +879,7 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
 
-    // if (bidh == 7 && thread_idx == 0) {
+    // if (bidh == 0 && thread_idx == 0) {
     //     printf("[BWD MMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n", bidb, kBlockM, kBlockN, n_block,
     //     m_block_min, m_block_max, attn_type);
     // }
@@ -913,8 +906,6 @@ struct CollectiveMainloopBwdSm90 {
     Tensor sdQ = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumTMA{}));
     Tensor sdQt = cute::as_position_independent_swizzle_tensor(make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dqacc.data()), SmemLayoutdQaccumtTMA{}));
     // Tensor cdQsdQ = make_identity_tensor(SmemLayoutdQaccumTMA{}.shape());
-    // Tensor sLSEMma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSEMma{});
-    // Tensor sdPsumMma = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
 
     Tensor sdPsumMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_dpsum.data()), SmemLayoutLSEMma{});
     Tensor sLSEMma_full = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_lse.data()), SmemLayoutLSEMma{});
@@ -999,7 +990,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
-    // if (thread_idx == 0 && bidh == 7 && n_block == 0){
+    // if (thread_idx == 0 && bidh == 0 && n_block == 0){
     //     printf("bidb: %d, offset_q: %d\n", bidb, seqlen_info.offset_q);
     //     printf("mdQaccum: "); print(mdQaccum); printf("\n");
     //     printf("gdQaccum_: "); print(gdQaccum_); printf("\n");
@@ -1078,8 +1069,6 @@ struct CollectiveMainloopBwdSm90 {
         static constexpr int Row = !SdP_swapAB ? 0 : 1, Col = !SdP_swapAB ? 1 : 0;
         Tensor cS = cute::make_identity_tensor(Shape<Int<!SdP_swapAB ? kBlockM : kBlockN>, Int<!SdP_swapAB ? kBlockN : kBlockM>>{});
         Tensor tScS = thread_mma.partition_C(cS);
-        // Tensor tSrS_rowcol =
-        //     make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tSrS.layout()));
         Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tScS.layout()));
         Tensor t0ScS = thread0_mma.partition_C(cS);
         Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(t0ScS.layout()));
@@ -1240,7 +1229,7 @@ struct CollectiveMainloopBwdSm90 {
             taccdQrdQ(dqi) *= params.softmax_scale;
           }
           cute::copy(r2s_tiled_copy_dQaccum, taccdQrdQ, tdQsdQaccum);
-          // if (thread_idx == 0 && bidh == 7 && bidb == 0 && n_block == 0) {
+          // if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
           //     printf("=================== before retile ===================\n");
           //     cute::print_tensor(tdQrdQ);
           //     printf("=================== after retile ===================\n");
@@ -1267,7 +1256,7 @@ struct CollectiveMainloopBwdSm90 {
           //             tdQsdQaccum(i) = 0;
           //         }
           //     }
-          //     if (thread_idx == 0 && bidh == 7 && bidb == 0 && n_block == 0) {
+          //     if (thread_idx == 0 && bidh == 0 && bidb == 0 && n_block == 0) {
           //         printf("=================== tdQsdQaccum ===================\n");
           //         cute::print_tensor(tdQsdQaccum);
           //         printf("=================== bound ===================\n");
@@ -1361,7 +1350,6 @@ struct CollectiveMainloopBwdSm90 {
     if constexpr (Q_dO_same_stages) {
       smem_pipe_read_do = smem_pipe_read;
     }
-
     return true;
   }
 };

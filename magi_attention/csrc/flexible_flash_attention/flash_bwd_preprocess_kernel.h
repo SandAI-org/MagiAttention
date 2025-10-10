@@ -176,14 +176,6 @@ class FlashAttnBwdPreprocess {
     int const bidh = blockIdx.z;
     int const bidb = blockIdx.x;
 
-    // Initialize the seqlen info
-    // flash::DistributedSeqlenInfo seqlen_info(bidb, params.q_ranges, params.k_ranges);
-    // int const seqlen_o = seqlen_info.seqlen_q;
-    // Early return if the current block is out of range
-    // if (m_block * kBlockM >= seqlen_o) {
-    //  return;
-    //}
-
     // TODO: remove to params
     // auto shape_LSE = select<0, 2>(params.shape_O);
     // Initialize the tensors for O, dO, and LSE
