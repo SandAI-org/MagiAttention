@@ -1470,7 +1470,14 @@ class DistAttnFunc(torch.autograd.Function):
             ref_local_dkv=local_kv,
         )
 
-        return local_dq, local_dk, local_dv, None, None
+        return (
+            local_dq,
+            local_dk,
+            local_dv,
+            None,  # dist_attn_runtime
+            None,  # softmax_scale
+            None,  # softcap
+        )
 
 
 def dist_attn_func(
@@ -1504,10 +1511,10 @@ def dist_attn_func(
         lse: [num_tokens_q_local, num_heads_q]
     """
     return DistAttnFunc.apply(
-        q=q,
-        k=k,
-        v=v,
-        dist_attn_runtime=dist_attn_runtime,
-        softmax_scale=softmax_scale,
-        softcap=softcap,
+        q,
+        k,
+        v,
+        dist_attn_runtime,
+        softmax_scale,
+        softcap,
     )
