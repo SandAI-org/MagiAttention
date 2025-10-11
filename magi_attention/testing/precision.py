@@ -133,9 +133,13 @@ def torch_attn_ref(
     k: torch.Tensor,
     v: torch.Tensor,
     mask: torch.Tensor,
+    softmax_scale: float | None = None,
+    softcap: float = 0.0,
     layout: str = "thd",
     high_precision: bool = False,
 ) -> torch.Tensor:
+    assert softcap == 0.0, "non-zero softcap is not supported by now"
+
     if layout == "thd":
         q = rearrange(q, "t h d -> 1 h t d")
         k = rearrange(k, "t h d -> 1 h t d")
@@ -151,6 +155,7 @@ def torch_attn_ref(
                 v.to(torch.float64),
                 attn_mask=mask,
                 enable_gqa=True,
+                scale=softmax_scale,
             )
         else:
             out = F.scaled_dot_product_attention(
@@ -159,6 +164,7 @@ def torch_attn_ref(
                 v,
                 attn_mask=mask,
                 enable_gqa=True,
+                scale=softmax_scale,
             )
 
     if layout == "thd":
