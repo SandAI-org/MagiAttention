@@ -221,6 +221,8 @@ class DistAttnRuntime:
                     k=k,
                     v=v,
                     attn_arg=attn_arg,
+                    softmax_scale=_softmax_scale,
+                    softcap=softcap,
                 )
             else:
                 partial_out, partial_lse = _flex_flash_attn_forward(
@@ -483,6 +485,8 @@ class DistAttnRuntime:
                 o=o,
                 lse=lse,
                 attn_arg=attn_arg,
+                softmax_scale=_softmax_scale,
+                softcap=softcap,
             )
             partial_dkv = self._maybe_concat_kv(partial_dk, partial_dv)
         else:

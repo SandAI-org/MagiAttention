@@ -689,6 +689,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}] x "
         )
+        test_case_seed = str2seed(test_case)
 
         # -----    contruct config from test cases   ---- #
 
@@ -698,7 +699,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         if random_type_mapping:
             # NOTE: to test causal mapping, we design a mode to just use random `attn_type_mapping`
             # instead of hard-coded config in the test cases
-            with sync_rng(seed=str2seed(test_case)):
+            with sync_rng(seed=test_case_seed):
                 attn_type_mapping = [
                     random.choice([0, 1, 2, 3]) for _ in attn_type_mapping
                 ]
@@ -707,6 +708,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         chunk_size: int = attn_config["chunk_size"]
         num_heads_q, num_heads_kv = num_heads
+        softmax_scale = (  # choose softmax_scale by rule
+            None if test_case_seed % 2 == 0 else (1 / head_dim)
+        )
+        softcap = 0.0  # not supported for test
 
         dist_attn_config = DistAttnConfig(
             dispatch_config=DispatchConfig(
@@ -796,7 +801,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----   run dist attn forward on local qkv for local o   ---- #
 
-        local_out, _ = dist_attn_runtime_mgr.calc_attn(local_q, local_k, local_v)
+        local_out, _ = dist_attn_runtime_mgr.calc_attn(
+            q=local_q,
+            k=local_k,
+            v=local_v,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
+        )
 
         # -----   undispatch local o to global o   ---- #
 
@@ -825,6 +836,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             attn_type_map=attn_type_mapping,
             total_seqlen_q=total_seqlen_q,
             total_seqlen_k=total_seqlen_k,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
             total_q=total_q,
             total_k=total_k,
             total_v=total_v,
@@ -844,6 +857,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         attn_type_map: list[int],
         total_seqlen_q: int,
         total_seqlen_k: int,
+        softmax_scale: float | None,
+        softcap: float,
         total_q: torch.Tensor,
         total_k: torch.Tensor,
         total_v: torch.Tensor,
@@ -889,6 +904,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             k=total_k,
             v=total_v,
             mask=mask,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
             layout="thd",
             high_precision=True,
         )

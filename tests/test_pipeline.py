@@ -543,10 +543,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         chunk_size: int = attn_config["chunk_size"]
         num_heads_q, num_heads_kv = num_heads
-        softmax_scale = (
+        softmax_scale = (  # choose softmax_scale by rule
             None if test_case_seed % 2 == 0 else (1 / head_dim)
-        )  # choose softmax_scale by rule
-        softcap = 0.0  # not supported for ref
+        )
+        softcap = 0.0  # not supported for test
 
         dist_attn_config = DistAttnConfig(
             dispatch_config=DispatchConfig(
