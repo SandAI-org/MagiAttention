@@ -124,9 +124,21 @@ class DistAttnRuntimeMgr:
         return k_or_v
 
     def calc_attn(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        softmax_scale: float | None = None,
+        softcap: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return dist_attn_func(q, k, v, self.dist_attn_runtime)
+        return dist_attn_func(
+            q=q,
+            k=k,
+            v=v,
+            dist_attn_runtime=self.dist_attn_runtime,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
+        )
 
     def get_xattn_args(
         self,

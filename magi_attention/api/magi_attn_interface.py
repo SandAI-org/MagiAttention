@@ -663,7 +663,7 @@ def dispatch(
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = dist_attn_runtime_dict.get(key)
+    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
@@ -692,7 +692,7 @@ def undispatch(
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = dist_attn_runtime_dict.get(key)
+    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
@@ -708,6 +708,8 @@ def calc_attn(
     k: torch.Tensor,
     v: torch.Tensor,
     key: DistAttnRuntimeKey,
+    softmax_scale: float | None = None,
+    softcap: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply attention computation.
@@ -719,6 +721,10 @@ def calc_attn(
         key (DistAttnRuntimeKey): the object that holds some inner meta data
             as one argument for many other magi_attention APIs,
             about which the users may have no bother to care.
+
+        softmax_scale (float, optional): given softmax scale.
+            Defaults to None to use default value: 1/sqrt(head_dim)
+        softcap (float, optional): given softcap. Defaults to 0.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
@@ -735,11 +741,17 @@ def calc_attn(
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr = dist_attn_runtime_dict.get(key)
+    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
-    return mgr.calc_attn(q, k, v)
+    return mgr.calc_attn(
+        q=q,
+        k=k,
+        v=v,
+        softmax_scale=softmax_scale,
+        softcap=softcap,
+    )
 
 
 def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
