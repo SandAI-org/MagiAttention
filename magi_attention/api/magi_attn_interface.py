@@ -66,7 +66,7 @@ def magi_attn_varlen_key(
         cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
         cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
 
-        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
+        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by ``chunk_size * cp_size``.
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
@@ -74,8 +74,8 @@ def magi_attn_varlen_key(
             **NOTE**: for process group, we only support nccl backend for now,
             and for device mesh, we only support 1D or 2D mesh for now.
 
-        causal (bool, optional): if True, all attn_mask_type is CAUSAL. else, determine masktype with ``window_size``.
-            Defaults to False.
+        causal (bool, optional): if ``True``, all mask types are set to ``CAUSAL``,
+            otherwise, determine the mask types by ``window_size``. Defaults to ``False``.
         window_size (tuple[int, int], optional): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
@@ -195,7 +195,7 @@ def magi_attn_varlen_dispatch(
         cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
         cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
 
-        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
+        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by ``chunk_size * cp_size``.
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
@@ -203,8 +203,8 @@ def magi_attn_varlen_dispatch(
             **NOTE**: for process group, we only support nccl backend for now,
             and for device mesh, we only support 1D or 2D mesh for now.
 
-        causal (bool, optional): if True, all attn_mask_type is CAUSAL. else, determine masktype with ``window_size``.
-            Defaults to False.
+        causal (bool, optional): if ``True``, all mask types are set to ``CAUSAL``,
+            otherwise, determine the mask types by ``window_size``. Defaults to ``False``.
         window_size (tuple[int, int], optional): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
@@ -317,7 +317,7 @@ def magi_attn_flex_key(
         total_seqlen_q (int): the total seqlen of query
         total_seqlen_k (int): the total seqlen of key
 
-        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
+        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by ``chunk_size * cp_size``.
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
@@ -528,7 +528,7 @@ def magi_attn_flex_dispatch(
         total_seqlen_q (int): the total seqlen of query
         total_seqlen_k (int): the total seqlen of key
 
-        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
+        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by ``chunk_size * cp_size``.
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
@@ -722,9 +722,9 @@ def calc_attn(
             as one argument for many other magi_attention APIs,
             about which the users may have no bother to care.
 
-        softmax_scale (float, optional): given softmax scale.
-            Defaults to None to use default value: 1/sqrt(head_dim)
-        softcap (float, optional): given softcap. Defaults to 0.
+        softmax_scale (float, optional): softmax scale.
+            Defaults to ``None`` to use: ``1/sqrt(head_dim)``.
+        softcap (float, optional): softcap. Defaults to ``0.0``.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
@@ -732,11 +732,11 @@ def calc_attn(
             - lse (torch.Tensor): local log-sum-exp tensor.
 
     Shapes:
-        q: [num_tokens_q_local, num_heads_q, head_dim]
-        k: [num_tokens_kv_local, num_heads_kv, head_dim]
-        v: [num_tokens_kv_local, num_heads_kv, head_dim]
-        out: [num_tokens_q_local, num_heads_q, head_dim]
-        lse: [num_tokens_q_local, num_heads_q]
+        - q: [num_tokens_q_local, num_heads_q, head_dim]
+        - k: [num_tokens_kv_local, num_heads_kv, head_dim]
+        - v: [num_tokens_kv_local, num_heads_kv, head_dim]
+        - out: [num_tokens_q_local, num_heads_q, head_dim]
+        - lse: [num_tokens_q_local, num_heads_q]
 
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
@@ -814,7 +814,7 @@ def make_varlen_key_for_new_mask_after_dispatch(
         cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
         cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
         key_for_dispatch (DistAttnRuntimeKey): the key used for dispatch
-        causal (bool, optional): whether the varlen attention mask is causal. Defaults to False.
+        causal (bool, optional): whether the varlen attention mask is causal. Defaults to ``False``.
         window_size (tuple[int, int], optional): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.

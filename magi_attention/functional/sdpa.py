@@ -154,9 +154,9 @@ def sdpa_fwd(
 
         attn_arg (AttnArg): attention arguments for ffa
 
-        softmax_scale (float, optional): given softmax scale.
+        softmax_scale (float, optional): softmax scale.
             Defaults to None to use default value: 1/sqrt(head_dim)
-        softcap (float, optional): given softcap. Defaults to 0.
+        softcap (float, optional): softcap. Defaults to 0.
 
     Returns:
         torch.Tensor: out with shape [num_tokens_q, num_heads_q, head_dim]
@@ -352,9 +352,9 @@ def sdpa_bwd(
             or [batch_size, num_heads_q, num_tokens_q]
         attn_arg (AttnArg): attention arguments for ffa
 
-        softmax_scale (float, optional): given softmax scale.
+        softmax_scale (float, optional): softmax scale.
             Defaults to None to use default value: 1/sqrt(head_dim)
-        softcap (float, optional): given softcap. Defaults to 0.
+        softcap (float, optional): softcap. Defaults to 0.
 
     Returns:
         torch.Tensor: dq with shape [num_tokens_q, num_heads_q, head_dim]

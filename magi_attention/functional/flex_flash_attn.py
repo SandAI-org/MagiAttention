@@ -729,9 +729,10 @@ def flex_flash_attn_func(
 
             More information about the attention type map can be found in the ``Note`` below.
 
-        softmax_scale (float, optional): Softmax scale, defaults to 1/sqrt(head_dim).
-        softcap (float, optional): Softcap value, defaults to 0.
-        deterministic (bool, optional): Whether to use deterministic attention, defaults to False.
+        softmax_scale (float, optional): Softmax scale.
+            Defaults to ``None`` to use: ``1/sqrt(head_dim)``.
+        softcap (float, optional): Softcap. Defaults to ``0.0``.
+        deterministic (bool, optional): Whether to use deterministic attention. Defaults to ``False``.
         sm_margin (int, optional): the amount of SMs(streaming multiprocessors) reserved for communication.
         disable_fwd_atomic_reduction (bool):
             Whether to disable forward atomic reduction:
@@ -741,7 +742,8 @@ def flex_flash_attn_func(
                 For example, q_ranges = ``[[0, 15], [10, 20], [20, 30]]`` has overlap because
                 ``[0, 15]`` and ``[10, 20]`` intersect. While q_ranges = ``[[0, 15], [15, 20], [20, 30]]`` has no overlap.
 
-        auto_range_merge (bool, optional): Whether to automatically merge k_ranges for the same q_range, defaults to False.
+        auto_range_merge (bool, optional): Whether to automatically merge k_ranges for the same q_range.
+            Defaults to ``False``.
 
             **Note:** This flag is usually used in sparse attention cases but still under development.
 

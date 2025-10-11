@@ -158,9 +158,9 @@ class DistAttnRuntime:
             lse_acc (torch.Tensor, optional): accumulative buffer for lse
             overlap_stage (int, optional): given overlap stage. Defaults to None.
 
-            softmax_scale (float, optional): given softmax scale.
+            softmax_scale (float, optional): softmax scale.
                 Defaults to None to use default value: 1/sqrt(head_dim)
-            softcap (float, optional): given softcap. Defaults to 0.
+            softcap (float, optional): softcap. Defaults to 0.
 
         Returns:
             out (torch.Tensor | None): partial out, or None if skipped
@@ -423,9 +423,9 @@ class DistAttnRuntime:
             dq_acc (torch.Tensor, optional): accumulative buffer for dq
             overlap_stage (int, optional): given overlap stage. Defaults to None.
 
-            softmax_scale (float, optional): given softmax scale.
+            softmax_scale (float, optional): softmax scale.
                 Defaults to None to use default value: 1/sqrt(head_dim)
-            softcap (float, optional): given softcap. Defaults to 0.
+            softcap (float, optional): softcap. Defaults to 0.
 
         Returns:
             partial_dq (torch.Tensor | None): partial dq, or None if skipped
@@ -1298,9 +1298,9 @@ class DistAttnFunc(torch.autograd.Function):
             local_v (torch.Tensor): local v tensor
             dist_attn_runtime(DistAttnRuntime): dist attn runtime
 
-            softmax_scale (float, optional): given softmax scale.
+            softmax_scale (float, optional): softmax scale.
                 Defaults to None to use default value: 1/sqrt(head_dim)
-            softcap (float, optional): given softcap. Defaults to 0.
+            softcap (float, optional): softcap. Defaults to 0.
 
         Returns:
             local_out (torch.Tensor): local out tensor
@@ -1500,9 +1500,9 @@ def dist_attn_func(
         v (torch.Tensor): local v
         dist_attn_runtime (DistAttnRuntime): distributed attention runtime
 
-        softmax_scale (float, optional): given softmax scale.
+        softmax_scale (float, optional): softmax scale.
             Defaults to None to use default value: 1/sqrt(head_dim)
-        softcap (float, optional): given softcap. Defaults to 0.
+        softcap (float, optional): softcap. Defaults to 0.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: local out and local lse
