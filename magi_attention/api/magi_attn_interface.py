@@ -25,7 +25,6 @@ from magi_attention.config import DistAttnConfig
 from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeDict,
     DistAttnRuntimeKey,
-    DistAttnRuntimeMgr,
     init_dist_attn_runtime_key,
     init_dist_attn_runtime_mgr,
 )
@@ -663,7 +662,7 @@ def dispatch(
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
@@ -692,7 +691,7 @@ def undispatch(
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
@@ -741,7 +740,7 @@ def calc_attn(
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
@@ -769,7 +768,7 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
         raise ValueError("The dist attn runtime key does not exist!")
 
@@ -787,7 +786,12 @@ def get_most_recent_key() -> DistAttnRuntimeKey:
     Returns:
         DistAttnRuntimeKey: the most recent inserted key.
     """
-    return dist_attn_runtime_dict.get_most_recent_key()
+
+    key = dist_attn_runtime_dict.get_most_recent_key()
+    if key is None:
+        raise ValueError("The dist attn runtime dict is empty!")
+
+    return key
 
 
 def make_varlen_key_for_new_mask_after_dispatch(
@@ -1043,11 +1047,6 @@ def make_flex_key_for_new_mask_after_dispatch(
         >>> total_out1 = undispatch(local_out1, key_for_dispatch)
         >>> total_out2 = undispatch(local_out2, new_key_for_swa_mask)
     """
-    # validate key_for_dispatch
-    assert (
-        key_for_dispatch in dist_attn_runtime_dict.keys()
-    ), "The key_for_dispatch does not exist!"
-
     # validate and transform attn_mask_type
     attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
     assert is_list_type_all(attn_mask_type, (str, AttnMaskType)), (
@@ -1077,7 +1076,9 @@ def make_flex_key_for_new_mask_after_dispatch(
     )
 
     # extract the common attributes from the mgr for dispatch
-    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict[key_for_dispatch]
+    mgr = dist_attn_runtime_dict.get(key_for_dispatch)
+    if mgr is None:
+        raise ValueError("The dist attn runtime key for dispatch does not exist!")
     ref_dispatch_meta_q = mgr.dispatch_meta_q
     ref_dispatch_meta_k = mgr.dispatch_meta_k
     is_same_source = mgr.is_same_source
