@@ -1347,14 +1347,14 @@ struct CollectiveMainloopBwdSm90 {
     if (n_block == last_n_block) {
       // for last n_block, we can skip all mask mask.
       if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
-        CUTLASS_PRAGMA_NO_UNROLL
+#pragma unroll 1
         for (; m_block < m_block_max; ++m_block) {
           bwd_step(m_block, bypass_fn);
         }
       }
       // otherwise we need boundary mask.
       else {
-        CUTLASS_PRAGMA_NO_UNROLL
+#pragma unroll 1
         for (; m_block < m_block_max; ++m_block) {
           bwd_step(m_block, boundary_mask_fn);
         }
@@ -1364,7 +1364,7 @@ struct CollectiveMainloopBwdSm90 {
       if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
         int n_idx_max = (n_block + 1) * kBlockN;
         int m_block_idx_for_casual = std::max(m_block_min, (n_idx_max + seqlen_k - seqlen_q) / kBlockM);
-        CUTLASS_PRAGMA_NO_UNROLL
+#pragma unroll 1
         for (; m_block < m_block_idx_for_casual; ++m_block) {
           bwd_step(m_block, regular_mask_fn);
         }
@@ -1374,13 +1374,13 @@ struct CollectiveMainloopBwdSm90 {
       int const m_block_idx_for_inv_casual =
           attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? m_block_max : cute::ceil_div(n_idx_min, kBlockN) - 1;
 
-      CUTLASS_PRAGMA_NO_UNROLL
+#pragma unroll 1
       for (; m_block < m_block_idx_for_inv_casual; ++m_block) {
         bwd_step(m_block, bypass_fn);
       }
 
-      // for Invcausal and BiCausal, we need to do regular mask for some block at the end;
-      CUTLASS_PRAGMA_NO_UNROLL
+// for Invcausal and BiCausal, we need to do regular mask for some block at the end;
+#pragma unroll 1
       for (; m_block < m_block_max; ++m_block) {
         bwd_step(m_block, regular_mask_fn);
       }
