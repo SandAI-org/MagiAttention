@@ -79,6 +79,7 @@ def magi_attn_varlen_key(
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
             Defaults to be ``(-1, -1)``.
+
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
@@ -208,6 +209,7 @@ def magi_attn_varlen_dispatch(
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
             Defaults to be ``(-1, -1)``.
+
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
@@ -306,7 +308,6 @@ def magi_attn_flex_key(
     calculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
 
     Args:
-        x (torch.Tensor): input tensor
         q_ranges (AttnRanges): the global query ranges
         k_ranges (AttnRanges): the global key ranges
         attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]):
@@ -518,6 +519,7 @@ def magi_attn_flex_dispatch(
 
     Args:
         x (torch.Tensor): input tensor
+
         q_ranges (AttnRanges): the global query ranges
         k_ranges (AttnRanges): the global key ranges
         attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]):
@@ -817,12 +819,14 @@ def make_varlen_key_for_new_mask_after_dispatch(
     Args:
         cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
         cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
+
         key_for_dispatch (DistAttnRuntimeKey): the key used for dispatch
         causal (bool, optional): whether the varlen attention mask is causal. Defaults to ``False``.
         window_size (tuple[int, int], optional): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
             Defaults to be ``(-1, -1)``.
+
         dist_attn_config (DistAttnConfig, optional): the optional new dist attn config,
 
             NOTE: if not provided, we will use the same config as the ``key_for_dispatch``,
@@ -959,7 +963,9 @@ def make_flex_key_for_new_mask_after_dispatch(
         attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]):
             the global attn mask type (list)
             represented by str or enum ``AttnMaskType`` or their mixed combination
+
         key_for_dispatch (DistAttnRuntimeKey): the key used for dispatch
+
         dist_attn_config (DistAttnConfig, optional): the optional new dist attn config,
 
             NOTE: if not provided, we will use the same config as the ``key_for_dispatch``,
