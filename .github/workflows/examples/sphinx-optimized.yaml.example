@@ -1,0 +1,64 @@
+# Example: Optimized Sphinx documentation build with caching
+# This is an example configuration showing how to optimize documentation builds
+# Rename this file to remove .example extension to activate it
+
+name: sphinx deploy (optimized)
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    # Use larger runner for faster documentation builds
+    runs-on: ubuntu-latest-4-cores
+    
+    container:
+      image: nvcr.io/nvidia/pytorch:25.05-py3
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+          key: ${{ runner.os }}-pip-docs-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-docs-
+      
+      - name: Cache Sphinx build
+        uses: actions/cache@v4
+        with:
+          path: |
+            docs/build
+            docs/source/_build
+          key: ${{ runner.os }}-sphinx-${{ hashFiles('docs/source/**') }}
+          restore-keys: |
+            ${{ runner.os }}-sphinx-
+      
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y rsync
+          pip install sphinx
+          pip install pydata-sphinx-theme myst_parser sphinx-copybutton
+      
+      - name: Build docs
+        run: |
+          cd docs
+          make clean
+          sphinx-build -b html source/ html/
+      
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        if: ${{ github.event_name == 'push' }}
+        with:
+          branch: gh-pages
+          folder: docs/html
+          target-folder: docs/main

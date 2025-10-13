@@ -1,0 +1,56 @@
+# Example: Using self-hosted GPU runners for testing
+# This is an example configuration showing how to use self-hosted GPU runners
+# Rename this file to remove .example extension to activate it
+
+name: GPU Tests (self-hosted)
+
+on:
+  push:
+    branches: 
+      - main
+  pull_request:
+    # Only run GPU tests when specifically requested via label
+    types: [labeled]
+
+jobs:
+  gpu-tests:
+    # Only run if the PR has the 'run-gpu-tests' label or on main branch
+    if: |
+      github.event_name == 'push' || 
+      contains(github.event.pull_request.labels.*.name, 'run-gpu-tests')
+    
+    # Use self-hosted runner with GPU and CUDA support
+    runs-on: [self-hosted, linux, x64, gpu, cuda]
+    
+    timeout-minutes: 60  # Prevent stuck jobs
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Set up environment
+        run: |
+          nvidia-smi
+          python --version
+          pip --version
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements_dev.txt
+      
+      - name: Install MagiAttention
+        run: |
+          pip install --no-build-isolation .
+      
+      - name: Run GPU tests
+        run: |
+          # Run tests that require GPU
+          pytest tests/ -v -m gpu
+      
+      - name: Cleanup
+        if: always()
+        run: |
+          # Clean up any GPU resources
+          nvidia-smi

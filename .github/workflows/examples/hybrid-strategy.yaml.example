@@ -1,0 +1,109 @@
+# Example: Hybrid strategy using different runners for different jobs
+# This is an example configuration showing how to use different runner types
+# Rename this file to remove .example extension to activate it
+
+name: CI (hybrid strategy)
+
+on:
+  push:
+    branches: '**'
+  pull_request:
+
+jobs:
+  # Lightweight linting on standard runner
+  quick-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pre-commit
+        run: pip install pre-commit==4.0.1
+      - name: Run quick linters
+        run: pre-commit run --all-files --hook-stage manual
+  
+  # Full lint matrix on larger runner for speed
+  full-lint:
+    needs: quick-lint
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+      fail-fast: false
+    runs-on: ubuntu-latest-4-cores
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format-${{ env.LLVM_VERSION }}
+        env:
+          LLVM_VERSION: 21
+        run: |
+          sudo chmod +x ./scripts/install_clang_format.sh
+          sudo ./scripts/install_clang_format.sh
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependency
+        run: pip install pre-commit==4.0.1
+      - name: Install pre-commit
+        run: pre-commit install
+      - name: Run pre-commit
+        run: pre-commit run --all-files
+  
+  # CPU tests on standard runner
+  cpu-tests:
+    needs: quick-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements_dev.txt
+      - name: Run CPU tests
+        run: |
+          pytest tests/ -v -m "not gpu"
+  
+  # GPU tests on self-hosted runner (only on main or with label)
+  gpu-tests:
+    if: |
+      github.ref == 'refs/heads/main' || 
+      contains(github.event.pull_request.labels.*.name, 'run-gpu-tests')
+    needs: quick-lint
+    runs-on: [self-hosted, linux, x64, gpu, cuda]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements_dev.txt
+      - name: Install MagiAttention
+        run: pip install --no-build-isolation .
+      - name: Run GPU tests
+        run: pytest tests/ -v -m gpu
+  
+  # Documentation build on larger runner
+  docs:
+    needs: quick-lint
+    runs-on: ubuntu-latest-4-cores
+    container:
+      image: nvcr.io/nvidia/pytorch:25.05-py3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y rsync
+          pip install sphinx pydata-sphinx-theme myst_parser sphinx-copybutton
+      - name: Build docs
+        run: |
+          cd docs
+          sphinx-build -b html source/ html/

@@ -1,0 +1,38 @@
+# Example: Using larger GitHub-hosted runners for lint workflow
+# This is an example configuration showing how to use larger runners
+# Rename this file to remove .example extension to activate it
+
+name: lint (with larger runner)
+
+on:
+  push:
+    branches: '**'
+  pull_request:
+
+jobs:
+  lint:
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    # Use larger GitHub-hosted runner for faster execution
+    runs-on: ubuntu-latest-4-cores  # Options: ubuntu-latest-4-cores, ubuntu-latest-8-cores, ubuntu-latest-16-cores
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format-${{ env.LLVM_VERSION }}
+        env:
+          LLVM_VERSION: 21
+        run: |
+          sudo chmod +x ./scripts/install_clang_format.sh
+          sudo ./scripts/install_clang_format.sh
+          clang-format-${{ env.LLVM_VERSION }} --version
+          clang-format --version
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependency
+        run: pip install pre-commit==4.0.1
+      - name: Install pre-commit
+        run: pre-commit install
+      - name: Run pre-commit
+        run: pre-commit run --all-files

@@ -12,6 +12,10 @@ Please follow these steps to open a pull request:
 5. Open a Pull Request
 
 
+## CI/CD and GitHub Actions
+
+For information about expanding GitHub Actions runner capacity and optimizing CI/CD workflows, please refer to our [GitHub Actions Runner Guide](./docs/source/github_actions_runners.md).
+
 ## Requirements
 
 First of all, please install the required packages specific for developers by running:
