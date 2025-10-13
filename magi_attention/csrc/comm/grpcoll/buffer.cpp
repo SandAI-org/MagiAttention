@@ -1442,7 +1442,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
 #endif
 }
 
-// TODO: deal with low latency mode
+// NOTE: remain original low-latency interface here for future potential usage,
+// which won't be exposed to users for now, but guaranteed its compatibility internally
 void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
 #ifndef DISABLE_NVSHMEM
   EP_HOST_ASSERT(low_latency_mode);
