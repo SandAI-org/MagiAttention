@@ -14,8 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+if [[ -f .env ]]; then
+    source .env # maybe put your own master node IP here
+fi
+
 TEST_ROOT=.
 LOG_ROOT=${TEST_ROOT}/outs
+TEST_MODE=${TEST_MODE:-"intra_node"} # intra_node | low_latency | internode
 
 mkdir -p ${LOG_ROOT}
 
@@ -30,26 +35,26 @@ export PYTHONPATH=$PYTHONPATH:.
 
 # ----- test-intranode ----- #
 
-# self-added env variable to control low-latency mode for test_intranode.py
-# FIXME: enable this wll raise the error:
-#   assert calc_diff(recv_x[:, -1], recv_src_info.view(-1)) < 0.007
-export GRPCOLL_TEST_INTRANODE_LOW_LATENCY=0
-
-LOG_PATH=${LOG_ROOT}/test_intranode_grpcoll.log
-echo "Logging to ${LOG_PATH} ..."
-python ${TEST_ROOT}/test_intranode_grpcoll.py > ${LOG_PATH} 2>&1; exit 0
+if [[ $TEST_MODE == "intra_node" ]]; then
+    LOG_PATH=${LOG_ROOT}/test_intranode_grpcoll.log
+    echo "Logging to ${LOG_PATH} ..."
+    python ${TEST_ROOT}/test_intranode_grpcoll.py > ${LOG_PATH} 2>&1; exit 0
+fi
 
 # ----- test-low-latency ----- #
 
-# self-added env variable to control allow-nvlink mode for test_low_latency.py
-export GRPCOLL_TEST_LOW_LATENCY_ALLOW_NVLINK=1
-
-# LOG_PATH=${LOG_ROOT}/test_low_latency_grpcoll.log
-# echo "Logging to ${LOG_PATH} ..."
-# python ${TEST_ROOT}/test_low_latency_grpcoll.py > ${LOG_PATH} 2>&1; exit 0
-
+if [[ $TEST_MODE == "low_latency" ]]; then
+    LOG_PATH=${LOG_ROOT}/test_low_latency_grpcoll.log
+    echo "Logging to ${LOG_PATH} ..."
+    python ${TEST_ROOT}/test_low_latency_grpcoll.py > ${LOG_PATH} 2>&1; exit 0
+fi
 
 # ----- test-internode ----- #
+
+if [[ $TEST_MODE != "inter_node" ]]; then
+    echo "Error: Unknown TEST_MODE=$TEST_MODE"
+    exit 1
+fi
 
 if [ -z "$1" ]; then
     echo "Error: Please specify the rank of this node."
@@ -61,11 +66,6 @@ else
 fi
 
 # init dist env vars
-
-if [[ -f .env ]]; then
-    source .env # maybe put your own master node IP here
-fi
-
 export OMP_NUM_THREADS=1
 export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1} # replace with your own master node IP
 export MASTER_PORT=23457
