@@ -143,7 +143,7 @@ def native_group_cast_impl(
         _,  # recv_num_tokens_per_expert_list
         handle,
         event,
-    ) = buffer.dispatch(
+    ) = buffer.group_cast(
         x=input,
         recv_x=output,
         handle=handle,
@@ -278,7 +278,7 @@ def native_group_reduce_impl(
         )
 
     # launch combine kernel
-    combined_x, _, event = buffer.combine(
+    combined_x, _, event = buffer.group_reduce(
         x=input,
         handle=handle,
         combined_x=output,
