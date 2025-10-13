@@ -701,7 +701,7 @@ class GrpCollBuffer:
             recv_src_idx,
             send_head,
             event,
-        ) = self.runtime.intranode_dispatch(
+        ) = self.runtime.intranode_group_cast(
             x,
             recv_x,
             None,  # x_scales
@@ -767,7 +767,7 @@ class GrpCollBuffer:
             combined_x,
             _,  # combined_topk_weights
             event,
-        ) = self.runtime.intranode_combine(
+        ) = self.runtime.intranode_group_reduce(
             x,
             combined_x,
             topk_weights,
@@ -861,7 +861,7 @@ class GrpCollBuffer:
             send_rdma_head,
             send_nvl_head,
             event,
-        ) = self.runtime.internode_dispatch(
+        ) = self.runtime.internode_group_cast(
             x,
             recv_x,
             None,  # x_scales
@@ -936,7 +936,7 @@ class GrpCollBuffer:
             combined_x,
             _,  # combined_topk_weights
             event,
-        ) = self.runtime.internode_combine(
+        ) = self.runtime.internode_group_reduce(
             x,
             combined_x,
             topk_weights,

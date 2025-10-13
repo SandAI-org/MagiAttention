@@ -35,7 +35,6 @@
 # SOFTWARE.
 
 import argparse
-import os
 import random
 from functools import partial
 
@@ -547,7 +546,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     assert num_topk <= 9  # kNumMaxTopK = 9
     num_local_experts = num_experts // num_ranks
     num_qps_per_rank = num_local_experts
-    allow_nvlink = os.environ.get("GRPCOLL_TEST_LOW_LATENCY_ALLOW_NVLINK", "1") == "1"
+    allow_nvlink = True
 
     num_device_sms = 132  # for Hopper
     num_warp_groups = (num_experts + num_device_sms - 1) // num_device_sms

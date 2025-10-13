@@ -91,7 +91,7 @@ def test_main(
         min_num_dst_ranks > 0
     )  # if every token has at least one dst, we can empty-init
     pass_out_buffer = True
-    acc_reduce_out_buffer = False  # TODO: support acc_reduce for internode_combine
+    acc_reduce_out_buffer = False  # TODO: support acc_reduce for internode_group_reduce
     acc_reduce_constant = rank
     if acc_reduce_out_buffer:
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"

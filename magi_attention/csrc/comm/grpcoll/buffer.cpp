@@ -321,7 +321,7 @@ std::tuple<
     torch::Tensor,
     torch::Tensor,
     std::optional<EventHandle>>
-Buffer::intranode_dispatch(
+Buffer::intranode_group_cast(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& recv_x_buf,
     const std::optional<torch::Tensor>& x_scales,
@@ -662,7 +662,7 @@ Buffer::intranode_dispatch(
       event};
 }
 
-std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::intranode_combine(
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::intranode_group_reduce(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& combined_x_buf,
     const std::optional<torch::Tensor>& topk_weights,
@@ -868,7 +868,7 @@ std::tuple<
     std::optional<torch::Tensor>,
     std::optional<torch::Tensor>,
     std::optional<EventHandle>>
-Buffer::internode_dispatch(
+Buffer::internode_group_cast(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& recv_x_buf,
     const std::optional<torch::Tensor>& x_scales,
@@ -1246,7 +1246,7 @@ Buffer::internode_dispatch(
 #endif
 }
 
-std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::internode_combine(
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::internode_group_reduce(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& combined_x_buf,
     const std::optional<torch::Tensor>& topk_weights,
@@ -1852,10 +1852,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("sync", &grpcoll::Buffer::sync)
       .def("destroy", &grpcoll::Buffer::destroy)
       .def("get_dispatch_layout", &grpcoll::Buffer::get_dispatch_layout)
-      .def("intranode_dispatch", &grpcoll::Buffer::intranode_dispatch)
-      .def("intranode_combine", &grpcoll::Buffer::intranode_combine)
-      .def("internode_dispatch", &grpcoll::Buffer::internode_dispatch)
-      .def("internode_combine", &grpcoll::Buffer::internode_combine)
+      .def("intranode_group_cast", &grpcoll::Buffer::intranode_group_cast)
+      .def("intranode_group_reduce", &grpcoll::Buffer::intranode_group_reduce)
+      .def("internode_group_cast", &grpcoll::Buffer::internode_group_cast)
+      .def("internode_group_reduce", &grpcoll::Buffer::internode_group_reduce)
       .def("clean_low_latency_buffer", &grpcoll::Buffer::clean_low_latency_buffer)
       .def("low_latency_dispatch", &grpcoll::Buffer::low_latency_dispatch)
       .def("low_latency_combine", &grpcoll::Buffer::low_latency_combine)
