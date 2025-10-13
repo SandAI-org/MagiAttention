@@ -138,9 +138,6 @@ def native_group_cast_impl(
     # launch dispatch kernel
     (
         recv_x,
-        _,  # recv_topk_idx
-        _,  # recv_topk_weights
-        _,  # recv_num_tokens_per_expert_list
         handle,
         event,
     ) = buffer.group_cast(
@@ -278,7 +275,7 @@ def native_group_reduce_impl(
         )
 
     # launch combine kernel
-    combined_x, _, event = buffer.group_reduce(
+    combined_x, event = buffer.group_reduce(
         x=input,
         handle=handle,
         combined_x=output,

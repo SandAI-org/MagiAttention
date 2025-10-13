@@ -61,7 +61,6 @@ from grpcoll_utils import (
     get_output_split_size_list_and_src_index_list,
     get_random_dst_indices_list,
     get_random_split_size_list,
-    inplace_unique,
     per_token_cast_back,
     per_token_cast_to_fp8,
     perm_idxs2unperm_idxs,
@@ -80,7 +79,6 @@ def test_main(
     rank: int,
     buffer: GrpCollBuffer,
     group: dist.ProcessGroup,
-    use_topk: bool = True,
 ):
     # Settings
     num_tokens, hidden = args.num_tokens, args.hidden
@@ -102,10 +100,7 @@ def test_main(
 
     assert num_experts % num_ranks == 0 and num_local_ranks == 8
     num_local_experts = num_experts // num_ranks
-    if use_topk:
-        assert num_local_experts == num_ranks
-    else:
-        assert num_local_experts == 1
+    assert num_local_experts == 1
 
     num_max_nvl_chunked_send_tokens = 8
     nvl_buffer_size = num_max_nvl_chunked_recv_tokens = (
@@ -270,20 +265,10 @@ def test_main(
         dst_indices_list=dst_indices_list,
         output_split_size_list=output_split_size_list,
         src_index_list=src_index_list,
-        use_topk=use_topk,
+        use_topk=False,
         use_a2a_order_output=not random_permute_output,
     )
-    if use_topk:
-        topk_weights_pure_rand = torch.randn_like(topk_weights)
-        rank_idx_ref = topk_idx // num_local_experts
-        rank_idx_ref.masked_fill_(topk_idx == -1, -1)
-        inplace_unique(rank_idx_ref, num_ranks)
-        assert torch.equal(rank_idx, rank_idx_ref), (
-            f"[RANK {rank}]: diff for rank_idx and rank_idx_ref\n{rank_idx=}\n"
-            f"{rank_idx_ref=}\n"
-        )
-    else:
-        topk_weights_pure_rand = None
+
     print(
         f"[RANK {rank}]: {input_split_size_list=} | {dst_indices_list=} | "
         f"{output_split_size_list=} | {src_index_list=} | {sum(output_split_size_list)=}\n",
@@ -398,26 +383,24 @@ def test_main(
     assert torch.allclose(ref_is_token_in_rank_device, is_token_in_rank)
 
     # get dispatch layout from buffer as reference
-    if not use_topk:
-        assert num_experts == num_ranks
+    assert num_experts == num_ranks
 
-        # use host meta
-        layout_topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
-            input_split_sizes=input_split_size_list,
-            dst_indices=dst_indices_list,
-            num_ranks=num_ranks,
-        )
+    # use host meta
+    layout_topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+        input_split_sizes=input_split_size_list,
+        dst_indices=dst_indices_list,
+        num_ranks=num_ranks,
+    )
 
-        # use device meta
-        layout_topk_idx_device = transfer_splits_and_dst_idxs_to_topk_idx(
-            input_split_sizes=input_split_sizes,
-            dst_indices=dst_indices,
-            num_ranks=num_ranks,
-        )
+    # use device meta
+    layout_topk_idx_device = transfer_splits_and_dst_idxs_to_topk_idx(
+        input_split_sizes=input_split_sizes,
+        dst_indices=dst_indices,
+        num_ranks=num_ranks,
+    )
 
-        assert torch.equal(layout_topk_idx, layout_topk_idx_device)
-    else:
-        layout_topk_idx = topk_idx
+    assert torch.equal(layout_topk_idx, layout_topk_idx_device)
+
     (
         ref_num_tokens_per_rank,
         ref_num_tokens_per_rdma_rank,
@@ -463,8 +446,8 @@ def test_main(
 
     for previous_mode in (True,):  # (False, True):
         for async_mode in (True,):  # (False, True):
-            for current_x in (x,):  # (x_pure_rand, x, x_e4m3):
-                for with_topk in (use_topk,):  # (False, True):
+            for current_x in (x,):
+                for with_topk in (False,):
                     if local_rank == 0:
                         print(
                             "\n# ------    Test Internode Dispatch   ------ #\n",
@@ -476,7 +459,6 @@ def test_main(
                         print(
                             f"[testing] Running with "
                             f'{"FP8" if isinstance(current_x, tuple) else "BF16"}, '
-                            f'{"with" if with_topk else "without"} top-k '
                             f"(async={async_mode}, previous={previous_mode}) ...",
                             flush=True,
                             end="",
@@ -494,15 +476,6 @@ def test_main(
                         if use_a2av_perm_idxs == "inside"
                         else None,
                     }
-                    if with_topk:
-                        dispatch_args.update(
-                            {
-                                "topk_idx": topk_idx,
-                                "topk_weights": topk_weights_pure_rand
-                                if current_x is x_pure_rand
-                                else topk_weights,
-                            }
-                        )
                     if previous_mode:
                         dispatch_args.update({"previous_event": buffer.capture()})
 
@@ -510,13 +483,6 @@ def test_main(
                     # recv_x: shape=[num_recv_tokens, hidden_dim]:
                     #   the recv tokens for this rank (in rank order just like a2a output,
                     #   while the boundary is indicated by rank_prefix_matrix)
-                    # recv_topk_idx: shape=[num_recv_tokens, topk]:
-                    #   the local expert idx for this rank w.r.t.
-                    #   each recv token's topk list (-1 means not sent to this rank)
-                    # recv_topk_weights: shape=[num_recv_tokens, topk]:
-                    #   the corr. weight for each recv token's topk list (if idx = -1, then weight = 0.)
-                    # recv_num_tokens_per_expert_list: shape=[num_local_experts,]:
-                    #   the number of tokens to recv for each local expert in this rank
                     # handle: the tuple of some meta tensors that will be passed to combine or cached dispatch
                     # handle[0] (is_token_in_rank): shape=[num_tokens, num_ranks]
                     # handle[1] (rdma_channel_prefix_matrix): shape=[num_rdma_ranks, num_channels]:
@@ -556,9 +522,6 @@ def test_main(
                     #   and if this recv token won't be sent to local rank r, then send_nvl_head[i, r] == -1 as well
                     (
                         recv_x,
-                        recv_topk_idx,
-                        recv_topk_weights,
-                        recv_num_tokens_per_expert_list,
                         handle,
                         event,
                     ) = buffer.group_cast(**dispatch_args)
@@ -606,17 +569,9 @@ def test_main(
                     send_rdma_head = handle.send_rdma_head
                     send_nvl_head = handle.send_nvl_head
 
-                    recv_topk_idx_shape = recv_topk_idx.shape if with_topk else None  # type: ignore[union-attr]
-                    recv_topk_weights_shape = (
-                        recv_topk_weights.shape if with_topk else None  # type: ignore[union-attr]
-                    )
-
                     print(
                         (
                             f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
-                            f"{recv_topk_idx_shape=} | {recv_topk_idx=}\n"  # type: ignore[union-attr]
-                            f"{recv_topk_weights_shape=} | {recv_topk_weights=}\n"  # type: ignore[union-attr]
-                            f"{len(recv_num_tokens_per_expert_list)=} | {recv_num_tokens_per_expert_list=}\n"
                             f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[0]
                             f"{rdma_channel_prefix_matrix.shape=} | {rdma_channel_prefix_matrix=}\n"  # handle[1]
                             f"{gbl_channel_prefix_matrix.shape=} | {gbl_channel_prefix_matrix=}\n"  # handle[2]
@@ -648,28 +603,6 @@ def test_main(
                     ), f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
                     if current_x is not x_pure_rand:
                         check_data(recv_x, recv_gbl_rank_prefix_sum)
-                    if with_topk:
-                        # Check `topk_idx`
-                        assert (
-                            recv_topk_idx.eq(-1)  # type: ignore[union-attr]
-                            | (
-                                (recv_topk_idx >= 0)  # type: ignore[operator]
-                                & (recv_topk_idx < (num_experts // num_ranks))
-                            )
-                        ).sum().item() == recv_topk_idx.numel()  # type: ignore[union-attr]
-
-                        # Check `topk_weights`
-                        if current_x is not x_pure_rand:
-                            recv_topk_weights[  # type: ignore[index]
-                                recv_topk_idx.eq(-1)  # type: ignore[union-attr]
-                            ] = recv_topk_weights.amax(  # type: ignore[union-attr]
-                                dim=1, keepdim=True
-                            ).expand_as(  # type: ignore[union-attr]
-                                recv_topk_weights
-                            )[
-                                recv_topk_idx.eq(-1)  # type: ignore[union-attr]
-                            ]
-                            check_data(recv_topk_weights, recv_gbl_rank_prefix_sum)
 
                     if local_rank == 0:
                         print(
@@ -678,26 +611,23 @@ def test_main(
                         )
 
                     # Test cached dispatch (must without top-k staffs)
-                    if not with_topk:
-                        dispatch_args = {
-                            "x": current_x,
-                            "handle": handle,
-                            "config": config,
-                            "async_finish": async_mode,
-                        }
-                        if previous_mode:
-                            dispatch_args.update({"previous_event": buffer.capture()})
-                        recv_cached_x, _, _, _, _, event = buffer.group_cast(
-                            **dispatch_args
-                        )
-                        event.current_stream_wait() if async_mode else ()
-                        recv_cached_x = (
-                            per_token_cast_back(*recv_cached_x)
-                            if isinstance(recv_cached_x, tuple)
-                            else recv_cached_x
-                        )
-                        if current_x is not x_pure_rand:
-                            check_data(recv_cached_x, recv_gbl_rank_prefix_sum)
+                    dispatch_args = {
+                        "x": current_x,
+                        "handle": handle,
+                        "config": config,
+                        "async_finish": async_mode,
+                    }
+                    if previous_mode:
+                        dispatch_args.update({"previous_event": buffer.capture()})
+                    recv_cached_x, _, event = buffer.group_cast(**dispatch_args)
+                    event.current_stream_wait() if async_mode else ()
+                    recv_cached_x = (
+                        per_token_cast_back(*recv_cached_x)
+                        if isinstance(recv_cached_x, tuple)
+                        else recv_cached_x
+                    )
+                    if current_x is not x_pure_rand:
+                        check_data(recv_cached_x, recv_gbl_rank_prefix_sum)
 
                     if local_rank == 0:
                         print(
@@ -742,20 +672,12 @@ def test_main(
                         if use_a2av_perm_idxs == "inside"
                         else None,
                     }
-                    if with_topk:
-                        combine_args.update({"topk_weights": recv_topk_weights})
                     if previous_mode:
                         combine_args.update({"previous_event": buffer.capture()})
 
                     # combine
                     # combined_x: shape=[num_tokens, hidden_size]: combined_x[i]:
                     #   the ith token's sum-reduction result of top-k experts
-                    #   NOTE: the combined_x is assumed to be already scaled by topk_weights before combining,
-                    #   thus in kernel we don't have to multiply topk_weights
-                    # combined_topk_weights: shape=[num_tokens, topk]:
-                    #   combined_topk_weights[i]: the ith token's sum-reduction weights
-                    #   NOTE: the topk_weights might not a valid probability distribution,
-                    #       thus here we might need combined_topk_weights to be normalized
                     #   NOTE: the send_rdma_head will be modified in-place in internode::cached_notify
                     #       for the entries == -1 to the position of next valid token (encoded to -p-1)
                     #       since the combine kernel needs to know the channel position when iterating at this token,
@@ -764,9 +686,7 @@ def test_main(
                     #       for the entries == -1 to the position of next valid token (encoded to -p-1)
                     #       since the combine kernel needs to know the channel position when iterating at this token,
                     #       even though it is not sent to the target rdma rank
-                    combined_x, combined_topk_weights, event = buffer.group_reduce(
-                        **combine_args
-                    )
+                    combined_x, event = buffer.group_reduce(**combine_args)
 
                     # wait
                     event.current_stream_wait() if async_mode else ()
@@ -777,13 +697,9 @@ def test_main(
                         assert combined_x_gr_buf.data_ptr() == combined_x.data_ptr()
 
                     # print
-                    combined_topk_weights_shape = (
-                        combined_topk_weights.shape if with_topk else None  # type: ignore[union-attr]
-                    )
                     print(
                         (
                             f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
-                            f"{combined_topk_weights_shape=} | {combined_topk_weights=}\n"  # type: ignore[union-attr]
                             f"Before combine: {send_rdma_head.shape=} | {send_rdma_head=}\n\n"
                             f"Before combine: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"
                         ),
@@ -818,22 +734,6 @@ def test_main(
 
                     diff = calc_diff(check_x, ref_x)
                     assert diff < 5e-6, f"{check_x} != {ref_x} with ({diff=})"
-
-                    if with_topk:
-                        check_topk_weights = (
-                            combined_topk_weights
-                            if (current_x is x_pure_rand)
-                            else (
-                                combined_topk_weights
-                                / is_token_in_rank.sum(dim=1).unsqueeze(1)
-                            )
-                        )
-                        ref_topk_weights = (
-                            topk_weights_pure_rand
-                            if current_x is x_pure_rand
-                            else topk_weights
-                        )
-                        assert calc_diff(check_topk_weights, ref_topk_weights) < 1e-9
 
                     # For later tuning
                     dispatch_bf16_rdma_send_bytes = num_rdma_token_sent * hidden * 2
@@ -936,7 +836,7 @@ def test_main(
         "num_tokens_per_expert": num_tokens_per_expert,
         "config": dispatch_config if dispatch_config is not None else config,
     }
-    recv_x, _, _, _, handle, _ = buffer.group_cast(**dispatch_args)  # type: ignore[assignment]
+    recv_x, handle, _ = buffer.group_cast(**dispatch_args)  # type: ignore[assignment]
 
     # Tune combine performance
     best_time, best_results = 1e10, None
@@ -1024,9 +924,8 @@ def test_loop(args: argparse.Namespace):
     num_rdma_bytes = int(1e9)
 
     # reset for group-collective
-    use_topk = False  # NOTE: disable topk to improve bandwidth by saving unused experts
     num_topk = num_ranks
-    num_experts = num_ranks * num_ranks if use_topk else num_ranks
+    num_experts = num_ranks
     args.num_topk = num_topk
     args.num_experts = num_experts
 
@@ -1087,7 +986,6 @@ def test_loop(args: argparse.Namespace):
         rank,
         buffer,
         group,
-        use_topk=use_topk,
     )
     if local_rank == 0:
         print("", flush=True)

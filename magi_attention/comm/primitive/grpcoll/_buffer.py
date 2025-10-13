@@ -414,14 +414,7 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        list[int],
-        GrpCollHandle,
-        EventOverlap,
-    ]:
+    ) -> tuple[torch.Tensor, GrpCollHandle, EventOverlap]:
         """
         Dispatch tokens to different ranks, both intranode and internode settings are supported.
         Intranode kernels require all the ranks should be visible via NVLink.
@@ -456,11 +449,6 @@ class GrpCollBuffer:
         Returns:
             recv_x: received tokens, the same type and tuple as the input `x`, but the number of tokens equals to the
                 received token count.
-            recv_topk_idx: received expert indices.
-            recv_topk_weights: received expert weights.
-            num_recv_tokens_per_expert_list: Python list shaped `[num_local_experts]`, the received token count by
-                each local expert, aligned to the input `expert_alignment`. If `num_worst_tokens` is specified, the list
-                will be empty.
             handle: the returned communication handle.
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
@@ -560,7 +548,7 @@ class GrpCollBuffer:
         allocate_on_comm_stream: bool = False,
         allow_empty_init_out_buf: bool = False,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
+    ) -> tuple[torch.Tensor, EventOverlap]:
         """
         Combine (reduce) tokens (addition **without** weights) from different ranks, both intranode and internode
             settings are supported.
@@ -591,7 +579,6 @@ class GrpCollBuffer:
 
         Returns:
             combined_x: the reduced token from its dispatched ranks.
-            recv_topk_weights: the reduced top-k weights from its dispatch ranks.
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
         is_out_buf_given = combined_x is not None
@@ -688,14 +675,9 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        list[int],
-        GrpCollIntraHandle,
-        EventOverlap,
-    ]:
+    ) -> tuple[torch.Tensor, GrpCollIntraHandle, EventOverlap]:
+        """Intranode group cast implementation"""
+
         # Launch the kernel with cached or non-cached mode
         if handle is not None:
             assert topk_idx is None and topk_weights is None
@@ -739,9 +721,6 @@ class GrpCollBuffer:
 
             return (  # type: ignore[return-value]
                 recv_x,
-                None,  # recv_topk_idx
-                None,  # recv_topk_weights
-                None,  # num_recv_tokens_per_expert_list
                 handle,
                 EventOverlap(event),
             )
@@ -755,9 +734,9 @@ class GrpCollBuffer:
             (
                 recv_x,
                 _,  # recv_x_scales
-                recv_topk_idx,
-                recv_topk_weights,
-                num_recv_tokens_per_expert_list,
+                _,  # recv_topk_idx
+                _,  # recv_topk_weights
+                _,  # num_recv_tokens_per_expert_list
                 rank_prefix_matrix,
                 channel_prefix_matrix,
                 recv_channel_prefix_matrix,
@@ -799,9 +778,6 @@ class GrpCollBuffer:
 
             return (
                 recv_x,
-                recv_topk_idx,
-                recv_topk_weights,
-                num_recv_tokens_per_expert_list,
                 handle,
                 EventOverlap(event),
             )
@@ -821,11 +797,17 @@ class GrpCollBuffer:
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
         allow_empty_init_out_buf: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
+    ) -> tuple[torch.Tensor, EventOverlap]:
+        """Intranode group reduce implementation"""
+
         assert isinstance(handle, GrpCollIntraHandle)
 
         # Launch the kernel
-        combined_x, recv_topk_weights, event = self.runtime.intranode_combine(
+        (
+            combined_x,
+            _,  # recv_topk_weights
+            event,
+        ) = self.runtime.intranode_combine(
             x,
             combined_x,
             topk_weights,
@@ -848,7 +830,7 @@ class GrpCollBuffer:
         # View output to hidden shape
         combined_x = combined_x.view(-1, *hidden_shape)
 
-        return combined_x, recv_topk_weights, EventOverlap(event)
+        return combined_x, EventOverlap(event)
 
     def _internode_group_cast(
         self,
@@ -869,18 +851,9 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        list[int],
-        GrpCollInterHandle,
-        EventOverlap,
-    ]:
-        """
-        Internode dispatch implementation, for more details, please refer to the `dispatch` docs.
-        Normally, you should not directly call this function.
-        """
+    ) -> tuple[torch.Tensor, GrpCollInterHandle, EventOverlap]:
+        """Internode group cast implementation"""
+
         assert post_perm_idx is None  # TODO: support post-perm for internode dispatch
         assert (
             num_worst_tokens == 0
@@ -935,9 +908,6 @@ class GrpCollBuffer:
 
             return (  # type: ignore[return-value]
                 recv_x,
-                None,  # recv_topk_idx
-                None,  # recv_topk_weights
-                None,  # num_recv_tokens_per_expert_list
                 handle,
                 EventOverlap(event),
             )
@@ -951,9 +921,9 @@ class GrpCollBuffer:
             (
                 recv_x,
                 _,  # recv_x_scales
-                recv_topk_idx,
-                recv_topk_weights,
-                num_recv_tokens_per_expert_list,
+                _,  # recv_topk_idx
+                _,  # recv_topk_weights
+                _,  # num_recv_tokens_per_expert_list
                 rdma_channel_prefix_matrix,
                 gbl_channel_prefix_matrix,
                 recv_rdma_channel_prefix_matrix,
@@ -1005,9 +975,6 @@ class GrpCollBuffer:
 
             return (
                 recv_x,
-                recv_topk_idx,
-                recv_topk_weights,
-                num_recv_tokens_per_expert_list,
                 handle,
                 EventOverlap(event),
             )
@@ -1027,16 +994,18 @@ class GrpCollBuffer:
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
         allow_empty_init_out_buf: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
-        """
-        Internode combine implementation, for more details, please refer to the `combine` docs.
-        Normally, you should not directly call this function.
-        """
+    ) -> tuple[torch.Tensor, EventOverlap]:
+        """Internode group reduce implementation"""
+
         assert pre_perm_idx is None  # TODO: Support pre_perm_idx for internode combine
         assert isinstance(handle, GrpCollInterHandle)
 
         # Launch the kernel
-        combined_x, combined_topk_weights, event = self.runtime.internode_combine(
+        (
+            combined_x,
+            _,  # combined_topk_weights
+            event,
+        ) = self.runtime.internode_combine(
             x,
             combined_x,
             topk_weights,
@@ -1061,9 +1030,10 @@ class GrpCollBuffer:
         # View output to hidden shape
         combined_x = combined_x.view(-1, *hidden_shape)
 
-        return combined_x, combined_topk_weights, EventOverlap(event)
+        return combined_x, EventOverlap(event)
 
-    # TODO: deal with low-latency mode
+    # NOTE: remain original low-latency interface here for future potential usage,
+    # which won't be exposed to users for now, but guaranteed its compatibility internally
     def clean_low_latency_buffer(
         self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int
     ) -> None:
