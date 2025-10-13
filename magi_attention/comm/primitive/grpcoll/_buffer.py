@@ -93,7 +93,6 @@ class GrpCollBuffer:
         low_latency_mode: bool = False,
         num_qps_per_rank: int = 24,
         allow_nvlink_for_low_latency_mode: bool = True,
-        allow_mnnvl: bool = False,
         explicitly_destroy: bool = False,
     ) -> None:
         """
@@ -110,19 +109,18 @@ class GrpCollBuffer:
                 this is somehow incompatible with the hook-based overlapping.
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
                 please make sure all connections are via NVLink.
-            allow_mnnvl: whether to allow MNNVL
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
         """
 
+        # Checks
         assert (
             is_magi_attn_comm_installed
         ), "The `magi_attn_comm` extension module is not installed."
-
         check_nvlink_connections(group)
 
-        # Initialize the CPP runtime
+        # Set attributes
         self.rank = group.rank()
         self.group_size = group.size()
         self.group = group
@@ -131,7 +129,8 @@ class GrpCollBuffer:
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
 
-        # TODO: make the runtime API torch compilable
+        # Initialize the CPP backend of grpcoll buffer as runtime
+        # TODO: make the runtime API compatible with `torch.compile`
         self.runtime = grpcoll.Buffer(
             self.rank,
             self.group_size,
@@ -141,21 +140,17 @@ class GrpCollBuffer:
             explicitly_destroy,
         )
 
-        # Synchronize device IDs
-        device_ids = [
-            None,
-        ] * self.group_size
+        # All gather device IDs
+        device_ids = [None] * self.group_size
         local_device_id = self.runtime.get_local_device_id()
         dist.all_gather_object(device_ids, local_device_id, group)
 
-        # Synchronize IPC handles
-        ipc_handles = [
-            None,
-        ] * self.group_size
+        # All gather NVLink IPC handles
+        ipc_handles = [None] * self.group_size
         local_ipc_handle = self.runtime.get_local_ipc_handle()
         dist.all_gather_object(ipc_handles, local_ipc_handle, group)
 
-        # Synchronize NVSHMEM unique IDs
+        # Get NVSHMEM unique IDs from the root rank
         root_unique_id = None
         if self.runtime.get_num_rdma_ranks() > 1 or low_latency_mode:
             # Enable IBGDA
@@ -176,14 +171,11 @@ class GrpCollBuffer:
             # NOTES: NVSHMEM initialization requires at least 256 MiB
             os.environ["NVSHMEM_CUMEM_GRANULARITY"] = f"{2 ** 29}"
 
-            if not allow_mnnvl:
-                # Disable multi-node NVLink detection
-                os.environ["NVSHMEM_DISABLE_MNNVL"] = "1"
+            # Disable multi-node NVLink detection
+            os.environ["NVSHMEM_DISABLE_MNNVL"] = "1"
 
-            # Synchronize using the root ID
-            nvshmem_unique_ids = [
-                None,
-            ] * self.group_size
+            # Broadcast NVSHMEM unique IDs from the root rank
+            nvshmem_unique_ids = [None] * self.group_size
             if (low_latency_mode and self.rank == 0) or (
                 not low_latency_mode and self.runtime.get_rdma_rank() == 0
             ):
@@ -193,9 +185,15 @@ class GrpCollBuffer:
                 0 if low_latency_mode else self.runtime.get_root_rdma_rank(True)
             ]
 
-        # Make CPP runtime available
+        # Synchronize device IDs, NVLink IPC handles and NVSHMEM unique IDs
+        # and make the runtime available
+        assert (
+            not self.runtime.is_available()
+        ), "Runtime is already available before initialization"
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
-        assert self.runtime.is_available()
+        assert (
+            self.runtime.is_available()
+        ), "Runtime is still not available after initialization"
 
     def destroy(self):
         """
@@ -764,10 +762,10 @@ class GrpCollBuffer:
 
         assert isinstance(handle, GrpCollIntraHandle)
 
-        # Launch the kernel
+        # Launch the intranode group reduce kernel
         (
             combined_x,
-            _,  # recv_topk_weights
+            _,  # combined_topk_weights
             event,
         ) = self.runtime.intranode_combine(
             x,
@@ -928,10 +926,12 @@ class GrpCollBuffer:
     ) -> tuple[torch.Tensor, EventOverlap]:
         """Internode group reduce implementation"""
 
-        assert pre_perm_idx is None  # TODO: Support pre_perm_idx for internode combine
+        assert (
+            pre_perm_idx is None
+        )  # TODO: Support pre_perm_idx for internode group reduce
         assert isinstance(handle, GrpCollInterHandle)
 
-        # Launch the kernel
+        # Launch the internode group reduce kernel
         (
             combined_x,
             _,  # combined_topk_weights
