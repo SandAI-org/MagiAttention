@@ -36,7 +36,7 @@
 
 import math
 import os
-from typing import Callable, Union
+from typing import Callable
 
 import torch
 import torch.distributed as dist
@@ -553,7 +553,6 @@ class GrpCollBuffer:
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
-        bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         pre_perm_idx: torch.Tensor | None = None,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
@@ -647,7 +646,6 @@ class GrpCollBuffer:
                 reduce_op=reduce_op,
                 acc_reduce=acc_reduce,
                 topk_weights=topk_weights,
-                bias=bias,
                 pre_perm_idx=pre_perm_idx,
                 previous_event=previous_event,
                 async_finish=async_finish,
@@ -665,7 +663,6 @@ class GrpCollBuffer:
             reduce_op=reduce_op,
             acc_reduce=acc_reduce,
             topk_weights=topk_weights,
-            bias=bias,
             pre_perm_idx=pre_perm_idx,
             previous_event=previous_event,
             async_finish=async_finish,
@@ -819,7 +816,6 @@ class GrpCollBuffer:
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
-        bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         pre_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
@@ -828,15 +824,13 @@ class GrpCollBuffer:
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
         assert isinstance(handle, GrpCollIntraHandle)
 
-        bias_0, bias_1 = GrpCollBuffer._unpack_bias(bias)
-
         # Launch the kernel
         combined_x, recv_topk_weights, event = self.runtime.intranode_combine(
             x,
             combined_x,
             topk_weights,
-            bias_0,
-            bias_1,
+            None,  # bias_0
+            None,  # bias_1
             pre_perm_idx,
             handle.recv_src_idx,  # src_idx
             handle.rank_prefix_matrix,  # rank_prefix_matrix
@@ -1028,7 +1022,6 @@ class GrpCollBuffer:
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         topk_weights: torch.Tensor | None = None,
-        bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         pre_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
@@ -1042,16 +1035,13 @@ class GrpCollBuffer:
         assert pre_perm_idx is None  # TODO: Support pre_perm_idx for internode combine
         assert isinstance(handle, GrpCollInterHandle)
 
-        # Unpack handle and bias
-        bias_0, bias_1 = GrpCollBuffer._unpack_bias(bias)
-
         # Launch the kernel
         combined_x, combined_topk_weights, event = self.runtime.internode_combine(
             x,
             combined_x,
             topk_weights,
-            bias_0,
-            bias_1,
+            None,  # bias_0
+            None,  # bias_1
             handle.recv_src_meta,  # src_meta
             handle.is_token_in_rank,  # is_combined_token_in_rank
             handle.recv_rdma_channel_prefix_matrix,  # rdma_channel_prefix_matrix
@@ -1301,6 +1291,29 @@ class GrpCollBuffer:
         )
 
     @staticmethod
+    def get_low_latency_rdma_size_hint(
+        num_max_dispatch_tokens_per_rank: int,
+        hidden: int,
+        num_ranks: int,
+        num_experts: int,
+    ) -> int:
+        """
+        Get a minimum size requirement for the RDMA buffer. The size calculation will be done with BF16.
+
+        Arguments:
+            num_max_dispatch_tokens_per_rank: the maximum number of tokens to dispatch, all the ranks must hold the same value.
+            hidden: the hidden dimension of each token.
+            num_ranks: the number of EP group ranks.
+            num_experts: the number of all experts.
+
+        Returns:
+            size: the RDMA buffer size recommended.
+        """
+        return grpcoll.get_low_latency_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts
+        )
+
+    @staticmethod
     def is_sm90_compiled() -> bool:
         return grpcoll.is_sm90_compiled()
 
@@ -1325,36 +1338,3 @@ class GrpCollBuffer:
             event: the captured event.
         """
         return EventOverlap(EventHandle())
-
-    @staticmethod
-    def get_low_latency_rdma_size_hint(
-        num_max_dispatch_tokens_per_rank: int,
-        hidden: int,
-        num_ranks: int,
-        num_experts: int,
-    ) -> int:
-        """
-        Get a minimum size requirement for the RDMA buffer. The size calculation will be done with BF16.
-
-        Arguments:
-            num_max_dispatch_tokens_per_rank: the maximum number of tokens to dispatch, all the ranks must hold the same value.
-            hidden: the hidden dimension of each token.
-            num_ranks: the number of EP group ranks.
-            num_experts: the number of all experts.
-
-        Returns:
-            size: the RDMA buffer size recommended.
-        """
-        return grpcoll.get_low_latency_rdma_size_hint(
-            num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts
-        )
-
-    @staticmethod
-    def _unpack_bias(bias: Union[torch.Tensor, torch.Tensor | torch.Tensor]):
-        bias_0, bias_1 = None, None
-        if isinstance(bias, torch.Tensor):
-            bias_0 = bias
-        elif isinstance(bias, tuple):
-            assert len(bias) == 2
-            bias_0, bias_1 = bias
-        return bias_0, bias_1
