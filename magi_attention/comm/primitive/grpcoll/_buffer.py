@@ -405,8 +405,6 @@ class GrpCollBuffer:
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
         num_tokens_per_expert: torch.Tensor | None = None,
-        topk_idx: torch.Tensor | None = None,
-        topk_weights: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
         expert_alignment: int = 1,
         num_worst_tokens: int = 0,
@@ -503,8 +501,6 @@ class GrpCollBuffer:
                 num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
                 is_token_in_rank=is_token_in_rank,
                 num_tokens_per_expert=num_tokens_per_expert,
-                topk_idx=topk_idx,
-                topk_weights=topk_weights,
                 post_perm_idx=post_perm_idx,
                 expert_alignment=expert_alignment,
                 num_worst_tokens=num_worst_tokens,
@@ -523,8 +519,6 @@ class GrpCollBuffer:
             num_tokens_per_rank=num_tokens_per_rank,
             is_token_in_rank=is_token_in_rank,
             num_tokens_per_expert=num_tokens_per_expert,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
             post_perm_idx=post_perm_idx,
             expert_alignment=expert_alignment,
             num_worst_tokens=num_worst_tokens,
@@ -667,8 +661,6 @@ class GrpCollBuffer:
         num_tokens_per_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
         num_tokens_per_expert: torch.Tensor | None = None,
-        topk_idx: torch.Tensor | None = None,
-        topk_weights: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
         expert_alignment: int = 1,
         num_worst_tokens: int = 0,
@@ -678,92 +670,62 @@ class GrpCollBuffer:
     ) -> tuple[torch.Tensor, GrpCollIntraHandle, EventOverlap]:
         """Intranode group cast implementation"""
 
-        # Launch the kernel with cached or non-cached mode
-        if handle is not None:
-            assert topk_idx is None and topk_weights is None
+        is_handle_given = handle is not None
+
+        if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollIntraHandle)
-
-            (
-                recv_x,
-                _,  # recv_x_scales
-                _,  # recv_topk_idx
-                _,  # recv_topk_weights
-                _,  # num_recv_tokens_per_expert_list
-                _,  # rank_prefix_matrix
-                _,  # channel_prefix_matrix
-                _,  # recv_channel_prefix_matrix
-                _,  # recv_src_idx
-                _,  # send_head
-                event,
-            ) = self.runtime.intranode_dispatch(
-                x,
-                recv_x,
-                None,  # x_scales
-                None,  # topk_idx
-                None,  # topk_weights
-                None,  # num_tokens_per_rank
-                handle.is_token_in_rank,
-                None,  # num_tokens_per_expert
-                handle.num_recv_tokens,
-                handle.rank_prefix_matrix,
-                handle.channel_prefix_matrix,
-                post_perm_idx,
-                expert_alignment,
-                num_worst_tokens,
-                config.to_kernel_config(),
-                getattr(previous_event, "event", None),
-                async_finish,
-                allocate_on_comm_stream,
-            )
-
-            # View output to hidden shape
-            recv_x = recv_x.view(-1, *hidden_shape)
-
-            return (  # type: ignore[return-value]
-                recv_x,
-                handle,
-                EventOverlap(event),
-            )
+            num_tokens_per_rank = None
+            num_tokens_per_expert = None
+            is_token_in_rank = handle.is_token_in_rank
+            num_recv_tokens = handle.num_recv_tokens
+            rank_prefix_matrix = handle.rank_prefix_matrix
+            channel_prefix_matrix = handle.channel_prefix_matrix
         else:
             assert (
                 num_tokens_per_rank is not None
                 and is_token_in_rank is not None
                 and num_tokens_per_expert is not None
             )
+            num_recv_tokens = 0
+            rank_prefix_matrix = None
+            channel_prefix_matrix = None
 
-            (
-                recv_x,
-                _,  # recv_x_scales
-                _,  # recv_topk_idx
-                _,  # recv_topk_weights
-                _,  # num_recv_tokens_per_expert_list
-                rank_prefix_matrix,
-                channel_prefix_matrix,
-                recv_channel_prefix_matrix,
-                recv_src_idx,
-                send_head,
-                event,
-            ) = self.runtime.intranode_dispatch(
-                x,
-                recv_x,
-                None,  # x_scales
-                topk_idx,
-                topk_weights,
-                num_tokens_per_rank,
-                is_token_in_rank,
-                num_tokens_per_expert,
-                0,  # num_recv_tokens
-                None,  # rank_prefix_matrix
-                None,  # channel_prefix_matrix
-                post_perm_idx,
-                expert_alignment,
-                num_worst_tokens,
-                config.to_kernel_config(),
-                getattr(previous_event, "event", None),
-                async_finish,
-                allocate_on_comm_stream,
-            )
+        # Launch the intranode group cast kernel
+        (
+            recv_x,
+            _,  # recv_x_scales
+            _,  # recv_topk_idx
+            _,  # recv_topk_weights
+            _,  # num_recv_tokens_per_expert_list
+            rank_prefix_matrix,
+            channel_prefix_matrix,
+            recv_channel_prefix_matrix,
+            recv_src_idx,
+            send_head,
+            event,
+        ) = self.runtime.intranode_dispatch(
+            x,
+            recv_x,
+            None,  # x_scales
+            None,  # topk_idx
+            None,  # topk_weights
+            num_tokens_per_rank,
+            is_token_in_rank,
+            num_tokens_per_expert,
+            num_recv_tokens,
+            rank_prefix_matrix,
+            channel_prefix_matrix,
+            post_perm_idx,
+            expert_alignment,
+            num_worst_tokens,
+            config.to_kernel_config(),
+            getattr(previous_event, "event", None),
+            async_finish,
+            allocate_on_comm_stream,
+        )
 
+        # Prepare the intranode handle for non-cached mode
+        if not is_handle_given:
             handle = GrpCollIntraHandle(
                 rank_prefix_matrix=rank_prefix_matrix,
                 channel_prefix_matrix=channel_prefix_matrix,
@@ -773,14 +735,14 @@ class GrpCollBuffer:
                 send_head=send_head,
             )
 
-            # View output to hidden shape
-            recv_x = recv_x.view(-1, *hidden_shape)
+        # View output to hidden shape
+        recv_x = recv_x.view(-1, *hidden_shape)
 
-            return (
-                recv_x,
-                handle,
-                EventOverlap(event),
-            )
+        return (
+            recv_x,
+            handle,  # type: ignore[return-value]
+            EventOverlap(event),
+        )
 
     def _intranode_group_reduce(
         self,
@@ -843,8 +805,6 @@ class GrpCollBuffer:
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
         num_tokens_per_expert: torch.Tensor | None = None,
-        topk_idx: torch.Tensor | None = None,
-        topk_weights: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
         expert_alignment: int = 1,
         num_worst_tokens: int = 0,
@@ -854,109 +814,80 @@ class GrpCollBuffer:
     ) -> tuple[torch.Tensor, GrpCollInterHandle, EventOverlap]:
         """Internode group cast implementation"""
 
-        assert post_perm_idx is None  # TODO: support post-perm for internode dispatch
+        assert post_perm_idx is None  # TODO: support post-perm for internode group cast
         assert (
             num_worst_tokens == 0
-        ), "Internode dispatch does not support `num_worst_tokens > 0`"
+        ), "Internode group cast does not support `num_worst_tokens > 0`"
 
-        # Launch the kernel with cached or non-cached mode
-        if handle is not None:
+        is_handle_given = handle is not None
+
+        if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollInterHandle)
-            assert topk_idx is None and topk_weights is None
-
-            (
-                recv_x,
-                _,  # recv_x_scales
-                _,  # recv_topk_idx
-                _,  # recv_topk_weights
-                _,  # num_recv_tokens_per_expert_list
-                _,  # rdma_channel_prefix_matrix
-                _,  # gbl_channel_prefix_matrix
-                _,  # recv_rdma_channel_prefix_matrix
-                _,  # recv_rdma_rank_prefix_sum
-                _,  # recv_gbl_channel_prefix_matrix
-                _,  # recv_gbl_rank_prefix_sum
-                _,  # recv_src_meta
-                _,  # send_rdma_head
-                _,  # send_nvl_head
-                event,
-            ) = self.runtime.internode_dispatch(
-                x,
-                recv_x,
-                None,  # x_scales
-                None,  # topk_idx
-                None,  # topk_weights
-                None,  # num_tokens_per_rank
-                None,  # num_tokens_per_rdma_rank
-                handle.is_token_in_rank,
-                None,  # num_tokens_per_expert
-                handle.num_recv_tokens,
-                handle.num_rdma_recv_tokens,
-                handle.rdma_channel_prefix_matrix,
-                handle.recv_rdma_rank_prefix_sum,
-                handle.gbl_channel_prefix_matrix,
-                handle.recv_gbl_rank_prefix_sum,
-                expert_alignment,
-                config.to_kernel_config(),
-                getattr(previous_event, "event", None),
-                async_finish,
-                allocate_on_comm_stream,
-            )
-
-            # View output to hidden shape
-            recv_x = recv_x.view(-1, *hidden_shape)
-
-            return (  # type: ignore[return-value]
-                recv_x,
-                handle,
-                EventOverlap(event),
-            )
+            num_tokens_per_rank = None
+            num_tokens_per_rdma_rank = None
+            num_tokens_per_expert = None
+            is_token_in_rank = handle.is_token_in_rank
+            num_recv_tokens = handle.num_recv_tokens
+            num_rdma_recv_tokens = handle.num_rdma_recv_tokens
+            rdma_channel_prefix_matrix = handle.rdma_channel_prefix_matrix
+            recv_rdma_rank_prefix_sum = handle.recv_rdma_rank_prefix_sum
+            gbl_channel_prefix_matrix = handle.gbl_channel_prefix_matrix
+            recv_gbl_rank_prefix_sum = handle.recv_gbl_rank_prefix_sum
         else:
             assert (
                 num_tokens_per_rank is not None
                 and is_token_in_rank is not None
                 and num_tokens_per_expert is not None
             )
+            num_recv_tokens = 0
+            num_rdma_recv_tokens = 0
+            rdma_channel_prefix_matrix = None
+            recv_rdma_rank_prefix_sum = None
+            gbl_channel_prefix_matrix = None
+            recv_gbl_rank_prefix_sum = None
 
-            (
-                recv_x,
-                _,  # recv_x_scales
-                _,  # recv_topk_idx
-                _,  # recv_topk_weights
-                _,  # num_recv_tokens_per_expert_list
-                rdma_channel_prefix_matrix,
-                gbl_channel_prefix_matrix,
-                recv_rdma_channel_prefix_matrix,
-                recv_rdma_rank_prefix_sum,
-                recv_gbl_channel_prefix_matrix,
-                recv_gbl_rank_prefix_sum,
-                recv_src_meta,
-                send_rdma_head,
-                send_nvl_head,
-                event,
-            ) = self.runtime.internode_dispatch(
-                x,
-                recv_x,
-                None,  # x_scales
-                topk_idx,
-                topk_weights,
-                num_tokens_per_rank,
-                num_tokens_per_rdma_rank,
-                is_token_in_rank,
-                num_tokens_per_expert,
-                0,
-                0,
-                None,
-                None,
-                None,
-                None,
-                expert_alignment,
-                config.to_kernel_config(),
-                getattr(previous_event, "event", None),
-                async_finish,
-                allocate_on_comm_stream,
-            )
+        # Launch the internode group cast kernel
+        (
+            recv_x,
+            _,  # recv_x_scales
+            _,  # recv_topk_idx
+            _,  # recv_topk_weights
+            _,  # num_recv_tokens_per_expert_list
+            rdma_channel_prefix_matrix,
+            gbl_channel_prefix_matrix,
+            recv_rdma_channel_prefix_matrix,
+            recv_rdma_rank_prefix_sum,
+            recv_gbl_channel_prefix_matrix,
+            recv_gbl_rank_prefix_sum,
+            recv_src_meta,
+            send_rdma_head,
+            send_nvl_head,
+            event,
+        ) = self.runtime.internode_dispatch(
+            x,
+            recv_x,
+            None,  # x_scales
+            None,  # topk_idx
+            None,  # topk_weights
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            is_token_in_rank,
+            num_tokens_per_expert,
+            num_recv_tokens,
+            num_rdma_recv_tokens,
+            rdma_channel_prefix_matrix,
+            recv_rdma_rank_prefix_sum,
+            gbl_channel_prefix_matrix,
+            recv_gbl_rank_prefix_sum,
+            expert_alignment,
+            config.to_kernel_config(),
+            getattr(previous_event, "event", None),
+            async_finish,
+            allocate_on_comm_stream,
+        )
 
+        # Prepare the internode handle for non-cached mode
+        if not is_handle_given:
             handle = GrpCollInterHandle(
                 is_token_in_rank=is_token_in_rank,
                 rdma_channel_prefix_matrix=rdma_channel_prefix_matrix,
@@ -970,14 +901,14 @@ class GrpCollBuffer:
                 send_nvl_head=send_nvl_head,
             )
 
-            # View output to hidden shape
-            recv_x = recv_x.view(-1, *hidden_shape)
+        # View output to hidden shape
+        recv_x = recv_x.view(-1, *hidden_shape)
 
-            return (
-                recv_x,
-                handle,
-                EventOverlap(event),
-            )
+        return (
+            recv_x,
+            handle,  # type: ignore[return-value]
+            EventOverlap(event),
+        )
 
     def _internode_group_reduce(
         self,
