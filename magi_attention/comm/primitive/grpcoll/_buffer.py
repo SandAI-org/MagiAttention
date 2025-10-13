@@ -208,32 +208,6 @@ class GrpCollBuffer:
         self.runtime.destroy()
         self.runtime = None
 
-    @staticmethod
-    def is_sm90_compiled():
-        return grpcoll.is_sm90_compiled()
-
-    @staticmethod
-    def set_num_sms(new_num_sms: int) -> None:
-        """
-        Set the number of SMs to use in high-throughput kernels.
-
-        Arguments:
-            new_num_sms: the new number to be set.
-        """
-
-        assert new_num_sms % 2 == 0, "The SM count must be even"
-        GrpCollBuffer.num_sms = new_num_sms
-
-    @staticmethod
-    def capture() -> EventOverlap:
-        """
-        Capture a CUDA event on the current stream, i.e. `torch.cuda.current_stream()`.
-
-        Returns:
-            event: the captured event.
-        """
-        return EventOverlap(EventHandle())
-
     def get_comm_stream(self) -> torch.Stream:
         """
         Get the communication stream.
@@ -270,72 +244,6 @@ class GrpCollBuffer:
 
         assert tensor.numel() >= size.numel()
         return tensor[: size.numel()].view(size)
-
-    @staticmethod
-    def _unpack_bias(bias: Union[torch.Tensor, torch.Tensor | torch.Tensor]):
-        bias_0, bias_1 = None, None
-        if isinstance(bias, torch.Tensor):
-            bias_0 = bias
-        elif isinstance(bias, tuple):
-            assert len(bias) == 2
-            bias_0, bias_1 = bias
-        return bias_0, bias_1
-
-    @staticmethod
-    def get_dispatch_config(num_ranks: int) -> GrpCollConfig:
-        """
-        Get a recommended dispatch config.
-
-        Argument:
-            num_ranks: the number of ranks.
-
-        Returns:
-            config: the recommended config.
-        """
-
-        # TODO: automatically tune
-        config_map = {
-            2: GrpCollConfig(GrpCollBuffer.num_sms, 24, 256, 6, 128),
-            4: GrpCollConfig(GrpCollBuffer.num_sms, 6, 256, 6, 128),
-            8: GrpCollConfig(GrpCollBuffer.num_sms, 6, 256, 6, 128),
-            16: GrpCollConfig(GrpCollBuffer.num_sms, 36, 288, 20, 128),
-            24: GrpCollConfig(GrpCollBuffer.num_sms, 8, 288, 32, 128),
-            32: GrpCollConfig(GrpCollBuffer.num_sms, 32, 288, 32, 128),
-            64: GrpCollConfig(GrpCollBuffer.num_sms, 20, 288, 28, 128),
-            128: GrpCollConfig(GrpCollBuffer.num_sms, 20, 560, 32, 128),
-            144: GrpCollConfig(GrpCollBuffer.num_sms, 32, 720, 12, 128),
-            160: GrpCollConfig(GrpCollBuffer.num_sms, 28, 720, 12, 128),
-        }
-        assert num_ranks in config_map, f"Unsupported number of EP ranks: {num_ranks}"
-        return config_map[num_ranks]
-
-    @staticmethod
-    def get_combine_config(num_ranks: int) -> GrpCollConfig:
-        """
-        Get a recommended combine config.
-
-        Argument:
-            num_ranks: the number of ranks.
-
-        Returns:
-            config: the recommended config.
-        """
-
-        # TODO: automatically tune
-        config_map = {
-            2: GrpCollConfig(GrpCollBuffer.num_sms, 10, 256, 6, 128),
-            4: GrpCollConfig(GrpCollBuffer.num_sms, 9, 256, 6, 128),
-            8: GrpCollConfig(GrpCollBuffer.num_sms, 4, 256, 6, 128),
-            16: GrpCollConfig(GrpCollBuffer.num_sms, 4, 288, 12, 128),
-            24: GrpCollConfig(GrpCollBuffer.num_sms, 1, 288, 8, 128),
-            32: GrpCollConfig(GrpCollBuffer.num_sms, 1, 288, 8, 128),
-            64: GrpCollConfig(GrpCollBuffer.num_sms, 1, 288, 20, 128),
-            128: GrpCollConfig(GrpCollBuffer.num_sms, 1, 560, 12, 128),
-            144: GrpCollConfig(GrpCollBuffer.num_sms, 2, 720, 8, 128),
-            160: GrpCollConfig(GrpCollBuffer.num_sms, 2, 720, 8, 128),
-        }
-        assert num_ranks in config_map, f"Unsupported number of EP ranks: {num_ranks}"
-        return config_map[num_ranks]
 
     @classmethod
     def get_dispatch_meta_from_topk_idx(
@@ -584,7 +492,11 @@ class GrpCollBuffer:
             )
 
         # Default config
-        config = self.get_dispatch_config(self.group_size) if config is None else config
+        config = (
+            GrpCollConfig.get_default_dispatch_config(self.group_size)
+            if config is None
+            else config
+        )
 
         # View input/output to 2D shape
         x = x.view(-1, hidden_size)  # type: ignore[union-attr]
@@ -713,7 +625,11 @@ class GrpCollBuffer:
             )
 
         # Default config
-        config = self.get_combine_config(self.group_size) if config is None else config
+        config = (
+            GrpCollConfig.get_default_combine_config(self.group_size)
+            if config is None
+            else config
+        )
 
         # View input/output to 2D shape
         x = x.view(-1, hidden_size)
@@ -1385,6 +1301,32 @@ class GrpCollBuffer:
         )
 
     @staticmethod
+    def is_sm90_compiled() -> bool:
+        return grpcoll.is_sm90_compiled()
+
+    @staticmethod
+    def set_num_sms(new_num_sms: int) -> None:
+        """
+        Set the number of SMs to use in high-throughput kernels.
+
+        Arguments:
+            new_num_sms: the new number to be set.
+        """
+
+        assert new_num_sms % 2 == 0, "The SM count must be even"
+        GrpCollBuffer.num_sms = new_num_sms
+
+    @staticmethod
+    def capture() -> EventOverlap:
+        """
+        Capture a CUDA event on the current stream, i.e. `torch.cuda.current_stream()`.
+
+        Returns:
+            event: the captured event.
+        """
+        return EventOverlap(EventHandle())
+
+    @staticmethod
     def get_low_latency_rdma_size_hint(
         num_max_dispatch_tokens_per_rank: int,
         hidden: int,
@@ -1406,3 +1348,13 @@ class GrpCollBuffer:
         return grpcoll.get_low_latency_rdma_size_hint(
             num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts
         )
+
+    @staticmethod
+    def _unpack_bias(bias: Union[torch.Tensor, torch.Tensor | torch.Tensor]):
+        bias_0, bias_1 = None, None
+        if isinstance(bias, torch.Tensor):
+            bias_0 = bias
+        elif isinstance(bias, tuple):
+            assert len(bias) == 2
+            bias_0, bias_1 = bias
+        return bias_0, bias_1

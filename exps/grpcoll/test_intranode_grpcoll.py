@@ -910,7 +910,7 @@ def test_main(
             else:
                 # Test default config as well
                 GrpCollBuffer.set_num_sms(num_sms)
-                config = GrpCollBuffer.get_dispatch_config(num_ranks)
+                config = GrpCollConfig.get_default_dispatch_config(num_ranks)
             tune_args = {"x": current_x, "handle": handle, "config": config}
             t = bench(lambda: buffer.dispatch(**tune_args))[0]
             if t < best_time and nvl_chunk_size > 0:
@@ -973,7 +973,7 @@ def test_main(
         else:
             # Test default config as well
             GrpCollBuffer.set_num_sms(num_sms)
-            config = GrpCollBuffer.get_combine_config(num_ranks)
+            config = GrpCollConfig.get_default_combine_config(num_ranks)
         tune_args = {
             "x": recv_x,
             "combined_x": combined_x_buf,
