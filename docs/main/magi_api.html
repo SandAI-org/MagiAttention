@@ -443,8 +443,6 @@ Directly call magi_attn_kernel to get attention output and lse. This is faster w
 <li><p><strong>v</strong> (<em>torch.Tensor</em>) – Value tensor.</p></li>
 <li><p><strong>q_ranges</strong> (<em>torch.Tensor</em>) – query ranges tensor to represent the attn mask.</p></li>
 <li><p><strong>k_ranges</strong> (<em>torch.Tensor</em>) – key ranges tensor to represent the attn mask.</p></li>
-<li><p><strong>max_seqlen_q</strong> (<em>int</em>) – Maximum sequence length of q_ranges.</p></li>
-<li><p><strong>max_seqlen_k</strong> (<em>int</em>) – Maximum sequence length of k_ranges.</p></li>
 <li><p><strong>attn_type_map</strong> (<em>torch.Tensor</em>) – <p>Attention type map tenspr with dtype=torch.int32.
 The values specify the attention type for each token:</p>
 <blockquote>
@@ -457,9 +455,10 @@ The values specify the attention type for each token:</p>
 </div></blockquote>
 <p>More information about the attention type map can be found in the <code class="docutils literal notranslate"><span class="pre">Note</span></code> below.</p>
 </p></li>
-<li><p><strong>softmax_scale</strong> (<em>float</em><em>, </em><em>optional</em>) – Softmax scale, defaults to 1/sqrt(head_dim).</p></li>
-<li><p><strong>softcap</strong> (<em>float</em><em>, </em><em>optional</em>) – Softcap value, defaults to 0.</p></li>
-<li><p><strong>deterministic</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to use deterministic attention, defaults to False.</p></li>
+<li><p><strong>softmax_scale</strong> (<em>float</em><em>, </em><em>optional</em>) – Softmax scale.
+Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to use: <code class="docutils literal notranslate"><span class="pre">1/sqrt(head_dim)</span></code>.</p></li>
+<li><p><strong>softcap</strong> (<em>float</em><em>, </em><em>optional</em>) – Softcap. Defaults to <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p></li>
+<li><p><strong>deterministic</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to use deterministic attention. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
 <li><p><strong>sm_margin</strong> (<em>int</em><em>, </em><em>optional</em>) – the amount of SMs(streaming multiprocessors) reserved for communication.</p></li>
 <li><p><strong>disable_fwd_atomic_reduction</strong> (<em>bool</em>) – <p>Whether to disable forward atomic reduction:</p>
 <blockquote>
@@ -469,7 +468,8 @@ For example, q_ranges = <code class="docutils literal notranslate"><span class="
 <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">15]</span></code> and <code class="docutils literal notranslate"><span class="pre">[10,</span> <span class="pre">20]</span></code> intersect. While q_ranges = <code class="docutils literal notranslate"><span class="pre">[[0,</span> <span class="pre">15],</span> <span class="pre">[15,</span> <span class="pre">20],</span> <span class="pre">[20,</span> <span class="pre">30]]</span></code> has no overlap.</p>
 </div></blockquote>
 </p></li>
-<li><p><strong>auto_range_merge</strong> (<em>bool</em><em>, </em><em>optional</em>) – <p>Whether to automatically merge k_ranges for the same q_range, defaults to False.</p>
+<li><p><strong>auto_range_merge</strong> (<em>bool</em><em>, </em><em>optional</em>) – <p>Whether to automatically merge k_ranges for the same q_range.
+Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p>
 <p><strong>Note:</strong> This flag is usually used in sparse attention cases but still under development.</p>
 </p></li>
 <li><p><strong>ref_block_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>] </em><em>| </em><em>None</em>)</p></li>
@@ -629,14 +629,14 @@ finally pad and dispatch the input tensor to local tensor.</p>
 <li><p><strong>x</strong> (<em>torch.Tensor</em>) – input tensor</p></li>
 <li><p><strong>cu_seqlens_q</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for queries.</p></li>
 <li><p><strong>cu_seqlens_k</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for keys.</p></li>
-<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by <code class="docutils literal notranslate"><span class="pre">chunk_size</span> <span class="pre">*</span> <span class="pre">cp_size</span></code>.</p></li>
 <li><p><strong>chunk_size</strong> (<em>int</em>) – chunk size to chunk the input tensor x along the seqlen dim for dispatch
 to control the granularity of computation load-balance.</p></li>
 <li><p><strong>cp_group_or_mesh</strong> (<em>dist.ProcessGroup</em><em> | </em><em>DeviceMesh</em>) – process group or device mesh.
 <strong>NOTE</strong>: for process group, we only support nccl backend for now,
 and for device mesh, we only support 1D or 2D mesh for now.</p></li>
-<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – if True, all attn_mask_type is CAUSAL. else, determine masktype with <code class="docutils literal notranslate"><span class="pre">window_size</span></code>.
-Defaults to False.</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – if <code class="docutils literal notranslate"><span class="pre">True</span></code>, all mask types are set to <code class="docutils literal notranslate"><span class="pre">CAUSAL</span></code>,
+otherwise, determine the mask types by <code class="docutils literal notranslate"><span class="pre">window_size</span></code>. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
 <li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
 which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
 when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.
@@ -727,14 +727,14 @@ calculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.</p
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>cu_seqlens_q</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for queries.</p></li>
 <li><p><strong>cu_seqlens_k</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for keys.</p></li>
-<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by <code class="docutils literal notranslate"><span class="pre">chunk_size</span> <span class="pre">*</span> <span class="pre">cp_size</span></code>.</p></li>
 <li><p><strong>chunk_size</strong> (<em>int</em>) – chunk size to chunk the input tensor x along the seqlen dim for dispatch
 to control the granularity of computation load-balance.</p></li>
 <li><p><strong>cp_group_or_mesh</strong> (<em>dist.ProcessGroup</em><em> | </em><em>DeviceMesh</em>) – process group or device mesh.
 <strong>NOTE</strong>: for process group, we only support nccl backend for now,
 and for device mesh, we only support 1D or 2D mesh for now.</p></li>
-<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – if True, all attn_mask_type is CAUSAL. else, determine masktype with <code class="docutils literal notranslate"><span class="pre">window_size</span></code>.
-Defaults to False.</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – if <code class="docutils literal notranslate"><span class="pre">True</span></code>, all mask types are set to <code class="docutils literal notranslate"><span class="pre">CAUSAL</span></code>,
+otherwise, determine the mask types by <code class="docutils literal notranslate"><span class="pre">window_size</span></code>. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
 <li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
 which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
 when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.
@@ -827,7 +827,7 @@ and optimized in communication.</p>
 <li><p><strong>cu_seqlens_q</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for queries.</p></li>
 <li><p><strong>cu_seqlens_k</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for keys.</p></li>
 <li><p><strong>key_for_dispatch</strong> (<em>DistAttnRuntimeKey</em>) – the key used for dispatch</p></li>
-<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – whether the varlen attention mask is causal. Defaults to False.</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – whether the varlen attention mask is causal. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
 <li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
 which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
 when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.
@@ -951,7 +951,7 @@ finally pad and dispatch the input tensor to local tensor.</p>
 represented by str or enum <code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code> or their mixed combination</p></li>
 <li><p><strong>total_seqlen_q</strong> (<em>int</em>) – the total seqlen of query</p></li>
 <li><p><strong>total_seqlen_k</strong> (<em>int</em>) – the total seqlen of key</p></li>
-<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by <code class="docutils literal notranslate"><span class="pre">chunk_size</span> <span class="pre">*</span> <span class="pre">cp_size</span></code>.</p></li>
 <li><p><strong>chunk_size</strong> (<em>int</em>) – chunk size to chunk the input tensor x along the seqlen dim for dispatch
 to control the granularity of computation load-balance.</p></li>
 <li><p><strong>cp_group_or_mesh</strong> (<em>dist.ProcessGroup</em><em> | </em><em>DeviceMesh</em>) – process group or device mesh.
@@ -1073,14 +1073,13 @@ calculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.</p
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
-<li><p><strong>x</strong> (<em>torch.Tensor</em>) – input tensor</p></li>
 <li><p><strong>q_ranges</strong> (<em>AttnRanges</em>) – the global query ranges</p></li>
 <li><p><strong>k_ranges</strong> (<em>AttnRanges</em>) – the global key ranges</p></li>
 <li><p><strong>attn_mask_type</strong> (<em>str</em><em> | </em><em>AttnMaskType</em><em> | </em><em>list</em><em>[</em><em>str</em><em> | </em><em>AttnMaskType</em><em>]</em>) – the global attn mask type (list)
 represented by str or enum <code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code> or their mixed combination</p></li>
 <li><p><strong>total_seqlen_q</strong> (<em>int</em>) – the total seqlen of query</p></li>
 <li><p><strong>total_seqlen_k</strong> (<em>int</em>) – the total seqlen of key</p></li>
-<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by <code class="docutils literal notranslate"><span class="pre">chunk_size</span> <span class="pre">*</span> <span class="pre">cp_size</span></code>.</p></li>
 <li><p><strong>chunk_size</strong> (<em>int</em>) – chunk size to chunk the input tensor x along the seqlen dim for dispatch
 to control the granularity of computation load-balance.</p></li>
 <li><p><strong>cp_group_or_mesh</strong> (<em>dist.ProcessGroup</em><em> | </em><em>DeviceMesh</em>) – process group or device mesh.
@@ -1356,6 +1355,9 @@ about which the users may have no bother to care.</p></li>
 <li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the object that holds some inner meta data
 as one argument for many other magi_attention APIs,
 about which the users may have no bother to care.</p></li>
+<li><p><strong>softmax_scale</strong> (<em>float</em><em>, </em><em>optional</em>) – softmax scale.
+Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to use: <code class="docutils literal notranslate"><span class="pre">1/sqrt(head_dim)</span></code>.</p></li>
+<li><p><strong>softcap</strong> (<em>float</em><em>, </em><em>optional</em>) – softcap. Defaults to <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1370,11 +1372,13 @@ about which the users may have no bother to care.</p></li>
 </dd>
 </dl>
 <dl class="simple">
-<dt>Shapes:</dt><dd><p>q: [num_tokens_q_local, num_heads_q, head_dim]
-k: [num_tokens_kv_local, num_heads_kv, head_dim]
-v: [num_tokens_kv_local, num_heads_kv, head_dim]
-out: [num_tokens_q_local, num_heads_q, head_dim]
-lse: [num_tokens_q_local, num_heads_q]</p>
+<dt>Shapes:</dt><dd><ul class="simple">
+<li><p>q: [num_tokens_q_local, num_heads_q, head_dim]</p></li>
+<li><p>k: [num_tokens_kv_local, num_heads_kv, head_dim]</p></li>
+<li><p>v: [num_tokens_kv_local, num_heads_kv, head_dim]</p></li>
+<li><p>out: [num_tokens_q_local, num_heads_q, head_dim]</p></li>
+<li><p>lse: [num_tokens_q_local, num_heads_q]</p></li>
+</ul>
 </dd>
 </dl>
 <dl class="field-list simple">
@@ -1387,6 +1391,8 @@ lse: [num_tokens_q_local, num_heads_q]</p>
 <li><p><strong>k</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>v</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>)</p></li>
+<li><p><strong>softmax_scale</strong> (<em>float</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>softcap</strong> (<em>float</em>)</p></li>
 </ul>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
@@ -1467,9 +1473,9 @@ to control the granularity of computation load-balance.</p></li>
 <li><p><strong>x</strong> (<em>torch.Tensor</em>) – Input tensor to be padded.</p></li>
 <li><p><strong>dim</strong> (<em>int</em>) – The dimension along which to apply padding.</p></li>
 <li><p><strong>pad_size</strong> (<em>int</em>) – The number of values to pad.</p></li>
-<li><p><strong>value</strong> (<em>float</em><em>, </em><em>optional</em>) – The padding value. Default is 0.</p></li>
-<li><p><strong>side</strong> (<em>str</em><em>, </em><em>optional</em>) – Side on which to apply the padding, either “left” or “right”.
-Default is “right”.</p></li>
+<li><p><strong>value</strong> (<em>float</em><em>, </em><em>optional</em>) – The padding value. Defaults to <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p></li>
+<li><p><strong>side</strong> (<em>str</em><em>, </em><em>optional</em>) – Side on which to apply the padding, either <code class="docutils literal notranslate"><span class="pre">left</span></code> or <code class="docutils literal notranslate"><span class="pre">right</span></code>.
+Defaults to <code class="docutils literal notranslate"><span class="pre">right</span></code>.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1602,7 +1608,7 @@ cumulative sequence lengths for queries and keys.</p>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
-<dd class="field-even"><p>A pair of 1D tensors (cu_seqlens_q, cu_seqlens_k), each of shape (batch_size + 1,),
+<dd class="field-even"><p>A pair of 1D tensors (cu_seqlens_q, cu_seqlens_k), each of shape <code class="docutils literal notranslate"><span class="pre">[batch_size</span> <span class="pre">+</span> <span class="pre">1,]</span></code>,
 representing the cumulative sequence lengths for the queries and keys respectively.</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
@@ -1642,7 +1648,7 @@ from cu_seqlens, widely used for varlen masks.</p>
 <dd class="field-odd"><ul class="simple">
 <li><p><strong>cu_seqlens_q</strong> (<em>torch.Tensor</em>) – cumulative sequence lengths for queries</p></li>
 <li><p><strong>cu_seqlens_k</strong> (<em>torch.Tensor</em>) – cumulative sequence lengths for keys</p></li>
-<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – whether the varlen attention mask is causal. Defaults to False.</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – whether the varlen attention mask is causal. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
 <li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
 which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
 when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.

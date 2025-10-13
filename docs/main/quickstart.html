@@ -444,17 +444,12 @@
 <span class="n">k_ranges_tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1024</span><span class="p">],</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">]],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
 <span class="n">attn_type_map_tensor</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span> <span class="c1"># full mask for 1st slice, causal mask for 2nd</span>
 
-<span class="n">max_seqlen_q</span> <span class="o">=</span> <span class="mi">1024</span> <span class="c1"># Max length of all q_ranges (2048 - 1024 = 1024)</span>
-<span class="n">max_seqlen_k</span> <span class="o">=</span> <span class="mi">2048</span> <span class="c1"># Max length of all k_ranges (2048 - 0 = 2048)</span>
-
 <span class="c1"># --- Attention computation --- #</span>
 
 <span class="n">out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">flex_flash_attn_func</span><span class="p">(</span> <span class="c1"># the second return value is `lse` (log-sum-exp), known as the online-softmax correction factor</span>
     <span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span>
     <span class="n">q_ranges</span><span class="o">=</span><span class="n">q_ranges_tensor</span><span class="p">,</span>
     <span class="n">k_ranges</span><span class="o">=</span><span class="n">k_ranges_tensor</span><span class="p">,</span>
-    <span class="n">max_seqlen_q</span><span class="o">=</span><span class="n">max_seqlen_q</span><span class="p">,</span>
-    <span class="n">max_seqlen_k</span><span class="o">=</span><span class="n">max_seqlen_k</span><span class="p">,</span>
     <span class="n">attn_type_map</span><span class="o">=</span><span class="n">attn_type_map_tensor</span><span class="p">,</span>
     <span class="n">softmax_scale</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="c1"># defaults to 1/sqrt(head_dim)</span>
 <span class="p">)</span>
