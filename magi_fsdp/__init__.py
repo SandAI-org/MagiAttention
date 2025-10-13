@@ -14,6 +14,8 @@
 
 # Copyright (c) Meta Platforms, Inc. and affiliates
 
+import os
+
 from ._fsdp_api import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy
 from ._fsdp_mem_tracker import MagiFSDPMemTracker
 from ._fsdp_module import MagiFSDPModule, UnshardHandle
@@ -29,3 +31,17 @@ __all__ = [
     "UnshardHandle",
     "MagiFSDPMemTracker",
 ]
+
+
+def is_multi_dtype_reduce_enable() -> bool:
+    """
+    Check whether multi-dtype reduce is enabled.
+
+    Controlled by the environment variable ``MAGI_FSDP_MULTI_DTYPE_REDUCE``:
+      - ``"1"``: use the foreach_dtype_reduce (allows mixed precision reduce across dtypes such as fp32/bf16).
+      - ``"0"`` (default): use the foreach_reduce.
+
+    NOTE: This option is intended only for testing or debugging, as the correctness
+    of custom implementation is not fully guaranteed.
+    """
+    return os.environ.get("MAGI_FSDP_MULTI_DTYPE_REDUCE", "0") == "1"

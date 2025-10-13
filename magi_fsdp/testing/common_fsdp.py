@@ -16,6 +16,7 @@
 # Owner(s): ["oncall: distributed"]
 
 import contextlib
+import hashlib
 import os
 import re
 import sys
@@ -68,6 +69,7 @@ from torch.testing._internal.common_utils import (
     TEST_XPU,
     get_cycles_per_ms,
 )
+from torch.testing._internal.distributed._tensor.common_dtensor import ModelArgs
 from torch.utils._triton import has_triton
 
 from magi_fsdp import fully_shard
@@ -1584,3 +1586,173 @@ class SkipModel(nn.Module):
         x = self.linear_skip(x)
         x = self.nested_linear(x)
         return x
+
+
+def str2seed(s: str) -> int:
+    max_value = 2**32 - 1  # numpy max seed
+    hash_value = int(hashlib.sha256(s.encode("utf-8")).hexdigest(), 16)
+
+    return hash_value % (max_value + 1)
+
+
+class Attention(nn.Module):
+    def __init__(self, args: ModelArgs, device=None, dtype=torch.float32):
+        super().__init__()
+        assert args.dim % args.n_heads == 0
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.head_dim = args.dim // args.n_heads
+        self.n_heads = args.n_heads
+        self.dropout_p = args.dropout_p
+        self.resid_dropout = nn.Dropout(args.dropout_p)
+        self.use_attn_mask = args.use_attn_mask
+
+        self.wq = nn.Linear(args.dim, args.dim, bias=False, **factory_kwargs)
+        self.wk = nn.Linear(args.dim, args.dim, bias=False, **factory_kwargs)
+        self.wv = nn.Linear(args.dim, args.dim, bias=False, **factory_kwargs)
+        self.wo = nn.Linear(args.dim, args.dim, bias=False, **factory_kwargs)
+
+    def forward(self, x):
+        bsz, seq_len, _ = x.size()
+        queries, keys, values = self.wq(x), self.wk(x), self.wv(x)
+        queries = queries.view(bsz, seq_len, self.n_heads, self.head_dim)
+        keys = keys.view(bsz, seq_len, self.n_heads, self.head_dim)
+        values = values.view(bsz, seq_len, self.n_heads, self.head_dim)
+
+        queries = queries.transpose(1, 2)  # (bsz, n_heads, seq_len, head_dim)
+        keys = keys.transpose(1, 2)  # (bsz, n_heads, seq_len, head_dim)
+        values = values.transpose(1, 2)  # (bsz, n_heads, seq_len, head_dim)
+
+        output = F.scaled_dot_product_attention(
+            queries,
+            keys,
+            values,
+            None,
+            self.dropout_p if self.training else 0,
+            self.use_attn_mask,
+        )
+        output = output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
+        return self.resid_dropout(self.wo(output))
+
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout_p, device=None, dtype=torch.float32):
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.dtype = dtype
+        self.w1 = nn.Linear(dim, hidden_dim, **factory_kwargs)
+        self.gelu = nn.GELU()
+        self.w2 = nn.Linear(hidden_dim, dim, **factory_kwargs)
+        self.resid_dropout = nn.Dropout(dropout_p)
+
+    def forward(self, x):
+        if not hasattr(self, "_get_fsdp_state"):
+            if x.dtype != self.dtype:
+                x = x.to(dtype=self.dtype)
+        else:
+            if (
+                x.dtype != self.dtype
+                and self._get_fsdp_state()._mp_policy.param_dtype is None
+            ):
+                x = x.to(dtype=self.dtype)
+        return self.resid_dropout(self.w2(self.gelu(self.w1(x))))
+
+
+class CustomLayerNorm(nn.LayerNorm):
+    def __init__(self, normalized_shape, dtype=None, device=None):
+        super().__init__(normalized_shape, dtype=dtype, device=device)
+        self.custom_dtype = dtype
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        orig_dtype = x.dtype
+        if self.custom_dtype is not None:
+            x = x.to(self.custom_dtype)
+        return super().forward(x).to(dtype=orig_dtype)
+
+
+class MultiDtypeTransformerBlock(nn.Module):
+    def __init__(
+        self,
+        args: ModelArgs,
+        device=None,
+        dtype=torch.float32,
+        norm_dtype=torch.float32,
+    ):
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.attention_norm = CustomLayerNorm(
+            args.dim, dtype=norm_dtype or dtype, device=device
+        )
+        self.attention = Attention(args, **factory_kwargs)
+        self.ffn_norm = CustomLayerNorm(
+            args.dim, dtype=norm_dtype or dtype, device=device
+        )
+        self.feed_forward = FeedForward(
+            args.dim,
+            hidden_dim=4 * args.dim,
+            dropout_p=args.dropout_p,
+            **factory_kwargs,
+        )
+        self.dtype = dtype
+
+    def forward(self, x):
+        if not hasattr(self, "_get_fsdp_state"):
+            if x.dtype != self.dtype:
+                x = x.to(dtype=self.dtype)
+        else:
+            if (
+                x.dtype != self.dtype
+                and self._get_fsdp_state()._mp_policy.param_dtype is None
+            ):
+                x = x.to(dtype=self.dtype)
+
+        # SDPA
+        h = x + self.attention(self.attention_norm(x))
+        out = h + self.feed_forward(self.ffn_norm(h))
+        return out
+
+
+class MultiDtypeTransformer(nn.Module):
+    def __init__(
+        self, args: ModelArgs, multidtype_kwargs: Optional[dict[str, Any]] = None
+    ):
+        super().__init__()
+        assert args.vocab_size is not None
+        assert args.max_seq_len is not None
+        self.model_args = args
+        self.max_seq_len = args.max_seq_len
+        self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
+        self.pos_embeddings = nn.Embedding(args.max_seq_len, args.dim)
+        self.dropout = nn.Dropout(args.dropout_p)
+        self.layers = nn.ModuleList()
+        norm_dtype = multidtype_kwargs.get("LayerNorm", None)  # type: ignore
+        self.norm_dtype = norm_dtype
+        for layer_idx in range(args.n_layers):
+            self.layers.append(
+                MultiDtypeTransformerBlock(
+                    args,
+                    dtype=multidtype_kwargs["TransformerBlock"].get(layer_idx, torch.float32),  # type: ignore
+                    norm_dtype=norm_dtype,
+                )
+            )
+        self.norm = nn.LayerNorm(args.dim)
+        self.output = nn.Linear(args.dim, args.vocab_size, bias=False)
+        if args.weight_tying:
+            self.output.weight = self.tok_embeddings.weight
+        self.checkpoint_activations = args.checkpoint_activations
+
+    def forward(self, tokens):
+        _bsz, seq_len = tokens.size()
+        assert seq_len <= self.max_seq_len
+        h = self.tok_embeddings(tokens)
+        pos = torch.arange(0, seq_len, device=tokens.device)
+        p = self.pos_embeddings(pos)  # positional embeddings of shape (seq_len, dim)
+        h = h + p
+        h = self.dropout(h)
+        for layer in self.layers:
+            if self.checkpoint_activations:
+                h = torch.utils.checkpoint.checkpoint(layer, h, use_reentrant=False)
+            else:
+                h = layer(h)
+        h = self.norm(h)
+        output = self.output(h).float()
+        return output

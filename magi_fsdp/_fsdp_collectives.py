@@ -14,6 +14,7 @@
 
 # Copyright (c) Meta Platforms, Inc. and affiliates
 
+from dataclasses import dataclass, field
 from itertools import chain
 from typing import Callable, NamedTuple, Optional, Union, cast
 
@@ -361,6 +362,266 @@ def foreach_all_gather_copy_out(
                 post_param_size[shard_dim] *= world_size
                 cat_out = target_all_gather_output.view(post_param_size)
                 torch.cat(chunks, dim=shard_dim, out=cat_out)
+
+
+@dataclass
+class MagiFSDPReduceDataPerDtype:
+    unsharded_grads_per_dtype: list[torch.Tensor] = field(default_factory=list)
+    indices_per_dtype: list[int] = field(default_factory=list)
+    padded_unsharded_sizes_per_dtype: list[int] = field(default_factory=list)
+    reduce_scatter_output_numel_per_dtype: int = 0
+    reduce_scatter_input_per_dtype: Optional[torch.Tensor] = None
+    factors_per_dtype: Union[tuple[None, None], tuple[float, float]] = (None, None)
+    reduce_output_per_dtype: Optional[torch.Tensor] = None
+
+
+@torch.no_grad()
+def foreach_dtype_reduce(
+    fsdp_params: list[MagiFSDPParam],
+    unsharded_grads: list[torch.Tensor],
+    reduce_scatter_group: dist.ProcessGroup,
+    reduce_scatter_stream: torch.Stream,
+    orig_dtypes: list[torch.dtype],
+    uniform_reduce_dtype: Optional[torch.dtype],
+    device: torch.device,
+    reduce_scatter_reduce_op: Optional[Union[dist.ReduceOp, dist.ReduceOp.RedOpType]],
+    all_reduce_group: Optional[dist.ProcessGroup],  # not `None` iff HSDP
+    all_reduce_stream: torch.Stream,
+    all_reduce_grads: bool,
+    partial_reduce_outputs: Optional[
+        dict[torch.dtype, Optional[torch.Tensor]]
+    ],  # only used for HSDP
+    all_reduce_hook: Optional[Callable[[torch.Tensor], None]],
+) -> tuple[
+    list[torch.Tensor],
+    torch.Event,
+    torch.Event,
+    Optional[list[torch.Tensor]],
+    Optional[torch.Event],
+    Optional[dict[torch.dtype, Optional[torch.Tensor]]],
+]:
+    """
+    ``unsharded_grads`` owns the references to the gradients computed by
+    autograd, so clearing the list frees the gradients.
+    """
+    grad_dtypes = [grad.dtype for grad in unsharded_grads]
+    world_size = reduce_scatter_group.size()
+    device_handle = _get_device_handle(device.type)
+    for i, (fsdp_param, unsharded_grad) in enumerate(zip(fsdp_params, unsharded_grads)):
+        if (shard_dim := fsdp_param.fsdp_placement.dim) == 0:
+            continue
+        assert (
+            unsharded_grad.size(shard_dim) % world_size == 0
+        ), f"Shard({shard_dim}) requires even sharding: {unsharded_grad.size()=} {world_size=}"
+        chunks = torch.chunk(unsharded_grad, world_size, dim=shard_dim)
+        unsharded_grads[i] = torch.cat(chunks, dim=0)
+
+    fsdp_reduce_data_per_dtype: dict[torch.dtype, MagiFSDPReduceDataPerDtype] = {}
+    for idx, grad_dtype in enumerate(grad_dtypes):
+        if grad_dtype not in fsdp_reduce_data_per_dtype:
+            fsdp_reduce_data_per_dtype[grad_dtype] = MagiFSDPReduceDataPerDtype()
+        fsdp_reduce_data_per_dtype[grad_dtype].unsharded_grads_per_dtype.append(
+            unsharded_grads[idx]
+        )
+        fsdp_reduce_data_per_dtype[grad_dtype].indices_per_dtype.append(idx)
+    for dtype, fsdp_reduce_data in fsdp_reduce_data_per_dtype.items():
+        fsdp_reduce_data.factors_per_dtype = _get_gradient_divide_factors(
+            reduce_scatter_group,
+            all_reduce_group,
+            uniform_reduce_dtype or dtype,
+            device.type,
+        )
+        padded_unsharded_sizes_per_dtype = tuple(
+            _get_dim0_padded_size(grad.size(), world_size)
+            for grad in fsdp_reduce_data.unsharded_grads_per_dtype
+        )
+        reduce_scatter_input_numel_per_dtype = sum(
+            s.numel() for s in padded_unsharded_sizes_per_dtype
+        )
+        fsdp_reduce_data.padded_unsharded_sizes_per_dtype = (
+            padded_unsharded_sizes_per_dtype  # type: ignore
+        )
+        fsdp_reduce_data.reduce_scatter_output_numel_per_dtype = (
+            reduce_scatter_input_numel_per_dtype // world_size
+        )
+        fsdp_reduce_data.reduce_scatter_input_per_dtype = torch.empty(
+            (reduce_scatter_input_numel_per_dtype,),
+            dtype=uniform_reduce_dtype or dtype,
+            device=device,
+        )
+        foreach_reduce_scatter_copy_in(
+            fsdp_reduce_data.unsharded_grads_per_dtype,
+            fsdp_reduce_data.reduce_scatter_input_per_dtype,
+            world_size,
+        )
+        fsdp_reduce_data.unsharded_grads_per_dtype.clear()
+
+    current_stream = device_handle.current_stream()
+    # Only after the copy-in finishes can we free the gradients
+    unsharded_grads.clear()
+    reduce_scatter_stream.wait_stream(current_stream)
+    all_reduce_inputs: list[torch.Tensor] = []
+    reduce_scatter_inputs: list[torch.Tensor] = []
+    all_reduce_event = None
+
+    with device_handle.stream(reduce_scatter_stream):
+        for dtype, fsdp_reduce_data in fsdp_reduce_data_per_dtype.items():
+            reduce_scatter_input_per_dtype = (
+                fsdp_reduce_data.reduce_scatter_input_per_dtype
+            )
+            predivide_factor, _ = fsdp_reduce_data.factors_per_dtype
+            fsdp_reduce_data.reduce_output_per_dtype = (
+                reduce_scatter_input_per_dtype.new_empty(  # type: ignore
+                    (fsdp_reduce_data.reduce_scatter_output_numel_per_dtype,)
+                )
+            )
+            # TODO: Clean up this hacky logic — explicitly set the reduce op, and
+            # consider configuring predivide_factor and postdivide_factor.
+            _div_if_needed(reduce_scatter_input_per_dtype, predivide_factor)
+            if reduce_scatter_reduce_op is None:
+                if predivide_factor is None:
+                    reduce_scatter_reduce_op = ReduceOp.AVG
+                else:
+                    reduce_scatter_reduce_op = ReduceOp.SUM
+            dist.reduce_scatter_tensor(
+                output=fsdp_reduce_data.reduce_output_per_dtype,
+                input=reduce_scatter_input_per_dtype,
+                group=reduce_scatter_group,
+                op=reduce_scatter_reduce_op,
+            )
+            reduce_scatter_inputs.append(reduce_scatter_input_per_dtype)
+        reduce_scatter_event = reduce_scatter_stream.record_event()
+        post_reduce_stream = reduce_scatter_stream
+
+        if all_reduce_group is not None:  # HSDP
+            # Accumulations must run in the reduce-scatter stream
+            if not all_reduce_grads:
+                if partial_reduce_outputs is None:
+                    partial_reduce_outputs = {}
+                for dtype, fsdp_reduce_data in fsdp_reduce_data_per_dtype.items():
+                    if dtype in partial_reduce_outputs:
+                        partial_reduce_outputs[  # type: ignore[operator]
+                            dtype
+                        ] += fsdp_reduce_data.reduce_output_per_dtype
+                    else:
+                        partial_reduce_outputs[
+                            dtype
+                        ] = fsdp_reduce_data.reduce_output_per_dtype
+                return (
+                    reduce_scatter_inputs,
+                    reduce_scatter_event,
+                    post_reduce_stream.record_event(),
+                    all_reduce_inputs,
+                    all_reduce_event,
+                    partial_reduce_outputs,
+                )
+            if partial_reduce_outputs is not None:
+                for dtype, partial_reduce_output in partial_reduce_outputs.items():
+                    fsdp_reduce_data_per_dtype[  # type: ignore
+                        dtype
+                    ].reduce_output_per_dtype += partial_reduce_output
+            post_reduce_stream = all_reduce_stream
+            all_reduce_stream.wait_stream(reduce_scatter_stream)
+            with device_handle.stream(all_reduce_stream):
+                for dtype, fsdp_reduce_data in fsdp_reduce_data_per_dtype.items():
+                    predivide_factor, _ = fsdp_reduce_data.factors_per_dtype
+                    dist.all_reduce(
+                        fsdp_reduce_data.reduce_output_per_dtype,
+                        group=all_reduce_group,
+                        op=ReduceOp.AVG if predivide_factor is None else ReduceOp.SUM,
+                    )
+                    all_reduce_inputs.append(fsdp_reduce_data.reduce_output_per_dtype)
+                all_reduce_event = all_reduce_stream.record_event()
+
+    # -- END: ops in reduce_scatter stream
+
+    if all_reduce_hook is not None:
+        # Execute user-specified all reduce hook.
+        # If native HSDP is used, this is executed after the HSDP all reduce.
+        # If 1-d FSDP is used, this is executed post reduce-scatter.
+        post_reduce_stream = all_reduce_stream
+        all_reduce_stream.wait_stream(reduce_scatter_stream)
+        with device_handle.stream(all_reduce_stream):
+            for dtype, fsdp_reduce_data in fsdp_reduce_data_per_dtype.items():
+                all_reduce_hook(fsdp_reduce_data.reduce_output_per_dtype)
+    # -- END: ops post reduce_scatter
+
+    with device_handle.stream(post_reduce_stream):
+        for dtype, fsdp_reduce_data in fsdp_reduce_data_per_dtype.items():
+            _, postdivide_factor = fsdp_reduce_data.factors_per_dtype
+            reduce_output_per_dtype = fsdp_reduce_data.reduce_output_per_dtype
+            padded_unsharded_sizes_per_dtype = (
+                fsdp_reduce_data.padded_unsharded_sizes_per_dtype  # type: ignore
+            )
+            _div_if_needed(reduce_output_per_dtype, postdivide_factor)
+            # View out and accumulate sharded gradients
+            flat_grad_offset = 0  # [0, reduce_scatter_output_numel - 1]
+            for idx, padded_unsharded_size_per_dtype in zip(
+                fsdp_reduce_data.indices_per_dtype, padded_unsharded_sizes_per_dtype
+            ):
+                fsdp_param = fsdp_params[idx]
+                # Assume even sharding for Shard(i), i > 0; otherwise would require
+                # copy-out for contiguous strides
+                new_sharded_grad = torch.as_strided(
+                    reduce_output_per_dtype,
+                    size=fsdp_param.sharded_size,
+                    stride=fsdp_param.contiguous_sharded_stride,
+                    storage_offset=flat_grad_offset,
+                )
+                new_sharded_grad = _to_dtype_if_needed(
+                    new_sharded_grad, orig_dtypes[idx]
+                )
+                to_accumulate_grad = fsdp_param.sharded_param.grad is not None
+                if fsdp_param.offload_to_cpu:
+                    # Only overlap the D2H copy (copying to pinned memory) if not
+                    # accumulating gradients since the CPU add kernel depends on
+                    # the copy result and we cannot run the add as a callback
+                    non_blocking = fsdp_param.pin_memory and not to_accumulate_grad
+                    # Since the GPU sharded gradient is allocated in the RS stream,
+                    # we can free it here by not keeping a ref without waiting for
+                    # the D2H copy since future RS-stream ops run after the copy
+                    new_sharded_grad = new_sharded_grad.to(
+                        torch.device("cpu"), non_blocking=non_blocking
+                    )
+                    if non_blocking:
+                        # Record an event on which to block the CPU thread to
+                        # ensure that the D2H copy finishes before the optimizer
+                        fsdp_param.grad_offload_event = (
+                            reduce_scatter_stream.record_event()
+                        )
+                if to_accumulate_grad:
+                    assert isinstance(fsdp_param.sharded_param.grad, DTensor)
+                    fsdp_param.sharded_param.grad._local_tensor += new_sharded_grad
+                else:
+                    new_sharded_dtensor_grad = fsdp_param.to_sharded_dtensor(
+                        new_sharded_grad
+                    )
+                    fsdp_param.sharded_param.grad = new_sharded_dtensor_grad
+                if not compiled_autograd_enabled():
+                    for hook in (
+                        getattr(
+                            fsdp_param.sharded_param, "_post_accumulate_grad_hooks", {}
+                        )
+                        or {}
+                    ).values():
+                        hook(fsdp_param.sharded_param)
+                padded_sharded_numel = (
+                    padded_unsharded_size_per_dtype.numel() // world_size
+                )
+                flat_grad_offset += padded_sharded_numel
+            post_reduce_event = post_reduce_stream.record_event()
+    # The RS output is allocated in the RS stream and used in the default
+    # stream (for optimizer). To ensure its memory is not reused for later
+    # RSs, we do not need extra synchronization since the sharded parameters
+    # hold refs through the end of backward.
+    return (
+        reduce_scatter_inputs,
+        reduce_scatter_event,
+        post_reduce_event,
+        all_reduce_inputs,
+        all_reduce_event,
+        None,
+    )
 
 
 @torch.no_grad()

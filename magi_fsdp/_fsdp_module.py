@@ -343,6 +343,97 @@ class MagiFSDPModule:
                 fsdp_param.reset_sharded_param()
         return ret
 
+    # EMA-related methods
+    def create_ema_params(
+        self, cpu_offload: bool = False, recurse: bool = True
+    ) -> None:
+        """
+        Create EMA params for the model parameters.
+
+        Args:
+            cpu_offload (bool): Whether to offload the EMA params to CPU.
+            recurse (bool): Whether to create EMA params for all MagiFSDP
+                submodules or just the passed-in module.
+        """
+        assert not cpu_offload, "cpu_offload is not supported yet"
+        # TODO: support cpu_offload
+
+        self_module = cast(nn.Module, self)
+        if recurse:
+            modules = list(self_module.modules())
+        else:
+            modules = [self_module]
+        for module in modules:
+            if isinstance(module, MagiFSDPModule):
+                state = module._get_fsdp_state()
+                if (fsdp_param_group := state._fsdp_param_group) is not None:
+                    fsdp_param_group.create_ema_params()
+
+    def update_ema_params(
+        self, decay: float, async_op: bool = False, recurse: bool = True
+    ) -> None:
+        """
+        Update the EMA params with the current model parameters.
+
+        Args:
+            decay (float): The decay factor for the EMA calculation.
+                formula for EMA is: ema_param = decay * ema_param + (1 - decay) * param
+            async_op (bool): If ``True``, then the EMA update is done
+                asynchronously. Otherwise, it is done synchronously.
+            recurse (bool): Whether to update EMA params for all MagiFSDP
+                submodules or just the passed-in module.
+        """
+        assert not async_op, "async_op is not supported yet"
+        # TODO: support async_op
+        self_module = cast(nn.Module, self)
+        if recurse:
+            modules = list(self_module.modules())
+        else:
+            modules = [self_module]
+        for module in modules:
+            if isinstance(module, MagiFSDPModule):
+                state = module._get_fsdp_state()
+                if (fsdp_param_group := state._fsdp_param_group) is not None:
+                    fsdp_param_group.update_ema_params(decay=decay)
+
+    def use_ema_params(self, recurse: bool = True) -> None:
+        """
+        Use the EMA params for the model parameters.
+
+        Args:
+            recurse (bool): Whether to use EMA params for all MagiFSDP
+                submodules or just the passed-in module.
+        """
+        self_module = cast(nn.Module, self)
+        if recurse:
+            modules = list(self_module.modules())
+        else:
+            modules = [self_module]
+        for module in modules:
+            if isinstance(module, MagiFSDPModule):
+                state = module._get_fsdp_state()
+                if (fsdp_param_group := state._fsdp_param_group) is not None:
+                    fsdp_param_group.use_ema_params()
+
+    def swap_ema_params(self, recurse: bool = True) -> None:
+        """
+        Swap the EMA params with the current model parameters.
+
+        Args:
+            recurse (bool): Whether to swap EMA params for all MagiFSDP
+                submodules or just the passed-in module.
+        """
+        self_module = cast(nn.Module, self)
+        if recurse:
+            modules = list(self_module.modules())
+        else:
+            modules = [self_module]
+        for module in modules:
+            if isinstance(module, MagiFSDPModule):
+                state = module._get_fsdp_state()
+                if (fsdp_param_group := state._fsdp_param_group) is not None:
+                    fsdp_param_group.swap_ema_params()
+
 
 class UnshardHandle:
     """

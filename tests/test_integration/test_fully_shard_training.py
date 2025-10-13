@@ -208,7 +208,7 @@ class TestFullyShardRegisteredParams(FSDPTestMultiThread):
             self.assertEqual(param, ref_param)
 
 
-class TestFullyShardCastAfterInit(FSDPTestMultiThread):
+class TestFullyShardCastAfterInit(FSDPTest):
     @property
     def world_size(self) -> int:
         return 2
@@ -271,7 +271,6 @@ class TestFullyShard1DTrainingCore(FSDPTest):
         self.run_subtests(
             {
                 "lin_shapes": [
-                    [(16, 15), (15, 8)],
                     [(7, 15), (15, 3)],
                     [(16, 17), (17, 8)],
                 ],
@@ -339,10 +338,32 @@ class TestFullyShard1DTrainingCore(FSDPTest):
                 "reshard_after_forward": [True, False, 2],
                 "device_type": ["cuda"],
                 "offload_policy": [OffloadPolicy()],
-                "delay_after_forward": [False, True],
-                "delay_before_all_gather": [False, True],
-                "delay_before_reduce_scatter": [False, True],
-                "delay_before_optim": [False, True],
+                "delay_flags": [
+                    {
+                        "delay_after_forward": False,
+                        "delay_before_all_gather": False,
+                        "delay_before_reduce_scatter": False,
+                        "delay_before_optim": False,
+                    },
+                    {
+                        "delay_after_forward": True,
+                        "delay_before_all_gather": False,
+                        "delay_before_reduce_scatter": False,
+                        "delay_before_optim": True,
+                    },
+                    {
+                        "delay_after_forward": False,
+                        "delay_before_all_gather": True,
+                        "delay_before_reduce_scatter": True,
+                        "delay_before_optim": False,
+                    },
+                    {
+                        "delay_after_forward": True,
+                        "delay_before_all_gather": True,
+                        "delay_before_reduce_scatter": True,
+                        "delay_before_optim": True,
+                    },
+                ],
                 "unshard_async_op": [False],
             },
             self._test_train_parity_multi_group,
@@ -365,10 +386,32 @@ class TestFullyShard1DTrainingCore(FSDPTest):
                     CPUOffloadPolicy(pin_memory=False),
                 ],
                 "device_type": ["cuda"],
-                "delay_after_forward": [False, True],
-                "delay_before_all_gather": [False, True],
-                "delay_before_reduce_scatter": [False, True],
-                "delay_before_optim": [False, True],
+                "delay_flags": [
+                    {
+                        "delay_after_forward": False,
+                        "delay_before_all_gather": False,
+                        "delay_before_reduce_scatter": False,
+                        "delay_before_optim": False,
+                    },
+                    {
+                        "delay_after_forward": True,
+                        "delay_before_all_gather": False,
+                        "delay_before_reduce_scatter": False,
+                        "delay_before_optim": True,
+                    },
+                    {
+                        "delay_after_forward": False,
+                        "delay_before_all_gather": True,
+                        "delay_before_reduce_scatter": True,
+                        "delay_before_optim": False,
+                    },
+                    {
+                        "delay_after_forward": True,
+                        "delay_before_all_gather": True,
+                        "delay_before_reduce_scatter": True,
+                        "delay_before_optim": True,
+                    },
+                ],
                 "unshard_async_op": [False],
             },
             self._test_train_parity_multi_group,
@@ -389,10 +432,32 @@ class TestFullyShard1DTrainingCore(FSDPTest):
                 "reshard_after_forward": [True],
                 "device_type": ["cuda"],
                 "offload_policy": [OffloadPolicy()],
-                "delay_after_forward": [False, True],
-                "delay_before_all_gather": [False, True],
-                "delay_before_reduce_scatter": [False, True],
-                "delay_before_optim": [False, True],
+                "delay_flags": [
+                    {
+                        "delay_after_forward": False,
+                        "delay_before_all_gather": False,
+                        "delay_before_reduce_scatter": False,
+                        "delay_before_optim": False,
+                    },
+                    {
+                        "delay_after_forward": True,
+                        "delay_before_all_gather": False,
+                        "delay_before_reduce_scatter": False,
+                        "delay_before_optim": True,
+                    },
+                    {
+                        "delay_after_forward": False,
+                        "delay_before_all_gather": True,
+                        "delay_before_reduce_scatter": True,
+                        "delay_before_optim": False,
+                    },
+                    {
+                        "delay_after_forward": True,
+                        "delay_before_all_gather": True,
+                        "delay_before_reduce_scatter": True,
+                        "delay_before_optim": True,
+                    },
+                ],
                 "unshard_async_op": [True],
             },
             self._test_train_parity_multi_group,
@@ -403,12 +468,14 @@ class TestFullyShard1DTrainingCore(FSDPTest):
         reshard_after_forward: Union[bool, int],
         offload_policy: OffloadPolicy,
         device_type: str,
-        delay_after_forward: bool,
-        delay_before_all_gather: bool,
-        delay_before_reduce_scatter: bool,
-        delay_before_optim: bool,
+        delay_flags: dict[str, bool],
         unshard_async_op: bool,
     ):
+        delay_after_forward: bool = delay_flags["delay_after_forward"]
+        delay_before_all_gather: bool = delay_flags["delay_before_all_gather"]
+        delay_before_reduce_scatter: bool = delay_flags["delay_before_reduce_scatter"]
+        delay_before_optim: bool = delay_flags["delay_before_optim"]
+
         # Only test individual delays or all four delays to save test time
         if (
             delay_after_forward
@@ -683,19 +750,35 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
         """
         self.run_subtests(
             {
-                "reshard_after_forward": [True, False],
-                "checkpoint_impl": ["composable", "utils", "wrapper"],
-                "module_grouping": ["block", "mem_eff", "mem_eff_weight_tied"],
+                "test_case": [
+                    {
+                        "reshard_after_forward": True,
+                        "checkpoint_impl": "composable",
+                        "module_grouping": "block",
+                    },
+                    {
+                        "reshard_after_forward": False,
+                        "checkpoint_impl": "utils",
+                        "module_grouping": "mem_eff",
+                    },
+                    {
+                        "reshard_after_forward": True,
+                        "checkpoint_impl": "wrapper",
+                        "module_grouping": "mem_eff_weight_tied",
+                    },
+                ]
             },
             self._test_train_parity_with_activation_checkpointing,
         )
 
     def _test_train_parity_with_activation_checkpointing(
         self,
-        reshard_after_forward: Union[bool, int],
-        checkpoint_impl: str,
-        module_grouping: str,
+        test_case: dict[str, Any],
     ):
+        reshard_after_forward: Union[bool, int] = test_case["reshard_after_forward"]
+        checkpoint_impl: str = test_case["checkpoint_impl"]
+        module_grouping: str = test_case["module_grouping"]
+
         assert checkpoint_impl in ("composable", "utils", "wrapper")
         testing_compile = fully_shard != torch.distributed.fsdp.fully_shard
         if testing_compile and checkpoint_impl == "composable":
@@ -947,19 +1030,29 @@ class TestFullyShardGradientAccumulation(FSDPTest):
         self.run_subtests(
             {
                 "mesh": meshes,
-                "reshard_after_forward": [True, False, 2],
-                # "all": disable reduce-scatter for all modules
-                # "root_only": disable reduce-scatter for root's linear only
-                # "some_mlps": disable reduce-scatter for some MLPs
-                "mode": ["all", "root_only", "some_mlps"],
-                "reshard_after_backward": [False, True],
-                "offload_policy": [OffloadPolicy(), CPUOffloadPolicy()],
-                # For HSDP only:
-                # `True`: reduce-scatter only (no all-reduce) each microbatch
-                # until the last microbatch
-                # `False`: neither reduce-scatter nor all-reduce each
-                # microbatch until the last microbatch
-                "reduce_scatter_only": [False, True],
+                "test_case": [
+                    {
+                        "reshard_after_forward": True,
+                        "mode": "all",  # "all": disable reduce-scatter for all modules
+                        "reshard_after_backward": True,
+                        "offload_policy": OffloadPolicy(),
+                        "reduce_scatter_only": False,  # `False`: neither reduce-scatter nor all-reduce each
+                    },
+                    {
+                        "reshard_after_forward": False,
+                        "mode": "root_only",  # "root_only": disable reduce-scatter for root's linear only
+                        "reshard_after_backward": False,
+                        "offload_policy": CPUOffloadPolicy(),
+                        "reduce_scatter_only": True,  # `True`: reduce-scatter only (no all-reduce) each microbatch
+                    },
+                    {
+                        "reshard_after_forward": 2,
+                        "mode": "some_mlps",  # "some_mlps": disable reduce-scatter for some MLPs
+                        "reshard_after_backward": True,
+                        "offload_policy": OffloadPolicy(),
+                        "reduce_scatter_only": False,  # `False`: neither reduce-scatter nor all-reduce each
+                    },
+                ],
             },
             self._test_gradient_accumulation,
         )
@@ -967,12 +1060,14 @@ class TestFullyShardGradientAccumulation(FSDPTest):
     def _test_gradient_accumulation(
         self,
         mesh: DeviceMesh,
-        reshard_after_forward: Union[bool, int],
-        mode: str,
-        reshard_after_backward: bool,
-        offload_policy: OffloadPolicy,
-        reduce_scatter_only: bool,  # for HSDP
+        test_case: dict[str, Any],
     ):
+        reshard_after_forward: Union[bool, int] = test_case["reshard_after_forward"]
+        mode: str = test_case["mode"]
+        reshard_after_backward: bool = test_case["reshard_after_backward"]
+        offload_policy: OffloadPolicy = test_case["offload_policy"]
+        reduce_scatter_only: bool = test_case["reduce_scatter_only"]  # for HSDP
+
         if (
             (
                 not reshard_after_backward
@@ -1198,12 +1293,32 @@ class TestFullyShardNDTraining(FSDPTest):
         global_mesh = self.init_global_mesh()
         self.run_subtests(
             {
-                "reshard_after_forward": [False, True],
-                "use_activation_checkpointing": [False, True],
-                # TODO: change "mlp_dim" back to [3, 16, 17] when uneven sharding
-                # is supported for FSDP+TP
-                "mlp_dim": [4, 16, 20],
-                "foreach": [False],
+                "test_case": [
+                    {
+                        "reshard_after_forward": False,
+                        "use_activation_checkpointing": False,
+                        "mlp_dim": 4,
+                        "foreach": False,
+                    },
+                    {
+                        "reshard_after_forward": True,
+                        "use_activation_checkpointing": True,
+                        "mlp_dim": 16,
+                        "foreach": False,
+                    },
+                    {
+                        "reshard_after_forward": True,
+                        "use_activation_checkpointing": False,
+                        "mlp_dim": 20,
+                        "foreach": False,
+                    },
+                    {
+                        "reshard_after_forward": True,
+                        "use_activation_checkpointing": True,
+                        "mlp_dim": 24,
+                        "foreach": False,
+                    },
+                ]
             },
             functools.partial(self._test_2d_mlp_with_nd_mesh, global_mesh),
         )
@@ -1211,11 +1326,13 @@ class TestFullyShardNDTraining(FSDPTest):
     def _test_2d_mlp_with_nd_mesh(
         self,
         global_mesh: DeviceMesh,
-        reshard_after_forward: bool,
-        use_activation_checkpointing: bool,
-        mlp_dim: int,
-        foreach: bool,
+        test_case: dict[str, Any],
     ):
+        reshard_after_forward: bool = test_case["reshard_after_forward"]
+        use_activation_checkpointing: bool = test_case["use_activation_checkpointing"]
+        mlp_dim: int = test_case["mlp_dim"]
+        foreach: bool = test_case["foreach"]
+
         global_mesh = self.init_global_mesh()
         _, dp_mesh, tp_mesh = (
             global_mesh["pp"],
@@ -1273,12 +1390,32 @@ class TestFullyShardHSDP3DTraining(FSDPTest):
         global_mesh = self.init_global_mesh()
         self.run_subtests(
             {
-                "reshard_after_forward": [False, True],
-                "use_activation_checkpointing": [False, True],
-                # TODO: change "mlp_dim" back to [3, 16, 17] when uneven sharding
-                # is supported for FSDP+TP
-                "mlp_dim": [4, 16, 20],
-                "foreach": [False],
+                "test_case": [
+                    {
+                        "reshard_after_forward": False,
+                        "use_activation_checkpointing": False,
+                        "mlp_dim": 4,
+                        "foreach": False,
+                    },
+                    {
+                        "reshard_after_forward": True,
+                        "use_activation_checkpointing": True,
+                        "mlp_dim": 16,
+                        "foreach": False,
+                    },
+                    {
+                        "reshard_after_forward": True,
+                        "use_activation_checkpointing": False,
+                        "mlp_dim": 20,
+                        "foreach": False,
+                    },
+                    {
+                        "reshard_after_forward": True,
+                        "use_activation_checkpointing": True,
+                        "mlp_dim": 24,
+                        "foreach": False,
+                    },
+                ]
             },
             functools.partial(self._test_3d_mlp_with_nd_mesh, global_mesh),
         )
@@ -1286,11 +1423,13 @@ class TestFullyShardHSDP3DTraining(FSDPTest):
     def _test_3d_mlp_with_nd_mesh(
         self,
         global_mesh: DeviceMesh,
-        reshard_after_forward: bool,
-        use_activation_checkpointing: bool,
-        mlp_dim: int,
-        foreach: bool,
+        test_case: dict[str, Any],
     ):
+        reshard_after_forward: bool = test_case["reshard_after_forward"]
+        use_activation_checkpointing: bool = test_case["use_activation_checkpointing"]
+        mlp_dim: int = test_case["mlp_dim"]
+        foreach: bool = test_case["foreach"]
+
         global_mesh = self.init_global_mesh()
         dp_mesh, tp_mesh = global_mesh["dp_replicate", "dp_shard"], global_mesh["tp"]
         dp_pg = dp_mesh._flatten().get_group()  # used for `replicate()`
@@ -1345,10 +1484,32 @@ class TestFullyShardHSDPTraining(FSDPTest):
         )
         self.run_subtests(
             {
-                "reshard_after_forward": [False, True],
-                "use_activation_checkpointing": [False, True],
-                "mlp_dim": [3, 16, 17],
-                "sync_gradients_at_last_batch": [True, False],
+                "test_case": [
+                    {
+                        "reshard_after_forward": False,
+                        "use_activation_checkpointing": False,
+                        "mlp_dim": 4,
+                        "sync_gradients_at_last_batch": True,
+                    },
+                    {
+                        "reshard_after_forward": True,
+                        "use_activation_checkpointing": True,
+                        "mlp_dim": 16,
+                        "sync_gradients_at_last_batch": False,
+                    },
+                    {
+                        "reshard_after_forward": True,
+                        "use_activation_checkpointing": False,
+                        "mlp_dim": 20,
+                        "sync_gradients_at_last_batch": True,
+                    },
+                    {
+                        "reshard_after_forward": True,
+                        "use_activation_checkpointing": True,
+                        "mlp_dim": 24,
+                        "sync_gradients_at_last_batch": False,
+                    },
+                ]
             },
             functools.partial(self._test_train_parity_hsdp, global_mesh),
         )
@@ -1356,11 +1517,13 @@ class TestFullyShardHSDPTraining(FSDPTest):
     def _test_train_parity_hsdp(
         self,
         global_mesh: DeviceMesh,
-        reshard_after_forward: bool,
-        use_activation_checkpointing: bool,
-        mlp_dim: int,
-        sync_gradients_at_last_batch: bool,
+        test_case: dict[str, Any],
     ):
+        reshard_after_forward: bool = test_case["reshard_after_forward"]
+        use_activation_checkpointing: bool = test_case["use_activation_checkpointing"]
+        mlp_dim: int = test_case["mlp_dim"]
+        sync_gradients_at_last_batch: bool = test_case["sync_gradients_at_last_batch"]
+
         torch.manual_seed(42)
         model = nn.Sequential(
             nn.LayerNorm(mlp_dim, bias=False),

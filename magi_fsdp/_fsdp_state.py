@@ -69,18 +69,14 @@ class MagiFSDPStateContext:
 
 
 def disable_if_config_true(func):
-    @functools.wraps(func)
-    def fsdp_hook_wrapper(*args, **kwargs):
-        if torch._dynamo.config.skip_fsdp_hooks:
-            return torch._dynamo.disable(
-                func,
-                recursive=True,
-                reason="skipping MagiFSDP hooks since torch._dynamo.config.skip_fsdp_hooks is set",
-            )(*args, **kwargs)
-        else:
-            return func(*args, **kwargs)
-
-    return fsdp_hook_wrapper
+    if torch._dynamo.config.skip_fsdp_hooks:
+        return torch._dynamo.disable(
+            func,
+            recursive=True,
+            reason="skipping MagiFSDP hooks since torch._dynamo.config.skip_fsdp_hooks is set",
+        )
+    else:
+        return func
 
 
 class MagiFSDPState(_State):
@@ -370,12 +366,20 @@ def _register_group_forward_hooks(
     """
     modules_set = set(modules)
 
+    # NOTE: We define an empty wrapper `get_wrapped_pre_hook` due to how `torch._dynamo.disable` works:
+    # the first time a function is decorated, `DisableContext.__call__()` stores it in
+    # `_torchdynamo_orig_callable`. If `disable_if_config_true` directly returns the function
+    # and `wrapped_pre_hook` is decorated with `functools.wraps(pre_hook)`, a second call
+    # to `disable` (via `innermost_fn`) fetches `_torchdynamo_orig_callable`, losing the `self` binding.
     @disable_if_config_true
-    @functools.wraps(pre_hook)
-    def wrapped_pre_hook(*args: Any, **kwargs: Any):
-        if len(modules_to_run) == 0:  # first to run
-            modules_to_run.update(modules_set)
-            return pre_hook(*args, **kwargs)
+    def get_wrapped_pre_hook():
+        @functools.wraps(pre_hook)
+        def wrapped_pre_hook(*args: Any, **kwargs: Any):
+            if len(modules_to_run) == 0:  # first to run
+                modules_to_run.update(modules_set)
+                return pre_hook(*args, **kwargs)
+
+        return wrapped_pre_hook
 
     @disable_if_config_true
     def get_wrapped_post_hook(module: nn.Module):
@@ -389,7 +393,7 @@ def _register_group_forward_hooks(
 
     pre_handles = [
         module.register_forward_pre_hook(
-            wrapped_pre_hook, prepend=True, with_kwargs=True
+            get_wrapped_pre_hook(), prepend=True, with_kwargs=True
         )
         for module in modules
     ]

@@ -16,7 +16,7 @@
 
 import contextlib
 import logging
-from typing import Any, Callable, NamedTuple, Optional, cast
+from typing import Any, Callable, NamedTuple, Optional, Union, cast
 
 import torch
 import torch.distributed as dist
@@ -28,11 +28,14 @@ from torch.profiler import record_function
 from torch.utils._pytree import tree_flatten, tree_unflatten
 from torch.utils.hooks import RemovableHandle
 
+import magi_fsdp
+
 from ._fsdp_api import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy
 from ._fsdp_collectives import (
     AllGatherResult,
     foreach_all_gather,
     foreach_all_gather_copy_out,
+    foreach_dtype_reduce,
     foreach_reduce,
 )
 from ._fsdp_common import (
@@ -113,12 +116,12 @@ class AllGatherState(NamedTuple):
 
 
 class ReduceScatterState(NamedTuple):
-    reduce_scatter_input: torch.Tensor
+    reduce_scatter_inputs: Union[torch.Tensor, list[torch.Tensor]]
     event: Optional[torch.Event]  # reduce-scatter event
 
 
 class AllReduceState(NamedTuple):
-    all_reduce_input: torch.Tensor
+    all_reduce_inputs: Union[torch.Tensor, list[torch.Tensor]]
     event: Optional[torch.Event]  # all-reduce event
 
 
@@ -160,6 +163,7 @@ class MagiFSDPParamGroup:
         self.device = device
         self.device_handle = _get_device_handle(device.type)
         self.mp_policy = mp_policy
+        self._uniform_reduce_dtype: Optional[torch.dtype] = None
         self.offload_policy = offload_policy
         self._training_state = TrainingState.IDLE
         # Group's sharded state always matches its parameters' sharded states
@@ -215,7 +219,9 @@ class MagiFSDPParamGroup:
 
         # Only for HSDP, if accumulating gradients without all-reduce, save the
         # partial reduce output (only reduce-scattered but not all-reduced)
-        self._partial_reduce_output: Optional[torch.Tensor] = None
+        self._partial_reduce_outputs: Optional[
+            Union[dict[torch.dtype, torch.Tensor], torch.Tensor]
+        ] = None
         # Holds the all-reduce input and all-reduce event to keep it alive
         # until the end of backward (critical when doing bf16 reduction with
         # fp32 parameters since the all-reduce input is allocated in the RS
@@ -226,22 +232,33 @@ class MagiFSDPParamGroup:
     def _init_mp_dtypes(self) -> None:
         for fsdp_param in self.fsdp_params:
             fsdp_param.init_dtype_attrs(self.mp_policy)
-        orig_dtypes = {fsdp_param.orig_dtype for fsdp_param in self.fsdp_params}
-        if len(orig_dtypes) != 1:
-            # This can be relaxed if we copy-out for the reduce-scatter
-            raise AssertionError(
-                f"MagiFSDP expects uniform original parameter dtype but got {orig_dtypes}"
-            )
-        self._orig_dtype = next(iter(orig_dtypes))
-        reduce_dtypes = {fsdp_param.reduce_dtype for fsdp_param in self.fsdp_params}
-        if len(reduce_dtypes) != 1:
-            # This can be relaxed if we issue one reduce-scatter per reduce
-            # dtype (but we would need a way for users to specify multiple
-            # reduce dtypes)
-            raise AssertionError(
-                f"MagiFSDP expects uniform reduce dtype but got {reduce_dtypes}"
-            )
-        self._reduce_dtype = next(iter(reduce_dtypes))
+
+        if magi_fsdp.is_multi_dtype_reduce_enable():
+            self._orig_dtypes = [
+                fsdp_param.orig_dtype for fsdp_param in self.fsdp_params
+            ]
+            reduce_dtypes = {fsdp_param.reduce_dtype for fsdp_param in self.fsdp_params}
+            if len(reduce_dtypes) == 1:
+                self._uniform_reduce_dtype = next(iter(reduce_dtypes))
+            else:
+                self._uniform_reduce_dtype = None
+        else:
+            orig_dtypes = {fsdp_param.orig_dtype for fsdp_param in self.fsdp_params}
+            if len(orig_dtypes) != 1:
+                # This can be relaxed if we copy-out for the reduce-scatter
+                raise AssertionError(
+                    f"MagiFSDP expects uniform original parameter dtype but got {orig_dtypes}"
+                )
+            self._orig_dtype = next(iter(orig_dtypes))
+            reduce_dtypes = {fsdp_param.reduce_dtype for fsdp_param in self.fsdp_params}
+            if len(reduce_dtypes) != 1:
+                # This can be relaxed if we issue one reduce-scatter per reduce
+                # dtype (but we would need a way for users to specify multiple
+                # reduce dtypes)
+                raise AssertionError(
+                    f"MagiFSDP expects uniform reduce dtype but got {reduce_dtypes}"
+                )
+            self._reduce_dtype = next(iter(reduce_dtypes))
 
     def lazy_init(self):
         # Lazy init should be idempotent
@@ -449,37 +466,71 @@ class MagiFSDPParamGroup:
                 all_reduce_stream = self.comm_ctx.all_reduce_stream
 
             self._wait_for_post_backward()
-            (
-                reduce_scatter_input,
-                reduce_scatter_event,
-                self._post_reduce_event,
-                all_reduce_input,
-                all_reduce_event,
-                self._partial_reduce_output,
-            ) = foreach_reduce(
-                fsdp_params_with_grad,
-                unsharded_grads,
-                self._reduce_scatter_process_group,
-                self.comm_ctx.reduce_scatter_stream,
-                self._orig_dtype,
-                self._reduce_dtype,
-                self.device,
-                self.reduce_scatter_reduce_op,
-                self._all_reduce_process_group if self._is_hsdp else None,
-                all_reduce_stream,
-                self.all_reduce_grads,
-                self._partial_reduce_output,
-                self._all_reduce_hook,
-            )
-            self.comm_ctx.reduce_scatter_state = ReduceScatterState(
-                reduce_scatter_input, reduce_scatter_event
-            )
-            if all_reduce_input is not None:
-                if self.device.type != "cpu":
-                    assert all_reduce_event is not None
-                self._all_reduce_state = AllReduceState(
-                    all_reduce_input, all_reduce_event
+
+            if magi_fsdp.is_multi_dtype_reduce_enable():
+                (
+                    reduce_scatter_inputs,
+                    reduce_scatter_event,
+                    self._post_reduce_event,
+                    all_reduce_inputs,
+                    all_reduce_event,
+                    self._partial_reduce_outputs,
+                ) = foreach_dtype_reduce(
+                    fsdp_params_with_grad,
+                    unsharded_grads,
+                    self._reduce_scatter_process_group,
+                    self.comm_ctx.reduce_scatter_stream,
+                    self._orig_dtypes,
+                    self._uniform_reduce_dtype,
+                    self.device,
+                    self.reduce_scatter_reduce_op,
+                    self._all_reduce_process_group if self._is_hsdp else None,
+                    all_reduce_stream,
+                    self.all_reduce_grads,
+                    self._partial_reduce_outputs,
+                    self._all_reduce_hook,
                 )
+                self.comm_ctx.reduce_scatter_state = ReduceScatterState(
+                    reduce_scatter_inputs, reduce_scatter_event
+                )
+                if all_reduce_inputs is not None and len(all_reduce_inputs) > 0:
+                    if self.device.type != "cpu":
+                        assert all_reduce_event is not None
+                    self._all_reduce_state = AllReduceState(
+                        all_reduce_inputs, all_reduce_event
+                    )
+            else:
+                (
+                    reduce_scatter_input,
+                    reduce_scatter_event,
+                    self._post_reduce_event,
+                    all_reduce_input,
+                    all_reduce_event,
+                    self._partial_reduce_outputs,
+                ) = foreach_reduce(
+                    fsdp_params_with_grad,
+                    unsharded_grads,
+                    self._reduce_scatter_process_group,
+                    self.comm_ctx.reduce_scatter_stream,
+                    self._orig_dtype,
+                    self._reduce_dtype,
+                    self.device,
+                    self.reduce_scatter_reduce_op,
+                    self._all_reduce_process_group if self._is_hsdp else None,
+                    all_reduce_stream,
+                    self.all_reduce_grads,
+                    self._partial_reduce_outputs,
+                    self._all_reduce_hook,
+                )
+                self.comm_ctx.reduce_scatter_state = ReduceScatterState(
+                    reduce_scatter_input, reduce_scatter_event
+                )
+                if all_reduce_input is not None:
+                    if self.device.type != "cpu":
+                        assert all_reduce_event is not None
+                    self._all_reduce_state = AllReduceState(
+                        all_reduce_input, all_reduce_event
+                    )
 
     def finalize_backward(self):
         self._wait_for_post_backward()
@@ -707,6 +758,23 @@ class MagiFSDPParamGroup:
                 "Found following parameters on non-CPU device: "
                 f"{[(fsdp_param._param_fqn, fsdp_param.sharded_param.device) for fsdp_param in fsdp_params_not_on_cpu]}\n"
             )
+
+    # EMA-related methods
+    def create_ema_params(self) -> None:
+        for fsdp_param in self.fsdp_params:
+            fsdp_param.create_ema_param()
+
+    def update_ema_params(self, decay: float) -> None:
+        for fsdp_param in self.fsdp_params:
+            fsdp_param.update_ema_param(decay)
+
+    def use_ema_params(self) -> None:
+        for fsdp_param in self.fsdp_params:
+            fsdp_param.use_ema_param()
+
+    def swap_ema_params(self) -> None:
+        for fsdp_param in self.fsdp_params:
+            fsdp_param.swap_ema_param()
 
 
 def _get_param_module_infos(

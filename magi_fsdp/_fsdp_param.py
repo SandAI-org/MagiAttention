@@ -233,6 +233,9 @@ class MagiFSDPParam:
     _extensions_data: ExtensionsData
     _unsharded_inner_tensors: list[torch.Tensor]
 
+    # EMA-related attributes
+    sharded_ema_param: Optional[nn.Parameter]  # ND
+
     def __init__(
         self,
         param: nn.Parameter,
@@ -888,6 +891,41 @@ class MagiFSDPParam:
 
     def __repr__(self) -> str:
         return f"MagiFSDPParam(fqn={self._param_fqn}, orig_size={self._orig_size})"
+
+    # EMA-related methods
+    def create_ema_param(self) -> None:
+        assert not hasattr(self, "sharded_ema_param"), "Cannot create ema_param twice"
+        self.sharded_ema_param = torch.nn.Parameter(
+            data=self.sharded_param.data.clone(),
+            requires_grad=False,
+        )
+
+    def update_ema_param(self, decay: float) -> None:
+        if (
+            hasattr(self, "sharded_ema_param") is False
+            or self.sharded_ema_param is None
+        ):
+            raise AssertionError("Expects sharded_ema_param to be not None")
+        with torch.no_grad():
+            self.sharded_ema_param.data.mul_(decay).add_(
+                self.sharded_param.data, alpha=1 - decay
+            )
+
+    def use_ema_param(self) -> None:
+        if (
+            hasattr(self, "sharded_ema_param") is False
+            or self.sharded_ema_param is None
+        ):
+            raise AssertionError("Expects sharded_ema_param to be not None")
+        self.sharded_param.data.copy_(self.sharded_ema_param.data)
+
+    def swap_ema_param(self) -> None:
+        if (
+            hasattr(self, "sharded_ema_param") is False
+            or self.sharded_ema_param is None
+        ):
+            raise AssertionError("Expects sharded_ema_param to be not None")
+        torch.utils.swap_tensors(t1=self.sharded_param, t2=self.sharded_ema_param)
 
 
 def alloc_storage(tensor: torch.Tensor) -> None:
