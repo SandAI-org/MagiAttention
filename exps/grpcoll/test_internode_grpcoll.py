@@ -561,7 +561,7 @@ def test_main(
                         recv_num_tokens_per_expert_list,
                         handle,
                         event,
-                    ) = buffer.dispatch(**dispatch_args)
+                    ) = buffer.group_cast(**dispatch_args)
 
                     # wait
                     event.current_stream_wait() if async_mode else ()
@@ -687,7 +687,7 @@ def test_main(
                         }
                         if previous_mode:
                             dispatch_args.update({"previous_event": buffer.capture()})
-                        recv_cached_x, _, _, _, _, event = buffer.dispatch(
+                        recv_cached_x, _, _, _, _, event = buffer.group_cast(
                             **dispatch_args
                         )
                         event.current_stream_wait() if async_mode else ()
@@ -764,7 +764,7 @@ def test_main(
                     #       for the entries == -1 to the position of next valid token (encoded to -p-1)
                     #       since the combine kernel needs to know the channel position when iterating at this token,
                     #       even though it is not sent to the target rdma rank
-                    combined_x, combined_topk_weights, event = buffer.combine(
+                    combined_x, combined_topk_weights, event = buffer.group_reduce(
                         **combine_args
                     )
 
@@ -876,7 +876,7 @@ def test_main(
                 )
                 tune_args = {"x": current_x, "handle": handle, "config": config}
                 t, notify_t = bench_kineto(
-                    lambda: buffer.dispatch(**tune_args), ("dispatch", "notify")
+                    lambda: buffer.group_cast(**tune_args), ("dispatch", "notify")
                 )
                 if t < best_time:
                     best_time, best_results = t, (
@@ -936,7 +936,7 @@ def test_main(
         "num_tokens_per_expert": num_tokens_per_expert,
         "config": dispatch_config if dispatch_config is not None else config,
     }
-    recv_x, _, _, _, handle, _ = buffer.dispatch(**dispatch_args)  # type: ignore[assignment]
+    recv_x, _, _, _, handle, _ = buffer.group_cast(**dispatch_args)  # type: ignore[assignment]
 
     # Tune combine performance
     best_time, best_results = 1e10, None
@@ -960,7 +960,7 @@ def test_main(
                 "allow_empty_init_out_buf": allow_empty_init_out_buf,
             }
             t, notify_t = bench_kineto(
-                lambda: buffer.combine(**tune_args), ("combine", "notify")
+                lambda: buffer.group_reduce(**tune_args), ("combine", "notify")
             )
             if local_rank == 0:
                 print(

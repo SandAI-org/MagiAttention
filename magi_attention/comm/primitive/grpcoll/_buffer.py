@@ -396,7 +396,7 @@ class GrpCollBuffer:
             EventOverlap(event),
         )
 
-    def dispatch(
+    def group_cast(
         self,
         x: torch.Tensor,
         recv_x: torch.Tensor | None = None,
@@ -505,7 +505,7 @@ class GrpCollBuffer:
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
-            return self._internode_dispatch(
+            return self._internode_group_cast(
                 x=x,
                 recv_x=recv_x,
                 config=config,
@@ -526,7 +526,7 @@ class GrpCollBuffer:
             )
 
         # Intranode
-        return self._intranode_dispatch(
+        return self._intranode_group_cast(
             x=x,
             recv_x=recv_x,
             config=config,
@@ -545,7 +545,7 @@ class GrpCollBuffer:
             allocate_on_comm_stream=allocate_on_comm_stream,
         )
 
-    def combine(
+    def group_reduce(
         self,
         x: torch.Tensor,
         handle: GrpCollHandle,
@@ -637,7 +637,7 @@ class GrpCollBuffer:
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
-            return self._internode_combine(
+            return self._internode_group_reduce(
                 x=x,
                 combined_x=combined_x,
                 config=config,
@@ -654,7 +654,7 @@ class GrpCollBuffer:
             )
 
         # Intranode
-        return self._intranode_combine(
+        return self._intranode_group_reduce(
             x=x,
             combined_x=combined_x,
             config=config,
@@ -670,7 +670,7 @@ class GrpCollBuffer:
             allow_empty_init_out_buf=allow_empty_init_out_buf,
         )
 
-    def _intranode_dispatch(
+    def _intranode_group_cast(
         self,
         x: torch.Tensor,
         recv_x: torch.Tensor | None,
@@ -806,7 +806,7 @@ class GrpCollBuffer:
                 EventOverlap(event),
             )
 
-    def _intranode_combine(
+    def _intranode_group_reduce(
         self,
         x: torch.Tensor,
         combined_x: torch.Tensor | None,
@@ -850,7 +850,7 @@ class GrpCollBuffer:
 
         return combined_x, recv_topk_weights, EventOverlap(event)
 
-    def _internode_dispatch(
+    def _internode_group_cast(
         self,
         x: torch.Tensor,
         recv_x: torch.Tensor | None,
@@ -1012,7 +1012,7 @@ class GrpCollBuffer:
                 EventOverlap(event),
             )
 
-    def _internode_combine(
+    def _internode_group_reduce(
         self,
         x: torch.Tensor,
         combined_x: torch.Tensor | None,
