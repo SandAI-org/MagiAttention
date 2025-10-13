@@ -56,6 +56,10 @@ namespace grpcoll = magi_attn_comm::grpcoll;
 
 namespace magi_attn_comm::grpcoll {
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Buffer Initialization
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy)
     : rank(rank),
       num_ranks(num_ranks),
@@ -64,10 +68,10 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
       low_latency_mode(low_latency_mode),
       explicitly_destroy(explicitly_destroy),
       comm_stream(at::cuda::getStreamFromPool(true)) {
-  // Metadata memory
-  int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int);
-  int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*);
-  int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*);
+  // Calculate metadata memory
+  int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int); // host signal array for each nvl rank
+  int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*); // host buffer ptr array to each buffer ptr for each nvl rank
+  int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*); // host signal ptr array to each signal for each nvl rank
 
   // Common checks
   EP_HOST_ASSERT(num_nvl_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0 and (num_nvl_bytes <= std::numeric_limits<int>::max() or num_rdma_bytes == 0));
@@ -90,36 +94,60 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
   CUDA_CHECK(cudaGetDeviceProperties(&device_prop, device_id));
   num_device_sms = device_prop.multiProcessorCount;
 
+  // Initialize intranode NVLink buffer (alloc local device buffer memory and set local IPC handles)
   if (num_nvl_bytes > 0) {
-    // Local IPC: alloc local memory and set local IPC handles
-    CUDA_CHECK(cudaMalloc(&buffer_ptrs[nvl_rank], num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes + barrier_signal_ptr_bytes));
-    CUDA_CHECK(cudaIpcGetMemHandle(&ipc_handles[nvl_rank], buffer_ptrs[nvl_rank]));
-    buffer_ptrs_gpu = reinterpret_cast<void**>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + barrier_signal_bytes);
+    // Allocate local NVLink buffer memory
+    CUDA_CHECK(cudaMalloc(
+        &buffer_ptrs[nvl_rank], // local nvl buffer_ptr
+        num_nvl_bytes // the nvl buffer size set by the user
+            + barrier_signal_bytes // the signal size
+            + buffer_ptr_bytes // the buffer ptr array size
+            + barrier_signal_ptr_bytes // the signal ptr array size
+        ));
 
-    // Set barrier signals
-    barrier_signal_ptrs[nvl_rank] = reinterpret_cast<int*>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes);
-    barrier_signal_ptrs_gpu = reinterpret_cast<int**>(static_cast<uint8_t*>(buffer_ptrs[nvl_rank]) + num_nvl_bytes + barrier_signal_bytes + buffer_ptr_bytes);
+    // Initialize local NVLink IPC handle
+    CUDA_CHECK(cudaIpcGetMemHandle(
+        &ipc_handles[nvl_rank], // local nvl ipc handle
+        buffer_ptrs[nvl_rank] // local nvl buffer_ptr
+        ));
 
-    // No need to synchronize, will do a full device sync during `sync`
+    // Set several local device ptrs into host ptr array
+    // and set the device ptrs to global ptr arrays
+    auto local_nvl_buffer_byte_ptr = static_cast<uint8_t*>(buffer_ptrs[nvl_rank]);
+
+    // Set the host ptr to the local nvl signal
+    int64_t local_nvl_buffer_byte_offs = num_nvl_bytes;
+    barrier_signal_ptrs[nvl_rank] = reinterpret_cast<int*>(local_nvl_buffer_byte_ptr + local_nvl_buffer_byte_offs);
+
+    // Set the device ptr to the buffer ptr array
+    local_nvl_buffer_byte_offs += barrier_signal_bytes;
+    buffer_ptrs_gpu = reinterpret_cast<void**>(local_nvl_buffer_byte_ptr + local_nvl_buffer_byte_offs);
+
+    // Set the device ptr to the signal ptr array
+    local_nvl_buffer_byte_offs += buffer_ptr_bytes;
+    barrier_signal_ptrs_gpu = reinterpret_cast<int**>(local_nvl_buffer_byte_ptr + local_nvl_buffer_byte_offs);
+
+    // Initialize local nvl signal to zero
+    // NOTE: no need to synchronize here, since we will apply a full device sync in `sync`
     CUDA_CHECK(cudaMemsetAsync(barrier_signal_ptrs[nvl_rank], 0, barrier_signal_bytes, comm_stream));
   }
 
-  // Create 32 MiB workspace
+  // Initialize 32 MB device workspace
   CUDA_CHECK(cudaMalloc(&workspace, NUM_WORKSPACE_BYTES));
   CUDA_CHECK(cudaMemsetAsync(workspace, 0, NUM_WORKSPACE_BYTES, comm_stream));
 
-  // MoE counter
+  // Initialize MoE counter (pinned host memory with its device ptr)
   CUDA_CHECK(cudaMallocHost(&moe_recv_counter, sizeof(int64_t), cudaHostAllocMapped));
   CUDA_CHECK(cudaHostGetDevicePointer(&moe_recv_counter_mapped, const_cast<int*>(moe_recv_counter), 0));
   *moe_recv_counter = -1;
 
-  // MoE expert-level counter
+  // Initialize MoE expert-level counter for each local expert (pinned host memory with its device ptr)
   CUDA_CHECK(cudaMallocHost(&moe_recv_expert_counter, sizeof(int) * NUM_MAX_LOCAL_EXPERTS, cudaHostAllocMapped));
   CUDA_CHECK(cudaHostGetDevicePointer(&moe_recv_expert_counter_mapped, const_cast<int*>(moe_recv_expert_counter), 0));
   for (int i = 0; i < NUM_MAX_LOCAL_EXPERTS; ++i)
     moe_recv_expert_counter[i] = -1;
 
-  // MoE RDMA-level counter
+  // Initialize MoE RDMA-level counter (pinned host memory with its device ptr)
   if (num_rdma_ranks > 0) {
     CUDA_CHECK(cudaMallocHost(&moe_recv_rdma_counter, sizeof(int), cudaHostAllocMapped));
     CUDA_CHECK(cudaHostGetDevicePointer(&moe_recv_rdma_counter_mapped, const_cast<int*>(moe_recv_rdma_counter), 0));
@@ -127,63 +155,101 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
   }
 }
 
+void Buffer::sync(
+    const std::vector<int>& device_ids,
+    const std::vector<std::optional<py::bytearray>>& all_gathered_handles,
+    const std::optional<py::bytearray>& root_unique_id_opt) {
+  // Sync NVLink IPC handles, buffer ptrs, and signal ptrs
+  if (num_nvl_bytes > 0) {
+    EP_HOST_ASSERT(num_ranks == device_ids.size());
+    EP_HOST_ASSERT(device_ids.size() == all_gathered_handles.size());
+
+    for (int i = 0, node_offset = rdma_rank * num_nvl_ranks; i < num_nvl_ranks; ++i) {
+      auto ith_nvl_rank = node_offset + i;
+
+      // Get IPC handle for the ith nvl rank in this node
+      EP_HOST_ASSERT(all_gathered_handles[ith_nvl_rank].has_value());
+      auto handle_str = std::string(all_gathered_handles[ith_nvl_rank].value());
+      EP_HOST_ASSERT(handle_str.size() == CUDA_IPC_HANDLE_SIZE);
+
+      auto ith_ipc_handle = ipc_handles[i];
+      if (ith_nvl_rank != rank) { // another peer
+        // Copy IPC handle of the ith nvl rank to the handle array
+        std::memcpy(ith_ipc_handle.reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE);
+
+        // Open the IPC handle of the ith nvl rank
+        // and store its buffer ptr to the buffer ptr array
+        CUDA_CHECK(cudaIpcOpenMemHandle(
+            &buffer_ptrs[i],
+            ith_ipc_handle,
+            cudaIpcMemLazyEnablePeerAccess // Enable P2P Access
+            ));
+
+        // Store the signal ptr of the ith nvl rank to the signal ptr array
+        barrier_signal_ptrs[i] = reinterpret_cast<int*>(static_cast<uint8_t*>(buffer_ptrs[i]) + num_nvl_bytes);
+      } else { // current rank
+        // Just check if the handle matches
+        EP_HOST_ASSERT(std::memcmp(ith_ipc_handle.reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE) == 0);
+      }
+    }
+
+    // Here, all the device buffer ptr and device signal ptrs are ready from the all gathed NVLink IPC handles
+    // but the ptr arrays themselves are still on the host, thus copy them to GPU
+    CUDA_CHECK(cudaMemcpy(buffer_ptrs_gpu, buffer_ptrs, sizeof(void*) * NUM_MAX_NVL_PEERS, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(barrier_signal_ptrs_gpu, barrier_signal_ptrs, sizeof(int*) * NUM_MAX_NVL_PEERS, cudaMemcpyHostToDevice));
+
+    // Synchronize all GPU jobs to be finished with the CPU
+    CUDA_CHECK(cudaDeviceSynchronize());
+  }
+
+  // Sync NVSHMEM handles and allocate memory
+#ifndef DISABLE_NVSHMEM
+  if (num_rdma_bytes > 0) {
+    // Get the root unique ID
+    EP_HOST_ASSERT(root_unique_id_opt.has_value());
+    std::vector<uint8_t> root_unique_id(root_unique_id_opt->size());
+    auto root_unique_id_str = root_unique_id_opt->cast<std::string>();
+
+    // Copy the root unique ID
+    std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
+
+    // Initialize NVSHMEM
+    auto nvshmem_rank = low_latency_mode ? rank : rdma_rank;
+    auto num_nvshmem_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
+    EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode));
+
+    // Barrier all ranks in the same NVSHMEM team until initialized
+    internode::barrier();
+
+    // Allocate the NVSHMEM symmetric buffer for rdma transfer
+    rdma_buffer_ptr = internode::alloc(num_rdma_bytes, NUM_BUFFER_ALIGNMENT_BYTES);
+
+    // Clean buffer (mainly for low-latency mode)
+    CUDA_CHECK(cudaMemset(rdma_buffer_ptr, 0, num_rdma_bytes));
+
+    // Barrier all ranks in the same NVSHMEM team until allocated
+    internode::barrier();
+
+    // Synchronize all GPU jobs to be finished with the CPU
+    CUDA_CHECK(cudaDeviceSynchronize());
+  }
+#endif
+
+  // Make buffer available
+  available = true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Buffer Finalization
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 Buffer::~Buffer() noexcept(false) {
   if (not explicitly_destroy) {
     destroy();
   } else if (not destroyed) {
-    printf("WARNING: destroy() was not called before grpcoll buffer destruction, which can leak resources.\n");
+    printf("WARNING: destroy() was not called before grpcoll buffer destruction, which may leak resources.\n");
     fflush(stdout);
   }
-}
-
-bool Buffer::is_available() const {
-  return available;
-}
-
-bool Buffer::is_internode_available() const {
-  return is_available() and num_ranks > NUM_MAX_NVL_PEERS;
-}
-
-int Buffer::get_num_rdma_ranks() const {
-  return num_rdma_ranks;
-}
-
-int Buffer::get_rdma_rank() const {
-  return rdma_rank;
-}
-
-int Buffer::get_root_rdma_rank(bool global) const {
-  return global ? nvl_rank : 0;
-}
-
-int Buffer::get_local_device_id() const {
-  return device_id;
-}
-
-py::bytearray Buffer::get_local_ipc_handle() const {
-  return {ipc_handles[nvl_rank].reserved, CUDA_IPC_HANDLE_SIZE};
-}
-
-py::bytearray Buffer::get_local_nvshmem_unique_id() const {
-#ifndef DISABLE_NVSHMEM
-  EP_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get NVSHMEM unique ID");
-  auto unique_id = internode::get_unique_id();
-  return {reinterpret_cast<const char*>(unique_id.data()), unique_id.size()};
-#else
-  EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
-#endif
-}
-
-torch::Tensor Buffer::get_local_buffer_tensor(const py::object& dtype, int64_t offset, bool use_rdma_buffer) const {
-  torch::ScalarType casted_dtype = torch::python::detail::py_object_to_dtype(dtype);
-  auto element_bytes = static_cast<int64_t>(elementSize(casted_dtype));
-  auto base_ptr = static_cast<uint8_t*>(use_rdma_buffer ? rdma_buffer_ptr : buffer_ptrs[nvl_rank]) + offset;
-  auto num_bytes = use_rdma_buffer ? num_rdma_bytes : num_nvl_bytes;
-  return torch::from_blob(base_ptr, num_bytes / element_bytes, torch::TensorOptions().dtype(casted_dtype).device(at::kCUDA));
-}
-
-torch::Stream Buffer::get_comm_stream() const {
-  return comm_stream;
 }
 
 void Buffer::destroy() {
@@ -229,63 +295,9 @@ void Buffer::destroy() {
   available = false;
 }
 
-void Buffer::sync(
-    const std::vector<int>& device_ids,
-    const std::vector<std::optional<py::bytearray>>& all_gathered_handles,
-    const std::optional<py::bytearray>& root_unique_id_opt) {
-  EP_HOST_ASSERT(not is_available());
-
-  // Sync IPC handles
-  if (num_nvl_bytes > 0) {
-    EP_HOST_ASSERT(num_ranks == device_ids.size());
-    EP_HOST_ASSERT(device_ids.size() == all_gathered_handles.size());
-    for (int i = 0, offset = rdma_rank * num_nvl_ranks; i < num_nvl_ranks; ++i) {
-      EP_HOST_ASSERT(all_gathered_handles[offset + i].has_value());
-      auto handle_str = std::string(all_gathered_handles[offset + i].value());
-      EP_HOST_ASSERT(handle_str.size() == CUDA_IPC_HANDLE_SIZE);
-      if (offset + i != rank) {
-        std::memcpy(ipc_handles[i].reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE);
-        CUDA_CHECK(cudaIpcOpenMemHandle(&buffer_ptrs[i], ipc_handles[i], cudaIpcMemLazyEnablePeerAccess));
-        barrier_signal_ptrs[i] = reinterpret_cast<int*>(static_cast<uint8_t*>(buffer_ptrs[i]) + num_nvl_bytes);
-      } else {
-        EP_HOST_ASSERT(std::memcmp(ipc_handles[i].reserved, handle_str.c_str(), CUDA_IPC_HANDLE_SIZE) == 0);
-      }
-    }
-
-    // Copy all buffer and barrier signal pointers to GPU
-    CUDA_CHECK(cudaMemcpy(buffer_ptrs_gpu, buffer_ptrs, sizeof(void*) * NUM_MAX_NVL_PEERS, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(barrier_signal_ptrs_gpu, barrier_signal_ptrs, sizeof(int*) * NUM_MAX_NVL_PEERS, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaDeviceSynchronize());
-  }
-
-  // Sync NVSHMEM handles and allocate memory
-#ifndef DISABLE_NVSHMEM
-  if (num_rdma_bytes > 0) {
-    // Initialize NVSHMEM
-    EP_HOST_ASSERT(root_unique_id_opt.has_value());
-    std::vector<uint8_t> root_unique_id(root_unique_id_opt->size());
-    auto root_unique_id_str = root_unique_id_opt->cast<std::string>();
-    std::memcpy(root_unique_id.data(), root_unique_id_str.c_str(), root_unique_id_opt->size());
-    auto nvshmem_rank = low_latency_mode ? rank : rdma_rank;
-    auto num_nvshmem_ranks = low_latency_mode ? num_ranks : num_rdma_ranks;
-    EP_HOST_ASSERT(nvshmem_rank == internode::init(root_unique_id, nvshmem_rank, num_nvshmem_ranks, low_latency_mode));
-    internode::barrier();
-
-    // Allocate
-    rdma_buffer_ptr = internode::alloc(num_rdma_bytes, NUM_BUFFER_ALIGNMENT_BYTES);
-
-    // Clean buffer (mainly for low-latency mode)
-    CUDA_CHECK(cudaMemset(rdma_buffer_ptr, 0, num_rdma_bytes));
-
-    // Barrier
-    internode::barrier();
-    CUDA_CHECK(cudaDeviceSynchronize());
-  }
-#endif
-
-  // Ready to use
-  available = true;
-}
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Core Kernel APIs
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>> Buffer::get_dispatch_layout(
     const torch::Tensor& topk_idx,
@@ -1442,29 +1454,6 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
 #endif
 }
 
-// NOTE: remain original low-latency interface here for future potential usage,
-// which won't be exposed to users for now, but guaranteed its compatibility internally
-void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
-#ifndef DISABLE_NVSHMEM
-  EP_HOST_ASSERT(low_latency_mode);
-
-  auto layout = LowLatencyLayout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
-  auto clean_meta_0 = layout.buffers[0].clean_meta();
-  auto clean_meta_1 = layout.buffers[1].clean_meta();
-
-  auto check_boundary = [=](void* ptr, size_t num_bytes) {
-    auto offset = reinterpret_cast<int64_t>(ptr) - reinterpret_cast<int64_t>(rdma_buffer_ptr);
-    EP_HOST_ASSERT(0 <= offset and offset + num_bytes <= num_rdma_bytes);
-  };
-  check_boundary(clean_meta_0.first, clean_meta_0.second * sizeof(int));
-  check_boundary(clean_meta_1.first, clean_meta_1.second * sizeof(int));
-
-  internode_ll::clean_low_latency_buffer(clean_meta_0.first, clean_meta_0.second, clean_meta_1.first, clean_meta_1.second, at::cuda::getCurrentCUDAStream());
-#else
-  EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
-#endif
-}
-
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
 Buffer::low_latency_dispatch(
     const torch::Tensor& x,
@@ -1711,6 +1700,33 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
 #endif
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Common Helper APIs
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// NOTE: remain original low-latency interface here for future potential usage,
+// which won't be exposed to users for now, but guaranteed its compatibility internally
+void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
+#ifndef DISABLE_NVSHMEM
+  EP_HOST_ASSERT(low_latency_mode);
+
+  auto layout = LowLatencyLayout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
+  auto clean_meta_0 = layout.buffers[0].clean_meta();
+  auto clean_meta_1 = layout.buffers[1].clean_meta();
+
+  auto check_boundary = [=](void* ptr, size_t num_bytes) {
+    auto offset = reinterpret_cast<int64_t>(ptr) - reinterpret_cast<int64_t>(rdma_buffer_ptr);
+    EP_HOST_ASSERT(0 <= offset and offset + num_bytes <= num_rdma_bytes);
+  };
+  check_boundary(clean_meta_0.first, clean_meta_0.second * sizeof(int));
+  check_boundary(clean_meta_1.first, clean_meta_1.second * sizeof(int));
+
+  internode_ll::clean_low_latency_buffer(clean_meta_0.first, clean_meta_0.second, clean_meta_1.first, clean_meta_1.second, at::cuda::getCurrentCUDAStream());
+#else
+  EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+#endif
+}
+
 torch::Tensor Buffer::get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const {
 #ifndef DISABLE_NVSHMEM
   LowLatencyLayout layout(rdma_buffer_ptr, num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts);
@@ -1731,6 +1747,56 @@ torch::Tensor Buffer::get_next_low_latency_combine_buffer(int num_max_dispatch_t
 #endif
 }
 
+bool Buffer::is_available() const {
+  return available;
+}
+
+bool Buffer::is_internode_available() const {
+  return is_available() and num_ranks > NUM_MAX_NVL_PEERS;
+}
+
+int Buffer::get_num_rdma_ranks() const {
+  return num_rdma_ranks;
+}
+
+int Buffer::get_rdma_rank() const {
+  return rdma_rank;
+}
+
+int Buffer::get_root_rdma_rank(bool global) const {
+  return global ? nvl_rank : 0;
+}
+
+int Buffer::get_local_device_id() const {
+  return device_id;
+}
+
+py::bytearray Buffer::get_local_ipc_handle() const {
+  return {ipc_handles[nvl_rank].reserved, CUDA_IPC_HANDLE_SIZE};
+}
+
+py::bytearray Buffer::get_local_nvshmem_unique_id() const {
+#ifndef DISABLE_NVSHMEM
+  EP_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get NVSHMEM unique ID");
+  auto unique_id = internode::get_unique_id();
+  return {reinterpret_cast<const char*>(unique_id.data()), unique_id.size()};
+#else
+  EP_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+#endif
+}
+
+torch::Tensor Buffer::get_local_buffer_tensor(const py::object& dtype, int64_t offset, bool use_rdma_buffer) const {
+  torch::ScalarType casted_dtype = torch::python::detail::py_object_to_dtype(dtype);
+  auto element_bytes = static_cast<int64_t>(elementSize(casted_dtype));
+  auto base_ptr = static_cast<uint8_t*>(use_rdma_buffer ? rdma_buffer_ptr : buffer_ptrs[nvl_rank]) + offset;
+  auto num_bytes = use_rdma_buffer ? num_rdma_bytes : num_nvl_bytes;
+  return torch::from_blob(base_ptr, num_bytes / element_bytes, torch::TensorOptions().dtype(casted_dtype).device(at::kCUDA));
+}
+
+torch::Stream Buffer::get_comm_stream() const {
+  return comm_stream;
+}
+
 bool is_sm90_compiled() {
 #ifndef DISABLE_SM90_FEATURES
   return true;
@@ -1740,6 +1806,10 @@ bool is_sm90_compiled() {
 }
 
 } // namespace magi_attn_comm::grpcoll
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// GrpColl SubModule PyBind
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.doc() = "Magi Attention Communication Library";
