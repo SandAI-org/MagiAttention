@@ -311,15 +311,13 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Te
 
 std::tuple<
     torch::Tensor,
-    std::optional<torch::Tensor>,
-    std::optional<torch::Tensor>,
-    std::optional<torch::Tensor>,
-    std::vector<int>,
+    /* handle */
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
+    /* event */
     std::optional<EventHandle>>
 Buffer::intranode_group_cast(
     const torch::Tensor& x,
@@ -437,7 +435,6 @@ Buffer::intranode_group_cast(
   int num_recv_tokens = -1;
   auto rank_prefix_matrix = torch::Tensor();
   auto channel_prefix_matrix = torch::Tensor();
-  std::vector<int> num_recv_tokens_per_expert_list;
 
   // Barrier or send sizes
   // To clean: channel start/end offset, head and tail
@@ -517,7 +514,6 @@ Buffer::intranode_group_cast(
         if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS)
           throw std::runtime_error("grpcoll error: CPU recv timeout");
       }
-      num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
     }
   }
 
@@ -557,7 +553,7 @@ Buffer::intranode_group_cast(
     recv_x_scales_ptr = static_cast<float*>(recv_x_scales->data_ptr());
   }
 
-  // Dispatch
+  // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT(
       num_ranks * num_ranks * sizeof(int) + // Size prefix matrix
           num_channels * num_ranks * sizeof(int) + // Channel start offset
@@ -614,9 +610,9 @@ Buffer::intranode_group_cast(
       config.num_max_nvl_chunked_send_tokens,
       config.num_max_nvl_chunked_recv_tokens);
 
-  // Wait streams
+  // Record or wait streams
   std::optional<EventHandle> event;
-  if (async) {
+  if (async) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     for (auto& t : {x, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, recv_x, recv_src_idx, recv_channel_prefix_matrix, send_head}) {
       t.record_stream(comm_stream);
@@ -624,22 +620,12 @@ Buffer::intranode_group_cast(
         t.record_stream(compute_stream);
     }
     for (auto& to :
-         {x_scales,
-          topk_idx,
-          topk_weights,
-          num_tokens_per_rank,
-          num_tokens_per_expert,
-          cached_channel_prefix_matrix,
-          cached_rank_prefix_matrix,
-          post_perm_idx,
-          recv_topk_idx,
-          recv_topk_weights,
-          recv_x_scales}) {
+         {x_scales, topk_idx, topk_weights, num_tokens_per_rank, num_tokens_per_expert, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
     }
-  } else {
+  } else { // Wait tensors on compute stream
     stream_wait(compute_stream, comm_stream);
   }
 
@@ -648,21 +634,10 @@ Buffer::intranode_group_cast(
     at::cuda::setCurrentCUDAStream(compute_stream);
 
   // Return values
-  return {
-      recv_x,
-      recv_x_scales,
-      recv_topk_idx,
-      recv_topk_weights,
-      num_recv_tokens_per_expert_list, /* unused */
-      rank_prefix_matrix,
-      channel_prefix_matrix,
-      recv_channel_prefix_matrix,
-      recv_src_idx,
-      send_head,
-      event};
+  return {recv_x, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event};
 }
 
-std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::intranode_group_reduce(
+std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_reduce(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& combined_x_buf,
     const std::optional<torch::Tensor>& topk_weights,
@@ -827,21 +802,21 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       config.num_max_nvl_chunked_recv_tokens,
       acc_reduce);
 
-  // Wait streams
+  // Record or wait streams
   std::optional<EventHandle> event;
-  if (async) {
+  if (async) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     for (auto& t : {x, src_idx, send_head, rank_prefix_matrix, channel_prefix_matrix, combined_x}) {
       t.record_stream(comm_stream);
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
     }
-    for (auto& to : {topk_weights, recv_topk_weights, bias_0, bias_1, pre_perm_idx}) {
+    for (auto& to : {topk_weights, bias_0, bias_1, pre_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
     }
-  } else {
+  } else { // Wait tensors on compute stream
     stream_wait(compute_stream, comm_stream);
   }
 
@@ -849,15 +824,12 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   if (allocate_on_comm_stream)
     at::cuda::setCurrentCUDAStream(compute_stream);
 
-  return {combined_x, recv_topk_weights, event};
+  return {combined_x, event};
 }
 
 std::tuple<
     torch::Tensor,
-    std::optional<torch::Tensor>,
-    std::optional<torch::Tensor>,
-    std::optional<torch::Tensor>,
-    std::vector<int>,
+    /* handle */
     torch::Tensor,
     torch::Tensor,
     std::optional<torch::Tensor>,
@@ -867,6 +839,7 @@ std::tuple<
     std::optional<torch::Tensor>,
     std::optional<torch::Tensor>,
     std::optional<torch::Tensor>,
+    /* event */
     std::optional<EventHandle>>
 Buffer::internode_group_cast(
     const torch::Tensor& x,
@@ -1000,7 +973,6 @@ Buffer::internode_group_cast(
   auto recv_rdma_rank_prefix_sum = torch::Tensor();
   auto gbl_channel_prefix_matrix = torch::Tensor();
   auto recv_gbl_rank_prefix_sum = torch::Tensor();
-  std::vector<int> num_recv_tokens_per_expert_list;
 
   // Barrier or send sizes
   if (cached_mode) {
@@ -1100,7 +1072,6 @@ Buffer::internode_group_cast(
         throw std::runtime_error("grpcoll error: timeout (dispatch CPU)");
       }
     }
-    num_recv_tokens_per_expert_list = std::vector<int>(moe_recv_expert_counter, moe_recv_expert_counter + num_local_experts);
   }
 
   // Allocate recv_x buffer
@@ -1183,9 +1154,9 @@ Buffer::internode_group_cast(
       num_channels,
       low_latency_mode);
 
-  // Wait streams
+  // Record or wait streams
   std::optional<EventHandle> event;
-  if (async) {
+  if (async) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     for (auto& t : {x, is_token_in_rank, recv_x, rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum}) {
       t.record_stream(comm_stream);
@@ -1203,9 +1174,6 @@ Buffer::internode_group_cast(
           cached_recv_rdma_rank_prefix_sum,
           cached_gbl_channel_prefix_matrix,
           cached_recv_gbl_rank_prefix_sum,
-          recv_topk_idx,
-          recv_topk_weights,
-          recv_x_scales,
           recv_rdma_channel_prefix_matrix,
           recv_gbl_channel_prefix_matrix,
           send_rdma_head,
@@ -1215,7 +1183,7 @@ Buffer::internode_group_cast(
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
     }
-  } else {
+  } else { // Wait tensors on compute stream
     stream_wait(compute_stream, comm_stream);
   }
 
@@ -1226,10 +1194,6 @@ Buffer::internode_group_cast(
   // Return values
   return {
       recv_x,
-      recv_x_scales,
-      recv_topk_idx,
-      recv_topk_weights,
-      num_recv_tokens_per_expert_list,
       rdma_channel_prefix_matrix,
       gbl_channel_prefix_matrix,
       recv_rdma_channel_prefix_matrix,
@@ -1246,7 +1210,7 @@ Buffer::internode_group_cast(
 #endif
 }
 
-std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::internode_group_reduce(
+std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_reduce(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& combined_x_buf,
     const std::optional<torch::Tensor>& topk_weights,
@@ -1416,9 +1380,9 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       num_channels,
       low_latency_mode);
 
-  // Wait streams
+  // Record or wait streams
   std::optional<EventHandle> event;
-  if (async) {
+  if (async) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     for (auto& t :
          {x,
@@ -1434,12 +1398,12 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
     }
-    for (auto& to : {topk_weights, combined_topk_weights, bias_0, bias_1}) {
+    for (auto& to : {topk_weights, bias_0, bias_1}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
     }
-  } else {
+  } else { // Wait tensors on compute stream
     stream_wait(compute_stream, comm_stream);
   }
 
@@ -1448,7 +1412,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     at::cuda::setCurrentCUDAStream(compute_stream);
 
   // Return values
-  return {combined_x, combined_topk_weights, event};
+  return {combined_x, event};
 #else
   GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
   return {};

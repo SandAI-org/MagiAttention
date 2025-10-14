@@ -691,15 +691,13 @@ class GrpCollBuffer:
         # Launch the intranode group cast kernel
         (
             recv_x,
-            _,  # recv_x_scales
-            _,  # recv_topk_idx
-            _,  # recv_topk_weights
-            _,  # num_recv_tokens_per_expert_list
+            # handle
             rank_prefix_matrix,
             channel_prefix_matrix,
             recv_channel_prefix_matrix,
             recv_src_idx,
             send_head,
+            # event
             event,
         ) = self.runtime.intranode_group_cast(
             x,
@@ -765,7 +763,6 @@ class GrpCollBuffer:
         # Launch the intranode group reduce kernel
         (
             combined_x,
-            _,  # combined_topk_weights
             event,
         ) = self.runtime.intranode_group_reduce(
             x,
@@ -847,10 +844,7 @@ class GrpCollBuffer:
         # Launch the internode group cast kernel
         (
             recv_x,
-            _,  # recv_x_scales
-            _,  # recv_topk_idx
-            _,  # recv_topk_weights
-            _,  # num_recv_tokens_per_expert_list
+            # handle
             rdma_channel_prefix_matrix,
             gbl_channel_prefix_matrix,
             recv_rdma_channel_prefix_matrix,
@@ -860,6 +854,7 @@ class GrpCollBuffer:
             recv_src_meta,
             send_rdma_head,
             send_nvl_head,
+            # event
             event,
         ) = self.runtime.internode_group_cast(
             x,
@@ -934,7 +929,6 @@ class GrpCollBuffer:
         # Launch the internode group reduce kernel
         (
             combined_x,
-            _,  # combined_topk_weights
             event,
         ) = self.runtime.internode_group_reduce(
             x,
