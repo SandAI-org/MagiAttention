@@ -69,7 +69,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
       explicitly_destroy(explicitly_destroy),
       comm_stream(at::cuda::getStreamFromPool(true)) {
   // Calculate metadata memory
-  // Note: The retired signals are actually boolean flags, but to align with 16 bytes, we make it `int64_t`
+  // NOTES: The retired signals are actually boolean flags, but to align with 16 bytes, we make it `int64_t`
   int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int); // host signal array for each nvl rank
   int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*); // host buffer ptr array to each buffer ptr for each nvl rank
   int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*); // host signal ptr array to each signal for each nvl rank

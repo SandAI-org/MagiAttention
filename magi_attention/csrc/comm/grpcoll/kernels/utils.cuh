@@ -42,6 +42,10 @@
 
 #include "exception.cuh"
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Unrolled Warp Copy
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 #define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC, ST_FUNC)                                               \
   {                                                                                                                             \
     constexpr int kLoopStride = 32 * (UNROLL_FACTOR);                                                                           \
@@ -57,6 +61,10 @@
   }
 
 namespace magi_attn_comm::grpcoll {
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Vectiorized Integer Dtype
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int kBytes>
 struct VecInt {};
@@ -81,20 +89,9 @@ struct VecInt<16> {
   using vec_t = int4;
 };
 
-template <typename FuncT>
-struct PatternVisitor {
-  FuncT func;
-
-  __device__ __host__ explicit PatternVisitor(FuncT&& func) : func(std::forward<FuncT>(func)) {}
-
-  __device__ __host__ auto operator[](const uint32_t& i) {
-    return func(i);
-  }
-};
-
-__device__ __forceinline__ void trap() {
-  asm("trap;");
-}
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Memory Fence Funcs
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 __device__ __forceinline__ void memory_fence() {
   asm volatile("fence.acq_rel.sys;" ::: "memory");
@@ -107,6 +104,10 @@ __device__ __forceinline__ void memory_fence_gpu() {
 __device__ __forceinline__ void memory_fence_cta() {
   asm volatile("fence.acq_rel.cta;" ::: "memory");
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Load/Store Funcs with Memory Order
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 __device__ __forceinline__ void st_relaxed_sys_global(const int* ptr, int val) {
   asm volatile("st.relaxed.sys.global.s32 [%0], %1;" ::"l"(ptr), "r"(val) : "memory");
@@ -204,6 +205,10 @@ __device__ __forceinline__ int64_t ld_volatile_global(const uint64_t* ptr) {
   return ret;
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Non-Cached Load/Store Funcs
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 #ifndef DISABLE_AGGRESSIVE_PTX_INSTRS
 #define LD_NC_FUNC "ld.global.nc.L1::no_allocate.L2::256B"
 #else
@@ -293,6 +298,8 @@ __device__ __forceinline__ void st_na_release(const uint64_t* ptr, uint64_t val)
 }
 
 // `st.global.L1::no_allocate` will be translated into `ST.E.NA.[width]` in SASS
+// NOTES: `L1::no_allocate` informs the compiler not to cache the data in L1 cache
+// since the data to be stored (i.e. recv data) won't be read
 #ifndef DISABLE_AGGRESSIVE_PTX_INSTRS
 #define ST_NA_FUNC "st.global.L1::no_allocate"
 #else
@@ -335,6 +342,10 @@ __device__ __forceinline__ float exp2f_approx(const float& x) {
   asm volatile("ex2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
   return ret;
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// TMA Helper Funcs
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 // TMA PTX instructions
 #ifndef DISABLE_SM90_FEATURES
@@ -422,6 +433,142 @@ __device__ __forceinline__ void tma_store_wait() {
 
 #endif
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Barrier Helper Funcs
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+__device__ __forceinline__ void trap() {
+  asm("trap;");
+}
+
+template <int kNumRanks, bool kSyncOnly = false>
+__forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int rank) {
+  auto thread_id = static_cast<int>(threadIdx.x);
+
+  // For non-sync-only cases, the memory operations by other threads in the block must be visible to the `sys` scope
+  if constexpr (not kSyncOnly) {
+    memory_fence();
+    __syncthreads();
+  }
+
+  // Add self-ranks, sub other ranks
+  if (thread_id < kNumRanks) {
+    atomicAdd_system(barrier_signal_ptrs[rank] + thread_id, FINISHED_SUM_TAG);
+    atomicSub_system(barrier_signal_ptrs[thread_id] + rank, FINISHED_SUM_TAG);
+  }
+  GRPCOLL_DEVICE_ASSERT(kNumRanks <= blockDim.x);
+
+  // Check timeout
+  auto start_time = clock64();
+  while (true) {
+    auto value = thread_id < kNumRanks ? ld_volatile_global(barrier_signal_ptrs[rank] + thread_id) : 0;
+    if (__all_sync(0xffffffff, value <= 0))
+      break;
+
+    if (clock64() - start_time > NUM_TIMEOUT_CYCLES and thread_id < kNumRanks) {
+      printf("grpcoll timeout check failed: rank = %d, thread = %d, value = %d)\n", rank, thread_id, value);
+      trap();
+    }
+  }
+  __syncthreads();
+}
+
+__forceinline__ __device__ int atomic_cas_cta_acquire(int* addr, int x, int y) {
+  int ret;
+  asm volatile("atom.acquire.cta.shared::cta.cas.b32 %0, [%1], %2, %3;" : "=r"(ret) : "l"(addr), "r"(x), "r"(y) : "memory");
+  return ret;
+}
+
+__forceinline__ __device__ int atomic_exch_cta_release(int* addr, int x) {
+  int ret;
+  asm volatile("atom.release.cta.shared::cta.exch.b32 %0, [%1], %2;" : "=r"(ret) : "l"(addr), "r"(x) : "memory");
+  return ret;
+}
+
+__forceinline__ __device__ void acquire_lock(int* mutex) {
+  // To make later memory operations valid, we must use `acquire` for memory semantics
+  while (atomic_cas_cta_acquire(mutex, 0, 1) != 0)
+    ;
+}
+
+__forceinline__ __device__ void release_lock(int* mutex) {
+  // To make previous memory operations visible to other threads, we must use `release` for memory semantics
+  atomic_exch_cta_release(mutex, 0);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Warp Reduce Funcs
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Operation functors
+template <typename T>
+struct ReduceSum {
+  __device__ T operator()(T a, T b) const {
+    return a + b;
+  }
+};
+template <typename T>
+struct ReduceMax {
+  __device__ T operator()(T a, T b) const {
+    return a > b ? a : b;
+  }
+};
+template <typename T>
+struct ReduceMin {
+  __device__ T operator()(T a, T b) const {
+    return a < b ? a : b;
+  }
+};
+
+// Unified reduction function
+template <uint32_t kNumLanes, typename T, typename Op>
+__forceinline__ __device__ T warp_reduce(T value, Op op) {
+  GRPCOLL_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or kNumLanes == 4 or kNumLanes == 2 or kNumLanes == 1, "Invalid number of lanes");
+
+  if constexpr (kNumLanes >= 32)
+    value = op(value, __shfl_xor_sync(0xffffffff, value, 16));
+  if constexpr (kNumLanes >= 16)
+    value = op(value, __shfl_xor_sync(0xffffffff, value, 8));
+  if constexpr (kNumLanes >= 8)
+    value = op(value, __shfl_xor_sync(0xffffffff, value, 4));
+  if constexpr (kNumLanes >= 4)
+    value = op(value, __shfl_xor_sync(0xffffffff, value, 2));
+  if constexpr (kNumLanes >= 2)
+    value = op(value, __shfl_xor_sync(0xffffffff, value, 1));
+  return value;
+}
+
+// Convenience aliases
+template <uint32_t kNumLanes = 32, typename T>
+__forceinline__ __device__ T warp_reduce_sum(T value) {
+  return warp_reduce<kNumLanes, T>(value, ReduceSum<T>{});
+}
+
+template <uint32_t kNumLanes = 32, typename T>
+__forceinline__ __device__ T warp_reduce_max(T value) {
+  return warp_reduce<kNumLanes, T>(value, ReduceMax<T>{});
+}
+
+template <uint32_t kNumLanes = 32, typename T>
+__forceinline__ __device__ T warp_reduce_min(T value) {
+  return warp_reduce<kNumLanes, T>(value, ReduceMin<T>{});
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Other Helpers
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+template <typename FuncT>
+struct PatternVisitor {
+  FuncT func;
+
+  __device__ __host__ explicit PatternVisitor(FuncT&& func) : func(std::forward<FuncT>(func)) {}
+
+  __device__ __host__ auto operator[](const uint32_t& i) {
+    return func(i);
+  }
+};
+
 template <typename dtype_t>
 __host__ __device__ constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
   return (a + b - 1) / b;
@@ -506,115 +653,6 @@ __forceinline__ __device__ out_dtype_t extract_required_scale_format(float value
   } else {
     return value;
   }
-}
-
-template <int kNumRanks, bool kSyncOnly = false>
-__forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int rank) {
-  auto thread_id = static_cast<int>(threadIdx.x);
-
-  // For non-sync-only cases, the memory operations by other threads in the block must be visible to the `sys` scope
-  if constexpr (not kSyncOnly) {
-    memory_fence();
-    __syncthreads();
-  }
-
-  // Add self-ranks, sub other ranks
-  if (thread_id < kNumRanks) {
-    atomicAdd_system(barrier_signal_ptrs[rank] + thread_id, FINISHED_SUM_TAG);
-    atomicSub_system(barrier_signal_ptrs[thread_id] + rank, FINISHED_SUM_TAG);
-  }
-  GRPCOLL_DEVICE_ASSERT(kNumRanks <= blockDim.x);
-
-  // Check timeout
-  auto start_time = clock64();
-  while (true) {
-    auto value = thread_id < kNumRanks ? ld_volatile_global(barrier_signal_ptrs[rank] + thread_id) : 0;
-    if (__all_sync(0xffffffff, value <= 0))
-      break;
-
-    if (clock64() - start_time > NUM_TIMEOUT_CYCLES and thread_id < kNumRanks) {
-      printf("grpcoll timeout check failed: rank = %d, thread = %d, value = %d)\n", rank, thread_id, value);
-      trap();
-    }
-  }
-  __syncthreads();
-}
-
-__forceinline__ __device__ int atomic_cas_cta_acquire(int* addr, int x, int y) {
-  int ret;
-  asm volatile("atom.acquire.cta.shared::cta.cas.b32 %0, [%1], %2, %3;" : "=r"(ret) : "l"(addr), "r"(x), "r"(y) : "memory");
-  return ret;
-}
-
-__forceinline__ __device__ int atomic_exch_cta_release(int* addr, int x) {
-  int ret;
-  asm volatile("atom.release.cta.shared::cta.exch.b32 %0, [%1], %2;" : "=r"(ret) : "l"(addr), "r"(x) : "memory");
-  return ret;
-}
-
-__forceinline__ __device__ void acquire_lock(int* mutex) {
-  // To make later memory operations valid, we must use `acquire` for memory semantics
-  while (atomic_cas_cta_acquire(mutex, 0, 1) != 0)
-    ;
-}
-
-__forceinline__ __device__ void release_lock(int* mutex) {
-  // To make previous memory operations visible to other threads, we must use `release` for memory semantics
-  atomic_exch_cta_release(mutex, 0);
-}
-
-// Operation functors
-template <typename T>
-struct ReduceSum {
-  __device__ T operator()(T a, T b) const {
-    return a + b;
-  }
-};
-template <typename T>
-struct ReduceMax {
-  __device__ T operator()(T a, T b) const {
-    return a > b ? a : b;
-  }
-};
-template <typename T>
-struct ReduceMin {
-  __device__ T operator()(T a, T b) const {
-    return a < b ? a : b;
-  }
-};
-
-// Unified reduction function
-template <uint32_t kNumLanes, typename T, typename Op>
-__forceinline__ __device__ T warp_reduce(T value, Op op) {
-  GRPCOLL_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or kNumLanes == 4 or kNumLanes == 2 or kNumLanes == 1, "Invalid number of lanes");
-
-  if constexpr (kNumLanes >= 32)
-    value = op(value, __shfl_xor_sync(0xffffffff, value, 16));
-  if constexpr (kNumLanes >= 16)
-    value = op(value, __shfl_xor_sync(0xffffffff, value, 8));
-  if constexpr (kNumLanes >= 8)
-    value = op(value, __shfl_xor_sync(0xffffffff, value, 4));
-  if constexpr (kNumLanes >= 4)
-    value = op(value, __shfl_xor_sync(0xffffffff, value, 2));
-  if constexpr (kNumLanes >= 2)
-    value = op(value, __shfl_xor_sync(0xffffffff, value, 1));
-  return value;
-}
-
-// Convenience aliases
-template <uint32_t kNumLanes = 32, typename T>
-__forceinline__ __device__ T warp_reduce_sum(T value) {
-  return warp_reduce<kNumLanes, T>(value, ReduceSum<T>{});
-}
-
-template <uint32_t kNumLanes = 32, typename T>
-__forceinline__ __device__ T warp_reduce_max(T value) {
-  return warp_reduce<kNumLanes, T>(value, ReduceMax<T>{});
-}
-
-template <uint32_t kNumLanes = 32, typename T>
-__forceinline__ __device__ T warp_reduce_min(T value) {
-  return warp_reduce<kNumLanes, T>(value, ReduceMin<T>{});
 }
 
 } // namespace magi_attn_comm::grpcoll
