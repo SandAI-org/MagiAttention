@@ -91,7 +91,7 @@
 #endif
 #endif
 
-// TODO: support more ranks
+// TODO: support other num_ranks
 #define SWITCH_RANKS(case_macro)                          \
   switch (num_ranks) {                                    \
     case 2:                                               \
@@ -105,7 +105,7 @@
   }                                                       \
   while (false)
 
-// TODO: support more RDMA ranks
+// TODO: support other RDMA num_ranks
 #define SWITCH_RDMA_RANKS(case_macro)                          \
   switch (num_ranks / NUM_MAX_NVL_PEERS) {                     \
     case 2:                                                    \
@@ -134,7 +134,7 @@
   }                                                       \
   while (false)
 
-// TODO: support more dtypes
+// TODO: support other dtypes
 #define SWITCH_TYPES(case_macro)                         \
   switch (type) {                                        \
     case CUDA_R_16BF:                                    \
@@ -144,7 +144,7 @@
   }                                                      \
   while (false)
 
-// TODO: support more hidden size
+// TODO: support other hidden sizes
 #define SWITCH_HIDDEN(case_macro)                          \
   switch (hidden) {                                        \
     case 2048:                                             \

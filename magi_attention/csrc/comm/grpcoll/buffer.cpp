@@ -69,6 +69,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
       explicitly_destroy(explicitly_destroy),
       comm_stream(at::cuda::getStreamFromPool(true)) {
   // Calculate metadata memory
+  // Note: The retired signals are actually boolean flags, but to align with 16 bytes, we make it `int64_t`
   int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int); // host signal array for each nvl rank
   int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*); // host buffer ptr array to each buffer ptr for each nvl rank
   int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*); // host signal ptr array to each signal for each nvl rank
@@ -555,14 +556,14 @@ Buffer::intranode_group_cast(
 
   // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT(
-      num_ranks * num_ranks * sizeof(int) + // Size prefix matrix
-          num_channels * num_ranks * sizeof(int) + // Channel start offset
-          num_channels * num_ranks * sizeof(int) + // Channel end offset
-          num_channels * num_ranks * sizeof(int) * 2 + // Queue head and tail
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * recv_x.element_size() + // Data buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // Source index buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(int64_t) + // Top-k index buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) + // Top-k weight buffer
+      num_ranks * num_ranks * sizeof(int) + // rank prefix matrix
+          num_channels * num_ranks * sizeof(int) + // channel start offset
+          num_channels * num_ranks * sizeof(int) + // channel end offset
+          num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * recv_x.element_size() + // data buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // source index buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(int64_t) + // top-k index buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) + // top-k weight buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_scales // FP8 scale buffer
       <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
 
