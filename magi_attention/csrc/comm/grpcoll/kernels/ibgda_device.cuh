@@ -53,7 +53,7 @@
 
 namespace magi_attn_comm::grpcoll {
 
-EP_STATIC_ASSERT(NVSHMEMI_IBGDA_MIN_QP_DEPTH >= 64, "Invalid QP minimum depth");
+GRPCOLL_STATIC_ASSERT(NVSHMEMI_IBGDA_MIN_QP_DEPTH >= 64, "Invalid QP minimum depth");
 
 __device__ static __forceinline__ uint64_t HtoBE64(uint64_t x) {
   uint64_t ret;
@@ -155,7 +155,7 @@ __device__ static __forceinline__ void ibgda_ring_db(nvshmemi_ibgda_device_qp_t*
   auto bf_ptr = reinterpret_cast<uint64_t*>(qp->tx_wq.bf);
   ibgda_ctrl_seg_t ctrl_seg = {.opmod_idx_opcode = HtoBE32(prod_idx << 8), .qpn_ds = HtoBE32(qp->qpn << 8)};
 
-  EP_STATIC_ASSERT(sizeof(decltype(&ctrl_seg)) == sizeof(uint64_t), "");
+  GRPCOLL_STATIC_ASSERT(sizeof(decltype(&ctrl_seg)) == sizeof(uint64_t), "");
   st_na_release(bf_ptr, *(reinterpret_cast<uint64_t*>(&ctrl_seg)));
 }
 
@@ -228,9 +228,9 @@ __device__ static __forceinline__ void ibgda_write_rdma_write_inl_wqe(
   if (imm != std::numeric_limits<uint32_t>::max())
     ctrl_seg.imm = HtoBE32(imm);
 
-  EP_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == 16, "sizeof(*ctrl_seg_ptr) == 16");
-  EP_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == 16, "sizeof(*raddr_seg_ptr) == 16");
-  EP_STATIC_ASSERT(sizeof(*inl_seg_ptr) == 4, "sizeof(*inl_seg_ptr) == 4");
+  GRPCOLL_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == 16, "sizeof(*ctrl_seg_ptr) == 16");
+  GRPCOLL_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == 16, "sizeof(*raddr_seg_ptr) == 16");
+  GRPCOLL_STATIC_ASSERT(sizeof(*inl_seg_ptr) == 4, "sizeof(*inl_seg_ptr) == 4");
   st_na_relaxed(reinterpret_cast<int4*>(ctrl_seg_ptr), *reinterpret_cast<const int4*>(&ctrl_seg));
   st_na_relaxed(reinterpret_cast<int4*>(raddr_seg_ptr), *reinterpret_cast<const int4*>(&raddr_seg));
   st_na_relaxed(reinterpret_cast<uint32_t*>(inl_seg_ptr), *reinterpret_cast<const uint32_t*>(&inl_seg));
@@ -345,9 +345,9 @@ __device__ static __forceinline__ void ibgda_write_rdma_write_wqe(
   ctrl_seg.fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
   ctrl_seg.opmod_idx_opcode = HtoBE32((wqe_idx << 8) | MLX5_OPCODE_RDMA_WRITE);
 
-  EP_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == 16, "sizeof(*ctrl_seg_ptr) == 16");
-  EP_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == 16, "sizeof(*raddr_seg_ptr) == 16");
-  EP_STATIC_ASSERT(sizeof(*data_seg_ptr) == 16, "sizeof(*data_seg_ptr) == 16");
+  GRPCOLL_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == 16, "sizeof(*ctrl_seg_ptr) == 16");
+  GRPCOLL_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == 16, "sizeof(*raddr_seg_ptr) == 16");
+  GRPCOLL_STATIC_ASSERT(sizeof(*data_seg_ptr) == 16, "sizeof(*data_seg_ptr) == 16");
   st_na_relaxed(reinterpret_cast<int4*>(ctrl_seg_ptr), *reinterpret_cast<const int4*>(&ctrl_seg));
   st_na_relaxed(reinterpret_cast<int4*>(raddr_seg_ptr), *reinterpret_cast<const int4*>(&raddr_seg));
   st_na_relaxed(reinterpret_cast<int4*>(data_seg_ptr), *reinterpret_cast<const int4*>(&data_seg));
@@ -362,7 +362,7 @@ __device__ static __forceinline__ void ibgda_write_empty_recv_wqe(void* out_wqe)
   data_seg.lkey = HtoBE64(MLX5_INVALID_LKEY);
   data_seg.addr = 0;
 
-  EP_STATIC_ASSERT(sizeof(mlx5_wqe_data_seg) == sizeof(int4), "Invalid data type length");
+  GRPCOLL_STATIC_ASSERT(sizeof(mlx5_wqe_data_seg) == sizeof(int4), "Invalid data type length");
   st_na_relaxed(reinterpret_cast<int4*>(data_seg_ptr), *reinterpret_cast<const int4*>(&data_seg));
 }
 
@@ -399,7 +399,7 @@ __device__ static __forceinline__ void nvshmemi_ibgda_put_nbi_warp(
     req_rptr += chunk_size;
     ++num_wqes;
   }
-  EP_DEVICE_ASSERT(num_wqes <= 32);
+  GRPCOLL_DEVICE_ASSERT(num_wqes <= 32);
 
   // Process WQE
   uint64_t base_wqe_idx = 0;
@@ -455,10 +455,10 @@ __device__ static __forceinline__ void ibgda_write_amo_add_wqe(
   data_seg.lkey = lkey;
   data_seg.addr = HtoBE64(laddr);
 
-  EP_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == sizeof(int4), "Invalid vectorization");
-  EP_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == sizeof(int4), "Invalid vectorization");
-  EP_STATIC_ASSERT(sizeof(*atomic_seg_ptr) == sizeof(int4), "Invalid vectorization");
-  EP_STATIC_ASSERT(sizeof(*data_seg_ptr) == sizeof(int4), "Invalid vectorization");
+  GRPCOLL_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == sizeof(int4), "Invalid vectorization");
+  GRPCOLL_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == sizeof(int4), "Invalid vectorization");
+  GRPCOLL_STATIC_ASSERT(sizeof(*atomic_seg_ptr) == sizeof(int4), "Invalid vectorization");
+  GRPCOLL_STATIC_ASSERT(sizeof(*data_seg_ptr) == sizeof(int4), "Invalid vectorization");
   st_na_relaxed(reinterpret_cast<int4*>(ctrl_seg_ptr), *reinterpret_cast<int4*>(&ctrl_seg));
   st_na_relaxed(reinterpret_cast<int4*>(raddr_seg_ptr), *reinterpret_cast<int4*>(&raddr_seg));
   st_na_relaxed(reinterpret_cast<int4*>(atomic_seg_ptr), *reinterpret_cast<int4*>(&atomic_seg_1));

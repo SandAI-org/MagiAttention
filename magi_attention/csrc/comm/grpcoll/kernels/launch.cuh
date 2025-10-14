@@ -68,23 +68,23 @@
 #ifndef DISABLE_SM90_FEATURES
 #define LAUNCH_KERNEL(config, kernel, ...) CUDA_CHECK(cudaLaunchKernelEx(config, kernel, ##__VA_ARGS__))
 #else
-#define LAUNCH_KERNEL(config, kernel, ...)                                           \
-  do {                                                                               \
-    kernel<<<__num_sms, __num_threads, 0, __stream>>>(__VA_ARGS__);                  \
-    cudaError_t e = cudaGetLastError();                                              \
-    if (e != cudaSuccess) {                                                          \
-      EPException cuda_exception("CUDA", __FILE__, __LINE__, cudaGetErrorString(e)); \
-      fprintf(stderr, "%s\n", cuda_exception.what());                                \
-      throw cuda_exception;                                                          \
-    }                                                                                \
+#define LAUNCH_KERNEL(config, kernel, ...)                                                \
+  do {                                                                                    \
+    kernel<<<__num_sms, __num_threads, 0, __stream>>>(__VA_ARGS__);                       \
+    cudaError_t e = cudaGetLastError();                                                   \
+    if (e != cudaSuccess) {                                                               \
+      GrpCollException cuda_exception("CUDA", __FILE__, __LINE__, cudaGetErrorString(e)); \
+      fprintf(stderr, "%s\n", cuda_exception.what());                                     \
+      throw cuda_exception;                                                               \
+    }                                                                                     \
   } while (0)
 #endif
 #endif
 
 #ifndef SET_SHARED_MEMORY_FOR_TMA
 #ifndef DISABLE_SM90_FEATURES
-#define SET_SHARED_MEMORY_FOR_TMA(kernel)                                                                              \
-  EP_HOST_ASSERT(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size) == cudaSuccess); \
+#define SET_SHARED_MEMORY_FOR_TMA(kernel)                                                                                   \
+  GRPCOLL_HOST_ASSERT(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size) == cudaSuccess); \
   cfg.dynamicSmemBytes = smem_size;
 #else
 #define SET_SHARED_MEMORY_FOR_TMA(kernel) void()
@@ -92,74 +92,74 @@
 #endif
 
 // TODO: support more ranks
-#define SWITCH_RANKS(case_macro)                     \
-  switch (num_ranks) {                               \
-    case 2:                                          \
-      case_macro(2);                                 \
-    case 4:                                          \
-      case_macro(4);                                 \
-    case 8:                                          \
-      case_macro(8);                                 \
-    default:                                         \
-      EP_HOST_ASSERT(false and "Unsupported ranks"); \
-  }                                                  \
-  while (false)
-
-// TODO: support more RDMA ranks
-#define SWITCH_RDMA_RANKS(case_macro)                     \
-  switch (num_ranks / NUM_MAX_NVL_PEERS) {                \
+#define SWITCH_RANKS(case_macro)                          \
+  switch (num_ranks) {                                    \
     case 2:                                               \
       case_macro(2);                                      \
     case 4:                                               \
       case_macro(4);                                      \
     case 8:                                               \
       case_macro(8);                                      \
-    case 16:                                              \
-      case_macro(16);                                     \
     default:                                              \
-      EP_HOST_ASSERT(false and "Unsupported RDMA ranks"); \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported ranks"); \
   }                                                       \
   while (false)
 
-#define SWITCH_RANKS_WITH_DTYPE(dtype, case_macro)   \
-  switch (num_ranks) {                               \
-    case 2:                                          \
-      case_macro(dtype, 2);                          \
-    case 4:                                          \
-      case_macro(dtype, 4);                          \
-    case 8:                                          \
-      case_macro(dtype, 8);                          \
-    default:                                         \
-      EP_HOST_ASSERT(false and "Unsupported ranks"); \
-  }                                                  \
+// TODO: support more RDMA ranks
+#define SWITCH_RDMA_RANKS(case_macro)                          \
+  switch (num_ranks / NUM_MAX_NVL_PEERS) {                     \
+    case 2:                                                    \
+      case_macro(2);                                           \
+    case 4:                                                    \
+      case_macro(4);                                           \
+    case 8:                                                    \
+      case_macro(8);                                           \
+    case 16:                                                   \
+      case_macro(16);                                          \
+    default:                                                   \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported RDMA ranks"); \
+  }                                                            \
+  while (false)
+
+#define SWITCH_RANKS_WITH_DTYPE(dtype, case_macro)        \
+  switch (num_ranks) {                                    \
+    case 2:                                               \
+      case_macro(dtype, 2);                               \
+    case 4:                                               \
+      case_macro(dtype, 4);                               \
+    case 8:                                               \
+      case_macro(dtype, 8);                               \
+    default:                                              \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported ranks"); \
+  }                                                       \
   while (false)
 
 // TODO: support more dtypes
-#define SWITCH_TYPES(case_macro)                    \
-  switch (type) {                                   \
-    case CUDA_R_16BF:                               \
-      case_macro(nv_bfloat16);                      \
-    default:                                        \
-      EP_HOST_ASSERT(false and "Unsupported type"); \
-  }                                                 \
+#define SWITCH_TYPES(case_macro)                         \
+  switch (type) {                                        \
+    case CUDA_R_16BF:                                    \
+      case_macro(nv_bfloat16);                           \
+    default:                                             \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported type"); \
+  }                                                      \
   while (false)
 
 // TODO: support more hidden size
-#define SWITCH_HIDDEN(case_macro)                     \
-  switch (hidden) {                                   \
-    case 2048:                                        \
-      case_macro(2048);                               \
-    case 2560:                                        \
-      case_macro(2560);                               \
-    case 4096:                                        \
-      case_macro(4096);                               \
-    case 5120:                                        \
-      case_macro(5120);                               \
-    case 7168:                                        \
-      case_macro(7168);                               \
-    case 8192:                                        \
-      case_macro(8192);                               \
-    default:                                          \
-      EP_HOST_ASSERT(false and "Unsupported hidden"); \
-  }                                                   \
+#define SWITCH_HIDDEN(case_macro)                          \
+  switch (hidden) {                                        \
+    case 2048:                                             \
+      case_macro(2048);                                    \
+    case 2560:                                             \
+      case_macro(2560);                                    \
+    case 4096:                                             \
+      case_macro(4096);                                    \
+    case 5120:                                             \
+      case_macro(5120);                                    \
+    case 7168:                                             \
+      case_macro(7168);                                    \
+    case 8192:                                             \
+      case_macro(8192);                                    \
+    default:                                               \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported hidden"); \
+  }                                                        \
   while (false)

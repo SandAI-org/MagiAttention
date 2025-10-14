@@ -85,7 +85,7 @@ struct AsymBuffer {
   int total_bytes;
 
   __device__ __forceinline__ AsymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
-    EP_STATIC_ASSERT(kNumRanks == 1, "");
+    GRPCOLL_STATIC_ASSERT(kNumRanks == 1, "");
     num_bytes = num_elems * sizeof(dtype_t);
 
     int per_channel_bytes = num_bytes * num_ranks;
@@ -95,7 +95,7 @@ struct AsymBuffer {
   }
 
   __device__ __forceinline__ AsymBuffer(void** gbl_ptrs, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
-    EP_STATIC_ASSERT(kNumRanks > 1, "");
+    GRPCOLL_STATIC_ASSERT(kNumRanks > 1, "");
     num_bytes = num_elems * sizeof(dtype_t);
 
     int per_channel_bytes = num_bytes * num_ranks;
@@ -125,12 +125,12 @@ struct AsymBuffer {
   }
 
   __device__ __forceinline__ dtype_t* buffer(int idx = 0) {
-    EP_STATIC_ASSERT(kNumRanks == 1, "`buffer` is only available for single rank case");
+    GRPCOLL_STATIC_ASSERT(kNumRanks == 1, "`buffer` is only available for single rank case");
     return reinterpret_cast<dtype_t*>(ptrs[0] + num_bytes * idx);
   }
 
   __device__ __forceinline__ dtype_t* buffer_by(int rank_idx, int idx = 0) {
-    EP_STATIC_ASSERT(kNumRanks > 1, "`buffer` is only available for single rank case");
+    GRPCOLL_STATIC_ASSERT(kNumRanks > 1, "`buffer` is only available for single rank case");
     return reinterpret_cast<dtype_t*>(ptrs[rank_idx] + num_bytes * idx);
   }
 };
@@ -157,17 +157,17 @@ struct SymBuffer {
   }
 
   __device__ __forceinline__ dtype_t* send_buffer(int idx = 0) {
-    EP_STATIC_ASSERT(kDecoupled, "`send_buffer` is only available for non-decoupled case");
+    GRPCOLL_STATIC_ASSERT(kDecoupled, "`send_buffer` is only available for non-decoupled case");
     return reinterpret_cast<dtype_t*>(send_ptr + num_bytes * idx);
   }
 
   __device__ __forceinline__ dtype_t* recv_buffer(int idx = 0) {
-    EP_STATIC_ASSERT(kDecoupled, "`recv_buffer` is only available for non-decoupled case");
+    GRPCOLL_STATIC_ASSERT(kDecoupled, "`recv_buffer` is only available for non-decoupled case");
     return reinterpret_cast<dtype_t*>(recv_ptr + num_bytes * idx);
   }
 
   __device__ __forceinline__ dtype_t* buffer(int idx = 0) {
-    EP_STATIC_ASSERT(not kDecoupled, "`buffer` is only available for decoupled case");
+    GRPCOLL_STATIC_ASSERT(not kDecoupled, "`buffer` is only available for decoupled case");
     return reinterpret_cast<dtype_t*>(send_ptr + num_bytes * idx);
   }
 };

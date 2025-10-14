@@ -90,7 +90,7 @@ __global__ void get_dispatch_layout(
      *  each thread tid in this SM will sum up the num of tokens sent to eid (expert_begin_idx + tid)
      *  by looping over the partial results in num_tokens_per_expert_per_thread[:][tid]
      */
-    EP_STATIC_ASSERT(kNumExpertsPerSM <= kNumThreads, "Too many experts per SM");
+    GRPCOLL_STATIC_ASSERT(kNumExpertsPerSM <= kNumThreads, "Too many experts per SM");
     if (expert_begin_idx + thread_id < expert_end_idx) {
       int sum = 0;
 #pragma unroll
@@ -102,7 +102,7 @@ __global__ void get_dispatch_layout(
   }
 
   if (num_tokens_per_rdma_rank != nullptr)
-    EP_DEVICE_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0 and num_ranks > NUM_MAX_NVL_PEERS);
+    GRPCOLL_DEVICE_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0 and num_ranks > NUM_MAX_NVL_PEERS);
 
   // Count rank statistics
   // by the last (num_ranks // kNumRanksPerSM) SMs
@@ -181,7 +181,7 @@ __global__ void get_dispatch_layout(
      * 3. for is_token_in_rank:
      *  it has no need to sum up
      */
-    EP_STATIC_ASSERT(kNumRanksPerSM <= kNumThreads, "Too many ranks per SM");
+    GRPCOLL_STATIC_ASSERT(kNumRanksPerSM <= kNumThreads, "Too many ranks per SM");
     if (rank_begin_idx + thread_id < rank_end_idx) {
       int sum = 0;
 #pragma unroll
@@ -215,7 +215,7 @@ void get_dispatch_layout(
   int num_sms_for_expert_stats = (num_experts + kNumExpertsPerSM - 1) / kNumExpertsPerSM;
   int num_sms_for_rank_stats = (num_ranks + kNumRanksPerSM - 1) / kNumRanksPerSM;
   int num_sms = num_sms_for_expert_stats + num_sms_for_rank_stats;
-  EP_STATIC_ASSERT(kNumRanksPerSM % NUM_MAX_NVL_PEERS == 0, "Invalid number of ranks per SM");
+  GRPCOLL_STATIC_ASSERT(kNumRanksPerSM % NUM_MAX_NVL_PEERS == 0, "Invalid number of ranks per SM");
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   LAUNCH_KERNEL(
@@ -319,8 +319,8 @@ __global__ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64
 
 void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx, int64_t* perm_to_a2av_idx, int num_ranks, int num_splits, cudaStream_t stream) {
   constexpr int num_sms = 1, kNumThreads = 256, kMaxNumRanks = 16;
-  EP_STATIC_ASSERT(kNumThreads >= kMaxNumRanks, "kNumThreads should NOT less than kMaxNumRanks");
-  EP_HOST_ASSERT(num_ranks <= kMaxNumRanks);
+  GRPCOLL_STATIC_ASSERT(kNumThreads >= kMaxNumRanks, "kNumThreads should NOT less than kMaxNumRanks");
+  GRPCOLL_HOST_ASSERT(num_ranks <= kMaxNumRanks);
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   LAUNCH_KERNEL(&cfg, (get_a2av_perm_idx<kNumThreads, kMaxNumRanks>), output_split_sizes, src_idx, perm_to_a2av_idx, num_ranks, num_splits);
