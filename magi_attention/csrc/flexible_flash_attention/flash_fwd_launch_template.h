@@ -172,7 +172,8 @@ template <int Arch,
           typename T_out,
           int kHeadDim,
           bool Has_softcap,
-          bool DisableFwdAtomicReduction>
+          bool DisableFwdAtomicReduction,
+          bool Deterministic>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // TODO: support cluster launch
@@ -180,19 +181,17 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   CLUSTER_SWITCH(cutlass::ceil_div(params.total_q, kBlockM) % 2 == 0, Use_cluster, [&] {
     static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
     BOOL_SWITCH(params.merge_q_ranges != nullptr, MergeRange, [&] {
-      BOOL_SWITCH(params.deterministic, Deterministic, [&] {
-        run_flash_fwd<Arch,
-                      kBlockM,
-                      kBlockN,
-                      kHeadDim,
-                      ClusterM,
-                      T,
-                      T_out,
-                      Has_softcap,
-                      DisableFwdAtomicReduction,
-                      Deterministic,
-                      MergeRange>(params, stream);
-      });
+      run_flash_fwd<Arch,
+                    kBlockM,
+                    kBlockN,
+                    kHeadDim,
+                    ClusterM,
+                    T,
+                    T_out,
+                    Has_softcap,
+                    DisableFwdAtomicReduction,
+                    Deterministic,
+                    MergeRange>(params, stream);
     });
   });
 }

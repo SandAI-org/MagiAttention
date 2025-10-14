@@ -14,6 +14,7 @@ using TOut     = {{ out_t }};
 static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableAtomic = {{ disable_atomic }};
+static constexpr bool kDeterministic = {{ deterministic }};
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
 static constexpr int kBlockM = {{ kblock_m }};
@@ -87,7 +88,7 @@ std::vector<at::Tensor> mha_fwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Kernel launch (single variant)
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kDeterministic>(params, stream);
 
   // Post-processing: fast zero fill for uncovered regions (to match library interface)
   run_fast_zero_fill(params, stream);

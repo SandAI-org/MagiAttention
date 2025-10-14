@@ -458,7 +458,7 @@ struct CollectiveEpilogueFwd {
       Tensor tOgPrevO = thr_copy_O.partition_S(gO);
 
       // Copy prev O from gmem to smem
-      cute::copy_if(tOpO, tOgPrevO, tOrPrevO_copy_view);
+      cute::copy_if(tiled_copy_O, tOpO, tOgPrevO, tOrPrevO_copy_view);
 
       // Correct output
       Tensor tOrPrevO_rowcol = make_tensor(tOrPrevO.data(), flash::convert_layout_acc_rowcol(tOrPrevO.layout()));

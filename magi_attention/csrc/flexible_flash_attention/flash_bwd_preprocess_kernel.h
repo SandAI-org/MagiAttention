@@ -169,12 +169,8 @@ class FlashAttnBwdPreprocess {
      * kernel-launch error. What's worse, this error may not be explicitly raised, resulting in the kernel being
      * skipped.
      */
-    // int const m_block = blockIdx.x;
-    // int const bidh = blockIdx.y;
-    // int const bidb = blockIdx.z;
     int const m_block = blockIdx.y;
     int const bidh = blockIdx.z;
-    int const bidb = blockIdx.x;
 
     // TODO: remove to params
     // auto shape_LSE = select<0, 2>(params.shape_O);

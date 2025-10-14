@@ -68,6 +68,7 @@ def get_ffa_uri(
     output_dtype: torch.dtype,
     softcap: bool,
     disable_atomic_reduction: bool,
+    deterministic: bool,
     kblock_m: int | None,
     kblock_n: int | None,
 ) -> str:
@@ -79,9 +80,10 @@ def get_ffa_uri(
         f"{direction}_"
         f"{head_dim}hd_"
         f"compute_{_dtype_name(compute_dtype)}_"
-        f"out_{_dtype_name(output_dtype)}_"
-        f"{'softcap' if softcap else 'nosoftcap'}_"
-        f"{'noatomic' if disable_atomic_reduction else 'atomic'}"
+        f"out_{_dtype_name(output_dtype)}"
+        f"{'_softcap' if softcap else ''}"
+        f"{'' if disable_atomic_reduction else '_atomic'}"
+        f"{'_deterministic' if deterministic else ''}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -127,6 +129,7 @@ def get_ffa_jit_spec(
     output_dtype: torch.dtype,
     softcap: bool,
     disable_atomic_reduction: bool,
+    deterministic: bool,
     ref_block_size: tuple[int, int] | None = None,
 ) -> tuple[JitSpec, str]:
     sanity_check(arch, direction, head_dim, compute_dtype, output_dtype)
@@ -150,6 +153,7 @@ def get_ffa_jit_spec(
         output_dtype,
         softcap,
         disable_atomic_reduction,
+        deterministic,
         kblock_m,
         kblock_n,
     )
@@ -178,6 +182,7 @@ def get_ffa_jit_spec(
         head_dim=head_dim,
         has_softcap=str(has_softcap).lower(),
         disable_atomic=str(disable_atomic).lower(),
+        deterministic=str(deterministic).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
     )
@@ -245,6 +250,7 @@ def get_ffa_jit_mod(
     output_dtype: torch.dtype,
     softcap: bool,
     disable_atomic_reduction: bool,
+    deterministic: bool,
     ref_block_size: tuple[int, int] | None = None,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
@@ -259,6 +265,7 @@ def get_ffa_jit_mod(
         output_dtype,
         softcap,
         disable_atomic_reduction,
+        deterministic,
         ref_block_size,
     )
 

@@ -206,6 +206,7 @@ def gen_jit_spec(
     needs_device_linking: bool = False,
 ) -> JitSpec:
     debug = os.environ.get("MAGI_ATTENTION_BUILD_DEBUG", "0") == "1"
+    verbose = os.environ.get("MAGI_ATTENTION_BUILD_VERBOSE", "0") == "1"
 
     cflags = ["-O3", "-std=c++17", "-Wno-switch-bool"]
     cuda_cflags = [
@@ -216,13 +217,16 @@ def gen_jit_spec(
         "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED",  # Necessary for the WGMMA shapes that we use
         f"--split-compile={os.getenv('NVCC_THREADS', '4')}",  # split-compile is faster
     ]
+    if verbose or debug:
+        cuda_cflags += [
+            "-lineinfo",
+            "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage",
+        ]
     if debug:
         cuda_cflags += [
             "-g",
             "--keep",
-            "-lineinfo",
             "--ftemplate-backtrace-limit=0",
-            "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage",
             "--resource-usage",  # printing out number of registers
             "-DCUTLASS_DEBUG_TRACE_LEVEL=2",
         ]

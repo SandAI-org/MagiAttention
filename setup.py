@@ -243,6 +243,7 @@ def prebuild_ffa_kernels() -> None:
     out_dtypes = [torch.float32, torch.bfloat16, torch.float16]
     softcaps = [False, True]
     disable_atomic_opts = [False, True]
+    deterministics = [False, True]
 
     combos = itertools.product(
         directions,
@@ -251,11 +252,12 @@ def prebuild_ffa_kernels() -> None:
         out_dtypes,
         softcaps,
         disable_atomic_opts,
+        deterministics,
     )
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
-        direction, h, cdtype, odtype, sc, da = args
+        direction, h, cdtype, odtype, sc, da, det = args
         spec, uri = get_ffa_jit_spec(
             arch=(9, 0),
             direction=direction,
@@ -264,6 +266,7 @@ def prebuild_ffa_kernels() -> None:
             output_dtype=odtype,
             softcap=sc,
             disable_atomic_reduction=da,
+            deterministic=det,
             ref_block_size=None,
         )
         spec.build()
