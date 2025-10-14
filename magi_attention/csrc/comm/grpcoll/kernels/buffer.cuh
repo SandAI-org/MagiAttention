@@ -55,10 +55,10 @@ struct Buffer {
 
   __device__ __forceinline__ Buffer() : ptr(nullptr), total_bytes(0) {}
 
-  __device__ __forceinline__ Buffer(void*& gbl_ptr, int num_elems, int offset = 0) {
-    total_bytes = num_elems * sizeof(dtype_t);
-    ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + offset * sizeof(dtype_t);
-    gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
+  __device__ __forceinline__ Buffer(void*& gbl_ptr, int num_elems, int elem_offset = 0) {
+    total_bytes = num_elems * sizeof(dtype_t); // the total bytes of this slice of buffer
+    ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + elem_offset * sizeof(dtype_t); // the start ptr in this slice
+    gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes; // in-place update the gbl_ptr across this slice
   }
 
   __device__ __forceinline__ Buffer advance_also(void*& gbl_ptr) {

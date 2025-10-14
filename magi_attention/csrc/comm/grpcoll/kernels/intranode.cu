@@ -75,6 +75,8 @@ __global__ void notify_dispatch(
 
     int *per_rank_buffer, *per_expert_buffer;
     if (thread_id < kNumRanks) {
+      // `per_rank_buffer` has shape (kNumRanks, kNumRanks)
+      // starting at the beginning of the buffer ptr of each rank
       per_rank_buffer = static_cast<int*>(buffer_ptrs[thread_id]);
       per_expert_buffer = per_rank_buffer + kNumRanks * kNumRanks;
     }
@@ -240,7 +242,7 @@ void cached_notify_dispatch(
 }
 
 template <int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp>
-__global__ void __launch_bounds__(kNumThreads, 1) dispatch(
+__global__ void __launch_bounds__(kNumThreads, 1) /*(max_threads_per_block, min_blocks_per_sm)*/ dispatch(
     int4* recv_x,
     float* recv_x_scales,
     int* recv_src_idx,
@@ -267,57 +269,56 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
     int rank,
     int num_max_send_tokens,
     int num_recv_buffer_tokens) {
+  // Get thread Info
   const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x);
   const auto thread_id = static_cast<int>(threadIdx.x), lane_id = get_lane_id();
-  const bool is_sender = sm_id % 2 == 0;
+  const bool is_sender = sm_id % 2 == 0; // even-numbered SMs are senders
   GRPCOLL_DEVICE_ASSERT(num_sms % 2 == 0);
 
-  // Several warps are response for a single rank
-  const auto num_threads_per_rank = kNumThreads / kNumRanks;
-  const auto num_channels = num_sms / 2;
-  const auto responsible_rank = (static_cast<int>(thread_id)) / num_threads_per_rank;
-  // Even-numbered blocks for sending, odd-numbered blocks for receiving.
-  const auto responsible_channel = sm_id / 2;
+  // Get Rank Info
+  const auto num_threads_per_rank = kNumThreads / kNumRanks; // Several warps are response for a single rank
+  const auto responsible_rank = thread_id / num_threads_per_rank;
+  const auto send_rank = is_sender ? rank : responsible_rank, recv_rank = is_sender ? responsible_rank : rank;
 
+  // Get Channel Info
+  const auto num_channels = num_sms / 2, responsible_channel = sm_id / 2;
+  const auto num_channels_total = num_channels * kNumRanks, channel_rank_offset = responsible_channel * kNumRanks + send_rank; // each rank has SM/2 channels
+  const auto num_channel_tokens_total = num_channels_total * num_recv_buffer_tokens, channel_rank_token_offset = channel_rank_offset * num_recv_buffer_tokens;
+
+  // Get expert Info (TODO: remove the logic for experts)
   int num_experts_per_rank = num_experts / kNumRanks;
   GRPCOLL_DEVICE_ASSERT(num_experts_per_rank > 0 or num_topk == 0);
   GRPCOLL_DEVICE_ASSERT(num_topk <= 32);
   GRPCOLL_DEVICE_ASSERT((topk_idx == nullptr) == (topk_weights == nullptr));
   GRPCOLL_DEVICE_ASSERT((recv_topk_idx == nullptr) == (recv_topk_weights == nullptr));
 
-  // Calculate pointers by the specific layout
+  // Get metadata pointer after the rank prefix matrix
   // `rank_prefix_matrix`: kNumRanks * kNumRanks * sizeof(int)
-  auto ptr = reinterpret_cast<void*>(static_cast<int8_t*>(buffer_ptrs[is_sender ? responsible_rank : rank]) + kNumRanks * kNumRanks * sizeof(int));
-  int target_rank = is_sender ? rank : responsible_rank;
-  auto num_channels_total = num_channels * kNumRanks;
-  auto channel_rank_offset = responsible_channel * kNumRanks + target_rank;
+  auto ptr = reinterpret_cast<void*>(static_cast<int8_t*>(buffer_ptrs[recv_rank]) + kNumRanks * kNumRanks * sizeof(int));
 
   // Channel buffer metadata
   // Senders are responsible for tails, and receivers are responsible for heads
-  // Stored on the receiver side
-  // The retired signals are actually boolean flags, but to align with 16 bytes, we make it `int64_t`
-  // `start_offset`: kNumChannels * kNumRanks * sizeof(int)
-  // `end_offset`: kNumChannels * kNumRanks * sizeof(int)
-  // `head_idx`: kNumChannels * kNumRanks * sizeof(int)
-  // `tail_idx`: kNumChannels * kNumRanks * sizeof(int)
-  auto channel_start_offset = Buffer<int>(ptr, num_channels_total, channel_rank_offset);
-  auto channel_end_offset = Buffer<int>(ptr, num_channels_total, channel_rank_offset);
-  auto channel_head_idx = Buffer<int>(ptr, num_channels_total, channel_rank_offset);
-  auto channel_tail_idx = Buffer<int>(ptr, num_channels_total, channel_rank_offset);
+  // And the metadata of any pair of (sender, receiver) is all stored on the receiver side
+  //  `start_offset`: kNumChannels * kNumRanks * sizeof(int)
+  //  `end_offset`: kNumChannels * kNumRanks * sizeof(int)
+  //  `head_idx`: kNumChannels * kNumRanks * sizeof(int)
+  //  `tail_idx`: kNumChannels * kNumRanks * sizeof(int)
+  auto channel_start_offset = Buffer<int>(ptr, /* num_elems */ num_channels_total, /* elem_offset */ channel_rank_offset);
+  auto channel_end_offset = Buffer<int>(ptr, /* num_elems */ num_channels_total, /* elem_offset */ channel_rank_offset);
+  auto channel_head_idx = Buffer<int>(ptr, /* num_elems */ num_channels_total, /* elem_offset */ channel_rank_offset);
+  auto channel_tail_idx = Buffer<int>(ptr, /* num_elems */ num_channels_total, /* elem_offset */ channel_rank_offset);
 
-  // Channel data buffers, stored on the receiver side
-  // `x_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * hidden_int4 * sizeof(int4)
-  // `src_idx_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * sizeof(int)
-  // `topk_idx_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_topk * sizeof(int64_t)
-  // `topk_weights_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_topk * sizeof(float)
-  // `x_scales_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_scales * sizeof(float)
-  auto channel_x_buffers = Buffer<int4>(ptr, num_channels_total * num_recv_buffer_tokens * hidden_int4, channel_rank_offset * num_recv_buffer_tokens * hidden_int4);
-  auto channel_src_idx_buffers = Buffer<int>(ptr, num_channels_total * num_recv_buffer_tokens, channel_rank_offset * num_recv_buffer_tokens);
-  auto channel_topk_idx_buffers = Buffer<int64_t>(ptr, num_channels_total * num_recv_buffer_tokens * num_topk, channel_rank_offset * num_recv_buffer_tokens * num_topk);
-  auto channel_topk_weights_buffers =
-      Buffer<float>(ptr, num_channels_total * num_recv_buffer_tokens * num_topk, channel_rank_offset * num_recv_buffer_tokens * num_topk);
-  auto channel_x_scales_buffers =
-      Buffer<float>(ptr, num_channels_total * num_recv_buffer_tokens * num_scales, channel_rank_offset * num_recv_buffer_tokens * num_scales);
+  // Channel data buffers
+  //  `x_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * hidden_int4 * sizeof(int4)
+  //  `src_idx_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * sizeof(int)
+  //  `topk_idx_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_topk * sizeof(int64_t)
+  //  `topk_weights_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_topk * sizeof(float)
+  //  `x_scales_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_scales * sizeof(float)
+  auto channel_x_buffers = Buffer<int4>(ptr, /* num_elems */ num_channel_tokens_total * hidden_int4, /* elem_offset */ channel_rank_token_offset * hidden_int4);
+  auto channel_src_idx_buffers = Buffer<int>(ptr, /* num_elems */ num_channel_tokens_total, /* elem_offset */ channel_rank_token_offset);
+  auto channel_topk_idx_buffers = Buffer<int64_t>(ptr, /* num_elems */ num_channel_tokens_total * num_topk, /* elem_offset */ channel_rank_token_offset * num_topk);
+  auto channel_topk_weights_buffers = Buffer<float>(ptr, /* num_elems */ num_channel_tokens_total * num_topk, /* elem_offset */ channel_rank_token_offset * num_topk);
+  auto channel_x_scales_buffers = Buffer<float>(ptr, /* num_elems */ num_channel_tokens_total * num_scales, /* elem_offset */ channel_rank_token_offset * num_scales);
 
   // TMA stuffs
 #ifndef DISABLE_SM90_FEATURES
@@ -606,10 +607,11 @@ void dispatch(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens) {
-  constexpr int kNumThreads = 768;
-  constexpr int kNumTMABytesPerWarp = 8192;
+  constexpr int kNumThreads = 768; // block size
+  constexpr int kNumWarps = kNumThreads / 32; // num warps per block
+  constexpr int kNumTMABytesPerWarp = 8192; // num bytes of tma transfer per warp
 #ifndef DISABLE_SM90_FEATURES
-  constexpr int smem_size = kNumTMABytesPerWarp * (kNumThreads / 32);
+  constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of tma transfer per block
 #endif
 
   // Make sure never OOB
@@ -651,7 +653,7 @@ void dispatch(
   }                                                                  \
   break
 
-  // Even-numbered blocks for sending, odd-numbered blocks for receiving.
+  // Even-numbered SMs for sending, odd-numbered SMs for receiving
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   SWITCH_RANKS(DISPATCH_LAUNCH_CASE);
