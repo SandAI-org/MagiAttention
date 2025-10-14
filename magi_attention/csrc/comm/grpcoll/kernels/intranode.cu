@@ -242,7 +242,7 @@ void cached_notify_dispatch(
 }
 
 template <int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp>
-__global__ void __launch_bounds__(kNumThreads, 1) /*(max_threads_per_block, min_blocks_per_sm)*/ dispatch(
+__global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_blocks_per_sm=*/1) dispatch(
     int4* recv_x,
     float* recv_x_scales,
     int* recv_src_idx,
@@ -476,7 +476,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) /*(max_threads_per_block, min_
         st_release_sys_global(channel_tail_idx.buffer(), cached_channel_tail_idx); // system scope, release order
     }
   } else {
-    // Workers for receiving and copying into buffer
+    // Ger recv warp info
     constexpr int num_recv_warps = kNumThreads / WARP_SIZE;
     constexpr int num_recv_warps_per_rank = num_recv_warps / kNumRanks;
     const auto recv_thread_id = thread_id;
@@ -485,25 +485,35 @@ __global__ void __launch_bounds__(kNumThreads, 1) /*(max_threads_per_block, min_
     GRPCOLL_DEVICE_ASSERT(kNumRanks <= WARP_SIZE);
     GRPCOLL_DEVICE_ASSERT(recv_thread_id >= 0 and num_recv_warps % kNumRanks == 0);
 
-    // Calculate offset first
-    auto rank_prefix_matrix = static_cast<int*>(buffer_ptrs[rank]);
-    int rank_offset = responsible_rank > 0 ? rank_prefix_matrix[(responsible_rank - 1) * kNumRanks + rank] : 0;
+    // Get global rank offset for the responsible rank from the rank prefix matrix
+    auto rank_prefix_matrix = static_cast<int*>(buffer_ptrs[recv_rank]);
+    int rank_offset = responsible_rank > 0 ? rank_prefix_matrix[(responsible_rank - 1) * kNumRanks + recv_rank] : 0;
 
-    // Receive channel offset
+    // Load channel start/end offset stored by the sender
+    // by lane0 in each warp
     int total_offset, num_tokens_to_recv;
     while (lane_id == 0 and (total_offset = ld_volatile_global(channel_start_offset.buffer())) == 0)
       ;
     while (lane_id == 0 and (num_tokens_to_recv = ld_volatile_global(channel_end_offset.buffer())) == 0)
       ;
     if (lane_id == 0) {
+      // Recover the real channel start/end offset from the code by `-code - 1`
       total_offset = -total_offset - 1, num_tokens_to_recv = -num_tokens_to_recv - 1;
-      if (recv_warp_id_in_rank == 0)
+
+      // Store channel start offset to the `recv_channel_offset`
+      if (recv_warp_id_in_rank == 0) // the lane0 in the recv warp0 for the responsible rank
+        // Here, total_offset = channel_start_offset
         recv_channel_offset[responsible_rank_channel] = total_offset;
+
+      // Here, num_tokens_to_recv = channel_end_offset - channel_start_offset
+      // = num_tokens to recv for the responsible rank w.r.t. the responsible channel
       num_tokens_to_recv -= total_offset;
     }
-    total_offset = __shfl_sync(0xffffffff, total_offset, 0);
+
+    // Broadcast total_offset and num_tokens_to_recv to other lanes
+    total_offset = broadcast_warp(total_offset);
     total_offset += rank_offset;
-    num_tokens_to_recv = __shfl_sync(0xffffffff, num_tokens_to_recv, 0);
+    num_tokens_to_recv = broadcast_warp(num_tokens_to_recv);
 
     // Shared tail indices for different warps
     __shared__ volatile int shared_channel_tail_idx[kNumRanks];
@@ -739,7 +749,7 @@ __global__ void cached_notify_combine(
       int token_idx = token_idx_tail - lane_id, expected_head = 0;
       auto current_head = (token_idx >= token_start_idx) ? __ldg(send_head + token_idx * kNumRanks + rank_id) : -1;
       for (int i = 0; i < min(WARP_SIZE, token_idx_tail - token_start_idx + 1); ++i) {
-        const int head = __shfl_sync(0xffffffff, current_head, i);
+        const int head = broadcast_warp(/*val=*/current_head, /*src_lane=*/i);
         if (head < 0) {
           if (lane_id == i)
             expected_head = -last_head - 1;
@@ -777,7 +787,7 @@ void cached_notify_combine(
 }
 
 template <typename dtype_t, int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp>
-__global__ void __launch_bounds__(kNumThreads, 1) combine(
+__global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_blocks_per_sm=*/1) combine(
     dtype_t* recv_x,
     float* recv_topk_weights,
     const dtype_t* x,
@@ -1006,7 +1016,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
         int num_topk_ranks = 0, topk_ranks[kNumRanks], slot_indices[kNumRanks];
 #pragma unroll
         for (int i = 0; i < kNumRanks; ++i) {
-          auto expected_head_i = __shfl_sync(0xffffffff, expected_head, i);
+          auto expected_head_i = broadcast_warp(/*val=*/expected_head, /*src_lane=*/i);
           if (expected_head_i >= 0) {
             slot_indices[num_topk_ranks] = expected_head_i % num_recv_buffer_tokens;
             topk_ranks[num_topk_ranks++] = i;

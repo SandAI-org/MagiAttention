@@ -501,6 +501,25 @@ __device__ __forceinline__ void release_lock(int* mutex) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
+// Warp Broatcast Funcs
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+__device__ __forceinline__ int broadcast_warp(int val, int src_lane = 0) {
+  return __shfl_sync(0xffffffff, val, src_lane);
+}
+
+template <typename dtype_t>
+__device__ __forceinline__ dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
+  GRPCOLL_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "");
+  auto send_int_values = reinterpret_cast<int*>(&ptr);
+  int recv_int_values[sizeof(dtype_t) / sizeof(int)];
+#pragma unroll
+  for (int i = 0; i < sizeof(dtype_t) / sizeof(int); ++i)
+    recv_int_values[i] = broadcast_warp(send_int_values[i], src_lane_idx);
+  return *reinterpret_cast<dtype_t*>(recv_int_values);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
 // Warp Reduce Funcs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -603,17 +622,6 @@ __device__ __forceinline__ void unpack2(const dtype_b_t& packed, dtype_a_t& x, d
   GRPCOLL_STATIC_ASSERT(sizeof(dtype_a_t) * 2 == sizeof(dtype_b_t), "Invalid dtypes");
   auto unpacked_ptr = reinterpret_cast<const dtype_a_t*>(&packed);
   x = unpacked_ptr[0], y = unpacked_ptr[1];
-}
-
-template <typename dtype_t>
-__device__ __forceinline__ dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
-  GRPCOLL_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "");
-  auto send_int_values = reinterpret_cast<int*>(&ptr);
-  int recv_int_values[sizeof(dtype_t) / sizeof(int)];
-#pragma unroll
-  for (int i = 0; i < sizeof(dtype_t) / sizeof(int); ++i)
-    recv_int_values[i] = __shfl_sync(0xffffffff, send_int_values[i], src_lane_idx);
-  return *reinterpret_cast<dtype_t*>(recv_int_values);
 }
 
 __device__ __forceinline__ int get_lane_id() {
