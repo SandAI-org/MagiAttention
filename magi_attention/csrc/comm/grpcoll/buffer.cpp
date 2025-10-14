@@ -324,8 +324,6 @@ Buffer::intranode_group_cast(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& recv_x_buf,
     const std::optional<torch::Tensor>& x_scales,
-    const std::optional<torch::Tensor>& topk_idx,
-    const std::optional<torch::Tensor>& topk_weights,
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const torch::Tensor& is_token_in_rank,
     const std::optional<torch::Tensor>& num_tokens_per_expert,
@@ -385,23 +383,6 @@ Buffer::intranode_group_cast(
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1));
   auto num_experts = cached_mode ? 0 : static_cast<int>(num_tokens_per_expert->size(0)), num_local_experts = num_experts / num_ranks;
-
-  // Top-k checks
-  int num_topk = 0;
-  int64_t* topk_idx_ptr = nullptr;
-  float* topk_weights_ptr = nullptr;
-  GRPCOLL_HOST_ASSERT(topk_idx.has_value() == topk_weights.has_value());
-  if (topk_idx.has_value()) {
-    num_topk = static_cast<int>(topk_idx->size(1));
-    GRPCOLL_HOST_ASSERT(num_experts > 0);
-    GRPCOLL_HOST_ASSERT(topk_idx->dim() == 2 and topk_idx->is_contiguous());
-    GRPCOLL_HOST_ASSERT(topk_weights->dim() == 2 and topk_weights->is_contiguous());
-    GRPCOLL_HOST_ASSERT(num_tokens == topk_idx->size(0) and num_tokens == topk_weights->size(0));
-    GRPCOLL_HOST_ASSERT(num_topk == topk_weights->size(1));
-    GRPCOLL_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
-    topk_idx_ptr = topk_idx->data_ptr<int64_t>();
-    topk_weights_ptr = topk_weights->data_ptr<float>();
-  }
 
   // FP8 scales checks
   float* x_scales_ptr = nullptr;
@@ -463,32 +444,28 @@ Buffer::intranode_group_cast(
     // TODO: make notify_dispatch an individual buffer API
     // to allow notifying in advance to enable cache mode amap
     intranode::notify_dispatch(
-        num_tokens_per_rank->data_ptr<int>(),
-        moe_recv_counter_mapped,
-        num_ranks,
-        num_tokens_per_expert->data_ptr<int>(),
-        moe_recv_expert_counter_mapped,
-        num_experts,
-        num_tokens,
-        is_token_in_rank.data_ptr<bool>(),
-        channel_prefix_matrix.data_ptr<int>(),
-        rank_prefix_matrix.data_ptr<int>(),
-        num_memset_int,
-        expert_alignment,
-        buffer_ptrs_gpu,
-        barrier_signal_ptrs_gpu,
-        rank,
-        comm_stream,
-        num_channels);
+        /*num_tokens_per_rank=*/num_tokens_per_rank->data_ptr<int>(),
+        /*moe_recv_counter_mapped=*/moe_recv_counter_mapped,
+        /*num_ranks=*/num_ranks,
+        /*num_tokens_per_expert=*/num_tokens_per_expert->data_ptr<int>(),
+        /*moe_recv_expert_counter_mapped=*/moe_recv_expert_counter_mapped,
+        /*num_experts=*/num_experts,
+        /*num_tokens=*/num_tokens,
+        /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
+        /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
+        /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
+        /*num_memset_int=*/num_memset_int,
+        /*expert_alignment=*/expert_alignment,
+        /*buffer_ptrs=*/buffer_ptrs_gpu,
+        /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
+        /*rank=*/rank,
+        /*comm_stream=*/comm_stream,
+        /*num_channels=*/num_channels);
 
     if (num_worst_tokens > 0) {
       // if num_worst_tokens is given,
       // just allocate the worst case to avoid CPU sync
       num_recv_tokens = num_worst_tokens;
-
-      // Must be forward with top-k stuffs
-      GRPCOLL_HOST_ASSERT(topk_idx.has_value());
-      GRPCOLL_HOST_ASSERT(topk_weights.has_value());
     } else if (recv_x_buf.has_value()) {
       // if the recv buffer is given,
       // use its dim0 size as num_recv_tokens to avoid CPU sync
@@ -528,21 +505,13 @@ Buffer::intranode_group_cast(
 
   // Allocate new tensors
   auto recv_src_idx = torch::empty({num_recv_tokens}, dtype(torch::kInt32).device(torch::kCUDA));
-  auto recv_topk_idx = std::optional<torch::Tensor>(), recv_topk_weights = std::optional<torch::Tensor>(), recv_x_scales = std::optional<torch::Tensor>();
+  auto recv_x_scales = std::optional<torch::Tensor>();
   auto recv_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
   auto send_head = torch::empty({num_tokens, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
   // Assign pointers
-  int64_t* recv_topk_idx_ptr = nullptr;
-  float* recv_topk_weights_ptr = nullptr;
   int64_t* post_perm_idx_ptr = nullptr;
   float* recv_x_scales_ptr = nullptr;
-  if (topk_idx.has_value()) {
-    recv_topk_idx = torch::empty({num_recv_tokens, num_topk}, topk_idx->options());
-    recv_topk_weights = torch::empty({num_recv_tokens, num_topk}, topk_weights->options());
-    recv_topk_idx_ptr = recv_topk_idx->data_ptr<int64_t>();
-    recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
-  }
   if (post_perm_idx.has_value()) {
     GRPCOLL_HOST_ASSERT(post_perm_idx->scalar_type() == torch::kInt64);
     GRPCOLL_HOST_ASSERT(post_perm_idx->dim() == 1);
@@ -562,8 +531,6 @@ Buffer::intranode_group_cast(
           num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * recv_x.element_size() + // data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // source index buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(int64_t) + // top-k index buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) + // top-k weight buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_scales // FP8 scale buffer
       <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
 
@@ -580,36 +547,30 @@ Buffer::intranode_group_cast(
    * but we don't know how to exactly fix this issue by now
    */
   intranode::dispatch(
-      recv_x.data_ptr(),
-      recv_x_scales_ptr,
-      recv_src_idx.data_ptr<int>(),
-      recv_topk_idx_ptr,
-      recv_topk_weights_ptr,
-      recv_channel_prefix_matrix.data_ptr<int>(),
-      send_head.data_ptr<int>(),
-      post_perm_idx_ptr,
-      x.data_ptr(),
-      x_scales_ptr,
-      topk_idx_ptr,
-      topk_weights_ptr,
-      is_token_in_rank.data_ptr<bool>(),
-      channel_prefix_matrix.data_ptr<int>(),
-      num_tokens,
-      num_worst_tokens,
-      // NOTE: hidden size should be aligned with int4
-      static_cast<int>(hidden * recv_x.element_size() / sizeof(int4)),
-      num_topk,
-      num_experts,
-      num_scales,
-      scale_token_stride,
-      scale_hidden_stride,
-      buffer_ptrs_gpu,
-      rank,
-      num_ranks,
-      comm_stream,
-      config.num_sms,
-      config.num_max_nvl_chunked_send_tokens,
-      config.num_max_nvl_chunked_recv_tokens);
+      /*recv_x=*/recv_x.data_ptr(),
+      /*recv_x_scales=*/recv_x_scales_ptr,
+      /*recv_src_idx=*/recv_src_idx.data_ptr<int>(),
+      /*recv_channel_offset=*/recv_channel_prefix_matrix.data_ptr<int>(),
+      /*send_head=*/send_head.data_ptr<int>(),
+      /*post_perm_idx=*/post_perm_idx_ptr,
+      /*x=*/x.data_ptr(),
+      /*x_scales=*/x_scales_ptr,
+      /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
+      /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
+      /*num_tokens=*/num_tokens,
+      /*num_worst_tokens=*/num_worst_tokens,
+      /*hidden_int4=*/static_cast<int>(hidden * recv_x.element_size() / sizeof(int4)), // NOTE: hidden size should be aligned with int4
+      /*num_experts=*/num_experts,
+      /*num_scales=*/num_scales,
+      /*scale_token_stride=*/scale_token_stride,
+      /*scale_hidden_stride=*/scale_hidden_stride,
+      /*buffer_ptrs=*/buffer_ptrs_gpu,
+      /*rank=*/rank,
+      /*num_ranks=*/num_ranks,
+      /*comm_stream=*/comm_stream,
+      /*num_sms=*/config.num_sms,
+      /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
+      /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens);
 
   // Record or wait streams
   std::optional<EventHandle> event;
@@ -620,8 +581,7 @@ Buffer::intranode_group_cast(
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
     }
-    for (auto& to :
-         {x_scales, topk_idx, topk_weights, num_tokens_per_rank, num_tokens_per_expert, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
+    for (auto& to : {x_scales, num_tokens_per_rank, num_tokens_per_expert, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
