@@ -158,15 +158,13 @@ struct Buffer {
 
   std::tuple<
       torch::Tensor,
-      std::optional<torch::Tensor>,
-      std::optional<torch::Tensor>,
-      std::optional<torch::Tensor>,
-      std::vector<int>,
+      /* handle */
       torch::Tensor,
       torch::Tensor,
       torch::Tensor,
       torch::Tensor,
       torch::Tensor,
+      /* event */
       std::optional<EventHandle>>
   intranode_group_cast(
       const torch::Tensor& x,
@@ -188,7 +186,7 @@ struct Buffer {
       bool async,
       bool allocate_on_comm_stream);
 
-  std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> intranode_group_reduce(
+  std::tuple<torch::Tensor, std::optional<EventHandle>> intranode_group_reduce(
       const torch::Tensor& x,
       std::optional<torch::Tensor>& combined_x_buf,
       const std::optional<torch::Tensor>& topk_weights,
@@ -209,10 +207,7 @@ struct Buffer {
 
   std::tuple<
       torch::Tensor,
-      std::optional<torch::Tensor>,
-      std::optional<torch::Tensor>,
-      std::optional<torch::Tensor>,
-      std::vector<int>,
+      /* handle */
       torch::Tensor,
       torch::Tensor,
       std::optional<torch::Tensor>,
@@ -222,6 +217,7 @@ struct Buffer {
       std::optional<torch::Tensor>,
       std::optional<torch::Tensor>,
       std::optional<torch::Tensor>,
+      /* event */
       std::optional<EventHandle>>
   internode_group_cast(
       const torch::Tensor& x,
@@ -245,7 +241,7 @@ struct Buffer {
       bool async,
       bool allocate_on_comm_stream);
 
-  std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> internode_group_reduce(
+  std::tuple<torch::Tensor, std::optional<EventHandle>> internode_group_reduce(
       const torch::Tensor& x,
       std::optional<torch::Tensor>& combined_x_buf,
       const std::optional<torch::Tensor>& topk_weights,
