@@ -440,7 +440,7 @@ __forceinline__ __device__ void get_channel_task_range(int num_tokens, int num_s
 
 template <typename dtype_a_t, typename dtype_b_t>
 __device__ __forceinline__ dtype_b_t pack2(const dtype_a_t& x, const dtype_a_t& y) {
-  EP_STATIC_ASSERT(sizeof(dtype_a_t) * 2 == sizeof(dtype_b_t), "Invalid dtypes");
+  GRPCOLL_STATIC_ASSERT(sizeof(dtype_a_t) * 2 == sizeof(dtype_b_t), "Invalid dtypes");
   dtype_b_t packed;
   auto unpacked_ptr = reinterpret_cast<dtype_a_t*>(&packed);
   unpacked_ptr[0] = x, unpacked_ptr[1] = y;
@@ -449,14 +449,14 @@ __device__ __forceinline__ dtype_b_t pack2(const dtype_a_t& x, const dtype_a_t& 
 
 template <typename dtype_a_t, typename dtype_b_t>
 __device__ __forceinline__ void unpack2(const dtype_b_t& packed, dtype_a_t& x, dtype_a_t& y) {
-  EP_STATIC_ASSERT(sizeof(dtype_a_t) * 2 == sizeof(dtype_b_t), "Invalid dtypes");
+  GRPCOLL_STATIC_ASSERT(sizeof(dtype_a_t) * 2 == sizeof(dtype_b_t), "Invalid dtypes");
   auto unpacked_ptr = reinterpret_cast<const dtype_a_t*>(&packed);
   x = unpacked_ptr[0], y = unpacked_ptr[1];
 }
 
 template <typename dtype_t>
 __device__ __forceinline__ dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
-  EP_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "");
+  GRPCOLL_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "");
   auto send_int_values = reinterpret_cast<int*>(&ptr);
   int recv_int_values[sizeof(dtype_t) / sizeof(int)];
 #pragma unroll
@@ -523,7 +523,7 @@ __forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int ran
     atomicAdd_system(barrier_signal_ptrs[rank] + thread_id, FINISHED_SUM_TAG);
     atomicSub_system(barrier_signal_ptrs[thread_id] + rank, FINISHED_SUM_TAG);
   }
-  EP_DEVICE_ASSERT(kNumRanks <= blockDim.x);
+  GRPCOLL_DEVICE_ASSERT(kNumRanks <= blockDim.x);
 
   // Check timeout
   auto start_time = clock64();
@@ -586,7 +586,7 @@ struct ReduceMin {
 // Unified reduction function
 template <uint32_t kNumLanes, typename T, typename Op>
 __forceinline__ __device__ T warp_reduce(T value, Op op) {
-  EP_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or kNumLanes == 4 or kNumLanes == 2 or kNumLanes == 1, "Invalid number of lanes");
+  GRPCOLL_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or kNumLanes == 4 or kNumLanes == 2 or kNumLanes == 1, "Invalid number of lanes");
 
   if constexpr (kNumLanes >= 32)
     value = op(value, __shfl_xor_sync(0xffffffff, value, 16));

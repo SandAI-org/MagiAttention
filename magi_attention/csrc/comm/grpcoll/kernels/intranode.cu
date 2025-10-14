@@ -195,8 +195,8 @@ void notify_dispatch(
   break
 
   constexpr int kNumThreads = 128;
-  EP_HOST_ASSERT(num_experts % num_ranks == 0);
-  EP_HOST_ASSERT(num_experts / num_ranks <= kNumThreads and num_ranks <= kNumThreads);
+  GRPCOLL_HOST_ASSERT(num_experts % num_ranks == 0);
+  GRPCOLL_HOST_ASSERT(num_experts / num_ranks <= kNumThreads and num_ranks <= kNumThreads);
 
   SETUP_LAUNCH_CONFIG(1 + num_ranks, kNumThreads, stream);
   SWITCH_RANKS(NOTIFY_DISPATCH_LAUNCH_CASE);
@@ -270,7 +270,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
   const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x);
   const auto thread_id = static_cast<int>(threadIdx.x), lane_id = get_lane_id();
   const bool is_sender = sm_id % 2 == 0;
-  EP_DEVICE_ASSERT(num_sms % 2 == 0);
+  GRPCOLL_DEVICE_ASSERT(num_sms % 2 == 0);
 
   // Several warps are response for a single rank
   const auto num_threads_per_rank = kNumThreads / kNumRanks;
@@ -280,10 +280,10 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
   const auto responsible_channel = sm_id / 2;
 
   int num_experts_per_rank = num_experts / kNumRanks;
-  EP_DEVICE_ASSERT(num_experts_per_rank > 0 or num_topk == 0);
-  EP_DEVICE_ASSERT(num_topk <= 32);
-  EP_DEVICE_ASSERT((topk_idx == nullptr) == (topk_weights == nullptr));
-  EP_DEVICE_ASSERT((recv_topk_idx == nullptr) == (recv_topk_weights == nullptr));
+  GRPCOLL_DEVICE_ASSERT(num_experts_per_rank > 0 or num_topk == 0);
+  GRPCOLL_DEVICE_ASSERT(num_topk <= 32);
+  GRPCOLL_DEVICE_ASSERT((topk_idx == nullptr) == (topk_weights == nullptr));
+  GRPCOLL_DEVICE_ASSERT((recv_topk_idx == nullptr) == (recv_topk_weights == nullptr));
 
   // Calculate pointers by the specific layout
   // `rank_prefix_matrix`: kNumRanks * kNumRanks * sizeof(int)
@@ -331,7 +331,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
     mbarrier_init(tma_mbarrier, 1);
     fence_view_async_shared();
     fence_barrier_init();
-    EP_DEVICE_ASSERT(hidden_int4 % 2 == 0 and half_hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
+    GRPCOLL_DEVICE_ASSERT(hidden_int4 % 2 == 0 and half_hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerWarp);
   }
   __syncwarp();
 #endif
@@ -342,8 +342,8 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
     constexpr int num_send_warps_per_rank = num_send_warps / kNumRanks;
     const auto send_thread_id = thread_id;
     const auto send_warp_id_in_rank = send_thread_id % num_threads_per_rank / 32;
-    EP_DEVICE_ASSERT(kNumRanks <= 32);
-    EP_DEVICE_ASSERT(num_send_warps % kNumRanks == 0);
+    GRPCOLL_DEVICE_ASSERT(kNumRanks <= 32);
+    GRPCOLL_DEVICE_ASSERT(num_send_warps % kNumRanks == 0);
 
     // Send offset by `-value - 1`, e.g. 0 -> -1, 1 -> -2
     // NOTES: this is for distinguishing zero tokens
@@ -443,8 +443,8 @@ __global__ void __launch_bounds__(kNumThreads, 1) dispatch(
     const auto recv_thread_id = thread_id;
     const auto recv_thread_id_in_rank = recv_thread_id % num_threads_per_rank;
     const auto recv_warp_id_in_rank = recv_thread_id_in_rank / 32;
-    EP_DEVICE_ASSERT(kNumRanks <= 32);
-    EP_DEVICE_ASSERT(recv_thread_id >= 0 and num_recv_warps % kNumRanks == 0);
+    GRPCOLL_DEVICE_ASSERT(kNumRanks <= 32);
+    GRPCOLL_DEVICE_ASSERT(recv_thread_id >= 0 and num_recv_warps % kNumRanks == 0);
 
     // Calculate offset first
     auto rank_prefix_matrix = static_cast<int*>(buffer_ptrs[rank]);
@@ -613,7 +613,7 @@ void dispatch(
 #endif
 
   // Make sure never OOB
-  EP_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < std::numeric_limits<int>::max());
+  GRPCOLL_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < std::numeric_limits<int>::max());
 
 #define DISPATCH_LAUNCH_CASE(ranks)                                  \
   {                                                                  \
@@ -652,7 +652,7 @@ void dispatch(
   break
 
   // Even-numbered blocks for sending, odd-numbered blocks for receiving.
-  EP_HOST_ASSERT(num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   SWITCH_RANKS(DISPATCH_LAUNCH_CASE);
 #undef DISPATCH_LAUNCH_CASE
@@ -728,9 +728,9 @@ void cached_notify_combine(
   break
 
   const int num_threads = std::max(128, 32 * num_ranks);
-  EP_HOST_ASSERT(num_ranks <= num_threads);
-  EP_HOST_ASSERT(num_threads <= 1024);
-  EP_HOST_ASSERT(1 + num_channels <= num_channels * 2);
+  GRPCOLL_HOST_ASSERT(num_ranks <= num_threads);
+  GRPCOLL_HOST_ASSERT(num_threads <= 1024);
+  GRPCOLL_HOST_ASSERT(1 + num_channels <= num_channels * 2);
   SETUP_LAUNCH_CONFIG(1 + num_channels, num_threads, stream);
   SWITCH_RANKS(CACHED_NOTIFY_COMBINE);
 #undef CACHED_NOTIFY_COMBINE
@@ -765,7 +765,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
   const auto num_channels = num_sms / 2;
   const bool is_sender = sm_id % 2 == 0;
   const int responsible_channel = sm_id / 2;
-  EP_DEVICE_ASSERT(num_topk <= 32);
+  GRPCOLL_DEVICE_ASSERT(num_topk <= 32);
 
   constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
   int hidden_int4 = hidden * sizeof(dtype_t) / sizeof(int4);
@@ -790,7 +790,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
     const auto send_warp_id = send_thread_id / 32;
     const auto send_rank_id = (responsible_channel + send_warp_id) % kNumRanks;
     const auto send_warp_id_in_rank = send_warp_id / kNumRanks;
-    EP_STATIC_ASSERT(num_send_warps * 32 == kNumThreads, "Invalid warp count");
+    GRPCOLL_STATIC_ASSERT(num_send_warps * 32 == kNumThreads, "Invalid warp count");
 
     // Calculate pointers by the specific layout
     auto ptr = reinterpret_cast<void*>(static_cast<int8_t*>(buffer_ptrs[send_rank_id]));
@@ -873,8 +873,8 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
     // One warp for moving the queue head, others for reduction
     constexpr int num_recv_warps = kNumThreads / 32;
     const auto recv_warp_id = thread_id / 32;
-    EP_DEVICE_ASSERT(kNumRanks <= 32 and kNumThreads > 32);
-    EP_DEVICE_ASSERT(thread_id >= 0 and kNumThreads % 32 == 0);
+    GRPCOLL_DEVICE_ASSERT(kNumRanks <= 32 and kNumThreads > 32);
+    GRPCOLL_DEVICE_ASSERT(thread_id >= 0 and kNumThreads % 32 == 0);
 
     // Shared head, tail and retired flags for receiver warps
     __shared__ volatile int warp_channel_head_idx[num_recv_warps][kNumRanks];
@@ -982,7 +982,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
 
         // Reduce data with pipeline
         constexpr int kNumStages = 8;
-        EP_STATIC_ASSERT(kNumStages * 32 * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid count");
+        GRPCOLL_STATIC_ASSERT(kNumStages * 32 * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid count");
 
 #pragma unroll
         for (int i = lane_id; i < hidden_int4; i += 32) {
@@ -1153,8 +1153,8 @@ void combine(
   break
 
   // Even-numbered blocks for sending, odd-numbered blocks for receiving
-  EP_HOST_ASSERT(num_sms % 2 == 0);
-  EP_HOST_ASSERT(kNumThreads >= num_ranks * 32);
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+  GRPCOLL_HOST_ASSERT(kNumThreads >= num_ranks * 32);
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   SWITCH_TYPES(COMBINE_DTYPE_LAUNCH_CASE);
 #undef COMBINE_DTYPE_LAUNCH_CASE

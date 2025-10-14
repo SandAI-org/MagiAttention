@@ -73,16 +73,16 @@ struct Config {
         num_max_nvl_chunked_recv_tokens(num_max_nvl_chunked_recv_tokens),
         num_max_rdma_chunked_send_tokens(num_max_rdma_chunked_send_tokens),
         num_max_rdma_chunked_recv_tokens(num_max_rdma_chunked_recv_tokens) {
-    EP_HOST_ASSERT(num_sms >= 0);
-    EP_HOST_ASSERT(num_max_nvl_chunked_send_tokens > 0 and num_max_nvl_chunked_recv_tokens > 0);
-    EP_HOST_ASSERT(num_max_nvl_chunked_send_tokens < num_max_nvl_chunked_recv_tokens);
-    EP_HOST_ASSERT(num_max_rdma_chunked_send_tokens > 0 and num_max_rdma_chunked_recv_tokens > 0);
+    GRPCOLL_HOST_ASSERT(num_sms >= 0);
+    GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_send_tokens > 0 and num_max_nvl_chunked_recv_tokens > 0);
+    GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_send_tokens < num_max_nvl_chunked_recv_tokens);
+    GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens > 0 and num_max_rdma_chunked_recv_tokens > 0);
 
     // Ceil up RDMA buffer size
     this->num_max_rdma_chunked_recv_tokens = align<int>(num_max_rdma_chunked_recv_tokens, num_max_rdma_chunked_send_tokens);
-    EP_HOST_ASSERT(num_max_rdma_chunked_send_tokens < num_max_rdma_chunked_recv_tokens);
+    GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens < num_max_rdma_chunked_recv_tokens);
     // NOTES: this assertion is related to RDMA lazy head update, we must ensure senders always have space to push
-    EP_HOST_ASSERT(num_max_rdma_chunked_send_tokens <= num_max_rdma_chunked_recv_tokens / 2);
+    GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens <= num_max_rdma_chunked_recv_tokens / 2);
   }
 
   size_t get_nvl_buffer_size_hint(size_t hidden_bytes, int num_ranks) const {
@@ -90,8 +90,8 @@ struct Config {
     // TODO: add assertions
     constexpr int kNumMaxTopK = 128;
     constexpr int kNumMaxScales = 128;
-    EP_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
-    EP_HOST_ASSERT(num_ranks <= NUM_MAX_NVL_PEERS or num_sms % 2 == 0);
+    GRPCOLL_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
+    GRPCOLL_HOST_ASSERT(num_ranks <= NUM_MAX_NVL_PEERS or num_sms % 2 == 0);
     const auto num_rdma_ranks = std::max(num_ranks / NUM_MAX_NVL_PEERS, 1);
     const auto num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
     const int num_channels = num_sms / 2;
@@ -119,8 +119,8 @@ struct Config {
     // TODO: add assertions
     constexpr int kNumMaxTopK = 128;
     constexpr int kNumMaxScales = 128;
-    EP_HOST_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0);
-    EP_HOST_ASSERT(num_sms % 2 == 0);
+    GRPCOLL_HOST_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0);
+    GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
     const int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
     const int num_channels = num_sms / 2;
 
@@ -135,7 +135,7 @@ struct Config {
     num_bytes = ((num_bytes + 127) / 128) * 128;
     return num_bytes;
 #else
-    EP_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
+    GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disable during compilation");
 #endif
   }
 };
@@ -155,7 +155,7 @@ struct LowLatencyBuffer {
   size_t num_bytes_per_combine_msg = 0;
 
   std::pair<int*, int> clean_meta() {
-    EP_HOST_ASSERT(dispatch_rdma_recv_count_buffer == combine_rdma_recv_flag_buffer);
+    GRPCOLL_HOST_ASSERT(dispatch_rdma_recv_count_buffer == combine_rdma_recv_flag_buffer);
     return {dispatch_rdma_recv_count_buffer, num_clean_int};
   }
 };
@@ -179,7 +179,7 @@ struct LowLatencyLayout {
 
     // Message sizes
     // NOTES: you should add a control `int4` for combine messages if you want to do data transformation
-    EP_HOST_ASSERT(num_scales * sizeof(float) <= hidden);
+    GRPCOLL_HOST_ASSERT(num_scales * sizeof(float) <= hidden);
     size_t num_bytes_per_dispatch_msg = sizeof(int4) + std::max(hidden * sizeof(nv_bfloat16), hidden + num_scales * sizeof(float));
     size_t num_bytes_per_combine_msg = hidden * sizeof(nv_bfloat16);
 
@@ -187,7 +187,7 @@ struct LowLatencyLayout {
     size_t dispatch_send_buffer_bytes = num_max_dispatch_tokens_per_rank * num_bytes_per_dispatch_msg;
     size_t combine_send_buffer_bytes = num_experts * num_max_dispatch_tokens_per_rank * num_bytes_per_combine_msg;
     size_t send_buffer_bytes = std::max(dispatch_send_buffer_bytes, combine_send_buffer_bytes);
-    EP_HOST_ASSERT(send_buffer_bytes % sizeof(int4) == 0);
+    GRPCOLL_HOST_ASSERT(send_buffer_bytes % sizeof(int4) == 0);
     total_bytes += send_buffer_bytes * 2;
 
     // Symmetric receive buffers
@@ -195,7 +195,7 @@ struct LowLatencyLayout {
     size_t dispatch_recv_data_buffer_bytes = num_experts * num_max_dispatch_tokens_per_rank * num_bytes_per_dispatch_msg;
     size_t combine_recv_buffer_bytes = num_experts * num_max_dispatch_tokens_per_rank * num_bytes_per_combine_msg;
     size_t recv_buffer_bytes = std::max(dispatch_recv_data_buffer_bytes, combine_recv_buffer_bytes);
-    EP_HOST_ASSERT(recv_buffer_bytes % sizeof(int4) == 0);
+    GRPCOLL_HOST_ASSERT(recv_buffer_bytes % sizeof(int4) == 0);
     total_bytes += recv_buffer_bytes * 2;
 
     // Symmetric signaling buffers

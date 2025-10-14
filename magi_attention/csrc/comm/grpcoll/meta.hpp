@@ -37,9 +37,9 @@ struct Meta {
       bool async,
       bool allocate_on_meta_stream,
       std::optional<at::cuda::CUDAStream> meta_stream) {
-    EP_HOST_ASSERT(topk_idx.dim() == 2);
-    EP_HOST_ASSERT(topk_idx.is_contiguous());
-    EP_HOST_ASSERT(num_experts > 0);
+    GRPCOLL_HOST_ASSERT(topk_idx.dim() == 2);
+    GRPCOLL_HOST_ASSERT(topk_idx.is_contiguous());
+    GRPCOLL_HOST_ASSERT(num_experts > 0);
 
     // Get meta stream
     at::cuda::CUDAStream meta_stream_ = meta_stream.has_value() ? meta_stream.value() : at::cuda::getStreamFromPool();
@@ -48,7 +48,7 @@ struct Meta {
     // NOTES: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
     if (allocate_on_meta_stream) {
-      EP_HOST_ASSERT(previous_event.has_value() and async);
+      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async);
       at::cuda::setCurrentCUDAStream(meta_stream_);
     }
 
@@ -117,10 +117,10 @@ struct Meta {
       bool async,
       bool allocate_on_meta_stream,
       std::optional<at::cuda::CUDAStream> meta_stream) {
-    EP_HOST_ASSERT(output_split_sizes.dim() == 1 && src_idx.dim() == 1);
-    EP_HOST_ASSERT(output_split_sizes.is_contiguous() && src_idx.is_contiguous());
-    EP_HOST_ASSERT(output_split_sizes.size(0) == src_idx.size(0));
-    EP_HOST_ASSERT(num_ranks > 0);
+    GRPCOLL_HOST_ASSERT(output_split_sizes.dim() == 1 && src_idx.dim() == 1);
+    GRPCOLL_HOST_ASSERT(output_split_sizes.is_contiguous() && src_idx.is_contiguous());
+    GRPCOLL_HOST_ASSERT(output_split_sizes.size(0) == src_idx.size(0));
+    GRPCOLL_HOST_ASSERT(num_ranks > 0);
 
     // Get meta stream
     at::cuda::CUDAStream meta_stream_ = meta_stream.has_value() ? meta_stream.value() : at::cuda::getStreamFromPool();
@@ -129,7 +129,7 @@ struct Meta {
     // NOTES: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
     if (allocate_on_meta_stream) {
-      EP_HOST_ASSERT(previous_event.has_value() and async);
+      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async);
       at::cuda::setCurrentCUDAStream(meta_stream_);
     }
 
