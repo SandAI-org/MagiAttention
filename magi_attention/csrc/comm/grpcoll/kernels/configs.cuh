@@ -40,6 +40,8 @@
 
 #pragma once
 
+#define WARP_SIZE 32
+
 #define NUM_MAX_NVL_PEERS 8
 // Some warp roles require at least `kNumRDMARank` warps, such as the combine forwarder
 // thus too large number of RDMA peers may cause the number of warps to exceed the limit.
