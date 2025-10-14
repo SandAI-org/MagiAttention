@@ -468,7 +468,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) /*(max_threads_per_block, min_
       }
 
       // Sync all send warps for the responsible rank
-      asm volatile("bar.sync %0, %1;" ::"r"(responsible_rank), "r"(num_threads_per_rank));
+      sync_warp_group(/*group_flag=*/responsible_rank, /*group_size=*/num_threads_per_rank);
 
       // Update tail idx for the responsible rank w.r.t. the responsible channel
       // NOTES: here all send warps for the responsible rank should share the same new tail
@@ -529,7 +529,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) /*(max_threads_per_block, min_
       }
 
       // Synchronize queue tail
-      asm volatile("bar.sync %0, %1;" ::"r"(responsible_rank), "r"(num_threads_per_rank));
+      sync_warp_group(/*group_flag=*/responsible_rank, /*group_size=*/num_threads_per_rank);
       cached_channel_tail_idx = shared_channel_tail_idx[responsible_rank];
 
       // Copy data
@@ -587,7 +587,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) /*(max_threads_per_block, min_
       // Move queue
       cached_channel_head_idx += num_recv_tokens;
       total_offset += num_recv_tokens;
-      asm volatile("bar.sync %0, %1;" ::"r"(responsible_rank), "r"(num_threads_per_rank));
+      sync_warp_group(/*group_flag=*/responsible_rank, /*group_size=*/num_threads_per_rank);
       if (recv_warp_id_in_rank == num_recv_warps_per_rank - 1 and lane_id == 0)
         st_relaxed_sys_global(channel_head_idx.buffer(), cached_channel_head_idx);
 
@@ -904,7 +904,7 @@ __global__ void __launch_bounds__(kNumThreads, 1) combine(
       current_channel_tail_idx += num_round_tokens;
 
       // Move tail index
-      asm volatile("bar.sync %0, %1;" ::"r"(send_rank_id), "r"(num_threads_per_rank));
+      sync_warp_group(/*group_flag=*/send_rank_id, /*group_size=*/num_threads_per_rank);
       if (lane_id == 0 and send_warp_id_in_rank == 0)
         st_release_sys_global(channel_tail_idx.buffer(), current_channel_tail_idx);
     }

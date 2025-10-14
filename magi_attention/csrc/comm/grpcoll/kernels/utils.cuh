@@ -434,15 +434,19 @@ __device__ __forceinline__ void tma_store_wait() {
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-// Barrier Helper Funcs
+// Sync/Barrier/Lock Helper Funcs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 __device__ __forceinline__ void trap() {
   asm("trap;");
 }
 
+__device__ __forceinline__ void sync_warp_group(int group_flag, int group_size) {
+  asm volatile("bar.sync %0, %1;" ::"r"(group_flag), "r"(group_size));
+}
+
 template <int kNumRanks, bool kSyncOnly = false>
-__forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int rank) {
+__device__ __forceinline__ void barrier_block(int** barrier_signal_ptrs, int rank) {
   auto thread_id = static_cast<int>(threadIdx.x);
 
   // For non-sync-only cases, the memory operations by other threads in the block must be visible to the `sys` scope
@@ -473,25 +477,25 @@ __forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int ran
   __syncthreads();
 }
 
-__forceinline__ __device__ int atomic_cas_cta_acquire(int* addr, int x, int y) {
+__device__ __forceinline__ int atomic_cas_cta_acquire(int* addr, int x, int y) {
   int ret;
   asm volatile("atom.acquire.cta.shared::cta.cas.b32 %0, [%1], %2, %3;" : "=r"(ret) : "l"(addr), "r"(x), "r"(y) : "memory");
   return ret;
 }
 
-__forceinline__ __device__ int atomic_exch_cta_release(int* addr, int x) {
+__device__ __forceinline__ int atomic_exch_cta_release(int* addr, int x) {
   int ret;
   asm volatile("atom.release.cta.shared::cta.exch.b32 %0, [%1], %2;" : "=r"(ret) : "l"(addr), "r"(x) : "memory");
   return ret;
 }
 
-__forceinline__ __device__ void acquire_lock(int* mutex) {
+__device__ __forceinline__ void acquire_lock(int* mutex) {
   // To make later memory operations valid, we must use `acquire` for memory semantics
   while (atomic_cas_cta_acquire(mutex, 0, 1) != 0)
     ;
 }
 
-__forceinline__ __device__ void release_lock(int* mutex) {
+__device__ __forceinline__ void release_lock(int* mutex) {
   // To make previous memory operations visible to other threads, we must use `release` for memory semantics
   atomic_exch_cta_release(mutex, 0);
 }
@@ -522,7 +526,7 @@ struct ReduceMin {
 
 // Unified reduction function
 template <uint32_t kNumLanes, typename T, typename Op>
-__forceinline__ __device__ T warp_reduce(T value, Op op) {
+__device__ __forceinline__ T warp_reduce(T value, Op op) {
   GRPCOLL_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or kNumLanes == 4 or kNumLanes == 2 or kNumLanes == 1, "Invalid number of lanes");
 
   if constexpr (kNumLanes >= 32)
@@ -540,17 +544,17 @@ __forceinline__ __device__ T warp_reduce(T value, Op op) {
 
 // Convenience aliases
 template <uint32_t kNumLanes = 32, typename T>
-__forceinline__ __device__ T warp_reduce_sum(T value) {
+__device__ __forceinline__ T warp_reduce_sum(T value) {
   return warp_reduce<kNumLanes, T>(value, ReduceSum<T>{});
 }
 
 template <uint32_t kNumLanes = 32, typename T>
-__forceinline__ __device__ T warp_reduce_max(T value) {
+__device__ __forceinline__ T warp_reduce_max(T value) {
   return warp_reduce<kNumLanes, T>(value, ReduceMax<T>{});
 }
 
 template <uint32_t kNumLanes = 32, typename T>
-__forceinline__ __device__ T warp_reduce_min(T value) {
+__device__ __forceinline__ T warp_reduce_min(T value) {
   return warp_reduce<kNumLanes, T>(value, ReduceMin<T>{});
 }
 
@@ -579,7 +583,7 @@ __host__ __device__ constexpr dtype_t align(dtype_t a, dtype_t b) {
   return ceil_div<dtype_t>(a, b) * b;
 }
 
-__forceinline__ __device__ void get_channel_task_range(int num_tokens, int num_sms, int sm_id, int& token_start_idx, int& token_end_idx) {
+__device__ __forceinline__ void get_channel_task_range(int num_tokens, int num_sms, int sm_id, int& token_start_idx, int& token_end_idx) {
   int num_tokens_per_sm = ceil_div(num_tokens, num_sms);
   token_start_idx = min(num_tokens_per_sm * sm_id, num_tokens);
   token_end_idx = min(token_start_idx + num_tokens_per_sm, num_tokens);
@@ -612,7 +616,7 @@ __device__ __forceinline__ dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
   return *reinterpret_cast<dtype_t*>(recv_int_values);
 }
 
-__forceinline__ __device__ int get_lane_id() {
+__device__ __forceinline__ int get_lane_id() {
   int lane_id;
   asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
   return lane_id;
@@ -622,20 +626,20 @@ constexpr float kFP8Margin = 1e-4;
 constexpr float kFinfoAmaxE4M3 = 448.0f;
 constexpr float kFinfoAmaxInvE4M3 = 1 / 448.0f;
 
-__forceinline__ __device__ float fast_pow2(int x) {
+__device__ __forceinline__ float fast_pow2(int x) {
   // We can ensure `-126 <= x and x <= 127`
   uint32_t bits_x = (x + 127) << 23;
   return *reinterpret_cast<float*>(&bits_x);
 }
 
-__forceinline__ __device__ int fast_log2_ceil(float x) {
+__device__ __forceinline__ int fast_log2_ceil(float x) {
   auto bits_x = *reinterpret_cast<uint32_t*>(&x);
   auto exp_x = (bits_x >> 23) & 0xff;
   auto man_bits = bits_x & ((1 << 23) - 1);
   return exp_x - 127 + (man_bits != 0);
 }
 
-__forceinline__ __device__ void calculate_fp8_scales(float amax, float& scale, float& scale_inv, bool round_scale) {
+__device__ __forceinline__ void calculate_fp8_scales(float amax, float& scale, float& scale_inv, bool round_scale) {
   if (round_scale) {
     auto exp_scale_inv = fast_log2_ceil(amax * kFinfoAmaxInvE4M3);
     scale = fast_pow2(-exp_scale_inv);
@@ -647,7 +651,7 @@ __forceinline__ __device__ void calculate_fp8_scales(float amax, float& scale, f
 }
 
 template <bool kIsUE8M0, typename out_dtype_t = std::conditional_t<kIsUE8M0, uint8_t, float>>
-__forceinline__ __device__ out_dtype_t extract_required_scale_format(float value) {
+__device__ __forceinline__ out_dtype_t extract_required_scale_format(float value) {
   if constexpr (kIsUE8M0) {
     return static_cast<uint8_t>((*reinterpret_cast<uint32_t*>(&value)) >> 23);
   } else {

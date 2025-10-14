@@ -121,12 +121,12 @@ __host__ __device__ __forceinline__ std::pair<int, int> get_nvl_clean_meta(
 }
 
 template <bool kLowLatencyMode>
-__forceinline__ __device__ int translate_dst_rdma_rank(const int dst_rdma_rank, const int nvl_rank) {
+__device__ __forceinline__ int translate_dst_rdma_rank(const int dst_rdma_rank, const int nvl_rank) {
   return kLowLatencyMode ? (dst_rdma_rank * NUM_MAX_NVL_PEERS + nvl_rank) : dst_rdma_rank;
 }
 
 template <bool kLowLatencyMode>
-__forceinline__ __device__ void nvshmem_sync_with_same_gpu_idx(const nvshmem_team_t& rdma_team) {
+__device__ __forceinline__ void nvshmem_sync_with_same_gpu_idx(const nvshmem_team_t& rdma_team) {
   kLowLatencyMode ? void(nvshmem_sync(rdma_team)) : nvshmem_sync_all();
 }
 
@@ -1918,7 +1918,7 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * 32, 1) combine(
         if (kNumWarpsPerForwarder == 1) {
           __syncwarp();
         } else {
-          asm volatile("bar.sync %0, %1;" ::"r"(dst_rdma_rank + 2), "r"(kNumWarpsPerForwarder * 32));
+          sync_warp_group(/*group_flag=*/dst_rdma_rank + 2, /*group_size=*/kNumWarpsPerForwarder * 32);
         }
       };
       GRPCOLL_STATIC_ASSERT(kNumWarpsPerForwarder == 1 or kNumRDMARanks + 2 <= 16, "Barriers are not enough");
