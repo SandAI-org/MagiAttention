@@ -101,7 +101,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
     int phases) {
   const auto sm_id = static_cast<int>(blockIdx.x);
   const auto thread_id = static_cast<int>(threadIdx.x);
-  const auto warp_id = thread_id / 32, lane_id = get_lane_id();
+  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
   const auto num_sms = static_cast<int>(gridDim.x);
   const auto num_warps = num_warp_groups * num_warps_per_group;
   const auto num_local_experts = num_experts / num_ranks;
@@ -128,7 +128,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
   GRPCOLL_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
 
   // Expert counts
-  constexpr int kNumMaxWarpGroups = 32;
+  constexpr int kNumMaxWarpGroups = WARP_SIZE;
   __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
 
   // Sending phase
@@ -140,9 +140,9 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
   // 2. The last warp for reading `topk_idx` and count for per-expert information
   if (warp_id < num_warps - 1) {
     constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
-    GRPCOLL_STATIC_ASSERT(kHidden % (32 * kNumElemsPerRead) == 0, "Invalid hidden");
-    GRPCOLL_STATIC_ASSERT(kNumElemsPerRead * 32 % kNumPerChannels == 0, "Invalid vectorization");
-    const auto num_threads = (num_warps - 1) * 32;
+    GRPCOLL_STATIC_ASSERT(kHidden % (WARP_SIZE * kNumElemsPerRead) == 0, "Invalid hidden");
+    GRPCOLL_STATIC_ASSERT(kNumElemsPerRead * WARP_SIZE % kNumPerChannels == 0, "Invalid vectorization");
+    const auto num_threads = (num_warps - 1) * WARP_SIZE;
     const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
 
     for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
@@ -173,7 +173,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
           }
 
           // Reduce amax and scale
-          GRPCOLL_STATIC_ASSERT(kNumElemsPerRead * 32 / kNumPerChannels == 2, "Invalid vectorization");
+          GRPCOLL_STATIC_ASSERT(kNumElemsPerRead * WARP_SIZE / kNumPerChannels == 2, "Invalid vectorization");
           amax = warp_reduce_max<16>(amax);
           calculate_fp8_scales(amax, scale, scale_inv, round_scale);
           if (lane_id == 0 or lane_id == 16)
@@ -227,13 +227,13 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
 
 // The first SM is also responsible for cleaning the next buffer
 #pragma unroll
-      for (int i = lane_id; i < num_next_clean_int; i += 32)
+      for (int i = lane_id; i < num_next_clean_int; i += WARP_SIZE)
         next_clean[i] = 0;
 
       // Notify before executing `int_p`
       __syncwarp();
 #pragma unroll
-      for (int i = lane_id; i < num_experts; i += 32)
+      for (int i = lane_id; i < num_experts; i += WARP_SIZE)
         atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
     }
 
@@ -244,7 +244,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
 
 // Per lane count
 #pragma unroll 8
-    for (int i = lane_id; i < num_tokens * num_topk; i += 32) {
+    for (int i = lane_id; i < num_tokens * num_topk; i += WARP_SIZE) {
       auto idx = static_cast<int>(__ldg(topk_idx + i));
       if (idx >= expert_begin_idx and idx < expert_end_idx)
         expert_count[idx - expert_begin_idx]++;
@@ -328,7 +328,7 @@ LOW_LATENCY_DISPATCH_RECV:
       if (cumulative_local_expert_recv_stats != nullptr)
         atomicAdd(cumulative_local_expert_recv_stats + local_expert_idx, num_recv_tokens);
     }
-    sync_warp_group(/*group_flag=*/warp_group_id + 2, /*group_size=*/num_warps_per_group * 32);
+    sync_warp_group(/*group_flag=*/warp_group_id + 2, /*group_size=*/num_warps_per_group * WARP_SIZE);
     num_recv_tokens = shared_num_recv_tokens[warp_group_id];
     recv_token_begin_idx = shared_recv_token_begin_idx[warp_group_id];
 
@@ -362,10 +362,10 @@ LOW_LATENCY_DISPATCH_RECV:
           auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id));
           recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
         }
-        if (lane_id + 32 < num_scales) {
-          const auto pack_idx = (lane_id + 32) / num_elems_per_pack;
-          const auto elem_idx = (lane_id + 32) % num_elems_per_pack;
-          auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + 32));
+        if (lane_id + WARP_SIZE < num_scales) {
+          const auto pack_idx = (lane_id + WARP_SIZE) / num_elems_per_pack;
+          const auto elem_idx = (lane_id + WARP_SIZE) % num_elems_per_pack;
+          auto scale = extract_required_scale_format<kUseUE8M0>(ld_nc_global(src_scales + lane_id + WARP_SIZE));
           recv_x_scales[token_idx * token_stride + pack_idx * pack_stride + elem_idx] = scale;
         }
       }
@@ -403,7 +403,7 @@ void dispatch(
     int phases) {
   constexpr int kNumMaxTopK = 9;
   const int num_warp_groups = ceil_div(num_experts, num_device_sms);
-  const int num_warps_per_group = 32 / num_warp_groups;
+  const int num_warps_per_group = WARP_SIZE / num_warp_groups;
   GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
   GRPCOLL_HOST_ASSERT(kNumMaxTopK + 1 <= num_warp_groups * num_warps_per_group);
 
@@ -458,7 +458,7 @@ void dispatch(
   }                                                      \
   break
 
-  SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
+  SETUP_LAUNCH_CONFIG(num_sms, num_warps * WARP_SIZE, stream);
   SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
 #undef DISPATCH_LAUNCH_CASE
 }
@@ -492,7 +492,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
   const auto num_sms = static_cast<int>(gridDim.x);
   const auto thread_id = static_cast<int>(threadIdx.x);
   const auto num_threads = static_cast<int>(blockDim.x);
-  const auto warp_id = thread_id / 32, lane_id = get_lane_id();
+  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
   const auto num_local_experts = num_experts / num_ranks;
   const auto warp_group_id = warp_id / num_warps_per_group;
   const auto sub_warp_id = warp_id % num_warps_per_group;
@@ -502,7 +502,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
   constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
   constexpr int64_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
   constexpr int kNumUnrolls = 4;
-  constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), 32 * kNumUnrolls);
+  constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), WARP_SIZE * kNumUnrolls);
   GRPCOLL_STATIC_ASSERT(hidden_bf16_int4 % kNumUnrolls == 0, "Invalid hidden");
   GRPCOLL_STATIC_ASSERT(kNumUnrolls == 1 or kNumUnrolls == 2 or kNumUnrolls == 4, "Invalid unrolling factors");
 
@@ -517,7 +517,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
   // Clean up next buffer
   if (sm_id == 0 and warp_group_id == 0 and sub_warp_id == 0) {
 #pragma unroll
-    for (int i = lane_id; i < num_next_clean_int; i += 32)
+    for (int i = lane_id; i < num_next_clean_int; i += WARP_SIZE)
       next_clean[i] = 0;
 
     // Notify before executing `int_p`
@@ -541,7 +541,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
     unpack2(layout, num_tokens_to_send, offset);
 
     // TMA stuffs
-    constexpr int kNumTMABufferBytes = sizeof(int4) * 32 * kNumUnrolls;
+    constexpr int kNumTMABufferBytes = sizeof(int4) * WARP_SIZE * kNumUnrolls;
     constexpr int kNumStages = 3;
     constexpr int kNumPrefetch = 1;
     GRPCOLL_STATIC_ASSERT(kNumStages == 3 and kNumPrefetch == 1, "Invalid stages");
@@ -561,7 +561,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
     }
     __syncwarp();
 
-    constexpr int kNumIters = hidden_bf16_int4_pad / (32 * kNumUnrolls);
+    constexpr int kNumIters = hidden_bf16_int4_pad / (WARP_SIZE * kNumUnrolls);
     auto tma_load_and_arrive = [&](const int& stage_idx, const int4* gmem_ptr, const int& num_bytes) {
       tma_load_1d(tma_buffer[stage_idx], gmem_ptr, tma_mbarrier[stage_idx], num_bytes);
       mbarrier_arrive_and_expect_tx(tma_mbarrier[stage_idx], num_bytes);
@@ -591,7 +591,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
         __syncwarp();
 
 #pragma unroll
-        for (int i = lane_id * kNumUnrolls, iter_idx = 0; i < hidden_bf16_int4_pad; i += 32 * kNumUnrolls, ++iter_idx) {
+        for (int i = lane_id * kNumUnrolls, iter_idx = 0; i < hidden_bf16_int4_pad; i += WARP_SIZE * kNumUnrolls, ++iter_idx) {
           // Read
           int4 int4_values[kNumUnrolls] = {0};
           auto uint32_values = reinterpret_cast<uint32_t*>(int4_values);
@@ -602,7 +602,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
           const int& next_stage_idx = (iter_idx + 1) % kNumStages;
           tma_store_wait<kNumStages - kNumPrefetch - 1>();
           if (iter_idx + 1 < kNumIters and elect_one_sync(lane_id)) {
-            const auto& offset_int4 = i + 32 * kNumUnrolls;
+            const auto& offset_int4 = i + WARP_SIZE * kNumUnrolls;
             tma_load_and_arrive(next_stage_idx, cpy_src_int4_ptr + offset_int4, get_num_tma_bytes(offset_int4));
           }
           __syncwarp();
@@ -617,7 +617,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
             constexpr float kMinClip = 32; // `== log_2(2 ^ (2 ^ 5))`
             constexpr int kNumBits = 10;
             constexpr int kNumValues = 1 << (kNumBits - 1);
-            GRPCOLL_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * 32) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
+            GRPCOLL_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * WARP_SIZE) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
 
             // Local log amax
             float log_abs_values[kNumElemsPerInt4 * kNumUnrolls], log_amax, log_amin, amax;
@@ -683,7 +683,7 @@ __global__ __launch_bounds__(1024, 1) void combine(
 
     // Put the finishing flag
     GRPCOLL_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 16);
-    sync_warp_group(/*group_flag=*/warp_group_id + 1, /*group_size=*/num_warps_per_group * 32);
+    sync_warp_group(/*group_flag=*/warp_group_id + 1, /*group_size=*/num_warps_per_group * WARP_SIZE);
     if (sub_warp_id == 1 and lane_id == 0) {
       while (ld_acquire_global(atomic_clean_flag) == 0)
         ;
@@ -715,8 +715,8 @@ LOW_LATENCY_COMBINE_RECV:
   cg::this_grid().sync();
 
   // Reduce tokens
-  GRPCOLL_DEVICE_ASSERT(num_topk <= 32);
-  GRPCOLL_STATIC_ASSERT(kHidden % (32 * kNumElemsPerInt4) == 0, "Invalid vectorization");
+  GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE);
+  GRPCOLL_STATIC_ASSERT(kHidden % (WARP_SIZE * kNumElemsPerInt4) == 0, "Invalid vectorization");
   for (int hidden_idx = thread_id; hidden_idx < hidden_bf16_int4; hidden_idx += num_threads) {
     for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
       // Read top-k indices and weights
@@ -783,7 +783,7 @@ void combine(
     bool zero_copy) {
   constexpr int kNumMaxTopk = 9;
   const int num_warp_groups = ceil_div(num_experts, num_device_sms);
-  const int num_warps_per_group = 32 / num_warp_groups;
+  const int num_warps_per_group = WARP_SIZE / num_warp_groups;
   GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
 
   const auto num_warps = num_warp_groups * num_warps_per_group;
@@ -833,7 +833,7 @@ void combine(
   }                                                                                                            \
   break
 
-  SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
+  SETUP_LAUNCH_CONFIG(num_sms, num_warps * WARP_SIZE, stream);
   SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);
 #undef COMBINE_LAUNCH_CASE
 }
