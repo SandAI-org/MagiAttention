@@ -703,8 +703,6 @@ class GrpCollBuffer:
             x,
             recv_x,
             None,  # x_scales
-            None,  # topk_idx
-            None,  # topk_weights
             num_tokens_per_rank,
             is_token_in_rank,
             num_tokens_per_expert,
