@@ -223,12 +223,20 @@ def gen_jit_spec(
             "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage",
         ]
     if debug:
+        """
         cuda_cflags += [
             "-g",
             "--keep",
             "--ftemplate-backtrace-limit=0",
             "--resource-usage",  # printing out number of registers
             "-DCUTLASS_DEBUG_TRACE_LEVEL=2",
+        ]
+        """
+        cuda_cflags += [
+            # "-g",
+            # "-lineinfo",
+            "--resource-usage",
+            "--ptxas-options=-v",
         ]
     else:
         # non debug mode

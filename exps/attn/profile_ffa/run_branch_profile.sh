@@ -37,6 +37,11 @@ echo "Received Branch Name: $BRANCH_NAME"
 echo "Output Directory: $OUTPUT_DIR"
 echo "================================================="
 
+# --- ADDED: Ensure the output directory exists before trying to write to it ---
+echo "Ensuring output directory '$OUTPUT_DIR' exists..."
+mkdir -p "$OUTPUT_DIR"
+# ---------------------------------------------------------------------------
+
 # 3. Run the dense type test
 #    The output path is now constructed with the directory prefix.
 OUTPUT_DENSE="${OUTPUT_DIR}/profile_dense_${BRANCH_NAME}.csv"
@@ -46,10 +51,11 @@ PYTHONPATH=../../../ python ffa_benchmark.py --test_type dense -o "$OUTPUT_DENSE
 
 # 4. Run the block_sparse type test
 #    The output path is now constructed with the directory prefix.
-OUTPUT_BLOCK_SPARSE="${OUTPUT_DIR}/profile_block_sparse_${BRANCH_NAME}.csv"
-echo "" # Print a blank line for spacing
-echo "Running block_sparse test, outputting to file: $OUTPUT_BLOCK_SPARSE ..."
-PYTHONPATH=../../../ python ffa_benchmark.py --test_type block_sparse -o "$OUTPUT_BLOCK_SPARSE"
+
+#OUTPUT_BLOCK_SPARSE="${OUTPUT_DIR}/profile_block_sparse_${BRANCH_NAME}.csv"
+#echo "" # Print a blank line for spacing
+#echo "Running block_sparse test, outputting to file: $OUTPUT_BLOCK_SPARSE ..."
+#PYTHONPATH=../../../ python ffa_benchmark.py --test_type block_sparse -o "$OUTPUT_BLOCK_SPARSE"
 
 echo ""
 echo "All profile have completed!"

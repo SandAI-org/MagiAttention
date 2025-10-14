@@ -18,6 +18,7 @@ import random
 from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
+import nvtx
 import torch
 
 from exps.attn.baselines.utils import (
@@ -37,9 +38,6 @@ from magi_attention.utils.sparse_utils import (
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
 )
-
-# import sys
-# sys.path.append("..")
 
 
 # -----------------------------------------------------------------------------
@@ -336,7 +334,9 @@ def run_benchmark_framework(
 
                 for _ in range(run_iters):
                     bench_fwd_start.record()
+                    rng = nvtx.start_range(message="forward_pass")
                     out, _ = ffa_func(q, k, v, **ffa_args)
+                    nvtx.end_range(rng)
                     bench_fwd_end.record()
                     torch.cuda.synchronize()
                     total_fwd_times.append(bench_fwd_start.elapsed_time(bench_fwd_end))
@@ -393,7 +393,10 @@ def run_benchmark_framework(
                     if v.grad is not None:
                         v.grad.zero_()
                     bench_bwd_start.record()
+                    rng = nvtx.start_range(message="backward_pass")
                     out.backward(do, retain_graph=True)
+                    nvtx.end_range(rng)
+                    torch.cuda.nvtx.range_pop()
                     bench_bwd_end.record()
                     torch.cuda.synchronize()
                     total_bwd_times.append(bench_bwd_start.elapsed_time(bench_bwd_end))
@@ -438,7 +441,8 @@ def run_benchmark_framework(
 # -----------------------------------------------------------------------------
 def run_dense_tests(args, common_params):
     seqlens_to_test = [8192]
-    mask_types_to_test = ["full", "causal", "varlen_full", "varlen_causal"]
+    # mask_types_to_test = ["full", "causal", "varlen_full", "varlen_causal"]
+    mask_types_to_test = ["full"]
     configs_to_test = [
         {"seqlen": sl, "mask_type": mt}
         for sl in seqlens_to_test
