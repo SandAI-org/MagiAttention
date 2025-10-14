@@ -350,6 +350,12 @@ __device__ __forceinline__ float exp2f_approx(const float& x) {
 // TMA PTX instructions
 #ifndef DISABLE_SM90_FEATURES
 
+template <typename ptr_t>
+__device__ __forceinline__ uint32_t to_shared_ptr_value(const ptr_t* ptr) {
+  // Transfer pointer from generic space to shared space
+  return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
+}
+
 __device__ __forceinline__ uint32_t elect_one_sync(int lane_id) {
   uint32_t pred = 0;
   asm volatile(
@@ -374,12 +380,12 @@ __device__ __forceinline__ void fence_barrier_init() {
 }
 
 __device__ __forceinline__ void mbarrier_init(uint64_t* mbar_ptr, uint32_t arrive_count) {
-  auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
+  auto mbar_int_ptr = to_shared_ptr_value<uint64_t>(mbar_ptr);
   asm volatile("mbarrier.init.shared::cta.b64 [%1], %0;" ::"r"(arrive_count), "r"(mbar_int_ptr));
 }
 
-__device__ __forceinline__ void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& phase) {
-  auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
+__device__ __forceinline__ void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& phase, int num_tma_stages = 2) {
+  auto mbar_int_ptr = to_shared_ptr_value<uint64_t>(mbar_ptr);
   asm volatile(
       "{\n\t"
       ".reg .pred       P1; \n\t"
@@ -391,11 +397,16 @@ __device__ __forceinline__ void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& phas
       "}" ::"r"(mbar_int_ptr),
       "r"(phase),
       "r"(0x989680));
-  phase ^= 1;
+
+  // NOTES: phase is inplace updated
+  if (num_tma_stages == 2)
+    phase ^= 1;
+  else
+    phase = (phase + 1) % num_tma_stages;
 }
 
 __device__ __forceinline__ void mbarrier_arrive_and_expect_tx(uint64_t* mbar_ptr, int num_bytes) {
-  auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
+  auto mbar_int_ptr = to_shared_ptr_value<uint64_t>(mbar_ptr);
   asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%1], %0; \n\t" ::"r"(num_bytes), "r"(mbar_int_ptr));
 }
 
@@ -403,12 +414,12 @@ __device__ __forceinline__ void tma_store_fence() {
   asm volatile("fence.proxy.async.shared::cta;");
 }
 
-constexpr uint64_t kEvictFirst = 0x12f0000000000000;
+constexpr uint64_t kEvictFirst = 0x12f0000000000000; // the data should be evicted first in the L2 cache
 constexpr uint64_t kEvictNormal = 0x1000000000000000;
 
 __device__ __forceinline__ void tma_load_1d(const void* smem_ptr, const void* gmem_ptr, uint64_t* mbar_ptr, int num_bytes, bool evict_first = true) {
-  auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
-  auto smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  auto mbar_int_ptr = to_shared_ptr_value<uint64_t>(mbar_ptr);
+  auto smem_int_ptr = to_shared_ptr_value<void>(smem_ptr);
   const auto cache_hint = evict_first ? kEvictFirst : kEvictNormal;
   asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1], %2, [%3], %4;\n" ::"r"(smem_int_ptr),
                "l"(gmem_ptr),
@@ -419,7 +430,7 @@ __device__ __forceinline__ void tma_load_1d(const void* smem_ptr, const void* gm
 }
 
 __device__ __forceinline__ void tma_store_1d(const void* smem_ptr, const void* gmem_ptr, int num_bytes, bool evict_first = true) {
-  auto smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  auto smem_int_ptr = to_shared_ptr_value<void>(smem_ptr);
   const auto cache_hint = evict_first ? kEvictFirst : kEvictNormal;
   asm volatile("cp.async.bulk.global.shared::cta.bulk_group.L2::cache_hint [%0], [%1], %2, %3;\n" ::"l"(gmem_ptr), "r"(smem_int_ptr), "r"(num_bytes), "l"(cache_hint)
                : "memory");
