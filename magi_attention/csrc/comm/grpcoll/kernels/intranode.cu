@@ -678,7 +678,7 @@ void dispatch(
 #endif
 
   // Make sure never OOB
-  GRPCOLL_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < std::numeric_limits<int>::max());
+  GRPCOLL_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < INT_MAX);
 
 #define DISPATCH_LAUNCH_CASE(ranks)                                  \
   {                                                                  \
@@ -862,7 +862,7 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     const auto responsible_rank = (responsible_channel + send_warp_id) % kNumRanks; // REVIEW: why shifted by responsible_channel ?
     const auto send_warp_id_in_rank = send_warp_id / kNumRanks;
 
-    GRPCOLL_STATIC_ASSERT(num_send_warps * WARP_SIZE == kNumThreads, "Invalid warp count");
+    GRPCOLL_STATIC_ASSERT(num_send_warps % kNumRanks == 0, "Invalid number of send warps");
 
     // Get buffer ptr of the recv rank
     // (the metadata of any pair of (sender, receiver) is all stored on the receiver side)
@@ -986,51 +986,60 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
         st_release_sys_global(channel_tail_idx.buffer(), current_channel_tail_idx); // system scope, release order
     }
   } else {
-    // Workers for receiving
-    // One warp for moving the queue head, others for reduction
+    // Ger recv warp info
+    // One warp for updating the queue head, others for reduction
     constexpr int num_recv_warps = kNumThreads / WARP_SIZE;
     const auto recv_warp_id = warp_id;
 
     GRPCOLL_STATIC_ASSERT(kNumRanks <= WARP_SIZE, "Invalid number of ranks");
-    GRPCOLL_STATIC_ASSERT(kNumThreads % WARP_SIZE == 0, "Invalid number of recv threads");
+    GRPCOLL_STATIC_ASSERT(num_recv_warps >= 2, "Invalid number of recv warps");
 
-    // Shared head, tail and retired flags for receiver warps
-    __shared__ volatile int warp_channel_head_idx[num_recv_warps][kNumRanks];
-    __shared__ volatile int channel_tail_idx[kNumRanks];
-    __shared__ volatile bool warp_retired[num_recv_warps];
+    // Prepare some shared memory buffers
+    // including shared head, tail and retired flags for receiver warps
+    __shared__ volatile int shared_warp_channel_head_idx[num_recv_warps][kNumRanks]; // all heads for each reduction warp, each rank w.r.t. the responsible channel
+    __shared__ volatile int shared_channel_tail_idx[kNumRanks]; // all tails for each rank w.r.t. the responsible channel
+    __shared__ volatile bool shared_warp_retired[num_recv_warps];
+
+    // Init the shared memory buffers
     if (thread_id < num_recv_warps)
-      warp_retired[thread_id] = false;
+      shared_warp_retired[thread_id] = false;
     if (lane_id < kNumRanks)
-      warp_channel_head_idx[recv_warp_id][lane_id] = 0;
+      shared_warp_channel_head_idx[recv_warp_id][lane_id] = 0;
     if (thread_id < kNumRanks)
-      channel_tail_idx[thread_id] = 0;
-    asm volatile("bar.sync 0, %0;" ::"r"(kNumThreads));
+      shared_channel_tail_idx[thread_id] = 0;
 
-    if (thread_id < WARP_SIZE) {
-      int* channel_head_idx_ptr = static_cast<int*>(buffer_ptrs[rank]) + responsible_channel * kNumRanks + lane_id;
-      int* channel_tail_idx_ptr = channel_head_idx_ptr + num_channels * kNumRanks;
+    // Sync all recv warps
+    sync_warp_group(/*group_flag=*/0, /*group_size=*/kNumThreads);
 
-      // Queue head updater
+    if (thread_id < WARP_SIZE) { // warp0 for updating the queue head, where each lane handles one rank
+      const int responsible_rank = lane_id;
+      // Get head/tail ptr of the responsible rank in buffer of the recv rank
+      //  `head_idx`: shape=(kNumChannels, kNumRanks), dtype=int
+      //  `tail_idx`: shape=(kNumChannels, kNumRanks), dtype=int
+      int* channel_head_idx_ptr = static_cast<int*>(buffer_ptrs[rank]) + responsible_channel * kNumRanks + responsible_rank;
+      int* channel_tail_idx_ptr = channel_head_idx_ptr + num_channels_total;
+
+      // Self-rotate to update the queue head and retire other reduction warps
       int last_head = 0;
-      while (lane_id < kNumRanks) {
-        // Check retired
+      while (responsible_rank < kNumRanks) {
+        // Check whether all reduction warps are retired
         bool retired = true;
 #pragma unroll
-        for (int i = 1; i < num_recv_warps; ++i)
-          retired = retired and warp_retired[i];
+        for (int reduce_warp_id = 1; reduce_warp_id < num_recv_warps; ++reduce_warp_id)
+          retired = retired & shared_warp_retired[reduce_warp_id];
         if (retired)
-          break;
+          break; // if all reduction warps are retired, this warp can exit as well
 
-        // Update queue tail
-        channel_tail_idx[lane_id] = ld_acquire_sys_global(channel_tail_idx_ptr);
+        // Load queue tail for the responsible rank w.r.t. the responsible channel
+        shared_channel_tail_idx[responsible_rank] = ld_acquire_sys_global(channel_tail_idx_ptr); // system scope, acquire order
 
         // Update minimum head
-        int min_head = std::numeric_limits<int>::max();
+        int min_head = INT_MAX;
 #pragma unroll
-        for (int i = 1; i < num_recv_warps; ++i)
-          if (not warp_retired[i])
-            min_head = min(min_head, warp_channel_head_idx[i][lane_id]);
-        if (min_head != std::numeric_limits<int>::max() and min_head > last_head)
+        for (int reduce_warp_id = 1; reduce_warp_id < num_recv_warps; ++reduce_warp_id)
+          if (!shared_warp_retired[reduce_warp_id])
+            min_head = min(min_head, shared_warp_channel_head_idx[reduce_warp_id][responsible_rank]);
+        if (min_head != INT_MAX and min_head > last_head)
           st_relaxed_sys_global(channel_head_idx_ptr, last_head = min_head);
       }
     } else {
@@ -1047,7 +1056,7 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
         const auto channel_rank_token_offset = channel_rank_offset * num_recv_buffer_tokens;
 
         // `head_idx` & `tail_idx`: kNumChannels * kNumRanks * sizeof(int)
-        auto ptr = reinterpret_cast<void*>(static_cast<int8_t*>(buffer_ptrs[rank]) + 2 * num_channels * kNumRanks * sizeof(int));
+        auto ptr = reinterpret_cast<void*>(static_cast<int8_t*>(buffer_ptrs[rank]) + 2 * num_channels_total * sizeof(int));
 
         // `x_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * hidden_int4 * sizeof(int4)
         channel_x_buffers[i] = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
@@ -1071,7 +1080,7 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
           expected_head = ld_nc_global(send_head + token_idx * kNumRanks + lane_id);
 
         auto start_time = clock64();
-        while (__any_sync(0xffffffff, channel_tail_idx[lane_id] <= expected_head and expected_head >= 0)) {
+        while (__any_sync(0xffffffff, shared_channel_tail_idx[lane_id] <= expected_head and expected_head >= 0)) {
           // Timeout check
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
             printf("grpcoll timeout for combine receivers, rank %d, responsible_channel = %d, expect = %d\n", rank, responsible_channel, expected_head);
@@ -1189,13 +1198,13 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
 
         // Update head
         if (lane_id < kNumRanks)
-          warp_channel_head_idx[recv_warp_id][lane_id] = (expected_head < 0) ? -expected_head - 1 : expected_head + 1;
+          shared_warp_channel_head_idx[recv_warp_id][lane_id] = (expected_head < 0) ? -expected_head - 1 : expected_head + 1;
       }
 
       // Retired
       __syncwarp();
       if (lane_id == 0)
-        warp_retired[recv_warp_id] = true;
+        shared_warp_retired[recv_warp_id] = true;
 
       // Make TMA store visible to the next kernel
 #ifndef DISABLE_SM90_FEATURES

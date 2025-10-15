@@ -62,7 +62,7 @@ struct SourceMeta {
   __forceinline__ SourceMeta() = default;
 
   // TODO: faster encoding
-  __device__ __forceinline__ SourceMeta(int rdma_rank, const bool* is_token_in_nvl_ranks) {
+  DEVICE_INLINE SourceMeta(int rdma_rank, const bool* is_token_in_nvl_ranks) {
     src_rdma_rank = rdma_rank;
     is_token_in_nvl_rank_bits = is_token_in_nvl_ranks[0];
 #pragma unroll
@@ -70,7 +70,7 @@ struct SourceMeta {
       is_token_in_nvl_rank_bits |= is_token_in_nvl_ranks[i] << i;
   }
 
-  __device__ __forceinline__ bool is_token_in_nvl_rank(int nvl_rank) const {
+  DEVICE_INLINE bool is_token_in_nvl_rank(int nvl_rank) const {
     return (is_token_in_nvl_rank_bits >> nvl_rank) & 1;
   }
 };
@@ -81,12 +81,12 @@ int get_source_meta_bytes() {
   return sizeof(SourceMeta);
 }
 
-__host__ __device__ __forceinline__ int get_num_bytes_per_token(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights) {
+__host__ DEVICE_INLINE int get_num_bytes_per_token(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights) {
   return static_cast<int>(align(
       hidden_int4 * sizeof(int4) + sizeof(SourceMeta) + num_scales * sizeof(float) + num_topk_idx * sizeof(int) + num_topk_weights * sizeof(float), sizeof(int4)));
 }
 
-__host__ __device__ __forceinline__ std::pair<int, int> get_rdma_clean_meta(
+__host__ DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(
     int hidden_int4,
     int num_scales,
     int num_topk_idx,
@@ -101,7 +101,7 @@ __host__ __device__ __forceinline__ std::pair<int, int> get_rdma_clean_meta(
       (NUM_MAX_NVL_PEERS * 2 + 4) * num_rdma_ranks * 2 * num_channels};
 }
 
-__host__ __device__ __forceinline__ std::pair<int, int> get_nvl_clean_meta(
+__host__ DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
     int hidden_int4,
     int num_scales,
     int num_topk_idx,
@@ -121,12 +121,12 @@ __host__ __device__ __forceinline__ std::pair<int, int> get_nvl_clean_meta(
 }
 
 template <bool kLowLatencyMode>
-__device__ __forceinline__ int translate_dst_rdma_rank(const int dst_rdma_rank, const int nvl_rank) {
+DEVICE_INLINE int translate_dst_rdma_rank(const int dst_rdma_rank, const int nvl_rank) {
   return kLowLatencyMode ? (dst_rdma_rank * NUM_MAX_NVL_PEERS + nvl_rank) : dst_rdma_rank;
 }
 
 template <bool kLowLatencyMode>
-__device__ __forceinline__ void nvshmem_sync_with_same_gpu_idx(const nvshmem_team_t& rdma_team) {
+DEVICE_INLINE void nvshmem_sync_with_same_gpu_idx(const nvshmem_team_t& rdma_team) {
   kLowLatencyMode ? void(nvshmem_sync(rdma_team)) : nvshmem_sync_all();
 }
 
@@ -451,8 +451,8 @@ void notify_dispatch(
       get_nvl_clean_meta(hidden_int4, num_scales, num_topk, num_topk, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, true);
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
-  GRPCOLL_HOST_ASSERT(num_rdma_bytes < std::numeric_limits<int>::max());
-  GRPCOLL_HOST_ASSERT(num_nvl_bytes < std::numeric_limits<int>::max());
+  GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
+  GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
 
   // Launch kernel
   SETUP_LAUNCH_CONFIG(1 + num_rdma_ranks, kNumThreads, stream);
@@ -1032,16 +1032,16 @@ __global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NV
     int last_head = 0, target_rdma = lane_id < kNumRDMARanks ? lane_id : 0;
     while (true) {
       // Find minimum head
-      int min_head = std::numeric_limits<int>::max();
+      int min_head = INT_MAX;
 #pragma unroll
       for (int i = 0; i < NUM_MAX_NVL_PEERS; ++i)
         if (not forward_channel_retired[i])
           min_head = min(min_head, forward_channel_head[i][target_rdma]);
-      if (__all_sync(0xffffffff, min_head == std::numeric_limits<int>::max()))
+      if (__all_sync(0xffffffff, min_head == INT_MAX))
         break;
 
       // Update remote head
-      if (min_head != std::numeric_limits<int>::max() and min_head >= last_head + num_max_rdma_chunked_send_tokens and lane_id < kNumRDMARanks) {
+      if (min_head != INT_MAX and min_head >= last_head + num_max_rdma_chunked_send_tokens and lane_id < kNumRDMARanks) {
         nvshmemi_ibgda_amo_nonfetch_add(
             rdma_channel_head.buffer(rdma_rank),
             min_head - last_head,
@@ -1229,7 +1229,7 @@ void dispatch(
   constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS;
 
   // Make sure never OOB
-  GRPCOLL_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < std::numeric_limits<int>::max());
+  GRPCOLL_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < INT_MAX);
 
 #define DISPATCH_LAUNCH_CASE(num_rdma_ranks)                                                                                                                 \
   {                                                                                                                                                          \
@@ -1475,8 +1475,8 @@ void cached_notify(
       hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, is_cached_dispatch);
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
-  GRPCOLL_HOST_ASSERT(num_rdma_bytes < std::numeric_limits<int>::max());
-  GRPCOLL_HOST_ASSERT(num_nvl_bytes < std::numeric_limits<int>::max());
+  GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
+  GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
   GRPCOLL_HOST_ASSERT(num_channels * 2 > 3);
 
   // Launch kernel
@@ -2179,12 +2179,12 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1) combine(
 
         // Find minimum head for RDMA ranks
         if (not is_forwarder_sm) {
-          int min_head = std::numeric_limits<int>::max();
+          int min_head = INT_MAX;
 #pragma unroll
           for (int i = 0; i < kNumRDMAReceivers; ++i)
             if (not rdma_receiver_retired[i])
               min_head = min(min_head, rdma_receiver_rdma_head[i][dst_rdma_rank]);
-          if (min_head != std::numeric_limits<int>::max() and min_head >= last_rdma_head + num_max_rdma_chunked_send_tokens and lane_id < kNumRDMARanks) {
+          if (min_head != INT_MAX and min_head >= last_rdma_head + num_max_rdma_chunked_send_tokens and lane_id < kNumRDMARanks) {
             nvshmemi_ibgda_amo_nonfetch_add(
                 rdma_channel_head.buffer(rdma_rank),
                 min_head - last_rdma_head,
@@ -2197,12 +2197,12 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1) combine(
 // Find minimum head for NVL ranks
 #pragma unroll
           for (int i = 0; i < kNumRDMARanks; ++i) {
-            int min_head = std::numeric_limits<int>::max();
+            int min_head = INT_MAX;
 #pragma unroll
             for (int j = 0; j < num_warps_per_rdma_rank; ++j)
               if (not forwarder_retired[i * num_warps_per_rdma_rank + j])
                 min_head = min(min_head, forwarder_nvl_head[i * num_warps_per_rdma_rank + j][dst_nvl_rank]);
-            if (min_head != std::numeric_limits<int>::max() and min_head > last_nvl_head[i] and lane_id < NUM_MAX_NVL_PEERS)
+            if (min_head != INT_MAX and min_head > last_nvl_head[i] and lane_id < NUM_MAX_NVL_PEERS)
               st_relaxed_sys_global(nvl_channel_head.buffer_by(dst_nvl_rank) + i, last_nvl_head[i] = min_head);
           }
         }
