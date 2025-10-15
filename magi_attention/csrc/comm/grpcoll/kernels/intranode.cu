@@ -307,22 +307,22 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
   auto channel_x_scales_buffers = Buffer<float>(ptr, /*num_elems=*/num_channel_tokens_total * num_scales, /*elem_offset=*/channel_rank_token_offset * num_scales);
 
   // Get copy info
-  const auto warp_copy_unroll_stages = 5; // TODO: test other stages and make it configurable
+  constexpr int warp_copy_unroll_stages = 5; // TODO: test other stages and make it configurable
 #ifndef DISABLE_SM90_FEATURES
   // Get TMA copy info
-  const auto num_tma_stages = 2; // TODO: test other stages and make it configurable
+  constexpr int num_tma_stages = 2; // TODO: test other stages and make it configurable
   GRPCOLL_DEVICE_ASSERT(hidden_int4 % num_tma_stages == 0);
   auto hidden_int4_per_stage = hidden_int4 / num_tma_stages;
 
   auto hidden_bytes_per_stage = hidden_int4_per_stage * static_cast<int>(sizeof(int4));
-  GRPCOLL_DEVICE_ASSERT(hidden_bytes_per_stage + sizeof(uint64_t) <= kNumTMABytesPerWarp); // tma buffer + mbarrier
+  GRPCOLL_DEVICE_ASSERT(hidden_bytes_per_stage + sizeof(uint64_t) <= kNumTMABytesPerWarp); // TMA buffer + mbarrier
 
   // Prepare TMA buffer in shared memory for this warp
   extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
   auto tma_buffer = smem_buffer + warp_id * kNumTMABytesPerWarp;
 
-  // Init the TMA phase and mbarrier for this warp
-  uint32_t tma_phase = 0;
+  // Init the TMA stage and mbarrier for this warp
+  uint32_t tma_stage = 0;
   auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes_per_stage);
   if (lane_id == 0) { // the lane0 in this warp
     mbarrier_init(tma_mbarrier, 1);
@@ -360,7 +360,8 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     }
     __syncwarp();
 
-    // Get send tasks, i.e. the range of tokens [start_idx, end_idx) in `x` for this channel
+    // Get send tasks
+    // i.e. the range of tokens [start_idx, end_idx) in `x` for the responsible channel
     // NOTES: this range does not distiguish the destination rank,
     // thus every warp in the block will get the same range
     int token_start_idx, token_end_idx;
@@ -439,7 +440,6 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
 #pragma unroll
           // Warp-strided copy `x_scales` to `channel_x_scales` by this warp
           // which is used to fill `recv_x_scales` by the receiver
-          // TODO: remove this unused copy
           for (int i = lane_id; i < num_scales; i += WARP_SIZE) {
             auto offset = token_idx * scale_token_stride + i * scale_hidden_stride;
             channel_x_scales_buffers[dst_slot_idx * num_scales + i] = __ldg(x_scales + offset);
@@ -565,7 +565,7 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
         for (int i = 0; i < num_tma_stages; ++i) // multiple TMA stages
           if (lane_id == 0) { // the lane0 in this warp issues the TMA
             // Wait for all previous TMA stores to be finished
-            // REVIEW: can we use double buffer for all stages ?
+            // REVIEW: can we use multiple buffers for multiple stages ?
             tma_store_wait();
 
             // Load the token from recv queue to shared memory
@@ -578,9 +578,9 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
             );
 
             // Barrier the last load above to be finished before the next store below
-            // NOTES: TMA phase will be inplace updated
+            // NOTES: TMA stage will be inplace updated
             mbarrier_arrive_and_expect_tx(/*mbar_ptr=*/tma_mbarrier, /*num_bytes=*/hidden_bytes_per_stage);
-            mbarrier_wait(/*mbar_ptr=*/tma_mbarrier, /*phase=*/tma_phase, /*num_tma_stages=*/num_tma_stages);
+            mbarrier_wait(/*mbar_ptr=*/tma_mbarrier, /*stage=*/tma_stage, /*num_tma_stages=*/num_tma_stages);
 
             // Store the token from shared memory to recv buffer
             tma_store_1d(
@@ -612,7 +612,6 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
 
 #pragma unroll 4
       // Thread-copy `channel_x_scales` stored by the sender to `recv_x_scales`
-      // TODO: remove this unused copy
       for (int i = recv_thread_id_in_rank; i < num_recv_tokens * num_scales; i += num_recv_threads_per_rank) { // warp-group strided
         int chunk_idx = i / num_scales, scales_idx = i % num_scales;
         int token_idx_in_queue = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
@@ -672,9 +671,9 @@ void dispatch(
     int num_recv_buffer_tokens) {
   constexpr int kNumThreads = 768; // block size
   constexpr int kNumWarps = kNumThreads / WARP_SIZE; // num warps per block
-  constexpr int kNumTMABytesPerWarp = 8192; // num bytes of tma transfer per warp
+  constexpr int kNumTMABytesPerWarp = 8192; // num bytes of TMA transfer per warp
 #ifndef DISABLE_SM90_FEATURES
-  constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of tma transfer per block
+  constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
   // Make sure never OOB
@@ -832,18 +831,24 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
   const auto num_channel_tokens_total = num_channels_total * num_recv_buffer_tokens;
   GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE);
 
-  // Get Dtype Info and Transform
+  // Get Dtype Info
   GRPCOLL_STATIC_ASSERT(sizeof(int4) % sizeof(dtype_t) == 0, "Invalid vectorization");
   constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
-  int hidden_int4 = hidden / kDtypePerInt4;
+  const int hidden_int4 = hidden / kDtypePerInt4;
+  GRPCOLL_DEVICE_ASSERT(hidden_int4 % WARP_SIZE == 0);
+
+  // Cast from `dtype_t` to `int4`
   auto x_int4 = reinterpret_cast<const int4*>(x);
   auto bias_0_int4 = reinterpret_cast<const int4*>(bias_0);
   auto bias_1_int4 = reinterpret_cast<const int4*>(bias_1);
-  auto recv_int4 = reinterpret_cast<int4*>(recv_x);
+  auto recv_x_int4 = reinterpret_cast<int4*>(recv_x);
 
   // Get copy info
+  constexpr int warp_copy_unroll_stages = 4; // TODO: test other stages and make it configurable
 #ifndef DISABLE_SM90_FEATURES
   // Get TMA copy info
+  constexpr int num_tma_stages = 8; // TODO: test other stages and make it configurable
+  GRPCOLL_STATIC_ASSERT(num_tma_stages * WARP_SIZE * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid TMA buffer count");
 
   // Prepare TMA buffer in shared memory for this warp
   extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
@@ -884,10 +889,11 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     // `topk_weights_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_topk), dtype=float
     auto channel_x_buffers = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
     auto channel_src_idx_buffers = Buffer<int>(ptr, num_channel_tokens_total, channel_rank_token_offset);
-    auto channel_topk_weights_buffers = Buffer<float>(ptr, num_channel_tokens_total * num_topk, channel_rank_token_offset * num_topk); // TODO: remove this unused
+    auto channel_topk_weights_buffers = Buffer<float>(ptr, num_channel_tokens_total * num_topk, channel_rank_token_offset * num_topk);
 
     // Get rank offset
-    // NOTES: `rank_prefix_matrix` is the same as the one in dispatch stage
+    // NOTES: `rank_prefix_matrix`: shape=(kNumRanks, kNumRanks), dtype=int
+    //  is the same as the one in dispatch stage
     //  thus rank_prefix_matrix[:, rank]: the token end offsets sent by each rank to this rank in dispatch stage
     //  then, [rank_prefix_matrix[responsible_rank-1, rank], rank_prefix_matrix[responsible_rank, rank]) is the range of tokens in `x`
     //  which we should return back to responsible_rank in combine stage
@@ -895,7 +901,8 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     int num_rank_tokens = rank_prefix_matrix[responsible_rank * kNumRanks + rank] - rank_offset;
 
     // Get channel offset
-    // NOTES: `channel_prefix_matrix` is actually the `recv_channel_prefix_matrix` in dispatch stage
+    // NOTES: `channel_prefix_matrix`: shape=(kNumRanks, kNumChannels), dtype=int
+    //  is actually the `recv_channel_prefix_matrix` in dispatch stage
     //  thus channel_prefix_matrix[responsible_rank, :]: the token start offsets recv by responsible_rank for each channel to this rank in dispatch stage
     //  then, [channel_prefix_matrix[responsible_rank, responsible_channel], channel_prefix_matrix[responsible_rank, responsible_channel+1])
     //  is the local range of the responsible channel, for the tokens in `x`, recv by responsible_rank in dispatch stage
@@ -953,7 +960,7 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
 
         // Warp-copy this token from send buffer to the recv queue
         UNROLLED_WARP_COPY(
-            /*UNROLL_FACTOR=*/4,
+            /*UNROLL_FACTOR=*/warp_copy_unroll_stages,
             /*LANE_ID=*/lane_id,
             /*N=*/hidden_int4,
             /*DST=*/token_ptr_in_queue_int4,
@@ -964,12 +971,11 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
 
         // Copy channel src idx by lane0
         // NOTES: `src_idx` is actually the `recv_src_idx` in dispatch stage
-        //  thus src_idx[j] indicates the token idx in `combined_x` for x[j] to reduce to
+        //  thus src_idx[j] indicates the token idx in `recv_x` for x[j] to reduce to
         if (lane_id == 0)
           channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + token_idx + i);
 
-        // Send `topk_weights`
-        // TODO: remove this unused copy
+        // Copy `topk_weights`
         if (num_topk > 0 and lane_id < num_topk)
           channel_topk_weights_buffers[dst_slot_idx * num_topk + lane_id] = __ldg(topk_weights + (token_idx + i) * num_topk + lane_id);
       }
@@ -987,7 +993,7 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     }
   } else {
     // Ger recv warp info
-    // One warp for updating the queue head, others for reduction
+    // NOTES: one warp for updating the queue head, others for reduction
     constexpr int num_recv_warps = kNumThreads / WARP_SIZE;
     const auto recv_warp_id = warp_id;
 
@@ -996,7 +1002,7 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
 
     // Prepare some shared memory buffers
     // including shared head, tail and retired flags for receiver warps
-    __shared__ volatile int shared_warp_channel_head_idx[num_recv_warps][kNumRanks]; // all heads for each reduction warp, each rank w.r.t. the responsible channel
+    __shared__ volatile int shared_warp_channel_head_idx[num_recv_warps][kNumRanks]; // all heads for each reduce warp, each rank w.r.t. the responsible channel
     __shared__ volatile int shared_channel_tail_idx[kNumRanks]; // all tails for each rank w.r.t. the responsible channel
     __shared__ volatile bool shared_warp_retired[num_recv_warps];
 
@@ -1013,200 +1019,249 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
 
     if (thread_id < WARP_SIZE) { // warp0 for updating the queue head, where each lane handles one rank
       const int responsible_rank = lane_id;
+
       // Get head/tail ptr of the responsible rank in buffer of the recv rank
       //  `head_idx`: shape=(kNumChannels, kNumRanks), dtype=int
       //  `tail_idx`: shape=(kNumChannels, kNumRanks), dtype=int
       int* channel_head_idx_ptr = static_cast<int*>(buffer_ptrs[rank]) + responsible_channel * kNumRanks + responsible_rank;
       int* channel_tail_idx_ptr = channel_head_idx_ptr + num_channels_total;
 
-      // Self-rotate to update the queue head and retire other reduction warps
+      // Self-rotate to update the queue head and retire other reduce warps
       int last_head = 0;
       while (responsible_rank < kNumRanks) {
-        // Check whether all reduction warps are retired
+        // Check whether all reduce warps are retired
         bool retired = true;
 #pragma unroll
-        for (int reduce_warp_id = 1; reduce_warp_id < num_recv_warps; ++reduce_warp_id)
-          retired = retired & shared_warp_retired[reduce_warp_id];
+        for (int reduce_warp_id = 1; reduce_warp_id < num_recv_warps; ++reduce_warp_id) {
+          retired &= shared_warp_retired[reduce_warp_id];
+          if (!retired)
+            break;
+        }
         if (retired)
-          break; // if all reduction warps are retired, this warp can exit as well
+          break; // if all reduce warps are retired, this warp can retire as well
 
         // Load queue tail for the responsible rank w.r.t. the responsible channel
         shared_channel_tail_idx[responsible_rank] = ld_acquire_sys_global(channel_tail_idx_ptr); // system scope, acquire order
 
-        // Update minimum head
+        // Get minimum head across all reduce warps
         int min_head = INT_MAX;
 #pragma unroll
         for (int reduce_warp_id = 1; reduce_warp_id < num_recv_warps; ++reduce_warp_id)
           if (!shared_warp_retired[reduce_warp_id])
             min_head = min(min_head, shared_warp_channel_head_idx[reduce_warp_id][responsible_rank]);
+
+        // Store queue head for the responsible rank w.r.t. the responsible channel
+        // if the minimum head across all reduce warps is larger than the last head
+        // and update the last head as well
         if (min_head != INT_MAX and min_head > last_head)
-          st_relaxed_sys_global(channel_head_idx_ptr, last_head = min_head);
+          st_relaxed_sys_global(channel_head_idx_ptr, last_head = min_head); // system scope, relaxed order
       }
-    } else {
-      // Receivers
-      // Channel metadata
-      // All lanes will use data buffer, but only rank lane will use `head/tail/src_idx`
+    } else { // other warps except than warp0 handle the reduction
+      // Ger reduce warp info
+      const int num_reduce_warps = num_recv_warps - 1, reduce_warp_id = recv_warp_id - 1;
+      const int responsible_rank = lane_id;
+
+      // Get channel data buffers for each rank
       Buffer<int4> channel_x_buffers[kNumRanks];
       Buffer<float> channel_topk_weights_buffers[kNumRanks];
-
-// Calculate pointers by the specific layout
 #pragma unroll
-      for (int i = 0; i < kNumRanks; ++i) {
-        const auto channel_rank_offset = responsible_channel * kNumRanks + i;
+      for (int curr_rank = 0; curr_rank < kNumRanks; ++curr_rank) {
+        const auto channel_rank_offset = responsible_channel * kNumRanks + curr_rank;
         const auto channel_rank_token_offset = channel_rank_offset * num_recv_buffer_tokens;
 
-        // `head_idx` & `tail_idx`: kNumChannels * kNumRanks * sizeof(int)
+        // Get buffer ptr of the recv rank
+        // and jumped across the `head_idx` and `tail_idx`, loaded by warp0
+        //  `head_idx`: shape=(kNumChannels, kNumRanks), dtype=int
+        //  `tail_idx`: shape=(kNumChannels, kNumRanks), dtype=int
+        // TODO: move this ptr out of the loop, when the non-inplace updated Buffer is supported
         auto ptr = reinterpret_cast<void*>(static_cast<int8_t*>(buffer_ptrs[rank]) + 2 * num_channels_total * sizeof(int));
 
-        // `x_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * hidden_int4 * sizeof(int4)
-        channel_x_buffers[i] = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
+        // Get `channel_x_buffers` for curr rank
+        // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int
+        channel_x_buffers[curr_rank] = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
 
-        // `src_idx_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * sizeof(int)
+        // Jumped across the `src_idx_buffers`, loaded by warp0
+        //  `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
         ptr = reinterpret_cast<void*>(static_cast<int8_t*>(ptr) + num_channel_tokens_total * sizeof(int));
 
-        // `topk_weights_buffers`: kNumChannels * kNumRanks * num_recv_buffer_tokens * num_topk * sizeof(float)
-        channel_topk_weights_buffers[i] = Buffer<float>(ptr, num_channel_tokens_total * num_topk, channel_rank_token_offset * num_topk);
+        // Get `channel_topk_weights_buffers` for curr rank
+        // `topk_weights_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_topk), dtype=float
+        channel_topk_weights_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total * num_topk, channel_rank_token_offset * num_topk);
       }
 
-      // The same tokens as the dispatch process
+      // Get reduce tasks
+      // i.e. the range of tokens [start_idx, end_idx) in `recv_x` for the responsible channel
+      // NOTES: this range is exactly the same as the one in dispatch stage
+      // so as to reduce the tokens from all source ranks
       int token_start_idx, token_end_idx;
       get_channel_task_range(num_recv_tokens, num_channels, responsible_channel, token_start_idx, token_end_idx);
 
-      // Iterate over all tokens and combine
-      for (int64_t token_idx = token_start_idx + recv_warp_id - 1; token_idx < token_end_idx; token_idx += num_recv_warps - 1) {
-        // Read expected head
+      // Iterate over all tokens to reduce to and reduce each from all src ranks
+      for (int64_t token_idx = token_start_idx + reduce_warp_id; token_idx < token_end_idx; token_idx += num_reduce_warps) { // warp-group strided
+        // Read expected head for each rank
         int expected_head = -1;
-        if (lane_id < kNumRanks)
-          expected_head = ld_nc_global(send_head + token_idx * kNumRanks + lane_id);
+        if (responsible_rank < kNumRanks) { // the first `kNumRanks` lanes in each reduce warp load the expected head for each rank
+          // `send_head`: shape=(num_recv_tokens, kNumRanks), dtype=int
+          //  is the same as the one in dispatch stage
+          //  thus send_head[token_idx, r]: the token offset of token_idx for the responsible channel
+          //  if it is sent to rank r in dispatch stage
+          expected_head = ld_nc_global(send_head + token_idx * kNumRanks + responsible_rank); // non-cached load
+        }
 
+        // Wait for expected head for each rank to be ready
+        // i.e. the recv queue for each rank is non-empty
         auto start_time = clock64();
-        while (__any_sync(0xffffffff, shared_channel_tail_idx[lane_id] <= expected_head and expected_head >= 0)) {
-          // Timeout check
+        // NOTES: here we should check `expected_head >= 0` first
+        // to avoid invalid `responsible_rank` when accessing `shared_channel_tail_idx`
+        while (__any_sync(0xffffffff, expected_head >= 0 and shared_channel_tail_idx[responsible_rank] <= expected_head)) {
+          // Check timeout
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-            printf("grpcoll timeout for combine receivers, rank %d, responsible_channel = %d, expect = %d\n", rank, responsible_channel, expected_head);
+            printf("grpcoll timeout for combine receivers, rank=%d, responsible_channel=%d, expect_head=%d\n", rank, responsible_channel, expected_head);
             trap();
           }
         }
         __syncwarp();
 
-        // Broadcast current heads
-        int num_topk_ranks = 0, topk_ranks[kNumRanks], slot_indices[kNumRanks];
+        // Get topk ranks and slot indices in the recv queue of each expected head for each rank
+        // TODO: rename the variables when removing topk
+        int num_src_ranks = 0, src_rank_idxs[kNumRanks], slot_indices[kNumRanks];
 #pragma unroll
-        for (int i = 0; i < kNumRanks; ++i) {
-          auto expected_head_i = broadcast_warp(/*val=*/expected_head, /*src_lane=*/i);
-          if (expected_head_i >= 0) {
-            slot_indices[num_topk_ranks] = expected_head_i % num_recv_buffer_tokens;
-            topk_ranks[num_topk_ranks++] = i;
+        for (int curr_rank = 0; curr_rank < kNumRanks; ++curr_rank) {
+          auto expected_head_cur_rank = broadcast_warp(/*val=*/expected_head, /*src_lane=*/curr_rank);
+          if (expected_head_cur_rank >= 0) { // valid head
+            slot_indices[num_src_ranks] = expected_head_cur_rank % num_recv_buffer_tokens;
+            src_rank_idxs[num_src_ranks++] = curr_rank;
           }
         }
 
-        // Wait shared memory release
+        // Wait for all previous TMA stores to be finished
+        // i.e. wait for all hidden values of last token is reduced
+        // and release all TMA slots for copying this token
 #ifndef DISABLE_SM90_FEATURES
         if (lane_id == 0)
           tma_store_wait();
         __syncwarp();
 #endif
 
-        // Reduce data with pipeline
-        constexpr int kNumStages = 8;
-        GRPCOLL_STATIC_ASSERT(kNumStages * WARP_SIZE * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid count");
-
 #pragma unroll
-        for (int i = lane_id; i < hidden_int4; i += WARP_SIZE) {
-          auto dst_buf_ptr_int4 = recv_int4 + token_idx * hidden_int4 + i;
+        // Reduce this token by all the received partial token from all src ranks
+        for (int i = lane_id; i < hidden_int4; i += WARP_SIZE) { // warp-strided
+          // Get the hidden value ptr of `int_4` to reduce to in `recv_x`
+          int4* reduce_hidval_ptr_int4 = recv_x_int4 + token_idx * hidden_int4 + i;
 
-          // Read bias
-          // TODO: make it as a template
+          // Get the hidden value ptr of `dtype_t` to reduce to in `recv_x`
+          // if in acc_reduce mode
+          const dtype_t* reduce_hidval_ptr_dtype = nullptr;
+          if (acc_reduce) {
+            reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
+          }
+
+          // Load biases
+          // TODO: remove this unused variable
           int4 bias_0_value_int4 = bias_0_int4 != nullptr ? __ldg(bias_0_int4 + token_idx * hidden_int4 + i) : make_int4(0, 0, 0, 0);
           int4 bias_1_value_int4 = bias_1_int4 != nullptr ? __ldg(bias_1_int4 + token_idx * hidden_int4 + i) : make_int4(0, 0, 0, 0);
 
-          // Read buffers
-          int4 recv_value_int4[kNumRanks];
-
+          // Load all recv partial hidden values from all src ranks
+          int4 recv_hidval_int4[kNumRanks];
 #pragma unroll
-          for (int j = 0; j < num_topk_ranks; ++j)
-            recv_value_int4[j] = ld_nc_global(channel_x_buffers[topk_ranks[j]].buffer() + slot_indices[j] * hidden_int4 + i);
+          for (int j = 0; j < num_src_ranks; ++j)
+            recv_hidval_int4[j] = ld_nc_global(channel_x_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * hidden_int4 + i);
+
+          // Prepare high-precision reduce buffer for this hidden value
+          float hp_hidval_reduce_buf[kDtypePerInt4];
 
           // Reduce bias
-          float values[kDtypePerInt4];
+          // to the high-precision reduce buffer
+          // TODO: remove this redundant reduce
+          // but do NOT forget to zero-init the high-precision reduce buffer
           auto bias_0_values = reinterpret_cast<const dtype_t*>(&bias_0_value_int4);
           auto bias_1_values = reinterpret_cast<const dtype_t*>(&bias_1_value_int4);
+#pragma unroll
+          for (int k = 0; k < kDtypePerInt4; ++k)
+            hp_hidval_reduce_buf[k] = static_cast<float>(bias_0_values[k]) + static_cast<float>(bias_1_values[k]);
 
 #pragma unroll
-          for (int j = 0; j < kDtypePerInt4; ++j)
-            values[j] = static_cast<float>(bias_0_values[j]) + static_cast<float>(bias_1_values[j]);
-
-          // Read acc out buffers if needed
-          const dtype_t* acc_buf_dtypes = nullptr;
-          if (acc_reduce) {
-            acc_buf_dtypes = reinterpret_cast<const dtype_t*>(dst_buf_ptr_int4);
-          }
-
-// Reduce all-to-all results
-#pragma unroll
-          for (int j = 0; j < num_topk_ranks; ++j) {
-            auto recv_value_dtypes = reinterpret_cast<const dtype_t*>(&recv_value_int4[j]);
-
+          // Reduce all recv partial hidden values from all src ranks
+          // to the high-precision reduce buffer
+          for (int j = 0; j < num_src_ranks; ++j) {
+            auto jth_recv_hidval_dtype = reinterpret_cast<const dtype_t*>(&recv_hidval_int4[j]);
 #pragma unroll
             for (int k = 0; k < kDtypePerInt4; ++k)
-              values[k] += static_cast<float>(recv_value_dtypes[k]);
+              hp_hidval_reduce_buf[k] += static_cast<float>(jth_recv_hidval_dtype[k]);
           }
+
+          // Reduce the old value in the `recv_x`
+          // to the high-precision reduce buffer
+          // if in acc_reduce mode
           if (acc_reduce) {
 #pragma unroll
             for (int k = 0; k < kDtypePerInt4; ++k)
-              values[k] += static_cast<float>(acc_buf_dtypes[k]);
+              hp_hidval_reduce_buf[k] += static_cast<float>(reduce_hidval_ptr_dtype[k]);
           }
 
-          // Cast back to `dtype_t`
-          int4 out_int4;
-          auto out_dtypes = reinterpret_cast<dtype_t*>(&out_int4);
+          // Cast the high-precision reduced value back to `dtype_t`
+          int4 reduced_hidval_int4;
+          dtype_t* reduced_hidval_ptr_dtype = reinterpret_cast<dtype_t*>(&reduced_hidval_int4);
 #pragma unroll
-          for (int j = 0; j < kDtypePerInt4; ++j)
-            out_dtypes[j] = static_cast<dtype_t>(values[j]);
+          for (int k = 0; k < kDtypePerInt4; ++k)
+            reduced_hidval_ptr_dtype[k] = static_cast<dtype_t>(hp_hidval_reduce_buf[k]);
 
+          // Copy the reduced hidden value to `recv_x`
 #ifndef DISABLE_SM90_FEATURES
-          // Wait TMA arrival
+          // Wait for the previous (num_tma_stages - 1) TMA stores to be finished
+          // to release at least one TMA slot for the current hidden value
           if (lane_id == 0)
-            tma_store_wait<kNumStages - 1>();
+            tma_store_wait<num_tma_stages - 1>();
           __syncwarp();
 
-          // Write into TMA buffer
-          auto tma_stage_idx = (i / WARP_SIZE) % kNumStages;
-          reinterpret_cast<int4*>(tma_buffer)[tma_stage_idx * WARP_SIZE + lane_id] = out_int4;
+          // Copy the reduced hidden value to the TMA slot for current TMA stage
+          const int tma_stage_idx = (i / WARP_SIZE) % num_tma_stages;
+          auto tma_ptr_int4_cur_stage = reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * WARP_SIZE;
+          tma_ptr_int4_cur_stage[lane_id] = reduced_hidval_int4;
 
-          // Issue TMA
+          // Fence TMA store to wait the TMA buffer for each lane to be ready
+          // NOTES: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
           tma_store_fence();
           __syncwarp();
+
+          // Store all the reduced hidden values for all lanes from TMA slot to `recv_x`
           if (lane_id == 0) {
             auto tma_bytes = min(WARP_SIZE, hidden_int4 - i) * static_cast<int>(sizeof(int4));
-            tma_store_1d(reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * WARP_SIZE, dst_buf_ptr_int4, tma_bytes, false);
+            tma_store_1d(
+                /*smem_ptr=*/tma_ptr_int4_cur_stage,
+                /*gmem_ptr=*/reduce_hidval_ptr_int4,
+                /*num_bytes=*/tma_bytes,
+                /*evict_first=*/false);
           }
           __syncwarp();
 #else
-          recv_int4[token_idx * hidden_int4 + i] = out_int4;
+          *reduce_hidval_ptr_int4 = reduced_hidval_int4;
 #endif
         }
 
-        // Reduce `topk_weights`
+        // Reduce `recv_topk_weights` from `channel_topk_weights_buffers`
+        // by the first `num_topk` lanes in each warp
+        // TODO: remove num_topk stuff
         if (lane_id < num_topk) {
-          float value = 0;
+          float reduced_topk_weights = 0;
 #pragma unroll
-          for (int i = 0; i < num_topk_ranks; ++i)
-            value += ld_nc_global(channel_topk_weights_buffers[topk_ranks[i]].buffer() + slot_indices[i] * num_topk + lane_id);
-          recv_topk_weights[token_idx * num_topk + lane_id] = value;
+          for (int j = 0; j < num_src_ranks; ++j)
+            reduced_topk_weights += ld_nc_global(channel_topk_weights_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_topk + lane_id);
+          recv_topk_weights[token_idx * num_topk + lane_id] = reduced_topk_weights;
         }
 
-        // Update head
-        if (lane_id < kNumRanks)
-          shared_warp_channel_head_idx[recv_warp_id][lane_id] = (expected_head < 0) ? -expected_head - 1 : expected_head + 1;
+        // Update channel head idx for each rank
+        // which will be read by the warp0 to store the `channel_head_idx` to inform the sender
+        if (responsible_rank < kNumRanks)
+          shared_warp_channel_head_idx[recv_warp_id][responsible_rank] = (expected_head == -1) ? 0 : expected_head + 1;
       }
 
-      // Retired
+      // Retired this warp by toggling the retire flag
       __syncwarp();
       if (lane_id == 0)
         shared_warp_retired[recv_warp_id] = true;
 
-      // Make TMA store visible to the next kernel
+      // Wait for all previous TMA stores to be finished
 #ifndef DISABLE_SM90_FEATURES
       if (lane_id == 0)
         tma_store_wait();
@@ -1242,9 +1297,9 @@ void combine(
     bool acc_reduce) {
   constexpr int kNumThreads = 768; // block size
   constexpr int kNumWarps = kNumThreads / WARP_SIZE; // num warps per block
-  constexpr int kNumTMABytesPerWarp = 4096; // num bytes of tma transfer per warp
+  constexpr int kNumTMABytesPerWarp = 4096; // num bytes of TMA transfer per warp
 #ifndef DISABLE_SM90_FEATURES
-  constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of tma transfer per block
+  constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
 #define COMBINE_LAUNCH_CASE(dtype, ranks)                                  \
