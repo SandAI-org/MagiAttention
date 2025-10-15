@@ -811,7 +811,7 @@ void combine(
     int* send_head,
     int num_tokens,
     int num_recv_tokens,
-    int hidden,
+    int hidden_size,
     void** buffer_ptrs,
     int rank,
     int num_max_send_tokens,
@@ -832,7 +832,7 @@ void combine(
   // Get dtype Info
   GRPCOLL_STATIC_ASSERT(sizeof(int4) % sizeof(dtype_t) == 0, "Invalid vectorization");
   constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
-  const int hidden_int4 = hidden / kDtypePerInt4;
+  const int hidden_int4 = hidden_size / kDtypePerInt4;
   GRPCOLL_DEVICE_ASSERT(hidden_int4 % WARP_SIZE == 0);
 
   // Cast from `dtype_t` to `int4`
@@ -1256,7 +1256,7 @@ void combine(
 }
 
 void combine(
-    cudaDataType_t type,
+    cudaDataType_t dtype,
     void* recv_x,
     float* recv_topk_weights,
     const void* x,
@@ -1268,7 +1268,7 @@ void combine(
     int* send_head,
     int num_tokens,
     int num_recv_tokens,
-    int hidden,
+    int hidden_size,
     void** buffer_ptrs,
     int rank,
     int num_ranks,
@@ -1302,7 +1302,7 @@ void combine(
         send_head,                                                         \
         num_tokens,                                                        \
         num_recv_tokens,                                                   \
-        hidden,                                                            \
+        hidden_size,                                                       \
         buffer_ptrs,                                                       \
         rank,                                                              \
         num_max_send_tokens,                                               \
@@ -1317,9 +1317,8 @@ void combine(
 
   // Even-numbered SMs for sending, odd-numbered SMs for receiving
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
-  GRPCOLL_HOST_ASSERT(kNumThreads >= num_ranks * WARP_SIZE);
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  SWITCH_TYPES(COMBINE_DTYPE_LAUNCH_CASE);
+  SWITCH_DTYPES(COMBINE_DTYPE_LAUNCH_CASE);
 
 #undef COMBINE_DTYPE_LAUNCH_CASE
 #undef COMBINE_LAUNCH_CASE

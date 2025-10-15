@@ -92,74 +92,74 @@
 #endif
 
 // TODO: support other num_ranks
-#define SWITCH_RANKS(case_macro)                          \
-  switch (num_ranks) {                                    \
-    case 2:                                               \
-      case_macro(2);                                      \
-    case 4:                                               \
-      case_macro(4);                                      \
-    case 8:                                               \
-      case_macro(8);                                      \
-    default:                                              \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported ranks"); \
-  }                                                       \
+#define SWITCH_RANKS(case_macro)                              \
+  switch (num_ranks) {                                        \
+    case 2:                                                   \
+      case_macro(2);                                          \
+    case 4:                                                   \
+      case_macro(4);                                          \
+    case 8:                                                   \
+      case_macro(8);                                          \
+    default:                                                  \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported num_ranks"); \
+  }                                                           \
   while (false)
 
 // TODO: support other RDMA num_ranks
-#define SWITCH_RDMA_RANKS(case_macro)                          \
-  switch (num_ranks / NUM_MAX_NVL_PEERS) {                     \
-    case 2:                                                    \
-      case_macro(2);                                           \
-    case 4:                                                    \
-      case_macro(4);                                           \
-    case 8:                                                    \
-      case_macro(8);                                           \
-    case 16:                                                   \
-      case_macro(16);                                          \
-    default:                                                   \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported RDMA ranks"); \
-  }                                                            \
+#define SWITCH_RDMA_RANKS(case_macro)                              \
+  switch (num_ranks / NUM_MAX_NVL_PEERS) {                         \
+    case 2:                                                        \
+      case_macro(2);                                               \
+    case 4:                                                        \
+      case_macro(4);                                               \
+    case 8:                                                        \
+      case_macro(8);                                               \
+    case 16:                                                       \
+      case_macro(16);                                              \
+    default:                                                       \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported num_rdma_ranks"); \
+  }                                                                \
   while (false)
 
-#define SWITCH_RANKS_WITH_DTYPE(dtype, case_macro)        \
-  switch (num_ranks) {                                    \
-    case 2:                                               \
-      case_macro(dtype, 2);                               \
-    case 4:                                               \
-      case_macro(dtype, 4);                               \
-    case 8:                                               \
-      case_macro(dtype, 8);                               \
-    default:                                              \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported ranks"); \
-  }                                                       \
+#define SWITCH_RANKS_WITH_DTYPE(dtype, case_macro)            \
+  switch (num_ranks) {                                        \
+    case 2:                                                   \
+      case_macro(dtype, 2);                                   \
+    case 4:                                                   \
+      case_macro(dtype, 4);                                   \
+    case 8:                                                   \
+      case_macro(dtype, 8);                                   \
+    default:                                                  \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported num_ranks"); \
+  }                                                           \
   while (false)
 
 // TODO: support other dtypes
-#define SWITCH_TYPES(case_macro)                         \
-  switch (type) {                                        \
-    case CUDA_R_16BF:                                    \
-      case_macro(nv_bfloat16);                           \
-    default:                                             \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported type"); \
-  }                                                      \
+#define SWITCH_DTYPES(case_macro)                         \
+  switch (dtype) {                                        \
+    case CUDA_R_16BF:                                     \
+      case_macro(nv_bfloat16);                            \
+    default:                                              \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported dtype"); \
+  }                                                       \
   while (false)
 
 // TODO: support other hidden sizes
-#define SWITCH_HIDDEN(case_macro)                          \
-  switch (hidden) {                                        \
-    case 2048:                                             \
-      case_macro(2048);                                    \
-    case 2560:                                             \
-      case_macro(2560);                                    \
-    case 4096:                                             \
-      case_macro(4096);                                    \
-    case 5120:                                             \
-      case_macro(5120);                                    \
-    case 7168:                                             \
-      case_macro(7168);                                    \
-    case 8192:                                             \
-      case_macro(8192);                                    \
-    default:                                               \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported hidden"); \
-  }                                                        \
+#define SWITCH_HIDDEN_SIZE(case_macro)                          \
+  switch (hidden_size) {                                        \
+    case 2048:                                                  \
+      case_macro(2048);                                         \
+    case 2560:                                                  \
+      case_macro(2560);                                         \
+    case 4096:                                                  \
+      case_macro(4096);                                         \
+    case 5120:                                                  \
+      case_macro(5120);                                         \
+    case 7168:                                                  \
+      case_macro(7168);                                         \
+    case 8192:                                                  \
+      case_macro(8192);                                         \
+    default:                                                    \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported hidden size"); \
+  }                                                             \
   while (false)
