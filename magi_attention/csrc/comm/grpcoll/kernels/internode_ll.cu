@@ -73,7 +73,7 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0, int* clean_1, i
   LAUNCH_KERNEL(&cfg, clean_low_latency_buffer<kNumThreads>, clean_0, num_clean_int_0, clean_1, num_clean_int_1);
 }
 
-template <bool kUseFP8, bool kUseUE8M0, int kHidden>
+template <bool kUseFP8, bool kUseUE8M0, int kHiddenSize>
 GLOBAL_LAUNCH_BOUNDS(1024, 1)
 void dispatch(
     void* packed_recv_x,
@@ -118,14 +118,14 @@ void dispatch(
 
   // FP8 staffs
   constexpr int kNumPerChannels = 128;
-  const int num_scales = kHidden / kNumPerChannels;
-  const size_t hidden_bytes = kHidden * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
+  const int num_scales = kHiddenSize / kNumPerChannels;
+  const size_t hidden_bytes = kHiddenSize * (kUseFP8 ? sizeof(__nv_fp8_storage_t) : sizeof(nv_bfloat16));
   const size_t hidden_int4 = hidden_bytes / sizeof(int4);
 
   // Message package: hidden data, FP8 scales, index at source
   // NOTES: currently we have 3 reserved int fields for future use
   using vec_t = typename std::conditional<kUseFP8, int2, int4>::type;
-  const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHidden + num_scales * sizeof(float)) : (kHidden * sizeof(nv_bfloat16)));
+  const size_t num_bytes_per_msg = sizeof(int4) + (kUseFP8 ? (kHiddenSize + num_scales * sizeof(float)) : (kHiddenSize * sizeof(nv_bfloat16)));
   const size_t num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
   GRPCOLL_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
 
@@ -142,10 +142,10 @@ void dispatch(
   // 2. The last warp for reading `topk_idx` and count for per-expert information
   if (warp_id < num_warps - 1) {
     constexpr int kNumElemsPerRead = sizeof(int4) / sizeof(nv_bfloat16);
-    GRPCOLL_STATIC_ASSERT(kHidden % (WARP_SIZE * kNumElemsPerRead) == 0, "Invalid hidden");
+    GRPCOLL_STATIC_ASSERT(kHiddenSize % (WARP_SIZE * kNumElemsPerRead) == 0, "Invalid hidden");
     GRPCOLL_STATIC_ASSERT(kNumElemsPerRead * WARP_SIZE % kNumPerChannels == 0, "Invalid vectorization");
     const auto num_threads = (num_warps - 1) * WARP_SIZE;
-    const size_t hidden_bf16_int4 = kHidden / kNumElemsPerRead;
+    const size_t hidden_bf16_int4 = kHiddenSize / kNumElemsPerRead;
 
     for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
       const auto x_int4 = static_cast<const int4*>(x) + token_idx * hidden_bf16_int4;
@@ -390,7 +390,7 @@ void dispatch(
     int* next_clean,
     int num_next_clean_int,
     int num_tokens,
-    int hidden,
+    int hidden_size,
     int num_max_dispatch_tokens_per_rank,
     int num_topk,
     int num_experts,
@@ -422,50 +422,50 @@ void dispatch(
   if (use_ue8m0)
     GRPCOLL_HOST_ASSERT(round_scale and "UE8M0 SF requires `round_scale=True`");
 
-#define DISPATCH_LAUNCH_CASE(hidden)                     \
-  {                                                      \
-    auto dispatch_func = dispatch<false, false, hidden>; \
-    if (use_fp8 and not use_ue8m0)                       \
-      dispatch_func = dispatch<true, false, hidden>;     \
-    if (use_fp8 and use_ue8m0)                           \
-      dispatch_func = dispatch<true, true, hidden>;      \
-    LAUNCH_KERNEL(                                       \
-        &cfg,                                            \
-        dispatch_func,                                   \
-        packed_recv_x,                                   \
-        packed_recv_x_scales,                            \
-        packed_recv_src_info,                            \
-        packed_recv_layout_range,                        \
-        packed_recv_count,                               \
-        cumulative_local_expert_recv_stats,              \
-        rdma_recv_x,                                     \
-        rdma_recv_count,                                 \
-        rdma_x,                                          \
-        x,                                               \
-        topk_idx,                                        \
-        atomic_counter_per_expert,                       \
-        atomic_finish_counter_per_expert,                \
-        next_clean,                                      \
-        num_next_clean_int,                              \
-        num_tokens,                                      \
-        num_max_dispatch_tokens_per_rank,                \
-        num_topk,                                        \
-        num_experts,                                     \
-        rank,                                            \
-        num_ranks,                                       \
-        num_warp_groups,                                 \
-        num_warps_per_group,                             \
-        round_scale,                                     \
-        phases);                                         \
-  }                                                      \
+#define DISPATCH_LAUNCH_CASE(hidden_size)                     \
+  {                                                           \
+    auto dispatch_func = dispatch<false, false, hidden_size>; \
+    if (use_fp8 and not use_ue8m0)                            \
+      dispatch_func = dispatch<true, false, hidden_size>;     \
+    if (use_fp8 and use_ue8m0)                                \
+      dispatch_func = dispatch<true, true, hidden_size>;      \
+    LAUNCH_KERNEL(                                            \
+        &cfg,                                                 \
+        dispatch_func,                                        \
+        packed_recv_x,                                        \
+        packed_recv_x_scales,                                 \
+        packed_recv_src_info,                                 \
+        packed_recv_layout_range,                             \
+        packed_recv_count,                                    \
+        cumulative_local_expert_recv_stats,                   \
+        rdma_recv_x,                                          \
+        rdma_recv_count,                                      \
+        rdma_x,                                               \
+        x,                                                    \
+        topk_idx,                                             \
+        atomic_counter_per_expert,                            \
+        atomic_finish_counter_per_expert,                     \
+        next_clean,                                           \
+        num_next_clean_int,                                   \
+        num_tokens,                                           \
+        num_max_dispatch_tokens_per_rank,                     \
+        num_topk,                                             \
+        num_experts,                                          \
+        rank,                                                 \
+        num_ranks,                                            \
+        num_warp_groups,                                      \
+        num_warps_per_group,                                  \
+        round_scale,                                          \
+        phases);                                              \
+  }                                                           \
   break
 
   SETUP_LAUNCH_CONFIG(num_sms, num_warps * WARP_SIZE, stream);
-  SWITCH_HIDDEN(DISPATCH_LAUNCH_CASE);
+  SWITCH_HIDDEN_SIZE(DISPATCH_LAUNCH_CASE);
 #undef DISPATCH_LAUNCH_CASE
 }
 
-template <bool kUseLogFMT, int kHidden, int kNumMaxTopk>
+template <bool kUseLogFMT, int kHiddenSize, int kNumMaxTopk>
 GLOBAL_LAUNCH_BOUNDS(1024, 1)
 void combine(
     void* combined_x,
@@ -481,7 +481,6 @@ void combine(
     int num_next_clean_int,
     int* atomic_clean_flag,
     int num_combined_tokens,
-    int hidden,
     int num_topk,
     int num_max_dispatch_tokens_per_rank,
     int num_experts,
@@ -503,14 +502,14 @@ void combine(
 
   // Data type staffs
   constexpr int kNumElemsPerInt4 = sizeof(int4) / sizeof(nv_bfloat16);
-  constexpr int64_t hidden_bf16_int4 = kHidden / kNumElemsPerInt4;
+  constexpr int64_t hidden_bf16_int4 = kHiddenSize / kNumElemsPerInt4;
   constexpr int kNumUnrolls = 4;
   constexpr int hidden_bf16_int4_pad = align(static_cast<int>(hidden_bf16_int4), WARP_SIZE * kNumUnrolls);
   GRPCOLL_STATIC_ASSERT(hidden_bf16_int4 % kNumUnrolls == 0, "Invalid hidden");
   GRPCOLL_STATIC_ASSERT(kNumUnrolls == 1 or kNumUnrolls == 2 or kNumUnrolls == 4, "Invalid unrolling factors");
 
   // Message package
-  constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16);
+  constexpr size_t num_bytes_per_slot = kHiddenSize * sizeof(nv_bfloat16);
   GRPCOLL_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0, "Invalid vectorization");
 
   // Sending phase
@@ -620,7 +619,7 @@ void combine(
             constexpr float kMinClip = 32; // `== log_2(2 ^ (2 ^ 5))`
             constexpr int kNumBits = 10;
             constexpr int kNumValues = 1 << (kNumBits - 1);
-            GRPCOLL_STATIC_ASSERT(kHidden % (kNumElemsPerInt4 * WARP_SIZE) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
+            GRPCOLL_STATIC_ASSERT(kHiddenSize % (kNumElemsPerInt4 * WARP_SIZE) == 0 and kNumElemsPerInt4 == 8, "Invalid hidden");
 
             // Local log amax
             float log_abs_values[kNumElemsPerInt4 * kNumUnrolls], log_amax, log_amin, amax;
@@ -681,7 +680,7 @@ void combine(
       // Issue RDMA
       // NOTES: for zero-copy mode, we assume the data is already in the send buffer
       if (dst_p2p_ptr == 0)
-        nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, hidden * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
+        nvshmemi_ibgda_put_nbi_warp(dst_ptr, buf_ptr, kHiddenSize * sizeof(nv_bfloat16), dst_rank, local_expert_idx, lane_id, token_idx - offset);
     }
 
     // Put the finishing flag
@@ -719,7 +718,7 @@ LOW_LATENCY_COMBINE_RECV:
 
   // Reduce tokens
   GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE);
-  GRPCOLL_STATIC_ASSERT(kHidden % (WARP_SIZE * kNumElemsPerInt4) == 0, "Invalid vectorization");
+  GRPCOLL_STATIC_ASSERT(kHiddenSize % (WARP_SIZE * kNumElemsPerInt4) == 0, "Invalid vectorization");
   for (int hidden_idx = thread_id; hidden_idx < hidden_bf16_int4; hidden_idx += num_threads) {
     for (int token_idx = sm_id; token_idx < num_combined_tokens; token_idx += num_sms) {
       // Read top-k indices and weights
@@ -772,7 +771,7 @@ void combine(
     int* next_clean,
     int num_next_clean_int,
     int num_combined_tokens,
-    int hidden,
+    int hidden_size,
     int num_max_dispatch_tokens_per_rank,
     int num_topk,
     int num_experts,
@@ -790,6 +789,7 @@ void combine(
   GRPCOLL_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
 
   const auto num_warps = num_warp_groups * num_warps_per_group;
+  const auto num_threads = num_warps * WARP_SIZE;
   const auto num_sms = ceil_div(num_experts, num_warp_groups);
 
   // Check workspace
@@ -803,41 +803,40 @@ void combine(
   constexpr int kNumTMABytesPerWarp = 12 * (512 + 16);
   const int smem_size = kNumTMABytesPerWarp * num_warps;
 
-#define COMBINE_LAUNCH_CASE(hidden)                                                                            \
-  {                                                                                                            \
-    auto combine_func = use_logfmt ? combine<true, hidden, kNumMaxTopk> : combine<false, hidden, kNumMaxTopk>; \
-    SET_SHARED_MEMORY_FOR_TMA(combine_func);                                                                   \
-    LAUNCH_KERNEL(                                                                                             \
-        &cfg,                                                                                                  \
-        combine_func,                                                                                          \
-        combined_x,                                                                                            \
-        rdma_recv_x,                                                                                           \
-        rdma_recv_flag,                                                                                        \
-        rdma_send_x,                                                                                           \
-        x,                                                                                                     \
-        topk_idx,                                                                                              \
-        topk_weights,                                                                                          \
-        src_info,                                                                                              \
-        layout_range,                                                                                          \
-        next_clean,                                                                                            \
-        num_next_clean_int,                                                                                    \
-        atomic_clean_flag,                                                                                     \
-        num_combined_tokens,                                                                                   \
-        hidden,                                                                                                \
-        num_topk,                                                                                              \
-        num_max_dispatch_tokens_per_rank,                                                                      \
-        num_experts,                                                                                           \
-        rank,                                                                                                  \
-        num_ranks,                                                                                             \
-        num_warp_groups,                                                                                       \
-        num_warps_per_group,                                                                                   \
-        phases,                                                                                                \
-        zero_copy);                                                                                            \
-  }                                                                                                            \
+#define COMBINE_LAUNCH_CASE(hidden_size)                                                                                 \
+  {                                                                                                                      \
+    auto combine_func = use_logfmt ? combine<true, hidden_size, kNumMaxTopk> : combine<false, hidden_size, kNumMaxTopk>; \
+    SET_SHARED_MEMORY_FOR_TMA(combine_func);                                                                             \
+    LAUNCH_KERNEL(                                                                                                       \
+        &cfg,                                                                                                            \
+        combine_func,                                                                                                    \
+        combined_x,                                                                                                      \
+        rdma_recv_x,                                                                                                     \
+        rdma_recv_flag,                                                                                                  \
+        rdma_send_x,                                                                                                     \
+        x,                                                                                                               \
+        topk_idx,                                                                                                        \
+        topk_weights,                                                                                                    \
+        src_info,                                                                                                        \
+        layout_range,                                                                                                    \
+        next_clean,                                                                                                      \
+        num_next_clean_int,                                                                                              \
+        atomic_clean_flag,                                                                                               \
+        num_combined_tokens,                                                                                             \
+        num_topk,                                                                                                        \
+        num_max_dispatch_tokens_per_rank,                                                                                \
+        num_experts,                                                                                                     \
+        rank,                                                                                                            \
+        num_ranks,                                                                                                       \
+        num_warp_groups,                                                                                                 \
+        num_warps_per_group,                                                                                             \
+        phases,                                                                                                          \
+        zero_copy);                                                                                                      \
+  }                                                                                                                      \
   break
 
-  SETUP_LAUNCH_CONFIG(num_sms, num_warps * WARP_SIZE, stream);
-  SWITCH_HIDDEN(COMBINE_LAUNCH_CASE);
+  SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
+  SWITCH_HIDDEN_SIZE(COMBINE_LAUNCH_CASE);
 #undef COMBINE_LAUNCH_CASE
 }
 

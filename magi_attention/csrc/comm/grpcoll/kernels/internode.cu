@@ -1698,7 +1698,7 @@ void combine(
     const int* gbl_channel_prefix_matrix,
     int num_tokens,
     int num_combined_tokens,
-    int hidden,
+    int hidden_size,
     int num_topk,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
@@ -1717,8 +1717,8 @@ void combine(
   const bool is_forwarder_sm = sm_id % 2 == 1;
 
   GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE);
-  GRPCOLL_DEVICE_ASSERT(hidden % (sizeof(int4) / sizeof(dtype_t)) == 0);
-  const auto hidden_int4 = hidden / (sizeof(int4) / sizeof(dtype_t));
+  GRPCOLL_DEVICE_ASSERT(hidden_size % (sizeof(int4) / sizeof(dtype_t)) == 0);
+  const auto hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t));
   const auto hidden_bytes = hidden_int4 * sizeof(int4);
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, 0, 0, num_topk);
 
@@ -2233,7 +2233,7 @@ void combine(
     const int* gbl_channel_prefix_matrix,
     int num_tokens,
     int num_combined_tokens,
-    int hidden,
+    int hidden_size,
     int num_topk,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
@@ -2275,7 +2275,7 @@ void combine(
         gbl_channel_prefix_matrix,                                                                                                         \
         num_tokens,                                                                                                                        \
         num_combined_tokens,                                                                                                               \
-        hidden,                                                                                                                            \
+        hidden_size,                                                                                                                       \
         num_topk,                                                                                                                          \
         rdma_buffer_ptr,                                                                                                                   \
         num_max_rdma_chunked_send_tokens,                                                                                                  \

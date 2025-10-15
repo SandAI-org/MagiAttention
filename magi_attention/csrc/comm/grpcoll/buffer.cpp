@@ -628,13 +628,13 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
   GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
   int num_channels = config.num_sms / 2;
 
-  auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1));
+  auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
   auto num_combined_tokens = static_cast<int>(send_head.size(0));
   GRPCOLL_HOST_ASSERT(src_idx.size(0) == num_tokens);
   GRPCOLL_HOST_ASSERT(send_head.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(rank_prefix_matrix.size(0) == num_ranks and rank_prefix_matrix.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(channel_prefix_matrix.size(0) == num_ranks and channel_prefix_matrix.size(1) == num_channels);
-  GRPCOLL_HOST_ASSERT((hidden * x.element_size()) % sizeof(int4) == 0);
+  GRPCOLL_HOST_ASSERT((hidden_size * x.element_size()) % sizeof(int4) == 0);
 
   // Allocate all tensors on comm stream if set
   // NOTES: do not allocate tensors upfront!
@@ -695,16 +695,17 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
   auto combined_x = torch::Tensor();
   if (!combined_x_buf.has_value()) {
     GRPCOLL_HOST_ASSERT(!acc_reduce);
-    combined_x = allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden}, x.options()) : torch::zeros({num_combined_tokens, hidden}, x.options());
+    combined_x =
+        allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden_size}, x.options()) : torch::zeros({num_combined_tokens, hidden_size}, x.options());
   } else {
-    GRPCOLL_HOST_ASSERT(combined_x_buf->size(0) == num_combined_tokens and combined_x_buf->size(1) == hidden);
+    GRPCOLL_HOST_ASSERT(combined_x_buf->size(0) == num_combined_tokens and combined_x_buf->size(1) == hidden_size);
     combined_x = combined_x_buf.value();
   }
 
   // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT(
       num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * x.element_size() + // data buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * x.element_size() + // data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // source idx buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) // top-k weight buffer
       <= num_nvl_bytes);
@@ -722,7 +723,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
    * but we don't know how to exactly fix this issue by now
    */
   intranode::combine(
-      /*type=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
+      /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
       /*recv_x=*/combined_x.data_ptr(),
       /*recv_topk_weights=*/recv_topk_weights_ptr,
       /*x=*/x.data_ptr(),
@@ -734,7 +735,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
       /*send_head=*/send_head.data_ptr<int>(),
       /*num_tokens=*/num_tokens,
       /*num_recv_tokens=*/num_combined_tokens,
-      /*hidden=*/hidden,
+      /*hidden_size=*/hidden_size,
       /*buffer_ptrs=*/buffer_ptrs_gpu,
       /*rank=*/rank,
       /*num_ranks=*/num_ranks,
