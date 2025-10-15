@@ -242,7 +242,8 @@ void cached_notify_dispatch(
 }
 
 template <int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp>
-__global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_blocks_per_sm=*/1) dispatch(
+GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
+void dispatch(
     int4* recv_x,
     float* recv_x_scales,
     int* recv_src_idx,
@@ -797,7 +798,8 @@ void cached_notify_combine(
 }
 
 template <typename dtype_t, int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp>
-__global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_blocks_per_sm=*/1) combine(
+GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
+void combine(
     dtype_t* recv_x,
     float* recv_topk_weights,
     const dtype_t* x,

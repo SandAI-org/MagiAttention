@@ -472,7 +472,8 @@ template <
     int kNumTMABytesPerWarp,
     int kNumDispatchRDMASenderWarps,
     int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks)>
-__global__ void __launch_bounds__(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS) * WARP_SIZE), 1) dispatch(
+GLOBAL_LAUNCH_BOUNDS(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS) * WARP_SIZE), 1)
+void dispatch(
     int4* recv_x,
     float* recv_x_scales,
     int64_t* recv_topk_idx,
@@ -1680,7 +1681,8 @@ template <
     int kNumWarpsPerForwarder = (kNumCombineForwarderWarps / kNumRDMARanks > 0) ? kNumCombineForwarderWarps / kNumRDMARanks : 1,
     int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder,
     int kNumRDMAReceivers = kNumForwarders - NUM_MAX_NVL_PEERS>
-__global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1) combine(
+GLOBAL_LAUNCH_BOUNDS((kNumForwarders + 1) * WARP_SIZE, 1)
+void combine(
     int4* combined_x,
     float* combined_topk_weights,
     const bool* is_combined_token_in_rank,
