@@ -390,7 +390,7 @@ DEVICE_INLINE void mbarrier_init(uint64_t* mbar_ptr, uint32_t arrive_count) {
   asm volatile("mbarrier.init.shared::cta.b64 [%1], %0;" ::"r"(arrive_count), "r"(mbar_int_ptr));
 }
 
-DEVICE_INLINE void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& phase, int num_tma_stages = 2) {
+DEVICE_INLINE void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& stage, int num_tma_stages = 2) {
   auto mbar_int_ptr = to_shared_ptr_value<uint64_t>(mbar_ptr);
   asm volatile(
       "{\n\t"
@@ -401,14 +401,14 @@ DEVICE_INLINE void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& phase, int num_tm
       "bra     LAB_WAIT; \n\t"
       "DONE: \n\t"
       "}" ::"r"(mbar_int_ptr),
-      "r"(phase),
+      "r"(stage),
       "r"(0x989680));
 
-  // NOTES: phase is inplace updated
+  // NOTES: stage is updated inplace
   if (num_tma_stages == 2)
-    phase ^= 1;
+    stage ^= 1;
   else
-    phase = (phase + 1) % num_tma_stages;
+    stage = (stage + 1) % num_tma_stages;
 }
 
 DEVICE_INLINE void mbarrier_arrive_and_expect_tx(uint64_t* mbar_ptr, int num_bytes) {

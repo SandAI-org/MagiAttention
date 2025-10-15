@@ -77,8 +77,14 @@ class GrpCollBuffer:
     """
 
     num_sms: int = 20
-    hidden_size_alignment: int = 2 * 128
-    hidden_size_ub: int = 64 * 128  # upper bound
+    # At least for intranode group_reduce kernel,
+    # it requires the hidden_size_int4 to be divisible by WARP_SIZE
+    # thus for bf16/fp16, the hidden size alignment is
+    # WARP_SIZE * sizeof(int4) / sizeof(dtype) = 32 * 128 / 16 = 256
+    hidden_size_alignment: int = 256  # hidden size alignment
+    # At least for intranode group_cast kernel,
+    # the current `kNumTMABytesPerWarp` is limited to accept at most 8192 bf16/fp16 hidden size
+    hidden_size_ub: int = 8192  # hidden size upper bound
     reduce_op_str2int_map = {
         "sum": 0,
         "avg": 1,

@@ -46,6 +46,7 @@
 
 namespace magi_attn_comm::grpcoll {
 
+// TODO: support non-inplace updated template parameter
 template <typename dtype_t>
 struct Buffer {
  private:
