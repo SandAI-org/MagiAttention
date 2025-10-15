@@ -1348,42 +1348,48 @@ struct CollectiveMainloopBwdSm90 {
       // for last n_block, we can skip all mask mask.
       if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
 #pragma unroll 1
-        for (; m_block < m_block_max; ++m_block) {
-          bwd_step(m_block, bypass_fn);
+        for (; m_block < m_block_max - 1; ++m_block) {
+          bwd_step(m_block, bypass_fn, cute::false_type{});
         }
+        bwd_step(m_block, bypass_fn, cute::true_type{});
       }
       // otherwise we need boundary mask.
       else {
 #pragma unroll 1
-        for (; m_block < m_block_max; ++m_block) {
-          bwd_step(m_block, boundary_mask_fn);
+        for (; m_block < m_block_max - 1; ++m_block) {
+          bwd_step(m_block, boundary_mask_fn, cute::false_type{});
         }
+        bwd_step(m_block, boundary_mask_fn, cute::true_type{});
       }
     } else {
       // for Causal and BiCausal, we need to do regular mask for some block at the begining;
       if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
         int n_idx_max = (n_block + 1) * kBlockN;
         int m_block_idx_for_casual = std::max(m_block_min, (n_idx_max + seqlen_k - seqlen_q) / kBlockM);
+        m_block_idx_for_casual = std::min(m_block_idx_for_casual, m_block_max - 1);
 #pragma unroll 1
         for (; m_block < m_block_idx_for_casual; ++m_block) {
-          bwd_step(m_block, regular_mask_fn);
+          bwd_step(m_block, regular_mask_fn, cute::false_type{});
         }
       }
 
       int const n_idx_min = n_block * kBlockM;
-      int const m_block_idx_for_inv_casual =
-          attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? m_block_max : cute::ceil_div(n_idx_min, kBlockN) - 1;
+      int m_block_idx_for_inv_casual =
+          attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? m_block_max - 1 : cute::ceil_div(n_idx_min, kBlockN) - 1;
+      m_block_idx_for_inv_casual = std::min(m_block_idx_for_inv_casual, m_block_max - 1);
 
 #pragma unroll 1
       for (; m_block < m_block_idx_for_inv_casual; ++m_block) {
-        bwd_step(m_block, bypass_fn);
+        bwd_step(m_block, bypass_fn, cute::false_type{});
       }
 
 // for Invcausal and BiCausal, we need to do regular mask for some block at the end;
 #pragma unroll 1
-      for (; m_block < m_block_max; ++m_block) {
-        bwd_step(m_block, regular_mask_fn);
+      for (; m_block < m_block_max - 1; ++m_block) {
+        bwd_step(m_block, regular_mask_fn, cute::false_type{});
       }
+
+      bwd_step(m_block, regular_mask_fn, cute::true_type{});
     }
 
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
