@@ -188,8 +188,6 @@ struct Buffer {
       const torch::Tensor& x,
       std::optional<torch::Tensor>& combined_x_buf,
       const std::optional<torch::Tensor>& topk_weights,
-      const std::optional<torch::Tensor>& bias_0,
-      const std::optional<torch::Tensor>& bias_1,
       const std::optional<torch::Tensor>& pre_perm_idx,
       const torch::Tensor& src_idx,
       const torch::Tensor& rank_prefix_matrix,
