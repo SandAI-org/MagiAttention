@@ -679,15 +679,15 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
   // Launch barrier and reset queue head and tail
   GRPCOLL_HOST_ASSERT(num_channels * num_ranks * sizeof(int) * 2 <= num_nvl_bytes);
   intranode::cached_notify_combine(
-      buffer_ptrs_gpu,
-      send_head.data_ptr<int>(),
-      num_channels,
-      num_combined_tokens,
-      num_channels * num_ranks * 2,
-      barrier_signal_ptrs_gpu,
-      rank,
-      num_ranks,
-      comm_stream);
+      /*buffer_ptrs=*/buffer_ptrs_gpu,
+      /*send_head=*/send_head.data_ptr<int>(),
+      /*num_channels=*/num_channels,
+      /*num_recv_tokens=*/num_combined_tokens,
+      /*num_memset_int=*/num_channels * num_ranks * 2,
+      /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
+      /*rank=*/rank,
+      /*num_ranks=*/num_ranks,
+      /*comm_stream=*/comm_stream);
 
   // Assign bias pointers
   auto bias_opts = std::vector<std::optional<torch::Tensor>>({bias_0, bias_1});
@@ -721,7 +721,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
   GRPCOLL_HOST_ASSERT(
       num_channels * num_ranks * sizeof(int) * 2 + // Queue head and tail
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * x.element_size() + // Data buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // Source index buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // Source idx buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) // Top-k weight buffer
       <= num_nvl_bytes);
 
@@ -738,30 +738,30 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
    * but we don't know how to exactly fix this issue by now
    */
   intranode::combine(
-      at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
-      combined_x.data_ptr(),
-      recv_topk_weights_ptr,
-      x.data_ptr(),
-      topk_weights_ptr,
-      bias_ptrs[0],
-      bias_ptrs[1],
-      pre_perm_idx_ptr,
-      src_idx.data_ptr<int>(),
-      rank_prefix_matrix.data_ptr<int>(),
-      channel_prefix_matrix.data_ptr<int>(),
-      send_head.data_ptr<int>(),
-      num_tokens,
-      num_combined_tokens,
-      hidden,
-      num_topk,
-      buffer_ptrs_gpu,
-      rank,
-      num_ranks,
-      comm_stream,
-      config.num_sms,
-      config.num_max_nvl_chunked_send_tokens,
-      config.num_max_nvl_chunked_recv_tokens,
-      acc_reduce);
+      /*type=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
+      /*recv_x=*/combined_x.data_ptr(),
+      /*recv_topk_weights=*/recv_topk_weights_ptr,
+      /*x=*/x.data_ptr(),
+      /*topk_weights=*/topk_weights_ptr,
+      /*bias_0=*/bias_ptrs[0],
+      /*bias_1=*/bias_ptrs[1],
+      /*pre_perm_idx=*/pre_perm_idx_ptr,
+      /*src_idx=*/src_idx.data_ptr<int>(),
+      /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
+      /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
+      /*send_head=*/send_head.data_ptr<int>(),
+      /*num_tokens=*/num_tokens,
+      /*num_recv_tokens=*/num_combined_tokens,
+      /*hidden=*/hidden,
+      /*num_topk=*/num_topk,
+      /*buffer_ptrs=*/buffer_ptrs_gpu,
+      /*rank=*/rank,
+      /*num_ranks=*/num_ranks,
+      /*comm_stream=*/comm_stream,
+      /*num_sms=*/config.num_sms,
+      /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
+      /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens,
+      /*acc_reduce=*/acc_reduce);
 
   // Record or wait streams
   std::optional<EventHandle> event;
