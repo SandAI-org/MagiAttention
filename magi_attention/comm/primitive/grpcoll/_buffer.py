@@ -772,8 +772,6 @@ class GrpCollBuffer:
             x,
             combined_x,
             topk_weights,
-            None,  # bias_0
-            None,  # bias_1
             pre_perm_idx,
             handle.recv_src_idx,  # src_idx
             handle.rank_prefix_matrix,  # rank_prefix_matrix

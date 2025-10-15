@@ -323,7 +323,7 @@ std::tuple<
 Buffer::intranode_group_cast(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& recv_x_buf,
-    const std::optional<torch::Tensor>& x_scales,
+    const std::optional<torch::Tensor>& x_scales, // renamed to lse
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const torch::Tensor& is_token_in_rank,
     const std::optional<torch::Tensor>& num_tokens_per_expert,
@@ -601,9 +601,7 @@ Buffer::intranode_group_cast(
 std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_reduce(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& combined_x_buf,
-    const std::optional<torch::Tensor>& topk_weights,
-    const std::optional<torch::Tensor>& bias_0,
-    const std::optional<torch::Tensor>& bias_1,
+    const std::optional<torch::Tensor>& topk_weights, // renamed to lse
     const std::optional<torch::Tensor>& pre_perm_idx,
     const torch::Tensor& src_idx,
     const torch::Tensor& rank_prefix_matrix,
@@ -653,7 +651,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
     stream_wait(comm_stream, compute_stream);
   }
 
-  int num_topk = 0;
   auto recv_topk_weights = std::optional<torch::Tensor>();
   float* topk_weights_ptr = nullptr;
   float* recv_topk_weights_ptr = nullptr;
@@ -662,9 +659,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
     GRPCOLL_HOST_ASSERT(topk_weights->dim() == 2 and topk_weights->is_contiguous());
     GRPCOLL_HOST_ASSERT(topk_weights->size(0) == num_tokens);
     GRPCOLL_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
-    num_topk = static_cast<int>(topk_weights->size(1));
     topk_weights_ptr = topk_weights->data_ptr<float>();
-    recv_topk_weights = torch::empty({num_combined_tokens, num_topk}, topk_weights->options());
+    recv_topk_weights = torch::empty({num_combined_tokens}, topk_weights->options());
     recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
   }
   if (pre_perm_idx.has_value()) {
@@ -689,18 +685,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
       /*num_ranks=*/num_ranks,
       /*comm_stream=*/comm_stream);
 
-  // Assign bias pointers
-  auto bias_opts = std::vector<std::optional<torch::Tensor>>({bias_0, bias_1});
-  void* bias_ptrs[2] = {nullptr, nullptr};
-  for (int i = 0; i < 2; ++i)
-    if (bias_opts[i].has_value()) {
-      auto bias = bias_opts[i].value();
-      GRPCOLL_HOST_ASSERT(bias.dim() == 2 and bias.is_contiguous());
-      GRPCOLL_HOST_ASSERT(bias.scalar_type() == x.scalar_type());
-      GRPCOLL_HOST_ASSERT(bias.size(0) == num_combined_tokens and bias.size(1) == hidden);
-      bias_ptrs[i] = bias.data_ptr();
-    }
-
   // Allocate combined_x buffer
   /** NOTE: different from ep, for group-reduce,
    * some token in combined_x might not reduce anything,
@@ -719,10 +703,10 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
 
   // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT(
-      num_channels * num_ranks * sizeof(int) * 2 + // Queue head and tail
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * x.element_size() + // Data buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // Source idx buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) // Top-k weight buffer
+      num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * x.element_size() + // data buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // source idx buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) // top-k weight buffer
       <= num_nvl_bytes);
 
   // Launch combine kernel
@@ -743,8 +727,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
       /*recv_topk_weights=*/recv_topk_weights_ptr,
       /*x=*/x.data_ptr(),
       /*topk_weights=*/topk_weights_ptr,
-      /*bias_0=*/bias_ptrs[0],
-      /*bias_1=*/bias_ptrs[1],
       /*pre_perm_idx=*/pre_perm_idx_ptr,
       /*src_idx=*/src_idx.data_ptr<int>(),
       /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
@@ -753,7 +735,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
       /*num_tokens=*/num_tokens,
       /*num_recv_tokens=*/num_combined_tokens,
       /*hidden=*/hidden,
-      /*num_topk=*/num_topk,
       /*buffer_ptrs=*/buffer_ptrs_gpu,
       /*rank=*/rank,
       /*num_ranks=*/num_ranks,
@@ -772,7 +753,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
     }
-    for (auto& to : {topk_weights, bias_0, bias_1, pre_perm_idx}) {
+    for (auto& to : {topk_weights, pre_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
@@ -1380,6 +1361,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
 #endif
 }
 
+// NOTE: remain original low-latency interface here for future potential usage,
+// which won't be exposed to users for now, but guaranteed its compatibility internally
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
 Buffer::low_latency_dispatch(
     const torch::Tensor& x,

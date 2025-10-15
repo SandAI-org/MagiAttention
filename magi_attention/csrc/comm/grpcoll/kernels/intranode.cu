@@ -270,12 +270,12 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
   const bool is_sender = sm_id % 2 == 0; // even-numbered SMs are senders
   GRPCOLL_DEVICE_ASSERT(num_sms % 2 == 0);
 
-  // Get Rank Info
+  // Get rank Info
   const auto num_threads_per_rank = kNumThreads / kNumRanks; // Several warps are response for a single rank
   const auto responsible_rank = thread_id / num_threads_per_rank;
   const auto send_rank = is_sender ? rank : responsible_rank, recv_rank = is_sender ? responsible_rank : rank;
 
-  // Get Channel Info
+  // Get channel Info
   const auto num_channels = num_sms / 2, responsible_channel = sm_id / 2;
   const auto num_channels_total = num_channels * kNumRanks, channel_rank_offset = responsible_channel * kNumRanks + send_rank; // each rank has SM/2 channels
   const auto num_channel_tokens_total = num_channels_total * num_recv_buffer_tokens, channel_rank_token_offset = channel_rank_offset * num_recv_buffer_tokens;
@@ -802,8 +802,6 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     float* recv_topk_weights,
     const dtype_t* x,
     const float* topk_weights,
-    const dtype_t* bias_0,
-    const dtype_t* bias_1,
     const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,
@@ -812,7 +810,6 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     int num_tokens,
     int num_recv_tokens,
     int hidden,
-    int num_topk,
     void** buffer_ptrs,
     int rank,
     int num_max_send_tokens,
@@ -824,14 +821,13 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
   const bool is_sender = sm_id % 2 == 0; // even-numbered SMs are senders
   GRPCOLL_DEVICE_ASSERT(num_sms % 2 == 0);
 
-  // Get Channel Info
+  // Get channel Info
   const auto num_channels = num_sms / 2;
   const int responsible_channel = sm_id / 2;
   const auto num_channels_total = num_channels * kNumRanks;
   const auto num_channel_tokens_total = num_channels_total * num_recv_buffer_tokens;
-  GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE);
 
-  // Get Dtype Info
+  // Get dtype Info
   GRPCOLL_STATIC_ASSERT(sizeof(int4) % sizeof(dtype_t) == 0, "Invalid vectorization");
   constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
   const int hidden_int4 = hidden / kDtypePerInt4;
@@ -839,8 +835,6 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
 
   // Cast from `dtype_t` to `int4`
   auto x_int4 = reinterpret_cast<const int4*>(x);
-  auto bias_0_int4 = reinterpret_cast<const int4*>(bias_0);
-  auto bias_1_int4 = reinterpret_cast<const int4*>(bias_1);
   auto recv_x_int4 = reinterpret_cast<int4*>(recv_x);
 
   // Get copy info
@@ -886,10 +880,10 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     // Get channel data buffers
     // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4
     // `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
-    // `topk_weights_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_topk), dtype=float
+    // `topk_weights_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=float
     auto channel_x_buffers = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
     auto channel_src_idx_buffers = Buffer<int>(ptr, num_channel_tokens_total, channel_rank_token_offset);
-    auto channel_topk_weights_buffers = Buffer<float>(ptr, num_channel_tokens_total * num_topk, channel_rank_token_offset * num_topk);
+    auto channel_topk_weights_buffers = Buffer<float>(ptr, num_channel_tokens_total, channel_rank_token_offset);
 
     // Get rank offset
     // NOTES: `rank_prefix_matrix`: shape=(kNumRanks, kNumRanks), dtype=int
@@ -947,9 +941,10 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
       for (int i = send_warp_id_in_rank; i < num_round_tokens; i += num_send_warps_per_rank) { // warp-group strided
         // Get an empty slot in recv queue
         int dst_slot_idx = (current_channel_tail_idx + i) % num_recv_buffer_tokens;
+        int send_token_idx = token_idx + i;
 
         // Determine the actual source token idx in the send buffer
-        auto token_idx_in_x = static_cast<int64_t>(token_idx + i);
+        auto token_idx_in_x = static_cast<int64_t>(send_token_idx);
         token_idx_in_x = pre_perm_idx == nullptr ? token_idx_in_x : pre_perm_idx[token_idx_in_x];
 
         // Get the token ptr in the send buffer
@@ -973,11 +968,11 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
         // NOTES: `src_idx` is actually the `recv_src_idx` in dispatch stage
         //  thus src_idx[j] indicates the token idx in `recv_x` for x[j] to reduce to
         if (lane_id == 0)
-          channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + token_idx + i);
+          channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + send_token_idx);
 
         // Copy `topk_weights`
-        if (num_topk > 0 and lane_id < num_topk)
-          channel_topk_weights_buffers[dst_slot_idx * num_topk + lane_id] = __ldg(topk_weights + (token_idx + i) * num_topk + lane_id);
+        if (topk_weights != nullptr and lane_id == 0)
+          channel_topk_weights_buffers[dst_slot_idx + lane_id] = __ldg(topk_weights + send_token_idx + lane_id);
       }
 
       // Update token idx, channel tail idx by chunk size for last round
@@ -1085,8 +1080,8 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
         ptr = reinterpret_cast<void*>(static_cast<int8_t*>(ptr) + num_channel_tokens_total * sizeof(int));
 
         // Get `channel_topk_weights_buffers` for curr rank
-        // `topk_weights_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_topk), dtype=float
-        channel_topk_weights_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total * num_topk, channel_rank_token_offset * num_topk);
+        // `topk_weights_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=float
+        channel_topk_weights_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total, channel_rank_token_offset);
       }
 
       // Get reduce tasks
@@ -1156,11 +1151,6 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
             reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
           }
 
-          // Load biases
-          // TODO: remove this unused variable
-          int4 bias_0_value_int4 = bias_0_int4 != nullptr ? __ldg(bias_0_int4 + token_idx * hidden_int4 + i) : make_int4(0, 0, 0, 0);
-          int4 bias_1_value_int4 = bias_1_int4 != nullptr ? __ldg(bias_1_int4 + token_idx * hidden_int4 + i) : make_int4(0, 0, 0, 0);
-
           // Load all recv partial hidden values from all src ranks
           int4 recv_hidval_int4[kNumRanks];
 #pragma unroll
@@ -1170,15 +1160,10 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
           // Prepare high-precision reduce buffer for this hidden value
           float hp_hidval_reduce_buf[kDtypePerInt4];
 
-          // Reduce bias
-          // to the high-precision reduce buffer
-          // TODO: remove this redundant reduce
-          // but do NOT forget to zero-init the high-precision reduce buffer
-          auto bias_0_values = reinterpret_cast<const dtype_t*>(&bias_0_value_int4);
-          auto bias_1_values = reinterpret_cast<const dtype_t*>(&bias_1_value_int4);
+          // Zero-initialize the high-precision reduce buffer
 #pragma unroll
           for (int k = 0; k < kDtypePerInt4; ++k)
-            hp_hidval_reduce_buf[k] = static_cast<float>(bias_0_values[k]) + static_cast<float>(bias_1_values[k]);
+            hp_hidval_reduce_buf[k] = 0;
 
 #pragma unroll
           // Reduce all recv partial hidden values from all src ranks
@@ -1240,14 +1225,12 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
         }
 
         // Reduce `recv_topk_weights` from `channel_topk_weights_buffers`
-        // by the first `num_topk` lanes in each warp
-        // TODO: remove num_topk stuff
-        if (lane_id < num_topk) {
+        if (recv_topk_weights != nullptr and lane_id == 0) {
           float reduced_topk_weights = 0;
 #pragma unroll
           for (int j = 0; j < num_src_ranks; ++j)
-            reduced_topk_weights += ld_nc_global(channel_topk_weights_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_topk + lane_id);
-          recv_topk_weights[token_idx * num_topk + lane_id] = reduced_topk_weights;
+            reduced_topk_weights += ld_nc_global(channel_topk_weights_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] + lane_id);
+          recv_topk_weights[token_idx + lane_id] = reduced_topk_weights;
         }
 
         // Update channel head idx for each rank
@@ -1276,8 +1259,6 @@ void combine(
     float* recv_topk_weights,
     const void* x,
     const float* topk_weights,
-    const void* bias_0,
-    const void* bias_1,
     const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,
@@ -1286,7 +1267,6 @@ void combine(
     int num_tokens,
     int num_recv_tokens,
     int hidden,
-    int num_topk,
     void** buffer_ptrs,
     int rank,
     int num_ranks,
@@ -1313,8 +1293,6 @@ void combine(
         recv_topk_weights,                                                 \
         reinterpret_cast<const dtype*>(x),                                 \
         topk_weights,                                                      \
-        reinterpret_cast<const dtype*>(bias_0),                            \
-        reinterpret_cast<const dtype*>(bias_1),                            \
         pre_perm_idx,                                                      \
         src_idx,                                                           \
         rank_prefix_matrix,                                                \
@@ -1323,7 +1301,6 @@ void combine(
         num_tokens,                                                        \
         num_recv_tokens,                                                   \
         hidden,                                                            \
-        num_topk,                                                          \
         buffer_ptrs,                                                       \
         rank,                                                              \
         num_max_send_tokens,                                               \
