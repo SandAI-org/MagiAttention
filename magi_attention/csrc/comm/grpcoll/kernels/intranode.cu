@@ -333,14 +333,15 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
 
   if (is_sender) {
     // Ger send warp info
-    const auto num_send_warps = kNumThreads / WARP_SIZE;
-    const auto num_send_warps_per_rank = num_send_warps / kNumRanks;
-    const auto send_thread_id = thread_id;
-    const auto send_warp_id_in_rank = send_thread_id % num_threads_per_rank / WARP_SIZE;
+    // NOTES: the warps in one block are first divided into `kNumRanks` warp groups
+    // where each warp group is responsible for one rank, with the group size of `num_send_warps / kNumRanks`
+    constexpr int num_send_warps = kNumThreads / WARP_SIZE;
+    constexpr int num_send_warps_per_rank = num_send_warps / kNumRanks;
+    const auto send_warp_id_in_rank = warp_id % num_send_warps_per_rank;
     const auto max_num_used_slots_in_queue = num_recv_buffer_tokens - num_max_send_tokens;
 
-    GRPCOLL_DEVICE_ASSERT(kNumRanks <= WARP_SIZE);
-    GRPCOLL_DEVICE_ASSERT(num_send_warps % kNumRanks == 0);
+    GRPCOLL_STATIC_ASSERT(kNumRanks <= WARP_SIZE, "Invalid number of ranks");
+    GRPCOLL_STATIC_ASSERT(num_send_warps % kNumRanks == 0, "Invalid number of send warps");
 
     // Store the channel start_offset, end_offset from the channel_prefix_matrix
     if (lane_id == 0 and send_warp_id_in_rank == 0) { // the lane0 in the send warp0 for this rank
@@ -458,14 +459,17 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     }
   } else {
     // Ger recv warp info
-    const auto num_recv_warps = kNumThreads / WARP_SIZE;
-    const auto num_recv_warps_per_rank = num_recv_warps / kNumRanks;
-    const auto num_recv_threads_per_rank = num_recv_warps_per_rank * WARP_SIZE;
+    // NOTES: the warps in one block are first divided into `kNumRanks` warp groups
+    // where each warp group is responsible for one rank, with the group size of `num_recv_warps / kNumRanks`
+    constexpr int num_recv_warps = kNumThreads / WARP_SIZE;
+    constexpr int num_recv_warps_per_rank = num_recv_warps / kNumRanks;
+    constexpr int num_recv_threads_per_rank = num_recv_warps_per_rank * WARP_SIZE;
     const auto recv_thread_id = thread_id;
     const auto recv_thread_id_in_rank = recv_thread_id % num_threads_per_rank;
     const auto recv_warp_id_in_rank = recv_thread_id_in_rank / WARP_SIZE;
-    GRPCOLL_DEVICE_ASSERT(kNumRanks <= WARP_SIZE);
-    GRPCOLL_DEVICE_ASSERT(recv_thread_id >= 0 and num_recv_warps % kNumRanks == 0);
+
+    GRPCOLL_STATIC_ASSERT(kNumRanks <= WARP_SIZE, "Invalid number of ranks");
+    GRPCOLL_STATIC_ASSERT(num_recv_warps % kNumRanks == 0, "Invalid number of recv warps");
 
     // Get global rank offset for the responsible rank from the rank prefix matrix
     auto rank_prefix_matrix = static_cast<int*>(buffer_ptrs[recv_rank]);
@@ -709,6 +713,7 @@ void dispatch(
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   SWITCH_RANKS(DISPATCH_LAUNCH_CASE);
+
 #undef DISPATCH_LAUNCH_CASE
 }
 
@@ -812,37 +817,47 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
     bool acc_reduce /*TODO: make acc_reduce a template parameter*/) {
-  const auto num_sms = static_cast<int>(gridDim.x);
-  const auto thread_id = static_cast<int>(threadIdx.x);
-  const auto sm_id = static_cast<int>(blockIdx.x), lane_id = get_lane_id();
+  // Get thread Info
+  const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
+  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
+  const bool is_sender = sm_id % 2 == 0; // even-numbered SMs are senders
+  GRPCOLL_DEVICE_ASSERT(num_sms % 2 == 0);
+
+  // Get Channel Info
   const auto num_channels = num_sms / 2;
-  const bool is_sender = sm_id % 2 == 0;
   const int responsible_channel = sm_id / 2;
   GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE);
 
+  // Get Dtype Info and Transform
+  GRPCOLL_STATIC_ASSERT(sizeof(int4) % sizeof(dtype_t) == 0, "Invalid vectorization");
   constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
-  int hidden_int4 = hidden * sizeof(dtype_t) / sizeof(int4);
+  int hidden_int4 = hidden / kDtypePerInt4;
   auto x_int4 = reinterpret_cast<const int4*>(x);
   auto bias_0_int4 = reinterpret_cast<const int4*>(bias_0);
   auto bias_1_int4 = reinterpret_cast<const int4*>(bias_1);
   auto recv_int4 = reinterpret_cast<int4*>(recv_x);
 
-  // TMA stuffs
+  // Get copy info
 #ifndef DISABLE_SM90_FEATURES
+  // Get TMA copy info
+
+  // Prepare TMA buffer in shared memory for this warp
   extern __shared__ __align__(1024) uint8_t smem_buffer[];
-  auto tma_buffer = smem_buffer + (thread_id / WARP_SIZE) * kNumTMABytesPerWarp;
+  auto tma_buffer = smem_buffer + warp_id * kNumTMABytesPerWarp;
 #endif
 
   if (is_sender) {
-    // Workers for sending
-    // Several warps are responsible for a single rank
-    constexpr int num_send_warps_per_rank = (kNumThreads / WARP_SIZE) / kNumRanks;
-    constexpr int num_send_warps = num_send_warps_per_rank * kNumRanks;
-    const auto num_threads_per_rank = num_send_warps_per_rank * WARP_SIZE;
-    const auto send_thread_id = thread_id;
-    const auto send_warp_id = send_thread_id / WARP_SIZE;
-    const auto send_rank_id = (responsible_channel + send_warp_id) % kNumRanks;
+    // Ger send warp info
+    // NOTES: the warps in one block are first divided into `num_send_warps / kNumRanks` warp groups
+    // where for every single warp group, each warp is responsible for each rank, with the group size of `kNumRanks`
+    // Review: why organized interleavely, instead of following the way in dispatch ?
+    constexpr int num_send_warps = kNumThreads / WARP_SIZE;
+    constexpr int num_send_warps_per_rank = num_send_warps / kNumRanks;
+    constexpr int num_send_threads_per_rank = num_send_warps_per_rank * WARP_SIZE;
+    const auto send_thread_id = thread_id, send_warp_id = warp_id;
+    const auto send_rank_id = (responsible_channel + send_warp_id) % kNumRanks; // Review: why shifted by responsible_channel ?
     const auto send_warp_id_in_rank = send_warp_id / kNumRanks;
+
     GRPCOLL_STATIC_ASSERT(num_send_warps * WARP_SIZE == kNumThreads, "Invalid warp count");
 
     // Calculate pointers by the specific layout
@@ -917,7 +932,7 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
       current_channel_tail_idx += num_round_tokens;
 
       // Move tail index
-      sync_warp_group(/*group_flag=*/send_rank_id, /*group_size=*/num_threads_per_rank);
+      sync_warp_group(/*group_flag=*/send_rank_id, /*group_size=*/num_send_threads_per_rank);
       if (lane_id == 0 and send_warp_id_in_rank == 0)
         st_release_sys_global(channel_tail_idx.buffer(), current_channel_tail_idx);
     }
@@ -925,9 +940,10 @@ __global__ void __launch_bounds__(/*max_threads_per_block=*/kNumThreads, /*min_b
     // Workers for receiving
     // One warp for moving the queue head, others for reduction
     constexpr int num_recv_warps = kNumThreads / WARP_SIZE;
-    const auto recv_warp_id = thread_id / WARP_SIZE;
-    GRPCOLL_DEVICE_ASSERT(kNumRanks <= WARP_SIZE and kNumThreads > WARP_SIZE);
-    GRPCOLL_DEVICE_ASSERT(thread_id >= 0 and kNumThreads % WARP_SIZE == 0);
+    const auto recv_warp_id = warp_id;
+
+    GRPCOLL_STATIC_ASSERT(kNumRanks <= WARP_SIZE, "Invalid number of ranks");
+    GRPCOLL_STATIC_ASSERT(kNumThreads % WARP_SIZE == 0, "Invalid number of recv threads");
 
     // Shared head, tail and retired flags for receiver warps
     __shared__ volatile int warp_channel_head_idx[num_recv_warps][kNumRanks];
@@ -1166,10 +1182,11 @@ void combine(
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
     bool acc_reduce) {
-  constexpr int kNumThreads = 768;
-  constexpr int kNumTMABytesPerWarp = 4096;
+  constexpr int kNumThreads = 768; // block size
+  constexpr int kNumWarps = kNumThreads / WARP_SIZE; // num warps per block
+  constexpr int kNumTMABytesPerWarp = 4096; // num bytes of tma transfer per warp
 #ifndef DISABLE_SM90_FEATURES
-  constexpr int smem_size = kNumTMABytesPerWarp * (kNumThreads / WARP_SIZE);
+  constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of tma transfer per block
 #endif
 
 #define COMBINE_LAUNCH_CASE(dtype, ranks)                                  \
@@ -1201,15 +1218,17 @@ void combine(
         acc_reduce);                                                       \
   }                                                                        \
   break
+
 #define COMBINE_DTYPE_LAUNCH_CASE(dtype)               \
   SWITCH_RANKS_WITH_DTYPE(dtype, COMBINE_LAUNCH_CASE); \
   break
 
-  // Even-numbered blocks for sending, odd-numbered blocks for receiving
+  // Even-numbered SMs for sending, odd-numbered SMs for receiving
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
   GRPCOLL_HOST_ASSERT(kNumThreads >= num_ranks * WARP_SIZE);
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   SWITCH_TYPES(COMBINE_DTYPE_LAUNCH_CASE);
+
 #undef COMBINE_DTYPE_LAUNCH_CASE
 #undef COMBINE_LAUNCH_CASE
 }
