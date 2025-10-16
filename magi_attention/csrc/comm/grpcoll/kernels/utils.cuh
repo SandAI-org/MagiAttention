@@ -48,6 +48,8 @@
 
 #define DEVICE_INLINE __device__ __forceinline__
 
+#define HOST_DEVICE __host__ __device__
+
 #define GLOBAL_LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK, MIN_BLOCKS_PER_SM) __global__ __launch_bounds__(MAX_THREADS_PER_BLOCK, MIN_BLOCKS_PER_SM)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -637,20 +639,20 @@ template <typename FuncT>
 struct PatternVisitor {
   FuncT func;
 
-  __device__ __host__ explicit PatternVisitor(FuncT&& func) : func(std::forward<FuncT>(func)) {}
+  HOST_DEVICE explicit PatternVisitor(FuncT&& func) : func(std::forward<FuncT>(func)) {}
 
-  __device__ __host__ auto operator[](const uint32_t& i) {
+  HOST_DEVICE auto operator[](const uint32_t& i) {
     return func(i);
   }
 };
 
 template <typename dtype_t>
-__host__ __device__ constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
+HOST_DEVICE constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
   return (a + b - 1) / b;
 }
 
 template <typename dtype_t>
-__host__ __device__ constexpr dtype_t align(dtype_t a, dtype_t b) {
+HOST_DEVICE constexpr dtype_t align(dtype_t a, dtype_t b) {
   return ceil_div<dtype_t>(a, b) * b;
 }
 
