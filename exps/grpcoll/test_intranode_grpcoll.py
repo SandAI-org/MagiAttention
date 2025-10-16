@@ -36,6 +36,7 @@
 
 import argparse
 import time
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -67,6 +68,315 @@ from grpcoll_utils import (
     sim_gemm,
     transfer_group_cast_meta_to_dispatch_meta,
 )
+
+
+def test_func(
+    rank: int,
+    local_rank: int,
+    num_ranks: int,
+    buffer: GrpCollBuffer,
+    current_x: torch.Tensor,
+    distinct_token: bool,
+    async_mode: bool,
+    previous_mode: bool,
+    pass_out_buffer: bool,
+    random_permute_output: bool,
+    allow_empty_init_out_buf: bool,
+    use_a2av_perm_idxs: str,
+    sim_gemm_weight: float,
+    acc_reduce_constant: int,
+    min_num_dst_ranks: int,
+    **kwargs,
+) -> dict[str, Any]:
+    if local_rank == 0:
+        print(
+            "\n# ------    Test Intranode Dispatch   ------ #\n"
+            f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, '
+            f"(async={async_mode}, previous={previous_mode}) ...",
+            flush=True,
+        )
+
+    # fetch kwargs
+    recv_x_gc: torch.Tensor = kwargs["recv_x_gc"]
+    recv_x_gc_buf: torch.Tensor = kwargs["recv_x_gc_buf"]
+    combined_x_gr: torch.Tensor = kwargs["combined_x_gr"]
+    combined_x_gr_buf: torch.Tensor = kwargs["combined_x_gr_buf"]
+    acc_reduce_out_buffer: torch.Tensor = kwargs["acc_reduce_out_buffer"]
+    is_token_in_rank: torch.Tensor = kwargs["is_token_in_rank"]
+    num_tokens_per_rank: torch.Tensor = kwargs["num_tokens_per_rank"]
+    num_tokens_per_expert: torch.Tensor = kwargs["num_tokens_per_expert"]
+    config: GrpCollConfig = kwargs["config"]
+    perm_to_a2av_idx: torch.Tensor = kwargs["perm_to_a2av_idx"]
+    unperm_from_a2av_idx: torch.Tensor = kwargs["unperm_from_a2av_idx"]
+    range_gather_post_dispatch_kwargs: dict = kwargs[
+        "range_gather_post_dispatch_kwargs"
+    ]
+    range_gather_pre_combine_kwargs: dict = kwargs["range_gather_pre_combine_kwargs"]
+    gbl_num_tokens_per_rank: torch.Tensor = kwargs["gbl_num_tokens_per_rank"]
+
+    # define check function
+    def check_data(check_x, rank_prefix_matrix):
+        if distinct_token:
+            # distinct token cannot use this check
+            return
+        assert torch.allclose(check_x.amin(dim=1), check_x.amax(dim=1))
+        check_start = 0
+        for i in range(num_ranks):
+            check_end = rank_prefix_matrix[i][rank].item()
+            assert (check_x[check_start:check_end, :].int() - i).sum().item() == 0
+            check_start = check_end
+
+    # prepare dispatch args
+    # x: shape=[num_local_tokens, hidden_dim]
+    # num_tokens_per_rank: shape=[num_ranks]: the number of tokens sent to each rank
+    # num_tokens_per_expert: shape=[num_experts]: the number of tokens sent to each expert
+    # is_token_in_rank: shape=[num_local_tokens, num_ranks]: whether a local token should be sent to a rank
+    # NOTE: if using top-k, the above args can be
+    #   calculated by buffer.get_dispatch_layout(topk_idx, num_experts)
+    #   where the topk_idx: shape=[num_local_tokens, topk]: the global expert idx for each local token
+    #   but we don't have to pass the topk_idx into dispatch kernels
+    dispatch_args = {
+        "x": current_x,
+        "recv_x": recv_x_gc_buf,
+        "is_token_in_rank": is_token_in_rank,
+        "num_tokens_per_rank": num_tokens_per_rank,
+        "num_tokens_per_expert": num_tokens_per_expert,
+        "config": config,
+        "async_finish": async_mode,
+        "post_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
+    }
+    if previous_mode:
+        dispatch_args.update({"previous_event": buffer.capture()})
+
+    # dispatch
+    # recv_x: shape=[num_recv_tokens, hidden_dim]:
+    #   the recv tokens for this rank (in rank order just like a2a output,
+    #   while the boundary is indicated by rank_prefix_matrix)
+    # handle: the tuple of some meta tensors that will be passed to combine or cached dispatch
+    # handle[0] (rank_prefix_matrix): shape=[num_ranks, num_ranks]:
+    #   rank_prefix_matrix[:, r]: the prefix sum of number of tokens (i.e. end idxs)
+    #   sent by each rank to rank r calculated in notify_dispatch
+    # handle[1] (channel_prefix_matrix): shape=[num_ranks, num_channels]:
+    #   channel_prefix_matrix[r, :]: the prefix sum of send token end idxs
+    #   sent by each send-channel to rank r calculated in notify_dispatch
+    # handle[2] (recv_channel_prefix_matrix): shape=[num_ranks, num_channels]:
+    #   recv_channel_prefix_matrix[r, :]: the prefix sum of recv token start idxs
+    #   recv by each recv-channel from rank r
+    # handle[3] (recv_src_idx): shape=[num_recv_tokens,]:
+    #   the original token idx in the sender's buffer of each recv token
+    #   so this is used in combine stage to indicate the original token position
+    #   that each recv token should be reduced to
+    # handle[4] (is_token_in_rank): shape=[num_tokens, num_ranks]
+    # handle[5] (send_head): shape=[num_tokens, num_ranks]:
+    #   send_head[i, r]: the offset in the corr. channel of send token i
+    #   if it needs to be sent to rank r
+    #   since the cached_channel_tail_idx starts at 0
+    #   when token_idx == token_start_idx for the corr. channel
+    #   thus the send_head[:, r] will be several cu_seqlens like:
+    #       [0, 1, ... channel0_size, 0, 1, ... channel1_size, ...]
+    #   and if is_token_in_rank[i, r] == -1, then send_head[i, r] == -1
+    #   as well (and should be ignored in the cu_seqlens above)
+    (
+        recv_x,
+        handle,
+        event,
+    ) = buffer.group_cast(**dispatch_args)
+
+    # wait
+    event.current_stream_wait() if async_mode else ()
+
+    # check in-place
+    if pass_out_buffer:
+        assert recv_x_gc_buf is not None
+        assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()  # type: ignore[union-attr]
+
+    # unpermute recv_x to the order indicated by
+    # output_split_size_list and src_index_list
+    if random_permute_output:
+        if use_a2av_perm_idxs == "inside":
+            # already permuted inside
+            pass
+        else:
+            recv_x_from_a2av = recv_x.clone()  # type: ignore[union-attr]
+            if use_a2av_perm_idxs == "outside":
+                recv_x = recv_x[unperm_from_a2av_idx]
+            elif use_a2av_perm_idxs == "no":
+                recv_x = unpermute_tensor(
+                    tensor=recv_x,
+                    unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
+                )
+            assert recv_x_from_a2av.shape == recv_x.shape  # type: ignore[union-attr]
+
+    # print
+    assert isinstance(handle, GrpCollIntraHandle)
+
+    rank_prefix_matrix = handle.rank_prefix_matrix
+    channel_prefix_matrix = handle.channel_prefix_matrix
+    recv_channel_prefix_matrix = handle.recv_channel_prefix_matrix
+    recv_src_idx = handle.recv_src_idx
+    is_token_in_rank_handle = handle.is_token_in_rank
+    send_head = handle.send_head
+
+    print(
+        (
+            f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
+            f"{rank_prefix_matrix.shape=} | {rank_prefix_matrix=}\n"  # handle[0]
+            f"{channel_prefix_matrix.shape=} | {channel_prefix_matrix=}\n"  # handle[1]
+            f"{recv_channel_prefix_matrix.shape=} | {recv_channel_prefix_matrix=}\n"  # handle[2]
+            f"{recv_src_idx.shape=} | {recv_src_idx=}\n"  # handle[3]
+            f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[4]
+            f"After dipatch: {send_head.shape=} | {send_head=}\n\n"  # handle[5]
+        ),
+        flush=True,
+    )
+
+    # cast back from fp8
+    recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
+
+    # check
+    assert torch.equal(recv_x, recv_x_gc)
+    assert torch.equal(is_token_in_rank_handle, is_token_in_rank)
+    assert torch.equal(channel_prefix_matrix[:, -1], num_tokens_per_rank)
+    assert torch.equal(
+        recv_channel_prefix_matrix[rank, 1:],
+        channel_prefix_matrix[rank, :-1],
+    )
+    assert torch.all(recv_channel_prefix_matrix[:, 0] == 0)
+    assert torch.all(send_head[is_token_in_rank_handle == -1] == -1)
+    assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(
+        0
+    ), f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
+    check_data(recv_x, rank_prefix_matrix)
+
+    if local_rank == 0:
+        print(
+            "\n# ------    Test Intranode Cached Dispatch   ------ #\n",
+            flush=True,
+        )
+
+    # Test cached dispatch
+    dispatch_args = {
+        "x": current_x,
+        "handle": handle,
+        "config": config,
+        "async_finish": async_mode,
+    }
+    if previous_mode:
+        dispatch_args.update({"previous_event": buffer.capture()})
+    recv_cache_x, _, event = buffer.group_cast(**dispatch_args)
+    event.current_stream_wait() if async_mode else ()
+    recv_cache_x = (
+        per_token_cast_back(*recv_cache_x)
+        if isinstance(recv_cache_x, tuple)
+        else recv_cache_x
+    )
+    check_data(recv_cache_x, rank_prefix_matrix)
+
+    if local_rank == 0:
+        print(
+            "\n# ------    Test Intranode Combine   ------ #\n",
+            flush=True,
+        )
+
+    # simulate gemm
+    x_combine = sim_gemm(recv_x, w=sim_gemm_weight)
+
+    # permute x to the rank order
+    if random_permute_output:
+        if use_a2av_perm_idxs == "inside":
+            # will permute inside
+            pass
+        else:
+            x_combine_before_to_a2av = x_combine.clone()
+            if use_a2av_perm_idxs == "outside":
+                x_combine = x_combine[perm_to_a2av_idx]
+            elif use_a2av_perm_idxs == "no":
+                x_combine = unpermute_tensor(
+                    tensor=x_combine,
+                    unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
+                )
+            assert x_combine_before_to_a2av.shape == x_combine.shape
+
+    # prepare combine args
+    send_head_copy = send_head.clone()
+    combine_args = {
+        "x": x_combine,
+        "combined_x": combined_x_gr_buf,
+        "handle": handle,
+        "config": config,
+        "async_finish": async_mode,
+        "reduce_op": "sum",
+        "acc_reduce": acc_reduce_out_buffer,
+        "allow_empty_init_out_buf": allow_empty_init_out_buf,
+        # NOTE: still perm_to_a2av_idx, instead of unperm_to_a2av_idx
+        "pre_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
+    }
+    if previous_mode:
+        combine_args.update({"previous_event": buffer.capture()})
+
+    # combine
+    # combined_x: shape=[num_tokens, hidden_size]:
+    #   combined_x[i]: the ith token's sum-reduction result of top-k experts
+    #   NOTE: the send_head will be modified in-place in intranode::cached_notify_combine
+    #   for the entries == -1 to the position p of next valid token (encoded to -p-1)
+    #   since the combine kernel needs to know the channel position when iterating at this token,
+    #   even though it is not sent to the target rank
+    combined_x, event = buffer.group_reduce(**combine_args)
+
+    # wait
+    event.current_stream_wait() if async_mode else ()
+
+    # check in-place
+    if pass_out_buffer:
+        assert combined_x_gr_buf is not None
+        assert combined_x_gr_buf.data_ptr() == combined_x.data_ptr()
+
+    # print
+    print(
+        (
+            f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
+            f"Before combine: {send_head.shape=} | {send_head=}\n\n"
+        ),
+        flush=True,
+    )
+
+    # check
+    torch.testing.assert_close(combined_x, combined_x_gr)
+    assert torch.equal(
+        send_head[send_head_copy != -1],
+        send_head_copy[send_head_copy != -1],
+    )  # cached_notify_combine will modify send_head in-place for any entry == -1
+
+    send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
+    check_x = combined_x.float() / send_token_nums
+    ref_x = current_x
+    ref_x = sim_gemm(ref_x, w=sim_gemm_weight)
+    # if acc_reduce, the combined token should add with a constant rank bias
+    if acc_reduce_out_buffer:
+        ref_x += acc_reduce_constant / send_token_nums
+
+    # if some token is not sent to any rank, the combined token should be 0
+    if min_num_dst_ranks == 0:
+        zero_num_dst_ranks_mask = (send_token_nums == 0.0).expand_as(combined_x)
+        check_x[zero_num_dst_ranks_mask] = (
+            acc_reduce_constant if acc_reduce_out_buffer else 0.0
+        )
+        ref_x[zero_num_dst_ranks_mask] = (
+            acc_reduce_constant if acc_reduce_out_buffer else 0.0
+        )
+
+    diff = calc_diff(check_x, ref_x)
+    assert diff < 5e-6, f"{check_x} != {ref_x} with ({diff=})"
+
+    # For later tuning
+    dispatch_bf16_nvl_recv_bytes = recv_x.numel() * 2
+    combine_bf16_nvl_send_bytes = dispatch_bf16_nvl_recv_bytes
+
+    return dict(
+        handle=handle,
+        dispatch_bf16_nvl_recv_bytes=dispatch_bf16_nvl_recv_bytes,
+        combine_bf16_nvl_send_bytes=combine_bf16_nvl_send_bytes,
+    )
 
 
 def test_main(
@@ -146,7 +456,6 @@ def test_main(
         print(f"[RANK {rank}]: distinct_input: {x=}\n", flush=True)
     else:
         x *= rank
-    x_pure_rand = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
     x_e4m3 = per_token_cast_to_fp8(x) if GrpCollBuffer.is_sm90_compiled() else None
     x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T) if x_e4m3 is not None else None
 
@@ -420,289 +729,48 @@ def test_main(
     group.barrier()
     time.sleep(1)
 
-    # Test dispatch
-    def check_data(check_x, rank_prefix_matrix):
-        if distinct_token:
-            # distinct token cannot use this check
-            return
-        assert torch.allclose(check_x.amin(dim=1), check_x.amax(dim=1))
-        check_start = 0
-        for i in range(num_ranks):
-            check_end = rank_prefix_matrix[i][rank].item()
-            assert (check_x[check_start:check_end, :].int() - i).sum().item() == 0
-            check_start = check_end
-
-    for previous_mode in (True,):  # (False, True)
-        for async_mode in (True,):  # (False, True)
-            for current_x in (x,):
-                if local_rank == 0:
-                    print(
-                        "\n# ------    Test Intranode Dispatch   ------ #\n"
-                        f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, '
-                        f"(async={async_mode}, previous={previous_mode}) ...",
-                        flush=True,
-                    )
-
-                # prepare dispatch args
-                # x: shape=[num_local_tokens, hidden_dim]
-                # num_tokens_per_rank: shape=[num_ranks]: the number of tokens sent to each rank
-                # num_tokens_per_expert: shape=[num_experts]: the number of tokens sent to each expert
-                # is_token_in_rank: shape=[num_local_tokens, num_ranks]: whether a local token should be sent to a rank
-                # NOTE: if using top-k, the above args can be
-                #   calculated by buffer.get_dispatch_layout(topk_idx, num_experts)
-                #   where the topk_idx: shape=[num_local_tokens, topk]: the global expert idx for each local token
-                #   but we don't have to pass the topk_idx into dispatch kernels
-                dispatch_args = {
-                    "x": current_x,
-                    "recv_x": recv_x_gc_buf,
-                    "is_token_in_rank": is_token_in_rank,
-                    "num_tokens_per_rank": num_tokens_per_rank,
-                    "num_tokens_per_expert": num_tokens_per_expert,
-                    "config": config,
-                    "async_finish": async_mode,
-                    "post_perm_idx": perm_to_a2av_idx
-                    if use_a2av_perm_idxs == "inside"
-                    else None,
-                }
-                if previous_mode:
-                    dispatch_args.update({"previous_event": buffer.capture()})
-
-                # dispatch
-                # recv_x: shape=[num_recv_tokens, hidden_dim]:
-                #   the recv tokens for this rank (in rank order just like a2a output,
-                #   while the boundary is indicated by rank_prefix_matrix)
-                # handle: the tuple of some meta tensors that will be passed to combine or cached dispatch
-                # handle[0] (rank_prefix_matrix): shape=[num_ranks, num_ranks]:
-                #   rank_prefix_matrix[:, r]: the prefix sum of number of tokens (i.e. end idxs)
-                #   sent by each rank to rank r calculated in notify_dispatch
-                # handle[1] (channel_prefix_matrix): shape=[num_ranks, num_channels]:
-                #   channel_prefix_matrix[r, :]: the prefix sum of send token end idxs
-                #   sent by each send-channel to rank r calculated in notify_dispatch
-                # handle[2] (recv_channel_prefix_matrix): shape=[num_ranks, num_channels]:
-                #   recv_channel_prefix_matrix[r, :]: the prefix sum of recv token start idxs
-                #   recv by each recv-channel from rank r
-                # handle[3] (recv_src_idx): shape=[num_recv_tokens,]:
-                #   the original token idx in the sender's buffer of each recv token
-                #   so this is used in combine stage to indicate the original token position
-                #   that each recv token should be reduced to
-                # handle[4] (is_token_in_rank): shape=[num_tokens, num_ranks]
-                # handle[5] (send_head): shape=[num_tokens, num_ranks]:
-                #   send_head[i, r]: the offset in the corr. channel of send token i
-                #   if it needs to be sent to rank r
-                #   since the cached_channel_tail_idx starts at 0
-                #   when token_idx == token_start_idx for the corr. channel
-                #   thus the send_head[:, r] will be several cu_seqlens like:
-                #       [0, 1, ... channel0_size, 0, 1, ... channel1_size, ...]
-                #   and if is_token_in_rank[i, r] == -1, then send_head[i, r] == -1
-                #   as well (and should be ignored in the cu_seqlens above)
-                (
-                    recv_x,
-                    handle,
-                    event,
-                ) = buffer.group_cast(**dispatch_args)
-
-                # wait
-                event.current_stream_wait() if async_mode else ()
-
-                # check in-place
-                if pass_out_buffer:
-                    assert recv_x_gc_buf is not None
-                    assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()  # type: ignore[union-attr]
-
-                # unpermute recv_x to the order indicated by
-                # output_split_size_list and src_index_list
-                if random_permute_output:
-                    if use_a2av_perm_idxs == "inside":
-                        # already permuted inside
-                        pass
-                    else:
-                        recv_x_from_a2av = recv_x.clone()  # type: ignore[union-attr]
-                        if use_a2av_perm_idxs == "outside":
-                            recv_x = recv_x[unperm_from_a2av_idx]
-                        elif use_a2av_perm_idxs == "no":
-                            recv_x = unpermute_tensor(
-                                tensor=recv_x,
-                                unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
-                            )
-                        assert recv_x_from_a2av.shape == recv_x.shape  # type: ignore[union-attr]
-
-                # print
-                assert isinstance(handle, GrpCollIntraHandle)
-
-                rank_prefix_matrix = handle.rank_prefix_matrix
-                channel_prefix_matrix = handle.channel_prefix_matrix
-                recv_channel_prefix_matrix = handle.recv_channel_prefix_matrix
-                recv_src_idx = handle.recv_src_idx
-                is_token_in_rank_handle = handle.is_token_in_rank
-                send_head = handle.send_head
-
-                print(
-                    (
-                        f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
-                        f"{rank_prefix_matrix.shape=} | {rank_prefix_matrix=}\n"  # handle[0]
-                        f"{channel_prefix_matrix.shape=} | {channel_prefix_matrix=}\n"  # handle[1]
-                        f"{recv_channel_prefix_matrix.shape=} | {recv_channel_prefix_matrix=}\n"  # handle[2]
-                        f"{recv_src_idx.shape=} | {recv_src_idx=}\n"  # handle[3]
-                        f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[4]
-                        f"After dipatch: {send_head.shape=} | {send_head=}\n\n"  # handle[5]
-                    ),
-                    flush=True,
-                )
-
-                # cast back from fp8
-                recv_x = (
-                    per_token_cast_back(*recv_x)
-                    if isinstance(recv_x, tuple)
-                    else recv_x
-                )
-
-                # check
-                assert torch.equal(recv_x, recv_x_gc)
-                assert torch.equal(is_token_in_rank_handle, is_token_in_rank)
-                assert torch.equal(channel_prefix_matrix[:, -1], num_tokens_per_rank)
-                assert torch.equal(
-                    recv_channel_prefix_matrix[rank, 1:],
-                    channel_prefix_matrix[rank, :-1],
-                )
-                assert torch.all(recv_channel_prefix_matrix[:, 0] == 0)
-                assert torch.all(send_head[is_token_in_rank_handle == -1] == -1)
-                assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(
-                    0
-                ), f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
-                if current_x is not x_pure_rand:
-                    check_data(recv_x, rank_prefix_matrix)
-
-                if local_rank == 0:
-                    print(
-                        "\n# ------    Test Intranode Cached Dispatch   ------ #\n",
-                        flush=True,
-                    )
-
-                # Test cached dispatch
-                dispatch_args = {
-                    "x": current_x,
-                    "handle": handle,
-                    "config": config,
-                    "async_finish": async_mode,
-                }
-                if previous_mode:
-                    dispatch_args.update({"previous_event": buffer.capture()})
-                recv_cache_x, _, event = buffer.group_cast(**dispatch_args)
-                event.current_stream_wait() if async_mode else ()
-                recv_cache_x = (
-                    per_token_cast_back(*recv_cache_x)
-                    if isinstance(recv_cache_x, tuple)
-                    else recv_cache_x
-                )
-                if current_x is not x_pure_rand:
-                    check_data(recv_cache_x, rank_prefix_matrix)
-
-                if local_rank == 0:
-                    print(
-                        "\n# ------    Test Intranode Combine   ------ #\n",
-                        flush=True,
-                    )
-
-                # simulate gemm
-                x_combine = sim_gemm(recv_x, w=sim_gemm_weight)
-
-                # permute x to the rank order
-                if random_permute_output:
-                    if use_a2av_perm_idxs == "inside":
-                        # will permute inside
-                        pass
-                    else:
-                        x_combine_before_to_a2av = x_combine.clone()
-                        if use_a2av_perm_idxs == "outside":
-                            x_combine = x_combine[perm_to_a2av_idx]
-                        elif use_a2av_perm_idxs == "no":
-                            x_combine = unpermute_tensor(
-                                tensor=x_combine,
-                                unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
-                            )
-                        assert x_combine_before_to_a2av.shape == x_combine.shape
-
-                # prepare combine args
-                send_head_copy = send_head.clone()
-                combine_args = {
-                    "x": x_combine,
-                    "combined_x": combined_x_gr_buf,
-                    "handle": handle,
-                    "config": config,
-                    "async_finish": async_mode,
-                    "reduce_op": "sum",
-                    "acc_reduce": acc_reduce_out_buffer,
-                    "allow_empty_init_out_buf": allow_empty_init_out_buf,
-                    # NOTE: still perm_to_a2av_idx, instead of unperm_to_a2av_idx
-                    "pre_perm_idx": perm_to_a2av_idx
-                    if use_a2av_perm_idxs == "inside"
-                    else None,
-                }
-                if previous_mode:
-                    combine_args.update({"previous_event": buffer.capture()})
-
-                # combine
-                # combined_x: shape=[num_tokens, hidden_size]:
-                #   combined_x[i]: the ith token's sum-reduction result of top-k experts
-                #   NOTE: the send_head will be modified in-place in intranode::cached_notify_combine
-                #   for the entries == -1 to the position p of next valid token (encoded to -p-1)
-                #   since the combine kernel needs to know the channel position when iterating at this token,
-                #   even though it is not sent to the target rank
-                combined_x, event = buffer.group_reduce(**combine_args)
-
-                # wait
-                event.current_stream_wait() if async_mode else ()
-
-                # check in-place
-                if pass_out_buffer:
-                    assert combined_x_gr_buf is not None
-                    assert combined_x_gr_buf.data_ptr() == combined_x.data_ptr()
-
-                # print
-                print(
-                    (
-                        f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
-                        f"Before combine: {send_head.shape=} | {send_head=}\n\n"
-                    ),
-                    flush=True,
-                )
-
-                # check
-                torch.testing.assert_close(combined_x, combined_x_gr)
-                assert torch.equal(
-                    send_head[send_head_copy != -1],
-                    send_head_copy[send_head_copy != -1],
-                )  # cached_notify_combine will modify send_head in-place for any entry == -1
-
-                send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
-                check_x = combined_x.float() / send_token_nums
-                ref_x = x_pure_rand if current_x is x_pure_rand else x
-                ref_x = sim_gemm(ref_x, w=sim_gemm_weight)
-                # if acc_reduce, the combined token should add with a constant rank bias
-                if acc_reduce_out_buffer:
-                    ref_x += acc_reduce_constant / send_token_nums
-
-                # if some token is not sent to any rank, the combined token should be 0
-                if min_num_dst_ranks == 0:
-                    zero_num_dst_ranks_mask = (send_token_nums == 0.0).expand_as(
-                        combined_x
-                    )
-                    check_x[zero_num_dst_ranks_mask] = (
-                        acc_reduce_constant if acc_reduce_out_buffer else 0.0
-                    )
-                    ref_x[zero_num_dst_ranks_mask] = (
-                        acc_reduce_constant if acc_reduce_out_buffer else 0.0
-                    )
-
-                diff = calc_diff(check_x, ref_x)
-                assert diff < 5e-6, f"{check_x} != {ref_x} with ({diff=})"
-
-                # For later tuning
-                dispatch_bf16_nvl_recv_bytes = recv_x.numel() * 2
-                combine_bf16_nvl_send_bytes = dispatch_bf16_nvl_recv_bytes
+    # Test dispatch / combine
+    meta_out = test_func(
+        rank=rank,
+        local_rank=local_rank,
+        num_ranks=num_ranks,
+        buffer=buffer,
+        current_x=x,
+        # test parameters
+        distinct_token=distinct_token,
+        async_mode=True,
+        previous_mode=True,
+        pass_out_buffer=pass_out_buffer,
+        random_permute_output=random_permute_output,
+        allow_empty_init_out_buf=allow_empty_init_out_buf,
+        use_a2av_perm_idxs=use_a2av_perm_idxs,
+        sim_gemm_weight=sim_gemm_weight,
+        acc_reduce_constant=acc_reduce_constant,
+        min_num_dst_ranks=min_num_dst_ranks,
+        # kwargs
+        recv_x_gc=recv_x_gc,
+        recv_x_gc_buf=recv_x_gc_buf,
+        combined_x_gr=combined_x_gr,
+        combined_x_gr_buf=combined_x_gr_buf,
+        acc_reduce_out_buffer=acc_reduce_out_buffer,
+        is_token_in_rank=is_token_in_rank,
+        num_tokens_per_rank=num_tokens_per_rank,
+        num_tokens_per_expert=num_tokens_per_expert,
+        config=config,
+        perm_to_a2av_idx=perm_to_a2av_idx,
+        unperm_from_a2av_idx=unperm_from_a2av_idx,
+        range_gather_post_dispatch_kwargs=range_gather_post_dispatch_kwargs,
+        range_gather_pre_combine_kwargs=range_gather_pre_combine_kwargs,
+        gbl_num_tokens_per_rank=gbl_num_tokens_per_rank,
+    )
 
     if local_rank == 0:
         print("passed", flush=True)
+
+    # fetch meta out from test func
+    handle = meta_out["handle"]
+    dispatch_bf16_nvl_recv_bytes = meta_out["dispatch_bf16_nvl_recv_bytes"]
+    combine_bf16_nvl_send_bytes = meta_out["combine_bf16_nvl_send_bytes"]
 
     # Tune dispatch performance
     best_dispatch_results = None
