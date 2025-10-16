@@ -797,6 +797,7 @@ void cached_notify_combine(
 #undef CACHED_NOTIFY_COMBINE
 }
 
+// TODO: support `reduce_dtype_t` as a template parameter
 template <typename dtype_t, int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp, bool kAccReduce>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void combine(

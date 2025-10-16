@@ -33,7 +33,7 @@ from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import assert_close
 from magi_attention.testing.utils import switch_envvar_context
-from magi_attention.utils import is_list_type_all
+from magi_attention.utils import is_list_type_all, max_fp_dtype
 
 
 # TODO: add test cases for world size > 4
@@ -288,16 +288,26 @@ class TestGroupCollective(DistTestBase):
             },
         ],
     )
+    @parameterize(
+        "dtype", [torch.bfloat16, torch.float16, torch.float32, torch.float64]
+    )
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
     @parameterize("async_op", [False, True])
     def test_group_cast(
         self,
         test_case: dict[str, Any],
+        dtype: torch.dtype,
         use_hier_comm: bool,
         use_native_grpcoll: bool,
         async_op: bool,
     ):
+        test_case_name = (
+            f"{test_case['name']=} x {dtype=} x "
+            f"{use_hier_comm=} x {use_native_grpcoll=} x "
+            f"{async_op=}"
+        )
+
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
             return
@@ -335,7 +345,7 @@ class TestGroupCollective(DistTestBase):
         send_buffer = (
             torch.tensor(
                 test_case["send_buffer_per_rank"][self.rank],
-                dtype=self.dtype,
+                dtype=dtype,
                 device=self.device,
             )
             .repeat_interleave(repeats=self.hidden_size, dim=0)
@@ -344,7 +354,7 @@ class TestGroupCollective(DistTestBase):
         expected_recv_buffer = (
             torch.tensor(
                 test_case["expected_recv_buffer_per_rank"][self.rank],
-                dtype=self.dtype,
+                dtype=dtype,
                 device=self.device,
             )
             .repeat_interleave(repeats=self.hidden_size, dim=0)
@@ -353,7 +363,7 @@ class TestGroupCollective(DistTestBase):
         recv_buffer = torch.full_like(
             expected_recv_buffer,
             fill_value=-1,
-            dtype=self.dtype,
+            dtype=dtype,
             device=self.device,
         )
 
@@ -398,7 +408,7 @@ class TestGroupCollective(DistTestBase):
             )
         except Exception as e:
             err_msg_list.append(
-                f"Group-Cast collective has failed due to error: \n{e}\n"
+                f"For group-cast: {test_case_name=}, recv buffer is failed due to error: \n{e}\n"
                 f"with: \n{recv_buffer=}\n{expected_recv_buffer=}\n"
             )
 
@@ -624,6 +634,9 @@ class TestGroupCollective(DistTestBase):
             },
         ],
     )
+    @parameterize(
+        "dtype", [torch.bfloat16, torch.float16, torch.float32, torch.float64]
+    )
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
     @parameterize("deterministic", [False, True])
@@ -631,14 +644,23 @@ class TestGroupCollective(DistTestBase):
     def test_group_reduce(
         self,
         test_case: dict[str, Any],
+        dtype: torch.dtype,
         use_hier_comm: bool,
         use_native_grpcoll: bool,
         deterministic: bool,
         async_op: bool,
     ):
-        test_case_name = test_case["name"]
+        test_case_name = (
+            f"{test_case['name']=} x {dtype=} x "
+            f"{use_hier_comm=} x {use_native_grpcoll=} x "
+            f"{deterministic=} x {async_op=}"
+        )
         reduce_op = test_case["reduce_op"]
         is_lse_reduce = reduce_op == "lse"
+
+        # FIXME: the expected answers of lse-reduce are based on torch.bfloat16
+        if is_lse_reduce and dtype != torch.bfloat16:
+            return
 
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
@@ -689,7 +711,7 @@ class TestGroupCollective(DistTestBase):
         send_buffer = (
             torch.tensor(
                 test_case["send_buffer_per_rank"][self.rank],
-                dtype=self.dtype,
+                dtype=dtype,
                 device=self.device,
             )
             .repeat_interleave(repeats=self.hidden_size, dim=0)
@@ -698,7 +720,7 @@ class TestGroupCollective(DistTestBase):
         recv_buffer_before_reduce = (
             torch.tensor(
                 test_case["recv_buffer_before_reduce_per_rank"][self.rank],
-                dtype=self.dtype,
+                dtype=dtype,
                 device=self.device,
             )
             .repeat_interleave(repeats=self.hidden_size, dim=0)
@@ -707,7 +729,7 @@ class TestGroupCollective(DistTestBase):
         expected_recv_buffer = (
             torch.tensor(
                 test_case["expected_recv_buffer_per_rank"][self.rank],
-                dtype=self.dtype,
+                dtype=dtype,
                 device=self.device,
             )
             .repeat_interleave(repeats=self.hidden_size, dim=0)
@@ -718,7 +740,7 @@ class TestGroupCollective(DistTestBase):
             send_lse_buffer = (
                 torch.tensor(
                     test_case["send_lse_buffer_per_rank"][self.rank],
-                    dtype=torch.float32,
+                    dtype=max_fp_dtype(dtype, torch.float32),
                     device=self.device,
                 )
                 .repeat_interleave(repeats=self.num_heads, dim=0)
@@ -727,7 +749,7 @@ class TestGroupCollective(DistTestBase):
             recv_lse_buffer_before_reduce = (
                 torch.tensor(
                     test_case["recv_lse_buffer_before_reduce_per_rank"][self.rank],
-                    dtype=torch.float32,
+                    dtype=max_fp_dtype(dtype, torch.float32),
                     device=self.device,
                 )
                 .repeat_interleave(repeats=self.num_heads, dim=0)
@@ -736,7 +758,7 @@ class TestGroupCollective(DistTestBase):
             expected_recv_lse_buffer = (
                 torch.tensor(
                     test_case["expected_recv_lse_buffer_per_rank"][self.rank],
-                    dtype=torch.float32,
+                    dtype=max_fp_dtype(dtype, torch.float32),
                     device=self.device,
                 )
                 .repeat_interleave(repeats=self.num_heads, dim=0)
@@ -800,7 +822,7 @@ class TestGroupCollective(DistTestBase):
             )
         except Exception as e:
             err_msg_list.append(
-                f"Group-Reduce collective {test_case_name=} recv buffer failed due to error: \n{e}\n"
+                f"For group-reduce: {test_case_name=}, recv buffer is failed due to error: \n{e}\n"
                 f"with: \n{recv_buffer_after_reduce=}\n{expected_recv_buffer=}\n"
             )
         if is_lse_reduce:
@@ -815,7 +837,7 @@ class TestGroupCollective(DistTestBase):
                 )
             except Exception as e:
                 err_msg_list.append(
-                    f"Group-Reduce collective {test_case_name=} recv lse buffer failed due to error: \n{e}\n"
+                    f"For group-reduce: {test_case_name=}, recv lse buffer is failed due to error: \n{e}\n"
                     f"with: \n{recv_lse_buffer_after_reduce=}\n{expected_recv_lse_buffer=}\n"
                 )
 

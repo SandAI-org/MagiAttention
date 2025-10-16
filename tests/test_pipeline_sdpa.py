@@ -24,6 +24,7 @@ from torch.testing._internal.common_utils import run_tests
 import magi_attention
 import magi_attention.testing
 from magi_attention import init_dist_attn_runtime_mgr
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.ranges import AttnRanges
@@ -706,11 +707,14 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----    skip for native grpcoll   ---- #
 
         if magi_attention.comm.is_native_grpcoll_enable():
-            # TODO: support other dtypes besides bf16
-            if dtype != torch.bfloat16:
+            # TODO: support reduce dtype for float64
+            if dtype == torch.float64:
                 return
             # TODO: support other world sizes
             if self.world_size not in (2, 4, 8):
+                return
+            hidden_size_kv = num_heads[1] * head_dim
+            if hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(dtype) != 0:
                 return
 
         # -----    construct test case name   ---- #

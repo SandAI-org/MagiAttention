@@ -134,11 +134,16 @@
   }                                                           \
   while (false)
 
-// TODO: support other dtypes
 #define SWITCH_DTYPES(case_macro)                         \
   switch (dtype) {                                        \
     case CUDA_R_16BF:                                     \
       case_macro(nv_bfloat16);                            \
+    case CUDA_R_16F:                                      \
+      case_macro(half);                                   \
+    case CUDA_R_32F:                                      \
+      case_macro(float);                                  \
+    case CUDA_R_64F:                                      \
+      case_macro(double);                                 \
     default:                                              \
       GRPCOLL_HOST_ASSERT(false and "Unsupported dtype"); \
   }                                                       \
