@@ -76,12 +76,6 @@ class GrpCollBuffer:
         runtime: the C++ runtime.
     """
 
-    # At least for intranode group_reduce kernel,
-    # it requires the hidden_size_int4 to be divisible by WARP_SIZE
-    # thus for bf16/fp16, the hidden size alignment is
-    # WARP_SIZE * sizeof(int4) / sizeof(dtype) = 32 * 128 / 16 = 256
-    hidden_size_alignment: int = 256  # hidden size alignment
-
     # TODO: make it enum in cpp backend
     reduce_op_str2int_map = {
         "sum": 0,
@@ -455,12 +449,12 @@ class GrpCollBuffer:
         is_out_buf_given = recv_x is not None
 
         # TODO: support other dtypes
-        assert (
-            x.dtype == torch.bfloat16  # type: ignore[union-attr]
-        ), f"Only support bfloat16 input for now, but got {x.dtype=}."  # type: ignore[union-attr]
-        assert (
-            not is_out_buf_given or recv_x.dtype == torch.bfloat16  # type: ignore[union-attr]
-        ), f"Only support bfloat16 output buffer for now, but got {recv_x.dtype=}."  # type: ignore[union-attr]
+        # assert (
+        #     x.dtype == torch.bfloat16
+        # ), f"Only support bfloat16 input for now, but got {x.dtype=}."
+        # assert (
+        #     not is_out_buf_given or recv_x.dtype == torch.bfloat16  # type: ignore[union-attr]
+        # ), f"Only support bfloat16 output buffer for now, but got {recv_x.dtype=}."  # type: ignore[union-attr]
 
         # FIXME: figure out the alignment requirement
         hidden_shape = x.shape[1:]  # type: ignore[union-attr]
@@ -572,12 +566,13 @@ class GrpCollBuffer:
         is_out_buf_given = combined_x is not None
 
         # TODO: support other dtypes
-        assert (
-            x.dtype == torch.bfloat16
-        ), f"Only support bfloat16 input for now, but got {x.dtype=}."
-        assert (
-            not is_out_buf_given or combined_x.dtype == torch.bfloat16  # type: ignore[union-attr]
-        ), f"Only support bfloat16 output buffer for now, but got {combined_x.dtype=}."  # type: ignore[union-attr]
+        # assert (
+        #     x.dtype == torch.bfloat16
+        # ), f"Only support bfloat16 input for now, but got {x.dtype=}."
+        # assert (
+        #     not is_out_buf_given or combined_x.dtype == torch.bfloat16  # type: ignore[union-attr]
+        # ), f"Only support bfloat16 output buffer for now, but got {combined_x.dtype=}."  # type: ignore[union-attr]
+
         # TODO: support other reduce ops
         assert reduce_op == "sum", "Only support sum-reduce for now"
 
@@ -1205,3 +1200,11 @@ class GrpCollBuffer:
             event: the captured event.
         """
         return EventOverlap(EventHandle())
+
+    @staticmethod
+    def get_hidden_size_alignment(dtype: torch.dtype) -> int:
+        # At least for intranode group_reduce kernel,
+        # it requires the hidden_size_int4 to be divisible by WARP_SIZE
+        # thus for bf16/fp16, the hidden size alignment is
+        # WARP_SIZE * sizeof(int4) / sizeof(dtype) = 32 * 128 / 16 = 256
+        return 32 * 128 // dtype.itemsize

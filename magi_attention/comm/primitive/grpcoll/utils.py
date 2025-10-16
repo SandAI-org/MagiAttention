@@ -1110,6 +1110,8 @@ def get_group_reduce_handle_from_sym_group_cast(
     from ._native_grpcoll_impl import native_group_cast_impl
 
     # prepare dummpy input/output for symmetric group-cast
+    sym_gc_output_seqlen = input.size(0)
+    hidden_size_alignment = GrpCollBuffer.get_hidden_size_alignment(input.dtype)
     if output is not None:
         sym_gc_input_seqlen = output.size(0)
     elif output_seqlen is not None:
@@ -1119,17 +1121,18 @@ def get_group_reduce_handle_from_sym_group_cast(
     else:
         # NOTE: had better pass output_seqlen to avoid gpu-cpu sync
         sym_gc_input_seqlen = output_split_sizes.sum().item()
-    sym_gc_output_seqlen = input.size(0)
+
     sym_gc_dummy_input = torch.empty(
-        (sym_gc_input_seqlen, GrpCollBuffer.hidden_size_alignment),
-        dtype=torch.bfloat16,
-        device="cuda",
+        (sym_gc_input_seqlen, hidden_size_alignment),
+        dtype=input.dtype,
+        device=input.device,
     )
+
     sym_gc_dummy_output = (
         torch.empty(
-            (sym_gc_output_seqlen, GrpCollBuffer.hidden_size_alignment),
-            dtype=torch.bfloat16,
-            device="cuda",
+            (sym_gc_output_seqlen, hidden_size_alignment),
+            dtype=input.dtype,
+            device=input.device,
         )
         if output is not None
         else None

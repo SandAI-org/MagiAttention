@@ -88,14 +88,6 @@ def test_func(
     min_num_dst_ranks: int,
     **kwargs,
 ) -> dict[str, Any]:
-    if local_rank == 0:
-        print(
-            "\n# ------    Test Intranode Dispatch   ------ #\n"
-            f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, '
-            f"(async={async_mode}, previous={previous_mode}) ...",
-            flush=True,
-        )
-
     # fetch kwargs
     recv_x_gc: torch.Tensor = kwargs["recv_x_gc"]
     recv_x_gc_buf: torch.Tensor = kwargs["recv_x_gc_buf"]
@@ -147,6 +139,16 @@ def test_func(
     }
     if previous_mode:
         dispatch_args.update({"previous_event": buffer.capture()})
+
+    # --------------      test normal dispatch       -------------- #
+
+    if local_rank == 0:
+        print(
+            "\n# ------    Test Normal Intranode Dispatch   ------ #\n"
+            f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, '
+            f"(async={async_mode}, previous={previous_mode}) ...",
+            flush=True,
+        )
 
     # dispatch
     # recv_x: shape=[num_recv_tokens, hidden_dim]:
@@ -250,6 +252,14 @@ def test_func(
 
     if local_rank == 0:
         print(
+            "\n# ------    Normal Intranode Dispatch Passed   ------ #\n",
+            flush=True,
+        )
+
+    # --------------      test cached dispatch       -------------- #
+
+    if local_rank == 0:
+        print(
             "\n# ------    Test Intranode Cached Dispatch   ------ #\n",
             flush=True,
         )
@@ -274,7 +284,15 @@ def test_func(
 
     if local_rank == 0:
         print(
-            "\n# ------    Test Intranode Combine   ------ #\n",
+            "\n# ------    Intranode Cached Dispatch Passed   ------ #\n",
+            flush=True,
+        )
+
+    # --------------      test normal combine       -------------- #
+
+    if local_rank == 0:
+        print(
+            "\n# ------    Test Normal Intranode Combine   ------ #\n",
             flush=True,
         )
 
@@ -368,14 +386,20 @@ def test_func(
     diff = calc_diff(check_x, ref_x)
     assert diff < 5e-6, f"{check_x} != {ref_x} with ({diff=})"
 
+    if local_rank == 0:
+        print(
+            "\n# ------    Normal Intranode Combine Passed  ------ #\n",
+            flush=True,
+        )
+
     # For later tuning
-    dispatch_bf16_nvl_recv_bytes = recv_x.numel() * 2
-    combine_bf16_nvl_send_bytes = dispatch_bf16_nvl_recv_bytes
+    dispatch_nvl_recv_bytes = recv_x.numel() * recv_x.dtype.itemsize
+    combine_nvl_send_bytes = dispatch_nvl_recv_bytes
 
     return dict(
         handle=handle,
-        dispatch_bf16_nvl_recv_bytes=dispatch_bf16_nvl_recv_bytes,
-        combine_bf16_nvl_send_bytes=combine_bf16_nvl_send_bytes,
+        dispatch_nvl_recv_bytes=dispatch_nvl_recv_bytes,
+        combine_nvl_send_bytes=combine_nvl_send_bytes,
     )
 
 
@@ -395,9 +419,11 @@ def test_main(
         num_sms // 2
     )  # one channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving
 
+    # TODO: make these parameterizable
     # Re-Settings for group-collective
     num_topk = num_ranks  # we can assume num_topk == num_ranks
     distinct_token = True
+    dtype = torch.bfloat16  # TODO: test other dtypes
     random_permute_output = True
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
@@ -445,12 +471,12 @@ def test_main(
     )
 
     # Random data
-    x = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device="cuda")
+    x = torch.ones((num_tokens, hidden), dtype=dtype, device="cuda")
     if distinct_token:
         x *= torch.arange(
             rank * num_tokens,
             (rank + 1) * num_tokens,
-            dtype=torch.bfloat16,
+            dtype=dtype,
             device="cuda",
         ).view(-1, 1) / (num_ranks * num_tokens)
         print(f"[RANK {rank}]: distinct_input: {x=}\n", flush=True)
@@ -512,7 +538,7 @@ def test_main(
 
     # get ref dispatch output by group-cast
     recv_x_gc = torch.empty(
-        (sum(output_split_size_list), *x.shape[1:]), dtype=torch.bfloat16, device="cuda"
+        (sum(output_split_size_list), *x.shape[1:]), dtype=dtype, device="cuda"
     )
     recv_x_gc_buf = recv_x_gc.clone() if pass_out_buffer else None
     work_with_pf_gc = group_cast(
@@ -729,7 +755,7 @@ def test_main(
     group.barrier()
     time.sleep(1)
 
-    # Test dispatch / combine
+    # test dispatch / combine
     meta_out = test_func(
         rank=rank,
         local_rank=local_rank,
@@ -764,13 +790,10 @@ def test_main(
         gbl_num_tokens_per_rank=gbl_num_tokens_per_rank,
     )
 
-    if local_rank == 0:
-        print("passed", flush=True)
-
     # fetch meta out from test func
     handle = meta_out["handle"]
-    dispatch_bf16_nvl_recv_bytes = meta_out["dispatch_bf16_nvl_recv_bytes"]
-    combine_bf16_nvl_send_bytes = meta_out["combine_bf16_nvl_send_bytes"]
+    dispatch_nvl_recv_bytes = meta_out["dispatch_nvl_recv_bytes"]
+    combine_nvl_send_bytes = meta_out["combine_nvl_send_bytes"]
 
     # Tune dispatch performance
     best_dispatch_results = None
@@ -778,9 +801,9 @@ def test_main(
     for current_x in (x,):  # filter(lambda elem: elem is not None, (x_e4m3, x)):
         best_time, best_results = 1e10, None
         nvl_recv_bytes = (
-            (dispatch_bf16_nvl_recv_bytes * fp8_factor)
+            (dispatch_nvl_recv_bytes * fp8_factor)
             if isinstance(current_x, tuple)
-            else dispatch_bf16_nvl_recv_bytes
+            else dispatch_nvl_recv_bytes
         )
         for nvl_chunk_size in tuple(range(4, 33, 2)) + (0,):
             if nvl_chunk_size > 0:
@@ -867,7 +890,7 @@ def test_main(
         if local_rank == 0:
             print(
                 f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
-                f"{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us",
+                f"{combine_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us",
                 flush=True,
             )
             if t < best_time and nvl_chunk_size > 0:
@@ -877,7 +900,7 @@ def test_main(
         print(
             f"[tuning] Best combine: SMs {best_results[0]}, "  # type: ignore[index]
             f"NVL chunk {best_results[1]}: "  # type: ignore[index]
-            f"{combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL), "
+            f"{combine_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL), "
             f"t: {best_time * 1e6:.2f} us",
             flush=True,
         )
