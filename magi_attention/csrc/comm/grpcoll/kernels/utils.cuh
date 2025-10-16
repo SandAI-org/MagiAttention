@@ -520,11 +520,19 @@ DEVICE_INLINE void release_lock(int* mutex) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-// Warp Broatcast Funcs
+// Warp Sync Funcs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 DEVICE_INLINE int broadcast_warp(int val, int src_lane = 0) {
   return __shfl_sync(0xffffffff, val, src_lane);
+}
+
+DEVICE_INLINE int any_warp(int pred) {
+  return __any_sync(0xffffffff, pred);
+}
+
+DEVICE_INLINE int all_warp(int pred) {
+  return __all_sync(0xffffffff, pred);
 }
 
 template <typename dtype_t>
@@ -594,6 +602,31 @@ DEVICE_INLINE T warp_reduce_max(T value) {
 template <uint32_t kNumLanes = 32, typename T>
 DEVICE_INLINE T warp_reduce_min(T value) {
   return warp_reduce<kNumLanes, T>(value, ReduceMin<T>{});
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// ForEach Funcs
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+template <typename dst_dtype_t, int kArrayLength>
+DEVICE_INLINE void foreach_fill(dst_dtype_t* dst_ptr, const dst_dtype_t value) {
+#pragma unroll
+  for (int i = 0; i < kArrayLength; ++i)
+    dst_ptr[i] = value;
+}
+
+template <typename dst_dtype_t, typename src_dtype_t, int kArrayLength>
+DEVICE_INLINE void foreach_assign(dst_dtype_t* dst_ptr, const src_dtype_t* src_ptr) {
+#pragma unroll
+  for (int i = 0; i < kArrayLength; ++i)
+    dst_ptr[i] = static_cast<dst_dtype_t>(src_ptr[i]);
+}
+
+template <typename dst_dtype_t, typename src_dtype_t, int kArrayLength>
+DEVICE_INLINE void foreach_reduce_add(dst_dtype_t* dst_ptr, const src_dtype_t* src_ptr) {
+#pragma unroll
+  for (int i = 0; i < kArrayLength; ++i)
+    dst_ptr[i] += static_cast<dst_dtype_t>(src_ptr[i]);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
