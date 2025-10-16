@@ -337,10 +337,10 @@ Buffer::intranode_group_cast(
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream) {
-  // TODO: support other num_ranks
-  GRPCOLL_HOST_ASSERT(num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
-
   bool cached_mode = cached_rank_prefix_matrix.has_value();
+
+  // TODO: support other num_ranks
+  GRPCOLL_HOST_ASSERT(num_ranks == 1 || num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
 
   // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
   GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -617,8 +617,11 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
     bool allow_empty_init_out_buf) {
   // TODO: support other reduce ops
   GRPCOLL_HOST_ASSERT(reduce_op == 0);
+
   // TODO: support other num_ranks
-  GRPCOLL_HOST_ASSERT(num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
+  GRPCOLL_HOST_ASSERT(num_ranks == 1 || num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
+
+  // Check tensors
   GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
   GRPCOLL_HOST_ASSERT(src_idx.dim() == 1 and src_idx.is_contiguous() and src_idx.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(send_head.dim() == 2 and send_head.is_contiguous() and send_head.scalar_type() == torch::kInt32);
