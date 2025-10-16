@@ -507,6 +507,7 @@ def test_main(
                 #   and if this recv token won't be sent to local rank r, then send_nvl_head[i, r] == -1 as well
                 (
                     recv_x,
+                    _,  # recv_lse
                     handle,
                     event,
                 ) = buffer.group_cast(**dispatch_args)
@@ -600,7 +601,9 @@ def test_main(
                 }
                 if previous_mode:
                     dispatch_args.update({"previous_event": buffer.capture()})
-                recv_cached_x, _, event = buffer.group_cast(**dispatch_args)
+                (recv_cached_x, _, _, event) = buffer.group_cast(  # recv_lse  # handle
+                    **dispatch_args
+                )
                 event.current_stream_wait() if async_mode else ()
                 recv_cached_x = (
                     per_token_cast_back(*recv_cached_x)
@@ -815,7 +818,9 @@ def test_main(
         "num_tokens_per_expert": num_tokens_per_expert,
         "config": dispatch_config if dispatch_config is not None else config,
     }
-    recv_x, handle, _ = buffer.group_cast(**dispatch_args)  # type: ignore[assignment]
+    (recv_x, _, handle, _) = buffer.group_cast(  # recv_lse  # event
+        **dispatch_args
+    )  # type: ignore[assignment]
 
     # Tune combine performance
     best_time, best_results = 1e10, None

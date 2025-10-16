@@ -312,6 +312,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Te
 
 std::tuple<
     torch::Tensor,
+    std::optional<torch::Tensor>,
     /* handle */
     torch::Tensor,
     torch::Tensor,
@@ -323,7 +324,7 @@ std::tuple<
 Buffer::intranode_group_cast(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& recv_x_buf,
-    const std::optional<torch::Tensor>& x_scales, // TODO: renamed to lse
+    const std::optional<torch::Tensor>& lse,
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const torch::Tensor& is_token_in_rank,
     const std::optional<torch::Tensor>& num_tokens_per_expert,
@@ -385,18 +386,16 @@ Buffer::intranode_group_cast(
   auto hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
   auto num_experts = cached_mode ? 0 : static_cast<int>(num_tokens_per_expert->size(0)), num_local_experts = num_experts / num_ranks;
 
-  // FP8 scales checks
-  float* x_scales_ptr = nullptr;
-  int num_scales = 0, scale_token_stride = 0, scale_hidden_stride = 0;
-  if (x_scales.has_value()) {
-    GRPCOLL_HOST_ASSERT(x.element_size() == 1);
-    GRPCOLL_HOST_ASSERT(x_scales->scalar_type() == torch::kFloat32 or x_scales->scalar_type() == torch::kInt);
-    GRPCOLL_HOST_ASSERT(x_scales->dim() == 2);
-    GRPCOLL_HOST_ASSERT(x_scales->size(0) == num_tokens);
-    num_scales = x_scales->dim() == 1 ? 1 : static_cast<int>(x_scales->size(1));
-    x_scales_ptr = static_cast<float*>(x_scales->data_ptr());
-    scale_token_stride = static_cast<int>(x_scales->stride(0));
-    scale_hidden_stride = static_cast<int>(x_scales->stride(1));
+  // LSE checks
+  float* lse_ptr = nullptr;
+  int num_heads = 0;
+  if (lse.has_value()) {
+    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
+    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
+    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens);
+    GRPCOLL_HOST_ASSERT(hidden_size % lse->size(1) == 0); // NOTES: hidden size should be divisible by num_heads
+    num_heads = static_cast<int>(lse->size(1));
+    lse_ptr = static_cast<float*>(lse->data_ptr());
   }
 
   // Allocate all tensors on comm stream if set
@@ -506,22 +505,22 @@ Buffer::intranode_group_cast(
 
   // Allocate new tensors
   auto recv_src_idx = torch::empty({num_recv_tokens}, dtype(torch::kInt32).device(torch::kCUDA));
-  auto recv_x_scales = std::optional<torch::Tensor>();
+  auto recv_lse = std::optional<torch::Tensor>();
   auto recv_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
   auto send_head = torch::empty({num_tokens, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
   // Assign pointers
   int64_t* post_perm_idx_ptr = nullptr;
-  float* recv_x_scales_ptr = nullptr;
+  float* recv_lse_ptr = nullptr;
   if (post_perm_idx.has_value()) {
     GRPCOLL_HOST_ASSERT(post_perm_idx->scalar_type() == torch::kInt64);
     GRPCOLL_HOST_ASSERT(post_perm_idx->dim() == 1);
     GRPCOLL_HOST_ASSERT(post_perm_idx->size(0) == num_recv_tokens);
     post_perm_idx_ptr = post_perm_idx->data_ptr<int64_t>();
   }
-  if (x_scales.has_value()) {
-    recv_x_scales = x_scales->dim() == 1 ? torch::empty({num_recv_tokens}, x_scales->options()) : torch::empty({num_recv_tokens, num_scales}, x_scales->options());
-    recv_x_scales_ptr = static_cast<float*>(recv_x_scales->data_ptr());
+  if (lse.has_value()) {
+    recv_lse = torch::empty({num_recv_tokens, num_heads}, lse->options());
+    recv_lse_ptr = static_cast<float*>(recv_lse->data_ptr());
   }
 
   // Check if the buffer size is enough
@@ -532,7 +531,7 @@ Buffer::intranode_group_cast(
           num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * recv_x.element_size() + // data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // source index buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_scales // FP8 scale buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_heads // LSE buffer
       <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
 
   // Launch dispatch kernel
@@ -549,22 +548,20 @@ Buffer::intranode_group_cast(
    */
   intranode::dispatch(
       /*recv_x=*/recv_x.data_ptr(),
-      /*recv_x_scales=*/recv_x_scales_ptr,
+      /*recv_lse=*/recv_lse_ptr,
       /*recv_src_idx=*/recv_src_idx.data_ptr<int>(),
       /*recv_channel_offset=*/recv_channel_prefix_matrix.data_ptr<int>(),
       /*send_head=*/send_head.data_ptr<int>(),
       /*post_perm_idx=*/post_perm_idx_ptr,
       /*x=*/x.data_ptr(),
-      /*x_scales=*/x_scales_ptr,
+      /*lse=*/lse_ptr,
       /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
       /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
       /*num_tokens=*/num_tokens,
       /*num_worst_tokens=*/num_worst_tokens,
       /*hidden_int4=*/hidden_int4,
       /*num_experts=*/num_experts,
-      /*num_scales=*/num_scales,
-      /*scale_token_stride=*/scale_token_stride,
-      /*scale_hidden_stride=*/scale_hidden_stride,
+      /*num_heads=*/num_heads,
       /*buffer_ptrs=*/buffer_ptrs_gpu,
       /*rank=*/rank,
       /*num_ranks=*/num_ranks,
@@ -582,7 +579,7 @@ Buffer::intranode_group_cast(
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
     }
-    for (auto& to : {x_scales, num_tokens_per_rank, num_tokens_per_expert, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
+    for (auto& to : {lse, num_tokens_per_rank, num_tokens_per_expert, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
@@ -596,7 +593,7 @@ Buffer::intranode_group_cast(
     at::cuda::setCurrentCUDAStream(compute_stream);
 
   // Return values
-  return {recv_x, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event};
+  return {recv_x, recv_lse, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event};
 }
 
 std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_reduce(

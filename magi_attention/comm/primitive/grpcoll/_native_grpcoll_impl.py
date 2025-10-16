@@ -138,6 +138,7 @@ def native_group_cast_impl(
     # launch dispatch kernel
     (
         recv_x,
+        _,  # recv_lse
         handle,
         event,
     ) = buffer.group_cast(
