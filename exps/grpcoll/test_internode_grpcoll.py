@@ -87,9 +87,9 @@ def test_main(
     random_permute_output = True
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
-    allow_empty_init_out_buf = (
+    allow_empty_init_out_buf = (  # if every token has at least one dst, we can empty-init
         min_num_dst_ranks > 0
-    )  # if every token has at least one dst, we can empty-init
+    )
     pass_out_buffer = True
     acc_reduce_out_buffer = False  # TODO: support acc_reduce for internode_group_reduce
     acc_reduce_constant = rank

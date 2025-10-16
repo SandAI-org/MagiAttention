@@ -323,7 +323,7 @@ std::tuple<
 Buffer::intranode_group_cast(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& recv_x_buf,
-    const std::optional<torch::Tensor>& x_scales, // renamed to lse
+    const std::optional<torch::Tensor>& x_scales, // TODO: renamed to lse
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const torch::Tensor& is_token_in_rank,
     const std::optional<torch::Tensor>& num_tokens_per_expert,
@@ -601,7 +601,7 @@ Buffer::intranode_group_cast(
 std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_reduce(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& combined_x_buf,
-    const std::optional<torch::Tensor>& topk_weights, // renamed to lse
+    const std::optional<torch::Tensor>& topk_weights, // TODO: renamed to lse
     const std::optional<torch::Tensor>& pre_perm_idx,
     const torch::Tensor& src_idx,
     const torch::Tensor& rank_prefix_matrix,

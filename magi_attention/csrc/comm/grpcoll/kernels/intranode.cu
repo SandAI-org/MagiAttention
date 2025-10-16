@@ -680,35 +680,35 @@ void dispatch(
   // Make sure never OOB
   GRPCOLL_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < INT_MAX);
 
-#define DISPATCH_LAUNCH_CASE(ranks)                                  \
-  {                                                                  \
-    auto kernel = dispatch<ranks, kNumThreads, kNumTMABytesPerWarp>; \
-    SET_SHARED_MEMORY_FOR_TMA(kernel);                               \
-    LAUNCH_KERNEL(                                                   \
-        &cfg,                                                        \
-        kernel,                                                      \
-        reinterpret_cast<int4*>(recv_x),                             \
-        recv_x_scales,                                               \
-        recv_src_idx,                                                \
-        recv_channel_offset,                                         \
-        send_head,                                                   \
-        post_perm_idx,                                               \
-        reinterpret_cast<const int4*>(x),                            \
-        x_scales,                                                    \
-        is_token_in_rank,                                            \
-        channel_prefix_matrix,                                       \
-        num_tokens,                                                  \
-        num_worst_tokens,                                            \
-        hidden_int4,                                                 \
-        num_experts,                                                 \
-        num_scales,                                                  \
-        scale_token_stride,                                          \
-        scale_hidden_stride,                                         \
-        buffer_ptrs,                                                 \
-        rank,                                                        \
-        num_max_send_tokens,                                         \
-        num_recv_buffer_tokens);                                     \
-  }                                                                  \
+#define DISPATCH_LAUNCH_CASE(num_ranks)                                  \
+  {                                                                      \
+    auto kernel = dispatch<num_ranks, kNumThreads, kNumTMABytesPerWarp>; \
+    SET_SHARED_MEMORY_FOR_TMA(kernel);                                   \
+    LAUNCH_KERNEL(                                                       \
+        &cfg,                                                            \
+        kernel,                                                          \
+        reinterpret_cast<int4*>(recv_x),                                 \
+        recv_x_scales,                                                   \
+        recv_src_idx,                                                    \
+        recv_channel_offset,                                             \
+        send_head,                                                       \
+        post_perm_idx,                                                   \
+        reinterpret_cast<const int4*>(x),                                \
+        x_scales,                                                        \
+        is_token_in_rank,                                                \
+        channel_prefix_matrix,                                           \
+        num_tokens,                                                      \
+        num_worst_tokens,                                                \
+        hidden_int4,                                                     \
+        num_experts,                                                     \
+        num_scales,                                                      \
+        scale_token_stride,                                              \
+        scale_hidden_stride,                                             \
+        buffer_ptrs,                                                     \
+        rank,                                                            \
+        num_max_send_tokens,                                             \
+        num_recv_buffer_tokens);                                         \
+  }                                                                      \
   break
 
   // Even-numbered SMs for sending, odd-numbered SMs for receiving
@@ -797,7 +797,7 @@ void cached_notify_combine(
 #undef CACHED_NOTIFY_COMBINE
 }
 
-template <typename dtype_t, int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp>
+template <typename dtype_t, int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp, bool kAccReduce>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void combine(
     dtype_t* recv_x,
@@ -815,8 +815,7 @@ void combine(
     void** buffer_ptrs,
     int rank,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens,
-    bool acc_reduce /*TODO: make acc_reduce a template parameter*/) {
+    int num_recv_buffer_tokens) {
   // Get thread Info
   const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
@@ -1146,13 +1145,6 @@ void combine(
           // Get the hidden value ptr of `int_4` to reduce to in `recv_x`
           int4* reduce_hidval_ptr_int4 = recv_x_int4 + token_idx * hidden_int4 + i;
 
-          // Get the hidden value ptr of `dtype_t` to reduce to in `recv_x`
-          // if in acc_reduce mode
-          const dtype_t* reduce_hidval_ptr_dtype = nullptr;
-          if (acc_reduce) {
-            reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
-          }
-
           // Load all recv partial hidden values from all src ranks
           int4 recv_hidval_int4[kNumRanks];
 #pragma unroll
@@ -1177,11 +1169,13 @@ void combine(
               hp_hidval_reduce_buf[k] += static_cast<float>(jth_recv_hidval_dtype[k]);
           }
 
-          // Reduce the old value in the `recv_x`
-          // to the high-precision reduce buffer
-          // if in acc_reduce mode
-          if (acc_reduce) {
+          // If in `kAccReduce` mode
+          if constexpr (kAccReduce) {
+            // Get the hidden value ptr of `dtype_t` to reduce to in `recv_x`
+            auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
 #pragma unroll
+            // Reduce the old value in the `recv_x`
+            // to the high-precision reduce buffer
             for (int k = 0; k < kDtypePerInt4; ++k)
               hp_hidval_reduce_buf[k] += static_cast<float>(reduce_hidval_ptr_dtype[k]);
           }
@@ -1284,31 +1278,32 @@ void combine(
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
-#define COMBINE_LAUNCH_CASE(dtype, ranks)                                  \
-  {                                                                        \
-    auto kernel = combine<dtype, ranks, kNumThreads, kNumTMABytesPerWarp>; \
-    SET_SHARED_MEMORY_FOR_TMA(kernel);                                     \
-    LAUNCH_KERNEL(                                                         \
-        &cfg,                                                              \
-        kernel,                                                            \
-        reinterpret_cast<dtype*>(recv_x),                                  \
-        recv_topk_weights,                                                 \
-        reinterpret_cast<const dtype*>(x),                                 \
-        topk_weights,                                                      \
-        pre_perm_idx,                                                      \
-        src_idx,                                                           \
-        rank_prefix_matrix,                                                \
-        channel_prefix_matrix,                                             \
-        send_head,                                                         \
-        num_tokens,                                                        \
-        num_recv_tokens,                                                   \
-        hidden_size,                                                       \
-        buffer_ptrs,                                                       \
-        rank,                                                              \
-        num_max_send_tokens,                                               \
-        num_recv_buffer_tokens,                                            \
-        acc_reduce);                                                       \
-  }                                                                        \
+#define COMBINE_LAUNCH_CASE(dtype, num_ranks)                                         \
+  {                                                                                   \
+    auto kernel = combine<dtype, num_ranks, kNumThreads, kNumTMABytesPerWarp, false>; \
+    if (acc_reduce)                                                                   \
+      kernel = combine<dtype, num_ranks, kNumThreads, kNumTMABytesPerWarp, true>;     \
+    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                \
+    LAUNCH_KERNEL(                                                                    \
+        &cfg,                                                                         \
+        kernel,                                                                       \
+        reinterpret_cast<dtype*>(recv_x),                                             \
+        recv_topk_weights,                                                            \
+        reinterpret_cast<const dtype*>(x),                                            \
+        topk_weights,                                                                 \
+        pre_perm_idx,                                                                 \
+        src_idx,                                                                      \
+        rank_prefix_matrix,                                                           \
+        channel_prefix_matrix,                                                        \
+        send_head,                                                                    \
+        num_tokens,                                                                   \
+        num_recv_tokens,                                                              \
+        hidden_size,                                                                  \
+        buffer_ptrs,                                                                  \
+        rank,                                                                         \
+        num_max_send_tokens,                                                          \
+        num_recv_buffer_tokens);                                                      \
+  }                                                                                   \
   break
 
 #define COMBINE_DTYPE_LAUNCH_CASE(dtype)               \
