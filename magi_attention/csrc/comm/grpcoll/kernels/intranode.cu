@@ -495,18 +495,18 @@ void dispatch(
     }
 
     // Broadcast total_offset to other lanes
-    total_offset = broadcast_warp(total_offset);
+    total_offset = broadcast_in_warp(total_offset);
     // Here, total_offset = rank_offset + channel_start_offset
     // = the global token offset in the send buffer of the start token in the channel
     total_offset += rank_offset;
 
     // Broadcast num_tokens_to_recv to other lanes
-    num_tokens_to_recv = broadcast_warp(num_tokens_to_recv);
+    num_tokens_to_recv = broadcast_in_warp(num_tokens_to_recv);
 
     // Shared tail indices for each rank
     // NOTES: unlike the sender, the receiver must ensure that
     // the tail index hold by all warps for the responsible rank are the same
-    // thus we cannot use `broadcast_warp` to sync the tail idx
+    // thus we cannot use `broadcast_in_warp` to sync the tail idx
     // but only utilize the shared memory to sync across warps
     __shared__ volatile int shared_channel_tail_idx[kNumRanks];
 
@@ -749,7 +749,7 @@ __global__ void cached_notify_combine(
       int token_idx = token_idx_tail - lane_id, expected_head = 0;
       auto current_head = (token_idx >= token_start_idx) ? __ldg(send_head + token_idx * kNumRanks + rank_id) : -1;
       for (int i = 0; i < min(WARP_SIZE, token_idx_tail - token_start_idx + 1); ++i) {
-        const int head = broadcast_warp(/*val=*/current_head, /*src_lane=*/i);
+        const int head = broadcast_in_warp(/*val=*/current_head, /*src_lane=*/i);
         if (head < 0) {
           if (lane_id == i)
             expected_head = -last_head - 1;
@@ -1098,7 +1098,7 @@ void combine(
         auto start_time = clock64();
         // NOTES: here we should check `expected_head >= 0` first
         // to avoid invalid `responsible_rank` when accessing `shared_channel_tail_idx`
-        while (any_warp(/*pred=*/expected_head >= 0 and shared_channel_tail_idx[responsible_rank] <= expected_head)) {
+        while (any_in_warp(/*pred=*/expected_head >= 0 and shared_channel_tail_idx[responsible_rank] <= expected_head)) {
           // Check timeout
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
             printf("grpcoll timeout for combine receivers, rank=%d, responsible_channel=%d, expect_head=%d\n", rank, responsible_channel, expected_head);
@@ -1112,7 +1112,7 @@ void combine(
         int num_src_ranks = 0, src_rank_idxs[kNumRanks], slot_indices[kNumRanks];
 #pragma unroll
         for (int curr_rank = 0; curr_rank < kNumRanks; ++curr_rank) {
-          auto expected_head_cur_rank = broadcast_warp(/*val=*/expected_head, /*src_lane=*/curr_rank);
+          auto expected_head_cur_rank = broadcast_in_warp(/*val=*/expected_head, /*src_lane=*/curr_rank);
           if (expected_head_cur_rank >= 0) { // valid head
             slot_indices[num_src_ranks] = expected_head_cur_rank % num_recv_buffer_tokens;
             src_rank_idxs[num_src_ranks++] = curr_rank;

@@ -392,7 +392,7 @@ DEVICE_INLINE static void nvshmemi_ibgda_put_nbi_warp(uint64_t req_rptr, uint64_
     }
 
     // Move one more message
-    auto chunk_size = broadcast_warp(/*val=*/my_chunk_size, /*src_lane=*/static_cast<int>(num_wqes));
+    auto chunk_size = broadcast_in_warp(/*val=*/my_chunk_size, /*src_lane=*/static_cast<int>(num_wqes));
     remaining_bytes -= chunk_size;
     req_lptr += chunk_size;
     req_rptr += chunk_size;
@@ -404,7 +404,7 @@ DEVICE_INLINE static void nvshmemi_ibgda_put_nbi_warp(uint64_t req_rptr, uint64_
   uint64_t base_wqe_idx = 0;
   if (lane_id == 0)
     base_wqe_idx = ibgda_reserve_wqe_slots(qp, num_wqes);
-  base_wqe_idx = broadcast_warp(base_wqe_idx);
+  base_wqe_idx = broadcast_in_warp(base_wqe_idx);
   if (lane_id < num_wqes) {
     auto wqe_idx = base_wqe_idx + lane_id;
     auto wqe_ptr = ibgda_get_wqe_ptr(qp, wqe_idx);
