@@ -276,7 +276,7 @@ __global__ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64
 
   // prefix sum for each rank by thread 0
   // rank_split_sizes[rid][rid]: the start offset of the a2av split buffer recved from rank rid
-  // NOTE: since num_ranks are usually small, we don't need to use Blelloch scan algorithm
+  // NOTES: since num_ranks are usually small, we don't need to use Blelloch scan algorithm
   if (thread_id == 0) {
     int64_t prefix_sum = 0;
 #pragma unroll

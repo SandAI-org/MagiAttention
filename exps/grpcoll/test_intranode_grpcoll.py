@@ -791,7 +791,6 @@ def test_main(
                 )
             else:
                 # Test default config as well
-                GrpCollBuffer.set_num_sms(num_sms)
                 config = GrpCollConfig.get_default_dispatch_config(num_ranks)
             tune_args = {"x": current_x, "handle": handle, "config": config}
             t = bench(lambda: buffer.group_cast(**tune_args))[0]
@@ -854,7 +853,6 @@ def test_main(
             )
         else:
             # Test default config as well
-            GrpCollBuffer.set_num_sms(num_sms)
             config = GrpCollConfig.get_default_combine_config(num_ranks)
         tune_args = {
             "x": recv_x,
