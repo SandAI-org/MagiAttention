@@ -420,7 +420,6 @@ void dispatch(
         // Pick (round-robin) one warp for the responsible rank to send this token
         if (cached_channel_tail_idx % num_send_warps_per_rank == send_warp_id_in_rank) {
           // Warp-copy this token from send buffer to the recv queue
-          // REVIEW: why not use TMA copy here ?
           auto token_ptr_in_queue = channel_x_buffers.buffer() + dst_slot_idx * hidden_int4; // token idx in the recv queue
           auto token_ptr_in_x = x + token_idx * hidden_int4; // global token idx in the send buffer
           UNROLLED_WARP_COPY(

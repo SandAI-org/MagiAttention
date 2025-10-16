@@ -94,6 +94,8 @@
 // TODO: support other num_ranks
 #define SWITCH_RANKS(case_macro)                              \
   switch (num_ranks) {                                        \
+    case 1:                                                   \
+      case_macro(1);                                          \
     case 2:                                                   \
       case_macro(2);                                          \
     case 4:                                                   \
@@ -136,6 +138,8 @@
 
 #define SWITCH_RANKS_WITH_DTYPE_REDUCE_DTYPE(dtype, reduce_dtype, case_macro) \
   switch (num_ranks) {                                                        \
+    case 1:                                                                   \
+      case_macro(dtype, reduce_dtype, 1);                                     \
     case 2:                                                                   \
       case_macro(dtype, reduce_dtype, 2);                                     \
     case 4:                                                                   \
