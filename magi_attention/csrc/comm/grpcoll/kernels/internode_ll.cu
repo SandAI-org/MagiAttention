@@ -200,7 +200,7 @@ void dispatch(
       // Issue IBGDA sends
       if (dst_expert_idx >= 0) {
         int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1) : 0;
-        slot_idx = broadcast_warp(slot_idx);
+        slot_idx = broadcast_in_warp(slot_idx);
         const auto dst_rank = dst_expert_idx / num_local_experts;
         const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
         const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
@@ -577,7 +577,7 @@ void combine(
       const auto rdma_send_x_vec_row = reinterpret_cast<uint8_t*>(rdma_send_type_row);
 
       // Copy directly to local rank, or copy to buffer and issue RDMA
-      const auto src_idx = broadcast_warp(__ldg(local_src_info + token_idx));
+      const auto src_idx = broadcast_in_warp(__ldg(local_src_info + token_idx));
       const auto buf_ptr = reinterpret_cast<int64_t>(rdma_send_x_vec_row);
       const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) + (global_expert_idx * num_max_dispatch_tokens_per_rank + src_idx) * num_bytes_per_slot;
       const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);

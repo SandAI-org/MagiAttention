@@ -679,14 +679,14 @@ void dispatch(
       void* dst_send_buffers[kNumTopkRDMARanks];
 #pragma unroll
       for (int i = 0, slot_idx; i < kNumRDMARanks; ++i)
-        if ((slot_idx = broadcast_warp(/*val=*/rdma_tail_idx, /*src_lane=*/i)) >= 0) {
+        if ((slot_idx = broadcast_in_warp(/*val=*/rdma_tail_idx, /*src_lane=*/i)) >= 0) {
           slot_idx = slot_idx % num_max_rdma_chunked_recv_tokens;
           topk_ranks[num_topk_ranks] = i;
-          auto recv_is_token_in_rank_uint64 = broadcast(is_token_in_rank_uint64, i);
+          auto recv_is_token_in_rank_uint64 = broadcast_ptr_in_warp(is_token_in_rank_uint64, i);
           auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint64);
           if (lane_id == num_topk_ranks)
             src_meta = SourceMeta(rdma_rank, recv_is_token_in_rank_values);
-          dst_send_buffers[num_topk_ranks++] = reinterpret_cast<uint8_t*>(broadcast(send_buffer, i)) + slot_idx * num_bytes_per_token;
+          dst_send_buffers[num_topk_ranks++] = reinterpret_cast<uint8_t*>(broadcast_ptr_in_warp(send_buffer, i)) + slot_idx * num_bytes_per_token;
         }
       GRPCOLL_DEVICE_ASSERT(num_topk_ranks <= kNumTopkRDMARanks);
 
@@ -802,14 +802,14 @@ void dispatch(
       for (int i = 0, synced_num_tokens_to_send; i < kNumRDMARanks; ++i) {
         // To mitigate incast congestion, shuffle the starting index of target rank for different ranks and channels
         int dst_rdma_rank = (i + channel_id + rdma_rank) % kNumRDMARanks;
-        synced_num_tokens_to_send = broadcast_warp(/*val=*/num_tokens_to_send, /*src_lane=*/dst_rdma_rank);
+        synced_num_tokens_to_send = broadcast_in_warp(/*val=*/num_tokens_to_send, /*src_lane=*/dst_rdma_rank);
         if (synced_num_tokens_to_send == 0)
           continue;
 
         // Read the latest progress
         // NOTES: `rdma_send_channel_tail` does not need to be protected by lock
-        auto processed_tail = broadcast_warp(ld_acquire_cta(const_cast<const int*>(rdma_send_channel_tail + dst_rdma_rank)));
-        auto synced_last_issued_tail = broadcast_warp(/*val=*/last_issued_tail, /*src_lane=*/dst_rdma_rank);
+        auto processed_tail = broadcast_in_warp(ld_acquire_cta(const_cast<const int*>(rdma_send_channel_tail + dst_rdma_rank)));
+        auto synced_last_issued_tail = broadcast_in_warp(/*val=*/last_issued_tail, /*src_lane=*/dst_rdma_rank);
         auto num_tokens_processed = processed_tail - synced_last_issued_tail;
         if (num_tokens_processed != synced_num_tokens_to_send and num_tokens_processed < num_max_rdma_chunked_send_tokens)
           continue;
@@ -914,7 +914,7 @@ void dispatch(
         const int num_used_slots = cached_nvl_channel_tail - cached_nvl_channel_head;
         if (num_max_nvl_chunked_recv_tokens - num_used_slots >= num_max_nvl_chunked_send_tokens)
           break;
-        cached_nvl_channel_head = broadcast_warp(ld_volatile_global(nvl_channel_head.buffer()));
+        cached_nvl_channel_head = broadcast_in_warp(ld_volatile_global(nvl_channel_head.buffer()));
 
         // Timeout check
         if (lane_id == 0 and clock64() - start_time > NUM_TIMEOUT_CYCLES) {
@@ -934,10 +934,10 @@ void dispatch(
       start_time = clock64();
       while (true) {
         src_rdma_rank = (src_rdma_rank + 1) % kNumRDMARanks;
-        if (broadcast_warp(/*val=*/num_tokens_to_recv_from_rdma, /*src_lane=*/src_rdma_rank) > 0) {
+        if (broadcast_in_warp(/*val=*/num_tokens_to_recv_from_rdma, /*src_lane=*/src_rdma_rank) > 0) {
           if (lane_id == src_rdma_rank and cached_rdma_channel_head == cached_rdma_channel_tail)
             cached_rdma_channel_tail = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(src_rdma_rank)));
-          if (broadcast_warp(/*val=*/cached_rdma_channel_tail > cached_rdma_channel_head, /*src_lane=*/src_rdma_rank))
+          if (broadcast_in_warp(/*val=*/cached_rdma_channel_tail > cached_rdma_channel_head, /*src_lane=*/src_rdma_rank))
             break;
         }
 
@@ -956,8 +956,8 @@ void dispatch(
           trap();
         }
       }
-      auto src_rdma_head = broadcast_warp(/*val=*/cached_rdma_channel_head, /*src_lane=*/src_rdma_rank);
-      auto src_rdma_tail = broadcast_warp(/*val=*/cached_rdma_channel_tail, /*src_lane=*/src_rdma_rank);
+      auto src_rdma_head = broadcast_in_warp(/*val=*/cached_rdma_channel_head, /*src_lane=*/src_rdma_rank);
+      auto src_rdma_tail = broadcast_in_warp(/*val=*/cached_rdma_channel_tail, /*src_lane=*/src_rdma_rank);
 
       // Iterate over every token from the RDMA buffer
       for (int i = src_rdma_head, num_tokens_sent = 0; i < src_rdma_tail; ++i) {
@@ -1107,7 +1107,7 @@ void dispatch(
         // Ready to copy
         if (cached_channel_head_idx != cached_channel_tail_idx)
           break;
-        cached_channel_tail_idx = broadcast_warp(ld_acquire_sys_global(nvl_channel_tail.buffer()));
+        cached_channel_tail_idx = broadcast_in_warp(ld_acquire_sys_global(nvl_channel_tail.buffer()));
 
         // Timeout check
         if (lane_id == 0 and clock64() - start_time > NUM_TIMEOUT_CYCLES) {
@@ -1129,7 +1129,7 @@ void dispatch(
         int token_idx_in_buffer = (cached_channel_head_idx++) % num_max_nvl_chunked_recv_tokens;
         auto shifted = nvl_channel_x.buffer() + token_idx_in_buffer * num_bytes_per_token;
         auto meta = ld_nc_global(reinterpret_cast<SourceMeta*>(shifted + hidden_bytes + scale_bytes));
-        int64_t recv_token_idx = broadcast_warp(/*val=*/total_offset, /*src_lane=*/meta.src_rdma_rank);
+        int64_t recv_token_idx = broadcast_in_warp(/*val=*/total_offset, /*src_lane=*/meta.src_rdma_rank);
         (lane_id == meta.src_rdma_rank) ? (total_offset += 1) : 0;
 
         bool scale_aligned = (scale_bytes % 16 == 0);
@@ -1539,8 +1539,8 @@ __device__ int combine_token(
   int num_topk_ranks = 0, topk_ranks[kMaxNumRanks], slot_indices[kMaxNumRanks];
 #pragma unroll
   for (int i = 0; i < kNumRanks; ++i)
-    if (broadcast_warp(/*val=*/is_token_in_rank, /*src_lane=*/i)) {
-      slot_indices[num_topk_ranks] = broadcast_warp(/*val=*/head_idx, /*src_lane=*/i) % num_max_recv_tokens;
+    if (broadcast_in_warp(/*val=*/is_token_in_rank, /*src_lane=*/i)) {
+      slot_indices[num_topk_ranks] = broadcast_in_warp(/*val=*/head_idx, /*src_lane=*/i) % num_max_recv_tokens;
       topk_ranks[num_topk_ranks++] = i;
     }
   GRPCOLL_DEVICE_ASSERT(num_topk_ranks <= kMaxNumRanks);
@@ -1831,12 +1831,12 @@ void combine(
       // Sync token start index and count
       for (int i = 0; i < kNumRDMARanks; ++i) {
         current_rdma_idx = (current_rdma_idx + 1) % kNumRDMARanks;
-        if (broadcast_warp(/*val=*/(token_start_idx >= token_end_idx) or (not is_lane_ready), /*src_lane=*/current_rdma_idx))
+        if (broadcast_in_warp(/*val=*/(token_start_idx >= token_end_idx) or (not is_lane_ready), /*src_lane=*/current_rdma_idx))
           continue;
 
         // Sync token start index
-        auto token_idx = static_cast<int64_t>(broadcast_warp(/*val=*/token_start_idx, /*src_lane=*/current_rdma_idx));
-        int num_tokens_in_chunk = broadcast_warp(/*val=*/min(num_max_nvl_chunked_send_tokens, token_end_idx - token_start_idx), /*src_lane=*/current_rdma_idx);
+        auto token_idx = static_cast<int64_t>(broadcast_in_warp(/*val=*/token_start_idx, /*src_lane=*/current_rdma_idx));
+        int num_tokens_in_chunk = broadcast_in_warp(/*val=*/min(num_max_nvl_chunked_send_tokens, token_end_idx - token_start_idx), /*src_lane=*/current_rdma_idx);
 
         // Send by chunk
         for (int chunk_idx = 0; chunk_idx < num_tokens_in_chunk; ++chunk_idx, ++token_idx) {
@@ -1846,7 +1846,7 @@ void combine(
             dst_slot_idx = (cached_channel_tail_idx++) % num_max_nvl_chunked_recv_tokens_per_rdma;
             dst_slot_idx = current_rdma_idx * num_max_nvl_chunked_recv_tokens_per_rdma + dst_slot_idx;
           }
-          dst_slot_idx = broadcast_warp(/*val=*/dst_slot_idx, /*src_lane=*/current_rdma_idx);
+          dst_slot_idx = broadcast_in_warp(/*val=*/dst_slot_idx, /*src_lane=*/current_rdma_idx);
 
           // Load data
           auto shifted_x_buffers = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;

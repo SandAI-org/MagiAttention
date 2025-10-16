@@ -525,27 +525,30 @@ DEVICE_INLINE void release_lock(int* mutex) {
 // Warp Sync Funcs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-DEVICE_INLINE int broadcast_warp(int val, int src_lane = 0) {
+DEVICE_INLINE int broadcast_in_warp(int val, int src_lane = 0) {
   return __shfl_sync(0xffffffff, val, src_lane);
 }
 
-DEVICE_INLINE int any_warp(int pred) {
+DEVICE_INLINE int any_in_warp(int pred) {
   return __any_sync(0xffffffff, pred);
 }
 
-DEVICE_INLINE int all_warp(int pred) {
+DEVICE_INLINE int all_in_warp(int pred) {
   return __all_sync(0xffffffff, pred);
 }
 
 template <typename dtype_t>
-DEVICE_INLINE dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
+DEVICE_INLINE dtype_t broadcast_ptr_in_warp(dtype_t& ptr, int src_lane = 0) {
   GRPCOLL_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "");
-  auto send_int_values = reinterpret_cast<int*>(&ptr);
-  int recv_int_values[sizeof(dtype_t) / sizeof(int)];
+
+  auto send_int_vals = reinterpret_cast<int*>(&ptr);
+  int recv_int_vals[sizeof(dtype_t) / sizeof(int)];
+
 #pragma unroll
   for (int i = 0; i < sizeof(dtype_t) / sizeof(int); ++i)
-    recv_int_values[i] = broadcast_warp(send_int_values[i], src_lane_idx);
-  return *reinterpret_cast<dtype_t*>(recv_int_values);
+    recv_int_vals[i] = broadcast_in_warp(send_int_vals[i], src_lane);
+
+  return *reinterpret_cast<dtype_t*>(recv_int_vals);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
