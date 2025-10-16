@@ -245,22 +245,20 @@ template <int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void dispatch(
     int4* recv_x,
-    float* recv_x_scales,
+    float* recv_lse,
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
     const int64_t* post_perm_idx,
     const int4* x,
-    const float* x_scales,
+    const float* lse,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
     int num_tokens,
     int num_worst_tokens,
     int hidden_int4,
     int num_experts,
-    int num_scales,
-    int scale_token_stride,
-    int scale_hidden_stride,
+    int num_heads,
     void** buffer_ptrs,
     int rank,
     int num_max_send_tokens,
@@ -302,10 +300,10 @@ void dispatch(
   // Get channel data buffers
   //  `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4
   //  `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
-  //  `x_scales_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_scales), dtype=float
+  //  `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
   auto channel_x_buffers = Buffer<int4>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
   auto channel_src_idx_buffers = Buffer<int>(ptr, /*num_elems=*/num_channel_tokens_total, /*elem_offset=*/channel_rank_token_offset);
-  auto channel_x_scales_buffers = Buffer<float>(ptr, /*num_elems=*/num_channel_tokens_total * num_scales, /*elem_offset=*/channel_rank_token_offset * num_scales);
+  auto channel_lse_buffers = Buffer<float>(ptr, /*num_elems=*/num_channel_tokens_total * num_heads, /*elem_offset=*/channel_rank_token_offset * num_heads);
 
   // Get copy info
   constexpr int warp_copy_unroll_stages = 5; // TODO: test other stages and make it configurable
@@ -438,11 +436,10 @@ void dispatch(
             channel_src_idx_buffers[dst_slot_idx] = static_cast<int>(token_idx);
 
 #pragma unroll
-          // Warp-strided copy `x_scales` to `channel_x_scales` by this warp
-          // which is used to fill `recv_x_scales` by the receiver
-          for (int i = lane_id; i < num_scales; i += WARP_SIZE) {
-            auto offset = token_idx * scale_token_stride + i * scale_hidden_stride;
-            channel_x_scales_buffers[dst_slot_idx * num_scales + i] = __ldg(x_scales + offset);
+          // Warp-strided copy `lse` to `channel_lse` by this warp
+          // which is used to fill `recv_lse` by the receiver
+          for (int i = lane_id; i < num_heads; i += WARP_SIZE) {
+            channel_lse_buffers[dst_slot_idx * num_heads + i] = __ldg(lse + token_idx * num_heads + i);
           }
         }
 
@@ -611,12 +608,12 @@ void dispatch(
         recv_src_idx[total_offset + chunk_idx - cached_channel_head_idx] = ld_nc_global(channel_src_idx_buffers.buffer() + chunk_idx % num_recv_buffer_tokens);
 
 #pragma unroll 4
-      // Thread-copy `channel_x_scales` stored by the sender to `recv_x_scales`
-      for (int i = recv_thread_id_in_rank; i < num_recv_tokens * num_scales; i += num_recv_threads_per_rank) { // warp-group strided
-        int chunk_idx = i / num_scales, scales_idx = i % num_scales;
+      // Thread-copy `channel_lse` stored by the sender to `recv_lse`
+      for (int i = recv_thread_id_in_rank; i < num_recv_tokens * num_heads; i += num_recv_threads_per_rank) { // warp-group strided
+        int chunk_idx = i / num_heads, head_idx = i % num_heads;
         int token_idx_in_queue = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
-        recv_x_scales[static_cast<int64_t>(total_offset + chunk_idx) * num_scales + scales_idx] =
-            ld_nc_global(channel_x_scales_buffers.buffer() + token_idx_in_queue * num_scales + scales_idx);
+        recv_lse[static_cast<int64_t>(total_offset + chunk_idx) * num_heads + head_idx] =
+            ld_nc_global(channel_lse_buffers.buffer() + token_idx_in_queue * num_heads + head_idx);
       }
 
       // Update head idx for the responsible rank w.r.t. the responsible channel
@@ -646,22 +643,20 @@ void dispatch(
 
 void dispatch(
     void* recv_x,
-    float* recv_x_scales,
+    float* recv_lse,
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
     const int64_t* post_perm_idx,
     const void* x,
-    const float* x_scales,
+    const float* lse,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
     int num_tokens,
     int num_worst_tokens,
     int hidden_int4,
     int num_experts,
-    int num_scales,
-    int scale_token_stride,
-    int scale_hidden_stride,
+    int num_heads,
     void** buffer_ptrs,
     int rank,
     int num_ranks,
@@ -676,9 +671,6 @@ void dispatch(
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
-  // Make sure never OOB
-  GRPCOLL_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < INT_MAX);
-
 #define DISPATCH_LAUNCH_CASE(num_ranks)                                  \
   {                                                                      \
     auto kernel = dispatch<num_ranks, kNumThreads, kNumTMABytesPerWarp>; \
@@ -687,22 +679,20 @@ void dispatch(
         &cfg,                                                            \
         kernel,                                                          \
         reinterpret_cast<int4*>(recv_x),                                 \
-        recv_x_scales,                                                   \
+        recv_lse,                                                        \
         recv_src_idx,                                                    \
         recv_channel_offset,                                             \
         send_head,                                                       \
         post_perm_idx,                                                   \
         reinterpret_cast<const int4*>(x),                                \
-        x_scales,                                                        \
+        lse,                                                             \
         is_token_in_rank,                                                \
         channel_prefix_matrix,                                           \
         num_tokens,                                                      \
         num_worst_tokens,                                                \
         hidden_int4,                                                     \
         num_experts,                                                     \
-        num_scales,                                                      \
-        scale_token_stride,                                              \
-        scale_hidden_stride,                                             \
+        num_heads,                                                       \
         buffer_ptrs,                                                     \
         rank,                                                            \
         num_max_send_tokens,                                             \
@@ -796,7 +786,6 @@ void cached_notify_combine(
 #undef CACHED_NOTIFY_COMBINE
 }
 
-// TODO: support `reduce_dtype_t` as a template parameter
 template <typename dtype_t, typename reduce_dtype_t, int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp, bool kAccReduce>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void combine(

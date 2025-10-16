@@ -501,6 +501,7 @@ def test_func(
     #   as well (and should be ignored in the cu_seqlens above)
     (
         recv_x,
+        _,  # recv_lse
         handle,
         event,
     ) = buffer.group_cast(**dispatch_args)
@@ -594,7 +595,9 @@ def test_func(
     }
     if previous_mode:
         dispatch_args.update({"previous_event": buffer.capture()})
-    recv_cache_x, _, event = buffer.group_cast(**dispatch_args)
+    (recv_cache_x, _, _, event) = buffer.group_cast(  # recv_lse  # handle
+        **dispatch_args
+    )
     event.current_stream_wait() if async_mode else ()
     recv_cache_x = (
         per_token_cast_back(*recv_cache_x)
@@ -932,7 +935,9 @@ def test_main(
         "num_tokens_per_expert": num_tokens_per_expert,
         "config": dispatch_config if dispatch_config is not None else config,
     }
-    recv_x, handle, _ = buffer.group_cast(**dispatch_args)  # type: ignore[assignment]
+    (recv_x, _, handle, _) = buffer.group_cast(  # recv_lse  # event
+        **dispatch_args
+    )  # type: ignore[assignment]
 
     # Tune combine performance
     best_time, best_results = 1e10, None

@@ -396,6 +396,7 @@ class GrpCollBuffer:
         self,
         x: torch.Tensor,
         recv_x: torch.Tensor | None = None,
+        lse: torch.Tensor | None = None,
         handle: GrpCollHandle | None = None,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
@@ -408,7 +409,7 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> tuple[torch.Tensor, GrpCollHandle, EventOverlap]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, GrpCollIntraHandle, EventOverlap]:
         """
         Dispatch tokens to different ranks, both intranode and internode settings are supported.
         Intranode kernels require all the ranks should be visible via NVLink.
@@ -416,11 +417,10 @@ class GrpCollBuffer:
             index should be visible via RDMA.
 
         Arguments:
-            x: `torch.Tensor` or tuple of `torch.Tensor`, for the first type, the shape must be `[num_tokens, hidden]`,
-                and type must be `torch.bfloat16`; for the second type, the first element of the tuple must be shaped as
-                `[num_tokens, hidden]` with type `torch.float8_e4m3fn`, the second must be `[num_tokens, hidden // 128]`
-                 (requiring divisible) with type `torch.float`.
+            x: `torch.Tensor` or tuple of `torch.Tensor`
             recv_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
+            lse: the logsumexp of each token in `x` for each attention head, with shape `[num_tokens, num_heads]`,
+                if given, or `None` to not transfer lse.
             handle: an optional communication handle, if set, the CPU will reuse the layout information to save some time.
             num_tokens_per_rank: `[num_ranks]` with `torch.int`, the number of tokens to be sent to each rank.
             num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
@@ -473,6 +473,7 @@ class GrpCollBuffer:
             return self._internode_group_cast(
                 x=x,
                 recv_x=recv_x,
+                lse=lse,
                 config=config,
                 handle=handle,
                 hidden_shape=hidden_shape,
@@ -492,6 +493,7 @@ class GrpCollBuffer:
         return self._intranode_group_cast(
             x=x,
             recv_x=recv_x,
+            lse=lse,
             config=config,
             handle=handle,
             hidden_shape=hidden_shape,
@@ -618,6 +620,7 @@ class GrpCollBuffer:
         self,
         x: torch.Tensor,
         recv_x: torch.Tensor | None,
+        lse: torch.Tensor | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
@@ -630,7 +633,7 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> tuple[torch.Tensor, GrpCollIntraHandle, EventOverlap]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, GrpCollIntraHandle, EventOverlap]:
         """Intranode group cast implementation"""
 
         is_handle_given = handle is not None
@@ -656,6 +659,7 @@ class GrpCollBuffer:
         # Launch the intranode group cast kernel
         (
             recv_x,
+            recv_lse,  # TODO: support user buffer to pass in
             # handle
             rank_prefix_matrix,
             channel_prefix_matrix,
@@ -667,7 +671,7 @@ class GrpCollBuffer:
         ) = self.runtime.intranode_group_cast(
             x,
             recv_x,
-            None,  # x_scales
+            lse,
             num_tokens_per_rank,
             is_token_in_rank,
             num_tokens_per_expert,
@@ -699,6 +703,7 @@ class GrpCollBuffer:
 
         return (
             recv_x,
+            recv_lse,
             handle,  # type: ignore[return-value]
             EventOverlap(event),
         )
@@ -754,6 +759,7 @@ class GrpCollBuffer:
         self,
         x: torch.Tensor,
         recv_x: torch.Tensor | None,
+        lse: torch.Tensor | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
@@ -767,9 +773,10 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> tuple[torch.Tensor, GrpCollInterHandle, EventOverlap]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, GrpCollIntraHandle, EventOverlap]:
         """Internode group cast implementation"""
 
+        assert lse is None  # TODO: support lse for internode group cast
         assert post_perm_idx is None  # TODO: support post-perm for internode group cast
         assert (
             num_worst_tokens == 0
@@ -860,6 +867,7 @@ class GrpCollBuffer:
 
         return (
             recv_x,
+            None,  # recv_lse TODO: support return recv_lse
             handle,  # type: ignore[return-value]
             EventOverlap(event),
         )
