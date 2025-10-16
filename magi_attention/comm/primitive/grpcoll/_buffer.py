@@ -76,15 +76,13 @@ class GrpCollBuffer:
         runtime: the C++ runtime.
     """
 
-    num_sms: int = 20
     # At least for intranode group_reduce kernel,
     # it requires the hidden_size_int4 to be divisible by WARP_SIZE
     # thus for bf16/fp16, the hidden size alignment is
     # WARP_SIZE * sizeof(int4) / sizeof(dtype) = 32 * 128 / 16 = 256
     hidden_size_alignment: int = 256  # hidden size alignment
-    # At least for intranode group_cast kernel,
-    # the current `kNumTMABytesPerWarp` is limited to accept at most 8192 bf16/fp16 hidden size
-    hidden_size_ub: int = 8192  # hidden size upper bound
+
+    # TODO: make it enum in cpp backend
     reduce_op_str2int_map = {
         "sum": 0,
         "avg": 1,
@@ -467,14 +465,6 @@ class GrpCollBuffer:
         # FIXME: figure out the alignment requirement
         hidden_shape = x.shape[1:]  # type: ignore[union-attr]
         hidden_size = math.prod(hidden_shape)
-        assert hidden_size % GrpCollBuffer.hidden_size_alignment == 0, (
-            f"The hidden size should be a multiple of {GrpCollBuffer.hidden_size_alignment}, "
-            f"but got {hidden_size=}."
-        )
-        assert hidden_size < GrpCollBuffer.hidden_size_ub, (
-            f"The hidden size should be less than {GrpCollBuffer.hidden_size_ub}, "
-            f"but got {hidden_size=}."
-        )
         if is_out_buf_given:
             assert recv_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
                 "The hidden shape (except dim0) of input and output buffer should be the same, "
@@ -594,14 +584,6 @@ class GrpCollBuffer:
         # FIXME: figure out the alignment requirement
         hidden_shape = x.shape[1:]
         hidden_size = math.prod(hidden_shape)
-        assert hidden_size % GrpCollBuffer.hidden_size_alignment == 0, (
-            f"The hidden size should be a multiple of {GrpCollBuffer.hidden_size_alignment}, "
-            f"but got {hidden_size=}."
-        )
-        assert hidden_size < GrpCollBuffer.hidden_size_ub, (
-            f"The hidden size should be less than {GrpCollBuffer.hidden_size_ub}, "
-            f"but got {hidden_size=}."
-        )
         if is_out_buf_given:
             assert combined_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
                 "The hidden shape (except dim0) of input and output buffer should be the same, "
@@ -1213,18 +1195,6 @@ class GrpCollBuffer:
     @staticmethod
     def is_sm90_compiled() -> bool:
         return grpcoll.is_sm90_compiled()
-
-    @staticmethod
-    def set_num_sms(new_num_sms: int) -> None:
-        """
-        Set the number of SMs to use in high-throughput kernels.
-
-        Arguments:
-            new_num_sms: the new number to be set.
-        """
-
-        assert new_num_sms % 2 == 0, "The SM count must be even"
-        GrpCollBuffer.num_sms = new_num_sms
 
     @staticmethod
     def capture() -> EventOverlap:

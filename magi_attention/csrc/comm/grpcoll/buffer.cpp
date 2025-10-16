@@ -129,7 +129,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     barrier_signal_ptrs_gpu = reinterpret_cast<int**>(local_nvl_buffer_byte_ptr + local_nvl_buffer_byte_offs);
 
     // Initialize local nvl signal to zero
-    // NOTE: no need to synchronize here, since we will apply a full device sync in `sync`
+    // NOTES: no need to synchronize here, since we will apply a full device sync in `sync`
     CUDA_CHECK(cudaMemsetAsync(barrier_signal_ptrs[nvl_rank], 0, barrier_signal_bytes, comm_stream));
   }
 
@@ -365,7 +365,7 @@ Buffer::intranode_group_cast(
 
   // Shape and contiguous checks
   GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
-  GRPCOLL_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0);
+  GRPCOLL_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0); // NOTES: hidden size should be aligned with int4
   GRPCOLL_HOST_ASSERT(is_token_in_rank.dim() == 2 and is_token_in_rank.is_contiguous());
   GRPCOLL_HOST_ASSERT(is_token_in_rank.size(0) == x.size(0) and is_token_in_rank.size(1) == num_ranks);
   if (cached_mode) {
@@ -381,7 +381,8 @@ Buffer::intranode_group_cast(
     GRPCOLL_HOST_ASSERT(num_tokens_per_rank->size(0) == num_ranks);
   }
 
-  auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1));
+  auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
+  auto hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
   auto num_experts = cached_mode ? 0 : static_cast<int>(num_tokens_per_expert->size(0)), num_local_experts = num_experts / num_ranks;
 
   // FP8 scales checks
@@ -469,7 +470,7 @@ Buffer::intranode_group_cast(
     } else if (recv_x_buf.has_value()) {
       // if the recv buffer is given,
       // use its dim0 size as num_recv_tokens to avoid CPU sync
-      GRPCOLL_HOST_ASSERT(recv_x_buf->size(1) == hidden);
+      GRPCOLL_HOST_ASSERT(recv_x_buf->size(1) == hidden_size);
       num_recv_tokens = recv_x_buf->size(0);
     } else {
       // otherwise, synchronize num_recv_tokens
@@ -498,7 +499,7 @@ Buffer::intranode_group_cast(
   // Allocate recv_x buffer
   auto recv_x = torch::Tensor();
   if (!recv_x_buf.has_value()) {
-    recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
+    recv_x = torch::empty({num_recv_tokens, hidden_size}, x.options());
   } else {
     recv_x = recv_x_buf.value();
   }
@@ -529,7 +530,7 @@ Buffer::intranode_group_cast(
           num_channels * num_ranks * sizeof(int) + // channel start offset
           num_channels * num_ranks * sizeof(int) + // channel end offset
           num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * recv_x.element_size() + // data buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * recv_x.element_size() + // data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // source index buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_scales // FP8 scale buffer
       <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
@@ -559,7 +560,7 @@ Buffer::intranode_group_cast(
       /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
       /*num_tokens=*/num_tokens,
       /*num_worst_tokens=*/num_worst_tokens,
-      /*hidden_int4=*/static_cast<int>(hidden * recv_x.element_size() / sizeof(int4)), // NOTE: hidden size should be aligned with int4
+      /*hidden_int4=*/hidden_int4,
       /*num_experts=*/num_experts,
       /*num_scales=*/num_scales,
       /*scale_token_stride=*/scale_token_stride,
@@ -634,7 +635,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
   GRPCOLL_HOST_ASSERT(send_head.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(rank_prefix_matrix.size(0) == num_ranks and rank_prefix_matrix.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(channel_prefix_matrix.size(0) == num_ranks and channel_prefix_matrix.size(1) == num_channels);
-  GRPCOLL_HOST_ASSERT((hidden_size * x.element_size()) % sizeof(int4) == 0);
+  GRPCOLL_HOST_ASSERT((hidden_size * x.element_size()) % sizeof(int4) == 0); // hidden_size should be aligned with int4
+  GRPCOLL_HOST_ASSERT(((hidden_size * x.element_size()) / sizeof(int4)) % WARP_SIZE == 0); // hidden_int4 % WARP_SIZE == 0
 
   // Allocate all tensors on comm stream if set
   // NOTES: do not allocate tensors upfront!
@@ -1362,7 +1364,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
 #endif
 }
 
-// NOTE: remain original low-latency interface here for future potential usage,
+// NOTES: remain original low-latency interface here for future potential usage,
 // which won't be exposed to users for now, but guaranteed its compatibility internally
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
 Buffer::low_latency_dispatch(
@@ -1614,7 +1616,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
 // Common Helper APIs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-// NOTE: remain original low-latency interface here for future potential usage,
+// NOTES: remain original low-latency interface here for future potential usage,
 // which won't be exposed to users for now, but guaranteed its compatibility internally
 void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
 #ifndef DISABLE_NVSHMEM
