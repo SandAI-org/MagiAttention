@@ -1109,7 +1109,7 @@ void combine(
         auto start_time = clock64();
         // NOTES: here we should check `expected_head >= 0` first
         // to avoid invalid `responsible_rank` when accessing `shared_channel_tail_idx`
-        while (__any_sync(0xffffffff, expected_head >= 0 and shared_channel_tail_idx[responsible_rank] <= expected_head)) {
+        while (any_warp(/*pred=*/expected_head >= 0 and shared_channel_tail_idx[responsible_rank] <= expected_head)) {
           // Check timeout
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
             printf("grpcoll timeout for combine receivers, rank=%d, responsible_channel=%d, expect_head=%d\n", rank, responsible_channel, expected_head);
@@ -1154,38 +1154,30 @@ void combine(
           // Prepare high-precision reduce buffer for this hidden value
           float hp_hidval_reduce_buf[kDtypePerInt4];
 
-          // Zero-initialize the high-precision reduce buffer
-#pragma unroll
-          for (int k = 0; k < kDtypePerInt4; ++k)
-            hp_hidval_reduce_buf[k] = 0;
+          // Initialize the high-precision reduce buffer
+          if constexpr (kAccReduce) { // if in `kAccReduce` mode
+            // Get the hidden value ptr of `dtype_t` to reduce to in `recv_x`
+            auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
+            // Initialize the high-precision reduce buffer
+            // with the old value in `recv_x`
+            foreach_assign<float, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
+          } else { // not in `kAccReduce` mode
+            // Zero-initialize the high-precision reduce buffer
+            foreach_fill<float, kDtypePerInt4>(hp_hidval_reduce_buf, 0);
+          }
 
 #pragma unroll
           // Reduce all recv partial hidden values from all src ranks
           // to the high-precision reduce buffer
           for (int j = 0; j < num_src_ranks; ++j) {
             auto jth_recv_hidval_dtype = reinterpret_cast<const dtype_t*>(&recv_hidval_int4[j]);
-#pragma unroll
-            for (int k = 0; k < kDtypePerInt4; ++k)
-              hp_hidval_reduce_buf[k] += static_cast<float>(jth_recv_hidval_dtype[k]);
-          }
-
-          // If in `kAccReduce` mode
-          if constexpr (kAccReduce) {
-            // Get the hidden value ptr of `dtype_t` to reduce to in `recv_x`
-            auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
-#pragma unroll
-            // Reduce the old value in the `recv_x`
-            // to the high-precision reduce buffer
-            for (int k = 0; k < kDtypePerInt4; ++k)
-              hp_hidval_reduce_buf[k] += static_cast<float>(reduce_hidval_ptr_dtype[k]);
+            foreach_reduce_add<float, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, jth_recv_hidval_dtype);
           }
 
           // Cast the high-precision reduced value back to `dtype_t`
           int4 reduced_hidval_int4;
           dtype_t* reduced_hidval_ptr_dtype = reinterpret_cast<dtype_t*>(&reduced_hidval_int4);
-#pragma unroll
-          for (int k = 0; k < kDtypePerInt4; ++k)
-            reduced_hidval_ptr_dtype[k] = static_cast<dtype_t>(hp_hidval_reduce_buf[k]);
+          foreach_assign<dtype_t, float, kDtypePerInt4>(reduced_hidval_ptr_dtype, hp_hidval_reduce_buf);
 
           // Copy the reduced hidden value to `recv_x`
 #ifndef DISABLE_SM90_FEATURES
