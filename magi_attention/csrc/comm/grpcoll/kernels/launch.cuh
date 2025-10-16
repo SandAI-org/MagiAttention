@@ -134,16 +134,44 @@
   }                                                           \
   while (false)
 
+#define SWITCH_RANKS_WITH_DTYPE_REDUCE_DTYPE(dtype, reduce_dtype, case_macro) \
+  switch (num_ranks) {                                                        \
+    case 2:                                                                   \
+      case_macro(dtype, reduce_dtype, 2);                                     \
+    case 4:                                                                   \
+      case_macro(dtype, reduce_dtype, 4);                                     \
+    case 8:                                                                   \
+      case_macro(dtype, reduce_dtype, 8);                                     \
+    default:                                                                  \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported num_ranks");                 \
+  }                                                                           \
+  while (false)
+
 #define SWITCH_DTYPES(case_macro)                         \
   switch (dtype) {                                        \
     case CUDA_R_16BF:                                     \
-      case_macro(nv_bfloat16);                            \
+      case_macro(nv_bfloat16, float);                     \
     case CUDA_R_16F:                                      \
-      case_macro(half);                                   \
+      case_macro(half, float);                            \
     case CUDA_R_32F:                                      \
-      case_macro(float);                                  \
+      case_macro(float, float);                           \
     case CUDA_R_64F:                                      \
-      case_macro(double);                                 \
+      case_macro(double, double);                         \
+    default:                                              \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported dtype"); \
+  }                                                       \
+  while (false)
+
+#define SWITCH_DTYPES_REDUCE_DTYPES(case_macro)           \
+  switch (dtype) {                                        \
+    case CUDA_R_16BF:                                     \
+      case_macro(nv_bfloat16, float);                     \
+    case CUDA_R_16F:                                      \
+      case_macro(half, float);                            \
+    case CUDA_R_32F:                                      \
+      case_macro(float, float);                           \
+    case CUDA_R_64F:                                      \
+      case_macro(double, double);                         \
     default:                                              \
       GRPCOLL_HOST_ASSERT(false and "Unsupported dtype"); \
   }                                                       \

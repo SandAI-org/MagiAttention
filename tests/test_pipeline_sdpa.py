@@ -707,9 +707,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----    skip for native grpcoll   ---- #
 
         if magi_attention.comm.is_native_grpcoll_enable():
-            # TODO: support reduce dtype for float64
-            if dtype == torch.float64:
-                return
             # TODO: support other world sizes
             if self.world_size not in (2, 4, 8):
                 return
