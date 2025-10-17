@@ -49,6 +49,9 @@ def group_cast(
     src_index: list[int],
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -65,6 +68,9 @@ def group_cast(
     src_index: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -81,6 +87,9 @@ def group_cast(
     src_index: list[int] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Group cast interface
@@ -89,6 +98,7 @@ def group_cast(
         input (torch.Tensor): input tensor with shape [input_seqlen, ...]
         output (torch.Tensor | None): output tensor buffer with shape [output_seqlen, ...]
             or None to let the function allocate the output buffer itself
+
         input_split_sizes (list[int] | torch.Tensor):
             the 1D size list / tensor to split the input tensor,
             where sum(input_split_sizes) == input_seqlen
@@ -110,8 +120,19 @@ def group_cast(
 
             NOTE: the order of the output splits are "stable",
             i.e. the ones from the same source will be in the same order as the input splits
+
         group (dist.ProcessGroup): the process group to comm
-        async_op (bool): whether to use async op. Defaults to False
+        async_op (bool): whether to use async op. Defaults to ``False``
+
+        cast_lse (bool): whether to cast the log-sum-exp tensor along with the input tensor. Defaults to ``False``.
+        input_lse (torch.Tensor | None): the log-sum-exp tensor w.r.t. the input tensor,
+            only required and used when ``cast_lse`` is ``True``
+        output_lse (torch.Tensor | None): the log-sum-exp tensor w.r.t. the output tensor,
+            only required and used when ``cast_lse`` is ``True``
+
+            NOTE: the input/output lse tensors can have different dtype from the input/output tensors,
+            and for now we only support ``float32`` dtype for lse tensors.
+
         kwargs: additional keyword arguments, varying from different implementations
 
     Returns:
@@ -129,6 +150,9 @@ def group_cast(
             src_index=src_index,
             group=group,
             async_op=async_op,
+            cast_lse=cast_lse,
+            input_lse=input_lse,
+            output_lse=output_lse,
             **kwargs,
         )
 
@@ -143,6 +167,9 @@ def group_cast(
             src_index=src_index,
             group=group,
             async_op=async_op,
+            cast_lse=cast_lse,
+            input_lse=input_lse,
+            output_lse=output_lse,
             **kwargs,
         )
 
@@ -156,6 +183,9 @@ def group_cast(
         src_index=src_index,
         group=group,
         async_op=async_op,
+        cast_lse=cast_lse,
+        input_lse=input_lse,
+        output_lse=output_lse,
         **kwargs,
     )
 
@@ -226,6 +256,7 @@ def group_reduce(
         input (torch.Tensor): input tensor with shape [input_seqlen, ...]
         output (torch.Tensor | None): output tensor buffer with shape [output_seqlen, ...]
             or None to let the function allocate the output buffer itself
+
         input_split_sizes (list[int] | torch.Tensor):
             the 1D size list / tensor to split the input tensor,
             where sum(input_split_sizes) == input_seqlen
@@ -249,6 +280,7 @@ def group_reduce(
                 where the right-padded entries should be filled with ``-1``
                 3. since any reduce operation satisfies the commutative property,
                 the order to reduce to the same output split does not matter, except for numerical errors
+
         group (dist.ProcessGroup): the process group to comm
         async_op (bool): whether to use async op. Defaults to False
         reduce_op (GroupReduceOp): the reduce operation to use. Defaults to "sum"
@@ -266,10 +298,15 @@ def group_reduce(
                 if False, the output will be overwritten and the initial value will be ignored.
                 Otherwise, the output buffer must be given and the initial value will be accumulated
                 w.r.t. the reduction operation according to the ``reduce_op``.
+
         input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
             only required and used if reduce_op is "lse"
         output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
             only required and used if reduce_op is "lse"
+
+            NOTE: the input/output lse tensors can have different dtype from the input/output tensors,
+            and for now we only support ``float32`` dtype for lse tensors.
+
         kwargs: additional keyword arguments, varying from different implementations
 
     Returns:

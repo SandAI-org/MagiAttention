@@ -82,6 +82,7 @@ def prepare_test_func_kwargs(
     dtype: torch.dtype,
     distinct_token: bool,
     pass_out_buffer: bool,
+    pass_out_lse_buffer: bool,
     random_permute_output: bool,
     sim_gemm_weight: float,
     acc_reduce_out_buffer: bool,
@@ -169,6 +170,17 @@ def prepare_test_func_kwargs(
         (sum(output_split_size_list), *x.shape[1:]), dtype=dtype, device="cuda"
     )
     recv_x_gc_buf = recv_x_gc.clone() if pass_out_buffer else None
+    if lse is not None:
+        recv_lse_gc_buf = (
+            torch.empty(
+                (recv_x_gc.shape[0], lse.shape[1]), dtype=lse.dtype, device="cuda"
+            )
+            if pass_out_lse_buffer
+            else None
+        )
+    else:
+        recv_lse_gc_buf = None
+
     work_with_pf_gc = group_cast(
         input=x,
         output=recv_x_gc,
@@ -178,15 +190,18 @@ def prepare_test_func_kwargs(
         src_index=src_index_list,
         group=group,
     )
+
     recv_x_gc = work_with_pf_gc.wait_post_process(recv_x_gc)
     print(f"[RANK {rank}]: {recv_x_gc.shape=} | {recv_x_gc=}\n", flush=True)
 
     # get ref combine output by group-reduce
     x_gr = sim_gemm(recv_x_gc, w=sim_gemm_weight)
     combined_x_gr = torch.zeros_like(x)
+
     if acc_reduce_out_buffer:
         combined_x_gr += acc_reduce_constant
     combined_x_gr_buf = combined_x_gr.clone() if pass_out_buffer else None
+
     work_with_pf_gr = group_reduce(
         input=x_gr,
         output=combined_x_gr,
@@ -196,6 +211,7 @@ def prepare_test_func_kwargs(
         src_indices=dst_indices_list,
         group=group,
     )
+
     combined_x_gr = work_with_pf_gr.wait_post_process(combined_x_gr)
     print(f"[RANK {rank}]: {combined_x_gr.shape=} | {combined_x_gr=}\n", flush=True)
 
@@ -388,6 +404,7 @@ def prepare_test_func_kwargs(
         lse=lse,
         recv_x_gc=recv_x_gc,
         recv_x_gc_buf=recv_x_gc_buf,
+        recv_lse_gc_buf=recv_lse_gc_buf,
         combined_x_gr=combined_x_gr,
         combined_x_gr_buf=combined_x_gr_buf,
         is_token_in_rank=is_token_in_rank,
@@ -404,13 +421,12 @@ def prepare_test_func_kwargs(
 def test_func(
     rank: int,
     local_rank: int,
-    num_ranks: int,
     config: GrpCollConfig,
     buffer: GrpCollBuffer,
-    distinct_token: bool,
     async_mode: bool,
     previous_mode: bool,
     pass_out_buffer: bool,
+    pass_out_lse_buffer: bool,
     random_permute_output: bool,
     allow_empty_init_out_buf: bool,
     use_a2av_perm_idxs: str,
@@ -425,6 +441,7 @@ def test_func(
     lse: torch.Tensor | None = kwargs["lse"]
     recv_x_gc: torch.Tensor = kwargs["recv_x_gc"]
     recv_x_gc_buf: torch.Tensor = kwargs["recv_x_gc_buf"]
+    recv_lse_gc_buf: torch.Tensor | None = kwargs["recv_lse_gc_buf"]
     combined_x_gr: torch.Tensor = kwargs["combined_x_gr"]
     combined_x_gr_buf: torch.Tensor = kwargs["combined_x_gr_buf"]
     is_token_in_rank: torch.Tensor = kwargs["is_token_in_rank"]
@@ -450,10 +467,12 @@ def test_func(
     common_dispatch_args = {  # w/o handle tensors
         "x": x,
         "recv_x": recv_x_gc_buf,
-        "lse": lse,
         "config": config,
         "async_finish": async_mode,
         "post_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
+        "cast_lse": pass_out_lse_buffer,
+        "lse": lse,
+        "recv_lse": recv_lse_gc_buf,
     }
     dispatch_args = common_dispatch_args | {
         "is_token_in_rank": is_token_in_rank,
@@ -511,10 +530,15 @@ def test_func(
     # wait
     event.current_stream_wait() if async_mode else ()
 
-    # check in-place
+    # check recv_x in-place
     if pass_out_buffer:
         assert recv_x_gc_buf is not None
         assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()  # type: ignore[union-attr]
+
+    # check recv_lse in-place
+    if pass_out_lse_buffer:
+        assert recv_lse_gc_buf is not None
+        assert recv_lse_gc_buf.data_ptr() == recv_lse.data_ptr()  # type: ignore[union-attr]
 
     # unpermute recv_x to the order indicated by
     # output_split_size_list and src_index_list
@@ -707,10 +731,15 @@ def test_func(
     # wait
     event.current_stream_wait() if async_mode else ()
 
-    # check in-place
+    # check combined_x in-place
     if pass_out_buffer:
         assert combined_x_gr_buf is not None
         assert combined_x_gr_buf.data_ptr() == combined_x.data_ptr()
+
+    # check combined_lse in-place
+    if pass_out_lse_buffer:
+        # TODO: support lse for combine
+        pass
 
     # print
     print(
@@ -825,7 +854,8 @@ def test_main(
     allow_empty_init_out_buf = (  # if every token has at least one dst, we can empty-init
         min_num_dst_ranks > 0
     )
-    pass_out_buffer = True
+    pass_out_buffer = True  # for both dispatch and combine
+    pass_out_lse_buffer = True  # for both dispatch and combine
 
     acc_reduce_out_buffer = True
     acc_reduce_constant = rank
@@ -845,7 +875,7 @@ def test_main(
                 f"{num_topk=} | {num_local_experts=} | {num_heads=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
-                f"{allow_empty_init_out_buf=} | {pass_out_buffer=} | "
+                f"{allow_empty_init_out_buf=} | {pass_out_buffer=} | {pass_out_lse_buffer=}\n"
                 f"{acc_reduce_out_buffer=} | {acc_reduce_constant=} | {use_a2av_perm_idxs=}\n"
             ),
             flush=True,
@@ -875,6 +905,7 @@ def test_main(
         dtype=dtype,
         distinct_token=distinct_token,
         pass_out_buffer=pass_out_buffer,
+        pass_out_lse_buffer=pass_out_lse_buffer,
         random_permute_output=random_permute_output,
         sim_gemm_weight=sim_gemm_weight,
         acc_reduce_out_buffer=acc_reduce_out_buffer,
@@ -886,14 +917,13 @@ def test_main(
     test_out = test_func(
         rank=rank,
         local_rank=local_rank,
-        num_ranks=num_ranks,
         config=config,
         buffer=buffer,
         # test parameters
-        distinct_token=distinct_token,
         async_mode=True,
         previous_mode=True,
         pass_out_buffer=pass_out_buffer,
+        pass_out_lse_buffer=pass_out_lse_buffer,
         random_permute_output=random_permute_output,
         allow_empty_init_out_buf=allow_empty_init_out_buf,
         use_a2av_perm_idxs=use_a2av_perm_idxs,
@@ -916,7 +946,14 @@ def test_main(
     dispatch_nvl_recv_bytes = test_out["dispatch_nvl_recv_bytes"]
     combine_nvl_send_bytes = test_out["combine_nvl_send_bytes"]
 
-    # Tune dispatch performance
+    # --------------      tune dispatch       -------------- #
+
+    if local_rank == 0:
+        print(
+            "\n# ------    Tune Intranode Dispatch   ------ #\n",
+            flush=True,
+        )
+
     best_dispatch_results = None
     fp8_factor = (1 + 4 / 128) / 2
     best_time, best_results = 1e10, None
@@ -932,10 +969,13 @@ def test_main(
                 nvl_chunk_size=nvl_chunk_size,
                 nvl_buffer_size=nvl_buffer_size,
             )
-        else:
-            # Test default config as well
+        else:  # Test default config as well
             config = GrpCollConfig.get_default_dispatch_config(num_ranks)
-        tune_args = {"x": x, "handle": handle, "config": config}
+        tune_args = {
+            "x": x,
+            "handle": handle,
+            "config": config,
+        }  # TODO: add other flags to tune args
         t = bench(lambda: buffer.group_cast(**tune_args))[0]
         if t < best_time and nvl_chunk_size > 0:
             best_time, best_results = t, (num_sms, nvl_chunk_size)
@@ -993,7 +1033,14 @@ def test_main(
         **dispatch_args
     )  # type: ignore[assignment]
 
-    # Tune combine performance
+    # --------------      tune combine       -------------- #
+
+    if local_rank == 0:
+        print(
+            "\n# ------    Tune Intranode Combine   ------ #\n",
+            flush=True,
+        )
+
     best_time, best_results = 1e10, None
     combined_x_buf = torch.zeros_like(x) if pass_out_buffer else None
     for nvl_chunk_size in tuple(range(1, 17, 1)) + (0,):
@@ -1003,8 +1050,7 @@ def test_main(
                 nvl_chunk_size=nvl_chunk_size,
                 nvl_buffer_size=nvl_buffer_size,
             )
-        else:
-            # Test default config as well
+        else:  # Test default config as well
             config = GrpCollConfig.get_default_combine_config(num_ranks)
         tune_args = {
             "x": recv_x,
