@@ -62,7 +62,6 @@ from grpcoll_utils import (
     get_random_dst_indices_list,
     get_random_split_size_list,
     init_dist,
-    per_token_cast_back,
     perm_idxs2unperm_idxs,
     sim_gemm,
     transfer_group_cast_meta_to_dispatch_meta,
@@ -439,18 +438,6 @@ def test_func(
     range_gather_pre_combine_kwargs: dict = kwargs["range_gather_pre_combine_kwargs"]
     gbl_num_tokens_per_rank: torch.Tensor = kwargs["gbl_num_tokens_per_rank"]
 
-    # define check function
-    def check_data(check_x, rank_prefix_matrix):
-        if distinct_token:
-            # distinct token cannot use this check
-            return
-        assert torch.allclose(check_x.amin(dim=1), check_x.amax(dim=1))
-        check_start = 0
-        for i in range(num_ranks):
-            check_end = rank_prefix_matrix[i][rank].item()
-            assert (check_x[check_start:check_end, :].int() - i).sum().item() == 0
-            check_start = check_end
-
     # prepare dispatch args
     # x: shape=[num_local_tokens, hidden_dim]
     # num_tokens_per_rank: shape=[num_ranks]: the number of tokens sent to each rank
@@ -460,16 +447,18 @@ def test_func(
     #   calculated by buffer.get_dispatch_layout(topk_idx, num_experts)
     #   where the topk_idx: shape=[num_local_tokens, topk]: the global expert idx for each local token
     #   but we don't have to pass the topk_idx into dispatch kernels
-    dispatch_args = {
+    common_dispatch_args = {  # w/o handle tensors
         "x": x,
         "recv_x": recv_x_gc_buf,
         "lse": lse,
-        "is_token_in_rank": is_token_in_rank,
-        "num_tokens_per_rank": num_tokens_per_rank,
-        "num_tokens_per_expert": num_tokens_per_expert,
         "config": config,
         "async_finish": async_mode,
         "post_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
+    }
+    dispatch_args = common_dispatch_args | {
+        "is_token_in_rank": is_token_in_rank,
+        "num_tokens_per_rank": num_tokens_per_rank,
+        "num_tokens_per_expert": num_tokens_per_expert,
     }
     if previous_mode:
         dispatch_args.update({"previous_event": buffer.capture()})
@@ -621,8 +610,6 @@ def test_func(
 
         assert torch.equal(recv_lse, repeated_permed_recv_src_idx)
 
-    check_data(recv_x, rank_prefix_matrix)
-
     if local_rank == 0:
         print(
             "\n# ------    Normal Intranode Dispatch Passed   ------ #\n",
@@ -638,29 +625,25 @@ def test_func(
         )
 
     # Test cached dispatch
-    dispatch_args = {
-        "x": x,
+    cached_dispatch_args = common_dispatch_args | {
         "handle": handle,
-        "config": config,
-        "async_finish": async_mode,
     }
     if previous_mode:
-        dispatch_args.update({"previous_event": buffer.capture()})
-    (recv_cache_x, recv_cache_lse, _, event) = buffer.group_cast(  # recv_lse  # handle
-        **dispatch_args
-    )
+        cached_dispatch_args.update({"previous_event": buffer.capture()})
+    (
+        recv_cached_x,
+        recv_cached_lse,
+        _,  # handle
+        event,
+    ) = buffer.group_cast(**cached_dispatch_args)
     event.current_stream_wait() if async_mode else ()
-    recv_cache_x = (
-        per_token_cast_back(*recv_cache_x)
-        if isinstance(recv_cache_x, tuple)
-        else recv_cache_x
-    )
-    check_data(recv_cache_x, rank_prefix_matrix)
+
+    # check recv_cache_x
+    assert torch.equal(recv_cached_x, recv_x)
 
     # check recv_cache_lse
-    if recv_cache_lse is not None:
-        assert recv_cache_lse.size(0) == recv_cache_x.size(0) == recv_src_idx.size(0)
-        assert torch.equal(recv_cache_lse, repeated_permed_recv_src_idx)
+    if recv_cached_lse is not None:
+        assert torch.equal(recv_cached_lse, recv_lse)
 
     if local_rank == 0:
         print(
@@ -1001,7 +984,12 @@ def test_main(
         "num_tokens_per_expert": num_tokens_per_expert,
         "config": dispatch_config if dispatch_config is not None else config,
     }
-    (recv_x, _, handle, _) = buffer.group_cast(  # recv_lse  # event
+    (
+        recv_x,
+        _,  # recv_lse
+        handle,
+        _,  # event
+    ) = buffer.group_cast(
         **dispatch_args
     )  # type: ignore[assignment]
 
