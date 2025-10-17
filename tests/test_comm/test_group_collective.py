@@ -33,7 +33,7 @@ from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import assert_close
 from magi_attention.testing.utils import switch_envvar_context
-from magi_attention.utils import is_list_type_all, max_fp_dtype
+from magi_attention.utils import is_list_type_all
 
 
 # TODO: add test cases for world size > 4
@@ -247,19 +247,32 @@ class TestGroupCollective(DistTestBase):
                 ],
             },
             {
-                "name": "normal_group_cast_case2",
+                "name": "normal_group_cast_case2_with_lse",
                 "world_size": 4,
+                "cast_lse": True,
                 "send_buffer_per_rank": [
                     [0, 1, 2, 3],
                     [4, 5, 6, 7],
                     [8, 9, 10, 11],
                     [12, 13, 14, 15],
                 ],
+                "send_lse_buffer_per_rank": [
+                    [0.1, 1.2, 2.3, 3.4],
+                    [4.5, 5.6, 6.7, 7.8],
+                    [8.9, 9.1, 10.2, 11.3],
+                    [12.4, 13.5, 14.6, 15.7],
+                ],
                 "expected_recv_buffer_per_rank": [
                     [5, 9, 13, 0, 1],
                     [0, 1, 10, 11, 2, 12, 13],
                     [2, 6, 7, 14, 15],
                     [8, 9, 4, 5],
+                ],
+                "expected_recv_lse_buffer_per_rank": [
+                    [5.6, 9.1, 13.5, 0.1, 1.2],
+                    [0.1, 1.2, 10.2, 11.3, 2.3, 12.4, 13.5],
+                    [2.3, 6.7, 7.8, 14.6, 15.7],
+                    [8.9, 9.1, 4.5, 5.6],
                 ],
                 "input_split_size_list_per_rank": [
                     [2, 1, 1],
@@ -307,6 +320,7 @@ class TestGroupCollective(DistTestBase):
             f"{use_hier_comm=} x {use_native_grpcoll=} x "
             f"{async_op=}"
         )
+        cast_lse = test_case.get("cast_lse", False)
 
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
@@ -319,6 +333,12 @@ class TestGroupCollective(DistTestBase):
                 return
             # TODO: support hier comm with native grpcoll
             if use_native_grpcoll:
+                return
+
+        # skip when enabling cast_lse
+        if cast_lse:
+            # TODO: support cast lse for other implementations
+            if not use_native_grpcoll:
                 return
 
         # sanity check for meta args per rank
@@ -366,6 +386,41 @@ class TestGroupCollective(DistTestBase):
             dtype=dtype,
             device=self.device,
         )
+        if cast_lse:
+            # prepare lse buffer with shape [seqlen, num_heads]
+            send_lse_buffer = (
+                torch.tensor(
+                    test_case["send_lse_buffer_per_rank"][self.rank],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                .repeat_interleave(repeats=self.num_heads, dim=0)
+                .reshape(-1, self.num_heads)
+            )
+            expected_recv_lse_buffer = (
+                torch.tensor(
+                    test_case["expected_recv_lse_buffer_per_rank"][self.rank],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                .repeat_interleave(repeats=self.num_heads, dim=0)
+                .reshape(-1, self.num_heads)
+            )
+            recv_lse_buffer = torch.full_like(
+                expected_recv_lse_buffer,
+                fill_value=-1,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            post_process_inputs = (
+                recv_buffer,
+                recv_lse_buffer,
+            )
+        else:
+            send_lse_buffer = None
+            recv_lse_buffer = None
+            expected_recv_lse_buffer = None
+            post_process_inputs = (recv_buffer,)  # type: ignore[assignment]
 
         # prepare for native grpcoll
         if use_native_grpcoll:
@@ -386,6 +441,9 @@ class TestGroupCollective(DistTestBase):
                 src_index=src_index_list,
                 group=self.process_group,
                 async_op=async_op,
+                cast_lse=cast_lse,
+                input_lse=send_lse_buffer,
+                output_lse=recv_lse_buffer,
                 # kwargs below for hier comm
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
@@ -393,12 +451,13 @@ class TestGroupCollective(DistTestBase):
                 native_grpcoll_handle_dict=native_grpcoll_handle_dict,
             )
 
-            # post process
-            recv_buffer = work.wait_post_process(recv_buffer)
+        # post process
+        post_process_outputs = work.wait_post_process(*post_process_inputs)
 
         # check results
         err_msg_list = []
         try:
+            recv_buffer = post_process_outputs[0] if cast_lse else post_process_outputs
             assert_close(
                 recv_buffer,
                 expected_recv_buffer,
@@ -411,6 +470,21 @@ class TestGroupCollective(DistTestBase):
                 f"For group-cast: {test_case_name=}, recv buffer is failed due to error: \n{e}\n"
                 f"with: \n{recv_buffer=}\n{expected_recv_buffer=}\n"
             )
+        if cast_lse:
+            try:
+                recv_lse_buffer = post_process_outputs[1]
+                assert_close(
+                    recv_lse_buffer,
+                    expected_recv_lse_buffer,
+                    atol=1e-8,
+                    rtol=1e-6,
+                    test_case="group-cast recv lse buffer",
+                )
+            except Exception as e:
+                err_msg_list.append(
+                    f"For group-cast: {test_case_name=}, recv lse buffer is failed due to error: \n{e}\n"
+                    f"with: \n{recv_lse_buffer=}\n{expected_recv_lse_buffer=}\n"
+                )
 
         if err_msg_list:
             raise AssertionError("\n".join(err_msg_list))
@@ -740,7 +814,7 @@ class TestGroupCollective(DistTestBase):
             send_lse_buffer = (
                 torch.tensor(
                     test_case["send_lse_buffer_per_rank"][self.rank],
-                    dtype=max_fp_dtype(dtype, torch.float32),
+                    dtype=torch.float32,
                     device=self.device,
                 )
                 .repeat_interleave(repeats=self.num_heads, dim=0)
@@ -749,7 +823,7 @@ class TestGroupCollective(DistTestBase):
             recv_lse_buffer_before_reduce = (
                 torch.tensor(
                     test_case["recv_lse_buffer_before_reduce_per_rank"][self.rank],
-                    dtype=max_fp_dtype(dtype, torch.float32),
+                    dtype=torch.float32,
                     device=self.device,
                 )
                 .repeat_interleave(repeats=self.num_heads, dim=0)
@@ -758,7 +832,7 @@ class TestGroupCollective(DistTestBase):
             expected_recv_lse_buffer = (
                 torch.tensor(
                     test_case["expected_recv_lse_buffer_per_rank"][self.rank],
-                    dtype=max_fp_dtype(dtype, torch.float32),
+                    dtype=torch.float32,
                     device=self.device,
                 )
                 .repeat_interleave(repeats=self.num_heads, dim=0)

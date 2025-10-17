@@ -38,6 +38,9 @@ def a2av_group_cast_impl(
     src_index: list[int],
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -54,6 +57,9 @@ def a2av_group_cast_impl(
     src_index: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -69,19 +75,23 @@ def a2av_group_cast_impl(
     src_index: list[int] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Group-cast implementation based on all2all_v"""
     # ---------    check     --------- #
 
     # check functionalities
-    assert output is not None, "A2A-based group-cast only supports output is given"
+    assert output is not None, "A2A-based group-cast only supports output to be given"
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_indices, src_index], list
     ), (
-        "This API only supports host meta interface, "
+        "A2A-based group-cast only supports host meta interface, "
         "thus the input_split_sizes, output_split_sizes, dst_indices, src_index should all be list type"
     )
+    assert not cast_lse, "A2A-based group-cast does not support lse cast for now"
 
     # check shapes
     assert len(input_split_sizes) == len(dst_indices), (
@@ -209,7 +219,7 @@ def a2av_group_reduce_impl(
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_index, src_indices], list
     ), (
-        "This API only supports host meta interface, "
+        "A2A-based group-reduce only supports host meta interface, "
         "thus the input_split_sizes, output_split_sizes, dst_index, src_indice should all be list type"
     )
 

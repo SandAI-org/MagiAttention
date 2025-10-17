@@ -578,6 +578,9 @@ def hier_group_cast_impl_with_a2av(
     src_index: list[int],
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -594,6 +597,9 @@ def hier_group_cast_impl_with_a2av(
     src_index: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -609,6 +615,9 @@ def hier_group_cast_impl_with_a2av(
     src_index: list[int] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Hierarchical group-cast implementation based on all2all_v"""
@@ -617,19 +626,20 @@ def hier_group_cast_impl_with_a2av(
     # check functionalities
     assert (
         not magi_attention.comm.is_native_grpcoll_enable()
-    ), "Hierarchical group-cast is not compatible with native grpcoll implementation"
-    assert (
-        async_op
-    ), "async_op must be True for hierarchical group-cast collective by now"
+    ), "A2A-based hierarchical group-cast is not compatible with native grpcoll implementation"
+    assert async_op, "A2A-based hierarchical group-cast only supports async_op for now"
     assert (
         output_tensor is not None
     ), "A2A-based hierarchical group-cast only supports output is given"
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_indices, src_index], list
     ), (
-        "This API only supports host meta interface, "
+        "A2A-based hierarchical group-cast only supports host meta interface, "
         "thus the input_split_sizes, output_split_sizes, dst_indices, src_index should all be list type"
     )
+    assert (
+        not cast_lse
+    ), "A2A-based hierarchical group-cast does not support lse cast for now"
 
     # check shapes
     assert len(input_split_sizes) == len(dst_indices), (
@@ -1187,20 +1197,20 @@ def hier_group_reduce_impl_with_a2av(
     # check functionalities
     assert (
         not magi_attention.comm.is_native_grpcoll_enable()
-    ), "Hierarchical group-reduce is not compatible with native grpcoll implementation"
+    ), "A2A-based hierarchical group-reduce is not compatible with native grpcoll implementation"
     assert (
         acc_reduce and output_tensor is not None
     ), "A2A-based hierarchical group-reduce only supports acc_reduce=True and output is given"
     assert (
         async_op
-    ), "async_op must be True for hierarchical group-reduce collective by now"
+    ), "A2A-based hierarchical group-reduce only supports async_op for now"
     assert (
         reduce_op == "sum"
-    ), "hierarchical group reduce only supports sum reduction by now"
+    ), "A2A-based hierarchical group-reduce only supports sum reduction by now"
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_index, src_indices], list
     ), (
-        "This API only supports host meta interface, "
+        "A2A-based hierarchical group-reduce only supports host meta interface, "
         "thus the input_split_sizes, output_split_sizes, dst_index, src_indice should all be list type"
     )
 

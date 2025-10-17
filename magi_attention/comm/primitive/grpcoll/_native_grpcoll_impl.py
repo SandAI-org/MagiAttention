@@ -52,6 +52,9 @@ def native_group_cast_impl(
     src_index: list[int],
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -68,6 +71,9 @@ def native_group_cast_impl(
     src_index: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -83,6 +89,9 @@ def native_group_cast_impl(
     src_index: list[int] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Native group-cast implementation"""
@@ -138,7 +147,7 @@ def native_group_cast_impl(
     # launch dispatch kernel
     (
         recv_x,
-        _,  # recv_lse
+        recv_lse,
         handle,
         event,
     ) = buffer.group_cast(
@@ -154,6 +163,9 @@ def native_group_cast_impl(
         previous_event=None,
         async_finish=async_op,
         allocate_on_comm_stream=False,
+        cast_lse=cast_lse,
+        lse=input_lse,
+        recv_lse=output_lse,
     )
 
     # HACK: prepare handle for symmetric group-reduce or cached group-cast
@@ -163,7 +175,11 @@ def native_group_cast_impl(
     # prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(
         work=GeneralWork(event),
-        post_process_fn=lambda *args, **kwargs: recv_x,
+        post_process_fn=(
+            (lambda *args, **kwargs: (recv_x, recv_lse))
+            if cast_lse
+            else lambda *args, **kwargs: recv_x
+        ),
         async_op=async_op,
     )
 

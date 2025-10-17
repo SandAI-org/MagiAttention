@@ -258,10 +258,10 @@ class GrpCollBuffer:
         Calculate the dispatch meta from the topk indices required for later communication.
 
         NOTE:
-            1. this is for now a static replacement API for ``buffer.get_dispatch_layout``
+            1. this is for now a static replacement API for `buffer.get_dispatch_layout`
             when the buffer runtime is not available.
 
-            2. this API is excuted not on the buffer comm stream but on a hidden ``meta_stream``
+            2. this API is excuted not on the buffer comm stream but on a hidden `meta_stream`
             since the buffer runtime is not available.
         """
 
@@ -396,7 +396,6 @@ class GrpCollBuffer:
         self,
         x: torch.Tensor,
         recv_x: torch.Tensor | None = None,
-        lse: torch.Tensor | None = None,
         handle: GrpCollHandle | None = None,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
@@ -409,6 +408,9 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
+        cast_lse: bool = False,
+        lse: torch.Tensor | None = None,
+        recv_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, GrpCollIntraHandle, EventOverlap]:
         """
         Dispatch tokens to different ranks, both intranode and internode settings are supported.
@@ -419,8 +421,6 @@ class GrpCollBuffer:
         Arguments:
             x: `torch.Tensor` or tuple of `torch.Tensor`
             recv_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
-            lse: the logsumexp of each token in `x` for each attention head, with shape `[num_tokens, num_heads]`,
-                if given, or `None` to not transfer lse.
             handle: an optional communication handle, if set, the CPU will reuse the layout information to save some time.
             num_tokens_per_rank: `[num_ranks]` with `torch.int`, the number of tokens to be sent to each rank.
             num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
@@ -435,10 +435,20 @@ class GrpCollBuffer:
             expert_alignment: align the number of tokens received by each local expert to this variable.
             num_worst_tokens: the worst number of tokens to receive, if specified, there will be no CPU sync, and it
                 will be CUDA-graph compatible. Please also notice that this flag is for intranode only.
-            config: the performance tuning config.
-            previous_event: the event to wait before actually executing the kernel.
+            config: the performance tuning config if given.
+            previous_event: the event to wait before actually executing the kernel if given.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
+                Defaults to `False`.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
+                Defaults to `False`.
+            cast_lse: whether to cast the given `lse` along with the x and write it to `recv_lse`.
+                Defaults to `False`.
+            lse: the logsumexp of each token in `x` for each attention head,
+                with shape `[num_tokens, num_heads]`, to be sent along with `x`,
+                only required and used when `cast_lse` is `True`.
+            recv_lse: the logsumexp of each token in `recv_x` for each attention head,
+                with shape `[num_recv_tokens, num_heads]`, to be received along with `recv_x`,
+                when `cast_lse` is `True`.
 
         Returns:
             recv_x: received tokens, the same type and tuple as the input `x`, but the number of tokens equals to the
@@ -473,7 +483,6 @@ class GrpCollBuffer:
             return self._internode_group_cast(
                 x=x,
                 recv_x=recv_x,
-                lse=lse,
                 config=config,
                 handle=handle,
                 hidden_shape=hidden_shape,
@@ -487,13 +496,15 @@ class GrpCollBuffer:
                 previous_event=previous_event,
                 async_finish=async_finish,
                 allocate_on_comm_stream=allocate_on_comm_stream,
+                cast_lse=cast_lse,
+                lse=lse,
+                recv_lse=recv_lse,
             )
 
         # Intranode
         return self._intranode_group_cast(
             x=x,
             recv_x=recv_x,
-            lse=lse,
             config=config,
             handle=handle,
             hidden_shape=hidden_shape,
@@ -506,6 +517,9 @@ class GrpCollBuffer:
             previous_event=previous_event,
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
+            cast_lse=cast_lse,
+            lse=lse,
+            recv_lse=recv_lse,
         )
 
     def group_reduce(
@@ -620,7 +634,6 @@ class GrpCollBuffer:
         self,
         x: torch.Tensor,
         recv_x: torch.Tensor | None,
-        lse: torch.Tensor | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
@@ -633,11 +646,13 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
+        cast_lse: bool = False,
+        lse: torch.Tensor | None = None,
+        recv_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, GrpCollIntraHandle, EventOverlap]:
         """Intranode group cast implementation"""
 
         is_handle_given = handle is not None
-
         if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollIntraHandle)
             num_tokens_per_rank = None
@@ -656,10 +671,16 @@ class GrpCollBuffer:
             rank_prefix_matrix = None
             channel_prefix_matrix = None
 
+        if cast_lse:
+            assert lse is not None, "lse should not be None when `cast_lse` is set"
+        else:  # no need to cast lse, even passed in
+            lse = None
+            recv_lse = None
+
         # Launch the intranode group cast kernel
         (
             recv_x,
-            recv_lse,  # TODO: support user buffer to pass in
+            recv_lse,
             # handle
             rank_prefix_matrix,
             channel_prefix_matrix,
@@ -672,6 +693,7 @@ class GrpCollBuffer:
             x,
             recv_x,
             lse,
+            recv_lse,
             num_tokens_per_rank,
             is_token_in_rank,
             num_tokens_per_expert,
@@ -759,7 +781,6 @@ class GrpCollBuffer:
         self,
         x: torch.Tensor,
         recv_x: torch.Tensor | None,
-        lse: torch.Tensor | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
@@ -773,17 +794,21 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
+        cast_lse: bool = False,
+        lse: torch.Tensor | None = None,
+        recv_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, GrpCollIntraHandle, EventOverlap]:
         """Internode group cast implementation"""
 
-        assert lse is None  # TODO: support lse for internode group cast
-        assert post_perm_idx is None  # TODO: support post-perm for internode group cast
+        # TODO: support lse for internode group cast
+        assert not cast_lse
+        # TODO: support post-perm for internode group cast
+        assert post_perm_idx is None
         assert (
             num_worst_tokens == 0
         ), "Internode group cast does not support `num_worst_tokens > 0`"
 
         is_handle_given = handle is not None
-
         if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollInterHandle)
             num_tokens_per_rank = None
@@ -867,7 +892,7 @@ class GrpCollBuffer:
 
         return (
             recv_x,
-            None,  # recv_lse TODO: support return recv_lse
+            None,  # recv_lse
             handle,  # type: ignore[return-value]
             EventOverlap(event),
         )
