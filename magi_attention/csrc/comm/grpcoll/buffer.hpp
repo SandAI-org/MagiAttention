@@ -186,10 +186,11 @@ struct Buffer {
       bool async,
       bool allocate_on_comm_stream);
 
-  std::tuple<torch::Tensor, std::optional<EventHandle>> intranode_group_reduce(
+  std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> intranode_group_reduce(
       const torch::Tensor& x,
       std::optional<torch::Tensor>& combined_x_buf,
-      const std::optional<torch::Tensor>& topk_weights,
+      const std::optional<torch::Tensor>& lse,
+      std::optional<torch::Tensor>& combined_lse_buf,
       const std::optional<torch::Tensor>& pre_perm_idx,
       const torch::Tensor& src_idx,
       const torch::Tensor& rank_prefix_matrix,

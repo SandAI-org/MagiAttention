@@ -391,8 +391,8 @@ Buffer::intranode_group_cast(
   float* lse_ptr = nullptr;
   int num_heads = 0;
   if (lse.has_value()) {
-    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
     GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
+    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
     GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens);
     GRPCOLL_HOST_ASSERT(hidden_size % lse->size(1) == 0); // NOTES: hidden size should be divisible by num_heads
     num_heads = static_cast<int>(lse->size(1));
@@ -470,8 +470,6 @@ Buffer::intranode_group_cast(
     } else if (recv_x_buf.has_value()) {
       // if the recv buffer is given,
       // use its dim0 size as num_recv_tokens to avoid CPU sync
-      GRPCOLL_HOST_ASSERT(recv_x_buf->size(1) == hidden_size);
-      GRPCOLL_HOST_ASSERT(recv_x_buf->scalar_type() == x.scalar_type());
       num_recv_tokens = recv_x_buf->size(0);
     } else {
       // otherwise, synchronize num_recv_tokens
@@ -499,10 +497,13 @@ Buffer::intranode_group_cast(
 
   // Allocate recv_x buffer
   auto recv_x = torch::Tensor();
-  if (!recv_x_buf.has_value()) {
-    recv_x = torch::empty({num_recv_tokens, hidden_size}, x.options());
-  } else {
+  if (recv_x_buf.has_value()) {
+    GRPCOLL_HOST_ASSERT(recv_x_buf->dim() == 2 && recv_x_buf->is_contiguous());
+    GRPCOLL_HOST_ASSERT(recv_x_buf->scalar_type() == x.scalar_type());
+    GRPCOLL_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens && recv_x_buf->size(1) == hidden_size);
     recv_x = recv_x_buf.value();
+  } else {
+    recv_x = torch::empty({num_recv_tokens, hidden_size}, x.options());
   }
 
   // Allocate new tensors
@@ -521,12 +522,13 @@ Buffer::intranode_group_cast(
     post_perm_idx_ptr = post_perm_idx->data_ptr<int64_t>();
   }
   if (lse.has_value()) {
-    if (!recv_lse_buf.has_value()) {
-      recv_lse = torch::empty({num_recv_tokens, num_heads}, lse->options());
-    } else {
-      GRPCOLL_HOST_ASSERT(recv_lse_buf->size(0) == num_recv_tokens && recv_lse_buf->size(1) == num_heads);
+    if (recv_lse_buf.has_value()) {
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->dim() == 2 && recv_lse_buf->is_contiguous());
       GRPCOLL_HOST_ASSERT(recv_lse_buf->scalar_type() == torch::kFloat32);
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->size(0) == num_recv_tokens && recv_lse_buf->size(1) == num_heads);
       recv_lse.emplace(recv_lse_buf.value());
+    } else {
+      recv_lse = torch::empty({num_recv_tokens, num_heads}, lse->options());
     }
     recv_lse_ptr = static_cast<float*>(recv_lse->data_ptr());
   }
@@ -583,7 +585,7 @@ Buffer::intranode_group_cast(
   if (async) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     // record tensors
-    for (auto& t : {x, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, recv_x, recv_src_idx, recv_channel_prefix_matrix, send_head}) {
+    for (auto& t : {x, recv_x, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, recv_src_idx, recv_channel_prefix_matrix, send_head}) {
       t.record_stream(comm_stream);
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
@@ -606,10 +608,11 @@ Buffer::intranode_group_cast(
   return {recv_x, recv_lse, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event};
 }
 
-std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_reduce(
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::intranode_group_reduce(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& combined_x_buf,
-    const std::optional<torch::Tensor>& topk_weights, // TODO: renamed to lse
+    const std::optional<torch::Tensor>& lse,
+    std::optional<torch::Tensor>& combined_lse_buf,
     const std::optional<torch::Tensor>& pre_perm_idx,
     const torch::Tensor& src_idx,
     const torch::Tensor& rank_prefix_matrix,
@@ -663,21 +666,32 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
     stream_wait(comm_stream, compute_stream);
   }
 
-  auto recv_topk_weights = std::optional<torch::Tensor>();
-  float* topk_weights_ptr = nullptr;
-  float* recv_topk_weights_ptr = nullptr;
+  int num_heads = 0;
+  auto combined_lse = std::optional<torch::Tensor>();
+  float* lse_ptr = nullptr;
+  float* combined_lse_ptr = nullptr;
   int64_t* pre_perm_idx_ptr = nullptr;
-  if (topk_weights.has_value()) {
-    GRPCOLL_HOST_ASSERT(topk_weights->dim() == 2 and topk_weights->is_contiguous());
-    GRPCOLL_HOST_ASSERT(topk_weights->size(0) == num_tokens);
-    GRPCOLL_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
-    topk_weights_ptr = topk_weights->data_ptr<float>();
-    recv_topk_weights = torch::empty({num_combined_tokens}, topk_weights->options());
-    recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
+  if (lse.has_value()) {
+    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
+    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
+    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0);
+    num_heads = static_cast<int>(lse->size(1));
+    lse_ptr = lse->data_ptr<float>();
+
+    if (combined_lse_buf.has_value()) {
+      GRPCOLL_HOST_ASSERT(combined_lse_buf->dim() == 2 and combined_lse_buf->is_contiguous());
+      GRPCOLL_HOST_ASSERT(combined_lse_buf->scalar_type() == lse->scalar_type());
+      GRPCOLL_HOST_ASSERT(combined_lse_buf->size(0) == num_combined_tokens && combined_lse_buf->size(1) == num_heads);
+      combined_lse.emplace(combined_lse_buf.value());
+    } else {
+      combined_lse = torch::empty({num_combined_tokens, num_heads}, lse->options());
+    }
+
+    combined_lse_ptr = combined_lse->data_ptr<float>();
   }
   if (pre_perm_idx.has_value()) {
+    GRPCOLL_HOST_ASSERT(pre_perm_idx->dim() == 1 && pre_perm_idx->is_contiguous());
     GRPCOLL_HOST_ASSERT(pre_perm_idx->scalar_type() == torch::kInt64);
-    GRPCOLL_HOST_ASSERT(pre_perm_idx->dim() == 1);
     GRPCOLL_HOST_ASSERT(pre_perm_idx->size(0) == num_tokens);
     pre_perm_idx_ptr = pre_perm_idx->data_ptr<int64_t>();
   }
@@ -705,13 +719,15 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
    * unless the user can guarantee that no such token exists
    */
   auto combined_x = torch::Tensor();
-  if (!combined_x_buf.has_value()) {
-    GRPCOLL_HOST_ASSERT(!acc_reduce);
-    combined_x =
-        allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden_size}, x.options()) : torch::zeros({num_combined_tokens, hidden_size}, x.options());
-  } else {
+  if (combined_x_buf.has_value()) {
+    GRPCOLL_HOST_ASSERT(combined_x_buf->dim() == 2 and combined_x_buf->is_contiguous());
+    GRPCOLL_HOST_ASSERT(combined_x_buf->scalar_type() == x.scalar_type());
     GRPCOLL_HOST_ASSERT(combined_x_buf->size(0) == num_combined_tokens and combined_x_buf->size(1) == hidden_size);
     combined_x = combined_x_buf.value();
+  } else {
+    GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if combined_x_buf is not provided
+    combined_x =
+        allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden_size}, x.options()) : torch::zeros({num_combined_tokens, hidden_size}, x.options());
   }
 
   // Check if the buffer size is enough
@@ -719,7 +735,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
       num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * x.element_size() + // data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // source idx buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) // top-k weight buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) // lse buffer
       <= num_nvl_bytes);
 
   // Launch combine kernel
@@ -736,10 +752,10 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
    */
   intranode::combine(
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
-      /*recv_x=*/combined_x.data_ptr(),
-      /*recv_topk_weights=*/recv_topk_weights_ptr,
+      /*combined_x=*/combined_x.data_ptr(),
+      /*combined_lse=*/combined_lse_ptr,
       /*x=*/x.data_ptr(),
-      /*topk_weights=*/topk_weights_ptr,
+      /*lse=*/lse_ptr,
       /*pre_perm_idx=*/pre_perm_idx_ptr,
       /*src_idx=*/src_idx.data_ptr<int>(),
       /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
@@ -748,6 +764,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
       /*num_tokens=*/num_tokens,
       /*num_recv_tokens=*/num_combined_tokens,
       /*hidden_size=*/hidden_size,
+      /*num_heads=*/num_heads,
       /*buffer_ptrs=*/buffer_ptrs_gpu,
       /*rank=*/rank,
       /*num_ranks=*/num_ranks,
@@ -762,13 +779,13 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
   if (async) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     // record tensors
-    for (auto& t : {x, src_idx, send_head, rank_prefix_matrix, channel_prefix_matrix, combined_x}) {
+    for (auto& t : {x, combined_x, src_idx, send_head, rank_prefix_matrix, channel_prefix_matrix}) {
       t.record_stream(comm_stream);
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
     }
     // record optional tensors
-    for (auto& to : {topk_weights, pre_perm_idx}) {
+    for (auto& to : {lse, combined_lse, pre_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
@@ -781,7 +798,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::intranode_group_re
   if (allocate_on_comm_stream)
     at::cuda::setCurrentCUDAStream(compute_stream);
 
-  return {combined_x, event};
+  return {combined_x, combined_lse, event};
 }
 
 std::tuple<
@@ -884,13 +901,15 @@ Buffer::internode_group_cast(
   float* topk_weights_ptr = nullptr;
   GRPCOLL_HOST_ASSERT(topk_idx.has_value() == topk_weights.has_value());
   if (topk_idx.has_value()) {
-    num_topk = static_cast<int>(topk_idx->size(1));
     GRPCOLL_HOST_ASSERT(num_experts > 0);
     GRPCOLL_HOST_ASSERT(topk_idx->dim() == 2 and topk_idx->is_contiguous());
     GRPCOLL_HOST_ASSERT(topk_weights->dim() == 2 and topk_weights->is_contiguous());
-    GRPCOLL_HOST_ASSERT(num_tokens == topk_idx->size(0) and num_tokens == topk_weights->size(0));
-    GRPCOLL_HOST_ASSERT(num_topk == topk_weights->size(1));
+    GRPCOLL_HOST_ASSERT(topk_idx->size(0) == num_tokens and topk_weights->size(0) == num_tokens);
+    GRPCOLL_HOST_ASSERT(topk_idx->size(1) == topk_weights->size(1));
+    GRPCOLL_HOST_ASSERT(topk_idx->scalar_type() == torch::kInt64);
     GRPCOLL_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
+
+    num_topk = static_cast<int>(topk_idx->size(1));
     topk_idx_ptr = topk_idx->data_ptr<int64_t>();
     topk_weights_ptr = topk_weights->data_ptr<float>();
   }
@@ -899,9 +918,8 @@ Buffer::internode_group_cast(
   float* x_scales_ptr = nullptr;
   int num_scales = 0, scale_token_stride = 0, scale_hidden_stride = 0;
   if (x_scales.has_value()) {
-    GRPCOLL_HOST_ASSERT(x.element_size() == 1);
-    GRPCOLL_HOST_ASSERT(x_scales->scalar_type() == torch::kFloat32 or x_scales->scalar_type() == torch::kInt);
-    GRPCOLL_HOST_ASSERT(x_scales->dim() == 2);
+    GRPCOLL_HOST_ASSERT(x_scales->dim() == 2 && x_scales->is_contiguous());
+    GRPCOLL_HOST_ASSERT(x_scales->scalar_type() == torch::kFloat32);
     GRPCOLL_HOST_ASSERT(x_scales->size(0) == num_tokens);
     num_scales = x_scales->dim() == 1 ? 1 : static_cast<int>(x_scales->size(1));
     x_scales_ptr = static_cast<float*>(x_scales->data_ptr());
@@ -1033,11 +1051,13 @@ Buffer::internode_group_cast(
 
   // Allocate recv_x buffer
   auto recv_x = torch::Tensor();
-  if (!recv_x_buf.has_value()) {
-    recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
-  } else {
+  if (recv_x_buf.has_value()) {
+    GRPCOLL_HOST_ASSERT(recv_x_buf->dim() == 2 && recv_x_buf->is_contiguous());
+    GRPCOLL_HOST_ASSERT(recv_x_buf->scalar_type() == x.scalar_type());
     GRPCOLL_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens and recv_x_buf->size(1) == hidden);
     recv_x = recv_x_buf.value();
+  } else {
+    recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
   }
 
   // Allocate new tensors
@@ -1242,8 +1262,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   float* combined_topk_weights_ptr = nullptr;
   if (topk_weights.has_value()) {
     GRPCOLL_HOST_ASSERT(topk_weights->dim() == 2 and topk_weights->is_contiguous());
-    GRPCOLL_HOST_ASSERT(topk_weights->size(0) == num_tokens);
     GRPCOLL_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
+    GRPCOLL_HOST_ASSERT(topk_weights->size(0) == num_tokens);
     num_topk = static_cast<int>(topk_weights->size(1));
     topk_weights_ptr = topk_weights->data_ptr<float>();
     combined_topk_weights = torch::empty({num_combined_tokens, num_topk}, topk_weights->options());
@@ -1299,12 +1319,14 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
    * unless the user can guarantee that no such token exists
    */
   auto combined_x = torch::Tensor();
-  if (!combined_x_buf.has_value()) {
-    GRPCOLL_HOST_ASSERT(!acc_reduce);
-    combined_x = allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden}, x.options()) : torch::zeros({num_combined_tokens, hidden}, x.options());
-  } else {
+  if (combined_x_buf.has_value()) {
+    GRPCOLL_HOST_ASSERT(combined_x_buf->dim() == 2 and combined_x_buf->is_contiguous());
+    GRPCOLL_HOST_ASSERT(combined_x_buf->scalar_type() == x.scalar_type());
     GRPCOLL_HOST_ASSERT(combined_x_buf->size(0) == num_combined_tokens and combined_x_buf->size(1) == hidden);
     combined_x = combined_x_buf.value();
+  } else {
+    GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if combined_x_buf is not provided
+    combined_x = allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden}, x.options()) : torch::zeros({num_combined_tokens, hidden}, x.options());
   }
 
   // Launch data combine

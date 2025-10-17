@@ -292,7 +292,11 @@ def native_group_reduce_impl(
         )
 
     # launch combine kernel
-    combined_x, event = buffer.group_reduce(
+    (
+        combined_x,
+        combined_lse,
+        event,
+    ) = buffer.group_reduce(
         x=input,
         handle=handle,
         combined_x=output,
@@ -304,8 +308,8 @@ def native_group_reduce_impl(
         async_finish=async_op,
         allocate_on_comm_stream=False,
         allow_empty_init_out_buf=kwargs.pop("allow_empty_init_out_buf", False),
-        input_lse=input_lse,
-        output_lse=output_lse,
+        lse=input_lse,
+        combined_lse=output_lse,
     )
 
     # HACK: prepare handle for symmetric group-cast or cached group-reduce
@@ -315,7 +319,11 @@ def native_group_reduce_impl(
     # prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(
         work=GeneralWork(event),
-        post_process_fn=lambda *args, **kwargs: combined_x,
+        post_process_fn=(
+            (lambda *args, **kwargs: (combined_x, combined_lse))
+            if reduce_op == "lse"
+            else lambda *args, **kwargs: combined_x
+        ),
         async_op=async_op,
     )
 

@@ -155,10 +155,10 @@ void cached_notify_combine(
 
 void combine(
     cudaDataType_t dtype,
-    void* recv_x,
-    float* recv_topk_weights,
+    void* combined_x,
+    float* combined_lse,
     const void* x,
-    const float* topk_weights,
+    const float* lse,
     const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,
@@ -167,6 +167,7 @@ void combine(
     int num_tokens,
     int num_recv_tokens,
     int hidden_size,
+    int num_heads,
     void** buffer_ptrs,
     int rank,
     int num_ranks,

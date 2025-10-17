@@ -796,10 +796,10 @@ void cached_notify_combine(
 template <typename dtype_t, typename reduce_dtype_t, int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp, bool kAccReduce>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void combine(
-    dtype_t* recv_x,
-    float* recv_topk_weights,
+    dtype_t* combined_x,
+    float* combined_lse,
     const dtype_t* x,
-    const float* topk_weights,
+    const float* lse,
     const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,
@@ -808,6 +808,7 @@ void combine(
     int num_tokens,
     int num_recv_tokens,
     int hidden_size,
+    int num_heads,
     void** buffer_ptrs,
     int rank,
     int num_max_send_tokens,
@@ -823,6 +824,7 @@ void combine(
   const int responsible_channel = sm_id / 2;
   const auto num_channels_total = num_channels * kNumRanks;
   const auto num_channel_tokens_total = num_channels_total * num_recv_buffer_tokens;
+  GRPCOLL_DEVICE_ASSERT(num_heads <= WARP_SIZE); // FIXME: support num_heads > WARP_SIZE
 
   // Get dtype Info
   GRPCOLL_STATIC_ASSERT(sizeof(int4) % sizeof(dtype_t) == 0, "Invalid vectorization");
@@ -832,7 +834,7 @@ void combine(
 
   // Cast from `dtype_t` to `int4`
   auto x_int4 = reinterpret_cast<const int4*>(x);
-  auto recv_x_int4 = reinterpret_cast<int4*>(recv_x);
+  auto combined_x_int4 = reinterpret_cast<int4*>(combined_x);
 
   // Get copy info
   constexpr int warp_copy_unroll_stages = 4; // TODO: test other stages and make it configurable
@@ -877,10 +879,10 @@ void combine(
     // Get channel data buffers
     // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4
     // `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
-    // `topk_weights_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=float
+    // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
     auto channel_x_buffers = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
     auto channel_src_idx_buffers = Buffer<int>(ptr, num_channel_tokens_total, channel_rank_token_offset);
-    auto channel_topk_weights_buffers = Buffer<float>(ptr, num_channel_tokens_total, channel_rank_token_offset);
+    auto channel_lse_buffers = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
 
     // Get rank offset
     // NOTES: `rank_prefix_matrix`: shape=(kNumRanks, kNumRanks), dtype=int
@@ -963,13 +965,13 @@ void combine(
 
         // Copy channel src idx by lane0
         // NOTES: `src_idx` is actually the `recv_src_idx` in dispatch stage
-        //  thus src_idx[j] indicates the token idx in `recv_x` for x[j] to reduce to
+        //  thus src_idx[j] indicates the token idx in `combined_x` for x[j] to reduce to
         if (lane_id == 0)
           channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + send_token_idx);
 
-        // Copy `topk_weights`
-        if (topk_weights != nullptr and lane_id == 0)
-          channel_topk_weights_buffers[dst_slot_idx + lane_id] = __ldg(topk_weights + send_token_idx + lane_id);
+        // Copy `lse`
+        if (num_heads > 0 and lane_id < num_heads)
+          channel_lse_buffers[dst_slot_idx * num_heads + lane_id] = __ldg(lse + send_token_idx * num_heads + lane_id);
       }
 
       // Update token idx, channel tail idx by chunk size for last round
@@ -1055,7 +1057,7 @@ void combine(
 
       // Get channel data buffers for each rank
       Buffer<int4> channel_x_buffers[kNumRanks];
-      Buffer<float> channel_topk_weights_buffers[kNumRanks];
+      Buffer<float> channel_lse_buffers[kNumRanks];
 #pragma unroll
       for (int curr_rank = 0; curr_rank < kNumRanks; ++curr_rank) {
         const auto channel_rank_offset = responsible_channel * kNumRanks + curr_rank;
@@ -1076,13 +1078,13 @@ void combine(
         //  `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
         ptr = reinterpret_cast<void*>(static_cast<int8_t*>(ptr) + num_channel_tokens_total * sizeof(int));
 
-        // Get `channel_topk_weights_buffers` for curr rank
-        // `topk_weights_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=float
-        channel_topk_weights_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total, channel_rank_token_offset);
+        // Get `channel_lse_buffers` for curr rank
+        // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
+        channel_lse_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
       }
 
       // Get reduce tasks
-      // i.e. the range of tokens [start_idx, end_idx) in `recv_x` for the responsible channel
+      // i.e. the range of tokens [start_idx, end_idx) in `combined_x` for the responsible channel
       // NOTES: this range is exactly the same as the one in dispatch stage
       // so as to reduce the tokens from all source ranks
       int token_start_idx, token_end_idx;
@@ -1138,8 +1140,8 @@ void combine(
 #pragma unroll
         // Reduce this token by all the received partial token from all src ranks
         for (int i = lane_id; i < hidden_int4; i += WARP_SIZE) { // warp-strided
-          // Get the hidden value ptr of `int_4` to reduce to in `recv_x`
-          int4* reduce_hidval_ptr_int4 = recv_x_int4 + token_idx * hidden_int4 + i;
+          // Get the hidden value ptr of `int_4` to reduce to in `combined_x`
+          int4* reduce_hidval_ptr_int4 = combined_x_int4 + token_idx * hidden_int4 + i;
 
           // Load all recv partial hidden values from all src ranks
           int4 recv_hidval_int4[kNumRanks];
@@ -1152,10 +1154,10 @@ void combine(
 
           // Initialize the high-precision reduce buffer
           if constexpr (kAccReduce) { // if in `kAccReduce` mode
-            // Get the hidden value ptr of `dtype_t` to reduce to in `recv_x`
+            // Get the hidden value ptr of `dtype_t` to reduce to in `combined_x`
             auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
             // Initialize the high-precision reduce buffer
-            // with the old value in `recv_x`
+            // with the old value in `combined_x`
             foreach_assign<reduce_dtype_t, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
           } else { // not in `kAccReduce` mode
             // Zero-initialize the high-precision reduce buffer
@@ -1175,7 +1177,7 @@ void combine(
           dtype_t* reduced_hidval_ptr_dtype = reinterpret_cast<dtype_t*>(&reduced_hidval_int4);
           foreach_assign<dtype_t, reduce_dtype_t, kDtypePerInt4>(reduced_hidval_ptr_dtype, hp_hidval_reduce_buf);
 
-          // Copy the reduced hidden value to `recv_x`
+          // Copy the reduced hidden value to `combined_x`
 #ifndef DISABLE_SM90_FEATURES
           // Wait for the previous (num_tma_stages - 1) TMA stores to be finished
           // to release at least one TMA slot for the current hidden value
@@ -1193,7 +1195,7 @@ void combine(
           tma_store_fence();
           __syncwarp();
 
-          // Store all the reduced hidden values for all lanes from TMA slot to `recv_x`
+          // Store all the reduced hidden values for all lanes from TMA slot to `combined_x`
           if (lane_id == 0) {
             auto tma_bytes = min(WARP_SIZE, hidden_int4 - i) * static_cast<int>(sizeof(int4));
             tma_store_1d(
@@ -1208,13 +1210,14 @@ void combine(
 #endif
         }
 
-        // Reduce `recv_topk_weights` from `channel_topk_weights_buffers`
-        if (recv_topk_weights != nullptr and lane_id == 0) {
-          reduce_dtype_t reduced_topk_weights = 0;
+        // Reduce `combined_lse` from `channel_lse_buffers`
+        // by the first `num_heads` lanes in each warp
+        if (lane_id < num_heads) {
+          reduce_dtype_t reduced_lse = 0;
 #pragma unroll
           for (int j = 0; j < num_src_ranks; ++j)
-            reduced_topk_weights += static_cast<reduce_dtype_t>(ld_nc_global(channel_topk_weights_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] + lane_id));
-          recv_topk_weights[token_idx + lane_id] = static_cast<float>(reduced_topk_weights);
+            reduced_lse += static_cast<reduce_dtype_t>(ld_nc_global(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + lane_id));
+          combined_lse[token_idx * num_heads + lane_id] = static_cast<float>(reduced_lse);
         }
 
         // Update channel head idx for each rank
@@ -1239,10 +1242,10 @@ void combine(
 
 void combine(
     cudaDataType_t dtype,
-    void* recv_x,
-    float* recv_topk_weights,
+    void* combined_x,
+    float* combined_lse,
     const void* x,
-    const float* topk_weights,
+    const float* lse,
     const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,
@@ -1251,6 +1254,7 @@ void combine(
     int num_tokens,
     int num_recv_tokens,
     int hidden_size,
+    int num_heads,
     void** buffer_ptrs,
     int rank,
     int num_ranks,
@@ -1275,10 +1279,10 @@ void combine(
     LAUNCH_KERNEL(                                                                                  \
         &cfg,                                                                                       \
         kernel,                                                                                     \
-        reinterpret_cast<dtype*>(recv_x),                                                           \
-        recv_topk_weights,                                                                          \
+        reinterpret_cast<dtype*>(combined_x),                                                       \
+        combined_lse,                                                                               \
         reinterpret_cast<const dtype*>(x),                                                          \
-        topk_weights,                                                                               \
+        lse,                                                                                        \
         pre_perm_idx,                                                                               \
         src_idx,                                                                                    \
         rank_prefix_matrix,                                                                         \
@@ -1287,6 +1291,7 @@ void combine(
         num_tokens,                                                                                 \
         num_recv_tokens,                                                                            \
         hidden_size,                                                                                \
+        num_heads,                                                                                  \
         buffer_ptrs,                                                                                \
         rank,                                                                                       \
         num_max_send_tokens,                                                                        \

@@ -726,7 +726,11 @@ def test_func(
     #   for the entries == -1 to the position p of next valid token (encoded to -p-1)
     #   since the combine kernel needs to know the channel position when iterating at this token,
     #   even though it is not sent to the target rank
-    combined_x, event = buffer.group_reduce(**combine_args)
+    (
+        combined_x,
+        _,  # combined_lse
+        event,
+    ) = buffer.group_reduce(**combine_args)
 
     # wait
     event.current_stream_wait() if async_mode else ()
