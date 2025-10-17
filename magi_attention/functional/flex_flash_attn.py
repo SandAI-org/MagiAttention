@@ -624,13 +624,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
-        assert isinstance(
-            max_seqlen_q, int
-        ), "max_seqlen_q must be an int, otherwise would lead to performance degradation"
-        assert isinstance(
-            max_seqlen_k, int
-        ), "max_seqlen_k must be an int, otherwise would lead to performance degradation"
-
         merge_range_start_event, to_op_start_event = None, None
         merge_range_end_event, to_op_end_event = None, None
 
