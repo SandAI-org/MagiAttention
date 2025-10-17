@@ -611,9 +611,16 @@ void dispatch(
       // Thread-copy `channel_lse` stored by the sender to `recv_lse`
       for (int i = recv_thread_id_in_rank; i < num_recv_tokens * num_heads; i += num_recv_threads_per_rank) { // warp-group strided
         int chunk_idx = i / num_heads, head_idx = i % num_heads;
+
+        // Determine the final destination token idx in the recv buffer
+        auto token_idx_in_recv_x = static_cast<int64_t>(total_offset + chunk_idx);
+        token_idx_in_recv_x = post_perm_idx == nullptr ? token_idx_in_recv_x : post_perm_idx[token_idx_in_recv_x];
+
+        // Get the token ptr in the recv queue
         int token_idx_in_queue = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
-        recv_lse[static_cast<int64_t>(total_offset + chunk_idx) * num_heads + head_idx] =
-            ld_nc_global(channel_lse_buffers.buffer() + token_idx_in_queue * num_heads + head_idx);
+        auto token_ptr_in_queue = channel_lse_buffers.buffer() + token_idx_in_queue * num_heads + head_idx;
+
+        recv_lse[token_idx_in_recv_x * num_heads + head_idx] = ld_nc_global(token_ptr_in_queue);
       }
 
       // Update head idx for the responsible rank w.r.t. the responsible channel

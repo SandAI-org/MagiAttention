@@ -63,7 +63,6 @@ from grpcoll_utils import (
     get_random_split_size_list,
     init_dist,
     per_token_cast_back,
-    per_token_cast_to_fp8,
     perm_idxs2unperm_idxs,
     sim_gemm,
     transfer_group_cast_meta_to_dispatch_meta,
@@ -78,6 +77,7 @@ def prepare_test_func_kwargs(
     buffer: GrpCollBuffer,
     num_tokens: int,
     hidden_size: int,
+    num_heads: int,
     num_experts: int,
     num_local_experts: int,
     dtype: torch.dtype,
@@ -91,6 +91,17 @@ def prepare_test_func_kwargs(
 ) -> dict[str, Any]:
     # Random data
     x = torch.ones((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    if num_heads > 0:
+        lse = (
+            torch.arange(num_tokens, dtype=torch.float32, device="cuda")
+            .repeat_interleave(repeats=num_heads, dim=0)
+            .reshape(-1, num_heads)
+        )
+        lse_shape = lse.shape
+    else:
+        lse = None
+        lse_shape = None
+
     if distinct_token:
         x *= torch.arange(
             rank * num_tokens,
@@ -98,11 +109,10 @@ def prepare_test_func_kwargs(
             dtype=dtype,
             device="cuda",
         ).view(-1, 1) / (num_ranks * num_tokens)
-        print(f"[RANK {rank}]: distinct_input: {x=}\n", flush=True)
     else:
         x *= rank
-    x_e4m3 = per_token_cast_to_fp8(x) if GrpCollBuffer.is_sm90_compiled() else None
-    x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T) if x_e4m3 is not None else None
+
+    print(f"[RANK {rank}]: {x.shape=} | {x=}\n" f"{lse_shape=} | {lse=}\n", flush=True)
 
     # Random score (transfered from group-cast meta args)
     num_input_splits = 10
@@ -376,6 +386,7 @@ def prepare_test_func_kwargs(
 
     return dict(
         x=x,
+        lse=lse,
         recv_x_gc=recv_x_gc,
         recv_x_gc_buf=recv_x_gc_buf,
         combined_x_gr=combined_x_gr,
@@ -412,6 +423,7 @@ def test_func(
 ) -> dict[str, Any]:
     # fetch kwargs
     x: torch.Tensor = kwargs["x"]
+    lse: torch.Tensor | None = kwargs["lse"]
     recv_x_gc: torch.Tensor = kwargs["recv_x_gc"]
     recv_x_gc_buf: torch.Tensor = kwargs["recv_x_gc_buf"]
     combined_x_gr: torch.Tensor = kwargs["combined_x_gr"]
@@ -451,6 +463,7 @@ def test_func(
     dispatch_args = {
         "x": x,
         "recv_x": recv_x_gc_buf,
+        "lse": lse,
         "is_token_in_rank": is_token_in_rank,
         "num_tokens_per_rank": num_tokens_per_rank,
         "num_tokens_per_expert": num_tokens_per_expert,
@@ -501,7 +514,7 @@ def test_func(
     #   as well (and should be ignored in the cu_seqlens above)
     (
         recv_x,
-        _,  # recv_lse
+        recv_lse,
         handle,
         event,
     ) = buffer.group_cast(**dispatch_args)
@@ -520,8 +533,9 @@ def test_func(
         if use_a2av_perm_idxs == "inside":
             # already permuted inside
             pass
-        else:
-            recv_x_from_a2av = recv_x.clone()  # type: ignore[union-attr]
+        else:  # "outside" or "no"
+            # recv_x
+            recv_x_from_a2av = recv_x.clone()
             if use_a2av_perm_idxs == "outside":
                 recv_x = recv_x[unperm_from_a2av_idx]
             elif use_a2av_perm_idxs == "no":
@@ -529,11 +543,24 @@ def test_func(
                     tensor=recv_x,
                     unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                 )
-            assert recv_x_from_a2av.shape == recv_x.shape  # type: ignore[union-attr]
+            assert recv_x_from_a2av.shape == recv_x.shape
+
+            # recv_lse
+            if recv_lse is not None:
+                recv_lse_from_a2av = recv_lse.clone()  # type: ignore[union-attr]
+                if use_a2av_perm_idxs == "outside":
+                    recv_lse = recv_lse[unperm_from_a2av_idx]
+                elif use_a2av_perm_idxs == "no":
+                    recv_lse = unpermute_tensor(
+                        tensor=recv_lse,
+                        unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
+                    )
+                assert recv_lse_from_a2av.shape == recv_lse.shape  # type: ignore[union-attr]
 
     # print
     assert isinstance(handle, GrpCollIntraHandle)
 
+    recv_lse_shape = recv_lse.shape if recv_lse is not None else None
     rank_prefix_matrix = handle.rank_prefix_matrix
     channel_prefix_matrix = handle.channel_prefix_matrix
     recv_channel_prefix_matrix = handle.recv_channel_prefix_matrix
@@ -543,19 +570,17 @@ def test_func(
 
     print(
         (
-            f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
-            f"{rank_prefix_matrix.shape=} | {rank_prefix_matrix=}\n"  # handle[0]
-            f"{channel_prefix_matrix.shape=} | {channel_prefix_matrix=}\n"  # handle[1]
-            f"{recv_channel_prefix_matrix.shape=} | {recv_channel_prefix_matrix=}\n"  # handle[2]
-            f"{recv_src_idx.shape=} | {recv_src_idx=}\n"  # handle[3]
-            f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[4]
-            f"After dipatch: {send_head.shape=} | {send_head=}\n\n"  # handle[5]
+            f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"
+            f"{recv_lse_shape=} | {recv_lse=}\n"
+            f"{rank_prefix_matrix.shape=} | {rank_prefix_matrix=}\n"
+            f"{channel_prefix_matrix.shape=} | {channel_prefix_matrix=}\n"
+            f"{recv_channel_prefix_matrix.shape=} | {recv_channel_prefix_matrix=}\n"
+            f"{recv_src_idx.shape=} | {recv_src_idx=}\n"
+            f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"
+            f"After dipatch: {send_head.shape=} | {send_head=}\n\n"
         ),
         flush=True,
     )
-
-    # cast back from fp8
-    recv_x = per_token_cast_back(*recv_x) if isinstance(recv_x, tuple) else recv_x
 
     # check
     assert torch.equal(recv_x, recv_x_gc)
@@ -570,6 +595,32 @@ def test_func(
     assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(
         0
     ), f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
+
+    # check recv_lse
+    if recv_lse is not None:
+        assert recv_lse.size(0) == recv_x.size(0) == recv_src_idx.size(0)
+        num_heads = recv_lse.size(1)
+
+        if random_permute_output:
+            if use_a2av_perm_idxs == "no":
+                permed_recv_src_idx = unpermute_tensor(
+                    tensor=recv_src_idx,
+                    unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
+                )
+            else:  # "inside" or "outside"
+                # NOTE: we won't permute recv_src_idx inside for now
+                permed_recv_src_idx = recv_src_idx[unperm_from_a2av_idx]
+        else:
+            permed_recv_src_idx = recv_src_idx
+
+        repeated_permed_recv_src_idx = (
+            permed_recv_src_idx.repeat_interleave(repeats=num_heads, dim=0)
+            .reshape(-1, num_heads)
+            .to(recv_lse.dtype)
+        )
+
+        assert torch.equal(recv_lse, repeated_permed_recv_src_idx)
+
     check_data(recv_x, rank_prefix_matrix)
 
     if local_rank == 0:
@@ -595,7 +646,7 @@ def test_func(
     }
     if previous_mode:
         dispatch_args.update({"previous_event": buffer.capture()})
-    (recv_cache_x, _, _, event) = buffer.group_cast(  # recv_lse  # handle
+    (recv_cache_x, recv_cache_lse, _, event) = buffer.group_cast(  # recv_lse  # handle
         **dispatch_args
     )
     event.current_stream_wait() if async_mode else ()
@@ -605,6 +656,11 @@ def test_func(
         else recv_cache_x
     )
     check_data(recv_cache_x, rank_prefix_matrix)
+
+    # check recv_cache_lse
+    if recv_cache_lse is not None:
+        assert recv_cache_lse.size(0) == recv_cache_x.size(0) == recv_src_idx.size(0)
+        assert torch.equal(recv_cache_lse, repeated_permed_recv_src_idx)
 
     if local_rank == 0:
         print(
@@ -731,8 +787,9 @@ def test_func(
         )
 
     # For later tuning
-    dispatch_nvl_recv_bytes = recv_x.numel() * recv_x.dtype.itemsize
-    combine_nvl_send_bytes = dispatch_nvl_recv_bytes
+    combine_nvl_send_bytes = dispatch_nvl_recv_bytes = (
+        recv_x.numel() * recv_x.dtype.itemsize
+    )
 
     return dict(
         handle=handle,
@@ -754,6 +811,8 @@ def test_main(
     num_tokens, hidden_size = args.num_tokens, args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
     num_channels = num_sms // 2
+    num_heads = 8  # set to 0 to not test lse transfer
+    assert num_heads == 0 or hidden_size % num_heads == 0
 
     # we can assume num_local_experts == 1
     # thus sending one token to one rank is equivalent to sending to the only one "local expert" in that rank
@@ -766,27 +825,32 @@ def test_main(
     nvl_buffer_size = num_max_nvl_chunked_recv_tokens = 256
 
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
-    # TODO: make it parameterizable
-    dtype = torch.bfloat16
-    # Remake the hidden size to control the communication bytes per token the same as bf16/fp16
+    dtype = torch.bfloat16  # TODO: make it parameterizable
+    assert dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64)
+
+    # Remake the hidden size to control
+    # the communication bytes per token the same as bf16/fp16
     hidden_size = hidden_size * 2 // dtype.itemsize
 
     # Re-Settings for group-collective
     # TODO: make these parameterizable
     num_topk = num_ranks  # we can assume num_topk == num_ranks
     distinct_token = True
-    random_permute_output = True
+    random_permute_output = True  # set to False to make the output / input of group-cast / group-reduce in a2a rank order
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
     allow_empty_init_out_buf = (  # if every token has at least one dst, we can empty-init
         min_num_dst_ranks > 0
     )
     pass_out_buffer = True
+
     acc_reduce_out_buffer = True
     acc_reduce_constant = rank
     if acc_reduce_out_buffer:
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"
-    use_a2av_perm_idxs = "inside"  # choose from "no", "outside", "inside"
+
+    # choose from {"no", "outside", "inside"}
+    use_a2av_perm_idxs = "inside"
     assert use_a2av_perm_idxs in ("no", "outside", "inside")
 
     # print settings
@@ -795,7 +859,7 @@ def test_main(
             (
                 f"[config] {num_sms=} | {num_channels=} | "
                 f"{num_experts=} | {num_tokens=} | {hidden_size=} | {dtype=} | "
-                f"{num_topk=} | {num_local_experts=}\n"
+                f"{num_topk=} | {num_local_experts=} | {num_heads=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
                 f"{allow_empty_init_out_buf=} | {pass_out_buffer=} | "
@@ -822,6 +886,7 @@ def test_main(
         buffer=buffer,
         num_tokens=num_tokens,
         hidden_size=hidden_size,
+        num_heads=num_heads,
         num_experts=num_experts,
         num_local_experts=num_local_experts,
         dtype=dtype,
@@ -871,63 +936,64 @@ def test_main(
     # Tune dispatch performance
     best_dispatch_results = None
     fp8_factor = (1 + 4 / 128) / 2
-    for current_x in (x,):  # filter(lambda elem: elem is not None, (x_e4m3, x)):
-        best_time, best_results = 1e10, None
-        nvl_recv_bytes = (
-            (dispatch_nvl_recv_bytes * fp8_factor)
-            if isinstance(current_x, tuple)
-            else dispatch_nvl_recv_bytes
-        )
-        for nvl_chunk_size in tuple(range(4, 33, 2)) + (0,):
-            if nvl_chunk_size > 0:
-                config = GrpCollConfig(
-                    num_sms=num_sms,
-                    nvl_chunk_size=nvl_chunk_size,
-                    nvl_buffer_size=nvl_buffer_size,
-                )
-            else:
-                # Test default config as well
-                config = GrpCollConfig.get_default_dispatch_config(num_ranks)
-            tune_args = {"x": current_x, "handle": handle, "config": config}
-            t = bench(lambda: buffer.group_cast(**tune_args))[0]
-            if t < best_time and nvl_chunk_size > 0:
-                best_time, best_results = t, (num_sms, nvl_chunk_size)
-            if local_rank == 0:
-                print(
-                    f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
-                    f"{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us",
-                    flush=True,
-                )
+    best_time, best_results = 1e10, None
+    nvl_recv_bytes = (
+        (dispatch_nvl_recv_bytes * fp8_factor)
+        if isinstance(x, tuple)
+        else dispatch_nvl_recv_bytes
+    )
+    for nvl_chunk_size in tuple(range(4, 33, 2)) + (0,):
+        if nvl_chunk_size > 0:
+            config = GrpCollConfig(
+                num_sms=num_sms,
+                nvl_chunk_size=nvl_chunk_size,
+                nvl_buffer_size=nvl_buffer_size,
+            )
+        else:
+            # Test default config as well
+            config = GrpCollConfig.get_default_dispatch_config(num_ranks)
+        tune_args = {"x": x, "handle": handle, "config": config}
+        t = bench(lambda: buffer.group_cast(**tune_args))[0]
+        if t < best_time and nvl_chunk_size > 0:
+            best_time, best_results = t, (num_sms, nvl_chunk_size)
         if local_rank == 0:
             print(
-                f"[tuning] Best dispatch "
-                f'({"FP8" if isinstance(current_x, tuple) else "BF16"}): '
-                f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "  # type: ignore[index]
-                f"{nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), "
-                f"t: {best_time * 1e6:.2f} us",
+                f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
+                f"{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us",
                 flush=True,
             )
-            print("", flush=True)
 
-        # Gather the best config from rank 0 and the first test setting
-        if best_dispatch_results is None:
-            best_dispatch_results = torch.tensor(
-                [best_results[0], best_results[1]],  # type: ignore[index]
-                dtype=torch.int32,
-                device="cuda",
-            )
-            all_best_results_list = [
-                torch.zeros_like(best_dispatch_results)
-                for _ in range(torch.distributed.get_world_size())
-            ]
-            dist.all_gather(all_best_results_list, best_dispatch_results, group=group)
-            best_dispatch_results = all_best_results_list[0].tolist()
+    if local_rank == 0:
+        print(
+            f"[tuning] Best dispatch "
+            f'({"FP8" if isinstance(x, tuple) else "BF16"}): '
+            f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "  # type: ignore[index]
+            f"{nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), "
+            f"t: {best_time * 1e6:.2f} us",
+            flush=True,
+        )
+        print("", flush=True)
+
+    # Gather the best config from rank 0 and the first test setting
+    if best_dispatch_results is None:
+        best_dispatch_results = torch.tensor(
+            [best_results[0], best_results[1]],  # type: ignore[index]
+            dtype=torch.int32,
+            device="cuda",
+        )
+        all_best_results_list = [
+            torch.zeros_like(best_dispatch_results)
+            for _ in range(torch.distributed.get_world_size())
+        ]
+        dist.all_gather(all_best_results_list, best_dispatch_results, group=group)
+        best_dispatch_results = all_best_results_list[0].tolist()
+
+    # apply dispatch to get handle before combine
     dispatch_config = GrpCollConfig(
         num_sms=best_dispatch_results[0],  # type: ignore[index]
         nvl_chunk_size=best_dispatch_results[1],  # type: ignore[index]
         nvl_buffer_size=nvl_buffer_size,
     )
-
     dispatch_args = {
         "x": x,
         "num_tokens_per_rank": num_tokens_per_rank,
