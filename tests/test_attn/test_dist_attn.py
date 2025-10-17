@@ -55,10 +55,6 @@ class TestDistAttn(DistTestBase):
             self.device_mesh = None
 
     @property
-    def process_group(self):
-        return dist.distributed_c10d._get_default_group()
-
-    @property
     def nccl_group(self) -> dist.ProcessGroup:
         return self.nccl_groups[0]
 
@@ -113,6 +109,7 @@ class TestDistAttn(DistTestBase):
                     ],
                     rank=self.rank,
                     world_size=self.world_size,
+                    group=self.nccl_group,
                     device_mesh=self.device_mesh,
                 )
             ],

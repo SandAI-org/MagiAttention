@@ -12,16 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import socket
+import warnings
 from collections import defaultdict
 from functools import partial
 from itertools import accumulate, chain, pairwise
-from typing import Any, Callable, Literal, TypeAlias
+from typing import Any, Callable, TypeAlias, overload
 
 import torch
 import torch.distributed as dist
+import triton
+import triton.language as tl
 
 import magi_attention
-from magi_attention.comm.work import WorkWithPostProcessFn
+from magi_attention.comm.primitive.grpcoll._handle import GrpCollHandle
+from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
+from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
 from magi_attention.common.range import NaiveRange
 from magi_attention.common.range_op import range_gather, range_reduce
 from magi_attention.common.range_op.utils import (
@@ -30,7 +37,11 @@ from magi_attention.common.range_op.utils import (
     _calc_ranges_row_map,
 )
 from magi_attention.common.ranges import NaiveRanges
-from magi_attention.utils import nvtx
+from magi_attention.utils import is_list_type_all, nvtx, perm_idxs2unperm_idxs
+
+# ------------------        common helpers       ------------------ #
+
+RangesWithRank: TypeAlias = list[tuple[NaiveRange, int]]
 
 
 def get_pg_backend(pg: dist.ProcessGroup, device: str = "cuda") -> dist.Backend:
@@ -75,9 +86,6 @@ def seqlens2curanges(
         NaiveRanges: the cumulative ranges, e.g. [(0, 4), (4, 6), (6, 13)]
     """
     return list(pairwise(accumulate([0] + seqlens)))
-
-
-RangesWithRank: TypeAlias = list[tuple[NaiveRange, int]]
 
 
 def _calc_range_gather_kwargs_from_ranges_with_rank(
@@ -270,9 +278,9 @@ def group_cast_impl_with_batch_p2p(
     work_list = dist.batch_isend_irecv(p2p_op_list)
 
     return WorkWithPostProcessFn(
-        work=work_list,
+        work=GeneralWork(work=work_list),
         post_process_fn=lambda x: x,
-        sync=not async_op,
+        async_op=async_op,
     )
 
 
@@ -591,8 +599,6 @@ def calc_group_cast_a2a_args(
 
 # ------------------        utils for group reduce       ------------------ #
 
-OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
-
 
 def sanity_check_for_group_reduce_meta_args_per_rank(
     input_split_size_list_per_rank: list[list[int]],
@@ -757,7 +763,7 @@ def _calc_group_reduce_a2a_input_args(
     input_split_size_list: list[int],
     dst_index_list: list[int],
     world_size: int,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: GroupReduceOp = "sum",
     input_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[OutMaybeWithLSE, list[int]]:
@@ -850,7 +856,7 @@ def _calc_group_reduce_a2a_output_args(
     output_split_size_list: list[int],
     src_indices_list: list[list[int]],
     world_size: int,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: GroupReduceOp = "sum",
     output_lse: torch.Tensor | None = None,
     deterministic: bool = False,
     **kwargs,
@@ -908,7 +914,7 @@ def calc_group_reduce_a2a_args(
     dst_index_list: list[int],
     src_indices_list: list[list[int]],
     world_size: int,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: GroupReduceOp = "sum",
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -982,3 +988,570 @@ def calc_group_reduce_a2a_args(
         a2a_input_split_size,
         post_process_fn,
     )
+
+
+# ------------------        utils for native grpcoll       ------------------ #
+
+
+def check_nvlink_connections(group: dist.ProcessGroup):
+    """
+    Check NVLink connection between every pair of GPUs.
+
+    Arguments:
+        group: the communication group.
+    """
+    # Check NVLink connection
+    # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
+    # TODO: check all cases, all local-node GPUs in the group should be connected via NVLink
+    if "PCIE" in torch.cuda.get_device_name():
+        assert group.size() <= 2, "PCIe GPUs only have pairwise NVLink connections"
+
+        import pynvml
+
+        pynvml.nvmlInit()
+
+        devices = (
+            os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+            .strip(",")
+            .split(",")
+        )
+        physical_device_idx = int(devices[torch.cuda.current_device()])
+        physical_device_indices = [
+            0,
+        ] * group.size()
+        dist.all_gather_object(physical_device_indices, physical_device_idx, group)
+
+        # Check whether they are all connected via NVLink, Reference:
+        # https://github.com/vllm-project/vllm/blob/b8e809a057765c574726a6077fd124db5077ce1f/vllm/platforms/cuda.py#L438
+        handles = [
+            pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_indices
+        ]
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i >= j:
+                    continue
+                status = pynvml.nvmlDeviceGetP2PStatus(
+                    handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK
+                )
+                assert (
+                    status == pynvml.NVML_P2P_STATUS_OK
+                ), f"GPU {physical_device_indices[i]} and GPU {physical_device_indices[j]} are not connected via NVLink"
+
+        # Close NVML
+        pynvml.nvmlShutdown()
+
+
+def are_all_ranks_on_same_host(group: dist.ProcessGroup = None) -> bool:
+    """
+    Checks if all ranks within a given ProcessGroup are running on the same host node.
+
+    This function works by having each rank gather its hostname and then comparing
+    these hostnames across the entire group.
+
+    Args:
+        group (dist.ProcessGroup, optional): The process group to check.
+                                             If None, the default process group is used.
+
+    Returns:
+        bool: True if all ranks are on the same host; False otherwise.
+
+    Raises:
+        RuntimeError: If torch.distributed has not been initialized.
+    """
+    if not dist.is_initialized():
+        raise RuntimeError(
+            "torch.distributed has not been initialized. Call dist.init_process_group first."
+        )
+
+    # Get the hostname of the current process
+    current_hostname = socket.gethostname()
+
+    # Create a list to store hostnames from all ranks in the group.
+    # all_gather_object requires a list as an output buffer,
+    # and its size must match the world size of the group.
+    world_size = dist.get_world_size(group)
+    gathered_hostnames = [None] * world_size
+
+    # Use all_gather_object to collect the current hostname from all ranks in the group.
+    # Note: all_gather_object is a blocking operation; all ranks must call it.
+    dist.all_gather_object(gathered_hostnames, current_hostname, group)
+
+    # Check if all gathered hostnames are identical.
+    # If the set of hostnames has only one unique element, it means all ranks
+    # are on the same host.
+    return len(set(gathered_hostnames)) == 1
+
+
+def maybe_lazy_init_buffer(group: dist.ProcessGroup) -> None:
+    from ._mgr import grpcoll_mgr
+
+    if not grpcoll_mgr.is_registered(group):
+        grpcoll_mgr.register_buffer(group=group)
+        warnings.warn(
+            f"Since the GrpCollBuffer is not registered for {group.group_name}, "
+            "we lazily register it here with the default config, "
+            "which might not be the best choice and cause performance/memory issue."
+        )
+
+
+def get_group_reduce_handle_from_sym_group_cast(
+    input: torch.Tensor,
+    output: torch.Tensor | None,
+    input_split_sizes: list[int] | torch.Tensor,
+    output_split_sizes: list[int] | torch.Tensor,
+    dst_index: list[int] | torch.Tensor,
+    src_indices: list[list[int]] | torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    output_seqlen: int | None = None,
+    topk_idx: torch.Tensor | None = None,
+) -> GrpCollHandle:
+    from ._buffer import GrpCollBuffer
+    from ._native_grpcoll_impl import native_group_cast_impl
+
+    # prepare dummpy input/output for symmetric group-cast
+    if output is not None:
+        sym_gc_input_seqlen = output.size(0)
+    elif output_seqlen is not None:
+        sym_gc_input_seqlen = output_seqlen
+    elif isinstance(output_split_sizes, list):
+        sym_gc_input_seqlen = sum(output_split_sizes)
+    else:
+        # NOTE: had better pass output_seqlen to avoid gpu-cpu sync
+        sym_gc_input_seqlen = output_split_sizes.sum().item()
+    sym_gc_output_seqlen = input.size(0)
+    sym_gc_dummy_input = torch.empty(
+        (sym_gc_input_seqlen, GrpCollBuffer.hidden_size_alignment),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    sym_gc_dummy_output = (
+        torch.empty(
+            (sym_gc_output_seqlen, GrpCollBuffer.hidden_size_alignment),
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        if output is not None
+        else None
+    )
+
+    # prepare native group-cast handle dict
+    # to receive the handle from symmetric group-cast
+    native_grpcoll_handle_dict: dict[str, GrpCollHandle] = {}
+
+    sym_work_gc = native_group_cast_impl(
+        input=sym_gc_dummy_input,
+        output=sym_gc_dummy_output,
+        input_split_sizes=output_split_sizes,
+        output_split_sizes=input_split_sizes,
+        dst_indices=src_indices,
+        src_index=dst_index,
+        group=group,
+        async_op=async_op,
+        # additional kwargs
+        native_grpcoll_handle_dict=native_grpcoll_handle_dict,
+        topk_idx=topk_idx,
+        output_seqlen=sym_gc_output_seqlen,
+    )
+    sym_work_gc.wait_post_process()
+
+    handle: GrpCollHandle = native_grpcoll_handle_dict["group_reduce"]
+
+    return handle
+
+
+@triton.jit
+def _varlen_for_each_copy_kernel(
+    output_ptr,
+    input_flat_ptr,
+    num_dst_ptr,
+    offsets_ptr,
+    stride_output_row,
+    num_ranks,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    split_idx = tl.program_id(axis=0)
+    col_block_idx = tl.program_id(axis=1)
+
+    col_start = col_block_idx * BLOCK_SIZE_N
+
+    num_dst = tl.load(num_dst_ptr + split_idx)
+
+    offset_in_flat_input = tl.load(offsets_ptr + split_idx)
+
+    output_row_base_ptr = output_ptr + split_idx * stride_output_row
+    input_flat_base_ptr = input_flat_ptr + offset_in_flat_input
+
+    cols_in_block = col_start + tl.arange(0, BLOCK_SIZE_N)
+
+    write_mask = (cols_in_block < num_ranks) & (cols_in_block < num_dst)
+
+    values_to_write = tl.load(
+        input_flat_base_ptr + cols_in_block, mask=write_mask, other=-1
+    )
+
+    tl.store(output_row_base_ptr + cols_in_block, values_to_write, mask=write_mask)
+
+
+def _varlen_for_each_copy_triton(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+    num_dst: torch.Tensor,
+    cu_num_dst: torch.Tensor,
+) -> torch.Tensor:
+    num_splits, num_ranks = dst.shape
+
+    if num_splits == 0:
+        return dst
+
+    BLOCK_SIZE_N = triton.next_power_of_2(num_ranks)
+    grid = (num_splits, triton.cdiv(num_ranks, BLOCK_SIZE_N))
+
+    _varlen_for_each_copy_kernel[grid](
+        dst,
+        src,
+        num_dst,
+        cu_num_dst,
+        dst.stride(0),
+        num_ranks,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+    )
+
+    return dst
+
+
+@overload
+def transfer_splits_and_dst_idxs_to_topk_idx(
+    input_split_sizes: list[int],
+    dst_indices: list[list[int]],
+    num_ranks: int,
+    input_seqlen: int | None = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    ...
+
+
+@overload
+def transfer_splits_and_dst_idxs_to_topk_idx(
+    input_split_sizes: torch.Tensor,
+    dst_indices: torch.Tensor,
+    num_ranks: int,
+    input_seqlen: int | None = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    ...
+
+
+@nvtx.instrument_nvtx
+def transfer_splits_and_dst_idxs_to_topk_idx(
+    input_split_sizes: list[int] | torch.Tensor,
+    dst_indices: list[list[int]] | torch.Tensor,
+    num_ranks: int,
+    input_seqlen: int | None = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    if is_list_type_all([input_split_sizes, dst_indices], list):
+        if input_seqlen is None:
+            input_seqlen = sum(input_split_sizes)
+        num_splits = len(input_split_sizes)
+
+        num_dst_list: list[int] = [len(dst_indices) for dst_indices in dst_indices]
+        cu_num_dst_list: list[int] = list(accumulate([0] + num_dst_list))
+        flatten_dst_indices_list: list[int] = list(chain(*dst_indices))
+        all_meta_list: list[list[int]] = [
+            num_dst_list,
+            cu_num_dst_list,
+            input_split_sizes,
+            flatten_dst_indices_list,
+        ]
+        all_meta_size_list: list[int] = [len(meta) for meta in all_meta_list]
+        flatten_all_meta_list: list[int] = list(chain(*all_meta_list))
+
+        (
+            num_dst_tensor,
+            cu_num_dst_tensor,
+            split_size_tensor,
+            dst_indices_tensor,
+        ) = torch.tensor(
+            flatten_all_meta_list,
+            dtype=dtype,
+            device=device,
+        ).split(
+            all_meta_size_list
+        )
+
+        topk_idx = torch.full(
+            (num_splits, num_ranks),  # assuming num_local_experts == 1
+            fill_value=-1,
+            dtype=dtype,
+            device=device,
+        )
+
+        _varlen_for_each_copy_triton(
+            dst=topk_idx,
+            src=dst_indices_tensor,
+            num_dst=num_dst_tensor,
+            cu_num_dst=cu_num_dst_tensor,
+        )
+    elif is_list_type_all([input_split_sizes, dst_indices], torch.Tensor):
+        assert dst_indices.size(1) == num_ranks  # type: ignore[union-attr]
+        # NOTE: had better pass input_seqlen to avoid gpu-cpu sync
+        if input_seqlen is None:
+            input_seqlen = input_split_sizes.sum().item()  # type: ignore[union-attr]
+        topk_idx = dst_indices.to(dtype=dtype, device=device)  # type: ignore[union-attr]
+        split_size_tensor = input_split_sizes.to(device=device)  # type: ignore[union-attr]
+    else:
+        raise ValueError(
+            "input_split_sizes and dst_indices must be "
+            "either all list or all torch.Tensor"
+        )
+
+    # shape: (num_splits, num_ranks) -> (input_seqlen, num_ranks)
+    topk_idx = topk_idx.repeat_interleave(
+        split_size_tensor,
+        dim=0,
+        output_size=input_seqlen,
+    )
+
+    return topk_idx
+
+
+@overload
+def get_dispatch_layout_from_group_cast_meta(
+    input_split_sizes: list[int],
+    dst_indices: list[list[int]],
+    group: dist.ProcessGroup,
+    topk_idx: torch.Tensor | None = None,
+    input_seqlen: int | None = None,
+    num_nodes: int | None = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    ...
+
+
+@overload
+def get_dispatch_layout_from_group_cast_meta(
+    input_split_sizes: torch.Tensor,
+    dst_indices: torch.Tensor,
+    group: dist.ProcessGroup,
+    topk_idx: torch.Tensor | None = None,
+    input_seqlen: int | None = None,
+    num_nodes: int | None = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    ...
+
+
+@nvtx.instrument_nvtx
+def get_dispatch_layout_from_group_cast_meta(
+    input_split_sizes: list[int] | torch.Tensor,
+    dst_indices: list[list[int]] | torch.Tensor,
+    group: dist.ProcessGroup,
+    topk_idx: torch.Tensor | None = None,
+    input_seqlen: int | None = None,
+    num_nodes: int | None = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    from ._buffer import GrpCollBuffer
+    from ._mgr import grpcoll_mgr
+
+    num_ranks = group.size()
+    num_experts = num_ranks
+
+    # TODO: support directly pass input_split_sizes and dst_indices
+    # and no need to transfer to topk_idx first
+    if topk_idx is None:
+        topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+            input_split_sizes=input_split_sizes,
+            dst_indices=dst_indices,
+            num_ranks=num_ranks,
+            input_seqlen=input_seqlen,
+            device=device,
+            dtype=dtype,
+        )
+
+    buffer_registered = grpcoll_mgr.is_registered(group)
+    if buffer_registered:
+        buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            _,  # event_overlap
+        ) = buffer.get_dispatch_layout(
+            topk_idx=topk_idx,
+            num_experts=num_experts,
+            previous_event=None,
+            async_finish=False,
+            allocate_on_comm_stream=False,
+        )
+    else:
+        assert num_nodes is not None, (
+            "``num_nodes`` must be provided "
+            "since the grpcoll buffer is not registered for the given group"
+        )
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            _,  # event_overlap,
+        ) = GrpCollBuffer.get_dispatch_meta_from_topk_idx(
+            topk_idx=topk_idx,
+            num_ranks=num_ranks,
+            num_nodes=num_nodes,
+            num_experts=num_experts,
+            previous_event=None,
+            async_finish=False,
+            allocate_on_meta_stream=False,
+        )
+
+    return (
+        num_tokens_per_rank,
+        num_tokens_per_rdma_rank,
+        num_tokens_per_expert,
+        is_token_in_rank,
+    )
+
+
+@overload
+def get_a2av_perm_idxs_from_group_cast_meta(
+    output_split_sizes: list[int],
+    src_index: list[int],
+    num_ranks: int,
+    output_seqlen: int | None = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    ...
+
+
+@overload
+def get_a2av_perm_idxs_from_group_cast_meta(
+    output_split_sizes: torch.Tensor,
+    src_index: torch.Tensor,
+    num_ranks: int,
+    output_seqlen: int | None = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    ...
+
+
+@nvtx.instrument_nvtx
+def get_a2av_perm_idxs_from_group_cast_meta(
+    output_split_sizes: list[int] | torch.Tensor,
+    src_index: list[int] | torch.Tensor,
+    num_ranks: int,
+    output_seqlen: int | None = None,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    from ._buffer import GrpCollBuffer
+
+    if is_list_type_all([output_split_sizes, src_index], list):
+        if output_seqlen is None:
+            output_seqlen = sum(output_split_sizes)
+        output_split_sizes = torch.tensor(
+            output_split_sizes,
+            dtype=dtype,
+            device=device,
+        )
+        src_index = torch.tensor(
+            src_index,
+            dtype=dtype,
+            device=device,
+        )
+    elif is_list_type_all([output_split_sizes, src_index], torch.Tensor):
+        # NOTE: had better pass output_seqlen to avoid gpu-cpu sync
+        if output_seqlen is None:
+            output_seqlen = output_split_sizes.sum().item()  # type: ignore[union-attr]
+        output_split_sizes = output_split_sizes.to(  # type: ignore[union-attr]
+            dtype=dtype, device=device
+        )
+        src_index = src_index.to(dtype=dtype, device=device)  # type: ignore[union-attr]
+    else:
+        raise ValueError(
+            "output_split_sizes and src_index must be "
+            "either all list or all torch.Tensor"
+        )
+
+    # A shortcut corner case when num_splits == output_seqlen
+    # where output_split_sizes will be a all-ones tensor
+    # and src_index indicates the source rank for each token
+    # then the perm_to_a2av_idx is just the sorted indices
+    # of sorting src_index stably and acscendingly
+    if output_split_sizes.size(0) == output_seqlen:
+        return torch.sort(src_index, stable=True).indices
+
+    (
+        perm_to_a2av_idx,
+        _,  # event_overlap
+    ) = GrpCollBuffer.get_a2av_perm_idx_from_src_idx(
+        output_split_sizes=output_split_sizes,
+        src_idx=src_index,
+        num_ranks=num_ranks,
+        output_seqlen=output_seqlen,
+        previous_event=None,
+        async_finish=False,
+        allocate_on_meta_stream=False,
+    )
+
+    return perm_to_a2av_idx
+
+
+def _get_a2av_perm_idxs_from_group_cast_meta_ref(
+    output_split_size_list: list[int],
+    src_index_list: list[int],
+    num_ranks: int,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.int64,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # count the total split size of each rank
+    rank_split_sizes = [0] * num_ranks
+    for i in range(len(output_split_size_list)):
+        rank_split_sizes[src_index_list[i]] += output_split_size_list[i]
+
+    # count the global rank offset
+    a2av_rank_offsets = list(accumulate([0] + rank_split_sizes))[:-1]
+
+    # a2a_output[unperm_from_a2av_idx] => output
+    unperm_from_a2av_idx: list[int] = []
+    current_offset_within_rank = [0] * num_ranks
+    for i in range(len(output_split_size_list)):
+        target_size = output_split_size_list[i]
+        target_rank = src_index_list[i]
+
+        # get the start offset of the target buffer sent from the target rank
+        global_start_offset_in_output = (
+            a2av_rank_offsets[target_rank] + current_offset_within_rank[target_rank]
+        )
+        unperm_from_a2av_idx.extend(
+            range(
+                global_start_offset_in_output,
+                global_start_offset_in_output + target_size,
+            )
+        )
+        current_offset_within_rank[target_rank] += target_size
+
+    # output[perm_to_a2av_idx] => a2a_output
+    perm_to_a2av_idx = perm_idxs2unperm_idxs(unperm_from_a2av_idx)
+
+    # convert to tensor
+    (
+        unperm_from_a2av_idx,
+        perm_to_a2av_idx,
+    ) = torch.tensor(
+        unperm_from_a2av_idx + perm_to_a2av_idx,
+        dtype=dtype,
+        device=device,
+    ).chunk(2)
+
+    return unperm_from_a2av_idx, perm_to_a2av_idx

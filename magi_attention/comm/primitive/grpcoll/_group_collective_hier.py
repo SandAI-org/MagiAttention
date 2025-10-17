@@ -14,16 +14,18 @@
 
 from functools import partial
 from itertools import chain
-from typing import Callable, Literal
+from typing import Callable, overload
 
 import torch
 import torch.distributed as dist
 
-from magi_attention.comm.work import WorkWithPostProcessFn
+import magi_attention
+from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
+from magi_attention.common.enum import GroupReduceOp
 from magi_attention.common.range_op import range_gather, range_reduce
-from magi_attention.utils import nvtx
+from magi_attention.utils import is_list_type_all, nvtx
 
-from ._all2all_v import all2all_v
+from .._all2all_v import all2all_v
 from .utils import (
     _calc_group_cast_a2a_input_meta_args,
     _calc_group_cast_a2a_output_meta_args,
@@ -41,10 +43,9 @@ __all__ = [
     "hier_group_reduce_impl_with_a2av",
 ]
 
-# ------------------        hierarchical group cast       ------------------ #
+# ------------------        hierarchical a2av group cast       ------------------ #
 
 
-# TODO: add ut
 class HierGroupCastMetaSolver:
     def __init__(
         self,
@@ -538,10 +539,10 @@ class HierGroupCastMetaSolver:
 
 
 def init_hier_group_cast_meta_solver(
-    input_split_size_list: list[int],
-    output_split_size_list: list[int],
-    dst_indices_list: list[list[int]],
-    src_index_list: list[int],
+    input_split_sizes: list[int],
+    output_split_sizes: list[int],
+    dst_indices: list[list[int]],
+    src_index: list[int],
     rank: int,
     world_size: int,
     intra_group: dist.ProcessGroup,
@@ -554,10 +555,10 @@ def init_hier_group_cast_meta_solver(
         return kwargs.pop("hier_group_cast_meta_solver")
 
     return HierGroupCastMetaSolver(
-        input_split_size_list=input_split_size_list,
-        output_split_size_list=output_split_size_list,
-        dst_indices_list=dst_indices_list,
-        src_index_list=src_index_list,
+        input_split_size_list=input_split_sizes,
+        output_split_size_list=output_split_sizes,
+        dst_indices_list=dst_indices,
+        src_index_list=src_index,
         rank=rank,
         world_size=world_size,
         intra_group=intra_group,
@@ -566,21 +567,87 @@ def init_hier_group_cast_meta_solver(
     )
 
 
-@nvtx.instrument_nvtx
+# host meta interface
+@overload
 def hier_group_cast_impl_with_a2av(
     input_tensor: torch.Tensor,
-    output_tensor: torch.Tensor,
-    input_split_size_list: list[int],
-    output_split_size_list: list[int],
-    dst_indices_list: list[list[int]],
-    src_index_list: list[int],
-    group: dist.ProcessGroup | None = None,
+    output_tensor: torch.Tensor | None,
+    input_split_sizes: list[int],
+    output_split_sizes: list[int],
+    dst_indices: list[list[int]],
+    src_index: list[int],
+    group: dist.ProcessGroup,
     async_op: bool = False,
     **kwargs,
 ) -> WorkWithPostProcessFn:
+    ...
+
+
+# device meta interface
+@overload
+def hier_group_cast_impl_with_a2av(
+    input_tensor: torch.Tensor,
+    output_tensor: torch.Tensor | None,
+    input_split_sizes: torch.Tensor,
+    output_split_sizes: torch.Tensor,
+    dst_indices: torch.Tensor,
+    src_index: torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    ...
+
+
+@nvtx.instrument_nvtx
+def hier_group_cast_impl_with_a2av(
+    input_tensor: torch.Tensor,
+    output_tensor: torch.Tensor | None,
+    input_split_sizes: list[int] | torch.Tensor,
+    output_split_sizes: list[int] | torch.Tensor,
+    dst_indices: list[list[int]] | torch.Tensor,
+    src_index: list[int] | torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    """Hierarchical group-cast implementation based on all2all_v"""
+    # ----    check     ---- #
+
+    # check functionalities
+    assert (
+        not magi_attention.comm.is_native_grpcoll_enable()
+    ), "Hierarchical group-cast is not compatible with native grpcoll implementation"
     assert (
         async_op
     ), "async_op must be True for hierarchical group-cast collective by now"
+    assert (
+        output_tensor is not None
+    ), "A2A-based hierarchical group-cast only supports output is given"
+    assert is_list_type_all(
+        [input_split_sizes, output_split_sizes, dst_indices, src_index], list
+    ), (
+        "This API only supports host meta interface, "
+        "thus the input_split_sizes, output_split_sizes, dst_indices, src_index should all be list type"
+    )
+
+    # check shapes
+    assert len(input_split_sizes) == len(dst_indices), (
+        f"The length of input_split_sizes and dst_indices should be the same, "
+        f"but got {len(input_split_sizes)=} and {len(dst_indices)=}"
+    )
+    assert len(output_split_sizes) == len(src_index), (
+        f"The length of output_split_sizes and src_index should be the same, "
+        f"but got {len(output_split_sizes)=} and {len(src_index)=}"
+    )
+    assert input_tensor.shape[0] == sum(input_split_sizes), (
+        f"The sum of input_split_sizes should be equal to input_seqlen, "
+        f"but got {sum(input_split_sizes)=} and {input_tensor.shape[0]=}"
+    )
+    assert output_tensor.shape[0] == sum(output_split_sizes), (
+        f"The sum of output_split_sizes should be equal to output_seqlen, "
+        f"but got {sum(output_split_sizes)=} and {output_tensor.shape[0]=}"
+    )
 
     rank = kwargs.pop("rank", dist.get_rank(group))
     world_size = kwargs.pop("world_size", dist.get_world_size(group))
@@ -592,10 +659,10 @@ def hier_group_cast_impl_with_a2av(
     # ----    get hier group-cast meta solver     ---- #
 
     meta_solver: HierGroupCastMetaSolver = init_hier_group_cast_meta_solver(
-        input_split_size_list=input_split_size_list,
-        output_split_size_list=output_split_size_list,
-        dst_indices_list=dst_indices_list,
-        src_index_list=src_index_list,
+        input_split_sizes=input_split_sizes,
+        output_split_sizes=output_split_sizes,
+        dst_indices=dst_indices,
+        src_index=src_index,
         rank=rank,
         world_size=world_size,
         intra_group=intra_group,
@@ -714,19 +781,18 @@ def hier_group_cast_impl_with_a2av(
     # which is issued after work_pre_intra's completion
     # thus we only need to wait for side_stream
     work_with_post_process_fn = WorkWithPostProcessFn(
-        # work=[work_pre_intra, side_stream],
-        work=side_stream,
+        # work=GeneralWork([work_pre_intra, side_stream]),
+        work=GeneralWork(side_stream),
         post_process_fn=post_process_fn_hier,
-        sync=not async_op,
+        async_op=async_op,
     )
 
     return work_with_post_process_fn
 
 
-# ------------------        hierarchical group reduce       ------------------ #
+# ------------------        hierarchical a2av group reduce       ------------------ #
 
 
-# TODO: add ut
 class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
     def __init__(
         self,
@@ -1020,10 +1086,10 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
 
 
 def init_hier_group_reduce_meta_solver(
-    input_split_size_list: list[int],
-    output_split_size_list: list[int],
-    dst_index_list: list[int],
-    src_indices_list: list[list[int]],
+    input_split_sizes: list[int],
+    output_split_sizes: list[int],
+    dst_index: list[int],
+    src_indices: list[list[int]],
     rank: int,
     world_size: int,
     intra_group: dist.ProcessGroup,
@@ -1046,10 +1112,10 @@ def init_hier_group_reduce_meta_solver(
         )
 
     return HierGroupReduceMetaSolver(
-        input_split_size_list=input_split_size_list,
-        output_split_size_list=output_split_size_list,
-        dst_index_list=dst_index_list,
-        src_indices_list=src_indices_list,
+        input_split_size_list=input_split_sizes,
+        output_split_size_list=output_split_sizes,
+        dst_index_list=dst_index,
+        src_indices_list=src_indices,
         rank=rank,
         world_size=world_size,
         intra_group=intra_group,
@@ -1059,27 +1125,102 @@ def init_hier_group_reduce_meta_solver(
     )
 
 
-@nvtx.instrument_nvtx
+# host meta interface
+@overload
 def hier_group_reduce_impl_with_a2av(
     input_tensor: torch.Tensor,
-    output_tensor: torch.Tensor,
-    input_split_size_list: list[int],
-    output_split_size_list: list[int],
-    dst_index_list: list[int],
-    src_indices_list: list[list[int]],
-    group: dist.ProcessGroup | None = None,
+    output_tensor: torch.Tensor | None,
+    input_split_sizes: list[int],
+    output_split_sizes: list[int],
+    dst_index: list[int],
+    src_indices: list[list[int]],
+    group: dist.ProcessGroup,
     async_op: bool = False,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: GroupReduceOp = "sum",
+    acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
+    ...
+
+
+# device meta interface
+@overload
+def hier_group_reduce_impl_with_a2av(
+    input_tensor: torch.Tensor,
+    output_tensor: torch.Tensor | None,
+    input_split_sizes: torch.Tensor,
+    output_split_sizes: torch.Tensor,
+    dst_index: torch.Tensor,
+    src_indices: torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    reduce_op: GroupReduceOp = "sum",
+    acc_reduce: bool = True,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    ...
+
+
+@nvtx.instrument_nvtx
+def hier_group_reduce_impl_with_a2av(
+    input_tensor: torch.Tensor,
+    output_tensor: torch.Tensor | None,
+    input_split_sizes: list[int] | torch.Tensor,
+    output_split_sizes: list[int] | torch.Tensor,
+    dst_index: list[int] | torch.Tensor,
+    src_indices: list[list[int]] | torch.Tensor,
+    group: dist.ProcessGroup,
+    async_op: bool = False,
+    reduce_op: GroupReduceOp = "sum",
+    acc_reduce: bool = True,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
+    **kwargs,
+) -> WorkWithPostProcessFn:
+    """Hierarchical group-reduce implementation based on all2all_v"""
+    # ----    check     ---- #
+
+    # check functionalities
+    assert (
+        not magi_attention.comm.is_native_grpcoll_enable()
+    ), "Hierarchical group-reduce is not compatible with native grpcoll implementation"
+    assert (
+        acc_reduce and output_tensor is not None
+    ), "A2A-based hierarchical group-reduce only supports acc_reduce=True and output is given"
     assert (
         async_op
     ), "async_op must be True for hierarchical group-reduce collective by now"
     assert (
         reduce_op == "sum"
     ), "hierarchical group reduce only supports sum reduction by now"
+    assert is_list_type_all(
+        [input_split_sizes, output_split_sizes, dst_index, src_indices], list
+    ), (
+        "This API only supports host meta interface, "
+        "thus the input_split_sizes, output_split_sizes, dst_index, src_indice should all be list type"
+    )
+
+    # check shape
+    assert len(input_split_sizes) == len(dst_index), (
+        f"input_split_sizes and dst_index should have the same length, "
+        f"but got {len(input_split_sizes)=} and {len(dst_index)=}"
+    )
+    assert len(output_split_sizes) == len(src_indices), (
+        f"output_split_sizes and src_indices should have the same length, "
+        f"but got {len(output_split_sizes)=} and {len(src_indices)=}"
+    )
+    assert input_tensor.shape[0] == sum(input_split_sizes), (
+        f"The sum of input_split_sizes should be equal to input_seqlen, "
+        f"but got {sum(input_split_sizes)=} and {input_tensor.shape[0]=}"
+    )
+    assert output_tensor.shape[0] == sum(output_split_sizes), (
+        f"The sum of output_split_sizes should be equal to output_seqlen, "
+        f"but got {sum(output_split_sizes)=} and {output_tensor.shape[0]=}"
+    )
 
     rank = kwargs.pop("rank", dist.get_rank(group))
     world_size = kwargs.pop("world_size", dist.get_world_size(group))
@@ -1091,10 +1232,10 @@ def hier_group_reduce_impl_with_a2av(
     # ----    get hier group-reduce meta solver     ---- #
 
     meta_solver: HierGroupReduceMetaSolver = init_hier_group_reduce_meta_solver(
-        input_split_size_list=input_split_size_list,
-        output_split_size_list=output_split_size_list,
-        dst_index_list=dst_index_list,
-        src_indices_list=src_indices_list,
+        input_split_sizes=input_split_sizes,
+        output_split_sizes=output_split_sizes,
+        dst_index=dst_index,
+        src_indices=src_indices,
         rank=rank,
         world_size=world_size,
         intra_group=intra_group,
@@ -1221,9 +1362,9 @@ def hier_group_reduce_impl_with_a2av(
     # since waiting for side_stream only guarantees
     # work_post_intra and work_inter is done
     work_with_post_process_fn = WorkWithPostProcessFn(
-        work=[work_pre_intra, side_stream],
+        work=GeneralWork([work_pre_intra, side_stream]),
         post_process_fn=post_process_fn_hier,
-        sync=not async_op,
+        async_op=async_op,
     )
 
     return work_with_post_process_fn

@@ -13,22 +13,26 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Literal
 
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
-from magi_attention.comm.primitive._group_collective_hier import (
+from magi_attention.comm.primitive.grpcoll._group_collective_hier import (
     init_hier_group_cast_meta_solver,
     init_hier_group_reduce_meta_solver,
 )
-from magi_attention.comm.primitive.utils import (
+from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_input_meta_args,
     _calc_group_cast_a2a_output_meta_args,
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
+    _get_a2av_perm_idxs_from_group_cast_meta_ref,
+    get_a2av_perm_idxs_from_group_cast_meta,
+    get_dispatch_layout_from_group_cast_meta,
 )
+from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import format_dict_field, format_list_field
 
 
@@ -47,6 +51,7 @@ class GroupCollectiveArg:
 
     rank: int
     world_size: int
+    group: dist.ProcessGroup
     device_mesh: DeviceMesh | None = None
 
     deterministic: bool = False
@@ -56,18 +61,18 @@ class GroupCollectiveArg:
 
     def to_group_cast_args(self) -> dict:
         return dict(
-            input_split_size_list=self.input_split_size_list,
-            output_split_size_list=self.output_split_size_list,
-            dst_indices_list=self.dst_indices_list,
-            src_index_list=self.src_index_list,
+            input_split_sizes=self.input_split_size_list,
+            output_split_sizes=self.output_split_size_list,
+            dst_indices=self.dst_indices_list,
+            src_index=self.src_index_list,
         )
 
     def to_group_reduce_args(self) -> dict:
         return dict(
-            input_split_size_list=self.output_split_size_list,
-            output_split_size_list=self.input_split_size_list,
-            dst_index_list=self.src_index_list,
-            src_indices_list=self.dst_indices_list,
+            input_split_sizes=self.output_split_size_list,
+            output_split_sizes=self.input_split_size_list,
+            dst_index=self.src_index_list,
+            src_indices=self.dst_indices_list,
         )
 
     def __repr__(self) -> str:
@@ -96,7 +101,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
     """The a2a-v based args for group cast/reduce collective"""
 
     packed_times: int = 1
-    reduce_op: Literal["sum", "avg", "lse"] = "sum"
+    reduce_op: GroupReduceOp = "sum"
     init_group_reduce: bool = True
 
     def __post_init__(self):
@@ -111,10 +116,10 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             # pack tensors along split dim by `self.packed_times` times
             k: v * self.packed_times  # type: ignore[operator]
             for k, v in {
-                "input_split_size_list": self.input_split_size_list,
-                "output_split_size_list": self.output_split_size_list,
-                "dst_indices_list": self.dst_indices_list,
-                "src_index_list": self.src_index_list,
+                "input_split_sizes": self.input_split_size_list,
+                "output_split_sizes": self.output_split_size_list,
+                "dst_indices": self.dst_indices_list,
+                "src_index": self.src_index_list,
             }.items()
         }
 
@@ -123,20 +128,23 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
         if self.init_group_reduce:
             # symmetric to group-cast
             self._group_reduce_args_dict_packed = dict(
-                input_split_size_list=self._group_cast_args_dict_packed[
-                    "output_split_size_list"
+                input_split_sizes=self._group_cast_args_dict_packed[
+                    "output_split_sizes"
                 ],
-                output_split_size_list=self._group_cast_args_dict_packed[
-                    "input_split_size_list"
+                output_split_sizes=self._group_cast_args_dict_packed[
+                    "input_split_sizes"
                 ],
-                dst_index_list=self._group_cast_args_dict_packed["src_index_list"],
-                src_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
+                dst_index=self._group_cast_args_dict_packed["src_index"],
+                src_indices=self._group_cast_args_dict_packed["dst_indices"],
                 reduce_op=self.reduce_op,
             )
 
         # ----   additional kwargs  ---- #
 
         if magi_attention.comm.is_hierarchical_comm_enable():
+            assert (
+                not magi_attention.comm.is_native_grpcoll_enable()
+            ), "Hierarchical comm mode is not compatible with native grpcoll for now."
             assert self.device_mesh.ndim == 2, (  # type: ignore[union-attr]
                 f"The hierarchical comm is only supported for 2D device mesh, "
                 f"but got {self.device_mesh.ndim=}."  # type: ignore[union-attr]
@@ -151,10 +159,16 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             if self.init_group_reduce:
                 self._init_meta_kwargs_for_hier_group_reduce()
         else:
-            # init a2a meta kwargs for group-cast/reduce
-            self._init_a2a_meta_kwargs_for_group_cast()
-            if self.init_group_reduce:
-                self._init_a2a_meta_kwargs_for_group_reduce()
+            if magi_attention.comm.is_native_grpcoll_enable():
+                # init meta kwargs for native group-cast/reduce
+                self._init_meta_kwargs_for_native_group_cast()
+                if self.init_group_reduce:
+                    self._init_meta_kwargs_for_native_group_reduce()
+            else:
+                # init meta kwargs for a2av group-cast/reduce
+                self._init_meta_kwargs_for_a2av_group_cast()
+                if self.init_group_reduce:
+                    self._init_meta_kwargs_for_a2av_group_reduce()
 
     def _init_meta_kwargs_for_hier_group_cast(self):
         self._group_cast_args_dict_packed.update(
@@ -196,15 +210,72 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             deterministic=self.deterministic,
         )
 
-    def _init_a2a_meta_kwargs_for_group_cast(self):
+    def _init_meta_kwargs_for_native_group_cast(self):
+        # transfer group-cast meta args to dispatch meta args
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+        ) = get_dispatch_layout_from_group_cast_meta(
+            input_split_sizes=self._group_cast_args_dict_packed["input_split_sizes"],
+            dst_indices=self._group_cast_args_dict_packed["dst_indices"],
+            group=self.group,
+            num_nodes=1,  # TODO: support internode
+        )
+
+        # for group-cast/group-reduce, perm_to_a2av_idx is the post_perm_idx/pre_perm_idx
+        post_perm_idx = get_a2av_perm_idxs_from_group_cast_meta(
+            output_split_sizes=self._group_cast_args_dict_packed["output_split_sizes"],
+            src_index=self._group_cast_args_dict_packed["src_index"],
+            num_ranks=self.world_size,
+        )
+        if magi_attention.is_sanity_check_enable():
+            _, post_perm_idx_ref = _get_a2av_perm_idxs_from_group_cast_meta_ref(
+                output_split_size_list=self._group_cast_args_dict_packed[
+                    "output_split_sizes"
+                ],
+                src_index_list=self._group_cast_args_dict_packed["src_index"],
+                num_ranks=self.world_size,
+            )
+
+            assert torch.equal(post_perm_idx, post_perm_idx_ref)
+
+        self._group_cast_args_dict_packed["native_group_cast_meta_dict"] = dict(
+            num_tokens_per_rank=num_tokens_per_rank,
+            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+            is_token_in_rank=is_token_in_rank,
+            num_tokens_per_expert=num_tokens_per_expert,
+            post_perm_idx=post_perm_idx,
+        )
+
+        self._group_cast_args_dict_packed["native_grpcoll_handle_dict"] = dict(
+            group_cast=None,
+        )
+
+    def _init_meta_kwargs_for_native_group_reduce(self):
+        pre_perm_idx = self._group_cast_args_dict_packed["native_group_cast_meta_dict"][
+            "post_perm_idx"
+        ]
+
+        self._group_reduce_args_dict_packed["native_group_reduce_meta_dict"] = dict(
+            pre_perm_idx=pre_perm_idx,
+        )
+        # HACK: the symmetric group-cast handle dict is shared with symmetric group-reduce
+        # since the "group_reduce" handle is not known until the "group_cast" returns
+        self._group_reduce_args_dict_packed[
+            "native_grpcoll_handle_dict"
+        ] = self._group_cast_args_dict_packed["native_grpcoll_handle_dict"]
+
+    def _init_meta_kwargs_for_a2av_group_cast(self):
         (
             self._group_cast_args_dict_packed["a2a_input_split_size"],
             self._group_cast_args_dict_packed["perm_before_a2a_kwargs"],
         ) = _calc_group_cast_a2a_input_meta_args(
             input_split_size_list=self._group_cast_args_dict_packed[
-                "input_split_size_list"
+                "input_split_sizes"
             ],
-            dst_indices_list=self._group_cast_args_dict_packed["dst_indices_list"],
+            dst_indices_list=self._group_cast_args_dict_packed["dst_indices"],
             world_size=self.world_size,
             device=self.device,
         )
@@ -214,22 +285,22 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             self._group_cast_args_dict_packed["unperm_after_a2a_kwargs"],
         ) = _calc_group_cast_a2a_output_meta_args(
             output_split_size_list=self._group_cast_args_dict_packed[
-                "output_split_size_list"
+                "output_split_sizes"
             ],
-            src_index_list=self._group_cast_args_dict_packed["src_index_list"],
+            src_index_list=self._group_cast_args_dict_packed["src_index"],
             world_size=self.world_size,
             device=self.device,
         )
 
-    def _init_a2a_meta_kwargs_for_group_reduce(self):
+    def _init_meta_kwargs_for_a2av_group_reduce(self):
         (
             self._group_reduce_args_dict_packed["a2a_input_split_size"],
             self._group_reduce_args_dict_packed["perm_before_a2a_kwargs"],
         ) = _calc_group_reduce_a2a_input_meta_args(
             input_split_size_list=self._group_reduce_args_dict_packed[
-                "input_split_size_list"
+                "input_split_sizes"
             ],
-            dst_index_list=self._group_reduce_args_dict_packed["dst_index_list"],
+            dst_index_list=self._group_reduce_args_dict_packed["dst_index"],
             world_size=self.world_size,
             device=self.device,
         )
@@ -239,9 +310,9 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             self._group_reduce_args_dict_packed["range_reduce_kwargs"],
         ) = _calc_group_reduce_a2a_output_meta_args(
             output_split_size_list=self._group_reduce_args_dict_packed[
-                "output_split_size_list"
+                "output_split_sizes"
             ],
-            src_indices_list=self._group_reduce_args_dict_packed["src_indices_list"],
+            src_indices_list=self._group_reduce_args_dict_packed["src_indices"],
             world_size=self.world_size,
             device=self.device,
             deterministic=self.deterministic,
@@ -359,6 +430,7 @@ class CommMeta:
                 src_index_list=kv_group_collective_arg.src_index_list,
                 rank=kv_group_collective_arg.rank,
                 world_size=kv_group_collective_arg.world_size,
+                group=kv_group_collective_arg.group,
                 device_mesh=kv_group_collective_arg.device_mesh,
                 deterministic=kv_group_collective_arg.deterministic,
                 packed_times=2,  # pack kv along seqlen dim
@@ -377,6 +449,7 @@ class CommMeta:
                     src_index_list=qo_group_collective_arg.src_index_list,
                     rank=qo_group_collective_arg.rank,
                     world_size=qo_group_collective_arg.world_size,
+                    group=qo_group_collective_arg.group,
                     device_mesh=qo_group_collective_arg.device_mesh,
                     deterministic=qo_group_collective_arg.deterministic,
                     packed_times=1,  # q, lse, dq along
@@ -397,6 +470,7 @@ class CommMeta:
                         src_index_list=qo_group_collective_arg.src_index_list,
                         rank=qo_group_collective_arg.rank,
                         world_size=qo_group_collective_arg.world_size,
+                        group=qo_group_collective_arg.group,
                         device_mesh=qo_group_collective_arg.device_mesh,
                         deterministic=qo_group_collective_arg.deterministic,
                         packed_times=3,  # pack q, o, do along seqlen dim
@@ -418,6 +492,7 @@ class CommMeta:
                         src_index_list=qo_group_collective_arg.src_index_list,
                         rank=qo_group_collective_arg.rank,
                         world_size=qo_group_collective_arg.world_size,
+                        group=qo_group_collective_arg.group,
                         device_mesh=qo_group_collective_arg.device_mesh,
                         deterministic=qo_group_collective_arg.deterministic,
                         packed_times=1,  # out with lse along

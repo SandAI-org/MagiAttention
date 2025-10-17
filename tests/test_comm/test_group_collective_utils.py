@@ -19,12 +19,17 @@ from unittest import TestCase
 
 import torch
 
-from magi_attention.comm.primitive.utils import (
+from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_input_args,
     _calc_group_reduce_a2a_input_args,
+    _get_a2av_perm_idxs_from_group_cast_meta_ref,
+    get_a2av_perm_idxs_from_group_cast_meta,
     sum_reduce_to_tensor,
+    transfer_splits_and_dst_idxs_to_topk_idx,
     unpermute_tensor,
 )
+from magi_attention.testing import parameterize
+from magi_attention.utils import pad_and_pack_tensors
 
 
 class TestGroupCollectiveUtils(TestCase):
@@ -197,7 +202,7 @@ class TestGroupCollectiveUtils(TestCase):
 
         # ---------    ref     --------- #
 
-        reduce_index_tensor = self._calc_reduce_index_tensor(
+        reduce_index_tensor = self._calc_reduce_index_tensor_ref(
             a2a_output_unpermute_index_list=a2a_output_unpermute_index_list,
             a2a_output_tensor_size_list=a2a_output_tensor_size_list,
             output_split_size_list=output_split_size_list,
@@ -371,6 +376,176 @@ class TestGroupCollectiveUtils(TestCase):
         self.assertTrue(torch.equal(a2a_input_ref, a2a_input))
         self.assertEqual(a2a_input_split_size_ref, a2a_input_split_size)
 
+    @parameterize(
+        "config",
+        [
+            {
+                "output_split_size_list": [10, 5, 20],
+                "src_index_list": [0, 1, 0],
+                "world_size": 2,
+            },
+            {
+                "output_split_size_list": [5, 10, 3],
+                "src_index_list": [0, 0, 0],
+                "world_size": 1,
+            },
+            {
+                "output_split_size_list": [10, 20, 30],
+                "src_index_list": [0, 1, 2],
+                "world_size": 3,
+            },
+            {
+                "output_split_size_list": [],
+                "src_index_list": [],
+                "world_size": 2,
+            },
+            {
+                "output_split_size_list": [0, 5, 0, 10],
+                "src_index_list": [0, 1, 0, 1],
+                "world_size": 2,
+            },
+            {
+                "output_split_size_list": [10, 5, 20, 15],
+                "src_index_list": [0, 1, 2, 1],
+                "world_size": 3,
+            },
+            # fmt: off
+            {
+                "output_split_size_list": [
+                    185, 302, 354, 517, 127, 55,  # group1
+                    915, 519, 1047, 535, 117, 97,  # group2
+                    697, 741, 372, 577, 422, 53,  # group3
+                    985, 332, 1944, 1083, 2, 339,  # group4
+                    219, 273, 472, 188, 709, 344,  # group5
+                    99, 212, 729, 68, 180, 198,  # group6
+                    28, 1189, 46, 321, 347, 224,  # group7
+                ],
+                "src_index_list": [
+                    1, 1, 0, 0, 6, 2,  # group1
+                    6, 7, 5, 3, 6, 4,  # group2
+                    7, 6, 0, 7, 5, 4,  # group3
+                    1, 4, 2, 5, 6, 4,  # group4
+                    5, 4, 7, 0, 7, 3,  # group5
+                    7, 4, 6, 1, 6, 7,  # group6
+                    2, 3, 3, 7, 2, 1,  # group7
+                ],
+                "world_size": 8,
+            },
+            # fmt: on
+        ],
+    )
+    def test_a2av_perm_idxs_from_group_cast_meta(self, config):
+        output_split_size_list = config["output_split_size_list"]
+        src_index_list = config["src_index_list"]
+        world_size = config["world_size"]
+
+        _, ref_perm_to_a2av_idx = _get_a2av_perm_idxs_from_group_cast_meta_ref(
+            output_split_size_list=output_split_size_list,
+            src_index_list=src_index_list,
+            num_ranks=world_size,
+        )
+
+        # use host meta
+        perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
+            output_split_sizes=output_split_size_list,
+            src_index=src_index_list,
+            num_ranks=world_size,
+        )
+
+        assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
+
+        # use device meta
+
+        output_split_sizes = torch.tensor(
+            output_split_size_list,
+            dtype=torch.int64,
+            device="cuda",
+        )
+        src_index = torch.tensor(
+            src_index_list,
+            dtype=torch.int64,
+            device="cuda",
+        )
+
+        perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
+            output_split_sizes=output_split_sizes,
+            src_index=src_index,
+            num_ranks=world_size,
+        )
+
+        assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
+
+    @parameterize(
+        "config",
+        [
+            {
+                "input_split_size_list": [10, 5, 20],
+                "dst_indices_list": [[0], [0, 1], [1]],
+                "world_size": 2,
+            },
+            # fmt: off
+            {
+                "input_split_size_list": [
+                    166, 895,   # group1
+                    517, 145,   # group2
+                    372, 1010,  # group3
+                    354, 188,   # group4
+                    308, 141,   # group5
+                ],
+                "dst_indices_list": [
+                    [2, 3, 7], [],                               # group1
+                    [0, 1, 2, 3, 4, 5, 7], [1, 2, 3, 4, 6, 7],   # group2
+                    [0, 1, 2, 3, 4, 5], [1, 2, 3, 4, 6, 7],      # group3
+                    [0, 2, 3, 4, 5, 6, 7], [0, 1, 3, 5, 6, 7],   # group4
+                    [2, 3, 5], [],                               # group5
+                ],
+                "world_size": 8,
+            },
+            # fmt: on
+        ],
+    )
+    def test_transfer_splits_and_dst_idxs_to_topk_idxs(self, config):
+        input_split_size_list = config["input_split_size_list"]
+        dst_indices_list = config["dst_indices_list"]
+        world_size = config["world_size"]
+
+        # use host meta as ref
+        ref_topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+            input_split_sizes=input_split_size_list,
+            dst_indices=dst_indices_list,
+            num_ranks=world_size,
+        )
+
+        # test device meta
+        input_split_sizes = torch.tensor(
+            input_split_size_list,
+            dtype=torch.int64,
+            device="cuda",
+        )
+        dst_indices_list: list[torch.Tensor] = [
+            torch.tensor(
+                dst_indices,
+                dtype=torch.int64,
+                device="cuda",
+            )
+            for dst_indices in dst_indices_list
+        ]
+        dst_indices = pad_and_pack_tensors(  # shape: [num_splits, num_ranks]
+            tensors=dst_indices_list,
+            target_length=world_size,
+            padding_value=-1,
+            dtype=torch.int64,
+            device="cuda",
+        )
+
+        topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+            input_split_sizes=input_split_sizes,
+            dst_indices=dst_indices,
+            num_ranks=world_size,
+        )
+
+        assert torch.equal(topk_idx, ref_topk_idx)
+
     def _seqlens2curanges(
         self,
         seqlens: list[int],
@@ -387,7 +562,7 @@ class TestGroupCollectiveUtils(TestCase):
         unperm_index: torch.LongTensor,
     ) -> torch.Tensor:
         """unpermute a2a output to output (deprecated as reference)
-        as a post-processing func for group_cast_collective
+        as a post-processing func for group_cast
         """
 
         return input_tensor.index_select(
@@ -545,7 +720,7 @@ class TestGroupCollectiveUtils(TestCase):
         reduce_index: torch.LongTensor,
     ) -> torch.Tensor:
         """sum-reduce a2a output to output (deprecated as reference)
-        as a post-processing func for group_reduce_collective
+        as a post-processing func for group_reduce
         """
 
         return output.index_add_(
@@ -554,7 +729,7 @@ class TestGroupCollectiveUtils(TestCase):
             source=a2a_output,
         )
 
-    def _calc_reduce_index_tensor(
+    def _calc_reduce_index_tensor_ref(
         self,
         a2a_output_unpermute_index_list: list[int],
         a2a_output_tensor_size_list: list[int],

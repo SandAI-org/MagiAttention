@@ -14,6 +14,7 @@
 
 from typing import Union
 
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
@@ -34,6 +35,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
     def __init__(
         self,
         algorithm: DynamicAttnAlgorithm,
+        cp_group: dist.ProcessGroup,
         dispatch_meta_q: DispatchMeta | None = None,
         dispatch_meta_k: DispatchMeta | None = None,
         total_seqlen_q: int | None = None,
@@ -48,6 +50,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         calc_local_range: bool = True,
     ):
         self.algorithm = algorithm
+        self.cp_group = cp_group
         self.cp_mesh = cp_mesh
         self.deterministic = magi_attention.is_deterministic_mode_enable()
         self.calc_local_range = calc_local_range
@@ -278,10 +281,6 @@ class DynamicAttnSolver(BaseDistAttnSolver):
                 dst_indices_list.append(list(dst_indices))
                 cur_start = cur_end
 
-        # print("local hold remote calc message")
-        # print(input_split_size_list)
-        # print(dst_indices_list)
-
         # build group collective arg
         group_collective_arg = GroupCollectiveArg(
             input_split_size_list=input_split_size_list,
@@ -290,6 +289,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             src_index_list=src_index_list,
             rank=self.cp_rank,
             world_size=self.cp_size,
+            group=self.cp_group,
             device_mesh=self.cp_mesh,
             deterministic=self.deterministic,
         )

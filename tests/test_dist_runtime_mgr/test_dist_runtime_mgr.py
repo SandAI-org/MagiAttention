@@ -746,15 +746,18 @@ class TestDistAttnRuntimeMgr(DistTestBase):
         )
 
         # check calc_attn results
-        self._calc_attn_with_mgr_and_assert_close_to_ref(
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            attn_mask_type=attn_mask_type,
-            total_seqlen_q=total_seqlen_q,
-            total_seqlen_k=total_seqlen_k,
-            dist_attn_runtime_mgr=dist_attn_runtime_mgr,
-            test_case=test_config["test_case"],
-        )
+        # NOTE: native grpcoll does not support fp64
+        if not magi_attention.comm.is_native_grpcoll_enable():
+            self._calc_attn_with_mgr_and_assert_close_to_ref(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_mask_type=attn_mask_type,
+                total_seqlen_q=total_seqlen_q,
+                total_seqlen_k=total_seqlen_k,
+                dist_attn_runtime_mgr=dist_attn_runtime_mgr,
+                dtype=torch.float64,
+                test_case=test_config["test_case"],
+            )
 
     def _calc_attn_with_mgr_and_assert_close_to_ref(
         self,

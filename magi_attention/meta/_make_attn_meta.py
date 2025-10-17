@@ -72,6 +72,7 @@ def make_attn_meta_from_dispatch_meta(
         # however, we will unify the static/dynamic attn solver in the future
         attn_solver = DynamicAttnSolver(
             algorithm=GRGDynamicAttnAlgorithm(),
+            cp_group=cp_group,
             dispatch_meta_q=dispatch_meta_q,
             dispatch_meta_k=dispatch_meta_k,
             num_heads_q=num_heads_q,

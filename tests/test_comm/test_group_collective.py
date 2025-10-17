@@ -21,9 +21,11 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
-import magi_attention
-from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
-from magi_attention.comm.primitive.utils import (
+from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
+from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
+from magi_attention.comm.primitive.grpcoll._handle import GrpCollHandle
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
+from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
     sanity_check_for_group_reduce_meta_args_per_rank,
 )
@@ -31,8 +33,10 @@ from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import assert_close
 from magi_attention.testing.utils import switch_envvar_context
+from magi_attention.utils import is_list_type_all
 
 
+# TODO: add test cases for world size > 4
 class TestGroupCollective(DistTestBase):
     def init_pg(self):
         super().init_pg()
@@ -61,6 +65,34 @@ class TestGroupCollective(DistTestBase):
         self.intra_group = device_mesh.get_group("intra")
         self.inter_group = device_mesh.get_group("inter")
 
+        # -----    set up for native grpcoll   ---- #
+
+        self._switch_native_grpcoll_context = partial(
+            switch_envvar_context, envvar_name="MAGI_ATTENTION_NATIVE_GRPCOLL"
+        )
+
+        grpcoll_mgr.register_buffer(
+            group=self.process_group,
+            config=GrpCollConfig(
+                num_sms=20,
+                nvl_chunk_size=8,
+                nvl_buffer_size=256,
+                rdma_chunk_size=8,
+                rdma_buffer_size=256,
+                num_nvl_bytes=int(1e9),
+                num_rdma_bytes=0,
+            ),
+        )
+
+        grpcoll_mgr.check_registered(group=self.process_group)
+
+    def destroy_pg(self):
+        grpcoll_mgr.release_buffer(group=self.process_group)
+
+        grpcoll_mgr.check_released(group=self.process_group)
+
+        super().destroy_pg()
+
     @property
     def device(self) -> int:
         return torch.cuda.current_device()
@@ -77,10 +109,21 @@ class TestGroupCollective(DistTestBase):
     def world_size(self) -> int:
         return 4
 
+    @property
+    def num_heads(self) -> int:
+        return 4
+
+    @property
+    def head_dim(self) -> int:
+        return 128
+
+    @property
+    def hidden_size(self) -> int:
+        return self.num_heads * self.head_dim
+
     @skip_if_lt_x_gpu(4)
     @with_comms
     @parameterize(
-        # TODO: add test cases for world size > 4
         "test_case",
         [
             {
@@ -246,20 +289,26 @@ class TestGroupCollective(DistTestBase):
         ],
     )
     @parameterize("use_hier_comm", [False, True])
-    @parameterize("async_op", [True])  # skip async_op=False to speed up
-    def test_group_cast_collective(
+    @parameterize("use_native_grpcoll", [False, True])
+    @parameterize("async_op", [False, True])
+    def test_group_cast(
         self,
         test_case: dict[str, Any],
-        async_op: bool,
         use_hier_comm: bool,
+        use_native_grpcoll: bool,
+        async_op: bool,
     ):
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
             return
 
-        # skip for hier comm
+        # skip when enabling hier comm
         if use_hier_comm:
+            # TODO: support hier comm as a sync op
             if not async_op:
+                return
+            # TODO: support hier comm with native grpcoll
+            if use_native_grpcoll:
                 return
 
         # sanity check for meta args per rank
@@ -283,15 +332,23 @@ class TestGroupCollective(DistTestBase):
         src_index_list = src_index_list_per_rank[self.rank]
 
         # prepare buffers
-        send_buffer = torch.tensor(
-            test_case["send_buffer_per_rank"][self.rank],
-            dtype=self.dtype,
-            device=self.device,
+        send_buffer = (
+            torch.tensor(
+                test_case["send_buffer_per_rank"][self.rank],
+                dtype=self.dtype,
+                device=self.device,
+            )
+            .repeat_interleave(repeats=self.hidden_size, dim=0)
+            .reshape(-1, self.num_heads, self.head_dim)
         )
-        expected_recv_buffer = torch.tensor(
-            test_case["expected_recv_buffer_per_rank"][self.rank],
-            dtype=self.dtype,
-            device=self.device,
+        expected_recv_buffer = (
+            torch.tensor(
+                test_case["expected_recv_buffer_per_rank"][self.rank],
+                dtype=self.dtype,
+                device=self.device,
+            )
+            .repeat_interleave(repeats=self.hidden_size, dim=0)
+            .reshape(-1, self.num_heads, self.head_dim)
         )
         recv_buffer = torch.full_like(
             expected_recv_buffer,
@@ -300,23 +357,30 @@ class TestGroupCollective(DistTestBase):
             device=self.device,
         )
 
+        # prepare for native grpcoll
+        if use_native_grpcoll:
+            native_grpcoll_handle_dict = {"group_cast": None}
+        else:
+            native_grpcoll_handle_dict = {}
+
         # run group-cast comm kernel
-        with self._switch_hier_comm_context(enable=use_hier_comm):
-            assert (
-                not use_hier_comm or magi_attention.comm.is_hierarchical_comm_enable()
-            )
-            work = group_cast_collective(
+        with self._switch_hier_comm_context(
+            enable=use_hier_comm
+        ), self._switch_native_grpcoll_context(enable=use_native_grpcoll):
+            work = group_cast(
                 input=send_buffer,
                 output=recv_buffer,
-                input_split_size_list=input_split_size_list,
-                output_split_size_list=output_split_size_list,
-                dst_indices_list=dst_indices_list,
-                src_index_list=src_index_list,
+                input_split_sizes=input_split_size_list,
+                output_split_sizes=output_split_size_list,
+                dst_indices=dst_indices_list,
+                src_index=src_index_list,
                 group=self.process_group,
                 async_op=async_op,
-                # NOTE: args below for hierarchical comm
+                # kwargs below for hier comm
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
+                # kwargs below for native grpcoll
+                native_grpcoll_handle_dict=native_grpcoll_handle_dict,
             )
 
             # post process
@@ -341,10 +405,15 @@ class TestGroupCollective(DistTestBase):
         if err_msg_list:
             raise AssertionError("\n".join(err_msg_list))
 
+        # check for native grpcoll
+        if use_native_grpcoll:
+            assert is_list_type_all(
+                list(native_grpcoll_handle_dict.values()), GrpCollHandle
+            )
+
     @skip_if_lt_x_gpu(4)
     @with_comms
     @parameterize(
-        # TODO: add test cases for world size > 4
         "test_case",
         [
             {
@@ -492,8 +561,6 @@ class TestGroupCollective(DistTestBase):
                 "name": "normal_group_lse_reduce",
                 "world_size": 4,
                 "reduce_op": "lse",
-                "num_heads": 2,
-                "head_dim": 3,
                 "send_buffer_per_rank": [
                     [0, 1, 2, 3, 4],
                     [5, 6, 7, 8, 9, 10, 11],
@@ -558,12 +625,14 @@ class TestGroupCollective(DistTestBase):
         ],
     )
     @parameterize("use_hier_comm", [False, True])
+    @parameterize("use_native_grpcoll", [False, True])
     @parameterize("deterministic", [False, True])
-    @parameterize("async_op", [True])  # skip async_op=False to speed up
-    def test_group_reduce_collective(
+    @parameterize("async_op", [False, True])
+    def test_group_reduce(
         self,
         test_case: dict[str, Any],
         use_hier_comm: bool,
+        use_native_grpcoll: bool,
         deterministic: bool,
         async_op: bool,
     ):
@@ -575,12 +644,24 @@ class TestGroupCollective(DistTestBase):
         if self.world_size != test_case["world_size"]:
             return
 
-        # skip for hier comm
+        # skip when enabling hier comm
         if use_hier_comm:
             # TODO: support hier comm as a sync op
             if not async_op:
                 return
-            # TODO: support hier comm for avg/lse reduce
+            # TODO: support hier comm for other reduce ops
+            if reduce_op != "sum":
+                return
+            # TODO: support hier comm with native grpcoll
+            if use_native_grpcoll:
+                return
+
+        # skip when enabling grpcoll
+        if use_native_grpcoll:
+            # for now, native grpcoll is always deterministic
+            if not deterministic:
+                return
+            # TODO: support native grpcoll for other reduce ops
             if reduce_op != "sum":
                 return
 
@@ -605,45 +686,43 @@ class TestGroupCollective(DistTestBase):
         src_indices_list = src_indices_list_per_rank[self.rank]
 
         # prepare buffers
-        send_buffer = torch.tensor(
-            test_case["send_buffer_per_rank"][self.rank],
-            dtype=self.dtype,
-            device=self.device,
+        send_buffer = (
+            torch.tensor(
+                test_case["send_buffer_per_rank"][self.rank],
+                dtype=self.dtype,
+                device=self.device,
+            )
+            .repeat_interleave(repeats=self.hidden_size, dim=0)
+            .reshape(-1, self.num_heads, self.head_dim)
         )
-        recv_buffer_before_reduce = torch.tensor(
-            test_case["recv_buffer_before_reduce_per_rank"][self.rank],
-            dtype=self.dtype,
-            device=self.device,
+        recv_buffer_before_reduce = (
+            torch.tensor(
+                test_case["recv_buffer_before_reduce_per_rank"][self.rank],
+                dtype=self.dtype,
+                device=self.device,
+            )
+            .repeat_interleave(repeats=self.hidden_size, dim=0)
+            .reshape(-1, self.num_heads, self.head_dim)
         )
-        expected_recv_buffer = torch.tensor(
-            test_case["expected_recv_buffer_per_rank"][self.rank],
-            dtype=self.dtype,
-            device=self.device,
+        expected_recv_buffer = (
+            torch.tensor(
+                test_case["expected_recv_buffer_per_rank"][self.rank],
+                dtype=self.dtype,
+                device=self.device,
+            )
+            .repeat_interleave(repeats=self.hidden_size, dim=0)
+            .reshape(-1, self.num_heads, self.head_dim)
         )
         if is_lse_reduce:
-            # for now, lse-reduce requires strictly on shape:
-            # send/recv buffer: [seqlen, num_heads, head_dim]
-            # send/recv lse buffer: [seqlen, num_heads]
-            nh, hd = test_case["num_heads"], test_case["head_dim"]
-
-            send_buffer = send_buffer.repeat_interleave(repeats=nh * hd, dim=0).reshape(
-                -1, nh, hd
-            )
-            recv_buffer_before_reduce = recv_buffer_before_reduce.repeat_interleave(
-                repeats=nh * hd, dim=0
-            ).reshape(-1, nh, hd)
-            expected_recv_buffer = expected_recv_buffer.repeat_interleave(
-                repeats=nh * hd, dim=0
-            ).reshape(-1, nh, hd)
-
+            # prepare lse buffer with shape [seqlen, num_heads]
             send_lse_buffer = (
                 torch.tensor(
                     test_case["send_lse_buffer_per_rank"][self.rank],
                     dtype=torch.float32,
                     device=self.device,
                 )
-                .repeat_interleave(repeats=nh, dim=0)
-                .reshape(-1, nh)
+                .repeat_interleave(repeats=self.num_heads, dim=0)
+                .reshape(-1, self.num_heads)
             )
             recv_lse_buffer_before_reduce = (
                 torch.tensor(
@@ -651,8 +730,8 @@ class TestGroupCollective(DistTestBase):
                     dtype=torch.float32,
                     device=self.device,
                 )
-                .repeat_interleave(repeats=nh, dim=0)
-                .reshape(-1, nh)
+                .repeat_interleave(repeats=self.num_heads, dim=0)
+                .reshape(-1, self.num_heads)
             )
             expected_recv_lse_buffer = (
                 torch.tensor(
@@ -660,8 +739,8 @@ class TestGroupCollective(DistTestBase):
                     dtype=torch.float32,
                     device=self.device,
                 )
-                .repeat_interleave(repeats=nh, dim=0)
-                .reshape(-1, nh)
+                .repeat_interleave(repeats=self.num_heads, dim=0)
+                .reshape(-1, self.num_heads)
             )
             post_process_inputs = (
                 recv_buffer_before_reduce,
@@ -673,27 +752,34 @@ class TestGroupCollective(DistTestBase):
             expected_recv_lse_buffer = None
             post_process_inputs = (recv_buffer_before_reduce,)  # type: ignore[assignment]
 
+        # prepare for native grpcoll
+        if use_native_grpcoll:
+            native_grpcoll_handle_dict = {"group_reduce": None}
+        else:
+            native_grpcoll_handle_dict = {}
+
         # run group-reduce comm kernel
-        with self._switch_hier_comm_context(enable=use_hier_comm):
-            assert (
-                not use_hier_comm or magi_attention.comm.is_hierarchical_comm_enable()
-            )
-            work = group_reduce_collective(
+        with self._switch_hier_comm_context(
+            enable=use_hier_comm
+        ), self._switch_native_grpcoll_context(enable=use_native_grpcoll):
+            work = group_reduce(
                 input=send_buffer,
                 output=recv_buffer_before_reduce,
-                input_split_size_list=input_split_size_list,
-                output_split_size_list=output_split_size_list,
-                dst_index_list=dst_index_list,
-                src_indices_list=src_indices_list,
+                input_split_sizes=input_split_size_list,
+                output_split_sizes=output_split_size_list,
+                dst_index=dst_index_list,
+                src_indices=src_indices_list,
                 group=self.process_group,
                 async_op=async_op,
                 reduce_op=reduce_op,
                 input_lse=send_lse_buffer,
                 output_lse=recv_lse_buffer_before_reduce,
-                # NOTE: args below for hierarchical comm
+                deterministic=deterministic,
+                # kwargs below for hier comm
                 intra_group=self.intra_group,
                 inter_group=self.inter_group,
-                deterministic=deterministic,
+                # kwargs below for native grpcoll
+                native_grpcoll_handle_dict=native_grpcoll_handle_dict,
             )
 
         # post process
@@ -735,6 +821,12 @@ class TestGroupCollective(DistTestBase):
 
         if err_msg_list:
             raise AssertionError("\n".join(err_msg_list))
+
+        # check for native grpcoll
+        if use_native_grpcoll:
+            assert is_list_type_all(
+                list(native_grpcoll_handle_dict.values()), GrpCollHandle
+            )
 
 
 if __name__ == "__main__":
