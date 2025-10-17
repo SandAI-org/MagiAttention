@@ -389,8 +389,15 @@ class FlashAttnFwdSm90 {
         // Do this here before the epilogue so that the next tile is ready to go.
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
         if (has_tile_valid) {
-          block_coord = cute::make_tuple(
-              get<0>(block_coord_raw), get<1>(block_coord_raw), params.mainloop.cu_batches[get<2>(block_coord_raw)]);
+          block_coord = [&]() {
+            if constexpr (MergeRange) {
+              return cute::make_tuple(get<0>(block_coord_raw),
+                                      get<1>(block_coord_raw),
+                                      params.mainloop.cu_batches[get<2>(block_coord_raw)]);
+            } else {
+              return cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
+            }
+          }();
           if constexpr (!Deterministic) {
             epilogue.store(params.epilogue,
                            tOrO,
