@@ -601,9 +601,12 @@ def test_main(
                 }
                 if previous_mode:
                     dispatch_args.update({"previous_event": buffer.capture()})
-                (recv_cached_x, _, _, event) = buffer.group_cast(  # recv_lse  # handle
-                    **dispatch_args
-                )
+                (
+                    recv_cached_x,
+                    _,  # recv_cached_lse
+                    _,  # handle
+                    event,
+                ) = buffer.group_cast(**dispatch_args)
                 event.current_stream_wait() if async_mode else ()
                 recv_cached_x = (
                     per_token_cast_back(*recv_cached_x)
@@ -818,7 +821,12 @@ def test_main(
         "num_tokens_per_expert": num_tokens_per_expert,
         "config": dispatch_config if dispatch_config is not None else config,
     }
-    (recv_x, _, handle, _) = buffer.group_cast(  # recv_lse  # event
+    (
+        recv_x,
+        _,  # recv_lse
+        handle,
+        _,  # event
+    ) = buffer.group_cast(
         **dispatch_args
     )  # type: ignore[assignment]
 

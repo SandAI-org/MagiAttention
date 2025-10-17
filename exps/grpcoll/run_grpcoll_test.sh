@@ -38,7 +38,8 @@ export PYTHONPATH=$PYTHONPATH:.
 if [[ $TEST_MODE == "intra_node" ]]; then
     LOG_PATH=${LOG_ROOT}/test_intranode_grpcoll.log
     echo "Logging to ${LOG_PATH} ..."
-    python ${TEST_ROOT}/test_intranode_grpcoll.py > ${LOG_PATH} 2>&1; exit 0
+    python ${TEST_ROOT}/test_intranode_grpcoll.py > ${LOG_PATH} 2>&1
+    exit $?
 fi
 
 # ----- test-low-latency ----- #
@@ -46,7 +47,8 @@ fi
 if [[ $TEST_MODE == "low_latency" ]]; then
     LOG_PATH=${LOG_ROOT}/test_low_latency_grpcoll.log
     echo "Logging to ${LOG_PATH} ..."
-    python ${TEST_ROOT}/test_low_latency_grpcoll.py > ${LOG_PATH} 2>&1; exit 0
+    python ${TEST_ROOT}/test_low_latency_grpcoll.py > ${LOG_PATH} 2>&1
+    exit $?
 fi
 
 # ----- test-internode ----- #
