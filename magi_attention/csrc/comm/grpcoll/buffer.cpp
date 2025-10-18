@@ -387,7 +387,7 @@ Buffer::intranode_group_cast(
 
   // LSE checks
   float* lse_ptr = nullptr;
-  int num_heads = 0;
+  int num_heads = 0; // NOTES: when lse is not provided, num_heads is set to 0 and consumes empty buffer
   if (lse.has_value()) {
     GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
     GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
@@ -664,12 +664,13 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     stream_wait(comm_stream, compute_stream);
   }
 
-  int num_heads = 0;
+  int num_heads = 0; // NOTES: when `reduce_op != ReduceOp::LSE`, num_heads is set to 0 and consumes empty buffer
   auto combined_lse = std::optional<torch::Tensor>();
   float* lse_ptr = nullptr;
   float* combined_lse_ptr = nullptr;
   int64_t* pre_perm_idx_ptr = nullptr;
   if (lse.has_value()) {
+    GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::LSE);
     GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
     GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
     GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0);
@@ -686,6 +687,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     }
 
     combined_lse_ptr = combined_lse->data_ptr<float>();
+  } else {
+    GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE);
   }
   if (pre_perm_idx.has_value()) {
     GRPCOLL_HOST_ASSERT(pre_perm_idx->dim() == 1 && pre_perm_idx->is_contiguous());
@@ -750,6 +753,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
    */
   intranode::combine(
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
+      /*reduce_op=*/reduce_op_,
       /*combined_x=*/combined_x.data_ptr(),
       /*combined_lse=*/combined_lse_ptr,
       /*x=*/x.data_ptr(),

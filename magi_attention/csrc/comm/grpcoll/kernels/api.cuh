@@ -41,6 +41,7 @@
 #pragma once
 
 #include <vector>
+#include "reduce_op.cuh"
 
 namespace magi_attn_comm::grpcoll {
 
@@ -155,6 +156,7 @@ void cached_notify_combine(
 
 void combine(
     cudaDataType_t dtype,
+    ReduceOp reduce_op,
     void* combined_x,
     float* combined_lse,
     const void* x,

@@ -620,6 +620,13 @@ DEVICE_INLINE void foreach_fill(dst_dtype_t* dst_ptr, const dst_dtype_t value) {
     dst_ptr[i] = value;
 }
 
+template <typename dst_dtype_t, int kArrayLength>
+DEVICE_INLINE void foreach_div(dst_dtype_t* dst_ptr, const dst_dtype_t divisor) {
+#pragma unroll
+  for (int i = 0; i < kArrayLength; ++i)
+    dst_ptr[i] /= divisor;
+}
+
 template <typename dst_dtype_t, typename src_dtype_t, int kArrayLength>
 DEVICE_INLINE void foreach_assign(dst_dtype_t* dst_ptr, const src_dtype_t* src_ptr) {
 #pragma unroll

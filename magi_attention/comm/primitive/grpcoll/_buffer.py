@@ -824,6 +824,12 @@ class GrpCollBuffer:
             num_worst_tokens == 0
         ), "Internode group cast does not support `num_worst_tokens > 0`"
 
+        if cast_lse:
+            assert lse is not None, "lse should not be None when `cast_lse` is set"  # type: ignore[unreachable]
+        else:  # no need to cast lse, even passed in
+            lse = None
+            # recv_lse = None
+
         is_handle_given = handle is not None
         if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollInterHandle)

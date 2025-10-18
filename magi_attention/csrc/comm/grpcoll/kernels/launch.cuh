@@ -42,9 +42,13 @@
 
 #include "configs.cuh"
 #include "exception.cuh"
+#include "reduce_op.cuh"
+
+using namespace magi_attn_comm::grpcoll;
 
 #ifndef SETUP_LAUNCH_CONFIG
 #ifndef DISABLE_SM90_FEATURES
+// TODO: dig into the effects on kernels by launch attributes
 #define SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream)                     \
   cudaLaunchConfig_t cfg = {(num_sms), (num_threads), 0, stream, nullptr, 0}; \
   cudaLaunchAttribute attr[2];                                                \
@@ -149,6 +153,19 @@
     default:                                                                  \
       GRPCOLL_HOST_ASSERT(false and "Unsupported num_ranks");                 \
   }                                                                           \
+  while (false)
+
+#define SWITCH_REDUCE_OP_WITH_DTYPES_RANKS(dtype, reduce_dtype, num_ranks, case_macro) \
+  switch (reduce_op) {                                                                 \
+    case ReduceOp::SUM:                                                                \
+      case_macro(dtype, reduce_dtype, num_ranks, ReduceOp::SUM);                       \
+    case ReduceOp::AVG:                                                                \
+      case_macro(dtype, reduce_dtype, num_ranks, ReduceOp::AVG);                       \
+    case ReduceOp::LSE:                                                                \
+      case_macro(dtype, reduce_dtype, num_ranks, ReduceOp::LSE);                       \
+    default:                                                                           \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported reduce op");                          \
+  }                                                                                    \
   while (false)
 
 #define SWITCH_DTYPES(case_macro)                         \

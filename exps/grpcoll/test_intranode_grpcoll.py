@@ -813,13 +813,14 @@ def test_func(
     if reduce_op in ("sum", "avg"):
         send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
         check_x = combined_x.float()
-        ref_x = sim_gemm(x.float(), w=sim_gemm_weight) * (
-            send_token_nums if reduce_op == "sum" else 1.0
-        )
+        ref_x = sim_gemm(x.float(), w=sim_gemm_weight) * send_token_nums
 
         # if acc_reduce, the combined token should add with a constant rank bias
         if acc_reduce_out_buffer:
             ref_x += acc_reduce_constant
+
+        if reduce_op == "avg":
+            ref_x /= send_token_nums + (1 if acc_reduce_out_buffer else 0)
 
         # if some token is not sent to any rank, the combined token should be 0 or acc_reduce_constant
         if min_num_dst_ranks == 0:
@@ -899,7 +900,7 @@ def test_main(
     )
 
     cast_lse = True
-    reduce_op: GroupReduceOp = "sum"  # choose from {"sum", "avg", "lse"}
+    reduce_op: GroupReduceOp = "avg"  # choose from {"sum", "avg", "lse"}
     if reduce_op == "lse":  # FIXME
         assert cast_lse
 

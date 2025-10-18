@@ -42,6 +42,7 @@
 #include "configs.cuh"
 #include "exception.cuh"
 #include "launch.cuh"
+#include "reduce_op.cuh"
 #include "utils.cuh"
 
 namespace magi_attn_comm::grpcoll {
@@ -793,7 +794,7 @@ void cached_notify_combine(
 #undef CACHED_NOTIFY_COMBINE
 }
 
-template <typename dtype_t, typename reduce_dtype_t, int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp, bool kAccReduce>
+template <typename dtype_t, typename reduce_dtype_t, ReduceOp kReduceOp, int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp, bool kAccReduce>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void combine(
     dtype_t* combined_x,
@@ -824,7 +825,6 @@ void combine(
   const int responsible_channel = sm_id / 2;
   const auto num_channels_total = num_channels * kNumRanks;
   const auto num_channel_tokens_total = num_channels_total * num_recv_buffer_tokens;
-  GRPCOLL_DEVICE_ASSERT(num_heads <= WARP_SIZE); // FIXME: support num_heads > WARP_SIZE
 
   // Get dtype Info
   GRPCOLL_STATIC_ASSERT(sizeof(int4) % sizeof(dtype_t) == 0, "Invalid vectorization");
@@ -880,6 +880,7 @@ void combine(
     // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4
     // `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
     // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
+    //  NOTES: we make sure that when `kReduceOp != ReduceOp::LSE`, `num_heads == 0` and `lse_buffers` is empty and not used
     auto channel_x_buffers = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
     auto channel_src_idx_buffers = Buffer<int>(ptr, num_channel_tokens_total, channel_rank_token_offset);
     auto channel_lse_buffers = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
@@ -969,9 +970,13 @@ void combine(
         if (lane_id == 0)
           channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + send_token_idx);
 
+#pragma unroll
         // Copy `lse` from the actual token idx in the send lse buffer
-        if (num_heads > 0 and lane_id < num_heads) {
-          channel_lse_buffers[dst_slot_idx * num_heads + lane_id] = __ldg(lse + token_idx_in_x * num_heads + lane_id);
+        // if `kReduceOp == ReduceOp::LSE`
+        if constexpr (kReduceOp == ReduceOp::LSE) {
+          for (int h = lane_id; h < num_heads; h += WARP_SIZE) {
+            channel_lse_buffers[dst_slot_idx * num_heads + h] = __ldg(lse + token_idx_in_x * num_heads + h);
+          }
         }
       }
 
@@ -1081,6 +1086,7 @@ void combine(
 
         // Get `channel_lse_buffers` for curr rank
         // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
+        //  NOTES: we make sure that when `kReduceOp != ReduceOp::LSE`, `num_heads == 0` and `lse_buffers` is empty and not used
         channel_lse_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
       }
 
@@ -1117,8 +1123,7 @@ void combine(
         }
         __syncwarp();
 
-        // Get topk ranks and slot indices in the recv queue of each expected head for each rank
-        // TODO: rename the variables when removing topk
+        // Get src ranks and slot indices in the recv queue of each expected head for each rank
         int num_src_ranks = 0, src_rank_idxs[kNumRanks], slot_indices[kNumRanks];
 #pragma unroll
         for (int curr_rank = 0; curr_rank < kNumRanks; ++curr_rank) {
@@ -1160,17 +1165,32 @@ void combine(
             // Initialize the high-precision reduce buffer
             // with the old value in `combined_x`
             foreach_assign<reduce_dtype_t, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
+
+            // FIXME: lse_reduce
           } else { // not in `kAccReduce` mode
             // Zero-initialize the high-precision reduce buffer
             foreach_fill<reduce_dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, 0);
+
+            // FIXME: lse_reduce
           }
 
 #pragma unroll
           // Reduce all recv partial hidden values from all src ranks
           // to the high-precision reduce buffer
-          for (int j = 0; j < num_src_ranks; ++j) {
-            auto jth_recv_hidval_dtype = reinterpret_cast<const dtype_t*>(&recv_hidval_int4[j]);
-            foreach_reduce_add<reduce_dtype_t, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, jth_recv_hidval_dtype);
+          if constexpr (kReduceOp == ReduceOp::LSE) {
+            // FIXME: lse_reduce
+          } else if constexpr (kReduceOp == ReduceOp::SUM || kReduceOp == ReduceOp::AVG) {
+            for (int j = 0; j < num_src_ranks; ++j) {
+              auto jth_recv_hidval_dtype = reinterpret_cast<const dtype_t*>(&recv_hidval_int4[j]);
+              foreach_reduce_add<reduce_dtype_t, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, jth_recv_hidval_dtype);
+            }
+            if constexpr (kReduceOp == ReduceOp::AVG) {
+              auto num_reduces = num_src_ranks;
+              if constexpr (kAccReduce) // if in `kAccReduce` mode, the old value also counts
+                ++num_reduces;
+              if (num_reduces > 1) // average by dividing non-trivial `num_reduces`
+                foreach_div<reduce_dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, static_cast<reduce_dtype_t>(num_reduces));
+            }
           }
 
           // Cast the high-precision reduced value back to `dtype_t`
@@ -1211,14 +1231,17 @@ void combine(
 #endif
         }
 
+        // FIXME: lse_reduce
         // Reduce `combined_lse` from `channel_lse_buffers`
-        // by the first `num_heads` lanes in each warp
-        if (lane_id < num_heads) {
+        // if `kReduceOp == ReduceOp::LSE`
+        if constexpr (kReduceOp == ReduceOp::LSE) {
           reduce_dtype_t reduced_lse = 0;
+          for (int h = lane_id; h < num_heads; h += WARP_SIZE) {
 #pragma unroll
-          for (int j = 0; j < num_src_ranks; ++j)
-            reduced_lse += static_cast<reduce_dtype_t>(ld_nc_global(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + lane_id));
-          combined_lse[token_idx * num_heads + lane_id] = static_cast<float>(reduced_lse);
+            for (int j = 0; j < num_src_ranks; ++j)
+              reduced_lse += static_cast<reduce_dtype_t>(ld_nc_global(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + h));
+            combined_lse[token_idx * num_heads + h] = static_cast<float>(reduced_lse);
+          }
         }
 
         // Update channel head idx for each rank
@@ -1243,6 +1266,7 @@ void combine(
 
 void combine(
     cudaDataType_t dtype,
+    ReduceOp reduce_op,
     void* combined_x,
     float* combined_lse,
     const void* x,
@@ -1271,37 +1295,46 @@ void combine(
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
-#define COMBINE_LAUNCH_CASE(dtype, reduce_dtype, num_ranks)                                         \
-  {                                                                                                 \
-    auto kernel = combine<dtype, reduce_dtype, num_ranks, kNumThreads, kNumTMABytesPerWarp, false>; \
-    if (acc_reduce)                                                                                 \
-      kernel = combine<dtype, reduce_dtype, num_ranks, kNumThreads, kNumTMABytesPerWarp, true>;     \
-    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                              \
-    LAUNCH_KERNEL(                                                                                  \
-        &cfg,                                                                                       \
-        kernel,                                                                                     \
-        reinterpret_cast<dtype*>(combined_x),                                                       \
-        combined_lse,                                                                               \
-        reinterpret_cast<const dtype*>(x),                                                          \
-        lse,                                                                                        \
-        pre_perm_idx,                                                                               \
-        src_idx,                                                                                    \
-        rank_prefix_matrix,                                                                         \
-        channel_prefix_matrix,                                                                      \
-        send_head,                                                                                  \
-        num_tokens,                                                                                 \
-        num_recv_tokens,                                                                            \
-        hidden_size,                                                                                \
-        num_heads,                                                                                  \
-        buffer_ptrs,                                                                                \
-        rank,                                                                                       \
-        num_max_send_tokens,                                                                        \
-        num_recv_buffer_tokens);                                                                    \
-  }                                                                                                 \
+  // NOTES: when `kReduceOp != ReduceOp::LSE`,
+  // num_heads should be 0 to let `lse_buffers` empty
+  if (reduce_op != ReduceOp::LSE)
+    GRPCOLL_HOST_ASSERT(num_heads == 0);
+
+#define COMBINE_LAUNCH_CASE(dtype, reduce_dtype, num_ranks, reduce_op)                                         \
+  {                                                                                                            \
+    auto kernel = combine<dtype, reduce_dtype, reduce_op, num_ranks, kNumThreads, kNumTMABytesPerWarp, false>; \
+    if (acc_reduce)                                                                                            \
+      kernel = combine<dtype, reduce_dtype, reduce_op, num_ranks, kNumThreads, kNumTMABytesPerWarp, true>;     \
+    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                                         \
+    LAUNCH_KERNEL(                                                                                             \
+        &cfg,                                                                                                  \
+        kernel,                                                                                                \
+        reinterpret_cast<dtype*>(combined_x),                                                                  \
+        combined_lse,                                                                                          \
+        reinterpret_cast<const dtype*>(x),                                                                     \
+        lse,                                                                                                   \
+        pre_perm_idx,                                                                                          \
+        src_idx,                                                                                               \
+        rank_prefix_matrix,                                                                                    \
+        channel_prefix_matrix,                                                                                 \
+        send_head,                                                                                             \
+        num_tokens,                                                                                            \
+        num_recv_tokens,                                                                                       \
+        hidden_size,                                                                                           \
+        num_heads,                                                                                             \
+        buffer_ptrs,                                                                                           \
+        rank,                                                                                                  \
+        num_max_send_tokens,                                                                                   \
+        num_recv_buffer_tokens);                                                                               \
+  }                                                                                                            \
   break
 
-#define COMBINE_DTYPE_LAUNCH_CASE(dtype, reduce_dtype)                            \
-  SWITCH_RANKS_WITH_DTYPE_REDUCE_DTYPE(dtype, reduce_dtype, COMBINE_LAUNCH_CASE); \
+#define COMBINE_REDUCE_OP_LAUNCH_CASE(dtype, reduce_dtype, num_ranks)                      \
+  SWITCH_REDUCE_OP_WITH_DTYPES_RANKS(dtype, reduce_dtype, num_ranks, COMBINE_LAUNCH_CASE); \
+  break
+
+#define COMBINE_DTYPE_LAUNCH_CASE(dtype, reduce_dtype)                                      \
+  SWITCH_RANKS_WITH_DTYPE_REDUCE_DTYPE(dtype, reduce_dtype, COMBINE_REDUCE_OP_LAUNCH_CASE); \
   break
 
   // Even-numbered SMs for sending, odd-numbered SMs for receiving
