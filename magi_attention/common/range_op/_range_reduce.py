@@ -192,7 +192,7 @@ def range_avg_reduce_kernel(
     out = out.to(reduce_dtype)
 
     # reduce input
-    cnt = 0.0
+    cnt = 1.0  # in acc_reduce mode, the old value in out counts 1
     out2inp_range_map_start = (
         out2inp_range_map_ptr + range_idx * out2inp_range_map_stride
     )
@@ -369,6 +369,7 @@ def range_reduce(
     deterministic: bool = False,
     reduce_op: GroupReduceOp = "sum",
     reduce_dtype: torch.dtype | None = None,
+    acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -396,7 +397,8 @@ def range_reduce(
                     and we only support input/output with shape [seqlen, num_heads, head_dim]
                     while input_lse/output_lse with shape [seqlen, num_heads] for now
         reduce_dtype (torch.dtype): the dtype for the reduction.
-            Defaults to None to use: maximum precision of the input/output and fp32
+            Defaults to ``None`` to use the maximum precision of the input/output's dtype and fp32
+        acc_reduce (bool): whether to accumulate the reduction to the given output buffer. Defaults to ``True``.
 
             NOTE: this is only used for those deterministic kernels, and for non-deterministic kernels,
             the dtype will always be the same dtype as the input/output
@@ -427,7 +429,11 @@ def range_reduce(
     deterministic |= reduce_op != "sum"
     is_lse_reduce = reduce_op == "lse"
 
-    # check
+    # check functionalities
+    # TODO: support non-accumulative reduction
+    assert acc_reduce, "By now, we only support accumulative reduction implementations"
+
+    # check shape and dtype
     assert (
         input_ranges.shape == output_ranges.shape
     ), f"{input_ranges=} and {output_ranges=} must have the same shape"

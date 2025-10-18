@@ -292,7 +292,7 @@ def group_reduce(
                 if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
                 and we only support input/output with shape [seqlen, num_heads, head_dim]
                 while input_lse/output_lse with shape [seqlen, num_heads] for now
-        acc_reduce (bool): whether to accumulate the reduction to the given output buffer. Defaults to True.
+        acc_reduce (bool): whether to accumulate the reduction to the given output buffer. Defaults to ``True``.
 
             NOTE:
                 if False, the output will be overwritten and the initial value will be ignored.

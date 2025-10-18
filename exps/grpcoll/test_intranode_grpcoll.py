@@ -52,6 +52,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     transfer_splits_and_dst_idxs_to_topk_idx,
     unpermute_tensor,
 )
+from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import pad_and_pack_tensors
 
 # isort: split
@@ -83,7 +84,7 @@ def prepare_test_func_kwargs(
     dtype: torch.dtype,
     distinct_token: bool,
     cast_lse: bool,
-    reduce_op: str,
+    reduce_op: GroupReduceOp,
     pass_out_buffer: bool,
     pass_out_lse_buffer: bool,
     random_permute_output: bool,
@@ -192,6 +193,7 @@ def prepare_test_func_kwargs(
         dst_indices=dst_indices_list,
         src_index=src_index_list,
         group=group,
+        async_op=True,
     )
 
     recv_x_gc = work_with_pf_gc.wait_post_process(recv_x_gc)
@@ -227,6 +229,8 @@ def prepare_test_func_kwargs(
         dst_index=src_index_list,
         src_indices=dst_indices_list,
         group=group,
+        async_op=True,
+        reduce_op=reduce_op,
     )
 
     combined_x_gr = work_with_pf_gr.wait_post_process(combined_x_gr)
@@ -444,7 +448,7 @@ def test_func(
     async_mode: bool,
     previous_mode: bool,
     cast_lse: bool,
-    reduce_op: str,
+    reduce_op: GroupReduceOp,
     pass_out_buffer: bool,
     pass_out_lse_buffer: bool,
     random_permute_output: bool,
@@ -805,48 +809,30 @@ def test_func(
         send_head_copy[send_head_copy != -1],
     )  # cached_notify_combine will modify send_head in-place for any entry == -1
 
-    send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
-    check_x = combined_x.float() / send_token_nums
-    ref_x = sim_gemm(x, w=sim_gemm_weight)
-
-    if reduce_op == "lse":  # FIXME
-        check_lse = combined_lse / send_token_nums
-        ref_lse = sim_gemm(lse, w=sim_gemm_weight)
-
-    # if acc_reduce, the combined token should add with a constant rank bias
-    if acc_reduce_out_buffer:
-        ref_x += acc_reduce_constant / send_token_nums
-
-    # if some token is not sent to any rank, the combined token should be 0
-    if min_num_dst_ranks == 0:
-        zero_num_dst_ranks_mask_x = (send_token_nums == 0.0).expand_as(combined_x)
-        check_x[zero_num_dst_ranks_mask_x] = (
-            acc_reduce_constant if acc_reduce_out_buffer else 0.0
-        )
-        ref_x[zero_num_dst_ranks_mask_x] = (
-            acc_reduce_constant if acc_reduce_out_buffer else 0.0
+    # specific check for specific reduce op
+    if reduce_op in ("sum", "avg"):
+        send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
+        check_x = combined_x.float()
+        ref_x = sim_gemm(x.float(), w=sim_gemm_weight) * (
+            send_token_nums if reduce_op == "sum" else 1.0
         )
 
-        if reduce_op == "lse":  # FIXME
-            zero_num_dst_ranks_mask_lse = (send_token_nums == 0.0).expand_as(
-                combined_lse
+        # if acc_reduce, the combined token should add with a constant rank bias
+        if acc_reduce_out_buffer:
+            ref_x += acc_reduce_constant
+
+        # if some token is not sent to any rank, the combined token should be 0 or acc_reduce_constant
+        if min_num_dst_ranks == 0:
+            zero_num_dst_ranks_mask_x = (send_token_nums == 0.0).expand_as(combined_x)
+            check_x[zero_num_dst_ranks_mask_x] = (
+                acc_reduce_constant if acc_reduce_out_buffer else 0.0
             )
-            check_lse[zero_num_dst_ranks_mask_lse] = 0.0
-            ref_lse[zero_num_dst_ranks_mask_lse] = 0.0
+            ref_x[zero_num_dst_ranks_mask_x] = (
+                acc_reduce_constant if acc_reduce_out_buffer else 0.0
+            )
 
-    diff_x = calc_diff(check_x, ref_x)
-
-    match x.dtype:
-        case torch.float32 | torch.float64:
-            assert diff_x < 5e-7, f"{check_x} != {ref_x} with ({diff_x=})"
-        case torch.bfloat16 | torch.float16:
-            assert diff_x < 5e-6, f"{check_x} != {ref_x} with ({diff_x=})"
-        case _:
-            raise ValueError("Unsupported dtype")
-
-    if reduce_op == "lse":  # FIXME
-        diff_lse = calc_diff(check_lse, ref_lse)
-        assert diff_lse < 5e-7, f"{check_lse} != {ref_lse} with ({diff_lse=})"
+        diff_x = calc_diff(check_x, ref_x)
+        assert diff_x < 5e-6, f"{check_x=} != {ref_x=} with ({diff_x=})"
 
     if local_rank == 0:
         print(
@@ -913,7 +899,7 @@ def test_main(
     )
 
     cast_lse = True
-    reduce_op = "sum"  # choose from {"sum", "avg", "lse"}
+    reduce_op: GroupReduceOp = "sum"  # choose from {"sum", "avg", "lse"}
     if reduce_op == "lse":  # FIXME
         assert cast_lse
 

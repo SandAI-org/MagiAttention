@@ -33,6 +33,7 @@ def range_reduce_ref(
     dim: int = 0,
     reduce_op: GroupReduceOp = "sum",
     reduce_dtype: torch.dtype | None = None,
+    acc_reduce: bool = True,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
 ) -> OutMaybeWithLSE:
@@ -48,8 +49,9 @@ def range_reduce_ref(
             - "sum": sum reduction
             - "avg": average reduction
             - "lse": log-sum-exp weighted average reduction, with lse correction
-        reduce_dtype (torch.dtype | None, optional): The dtype to use for the reduced tensor.
-            Defaults to None to use the maximum precision between input/output and fp32.
+        reduce_dtype (torch.dtype): the dtype for the reduction.
+            Defaults to ``None`` to use the maximum precision of the input/output's dtype and fp32
+        acc_reduce (bool): whether to accumulate the reduction to the given output buffer. Defaults to ``True``.
         input_lse (torch.Tensor | None, optional): Log-sum-exp tensor for input. Defaults to None.
         output_lse (torch.Tensor | None, optional): Log-sum-exp tensor for output. Defaults to None.
 
@@ -111,37 +113,57 @@ def range_reduce_ref(
             ):
                 output[out_start:out_end] += input[in_start:in_end]
         case "avg":
-            out_range_cnt_map: dict[tuple[int, int], int] = defaultdict(int)
+            out_range_cnt_map: dict[tuple[int, int], int] = (
+                defaultdict(lambda: 1) if acc_reduce else defaultdict(int)
+            )
             for (out_start, out_end), (in_start, in_end) in zip(
                 output_ranges, input_ranges
             ):
-                output[out_start:out_end] += input[in_start:in_end]
+                # if not acc_reduce, just store at the first time
+                if not acc_reduce and out_range_cnt_map[(out_start, out_end)] == 0:
+                    output[out_start:out_end] = input[in_start:in_end]
+                else:
+                    output[out_start:out_end] += input[in_start:in_end]
                 out_range_cnt_map[(out_start, out_end)] += 1
 
             for (out_start, out_end), cnt in out_range_cnt_map.items():
-                output[out_start:out_end] /= cnt
+                # if not acc_reduce and has no old value, set to 0
+                if not acc_reduce and cnt == 0:
+                    output[out_start:out_end] = 0
+                elif cnt > 1:
+                    output[out_start:out_end] /= cnt
         case "lse":
+            out_range_vis_map: dict[tuple[int, int], bool] = defaultdict(bool)
             for (out_start, out_end), (in_start, in_end) in zip(
                 output_ranges, input_ranges
             ):
                 cur_lse = input_lse[in_start:in_end]  # type: ignore[index]
-                old_lse_acc = output_lse[out_start:out_end].clone()  # type: ignore[index]
-                new_lse_acc = correct_attn_lse(
-                    lse1=old_lse_acc,
-                    lse2=cur_lse,
-                )
+                # if not acc_reduce, just store at the first time
+                if not acc_reduce and not out_range_vis_map[(out_start, out_end)]:
+                    new_lse_acc = cur_lse  # type: ignore[index]
+                else:
+                    old_lse_acc = output_lse[out_start:out_end].clone()  # type: ignore[index]
+                    new_lse_acc = correct_attn_lse(
+                        lse1=old_lse_acc,
+                        lse2=cur_lse,
+                    )
                 output_lse[out_start:out_end].copy_(new_lse_acc)  # type: ignore[index]
 
                 cur_out = input[in_start:in_end]
-                old_out_acc = output[out_start:out_end].clone()
-                new_out_acc = correct_attn_out(
-                    out1=old_out_acc,
-                    lse1=old_lse_acc,
-                    out2=cur_out,
-                    lse2=cur_lse,
-                    lse=new_lse_acc,
-                )
+                # if not acc_reduce, just store at the first time
+                if not acc_reduce and not out_range_vis_map[(out_start, out_end)]:
+                    new_out_acc = cur_out
+                else:
+                    old_out_acc = output[out_start:out_end].clone()
+                    new_out_acc = correct_attn_out(
+                        out1=old_out_acc,
+                        lse1=old_lse_acc,
+                        out2=cur_out,
+                        lse2=cur_lse,
+                        lse=new_lse_acc,
+                    )
                 output[out_start:out_end].copy_(new_out_acc)
+                out_range_vis_map[(out_start, out_end)] = True
         case _:
             raise ValueError(f"Invalid reduce_op: {reduce_op}")
 
@@ -175,8 +197,11 @@ class TestRangeReduce(TestCase):
 
     @parameterize("reduce_op", ["sum", "avg"])
     @parameterize("reduce_dtype", [None, torch.float32, torch.float64])
+    @parameterize("acc_reduce", [True])  # TODO: support acc_reduce=False
     @parameterize("deterministic", [False, True])
-    def test_normal_range_reduce(self, reduce_op, reduce_dtype, deterministic):
+    def test_normal_range_reduce(
+        self, reduce_op, reduce_dtype, acc_reduce, deterministic
+    ):
         """Test range_reduce function with normal reduction"""
 
         if not deterministic and reduce_dtype is not None:
@@ -208,6 +233,7 @@ class TestRangeReduce(TestCase):
             deterministic=deterministic,
             reduce_op=reduce_op,
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
             test_case="Basic functionality",
         )
 
@@ -225,6 +251,7 @@ class TestRangeReduce(TestCase):
             deterministic=deterministic,
             reduce_op=reduce_op,
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
             test_case="Empty tensor handling",
         )
 
@@ -250,6 +277,7 @@ class TestRangeReduce(TestCase):
             deterministic=deterministic,
             reduce_op=reduce_op,
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
             test_case="Different dimension (dim=1)",
         )
 
@@ -274,6 +302,7 @@ class TestRangeReduce(TestCase):
             deterministic=deterministic,
             reduce_op=reduce_op,
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
             test_case="Large tensors",
         )
 
@@ -298,6 +327,7 @@ class TestRangeReduce(TestCase):
             deterministic=deterministic,
             reduce_op=reduce_op,
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
             test_case="Edge case - single range",
         )
 
@@ -317,6 +347,7 @@ class TestRangeReduce(TestCase):
             deterministic=deterministic,
             reduce_op=reduce_op,
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
             test_case="Multi-dimensional tensors (dim=0)",
         )
 
@@ -335,6 +366,7 @@ class TestRangeReduce(TestCase):
             deterministic=deterministic,
             reduce_op=reduce_op,
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
             test_case="Multi-dimensional tensors (dim=2)",
         )
 
@@ -357,6 +389,7 @@ class TestRangeReduce(TestCase):
             deterministic=deterministic,
             reduce_op=reduce_op,
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
             test_case="Non-contiguous memory layout",
         )
 
@@ -376,6 +409,7 @@ class TestRangeReduce(TestCase):
                     deterministic=deterministic,
                     reduce_op=reduce_op,
                     reduce_dtype=reduce_dtype,
+                    acc_reduce=acc_reduce,
                     test_case=f"Various data types ({dtype=})",
                 )
 
@@ -389,6 +423,7 @@ class TestRangeReduce(TestCase):
         deterministic: bool = False,
         reduce_op: GroupReduceOp = "sum",
         reduce_dtype: torch.dtype | None = None,
+        acc_reduce: bool = True,
         test_case: str = "",
     ):
         assert reduce_op != "lse", "this func does not support lse-reduce"
@@ -407,6 +442,7 @@ class TestRangeReduce(TestCase):
             deterministic=deterministic,
             reduce_op=reduce_op,
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
         )
         assert output1.data_ptr() == result.data_ptr(), "Not in-place reduction"  # type: ignore[union-attr]
 
@@ -419,6 +455,7 @@ class TestRangeReduce(TestCase):
             dim=dim,
             reduce_op=reduce_op,
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
         )
 
         # Verify results match
@@ -431,7 +468,8 @@ class TestRangeReduce(TestCase):
                 f"in {deter_str} mode: {e}\nwhere {result=}\n{expected=}\n"
             )
 
-    def test_lse_range_reduce(self):
+    @parameterize("acc_reduce", [True])  # TODO: support acc_reduce=False
+    def test_lse_range_reduce(self, acc_reduce):
         """Test range_reduce function with lse reduction"""
 
         # --- Test case 1: Basic functionality --- #
@@ -460,6 +498,7 @@ class TestRangeReduce(TestCase):
             output_ranges,
             dim=0,
             reduce_dtype=torch.float32,
+            acc_reduce=acc_reduce,
             test_case="Basic functionality with bf16 input/output and fp32 lse",
         )
 
@@ -489,6 +528,7 @@ class TestRangeReduce(TestCase):
             output_ranges,
             dim=0,
             reduce_dtype=None,
+            acc_reduce=acc_reduce,
             test_case="Single Ranges with fp64 input/output and fp64 lse",
         )
 
@@ -526,6 +566,7 @@ class TestRangeReduce(TestCase):
             output_ranges,
             dim=0,
             reduce_dtype=None,
+            acc_reduce=acc_reduce,
             test_case="Double Ranges with all -inf lse",
         )
 
@@ -563,6 +604,7 @@ class TestRangeReduce(TestCase):
             output_ranges,
             dim=0,
             reduce_dtype=None,
+            acc_reduce=acc_reduce,
             test_case="Incomplete Single Ranges with half -inf lse",
         )
 
@@ -576,6 +618,7 @@ class TestRangeReduce(TestCase):
         output_ranges: torch.Tensor,
         dim: int = 0,
         reduce_dtype: torch.dtype | None = None,
+        acc_reduce: bool = True,
         test_case: str = "",
     ):
         # Copy output tensors for comparison
@@ -594,6 +637,7 @@ class TestRangeReduce(TestCase):
             deterministic=True,
             reduce_op="lse",
             reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
             input_lse=input_lse,
             output_lse=output_lse1,
         )
@@ -610,9 +654,10 @@ class TestRangeReduce(TestCase):
             output_ranges=output_ranges,
             dim=dim,
             reduce_op="lse",
+            reduce_dtype=reduce_dtype,
+            acc_reduce=acc_reduce,
             input_lse=input_lse,
             output_lse=output_lse2,
-            reduce_dtype=reduce_dtype,
         )
 
         # Verify results match
