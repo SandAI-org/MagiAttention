@@ -625,9 +625,6 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     int reduce_op,
     bool acc_reduce,
     bool allow_empty_init_out_buf) {
-  // TODO: support other reduce ops
-  GRPCOLL_HOST_ASSERT(reduce_op == 0);
-
   // TODO: support other num_ranks
   GRPCOLL_HOST_ASSERT(num_ranks == 1 || num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
 

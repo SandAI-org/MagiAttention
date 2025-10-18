@@ -969,9 +969,10 @@ void combine(
         if (lane_id == 0)
           channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + send_token_idx);
 
-        // Copy `lse`
-        if (num_heads > 0 and lane_id < num_heads)
-          channel_lse_buffers[dst_slot_idx * num_heads + lane_id] = __ldg(lse + send_token_idx * num_heads + lane_id);
+        // Copy `lse` from the actual token idx in the send lse buffer
+        if (num_heads > 0 and lane_id < num_heads) {
+          channel_lse_buffers[dst_slot_idx * num_heads + lane_id] = __ldg(lse + token_idx_in_x * num_heads + lane_id);
+        }
       }
 
       // Update token idx, channel tail idx by chunk size for last round

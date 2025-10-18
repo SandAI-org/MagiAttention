@@ -642,12 +642,9 @@ def test_main(
                         assert x_combine_before_to_a2av.shape == x_combine.shape
 
                 # prepare combine args
-                # bias_0 = torch.ones((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
-                # bias_1 = torch.randn((num_tokens, hidden), dtype=torch.bfloat16, device='cuda')
                 combine_args = {
                     "x": x_combine,
                     "combined_x": combined_x_gr_buf,
-                    "bias": None,
                     "handle": handle,
                     "config": config,
                     "async_finish": async_mode,
@@ -699,9 +696,6 @@ def test_main(
 
                 # check
                 torch.testing.assert_close(combined_x, combined_x_gr)
-                # check_x =
-                #   (combined_x.float() - bias_0.float() - bias_1.float())
-                #   / is_token_in_rank.sum(dim=1).unsqueeze(1)
 
                 send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
                 check_x = combined_x.float() / send_token_nums
