@@ -51,10 +51,13 @@
 #include <tuple>
 #include <vector>
 
-#include "config.hpp"
-#include "event.hpp"
+#include "kernels/api.cuh"
 #include "kernels/configs.cuh"
 #include "kernels/exception.cuh"
+#include "kernels/reduce_op.cuh"
+
+#include "config.hpp"
+#include "event.hpp"
 #include "meta.hpp"
 
 #ifndef TORCH_EXTENSION_NAME
@@ -200,7 +203,7 @@ struct Buffer {
       std::optional<EventHandle>& previous_event,
       bool async,
       bool allocate_on_comm_stream,
-      int reduce_op,
+      const std::string& reduce_op,
       bool acc_reduce,
       bool allow_empty_init_out_buf);
 
@@ -257,7 +260,7 @@ struct Buffer {
       std::optional<EventHandle>& previous_event,
       bool async,
       bool allocate_on_comm_stream,
-      int reduce_op,
+      const std::string& reduce_op,
       bool acc_reduce,
       bool allow_empty_init_out_buf);
 

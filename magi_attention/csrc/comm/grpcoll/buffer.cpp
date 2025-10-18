@@ -47,8 +47,6 @@
 #include <memory>
 
 #include "buffer.hpp"
-#include "kernels/api.cuh"
-#include "kernels/configs.cuh"
 
 namespace py = pybind11;
 
@@ -622,11 +620,14 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream,
-    int reduce_op,
+    const std::string& reduce_op,
     bool acc_reduce,
     bool allow_empty_init_out_buf) {
   // TODO: support other num_ranks
   GRPCOLL_HOST_ASSERT(num_ranks == 1 || num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
+
+  // Transfer reduce ops
+  ReduceOp reduce_op_ = str_to_reduce_op(reduce_op);
 
   // Check tensors
   GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
@@ -1203,13 +1204,16 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream,
-    int reduce_op,
+    const std::string& reduce_op,
     bool acc_reduce,
     bool allow_empty_init_out_buf) {
-  // TODO: support other reduce ops
-  GRPCOLL_HOST_ASSERT(reduce_op == 0);
   // TODO: support acc_reduce
   GRPCOLL_HOST_ASSERT(!acc_reduce);
+
+  // Transfer reduce ops
+  ReduceOp reduce_op_ = str_to_reduce_op(reduce_op);
+  // TODO: support other reduce ops
+  GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::SUM);
 
 #ifndef DISABLE_NVSHMEM
   const int num_channels = config.num_sms / 2;

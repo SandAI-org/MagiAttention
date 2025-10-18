@@ -783,7 +783,7 @@ class GrpCollBuffer:
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,
-            GrpCollBuffer.reduce_op_str2int_map[reduce_op],
+            reduce_op,
             acc_reduce,
             allow_empty_init_out_buf,
         )
@@ -933,13 +933,17 @@ class GrpCollBuffer:
         """Internode group reduce implementation"""
 
         # TODO: Support pre_perm_idx for internode group reduce
-        assert pre_perm_idx is None
-        # TODO: support other reduce ops
         assert (
-            reduce_op == "sum"
-        ), "Only support sum-reduce for internode group-reduce by now"
+            pre_perm_idx is None
+        ), "Internode group reduce does not support `pre_perm_idx`"
 
         assert isinstance(handle, GrpCollInterHandle)
+
+        if reduce_op == "lse":
+            assert lse is not None, "lse should not be None when `reduce_op == lse`"
+        else:  # no need to reduce lse, even passed in
+            lse = None
+            # combined_lse = None
 
         # Launch the internode group reduce kernel
         (
@@ -962,7 +966,7 @@ class GrpCollBuffer:
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,
-            GrpCollBuffer.reduce_op_str2int_map[reduce_op],
+            reduce_op,
             acc_reduce,
             allow_empty_init_out_buf,
         )
