@@ -387,7 +387,6 @@ def _flex_flash_attn_backward_compilable(
     bwd_end_events: list[int] | None,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
-    # print(f"{type(q_ranges)=}")
     mod = get_ffa_jit_mod(
         direction="bwd",
         head_dim=q.shape[-1],
@@ -658,8 +657,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges = None
             fwd_qk_map = None
             fwd_unique_count = None
-        # print(f"{fwd_start_events=}")
-        # print(f"{fwd_end_events=}")
+
         out, lse = _flex_flash_attn_forward(
             q,
             k,
@@ -789,9 +787,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if to_op_start_event:
             to_op_start_event.record()
-            dq = dq.to(q.dtype)
-            dk = dk.to(k.dtype)
-            dv = dv.to(v.dtype)
+        dq = dq.to(q.dtype)
+        dk = dk.to(k.dtype)
+        dv = dv.to(v.dtype)
+        if to_op_start_event:
             to_op_end_event.record()
 
         return (
@@ -874,7 +873,8 @@ def flex_flash_attn_func(
             Defaults to ``False``.
 
             **Note:** This flag is usually used in sparse attention cases but still under development.
-        fwd_start_events
+        fwd_start_events (list[torch.cuda.Event]): CUDA events for timing each part of the forward pass
+        bwd_start_events (list[torch.cuda.Event]): CUDA events for timing each part of the backward pass
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
             - out (torch.Tensor): Attention output tensor

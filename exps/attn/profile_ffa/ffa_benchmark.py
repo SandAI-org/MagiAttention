@@ -149,8 +149,6 @@ def prepare_dense_ffa_args(
         args = {
             "q_ranges": torch.tensor(cu_ranges, dtype=torch.int32, device=device),
             "k_ranges": torch.tensor(cu_ranges, dtype=torch.int32, device=device),
-            # "max_seqlen_q": max(seqlens),
-            # "max_seqlen_k": max(seqlens),
             "attn_type_map": torch.ones(
                 len(cu_ranges), dtype=torch.int32, device=device
             )
@@ -169,8 +167,6 @@ def prepare_dense_ffa_args(
         args = {
             "q_ranges": torch.tensor([[0, sq]], dtype=torch.int32, device=device),
             "k_ranges": torch.tensor([[0, sk]], dtype=torch.int32, device=device),
-            # "max_seqlen_q": sq,
-            # "max_seqlen_k": sk,
             "attn_type_map": torch.tensor(
                 [1 if causal else 0], dtype=torch.int32, device=device
             ),
@@ -223,8 +219,6 @@ def prepare_block_sparse_ffa_args(
         "q_ranges": q_ranges,
         "k_ranges": k_ranges,
         "attn_type_map": attn_type_map,
-        # "max_seqlen_q": block_size,
-        # "max_seqlen_k": block_size,
         "auto_range_merge": True,
     }
     return args, None
@@ -441,8 +435,7 @@ def run_benchmark_framework(
 # -----------------------------------------------------------------------------
 def run_dense_tests(args, common_params):
     seqlens_to_test = [8192]
-    # mask_types_to_test = ["full", "causal", "varlen_full", "varlen_causal"]
-    mask_types_to_test = ["full"]
+    mask_types_to_test = ["full", "causal", "varlen_full", "varlen_causal"]
     configs_to_test = [
         {"seqlen": sl, "mask_type": mt}
         for sl in seqlens_to_test
@@ -551,7 +544,7 @@ if __name__ == "__main__":
         "dtype": torch.bfloat16,
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         "warmup_iters": 100,
-        "run_iters": 1,
+        "run_iters": 100,
     }
 
     if args.test_type == "dense":

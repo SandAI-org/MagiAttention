@@ -1058,7 +1058,7 @@ struct CollectiveMainloopBwdSm90 {
         else
           return nullptr;
       }();
-      // mask_fn(tSrS, m_block);
+      mask_fn(tSrS, m_block);
 
       // we need to mask out the LSE values that might be read from other batch at each batch's last block.
       if constexpr (check_mask_lse) {
@@ -1339,9 +1339,14 @@ struct CollectiveMainloopBwdSm90 {
     for (; m_block < m_block_max - 1; ++m_block) {
       bwd_step(m_block, mask_fn, cute::false_type{});
     }
-
+    // only the last block need to mask_lse;
     bwd_step(m_block, mask_fn, cute::true_type{});
 
+    if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+      // TODO: Handle inv causal part, can be optimized
+    }
+
+    // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
     if constexpr (Q_dO_same_stages) {
       smem_pipe_read_do = smem_pipe_read;
     }

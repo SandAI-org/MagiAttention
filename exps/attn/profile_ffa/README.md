@@ -7,7 +7,7 @@
 
 - `compare_ffa_results.py`: compare two output csv with same mask type.
     ```shell
-    python base_output.csv target_output.csv compare_result.csv
+    python compare_ffa_results.py base_output.csv target_output.csv compare_result.csv
     ```
 
 ### Shells
@@ -36,6 +36,36 @@ In dir `optimize_ffa/benchmark_results_time`
 - `profile_dense_optimize_ffa.csv`:   dense mask result for optimize_ffa branch.
 - `profile_block_sparse_main.csv`: block sparse mask result for main branch.
 - `profile_block_sparse_optimize_ffa.csv`: block sparse mask results for optimize_ffa branch.
-- `main_optimize_ffa_dense.csv`: compare results for dense mask.
-- `main_optimize_ffa_block_sparse.csv`: compare results for block sparse mask.
+- `compare_main_optimize_ffa_dense.csv`: compare results for dense mask.
+- `compare_main_optimize_ffa_block_sparse.csv`: compare results for block sparse mask.
 - `output.txt`: Containing Intermediate outputs. At the end of output.txt, warnings will be issued for any cases with a TFLOPs variation greater than 1.5%.
+
+
+
+Testing Config: {'seqlen': 8192, 'mask_type': 'full'}
+**FORWARD PERFORMANCE**
+- Total Runtime (ms): 3.5861
+- Achieved TFLOP/s: 613.2028
+
+**Internal Timing Breakdown**
+| Operation   | Time (ms) | Description             |
+|-------------|-----------|-------------------------|
+| range_merge | 0.0000    | RangeMerge              |
+| Prepare     | 0.0153    | prepare_mha_forward     |
+| Run         | 3.4125    | run_mha_forward         |
+| Fill        | 0.0119    | Fast_zero_fill          |
+| to          | 0.0032    | cast output to qdtype   |
+
+
+**BACKWARD PERFORMANCE**
+- Total Runtime (ms)   | 10.0102
+- Achieved TFLOP/s     | 549.1948
+
+**Internal Timing Breakdown**
+| Operation  | Time (ms) | Description             |
+|------------|-----------|-------------------------|
+| range_merge| 0.0000    | RangeMerge              |
+| Prepare    | 0.1265    | prepare_mha_backward    |
+| Preprocess | 0.1050    | bwd_preprocess          |
+| Run        | 9.3409    | run_mha_backward        |
+| to         | 0.1765    | cast dq, dk, dv         |

@@ -70,7 +70,7 @@ echo "--- Comparing benchmark results ---"
 # Define full paths for the comparison script's input files
 BASE_DENSE_CSV="$OUTPUT_DIR/profile_dense_${BASE_BRANCH}.csv"
 TARGET_DENSE_CSV="$OUTPUT_DIR/profile_dense_${TARGET_BRANCH}.csv"
-COMPARE_DENSE_CSV="$OUTPUT_DIR/${BASE_BRANCH}_${TARGET_BRANCH}_dense.csv"
+COMPARE_DENSE_CSV="$OUTPUT_DIR/compare_${BASE_BRANCH}_${TARGET_BRANCH}_dense.csv"
 
 if [ -f "$BASE_DENSE_CSV" ] && [ -f "$TARGET_DENSE_CSV" ]; then
     echo "Comparing dense results into: $COMPARE_DENSE_CSV"
@@ -82,7 +82,7 @@ fi
 # Define full paths for the comparison script's input files
 BASE_SPARSE_CSV="$OUTPUT_DIR/profile_block_sparse_${BASE_BRANCH}.csv"
 TARGET_SPARSE_CSV="$OUTPUT_DIR/profile_block_sparse_${TARGET_BRANCH}.csv"
-COMPARE_SPARSE_CSV="$OUTPUT_DIR/${BASE_BRANCH}_${TARGET_BRANCH}_block_sparse.csv"
+COMPARE_SPARSE_CSV="$OUTPUT_DIR/compare_${BASE_BRANCH}_${TARGET_BRANCH}_block_sparse.csv"
 
 if [ -f "$BASE_SPARSE_CSV" ] && [ -f "$TARGET_SPARSE_CSV" ]; then
     echo "Comparing block_sparse results into: $COMPARE_SPARSE_CSV"
