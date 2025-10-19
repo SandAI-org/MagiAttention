@@ -500,10 +500,12 @@ class TestGroupCollective(DistTestBase):
     @parameterize(
         "test_case",
         [
+            # TODO: test acc_reduce=False
             {
                 "name": "naive_a2a_like_sum_reduce",
                 "world_size": 4,
                 "reduce_op": "sum",
+                "acc_reduce": True,
                 "send_buffer_per_rank": [
                     [0, 0, 0, 0],
                     [1, 1, 1, 1],
@@ -551,6 +553,7 @@ class TestGroupCollective(DistTestBase):
                 "name": "normal_group_sum_reduce",
                 "world_size": 4,
                 "reduce_op": "sum",
+                "acc_reduce": True,
                 "send_buffer_per_rank": [
                     [0, 1, 2, 3, 4],
                     [5, 6, 7, 8, 9, 10, 11],
@@ -598,6 +601,7 @@ class TestGroupCollective(DistTestBase):
                 "name": "normal_group_avg_reduce",
                 "world_size": 4,
                 "reduce_op": "avg",
+                "acc_reduce": True,
                 "send_buffer_per_rank": [
                     [0, 1, 2, 3, 4],
                     [5, 6, 7, 8, 9, 10, 11],
@@ -605,16 +609,16 @@ class TestGroupCollective(DistTestBase):
                     [17, 18, 19, 20, 21],
                 ],
                 "recv_buffer_before_reduce_per_rank": [
-                    [0, 0, 0, 0],
-                    [0, 0, 0, 0],
-                    [0, 0, 0, 0],
-                    [0, 0, 0, 0],
+                    [1, 2, 0, 1],
+                    [1, 0, 1, 0],
+                    [4, 2, 3, 4],
+                    [2, 2, 3, 2],
                 ],
                 "expected_recv_buffer_per_rank": [
-                    [4, 5, 10.5, 19],
-                    [17, 9, 13, 14],
-                    [20, 11, 7, 8],
-                    [10, 6.5, 15, 16],
+                    [3, 4, 7, 10],
+                    [9, 6, 7, 7],
+                    [12, 8, 5, 6],
+                    [6, 5, 9, 9],
                 ],
                 "input_split_size_list_per_rank": [
                     [1, 1, 1, 2],
@@ -645,6 +649,7 @@ class TestGroupCollective(DistTestBase):
                 "name": "normal_group_lse_reduce",
                 "world_size": 4,
                 "reduce_op": "lse",
+                "acc_reduce": True,
                 "send_buffer_per_rank": [
                     [0, 1, 2, 3, 4],
                     [5, 6, 7, 8, 9, 10, 11],
@@ -757,8 +762,8 @@ class TestGroupCollective(DistTestBase):
             # for now, native grpcoll is always deterministic
             if not deterministic:
                 return
-            # TODO: support native grpcoll for other reduce ops
-            if reduce_op != "sum":
+            # FIXME: lse_reduce
+            if reduce_op == "lse":
                 return
 
         # sanity check for meta args per rank
