@@ -204,8 +204,7 @@ struct Buffer {
       bool async,
       bool allocate_on_comm_stream,
       const std::string& reduce_op,
-      bool acc_reduce,
-      bool allow_empty_init_out_buf);
+      bool acc_reduce);
 
   std::tuple<
       torch::Tensor,
@@ -261,8 +260,7 @@ struct Buffer {
       bool async,
       bool allocate_on_comm_stream,
       const std::string& reduce_op,
-      bool acc_reduce,
-      bool allow_empty_init_out_buf);
+      bool acc_reduce);
 
   void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 

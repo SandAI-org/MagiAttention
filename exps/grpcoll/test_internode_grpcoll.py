@@ -87,9 +87,6 @@ def test_main(
     random_permute_output = True
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
-    allow_empty_init_out_buf = (  # if every token has at least one dst, we can empty-init
-        min_num_dst_ranks > 0
-    )
     pass_out_buffer = True
     acc_reduce_out_buffer = False  # TODO: support acc_reduce for internode_group_reduce
     acc_reduce_constant = rank
@@ -650,7 +647,6 @@ def test_main(
                     "async_finish": async_mode,
                     "reduce_op": "sum",
                     "acc_reduce": acc_reduce_out_buffer,
-                    "allow_empty_init_out_buf": allow_empty_init_out_buf,
                     # NOTE: still perm_to_a2av_idx, instead of unperm_to_a2av_idx
                     "pre_perm_idx": perm_to_a2av_idx
                     if use_a2av_perm_idxs == "inside"
@@ -847,7 +843,6 @@ def test_main(
                 "config": config,
                 "reduce_op": "sum",
                 "acc_reduce": acc_reduce_out_buffer,
-                "allow_empty_init_out_buf": allow_empty_init_out_buf,
             }
             t, notify_t = bench_kineto(
                 lambda: buffer.group_reduce(**tune_args), ("combine", "notify")

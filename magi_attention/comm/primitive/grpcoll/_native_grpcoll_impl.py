@@ -307,7 +307,6 @@ def native_group_reduce_impl(
         previous_event=None,
         async_finish=async_op,
         allocate_on_comm_stream=False,
-        allow_empty_init_out_buf=kwargs.pop("allow_empty_init_out_buf", False),
         lse=input_lse,
         combined_lse=output_lse,
     )

@@ -535,7 +535,6 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-        allow_empty_init_out_buf: bool = False,
         lse: torch.Tensor | None = None,
         combined_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
@@ -559,11 +558,6 @@ class GrpCollBuffer:
             previous_event: the event to wait before actually executing the kernel.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
-            allow_empty_init_out_buf:
-                whether to allow empty-initialize the combined_x / combined_lse buffer if not given,
-                which is useful when users know that no token is gonna be missed to be reduced
-                in the combined_x / combined_lse buffer, such as during the ep communication scenario,
-                but it is unsafe to set it to `True` in general group-reduce cases
 
             lse: the logsumexp of each token in `x` for each attention head,
                 with shape `[num_tokens, num_heads]`, to be sent along with `x`,
@@ -614,7 +608,6 @@ class GrpCollBuffer:
                 previous_event=previous_event,
                 async_finish=async_finish,
                 allocate_on_comm_stream=allocate_on_comm_stream,
-                allow_empty_init_out_buf=allow_empty_init_out_buf,
                 lse=lse,
                 combined_lse=combined_lse,
             )
@@ -632,7 +625,6 @@ class GrpCollBuffer:
             previous_event=previous_event,
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
-            allow_empty_init_out_buf=allow_empty_init_out_buf,
             lse=lse,
             combined_lse=combined_lse,
         )
@@ -750,7 +742,6 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-        allow_empty_init_out_buf: bool = False,
         lse: torch.Tensor | None = None,
         combined_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
@@ -785,7 +776,6 @@ class GrpCollBuffer:
             allocate_on_comm_stream,
             reduce_op,
             acc_reduce,
-            allow_empty_init_out_buf,
         )
 
         # View output to hidden shape
@@ -932,7 +922,6 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-        allow_empty_init_out_buf: bool = False,
         lse: torch.Tensor | None = None,
         combined_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
@@ -974,7 +963,6 @@ class GrpCollBuffer:
             allocate_on_comm_stream,
             reduce_op,
             acc_reduce,
-            allow_empty_init_out_buf,
         )
 
         # View output to hidden shape

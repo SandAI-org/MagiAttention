@@ -452,7 +452,6 @@ def test_func(
     pass_out_buffer: bool,
     pass_out_lse_buffer: bool,
     random_permute_output: bool,
-    allow_empty_init_out_buf: bool,
     use_a2av_perm_idxs: str,
     sim_gemm_weight: float,
     acc_reduce_out_buffer: bool,
@@ -749,7 +748,6 @@ def test_func(
         "async_finish": async_mode,
         "reduce_op": reduce_op,
         "acc_reduce": acc_reduce_out_buffer,
-        "allow_empty_init_out_buf": allow_empty_init_out_buf,
         # NOTE: still perm_to_a2av_idx, instead of unperm_to_a2av_idx
         "pre_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
         "lse": lse_combine,
@@ -895,9 +893,6 @@ def test_main(
     random_permute_output = True  # set to False to make the output / input of group-cast / group-reduce in a2a rank order
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
-    allow_empty_init_out_buf = (  # if every token has at least one dst, we can empty-init
-        min_num_dst_ranks > 0
-    )
 
     cast_lse = True
     reduce_op: GroupReduceOp = "avg"  # choose from {"sum", "avg", "lse"}
@@ -925,7 +920,7 @@ def test_main(
                 f"{num_topk=} | {num_local_experts=} | {num_heads=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
-                f"{allow_empty_init_out_buf=} | {cast_lse=} | {reduce_op=} | {pass_out_buffer=} | {pass_out_lse_buffer=}\n"
+                f"{cast_lse=} | {reduce_op=} | {pass_out_buffer=} | {pass_out_lse_buffer=}\n"
                 f"{acc_reduce_out_buffer=} | {acc_reduce_constant=} | {use_a2av_perm_idxs=}\n"
             ),
             flush=True,
@@ -980,7 +975,6 @@ def test_main(
         pass_out_buffer=pass_out_buffer,
         pass_out_lse_buffer=pass_out_lse_buffer,
         random_permute_output=random_permute_output,
-        allow_empty_init_out_buf=allow_empty_init_out_buf,
         use_a2av_perm_idxs=use_a2av_perm_idxs,
         sim_gemm_weight=sim_gemm_weight,
         acc_reduce_out_buffer=acc_reduce_out_buffer,
@@ -1114,7 +1108,6 @@ def test_main(
             "config": config,
             "reduce_op": "sum",
             "acc_reduce": acc_reduce_out_buffer,
-            "allow_empty_init_out_buf": allow_empty_init_out_buf,
         }
         t = bench(lambda: buffer.group_reduce(**tune_args))[0]
         if local_rank == 0:

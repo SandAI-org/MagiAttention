@@ -621,8 +621,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     bool async,
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
-    bool acc_reduce,
-    bool allow_empty_init_out_buf) {
+    bool acc_reduce) {
   // TODO: support other num_ranks
   GRPCOLL_HOST_ASSERT(num_ranks == 1 || num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
 
@@ -670,7 +669,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   float* combined_lse_ptr = nullptr;
   int64_t* pre_perm_idx_ptr = nullptr;
   if (lse.has_value()) {
-    GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::LSE);
+    GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::LSE); // no point to transfer lse if reduce_op != ReduceOp::LSE
     GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
     GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
     GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0);
@@ -683,12 +682,20 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       GRPCOLL_HOST_ASSERT(combined_lse_buf->size(0) == num_combined_tokens && combined_lse_buf->size(1) == num_heads);
       combined_lse.emplace(combined_lse_buf.value());
     } else {
+      GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if combined_lse_buf is not provided
+      /** NOTE: different from ep, for group-reduce with reduce_op == ReduceOp::LSE,
+       * some token in combined_lse might not reduce anything,
+       * since the corr. token has no destination rank in the corr. group-cast
+       * so we have to "-inf"-initialize combined_lse, instead of empty initialization
+       * however, we handle the "-inf" initialization inside the combine kernel
+       * thus here, we still use empty initialization
+       */
       combined_lse = torch::empty({num_combined_tokens, num_heads}, lse->options());
     }
 
     combined_lse_ptr = combined_lse->data_ptr<float>();
   } else {
-    GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE);
+    GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE); // lse must be provided when reduce_op == ReduceOp::LSE
   }
   if (pre_perm_idx.has_value()) {
     GRPCOLL_HOST_ASSERT(pre_perm_idx->dim() == 1 && pre_perm_idx->is_contiguous());
@@ -713,12 +720,6 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       /*comm_stream=*/comm_stream);
 
   // Allocate combined_x buffer
-  /** NOTE: different from ep, for group-reduce,
-   * some token in combined_x might not reduce anything,
-   * since the corr. token has no destination rank in the corr. group-cast
-   * so we have to zero-initialize combined_x, instead of empty initialization
-   * unless the user can guarantee that no such token exists
-   */
   auto combined_x = torch::Tensor();
   if (combined_x_buf.has_value()) {
     GRPCOLL_HOST_ASSERT(combined_x_buf->dim() == 2 and combined_x_buf->is_contiguous());
@@ -727,8 +728,14 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     combined_x = combined_x_buf.value();
   } else {
     GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if combined_x_buf is not provided
-    combined_x =
-        allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden_size}, x.options()) : torch::zeros({num_combined_tokens, hidden_size}, x.options());
+    /** NOTE: different from ep, for group-reduce,
+     * some token in combined_x might not reduce anything,
+     * since the corr. token has no destination rank in the corr. group-cast
+     * so we have to zero-initialize combined_x, instead of empty initialization
+     * however, we handle the zero initialization inside the combine kernel
+     * thus here, we still use empty initialization
+     */
+    combined_x = torch::empty({num_combined_tokens, hidden_size}, x.options());
   }
 
   // Check if the buffer size is enough
@@ -1209,8 +1216,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     bool async,
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
-    bool acc_reduce,
-    bool allow_empty_init_out_buf) {
+    bool acc_reduce) {
   // TODO: support acc_reduce
   GRPCOLL_HOST_ASSERT(!acc_reduce);
 
@@ -1317,12 +1323,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     }
 
   // Allocate combined_x buffer
-  /** NOTE: different from ep, for group-reduce,
-   * some token in combined_x might not reduce anything,
-   * since the corr. token has no destination rank in the corr. group-cast
-   * so we have to zero-initialize combined_x, instead of empty initialization
-   * unless the user can guarantee that no such token exists
-   */
   auto combined_x = torch::Tensor();
   if (combined_x_buf.has_value()) {
     GRPCOLL_HOST_ASSERT(combined_x_buf->dim() == 2 and combined_x_buf->is_contiguous());
@@ -1331,7 +1331,14 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     combined_x = combined_x_buf.value();
   } else {
     GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if combined_x_buf is not provided
-    combined_x = allow_empty_init_out_buf ? torch::empty({num_combined_tokens, hidden}, x.options()) : torch::zeros({num_combined_tokens, hidden}, x.options());
+    /** NOTE: different from ep, for group-reduce,
+     * some token in combined_x might not reduce anything,
+     * since the corr. token has no destination rank in the corr. group-cast
+     * so we have to zero-initialize combined_x, instead of empty initialization
+     * however, we handle the zero initialization inside the combine kernel
+     * thus here, we still use empty initialization
+     */
+    combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
   }
 
   // Launch data combine
