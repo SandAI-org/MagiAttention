@@ -1024,8 +1024,7 @@ struct CollectiveMainloopBwdSm90 {
       cute::copy(smem_tiled_copy_V, tdPsV_copy_view, tdPrV_copy_view);
     }
 
-    // auto bwd_step = [&](int m_block, auto mask_fn, auto check_mask_lse_type) {
-    auto bwd_step = [&](int m_block, auto check_mask_lse_type) {
+    auto bwd_step = [&](int m_block, auto mask_fn, auto check_mask_lse_type) {
       Tensor tSrS = partition_fragment_C(tiled_mma_SdP, select<!SdP_swapAB ? 0 : 1, !SdP_swapAB ? 1 : 0>(TileShape_MNK{}));
       consumer_wait(pipeline_q, smem_pipe_read);
       static constexpr bool check_mask_lse = decltype(check_mask_lse_type)::value;
@@ -1334,87 +1333,14 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
-    // auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
-
-    // auto bypass_fn = [&](auto& tSrS, int m_block) {};
-    // auto boundary_mask_fn = [&](auto& tSrS, int m_block) {
-    //  mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    //};
-    // auto regular_mask_fn = [&](auto& tSrS, int m_block) {
-    //  mask.template apply<false /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    //};
-
-    // int const last_n_block = cute::ceil_div(seqlen_info.seqlen_k, kBlockN) - 1;
-    /*
-    if (n_block == last_n_block) {
-      // for last n_block, we can skip all mask mask.
-      if (seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
-// #pragma unroll 1
-CUTLASS_PRAGMA_NO_UNROLL
-        for (; m_block < m_block_max - 1; ++m_block) {
-          bwd_step(m_block, bypass_fn, cute::false_type{});
-        }
-        bwd_step(m_block, bypass_fn, cute::true_type{});
-      }
-      // otherwise we need boundary mask.
-      else {
-// #pragma unroll 1
-CUTLASS_PRAGMA_NO_UNROLL
-        for (; m_block < m_block_max - 1; ++m_block) {
-          bwd_step(m_block, boundary_mask_fn, cute::false_type{});
-        }
-        bwd_step(m_block, boundary_mask_fn, cute::true_type{});
-      }
-    } else {
-      // for Causal and BiCausal, we need to do regular mask for some block at the begining;
-      if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-        int n_idx_max = (n_block + 1) * kBlockN;
-        int m_block_idx_for_casual = std::max(m_block_min, (n_idx_max + seqlen_k - seqlen_q) / kBlockM);
-        m_block_idx_for_casual = std::min(m_block_idx_for_casual, m_block_max - 1);
-// #pragma unroll 1
-CUTLASS_PRAGMA_NO_UNROLL
-        for (; m_block < m_block_idx_for_casual; ++m_block) {
-          bwd_step(m_block, regular_mask_fn, cute::false_type{});
-        }
-      }
-
-      int const n_idx_min = n_block * kBlockM;
-      int m_block_idx_for_inv_casual =
-          attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? m_block_max - 1 : cute::ceil_div(n_idx_min, kBlockN) - 1;
-      m_block_idx_for_inv_casual = std::min(m_block_idx_for_inv_casual, m_block_max - 1);
-
-// #pragma unroll 1
-CUTLASS_PRAGMA_NO_UNROLL
-      for (; m_block < m_block_idx_for_inv_casual; ++m_block) {
-        bwd_step(m_block, bypass_fn, cute::false_type{});
-      }
-
-// for Invcausal and BiCausal, we need to do regular mask for some block at the end;
-// #pragma unroll 1
-CUTLASS_PRAGMA_NO_UNROLL
-      for (; m_block < m_block_max - 1; ++m_block) {
-        bwd_step(m_block, regular_mask_fn, cute::false_type{});
-      }
-
-      bwd_step(m_block, regular_mask_fn, cute::true_type{});
-    }*/
+    auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
 
     CUTLASS_PRAGMA_NO_UNROLL
     for (; m_block < m_block_max - 1; ++m_block) {
-      // bwd_step(m_block, mask_fn, cute::false_type{});
-      bwd_step(m_block, cute::false_type{});
+      bwd_step(m_block, mask_fn, cute::false_type{});
     }
 
-    // bwd_step(m_block, mask_fn, cute::true_type{});
-    bwd_step(m_block, cute::true_type{});
-
-    /*
-    CUTLASS_PRAGMA_NO_UNROLL
-    for (; m_block < m_block_max - 1; ++m_block) {
-      bwd_step(m_block, cute::false_type{});
-    }
-
-    bwd_step(m_block, bypass_fn, cute::true_type{}); */
+    bwd_step(m_block, mask_fn, cute::true_type{});
 
     if constexpr (Q_dO_same_stages) {
       smem_pipe_read_do = smem_pipe_read;
