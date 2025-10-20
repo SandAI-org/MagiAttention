@@ -993,17 +993,28 @@ void combine(
     // Ger recv warp info
     // NOTES: the first warp for updating the queue head, others for reduction
     constexpr int num_reduce_warps = kNumThreads / WARP_SIZE - 1;
-    const int reduce_warp_id = warp_id - 1;
-    const int responsible_rank = lane_id;
-
+    const int reduce_warp_id = warp_id - 1, responsible_rank = lane_id;
     GRPCOLL_STATIC_ASSERT(kNumRanks <= WARP_SIZE, "Invalid number of ranks");
     GRPCOLL_STATIC_ASSERT(num_reduce_warps > 0, "Invalid number of warps");
 
-    // Prepare some static shared memory buffers
-    // including shared head, tail and retired flags for reduce warps
-    __shared__ volatile int shared_warp_channel_head_idx[num_reduce_warps][kNumRanks]; // all heads for each reduce warp, each rank w.r.t. the responsible channel
-    __shared__ volatile int shared_channel_tail_idx[kNumRanks]; // all tails for each rank w.r.t. the responsible channel
-    __shared__ volatile bool shared_warp_retired[num_reduce_warps]; // the retired flags for each reduce warp
+    // Get head info
+    // NOTES: the `num_heads` will be 0 if `kReduceOp != ReduceOp::LSE`
+    // and `kMaxNumHeads` will be 1 if `kReduceOp != ReduceOp::LSE`
+    constexpr int kMaxNumHeads = kReduceOp == ReduceOp::LSE ? 128 : 1;
+    const int head_dim = kReduceOp == ReduceOp::LSE ? hidden_size / num_heads : -1;
+    GRPCOLL_DEVICE_ASSERT(num_heads <= kMaxNumHeads);
+
+    // Prepare some static shared memory for flags
+    __shared__ volatile int shared_warp_channel_head_idx[num_reduce_warps][kNumRanks]; // channel heads for each reduce warp, each rank w.r.t. the responsible channel
+    __shared__ volatile int shared_channel_tail_idx[kNumRanks]; // channel tails for each rank w.r.t. the responsible channel
+    __shared__ volatile bool shared_warp_retired[num_reduce_warps]; // retired flags for each reduce warp w.r.t. the responsible channel
+
+    // Prepare some static shared memory for temporary lse buffers
+    // which will be read frequently while reducing the hidden values of some single token
+    // FIXME: the bank conflict is very severe for these buffers
+    __shared__ reduce_dtype_t shared_reduced_lse_buf[num_reduce_warps][kMaxNumHeads]; // reduced lse buffer for each head, each reduce warp
+    __shared__ reduce_dtype_t
+        shared_old_lse_rescale_weight_buf[num_reduce_warps][kMaxNumHeads]; // the weight to rescale the old `combined_lse` for each head, each reduce warp
 
     // Init the static shared memory buffers
     if (thread_id < num_reduce_warps)
@@ -1147,23 +1158,33 @@ void combine(
             float recv_lses[kNumRanks];
 #pragma unroll
             for (int j = 0; j < num_src_ranks; ++j)
-              // FIXME：for now, the channel_lse_buffers will be read again when reduing the hidden values
-              // since no shared memory is used, thus here we use `__ldg` instead of `ld_nc_global`
-              // recv_lses[j] = ld_nc_global(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + h);
+              // NOTES：for now, the channel_lse_buffers will be read repeatedly during reduing the hidden values
+              // since no shared memory is used, thus here we use `__ldg` instead of original `ld_nc_global`
               recv_lses[j] = __ldg(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + h);
 
             // Initialize the high-precision reduce buffer
-            reduce_dtype_t reduced_lse;
-            if constexpr (kAccReduce) // if in `kAccReduce` mode, initialize `combined_lse` with the old value
-              reduced_lse = static_cast<reduce_dtype_t>(*combined_lse_ptr);
-            else // else, initialize `combined_lse` with -inf
+            reduce_dtype_t reduced_lse, old_lse;
+            if constexpr (kAccReduce) { // if in `kAccReduce` mode, initialize `combined_lse` with the old value
+              reduced_lse = old_lse = static_cast<reduce_dtype_t>(*combined_lse_ptr);
+            } else { // else, initialize `combined_lse` with -inf
               reduced_lse = get_neg_inf<reduce_dtype_t>();
+            }
 
 #pragma unroll
             // Apply lse reduce for each src rank
             for (int j = 0; j < num_src_ranks; ++j)
               lse_reduce<reduce_dtype_t, float>(/*reduced_lse=*/reduced_lse, /*src_lse=*/recv_lses[j]);
             auto reduced_lse_float = static_cast<float>(reduced_lse);
+
+            // Store the reduced lse to shared memory buffer temporarily
+            // which will be read later to reduce the hidden values
+            shared_reduced_lse_buf[reduce_warp_id][h] = reduced_lse_float;
+
+            // Store the weight to rescale the old `combined_lse` for each head
+            // which will be read later to reduce the hidden values
+            // if in `kAccReduce` mode
+            if constexpr (kAccReduce)
+              shared_old_lse_rescale_weight_buf[reduce_warp_id][h] = get_lse_rescale_weight(old_lse, reduced_lse);
 
             // Store the reduced lse to `combined_lse` as well
             // REVIEW: is it necessary to use TMA copy here to optimize ?
@@ -1178,7 +1199,11 @@ void combine(
           // Get the hidden value ptr of `int_4` to reduce to in `combined_x`
           int4* reduce_hidval_ptr_int4 = combined_x_int4 + token_idx * hidden_int4 + i;
 
+          // Get the optional head idx, valid and used only when `kReduceOp == ReduceOp::LSE`
+          const int head_idx = kReduceOp == ReduceOp::LSE ? i * kDtypePerInt4 / head_dim : -1;
+
           // Load all recv partial hidden values from all src ranks
+          // REVIEW: why use a temp buffer here ?
           int4 recv_hidval_int4[kNumRanks];
 #pragma unroll
           for (int j = 0; j < num_src_ranks; ++j)
@@ -1194,7 +1219,12 @@ void combine(
             auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
             foreach_assign<reduce_dtype_t, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
 
-            // FIXME: the old lse needed to be loaded and to scale the initial value
+            // Rescale the initial old value in advance
+            // if `kReduceOp == ReduceOp::LSE`
+            if constexpr (kReduceOp == ReduceOp::LSE) {
+              reduce_dtype_t rescale_weight = shared_old_lse_rescale_weight_buf[reduce_warp_id][head_idx];
+              foreach_mul<reduce_dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, rescale_weight);
+            }
           } else { // not in `kAccReduce` mode
             // Zero-initialize the high-precision reduce buffer
             foreach_fill<reduce_dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, 0);
@@ -1203,10 +1233,8 @@ void combine(
           // Reduce all recv partial hidden values from all src ranks
           // to the high-precision reduce buffer
           if constexpr (kReduceOp == ReduceOp::LSE) {
-            // TODO: optimize the repeated load of each head of lse using shared memory
-            const auto head_dim = hidden_size / num_heads;
-            auto head_idx = i * kDtypePerInt4 / head_dim;
-            auto reduced_lse = static_cast<reduce_dtype_t>(__ldg(combined_lse + token_idx * num_heads + head_idx));
+            // TODO: optimize the repeated load of each head of lse with shared memory
+            reduce_dtype_t reduced_lse = shared_reduced_lse_buf[reduce_warp_id][head_idx];
             for (int j = 0; j < num_src_ranks; ++j) {
               auto jth_recv_hidval_dtype = reinterpret_cast<const dtype_t*>(&recv_hidval_int4[j]);
               auto jth_recv_lse = __ldg(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + head_idx);

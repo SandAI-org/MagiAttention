@@ -714,10 +714,17 @@ DEVICE_INLINE void foreach_fill(dst_dtype_t* dst_ptr, const dst_dtype_t value) {
 }
 
 template <typename dst_dtype_t, int kArrayLength>
-DEVICE_INLINE void foreach_div(dst_dtype_t* dst_ptr, const dst_dtype_t divisor) {
+DEVICE_INLINE void foreach_mul(dst_dtype_t* dst_ptr, const dst_dtype_t value) {
 #pragma unroll
   for (int i = 0; i < kArrayLength; ++i)
-    dst_ptr[i] /= divisor;
+    dst_ptr[i] *= value;
+}
+
+template <typename dst_dtype_t, int kArrayLength>
+DEVICE_INLINE void foreach_div(dst_dtype_t* dst_ptr, const dst_dtype_t value) {
+#pragma unroll
+  for (int i = 0; i < kArrayLength; ++i)
+    dst_ptr[i] /= value;
 }
 
 template <typename dst_dtype_t, typename src_dtype_t, int kArrayLength>
@@ -738,8 +745,7 @@ template <typename reduce_dtype_t, typename src_dtype_t, typename lse_dtype_t, i
 DEVICE_INLINE void foreach_reduce_lse(reduce_dtype_t* reduce_ptr, const reduce_dtype_t reduced_lse, const src_dtype_t* src_ptr, const lse_dtype_t src_lse) {
   // formula derivation:
   // out += exp(lsei - lse) * srci, where `lse` is the reduced lse, and `out` is the reduced buf
-  reduce_dtype_t src_lse_reduce_dtype = static_cast<reduce_dtype_t>(src_lse);
-  reduce_dtype_t rescale_weight = get_lse_rescale_weight(src_lse_reduce_dtype, reduced_lse);
+  reduce_dtype_t rescale_weight = get_lse_rescale_weight(static_cast<reduce_dtype_t>(src_lse), reduced_lse);
 
 #pragma unroll
   for (int i = 0; i < kArrayLength; ++i)
