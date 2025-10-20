@@ -465,9 +465,9 @@ def run_dense_tests(args, common_params):
 
 
 def run_block_sparse_tests(args, common_params):
-    seqlens_to_test = [49152]
-    sparsity_ratios_to_test = [0.2]
-    block_sizes_to_test = [64]
+    seqlens_to_test = [16384, 49152]
+    sparsity_ratios_to_test = [0.1, 0.2, 0.5, 0.8]
+    block_sizes_to_test = [64, 128]
     configs_to_test = [
         {"seqlen": sl, "sparsity_ratio": sr, "block_size": bs}
         for sl in seqlens_to_test
@@ -544,7 +544,7 @@ if __name__ == "__main__":
         "hd": 128,
         "dtype": torch.bfloat16,
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        "warmup_iters": 10,
+        "warmup_iters": 100,
         "run_iters": 100,
     }
 
