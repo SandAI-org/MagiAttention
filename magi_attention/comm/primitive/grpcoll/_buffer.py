@@ -402,7 +402,6 @@ class GrpCollBuffer:
         is_token_in_rank: torch.Tensor | None = None,
         num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
-        expert_alignment: int = 1,
         num_worst_tokens: int = 0,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
@@ -432,7 +431,6 @@ class GrpCollBuffer:
             topk_weights: `[num_tokens, num_topk]` with `torch.float`, the expert weights of each token to dispatch.
             post_perm_idx: `[num_recv_tokens]` with `torch.int64`, the post-permutation indices of each token,
                 i.e. recv_x[post_perm_idx] can recover to the original recv_x in rank order.
-            expert_alignment: align the number of tokens received by each local expert to this variable.
             num_worst_tokens: the worst number of tokens to receive, if specified, there will be no CPU sync, and it
                 will be CUDA-graph compatible. Please also notice that this flag is for intranode only.
             config: the performance tuning config if given.
@@ -492,8 +490,6 @@ class GrpCollBuffer:
                 is_token_in_rank=is_token_in_rank,
                 num_tokens_per_expert=num_tokens_per_expert,
                 post_perm_idx=post_perm_idx,
-                expert_alignment=expert_alignment,
-                num_worst_tokens=num_worst_tokens,
                 previous_event=previous_event,
                 async_finish=async_finish,
                 allocate_on_comm_stream=allocate_on_comm_stream,
@@ -513,7 +509,6 @@ class GrpCollBuffer:
             is_token_in_rank=is_token_in_rank,
             num_tokens_per_expert=num_tokens_per_expert,
             post_perm_idx=post_perm_idx,
-            expert_alignment=expert_alignment,
             num_worst_tokens=num_worst_tokens,
             previous_event=previous_event,
             async_finish=async_finish,
@@ -640,7 +635,6 @@ class GrpCollBuffer:
         is_token_in_rank: torch.Tensor | None = None,
         num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
-        expert_alignment: int = 1,
         num_worst_tokens: int = 0,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
@@ -700,7 +694,6 @@ class GrpCollBuffer:
             rank_prefix_matrix,
             channel_prefix_matrix,
             post_perm_idx,
-            expert_alignment,
             num_worst_tokens,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
@@ -795,8 +788,6 @@ class GrpCollBuffer:
         is_token_in_rank: torch.Tensor | None = None,
         num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
-        expert_alignment: int = 1,
-        num_worst_tokens: int = 0,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
@@ -810,9 +801,6 @@ class GrpCollBuffer:
         assert not cast_lse
         # TODO: support post-perm for internode group cast
         assert post_perm_idx is None
-        assert (
-            num_worst_tokens == 0
-        ), "Internode group cast does not support `num_worst_tokens > 0`"
 
         if cast_lse:
             assert lse is not None, "lse should not be None when `cast_lse` is set"  # type: ignore[unreachable]
@@ -877,7 +865,6 @@ class GrpCollBuffer:
             recv_rdma_rank_prefix_sum,
             gbl_channel_prefix_matrix,
             recv_gbl_rank_prefix_sum,
-            expert_alignment,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_finish,

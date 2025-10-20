@@ -143,7 +143,6 @@ __global__ void notify_dispatch(
     const bool* is_token_in_rank,
     int num_tokens,
     int num_channels,
-    int expert_alignment,
     const int rdma_clean_offset,
     const int rdma_num_int_clean,
     const int nvl_clean_offset,
@@ -315,7 +314,6 @@ __global__ void notify_dispatch(
 #pragma unroll
       for (int i = 0; i < NUM_MAX_NVL_PEERS; ++i)
         sum += nvl_recv_num_tokens_per_expert.buffer(i)[thread_id];
-      sum = (sum + expert_alignment - 1) / expert_alignment * expert_alignment;
       while (ld_volatile_global(moe_recv_expert_counter_mapped + thread_id) != -1)
         ;
       moe_recv_expert_counter_mapped[thread_id] = sum;
@@ -393,7 +391,6 @@ void notify_dispatch(
     int hidden_int4,
     int num_scales,
     int num_topk,
-    int expert_alignment,
     int* rdma_channel_prefix_matrix,
     int* recv_rdma_rank_prefix_sum,
     int* gbl_channel_prefix_matrix,
@@ -425,7 +422,6 @@ void notify_dispatch(
         is_token_in_rank,                                                                                                          \
         num_tokens,                                                                                                                \
         num_channels,                                                                                                              \
-        expert_alignment,                                                                                                          \
         rdma_clean_meta.first,                                                                                                     \
         rdma_clean_meta.second,                                                                                                    \
         nvl_clean_meta.first,                                                                                                      \

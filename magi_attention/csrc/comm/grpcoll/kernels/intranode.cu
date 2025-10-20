@@ -62,7 +62,6 @@ __global__ void notify_dispatch(
     int* channel_prefix_matrix,
     int* rank_prefix_matrix_copy,
     int num_memset_int,
-    int expert_alignment,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
     int rank) {
@@ -116,7 +115,6 @@ __global__ void notify_dispatch(
 #pragma unroll
       for (int i = 0; i < kNumRanks; ++i)
         sum += local_per_expert_buffer[i * num_experts_per_rank + thread_id];
-      sum = (sum + expert_alignment - 1) / expert_alignment * expert_alignment;
       moe_recv_expert_counter_mapped[thread_id] = sum;
     }
     __syncthreads();
@@ -170,7 +168,6 @@ void notify_dispatch(
     int* channel_prefix_matrix,
     int* rank_prefix_matrix_copy,
     int num_memset_int,
-    int expert_alignment,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
     int rank,
@@ -191,7 +188,6 @@ void notify_dispatch(
       channel_prefix_matrix,               \
       rank_prefix_matrix_copy,             \
       num_memset_int,                      \
-      expert_alignment,                    \
       buffer_ptrs,                         \
       barrier_signal_ptrs,                 \
       rank);                               \
@@ -258,7 +254,6 @@ void dispatch(
     int num_tokens,
     int num_worst_tokens,
     int hidden_int4,
-    int num_experts,
     int num_heads,
     void** buffer_ptrs,
     int rank,
@@ -663,7 +658,6 @@ void dispatch(
     int num_tokens,
     int num_worst_tokens,
     int hidden_int4,
-    int num_experts,
     int num_heads,
     void** buffer_ptrs,
     int rank,
@@ -699,7 +693,6 @@ void dispatch(
         num_tokens,                                                      \
         num_worst_tokens,                                                \
         hidden_int4,                                                     \
-        num_experts,                                                     \
         num_heads,                                                       \
         buffer_ptrs,                                                     \
         rank,                                                            \
