@@ -114,7 +114,7 @@ struct Softmax {
   CUTLASS_DEVICE Softmax(float const softmax_scale_log2_) : softmax_scale_log2(softmax_scale_log2_) {};
 
   template <bool Is_first, bool Check_inf = false, typename Tensor0>
-  __device__ __forceinline__ TensorT max_get_scale(Tensor0& acc_s) {
+  __forceinline__ __device__ TensorT max_get_scale(Tensor0& acc_s) {
     // Reshape acc_s from ((2, 2, V), MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
     Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
     static_assert(CUTE_STATIC_V(size<0>(scores)) == kNRows);
@@ -137,7 +137,7 @@ struct Softmax {
   };
 
   template <bool Is_first, bool Check_inf = false, typename Tensor0>
-  __device__ __forceinline__ void online_softmax(Tensor0& acc_s) {
+  __forceinline__ __device__ void online_softmax(Tensor0& acc_s) {
     // Reshape acc_s from ((2, 2, V), MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
     Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol(acc_s.layout()));
     static_assert(CUTE_STATIC_V(size<0>(scores)) == kNRows);
@@ -147,7 +147,7 @@ struct Softmax {
     flash::reduce_sum</*zero_init=*/Is_first, /*warp_reduce=*/false>(scores, row_sum);
   };
 
-  __device__ __forceinline__ TensorT finalize(float const final_scale = 1.f) {
+  __forceinline__ __device__ TensorT finalize(float const final_scale = 1.f) {
     SumOp<float> sum_op;
     quad_allreduce_(row_sum, row_sum, sum_op);
     TensorT scores_scale;
@@ -167,7 +167,7 @@ struct Softmax {
   };
 
   template <typename Tensor1>
-  __device__ __forceinline__ void rescale_o(Tensor1& acc_o, TensorT const& scores_scale) {
+  __forceinline__ __device__ void rescale_o(Tensor1& acc_o, TensorT const& scores_scale) {
     // Reshape acc_o from (MMA=4, MMA_M, MMA_K) to (nrow=(2, MMA_M), ncol=(2, MMA_K))
     Tensor acc_o_rowcol = make_tensor(acc_o.data(), flash::convert_layout_acc_rowcol(acc_o.layout()));
     static_assert(CUTE_STATIC_V(size<0>(acc_o_rowcol)) == kNRows);
