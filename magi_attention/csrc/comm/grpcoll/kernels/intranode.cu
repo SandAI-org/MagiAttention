@@ -816,7 +816,7 @@ void combine(
     int num_recv_buffer_tokens) {
   // Get thread Info
   const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
-  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id(), num_warps = static_cast<int>(blockDim.x) / WARP_SIZE;
+  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
   const bool is_sender = sm_id % 2 == 0; // even-numbered SMs are senders
   GRPCOLL_DEVICE_ASSERT(num_sms % 2 == 0);
 
@@ -991,33 +991,32 @@ void combine(
     }
   } else {
     // Ger recv warp info
-    // NOTES: one warp for updating the queue head, others for reduction
-    constexpr int num_recv_warps = kNumThreads / WARP_SIZE;
-    const auto recv_warp_id = warp_id;
+    // NOTES: the first warp for updating the queue head, others for reduction
+    constexpr int num_reduce_warps = kNumThreads / WARP_SIZE - 1;
+    const int reduce_warp_id = warp_id - 1;
+    const int responsible_rank = lane_id;
 
     GRPCOLL_STATIC_ASSERT(kNumRanks <= WARP_SIZE, "Invalid number of ranks");
-    GRPCOLL_STATIC_ASSERT(num_recv_warps >= 2, "Invalid number of recv warps");
+    GRPCOLL_STATIC_ASSERT(num_reduce_warps > 0, "Invalid number of warps");
 
     // Prepare some static shared memory buffers
-    // including shared head, tail and retired flags for receiver warps
-    __shared__ volatile int shared_warp_channel_head_idx[num_recv_warps][kNumRanks]; // all heads for each reduce warp, each rank w.r.t. the responsible channel
+    // including shared head, tail and retired flags for reduce warps
+    __shared__ volatile int shared_warp_channel_head_idx[num_reduce_warps][kNumRanks]; // all heads for each reduce warp, each rank w.r.t. the responsible channel
     __shared__ volatile int shared_channel_tail_idx[kNumRanks]; // all tails for each rank w.r.t. the responsible channel
-    __shared__ volatile bool shared_warp_retired[num_recv_warps]; // the retired flags for each reduce warp
+    __shared__ volatile bool shared_warp_retired[num_reduce_warps]; // the retired flags for each reduce warp
 
-    // Init the shared memory buffers
-    if (thread_id < num_recv_warps)
+    // Init the static shared memory buffers
+    if (thread_id < num_reduce_warps)
       shared_warp_retired[thread_id] = false;
     if (lane_id < kNumRanks)
-      shared_warp_channel_head_idx[recv_warp_id][lane_id] = 0;
+      shared_warp_channel_head_idx[reduce_warp_id][lane_id] = 0;
     if (thread_id < kNumRanks)
       shared_channel_tail_idx[thread_id] = 0;
 
     // Sync all recv warps
     sync_warp_group(/*group_flag=*/0, /*group_size=*/kNumThreads);
 
-    if (thread_id < WARP_SIZE) { // warp0 for updating the queue head, where each lane handles one rank
-      const int responsible_rank = lane_id;
-
+    if (warp_id == 0) { // warp0 for updating the queue head, where each lane handles one rank
       // Get head/tail ptr of the responsible rank in buffer of the recv rank
       //  `head_idx`: shape=(kNumChannels, kNumRanks), dtype=int
       //  `tail_idx`: shape=(kNumChannels, kNumRanks), dtype=int
@@ -1030,8 +1029,8 @@ void combine(
         // Check whether all reduce warps are retired
         bool retired = true;
 #pragma unroll
-        for (int reduce_warp_id = 1; reduce_warp_id < num_recv_warps; ++reduce_warp_id) {
-          retired &= shared_warp_retired[reduce_warp_id];
+        for (int i = 0; i < num_reduce_warps; ++i) {
+          retired &= shared_warp_retired[i];
           if (!retired)
             break;
         }
@@ -1044,9 +1043,10 @@ void combine(
         // Get minimum head across all reduce warps
         int min_head = INT_MAX;
 #pragma unroll
-        for (int reduce_warp_id = 1; reduce_warp_id < num_recv_warps; ++reduce_warp_id)
-          if (!shared_warp_retired[reduce_warp_id])
-            min_head = min(min_head, shared_warp_channel_head_idx[reduce_warp_id][responsible_rank]);
+        for (int i = 0; i < num_reduce_warps; ++i) {
+          if (!shared_warp_retired[i])
+            min_head = min(min_head, shared_warp_channel_head_idx[i][responsible_rank]);
+        }
 
         // Store queue head for the responsible rank w.r.t. the responsible channel
         // if the minimum head across all reduce warps is larger than the last head
@@ -1055,10 +1055,6 @@ void combine(
           st_relaxed_sys_global(channel_head_idx_ptr, last_head = min_head); // system scope, relaxed order
       }
     } else { // other warps except than warp0 handle the reduction
-      // Ger reduce warp info
-      const int num_reduce_warps = num_recv_warps - 1, reduce_warp_id = recv_warp_id - 1;
-      const int responsible_rank = lane_id;
-
       // Get channel data buffers for each rank
       Buffer<int4> channel_x_buffers[kNumRanks];
       Buffer<float> channel_lse_buffers[kNumRanks];
@@ -1273,13 +1269,13 @@ void combine(
         // Update channel head idx for each rank
         // which will be read by the warp0 to store the `channel_head_idx` to inform the sender
         if (responsible_rank < kNumRanks)
-          shared_warp_channel_head_idx[recv_warp_id][responsible_rank] = (expected_head == -1) ? 0 : expected_head + 1;
+          shared_warp_channel_head_idx[reduce_warp_id][responsible_rank] = (expected_head == -1) ? 0 : expected_head + 1;
       }
 
       // Retired this warp by toggling the retire flag
       __syncwarp();
       if (lane_id == 0)
-        shared_warp_retired[recv_warp_id] = true;
+        shared_warp_retired[reduce_warp_id] = true;
 
       // Wait for all previous TMA stores to be finished
 #ifndef DISABLE_SM90_FEATURES
