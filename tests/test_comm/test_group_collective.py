@@ -735,6 +735,7 @@ class TestGroupCollective(DistTestBase):
             f"{deterministic=} x {async_op=}"
         )
         reduce_op = test_case["reduce_op"]
+        acc_reduce = test_case["acc_reduce"]
         is_lse_reduce = reduce_op == "lse"
 
         # FIXME: the expected answers of lse-reduce are based on torch.bfloat16
@@ -761,9 +762,6 @@ class TestGroupCollective(DistTestBase):
         if use_native_grpcoll:
             # for now, native grpcoll is always deterministic
             if not deterministic:
-                return
-            # FIXME: lse_reduce
-            if reduce_op == "lse":
                 return
 
         # sanity check for meta args per rank
@@ -873,6 +871,7 @@ class TestGroupCollective(DistTestBase):
                 group=self.process_group,
                 async_op=async_op,
                 reduce_op=reduce_op,
+                acc_reduce=acc_reduce,
                 input_lse=send_lse_buffer,
                 output_lse=recv_lse_buffer_before_reduce,
                 deterministic=deterministic,

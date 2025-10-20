@@ -52,10 +52,6 @@
 
 #define GLOBAL_LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK, MIN_BLOCKS_PER_SM) __global__ __launch_bounds__(MAX_THREADS_PER_BLOCK, MIN_BLOCKS_PER_SM)
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-// Unrolled Warp Copy
-///////////////////////////////////////////////////////////////////////////////////////////////////
-
 #define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC, ST_FUNC)                                               \
   {                                                                                                                             \
     constexpr int kLoopStride = 32 * (UNROLL_FACTOR);                                                                           \
@@ -71,6 +67,119 @@
   }
 
 namespace magi_attn_comm::grpcoll {
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Common Helpers
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+DEVICE_INLINE int get_lane_id() {
+  int lane_id;
+  asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
+  return lane_id;
+}
+
+template <typename dtype_t>
+HOST_DEVICE constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
+  return (a + b - 1) / b;
+}
+
+template <typename dtype_t>
+HOST_DEVICE constexpr dtype_t align(dtype_t a, dtype_t b) {
+  return ceil_div<dtype_t>(a, b) * b;
+}
+
+DEVICE_INLINE float log2f_approx(const float& x) {
+  float ret;
+  asm volatile("lg2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
+  return ret;
+}
+
+DEVICE_INLINE float exp2f_approx(const float& x) {
+  float ret;
+  asm volatile("ex2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
+  return ret;
+}
+
+DEVICE_INLINE void trap() {
+  asm("trap;");
+}
+
+template <typename dtype_t>
+DEVICE_INLINE dtype_t get_neg_inf() {
+  return -std::numeric_limits<dtype_t>::infinity();
+}
+
+template <typename dtype_t>
+DEVICE_INLINE bool is_neg_inf(const dtype_t val) {
+  return val == get_neg_inf<dtype_t>();
+}
+
+template <typename dtype_t>
+DEVICE_INLINE dtype_t safe_subtract(const dtype_t a, const dtype_t b) {
+  if (is_neg_inf(a) && is_neg_inf(b)) {
+    // "-inf" - "-inf" will result in "nan"
+    // but we want it to be still "-inf"
+    return get_neg_inf<dtype_t>();
+  }
+  return a - b;
+}
+
+template <typename dtype_t>
+DEVICE_INLINE dtype_t safe_exp(const dtype_t val) {
+  if constexpr (std::is_same_v<dtype_t, half>) { // for fp16
+    return hexp(val);
+  } else if constexpr (std::is_same_v<dtype_t, nv_bfloat16>) { // for bf16
+    return __float2bfloat16(expf(__bfloat162float(val)));
+  } else { // for fp32 and fp64
+    return std::exp(val);
+  }
+}
+
+template <typename dtype_t>
+DEVICE_INLINE dtype_t safe_log1p(const dtype_t val) {
+  if constexpr (std::is_same_v<dtype_t, half>) { // for fp16
+    return __float2half(log1pf(__half2float(val)));
+  } else if constexpr (std::is_same_v<dtype_t, nv_bfloat16>) { // for bf16
+    return __float2bfloat16(log1pf(__bfloat162float(val)));
+  } else { // for fp32 and fp64
+    return std::log1p(val);
+  }
+}
+
+template <typename dtype_t>
+DEVICE_INLINE dtype_t get_lse_rescale_weight(const dtype_t lse_to_rescale, const dtype_t rescaled_lse) {
+  // formula derivation: wi = exp(lsei - lse)
+  dtype_t rescale_weight = safe_exp(safe_subtract(lse_to_rescale, rescaled_lse));
+  return rescale_weight;
+}
+
+template <typename reduce_dtype_t, typename src_dtype_t>
+DEVICE_INLINE void lse_reduce(reduce_dtype_t& reduced_lse, const src_dtype_t src_lse) {
+  auto src_lse_reduce_dtype = static_cast<reduce_dtype_t>(src_lse);
+
+  // formula derivation:
+  // lse = log(exp(lse1) + exp(lse2))
+  //     = lse1 + log(1 + exp(lse2 - lse1))
+  //     = max_lse + log(1 + exp(min_lse - max_lse))
+  //     = max_lse + log1p(exp(min_lse - max_lse))
+  //     = max_lse + softplus(min_lse - max_lse)
+  auto max_lse = std::max(reduced_lse, src_lse_reduce_dtype);
+  auto min_lse = std::min(reduced_lse, src_lse_reduce_dtype);
+  reduced_lse = max_lse + safe_log1p(safe_exp(safe_subtract(min_lse, max_lse)));
+}
+
+DEVICE_INLINE float fast_pow2(int x) {
+  // We can ensure `-126 <= x and x <= 127`
+  uint32_t bits_x = (x + 127) << 23;
+  return *reinterpret_cast<float*>(&bits_x);
+}
+
+DEVICE_INLINE int fast_log2_ceil(float x) {
+  auto bits_x = *reinterpret_cast<uint32_t*>(&x);
+  auto exp_x = (bits_x >> 23) & 0xff;
+  auto man_bits = bits_x & ((1 << 23) - 1);
+  return exp_x - 127 + (man_bits != 0);
+}
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Vectiorized Integer Dtype
@@ -341,18 +450,6 @@ DEVICE_INLINE void st_na_global(const int4* ptr, const int4& value) {
   asm volatile(ST_NA_FUNC ".v4.s32 [%0], {%1, %2, %3, %4};" ::"l"(ptr), "r"(value.x), "r"(value.y), "r"(value.z), "r"(value.w));
 }
 
-DEVICE_INLINE float log2f_approx(const float& x) {
-  float ret;
-  asm volatile("lg2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
-  return ret;
-}
-
-DEVICE_INLINE float exp2f_approx(const float& x) {
-  float ret;
-  asm volatile("ex2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
-  return ret;
-}
-
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // TMA Helper Funcs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -457,10 +554,6 @@ DEVICE_INLINE void tma_store_wait() {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Sync/Barrier/Lock Helper Funcs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-
-DEVICE_INLINE void trap() {
-  asm("trap;");
-}
 
 DEVICE_INLINE void sync_warp_group(int group_flag, int group_size) {
   asm volatile("bar.sync %0, %1;" ::"r"(group_flag), "r"(group_size));
@@ -634,11 +727,23 @@ DEVICE_INLINE void foreach_assign(dst_dtype_t* dst_ptr, const src_dtype_t* src_p
     dst_ptr[i] = static_cast<dst_dtype_t>(src_ptr[i]);
 }
 
-template <typename dst_dtype_t, typename src_dtype_t, int kArrayLength>
-DEVICE_INLINE void foreach_reduce_add(dst_dtype_t* dst_ptr, const src_dtype_t* src_ptr) {
+template <typename reduce_dtype_t, typename src_dtype_t, int kArrayLength>
+DEVICE_INLINE void foreach_reduce_add(reduce_dtype_t* reduce_ptr, const src_dtype_t* src_ptr) {
 #pragma unroll
   for (int i = 0; i < kArrayLength; ++i)
-    dst_ptr[i] += static_cast<dst_dtype_t>(src_ptr[i]);
+    reduce_ptr[i] += static_cast<reduce_dtype_t>(src_ptr[i]);
+}
+
+template <typename reduce_dtype_t, typename src_dtype_t, typename lse_dtype_t, int kArrayLength>
+DEVICE_INLINE void foreach_reduce_lse(reduce_dtype_t* reduce_ptr, const reduce_dtype_t reduced_lse, const src_dtype_t* src_ptr, const lse_dtype_t src_lse) {
+  // formula derivation:
+  // out += exp(lsei - lse) * srci, where `lse` is the reduced lse, and `out` is the reduced buf
+  reduce_dtype_t src_lse_reduce_dtype = static_cast<reduce_dtype_t>(src_lse);
+  reduce_dtype_t rescale_weight = get_lse_rescale_weight(src_lse_reduce_dtype, reduced_lse);
+
+#pragma unroll
+  for (int i = 0; i < kArrayLength; ++i)
+    reduce_ptr[i] += rescale_weight * static_cast<reduce_dtype_t>(src_ptr[i]);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -655,16 +760,6 @@ struct PatternVisitor {
     return func(i);
   }
 };
-
-template <typename dtype_t>
-HOST_DEVICE constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
-  return (a + b - 1) / b;
-}
-
-template <typename dtype_t>
-HOST_DEVICE constexpr dtype_t align(dtype_t a, dtype_t b) {
-  return ceil_div<dtype_t>(a, b) * b;
-}
 
 DEVICE_INLINE void get_channel_task_range(int num_tokens, int num_sms, int sm_id, int& token_start_idx, int& token_end_idx) {
   int num_tokens_per_sm = ceil_div(num_tokens, num_sms);
@@ -688,28 +783,9 @@ DEVICE_INLINE void unpack2(const dtype_b_t& packed, dtype_a_t& x, dtype_a_t& y) 
   x = unpacked_ptr[0], y = unpacked_ptr[1];
 }
 
-DEVICE_INLINE int get_lane_id() {
-  int lane_id;
-  asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
-  return lane_id;
-}
-
 constexpr float kFP8Margin = 1e-4;
 constexpr float kFinfoAmaxE4M3 = 448.0f;
 constexpr float kFinfoAmaxInvE4M3 = 1 / 448.0f;
-
-DEVICE_INLINE float fast_pow2(int x) {
-  // We can ensure `-126 <= x and x <= 127`
-  uint32_t bits_x = (x + 127) << 23;
-  return *reinterpret_cast<float*>(&bits_x);
-}
-
-DEVICE_INLINE int fast_log2_ceil(float x) {
-  auto bits_x = *reinterpret_cast<uint32_t*>(&x);
-  auto exp_x = (bits_x >> 23) & 0xff;
-  auto man_bits = bits_x & ((1 << 23) - 1);
-  return exp_x - 127 + (man_bits != 0);
-}
 
 DEVICE_INLINE void calculate_fp8_scales(float amax, float& scale, float& scale_inv, bool round_scale) {
   if (round_scale) {

@@ -317,7 +317,7 @@ void dispatch(
   auto hidden_bytes_per_stage = hidden_int4_per_stage * static_cast<int>(sizeof(int4));
   GRPCOLL_DEVICE_ASSERT(hidden_bytes_per_stage + sizeof(uint64_t) <= kNumTMABytesPerWarp); // TMA buffer + mbarrier
 
-  // Prepare TMA buffer in shared memory for this warp
+  // Prepare TMA buffer in dynamic shared memory for this warp
   extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
   auto tma_buffer = smem_buffer + warp_id * kNumTMABytesPerWarp;
 
@@ -504,7 +504,7 @@ void dispatch(
     // Broadcast num_tokens_to_recv to other lanes
     num_tokens_to_recv = broadcast_in_warp(num_tokens_to_recv);
 
-    // Shared tail indices for each rank
+    // Prepare shared tail idxs for each rank in static shared memory
     // NOTES: unlike the sender, the receiver must ensure that
     // the tail index hold by all warps for the responsible rank are the same
     // thus we cannot use `broadcast_in_warp` to sync the tail idx
@@ -816,7 +816,7 @@ void combine(
     int num_recv_buffer_tokens) {
   // Get thread Info
   const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
-  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
+  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id(), num_warps = static_cast<int>(blockDim.x) / WARP_SIZE;
   const bool is_sender = sm_id % 2 == 0; // even-numbered SMs are senders
   GRPCOLL_DEVICE_ASSERT(num_sms % 2 == 0);
 
@@ -843,7 +843,7 @@ void combine(
   constexpr int num_tma_stages = 8; // TODO: test other stages and make it configurable
   GRPCOLL_STATIC_ASSERT(num_tma_stages * WARP_SIZE * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid TMA buffer count");
 
-  // Prepare TMA buffer in shared memory for this warp
+  // Prepare TMA buffer in dynamic shared memory for this warp
   extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
   auto tma_buffer = smem_buffer + warp_id * kNumTMABytesPerWarp;
 #endif
@@ -970,13 +970,11 @@ void combine(
         if (lane_id == 0)
           channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + send_token_idx);
 
-#pragma unroll
         // Copy `lse` from the actual token idx in the send lse buffer
         // if `kReduceOp == ReduceOp::LSE`
         if constexpr (kReduceOp == ReduceOp::LSE) {
-          for (int h = lane_id; h < num_heads; h += WARP_SIZE) {
+          for (int h = lane_id; h < num_heads; h += WARP_SIZE)
             channel_lse_buffers[dst_slot_idx * num_heads + h] = __ldg(lse + token_idx_in_x * num_heads + h);
-          }
         }
       }
 
@@ -1000,11 +998,11 @@ void combine(
     GRPCOLL_STATIC_ASSERT(kNumRanks <= WARP_SIZE, "Invalid number of ranks");
     GRPCOLL_STATIC_ASSERT(num_recv_warps >= 2, "Invalid number of recv warps");
 
-    // Prepare some shared memory buffers
+    // Prepare some static shared memory buffers
     // including shared head, tail and retired flags for receiver warps
     __shared__ volatile int shared_warp_channel_head_idx[num_recv_warps][kNumRanks]; // all heads for each reduce warp, each rank w.r.t. the responsible channel
     __shared__ volatile int shared_channel_tail_idx[kNumRanks]; // all tails for each rank w.r.t. the responsible channel
-    __shared__ volatile bool shared_warp_retired[num_recv_warps];
+    __shared__ volatile bool shared_warp_retired[num_recv_warps]; // the retired flags for each reduce warp
 
     // Init the shared memory buffers
     if (thread_id < num_recv_warps)
@@ -1143,6 +1141,41 @@ void combine(
         __syncwarp();
 #endif
 
+        // Reduce `combined_lse` from `channel_lse_buffers`
+        // if `kReduceOp == ReduceOp::LSE`
+        if constexpr (kReduceOp == ReduceOp::LSE) {
+          for (int h = lane_id; h < num_heads; h += WARP_SIZE) {
+            auto combined_lse_ptr = combined_lse + token_idx * num_heads + h;
+
+            // Load all recv partial lse for current head from all src ranks
+            float recv_lses[kNumRanks];
+#pragma unroll
+            for (int j = 0; j < num_src_ranks; ++j)
+              // FIXME：for now, the channel_lse_buffers will be read again when reduing the hidden values
+              // since no shared memory is used, thus here we use `__ldg` instead of `ld_nc_global`
+              // recv_lses[j] = ld_nc_global(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + h);
+              recv_lses[j] = __ldg(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + h);
+
+            // Initialize the high-precision reduce buffer
+            reduce_dtype_t reduced_lse;
+            if constexpr (kAccReduce) // if in `kAccReduce` mode, initialize `combined_lse` with the old value
+              reduced_lse = static_cast<reduce_dtype_t>(*combined_lse_ptr);
+            else // else, initialize `combined_lse` with -inf
+              reduced_lse = get_neg_inf<reduce_dtype_t>();
+
+#pragma unroll
+            // Apply lse reduce for each src rank
+            for (int j = 0; j < num_src_ranks; ++j)
+              lse_reduce<reduce_dtype_t, float>(/*reduced_lse=*/reduced_lse, /*src_lse=*/recv_lses[j]);
+            auto reduced_lse_float = static_cast<float>(reduced_lse);
+
+            // Store the reduced lse to `combined_lse` as well
+            // REVIEW: is it necessary to use TMA copy here to optimize ?
+            *combined_lse_ptr = reduced_lse_float;
+          }
+          __syncwarp();
+        }
+
 #pragma unroll
         // Reduce this token by all the received partial token from all src ranks
         for (int i = lane_id; i < hidden_int4; i += WARP_SIZE) { // warp-strided
@@ -1160,30 +1193,36 @@ void combine(
 
           // Initialize the high-precision reduce buffer
           if constexpr (kAccReduce) { // if in `kAccReduce` mode
-            // Get the hidden value ptr of `dtype_t` to reduce to in `combined_x`
-            auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
             // Initialize the high-precision reduce buffer
             // with the old value in `combined_x`
+            auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
             foreach_assign<reduce_dtype_t, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
 
-            // FIXME: lse_reduce
+            // FIXME: the old lse needed to be loaded and to scale the initial value
           } else { // not in `kAccReduce` mode
             // Zero-initialize the high-precision reduce buffer
             foreach_fill<reduce_dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, 0);
-
-            // FIXME: lse_reduce
           }
 
-#pragma unroll
           // Reduce all recv partial hidden values from all src ranks
           // to the high-precision reduce buffer
           if constexpr (kReduceOp == ReduceOp::LSE) {
-            // FIXME: lse_reduce
+            // TODO: optimize the repeated load of each head of lse using shared memory
+            const auto head_dim = hidden_size / num_heads;
+            auto head_idx = i * kDtypePerInt4 / head_dim;
+            auto reduced_lse = static_cast<reduce_dtype_t>(__ldg(combined_lse + token_idx * num_heads + head_idx));
+            for (int j = 0; j < num_src_ranks; ++j) {
+              auto jth_recv_hidval_dtype = reinterpret_cast<const dtype_t*>(&recv_hidval_int4[j]);
+              auto jth_recv_lse = __ldg(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + head_idx);
+              foreach_reduce_lse<reduce_dtype_t, dtype_t, float, kDtypePerInt4>(hp_hidval_reduce_buf, reduced_lse, jth_recv_hidval_dtype, jth_recv_lse);
+            }
           } else if constexpr (kReduceOp == ReduceOp::SUM || kReduceOp == ReduceOp::AVG) {
+#pragma unroll
             for (int j = 0; j < num_src_ranks; ++j) {
               auto jth_recv_hidval_dtype = reinterpret_cast<const dtype_t*>(&recv_hidval_int4[j]);
               foreach_reduce_add<reduce_dtype_t, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, jth_recv_hidval_dtype);
             }
+
             if constexpr (kReduceOp == ReduceOp::AVG) {
               auto num_reduces = num_src_ranks;
               if constexpr (kAccReduce) // if in `kAccReduce` mode, the old value also counts
@@ -1229,19 +1268,6 @@ void combine(
 #else
           *reduce_hidval_ptr_int4 = reduced_hidval_int4;
 #endif
-        }
-
-        // FIXME: lse_reduce
-        // Reduce `combined_lse` from `channel_lse_buffers`
-        // if `kReduceOp == ReduceOp::LSE`
-        if constexpr (kReduceOp == ReduceOp::LSE) {
-          reduce_dtype_t reduced_lse = 0;
-          for (int h = lane_id; h < num_heads; h += WARP_SIZE) {
-#pragma unroll
-            for (int j = 0; j < num_src_ranks; ++j)
-              reduced_lse += static_cast<reduce_dtype_t>(ld_nc_global(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + h));
-            combined_lse[token_idx * num_heads + h] = static_cast<float>(reduced_lse);
-          }
         }
 
         // Update channel head idx for each rank
