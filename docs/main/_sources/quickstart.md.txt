@@ -71,7 +71,7 @@ from magi_attention.utils import setup_dist_env, clearup_dist_env
 
 # --- Set up distributed environment --- #
 
-rank, local_rank, world_size, world_group, device, seed = setup_dist_env()
+rank, local_rank, world_size, num_nodes, num_local_ranks, world_group, device, seed = setup_dist_env()
 
 # --- Define attention config --- #
 

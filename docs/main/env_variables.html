@@ -418,7 +418,15 @@
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable query/output communication, including fetching remote q (fwd), reducing partial out and lse (fwd), fetching remote q,o,lse,do (bwd), reducing partial dq (bwd), to eliminate the restriction that communication is limited solely to key/value. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>This feature is experimental and under development for now, which dose NOT support neither multi-stage overlap nor hierarchical comm.</p>
+<p>This feature is experimental and under early development for now, and not compatible with many other features,
+thus please do NOT enable it unless you know exactly what you are doing.</p>
+</div>
+<p><strong>MAGI_ATTENTION_NATIVE_GRPCOLL</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable native kernel implementation for group collective comm. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This feature is experimental and under early development for now, and not compatible with many other features,
+thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
 <p><strong>MAGI_ATTENTION_FFA_FORWARD_HIGH_PRECISION_REDUCE</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable high-precision (fp32) reduce for partial out during dist-attn forward
@@ -484,6 +492,12 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">flexible_flash_attention_utils_cuda</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">magi_attn_ext</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<p><strong>MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> can skip building <code class="docutils literal notranslate"><span class="pre">magi_attn_comm</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<p><strong>NVSHMEM_DIR</strong></p>
+<p>Set this env variable to the path of the custom <code class="docutils literal notranslate"><span class="pre">nvshmem</span></code> installation directory.</p>
+<p>If not set, it defaults to find the system module <code class="docutils literal notranslate"><span class="pre">nvidia-nvshmem-cu12</span></code> as listed in <code class="docutils literal notranslate"><span class="pre">requirements.txt</span></code>.</p>
+<p>If not found anywhere, all relative features used in native group collective comm kernels are disabled.</p>
 </section>
 </section>
 </section>
