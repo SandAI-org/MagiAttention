@@ -1,8 +1,34 @@
 ## How to profile ffa
-### Basic files
+
+### Test settings
+For now, we test for dense and block sparse scenerias.
+
+model_configs:
+- nhq: 64
+- nhk: 8
+- headdim: 128
+- dtype: torch.bfloat16
+
+You can change the model-related settings in `common_params` within `ffa_benchmark.py`.
+
+Dense:
+- seqlens_to_test = [8192, 16384]
+- mask_types_to_test = ["full", "causal", "varlen_full", "varlen_causal"]
+
+You can change the dense-related settings in `run_dense_tests` within `ffa_benchmark.py`.
+
+Block sparse:
+- seqlens_to_test = [16384, 49152]
+- sparsity_ratios_to_test = [0.1, 0.2, 0.5, 0.8]
+- block_sizes_to_test = [64, 128]
+
+You can change the block_sparse-related settings in `run_block_sparse_tests` within `ffa_benchmark.py`.
+
+
+### Basic file usage
 - `ffa_benchmark.py`: run ffa for dense/block sparse mask.
     ```shell
-    PYTHONPATH=../../../ python --test_type dense/block_sparse --o output.csv ffa_benchmark.py
+    PYTHONPATH=../../../ python ffa_benchmark.py --test_type dense/block_sparse --o output.csv
     ```
 
 - `compare_ffa_results.py`: compare two output csv with same mask type.

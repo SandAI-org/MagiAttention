@@ -197,8 +197,8 @@ def _flex_flash_attn_forward_compilable(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    fwd_start_events: list[int] | None,
-    fwd_end_events: list[int] | None,
+    fwd_start_cuda_events: list[int] | None,
+    fwd_end_cuda_events: list[int] | None,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     q, k, v, q_ranges, k_ranges = [
@@ -237,8 +237,8 @@ def _flex_flash_attn_forward_compilable(
         out_type,
         deterministic,
         sm_margin,
-        fwd_start_events,
-        fwd_end_events,
+        fwd_start_cuda_events,
+        fwd_end_cuda_events,
     )
 
 
@@ -289,8 +289,8 @@ def _flex_flash_attn_forward(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    fwd_start_events: list[int] | None,
-    fwd_end_events: list[int] | None,
+    fwd_start_cuda_events: list[int] | None,
+    fwd_end_cuda_events: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
@@ -344,8 +344,8 @@ def _flex_flash_attn_forward(
         out_type=out_type,
         deterministic=deterministic,
         sm_margin=sm_margin,
-        fwd_start_events=fwd_start_events,
-        fwd_end_events=fwd_end_events,
+        fwd_start_cuda_events=fwd_start_cuda_events,
+        fwd_end_cuda_events=fwd_end_cuda_events,
     )
 
     return out, lse
@@ -657,6 +657,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges = None
             fwd_qk_map = None
             fwd_unique_count = None
+        if merge_range_start_event:
+            fwd_start_events[1].record()
 
         out, lse = _flex_flash_attn_forward(
             q,

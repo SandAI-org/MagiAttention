@@ -319,6 +319,7 @@ def run_benchmark_framework(
                         config["block_size"],
                     )
 
+                print(f"{ffa_args=}")
                 # B. Forward pass
                 fwd_timings: List[List[float]] = [[] for _ in fwd_labels]
                 total_fwd_times: List[float] = []
@@ -434,7 +435,7 @@ def run_benchmark_framework(
 # Test Setup Functions
 # -----------------------------------------------------------------------------
 def run_dense_tests(args, common_params):
-    seqlens_to_test = [8192]
+    seqlens_to_test = [8192, 16384]
     mask_types_to_test = ["full", "causal", "varlen_full", "varlen_causal"]
     configs_to_test = [
         {"seqlen": sl, "mask_type": mt}
@@ -464,9 +465,9 @@ def run_dense_tests(args, common_params):
 
 
 def run_block_sparse_tests(args, common_params):
-    seqlens_to_test = [16384, 49152]
-    sparsity_ratios_to_test = [0.2, 0.5, 0.8]
-    block_sizes_to_test = [128]
+    seqlens_to_test = [49152]
+    sparsity_ratios_to_test = [0.2]
+    block_sizes_to_test = [64]
     configs_to_test = [
         {"seqlen": sl, "sparsity_ratio": sr, "block_size": bs}
         for sl in seqlens_to_test
@@ -543,7 +544,7 @@ if __name__ == "__main__":
         "hd": 128,
         "dtype": torch.bfloat16,
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        "warmup_iters": 100,
+        "warmup_iters": 10,
         "run_iters": 100,
     }
 

@@ -106,8 +106,8 @@ std::vector<at::Tensor> mha_fwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation
-  if (!start_events.empty())
-    CUDA_CHECK(cudaEventRecord(start_events[0], stream));
+  // if (!start_events.empty())
+  //   CUDA_CHECK(cudaEventRecord(start_events[0], stream));
   nvtxRangePushA("fwd prepare");
   auto [params, out, softmax_lse] = prepare_mha_fwd(
       q, k, v, out_, softmax_lse_, q_ranges, k_ranges,
