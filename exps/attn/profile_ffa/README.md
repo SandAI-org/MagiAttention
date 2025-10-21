@@ -12,14 +12,14 @@ model_configs:
 You can change the model-related settings in `common_params` within `ffa_benchmark.py`.
 
 Dense:
-- seqlens_to_test = [8192, 16384]
+- seqlens_to_test = [8192]
 - mask_types_to_test = ["full", "causal", "varlen_full", "varlen_causal"]
 
 You can change the dense-related settings in `run_dense_tests` within `ffa_benchmark.py`.
 
 Block sparse:
-- seqlens_to_test = [16384, 49152]
-- sparsity_ratios_to_test = [0.1, 0.2, 0.5, 0.8]
+- seqlens_to_test = [49152]
+- sparsity_ratios_to_test = [0.1, 0.2, 0.5]
 - block_sizes_to_test = [64, 128]
 
 You can change the block_sparse-related settings in `run_block_sparse_tests` within `ffa_benchmark.py`.
