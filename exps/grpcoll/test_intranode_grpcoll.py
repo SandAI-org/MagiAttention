@@ -94,6 +94,7 @@ def prepare_test_func_kwargs(
     min_num_dst_ranks: int,
 ) -> dict[str, Any]:
     # Random data
+    head_dim = hidden_size // num_heads
     x = torch.ones((num_tokens, hidden_size), dtype=dtype, device="cuda")
     if cast_lse:
         assert num_heads > 0
@@ -174,16 +175,13 @@ def prepare_test_func_kwargs(
         (sum(output_split_size_list), *x.shape[1:]), dtype=dtype, device="cuda"
     )
     recv_x_gc_buf = recv_x_gc.clone() if pass_out_buffer else None
+
     recv_lse_gc = (
         torch.empty((recv_x_gc.shape[0], lse.shape[1]), dtype=lse.dtype, device="cuda")
-        if pass_out_lse_buffer
+        if cast_lse and pass_out_lse_buffer
         else None
     )
-    recv_lse_gc_buf = (
-        torch.empty((recv_x_gc.shape[0], lse.shape[1]), dtype=lse.dtype, device="cuda")
-        if pass_out_lse_buffer
-        else None
-    )
+    recv_lse_gc_buf = recv_lse_gc.clone() if cast_lse and pass_out_lse_buffer else None  # type: ignore[union-attr]
 
     work_with_pf_gc = group_cast(
         input=x,
@@ -199,34 +197,50 @@ def prepare_test_func_kwargs(
         output_lse=recv_lse_gc,
     )
 
-    recv_x_gc, recv_lse_gc = work_with_pf_gc.wait_post_process(recv_x_gc)
-    print(f"[RANK {rank}]: {recv_x_gc.shape=} | {recv_x_gc=}\n", flush=True)
+    if cast_lse:
+        recv_x_gc, recv_lse_gc = work_with_pf_gc.wait_post_process(
+            recv_x_gc, recv_lse_gc
+        )
+        recv_lse_gc_shape = recv_lse_gc.shape
+    else:
+        recv_x_gc = work_with_pf_gc.wait_post_process(recv_x_gc)
+        recv_lse_gc_shape = None
+
+    print(
+        f"[RANK {rank}]: {recv_x_gc.shape=} | {recv_x_gc=}\n"
+        f"{recv_lse_gc_shape=} | {recv_lse_gc=}\n",
+        flush=True,
+    )
 
     # get ref combine output by group-reduce
     x_gr = sim_gemm(recv_x_gc, w=sim_gemm_weight)
     combined_x_gr = torch.zeros_like(x)
-
     if acc_reduce_out_buffer:
         combined_x_gr += acc_reduce_constant
-    combined_x_gr_buf = combined_x_gr.clone() if pass_out_buffer else None
 
-    if reduce_op == "lse" and pass_out_lse_buffer:
-        combined_lse_gr_buf = (
-            torch.full(
-                (combined_x_gr.shape[0], lse.shape[1]),
-                fill_value=0,  # FIXME
-                dtype=lse.dtype,
-                device="cuda",
-            )
-            if pass_out_lse_buffer
-            else None
+    combined_x_gr_buf = combined_x_gr.clone() if pass_out_buffer else None
+    lse_gr = recv_lse_gc.clone() if reduce_op == "lse" else None  # type: ignore[union-attr]
+    combined_lse_gr = (
+        torch.full(
+            (combined_x_gr.shape[0], lse.shape[1]),
+            fill_value=1 / (acc_reduce_constant + 1)
+            if acc_reduce_out_buffer
+            else float("-inf"),
+            dtype=lse.dtype,
+            device="cuda",
         )
-    else:
-        combined_lse_gr_buf = None
+        if reduce_op == "lse"
+        else None
+    )
+    combined_lse_gr_buf = (
+        combined_lse_gr.clone() if reduce_op == "lse" and pass_out_lse_buffer else None  # type: ignore[union-attr]
+    )
 
     work_with_pf_gr = group_reduce(
-        input=x_gr,
-        output=combined_x_gr,
+        input=x_gr.view(-1, num_heads, head_dim) if reduce_op == "lse" else x_gr,
+        output=combined_x_gr.view(-1, num_heads, head_dim)
+        if reduce_op == "lse"
+        else combined_x_gr,
         input_split_sizes=output_split_size_list,
         output_split_sizes=input_split_size_list,
         dst_index=src_index_list,
@@ -234,10 +248,24 @@ def prepare_test_func_kwargs(
         group=group,
         async_op=True,
         reduce_op=reduce_op,
+        input_lse=lse_gr,
+        output_lse=combined_lse_gr,
     )
 
-    combined_x_gr = work_with_pf_gr.wait_post_process(combined_x_gr)
-    print(f"[RANK {rank}]: {combined_x_gr.shape=} | {combined_x_gr=}\n", flush=True)
+    if reduce_op == "lse":
+        combined_x_gr, combined_lse_gr = work_with_pf_gr.wait_post_process(
+            combined_x_gr.view(-1, num_heads, head_dim), combined_lse_gr
+        )
+        combined_lse_gr_shape = combined_lse_gr.shape
+        combined_x_gr = combined_x_gr.view(-1, hidden_size)
+    else:
+        combined_x_gr = work_with_pf_gr.wait_post_process(combined_x_gr)
+        combined_lse_gr_shape = None
+    print(
+        f"[RANK {rank}]: {combined_x_gr.shape=} | {combined_x_gr=}\n"
+        f"{combined_lse_gr_shape=} | {combined_lse_gr=}\n",
+        flush=True,
+    )
 
     # transfer group-cast meta args to dispatch meta args
     (
@@ -428,9 +456,11 @@ def prepare_test_func_kwargs(
         lse=lse,
         recv_x_gc=recv_x_gc,
         recv_x_gc_buf=recv_x_gc_buf,
+        recv_lse_gc=recv_lse_gc,
         recv_lse_gc_buf=recv_lse_gc_buf,
         combined_x_gr=combined_x_gr,
         combined_x_gr_buf=combined_x_gr_buf,
+        combined_lse_gr=combined_lse_gr,
         combined_lse_gr_buf=combined_lse_gr_buf,
         is_token_in_rank=is_token_in_rank,
         num_tokens_per_rank=num_tokens_per_rank,
@@ -467,8 +497,10 @@ def test_func(
     lse: torch.Tensor | None = kwargs["lse"]
     recv_x_gc: torch.Tensor = kwargs["recv_x_gc"]
     recv_x_gc_buf: torch.Tensor = kwargs["recv_x_gc_buf"]
+    recv_lse_gc: torch.Tensor | None = kwargs["recv_lse_gc"]
     recv_lse_gc_buf: torch.Tensor | None = kwargs["recv_lse_gc_buf"]
     combined_x_gr: torch.Tensor = kwargs["combined_x_gr"]
+    combined_lse_gr: torch.Tensor | None = kwargs["combined_lse_gr"]
     combined_x_gr_buf: torch.Tensor = kwargs["combined_x_gr_buf"]
     combined_lse_gr_buf: torch.Tensor | None = kwargs["combined_lse_gr_buf"]
     is_token_in_rank: torch.Tensor = kwargs["is_token_in_rank"]
@@ -624,6 +656,8 @@ def test_func(
 
     # check
     assert torch.equal(recv_x, recv_x_gc)
+    if cast_lse:
+        assert torch.equal(recv_lse, recv_lse_gc)
     assert torch.equal(is_token_in_rank_handle, is_token_in_rank)
     assert torch.equal(channel_prefix_matrix[:, -1], num_tokens_per_rank)
     assert torch.equal(
@@ -712,7 +746,7 @@ def test_func(
 
     # simulate gemm
     x_combine = sim_gemm(recv_x, w=sim_gemm_weight)
-    lse_combine = sim_gemm(recv_lse, w=sim_gemm_weight) if reduce_op == "lse" else None
+    lse_combine = recv_lse.clone() if reduce_op == "lse" else None  # type: ignore[union-attr]
 
     # permute x/lse to the rank order
     if random_permute_output:
@@ -805,12 +839,18 @@ def test_func(
         case _:
             raise ValueError("Unsupported dtype")
 
+    # check combined_lse
+    if reduce_op == "lse":
+        torch.testing.assert_close(combined_lse, combined_lse_gr)
+
+    # check send head
+    # cached_notify_combine will modify send_head in-place for any entry == -1
     assert torch.equal(
         send_head[send_head_copy != -1],
         send_head_copy[send_head_copy != -1],
-    )  # cached_notify_combine will modify send_head in-place for any entry == -1
+    )
 
-    # specific check for specific reduce op
+    # specific check for combined_x for specific reduce op
     if reduce_op in ("sum", "avg"):
         send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
         check_x = combined_x.float()
