@@ -19,12 +19,7 @@ set -e
 
 LLVM_SH_URL="https://apt.llvm.org/llvm.sh"
 LLVM_SH_SCRIPT="llvm.sh"
-
-if [ -n "$1" ]; then
-    LLVM_VERSION=$1
-else
-    LLVM_VERSION=21
-fi
+LLVM_VERSION=${LLVM_VERSION:-21}
 
 echo "======================================================"
 echo " Starting LLVM and clang-format-${LLVM_VERSION} installation "
