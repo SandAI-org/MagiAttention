@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
-
 import torch
 from packaging import version
 
@@ -528,70 +526,6 @@ def _flex_flash_attn_backward(
 # -------------------       ffa autograd   ------------------- #
 
 
-def _prepare_events(
-    start_events: Optional[list[torch.cuda.Event]],
-    end_events: Optional[list[torch.cuda.Event]],
-) -> tuple[
-    Optional[int],
-    Optional[int],
-    Optional[int],
-    Optional[int],
-    Optional[list[int]],
-    Optional[list[int]],
-]:
-    """Helper function to parse and prepare CUDA event lists."""
-    if start_events is None or end_events is None:
-        return None, None, None, None, None, None
-
-    # Ensure event lists are either provided together or not at all.
-    expected_length = 5
-    assert (
-        len(start_events) == expected_length
-    ), f"Expected start_events to have length {expected_length}, but got {len(start_events)}"
-    assert (
-        len(end_events) == expected_length
-    ), f"Expected end_events to have length {expected_length}, but got {len(end_events)}"
-    """
-    merge_range_start_event = start_events.pop(0)
-    to_op_start_event = start_events.pop(-1)
-    merge_range_end_event = end_events.pop(0)
-    to_op_end_event = end_events.pop(-1)
-    """
-    merge_range_start_event = start_events[0]
-    to_op_start_event = start_events[-1]
-    merge_range_end_event = end_events[0]
-    to_op_end_event = end_events[-1]
-
-    # 2. Use slicing to get a new list of the middle events.
-    # The original lists (start_events, end_events) are not modified.
-    middle_start_events = start_events[1:-1]
-    middle_end_events = end_events[1:-1]
-
-    # --- In-place modification of the lists ---
-    # Iterate over the remaining Events, record them, and then
-    # replace the Event objects with their integer cuda_event handles.
-    start_cuda_events = []
-    for i in range(len(middle_start_events)):
-        middle_start_events[i].record()
-        start_cuda_events.append(middle_start_events[i].cuda_event)
-        # start_events[i] = start_events[i].cuda_event
-
-    end_cuda_events = []
-    for i in range(len(middle_end_events)):
-        middle_end_events[i].record()
-        # end_events[i] = end_events[i].cuda_event
-        end_cuda_events.append(middle_end_events[i].cuda_event)
-
-    return (
-        merge_range_start_event,
-        to_op_start_event,
-        merge_range_end_event,
-        to_op_end_event,
-        start_cuda_events,
-        end_cuda_events,
-    )
-
-
 class FlexFlashAttnFunc(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -615,12 +549,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
 
         if auto_range_merge:
-            # if merge_range_start_event:
-            #    merge_range_start_event.record()
             if profile_mode:
                 flexible_flash_attention_utils_cuda.start_event("fwd_range_merge")
 
-            torch.cuda.nvtx.range_push("merge_range")
             (
                 merge_q_ranges,
                 fwd_q_ranges,
@@ -629,7 +560,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 fwd_qk_map,
                 fwd_unique_count,
             ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
-            torch.cuda.nvtx.range_pop()
 
             if profile_mode:
                 flexible_flash_attention_utils_cuda.stop_event("fwd_range_merge")
@@ -674,17 +604,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if profile_mode:
             flexible_flash_attention_utils_cuda.stop_event("fwd_cast")
 
-        ctx.save_for_backward(
-            q,
-            k,
-            v,
-            out,
-            lse,
-            q_ranges,
-            k_ranges,
-            attn_type_map
-            # bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map
-        )
+        ctx.save_for_backward(q, k, v, out, lse, q_ranges, k_ranges, attn_type_map)
 
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
@@ -707,21 +627,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             k_ranges,
             attn_type_map,
         ) = ctx.saved_tensors
-        """
-        (
-            merge_range_start_event,
-            to_op_start_event,
-            merge_range_end_event,
-            to_op_end_event,
-            bwd_start_cuda_events,
-            bwd_ent_cuda_events,
-        ) = _prepare_events(ctx.bwd_start_events, ctx.bwd_end_events)
-        """
+
         if ctx.auto_range_merge:
             if ctx.profile_mode:
                 flexible_flash_attention_utils_cuda.start_event("bwd_range_merge")
 
-            torch.cuda.nvtx.range_push("range_merge")
             (
                 merge_k_ranges,
                 bwd_k_ranges,
@@ -730,7 +640,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 bwd_kq_map,
                 bwd_unique_count,
             ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
-            torch.cuda.nvtx.range_pop()
 
             if ctx.profile_mode:
                 flexible_flash_attention_utils_cuda.stop_event("bwd_range_merge")
@@ -772,9 +681,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if ctx.profile_mode:
             flexible_flash_attention_utils_cuda.start_event("bwd_cast")
+
         dq = dq.to(q.dtype)
         dk = dk.to(k.dtype)
         dv = dv.to(v.dtype)
+
         if ctx.profile_mode:
             flexible_flash_attention_utils_cuda.stop_event("bwd_cast")
 

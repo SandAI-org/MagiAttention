@@ -25,7 +25,6 @@
 #include <cutlass/cluster_launch.hpp> // For ClusterLauncher
 #include <cutlass/device_kernel.h> // For device_kernel
 #include <cutlass/kernel_launch.h> // For kernel_launch
-#include <nvtx3/nvToolsExt.h>
 
 #include "epilogue_bwd.hpp"
 #include "flash.h"
@@ -76,7 +75,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream, bool profile_m
   if (profile_mode) {
     MagiEvents::start("bwd_preprocess");
   }
-  nvtxRangePushA("preprocess");
   typename PreprocessKernel::Arguments preprocess_args{static_cast<Element const*>(params.o_ptr),
                                                        {params.total_q, params.d, params.h_qo}, // shape_O
                                                        {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O
@@ -107,9 +105,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream, bool profile_m
   if (profile_mode) {
     MagiEvents::stop("bwd_preprocess");
   }
-  nvtxRangePop();
 
-  nvtxRangePushA("backward run");
   if (profile_mode) {
     MagiEvents::start("bwd_run");
   }
@@ -245,7 +241,6 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream, bool profile_m
         grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
   }
   CHECK_CUDA_KERNEL_LAUNCH();
-  nvtxRangePop();
   if (profile_mode) {
     MagiEvents::stop("bwd_run");
   }
