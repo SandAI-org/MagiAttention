@@ -400,12 +400,12 @@ def prebuild_ffa_kernels() -> None:
 
     # determine the combinations of prebuild options
     directions = ["fwd", "bwd"]
-    head_dims = [128]
-    compute_dtypes = [torch.bfloat16]
-    out_dtypes = [torch.float32, torch.bfloat16]
-    softcaps = [False]
+    head_dims = [64, 128]
+    compute_dtypes = [torch.bfloat16, torch.float16]
+    out_dtypes = [torch.float32, torch.bfloat16, torch.float16]
+    softcaps = [False, True]
     disable_atomic_opts = [False, True]
-    deterministics = [False]
+    deterministics = [False, True]
 
     combos = itertools.product(
         directions,
@@ -429,7 +429,7 @@ def prebuild_ffa_kernels() -> None:
             softcap=sc,
             disable_atomic_reduction=da,
             deterministic=det,
-            ref_block_size=(128, 128),
+            ref_block_size=None,
         )
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()

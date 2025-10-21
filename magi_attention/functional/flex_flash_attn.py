@@ -575,9 +575,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_qk_map = None
             fwd_unique_count = None
 
-        # if merge_range_start_event:
-        #    fwd_start_events[1].record()
-
         out, lse = _flex_flash_attn_forward(
             q,
             k,
@@ -706,10 +703,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
             None,  # ref_block_size
-            None,  # fwd_start_events
-            None,  # fwd_end_events
-            None,  # bwd_start_events
-            None,  # bwd_stop_events
         )
 
 
@@ -769,8 +762,7 @@ def flex_flash_attn_func(
             Defaults to ``False``.
 
             **Note:** This flag is usually used in sparse attention cases but still under development.
-        fwd_start_events (list[torch.cuda.Event]): CUDA events for timing each part of the forward pass
-        bwd_start_events (list[torch.cuda.Event]): CUDA events for timing each part of the backward pass
+        profile_mode (bool): profile ffa or not.
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
             - out (torch.Tensor): Attention output tensor
