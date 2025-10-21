@@ -1066,7 +1066,7 @@ struct CollectiveMainloopBwdSm90 {
         auto thread_mma = TiledMmaSdP{}.get_thread_slice(thread_idx);
         auto thread0_mma = TiledMmaSdP{}.get_thread_slice(_0{});
 
-        static constexpr int Row = !SdP_swapAB ? 0 : 1, Col = !SdP_swapAB ? 1 : 0;
+        static constexpr int Row = !SdP_swapAB ? 0 : 1;
         Tensor cS = cute::make_identity_tensor(Shape<Int<!SdP_swapAB ? kBlockM : kBlockN>, Int<!SdP_swapAB ? kBlockN : kBlockM>>{});
         Tensor tScS = thread_mma.partition_C(cS);
         Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(tScS.layout()));

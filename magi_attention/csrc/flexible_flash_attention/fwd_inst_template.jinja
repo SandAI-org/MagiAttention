@@ -7,7 +7,6 @@
 #include "flash_fwd_launch_template.h"
 #include "flex_flash_fwd.hpp"
 #include "utils/profile_utils.h"
-#include <nvtx3/nvToolsExt.h>
 
 // Compile-time constants provided by Jinja arguments
 static constexpr int kArch = {{ arch_sm_num }};
@@ -83,13 +82,11 @@ std::vector<at::Tensor> mha_fwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation
-  nvtxRangePushA("fwd prepare");
   auto [params, out, softmax_lse] = prepare_mha_fwd(
       q, k, v, out_, softmax_lse_, q_ranges, k_ranges,
       attn_type_map_, merge_q_ranges_, qk_map_,
       unique_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
       out_type_, deterministic, sm_margin);
-  nvtxRangePop();
   if (profile_mode)
     MagiEvents::stop("fwd_prepare");
 
@@ -97,18 +94,14 @@ std::vector<at::Tensor> mha_fwd(
   if (profile_mode) 
     MagiEvents::start("fwd_run");
   
-  nvtxRangePushA("fwd run");
   run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kDeterministic>(params, stream);
   if (profile_mode) 
     MagiEvents::stop("fwd_run");
-  nvtxRangePop();
 
   // Post-processing: fast zero fill for uncovered regions (to match library interface)
   if (profile_mode)
     MagiEvents::start("fwd_fill");
-  nvtxRangePushA("fwd fill");
   run_fast_zero_fill(params, stream);
-  nvtxRangePop();
   if (profile_mode)
     MagiEvents::stop("fwd_fill");
 
