@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install clang-format-${{ env.LLVM_VERSION }}
         env:
-          LLVM_VERSION: 21
+          LLVM_VERSION: 20
         run: |
           sudo chmod +x ./scripts/install_clang_format.sh
           sudo ./scripts/install_clang_format.sh

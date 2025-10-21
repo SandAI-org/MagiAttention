@@ -17,7 +17,7 @@
 # Define the path to the clang-format executable.
 # You might need to adjust the version number (e.g., clang-format-15, clang-format-17)
 # or just "clang-format" if it's a generic link.
-CLANG_FORMAT_BIN="clang-format-21"
+CLANG_FORMAT_BIN="clang-format"
 
 INSTALL_CMD="bash scripts/install_clang_format.sh"
 

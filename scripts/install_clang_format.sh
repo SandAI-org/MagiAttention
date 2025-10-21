@@ -17,7 +17,7 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-LLVM_VERSION="21"
+LLVM_VERSION="20"
 LLVM_SH_URL="https://apt.llvm.org/llvm.sh"
 LLVM_SH_SCRIPT="llvm.sh"
 
@@ -100,3 +100,8 @@ echo "======================================================"
 echo " LLVM and clang-format-${LLVM_VERSION} installation completed! "
 echo " You can now use 'clang-format --version' or 'clang-format-${LLVM_VERSION} --version'."
 echo "======================================================"
+
+# Final check for clang-format version
+echo "Checking installed clang-format version:"
+clang-format --version || true # Add || true to prevent script exit if clang-format is not in PATH or fails for some reason.
+clang-format-${LLVM_VERSION} --version || true
