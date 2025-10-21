@@ -41,11 +41,8 @@ from magi_attention.utils.sparse_utils import (
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
-is_ffa_utils_installed = False
 try:
     from magi_attention import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
-
-    is_ffa_utils_installed = True
 except ImportError:
     pass
 
