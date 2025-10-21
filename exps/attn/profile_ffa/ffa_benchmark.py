@@ -362,6 +362,7 @@ def run_benchmark_framework(
                     # Call the new function to collect all internal C++ event timings
                     collect_magi_event_timings(fwd_event_keys, fwd_timings)
 
+                torch.cuda.synchronize()
                 flexible_flash_attention_utils_cuda.destroy_event()
 
                 print_performance_results(
@@ -432,6 +433,7 @@ def run_benchmark_framework(
                     # Call the new function to collect all internal C++ event timings
                     collect_magi_event_timings(bwd_event_keys, bwd_timings)
 
+                torch.cuda.synchronize()
                 flexible_flash_attention_utils_cuda.destroy_event()
 
                 print_performance_results(
@@ -472,8 +474,8 @@ def run_benchmark_framework(
 # Test Setup Functions
 # -----------------------------------------------------------------------------
 def run_dense_tests(args, common_params):
-    seqlens_to_test = [8192, 16384]
-    mask_types_to_test = ["full", "causal", "varlen_full", "varlen_causal"]
+    seqlens_to_test = [8192]
+    mask_types_to_test = ["full", "casual", "varlen_full", "varlen_casual"]
     configs_to_test = [
         {"seqlen": sl, "mask_type": mt}
         for sl in seqlens_to_test
@@ -502,8 +504,8 @@ def run_dense_tests(args, common_params):
 
 
 def run_block_sparse_tests(args, common_params):
-    seqlens_to_test = [16384, 49152]
-    sparsity_ratios_to_test = [0.1, 0.2, 0.5, 0.8]
+    seqlens_to_test = [49152]
+    sparsity_ratios_to_test = [0.1, 0.2, 0.5]
     block_sizes_to_test = [64, 128]
     configs_to_test = [
         {"seqlen": sl, "sparsity_ratio": sr, "block_size": bs}
