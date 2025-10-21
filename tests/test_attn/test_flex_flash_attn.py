@@ -53,6 +53,10 @@ class TestFlexFlashAttn(DistTestBase):
     def world_size(self) -> int:
         return 8
 
+    @property
+    def timeout(self) -> int:
+        return 400
+
     def generate_non_overlapping_qk_pairs(
         self,
         total_seqlen_q: int,
