@@ -43,7 +43,7 @@ import torch.distributed as dist
 
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
-from magi_attention.comm.primitive.grpcoll.utils import unpermute_tensor
+from magi_attention.comm.primitive.grpcoll.utils import unpermute_output
 
 # isort: split
 from grpcoll_utils import (
@@ -293,8 +293,8 @@ def test_main(
                         # output_split_size_list and src_index_list
                         if random_permute_output:
                             recv_x_before_rg = recv_x.clone()
-                            recv_x = unpermute_tensor(
-                                tensor=recv_x,
+                            recv_x = unpermute_output(
+                                output=recv_x,
                                 unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                             )
                             assert recv_x_before_rg.shape == recv_x.shape

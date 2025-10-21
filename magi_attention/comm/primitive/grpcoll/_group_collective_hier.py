@@ -32,8 +32,8 @@ from .utils import (
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
     _calc_unperm_range_gather_kwargs_from_split_size_list,
-    sum_reduce_to_tensor,
-    unpermute_tensor,
+    sum_reduce_output,
+    unpermute_output,
 )
 
 __all__ = [
@@ -141,7 +141,7 @@ class HierGroupCastMetaSolver:
         stashed_tensors: list[torch.Tensor] | None = None,
     ):
         core_post_process_fn_hier = partial(
-            unpermute_tensor,
+            unpermute_output,
             unperm_after_a2a_kwargs=self.unperm_after_a2a_kwargs_hier,
         )
 
@@ -875,13 +875,13 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         stashed_tensors: list[torch.Tensor] | None = None,
     ) -> Callable[[torch.Tensor], torch.Tensor]:
         post_process_fn_pre_intra = partial(
-            sum_reduce_to_tensor,  # TODO: support other reduce ops
+            sum_reduce_output,  # TODO: support other reduce ops
             a2a_output=a2a_output_pre_intra,
             range_reduce_kwargs=self.range_reduce_kwargs_pre_intra,
         )
 
         post_process_fn_inter = partial(
-            sum_reduce_to_tensor,  # TODO: support other reduce ops
+            sum_reduce_output,  # TODO: support other reduce ops
             a2a_output=a2a_output_inter,
             range_reduce_kwargs=self.range_reduce_kwargs_inter,
         )
@@ -1091,7 +1091,7 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         )
 
         self.pre_process_fn_hier = partial(
-            unpermute_tensor, unperm_after_a2a_kwargs=self.perm_before_a2a_kwargs_hier
+            unpermute_output, unperm_after_a2a_kwargs=self.perm_before_a2a_kwargs_hier
         )
 
 

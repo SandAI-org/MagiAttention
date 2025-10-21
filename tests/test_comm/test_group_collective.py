@@ -36,7 +36,6 @@ from magi_attention.testing.utils import switch_envvar_context
 from magi_attention.utils import is_list_type_all
 
 
-# TODO: add test cases for world size > 4
 class TestGroupCollective(DistTestBase):
     def init_pg(self):
         super().init_pg()
@@ -107,6 +106,7 @@ class TestGroupCollective(DistTestBase):
 
     @property
     def world_size(self) -> int:
+        # TODO: add test cases for world size > 4
         return 4
 
     @property
@@ -334,11 +334,8 @@ class TestGroupCollective(DistTestBase):
             # TODO: support hier comm with native grpcoll
             if use_native_grpcoll:
                 return
-
-        # skip when enabling cast_lse
-        if cast_lse:
-            # TODO: support cast lse for other implementations
-            if not use_native_grpcoll:
+            # TODO: support hier comm with cast_lse
+            if cast_lse:
                 return
 
         # sanity check for meta args per rank
@@ -675,10 +672,10 @@ class TestGroupCollective(DistTestBase):
                     [-1, -1, -1, -1],
                 ],
                 "expected_recv_buffer_per_rank": [
-                    [4.6250, 5.9375, 11.5625, 19.0],
-                    [12.1875, 13.6250, 10.5625, 12.8750],
-                    [4.0312, 2.2188, 6.2812, 4.3438],
-                    [5.0938, 2.1250, 8.8125, 6.6875],
+                    [4.6351, 5.9414, 11.5559, 19.0],
+                    [12.1877, 13.6155, 10.5503, 12.8558],
+                    [4.0215, 2.2208, 6.2703, 4.3447],
+                    [5.0946, 2.1294, 8.8161, 6.6724],
                 ],
                 "expected_recv_lse_buffer_per_rank": [
                     [0.7014, 1.5298, 0.4102, 2.75],
@@ -737,10 +734,6 @@ class TestGroupCollective(DistTestBase):
         reduce_op = test_case["reduce_op"]
         acc_reduce = test_case["acc_reduce"]
         is_lse_reduce = reduce_op == "lse"
-
-        # FIXME: the expected answers of lse-reduce are based on torch.bfloat16
-        if is_lse_reduce and dtype != torch.bfloat16:
-            return
 
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
@@ -894,8 +887,8 @@ class TestGroupCollective(DistTestBase):
             assert_close(
                 recv_buffer_after_reduce,
                 expected_recv_buffer,
-                atol=1e-8,
-                rtol=1e-4,
+                atol=1e-8 if dtype != torch.float16 else 1e-4,
+                rtol=1e-4 if dtype != torch.float16 else 5e-3,
                 test_case="group-reduce recv buffer",
             )
         except Exception as e:

@@ -50,7 +50,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_dispatch_layout_from_group_cast_meta,
     transfer_splits_and_dst_idxs_to_topk_idx,
-    unpermute_tensor,
+    unpermute_output,
 )
 from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import pad_and_pack_tensors
@@ -174,16 +174,16 @@ def prepare_test_func_kwargs(
         (sum(output_split_size_list), *x.shape[1:]), dtype=dtype, device="cuda"
     )
     recv_x_gc_buf = recv_x_gc.clone() if pass_out_buffer else None
-    if cast_lse and pass_out_lse_buffer:
-        recv_lse_gc_buf = (
-            torch.empty(
-                (recv_x_gc.shape[0], lse.shape[1]), dtype=lse.dtype, device="cuda"
-            )
-            if pass_out_lse_buffer
-            else None
-        )
-    else:
-        recv_lse_gc_buf = None
+    recv_lse_gc = (
+        torch.empty((recv_x_gc.shape[0], lse.shape[1]), dtype=lse.dtype, device="cuda")
+        if pass_out_lse_buffer
+        else None
+    )
+    recv_lse_gc_buf = (
+        torch.empty((recv_x_gc.shape[0], lse.shape[1]), dtype=lse.dtype, device="cuda")
+        if pass_out_lse_buffer
+        else None
+    )
 
     work_with_pf_gc = group_cast(
         input=x,
@@ -194,9 +194,12 @@ def prepare_test_func_kwargs(
         src_index=src_index_list,
         group=group,
         async_op=True,
+        cast_lse=cast_lse,
+        input_lse=lse,
+        output_lse=recv_lse_gc,
     )
 
-    recv_x_gc = work_with_pf_gc.wait_post_process(recv_x_gc)
+    recv_x_gc, recv_lse_gc = work_with_pf_gc.wait_post_process(recv_x_gc)
     print(f"[RANK {rank}]: {recv_x_gc.shape=} | {recv_x_gc=}\n", flush=True)
 
     # get ref combine output by group-reduce
@@ -576,8 +579,8 @@ def test_func(
             if use_a2av_perm_idxs == "outside":
                 recv_x = recv_x[unperm_from_a2av_idx]
             elif use_a2av_perm_idxs == "no":
-                recv_x = unpermute_tensor(
-                    tensor=recv_x,
+                recv_x = unpermute_output(
+                    output=recv_x,
                     unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                 )
             assert recv_x_from_a2av.shape == recv_x.shape
@@ -588,8 +591,8 @@ def test_func(
                 if use_a2av_perm_idxs == "outside":
                     recv_lse = recv_lse[unperm_from_a2av_idx]  # type: ignore[index]
                 elif use_a2av_perm_idxs == "no":
-                    recv_lse = unpermute_tensor(  # type: ignore[union-attr]
-                        tensor=recv_lse,
+                    recv_lse = unpermute_output(  # type: ignore[union-attr]
+                        output=recv_lse,
                         unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                     )
                 assert recv_lse_from_a2av.shape == recv_lse.shape  # type: ignore[union-attr]
@@ -640,8 +643,8 @@ def test_func(
 
         if random_permute_output:
             if use_a2av_perm_idxs == "no":
-                permed_recv_src_idx = unpermute_tensor(
-                    tensor=recv_src_idx,
+                permed_recv_src_idx = unpermute_output(
+                    output=recv_src_idx,
                     unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                 )
             else:  # "inside" or "outside"
@@ -721,8 +724,8 @@ def test_func(
             if use_a2av_perm_idxs == "outside":
                 x_combine = x_combine[perm_to_a2av_idx]
             elif use_a2av_perm_idxs == "no":
-                x_combine = unpermute_tensor(
-                    tensor=x_combine,
+                x_combine = unpermute_output(
+                    output=x_combine,
                     unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
                 )
             assert x_combine_before_to_a2av.shape == x_combine.shape
@@ -732,8 +735,8 @@ def test_func(
                 if use_a2av_perm_idxs == "outside":
                     lse_combine = lse_combine[perm_to_a2av_idx]  # type: ignore[index]
                 elif use_a2av_perm_idxs == "no":
-                    lse_combine = unpermute_tensor(  # type: ignore[union-attr]
-                        tensor=lse_combine,
+                    lse_combine = unpermute_output(  # type: ignore[union-attr]
+                        output=lse_combine,
                         unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
                     )
                 assert lse_combine_before_to_a2av.shape == lse_combine.shape  # type: ignore[union-attr]
@@ -895,9 +898,9 @@ def test_main(
     min_num_dst_ranks = 0
 
     cast_lse = True
-    reduce_op: GroupReduceOp = "avg"  # choose from {"sum", "avg", "lse"}
-    if reduce_op == "lse":  # FIXME
-        assert cast_lse
+    reduce_op: GroupReduceOp = "lse"  # choose from {"sum", "avg", "lse"}
+    if reduce_op == "lse":
+        assert cast_lse, "we need to cast lse first before reducing"
 
     pass_out_buffer = True  # for both dispatch and combine
     pass_out_lse_buffer = True  # for both dispatch and combine

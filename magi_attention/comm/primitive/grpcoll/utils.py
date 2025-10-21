@@ -351,8 +351,8 @@ def sanity_check_for_group_cast_meta_args_per_rank(
 
 
 @nvtx.instrument_nvtx
-def unpermute_tensor(
-    tensor: torch.Tensor,
+def unpermute_output(
+    output: torch.Tensor,
     unperm_after_a2a_kwargs: dict,
 ) -> torch.Tensor:
     """unpermute a2a output to output
@@ -360,9 +360,32 @@ def unpermute_tensor(
     """
 
     return range_gather(
-        input=tensor,
+        input=output,
         **unperm_after_a2a_kwargs,
     )
+
+
+@nvtx.instrument_nvtx
+def unpermute_output_with_lse(
+    output: torch.Tensor,
+    output_lse: torch.Tensor,
+    unperm_after_a2a_kwargs: dict,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """unpermute a2a output and a2a_output_lse to output and output_lse
+    as a post-processing func for group_cast
+    """
+
+    output = range_gather(
+        input=output,
+        **unperm_after_a2a_kwargs,
+    )
+
+    output_lse = range_gather(
+        input=output_lse,
+        **unperm_after_a2a_kwargs,
+    )
+
+    return output, output_lse
 
 
 @nvtx.instrument_nvtx
@@ -409,8 +432,10 @@ def _calc_group_cast_a2a_input_args(
     input_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     world_size: int,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
     **kwargs,
-) -> tuple[torch.Tensor, list[int]]:
+) -> tuple[OutMaybeWithLSE, list[int]]:
     # -----     group_cast_a2a_input meta args     ----- #
 
     # check if pre-calculated
@@ -434,6 +459,12 @@ def _calc_group_cast_a2a_input_args(
         input=input,
         **perm_before_a2a_kwargs,
     )
+    if cast_lse:
+        a2a_input_lse = range_gather(
+            input=input_lse,
+            **perm_before_a2a_kwargs,
+        )
+        a2a_input = (a2a_input, a2a_input_lse)
 
     return a2a_input, a2a_input_split_size
 
@@ -510,8 +541,10 @@ def _calc_group_cast_a2a_output_args(
     output_split_size_list: list[int],
     src_index_list: list[int],
     world_size: int,
+    cast_lse: bool = False,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
-) -> tuple[torch.Tensor, list[int], dict]:
+) -> tuple[OutMaybeWithLSE, list[int], dict]:
     # -----     group_cast_a2a_output meta args     ----- #
 
     # check if pre-calculated
@@ -531,6 +564,10 @@ def _calc_group_cast_a2a_output_args(
     # -----     group_cast_a2a_output tensor args     ----- #
 
     a2a_output = output
+    if cast_lse:
+        assert output_lse is not None
+        a2a_output_lse = output_lse
+        a2a_output = (a2a_output, a2a_output_lse)
 
     return (
         a2a_output,
@@ -549,13 +586,16 @@ def calc_group_cast_a2a_args(
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
     world_size: int,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
+    OutMaybeWithLSE,
+    OutMaybeWithLSE,
     list[int],
     list[int],
-    Callable[[torch.Tensor], torch.Tensor],
+    Callable[[OutMaybeWithLSE], OutMaybeWithLSE],
 ]:
     # ---------    calc a2a_input_split_size and a2a input     --------- #
 
@@ -564,6 +604,8 @@ def calc_group_cast_a2a_args(
         input_split_size_list=input_split_size_list,
         dst_indices_list=dst_indices_list,
         world_size=world_size,
+        cast_lse=cast_lse,
+        input_lse=input_lse,
         **kwargs,
     )
 
@@ -578,15 +620,23 @@ def calc_group_cast_a2a_args(
         output_split_size_list=output_split_size_list,
         src_index_list=src_index_list,
         world_size=world_size,
+        cast_lse=cast_lse,
+        output_lse=output_lse,
         **kwargs,
     )
 
     # ---------    prepare post-process fn    --------- #
 
-    post_process_fn = partial(
-        unpermute_tensor,
-        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
-    )
+    if cast_lse:
+        post_process_fn = partial(
+            unpermute_output_with_lse,
+            unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
+        )
+    else:
+        post_process_fn = partial(
+            unpermute_output,
+            unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
+        )
 
     return (
         a2a_output,
@@ -667,7 +717,7 @@ def sanity_check_for_group_reduce_meta_args_per_rank(
 
 
 @nvtx.instrument_nvtx
-def sum_reduce_to_tensor(
+def sum_reduce_output(
     output: torch.Tensor,
     a2a_output: torch.Tensor,
     range_reduce_kwargs: dict,
@@ -687,7 +737,7 @@ def sum_reduce_to_tensor(
 
 
 @nvtx.instrument_nvtx
-def avg_reduce_to_tensor(
+def avg_reduce_output(
     output: torch.Tensor,
     a2a_output: torch.Tensor,
     range_reduce_kwargs: dict,
@@ -707,7 +757,7 @@ def avg_reduce_to_tensor(
 
 
 @nvtx.instrument_nvtx
-def lse_reduce_to_tensor(
+def lse_reduce_output(
     output: torch.Tensor,
     output_lse: torch.Tensor,
     a2a_output: torch.Tensor,
@@ -789,6 +839,7 @@ def _calc_group_reduce_a2a_input_args(
         **perm_before_a2a_kwargs,
     )
     if reduce_op == "lse":
+        assert input_lse is not None
         a2a_input_lse = range_gather(
             input=input_lse,
             **perm_before_a2a_kwargs,
@@ -890,10 +941,11 @@ def _calc_group_reduce_a2a_output_args(
         dtype=output.dtype,
     )
     if reduce_op == "lse":
+        assert output_lse is not None
         a2a_output_lse = torch.empty(
-            [sum(a2a_output_split_size), *output_lse.shape[1:]],  # type: ignore[union-attr]
+            [sum(a2a_output_split_size), *output_lse.shape[1:]],
             device=output.device,
-            dtype=output_lse.dtype,  # type: ignore[union-attr]
+            dtype=output_lse.dtype,
         )
         a2a_output = (a2a_output, a2a_output_lse)
 
@@ -961,20 +1013,20 @@ def calc_group_reduce_a2a_args(
     match reduce_op:
         case "lse":
             post_process_fn = partial(
-                lse_reduce_to_tensor,
+                lse_reduce_output,
                 a2a_output=a2a_output[0],  # a2a_output
                 a2a_output_lse=a2a_output[1],  # a2a_output_lse
                 range_reduce_kwargs=range_reduce_kwargs,
             )
         case "sum":
             post_process_fn = partial(
-                sum_reduce_to_tensor,
+                sum_reduce_output,
                 a2a_output=a2a_output,
                 range_reduce_kwargs=range_reduce_kwargs,
             )
         case "avg":
             post_process_fn = partial(
-                avg_reduce_to_tensor,
+                avg_reduce_output,
                 a2a_output=a2a_output,
                 range_reduce_kwargs=range_reduce_kwargs,
             )

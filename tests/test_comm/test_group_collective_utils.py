@@ -24,9 +24,9 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_reduce_a2a_input_args,
     _get_a2av_perm_idxs_from_group_cast_meta_ref,
     get_a2av_perm_idxs_from_group_cast_meta,
-    sum_reduce_to_tensor,
+    sum_reduce_output,
     transfer_splits_and_dst_idxs_to_topk_idx,
-    unpermute_tensor,
+    unpermute_output,
 )
 from magi_attention.testing import parameterize
 from magi_attention.utils import pad_and_pack_tensors
@@ -37,21 +37,21 @@ class TestGroupCollectiveUtils(TestCase):
     def device(self) -> int:
         return torch.cuda.current_device()
 
-    def test_unpermute_tensor(self):
+    def test_unpermute_output(self):
         # ---------    normal unperm idxs     --------- #
 
         x = torch.randn(6, 3, 4, device=self.device)
 
         unperm_idxs1 = [0, 2, 1]
         split_sizes1 = [2, 1, 3]
-        y1_ref = self._unpermute_tensor_ref(
-            input_tensor=x,
+        y1_ref = self._unpermute_output_ref(
+            output=x,
             unperm_index=self._calc_unpermute_index_tensor(
                 x, unperm_idxs1, split_sizes1
             ),
         )
-        y1 = unpermute_tensor(
-            x,
+        y1 = unpermute_output(
+            output=x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
                     [[0, 2], [3, 6], [2, 3]],
@@ -83,13 +83,13 @@ class TestGroupCollectiveUtils(TestCase):
 
         unperm_idxs2 = [2, 1, 0]
         split_sizes2 = [2, 3, 1]
-        y2_ref = self._unpermute_tensor_ref(
-            input_tensor=x,
+        y2_ref = self._unpermute_output_ref(
+            output=x,
             unperm_index=self._calc_unpermute_index_tensor(
                 x, unperm_idxs2, split_sizes2
             ),
         )
-        y2 = unpermute_tensor(
+        y2 = unpermute_output(
             x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
@@ -121,13 +121,13 @@ class TestGroupCollectiveUtils(TestCase):
 
         unperm_idxs3 = [2, 0, 1]
         split_sizes3 = [3, 1, 2]
-        y3_ref = self._unpermute_tensor_ref(
-            input_tensor=x,
+        y3_ref = self._unpermute_output_ref(
+            output=x,
             unperm_index=self._calc_unpermute_index_tensor(
                 x, unperm_idxs3, split_sizes3
             ),
         )
-        y3 = unpermute_tensor(
+        y3 = unpermute_output(
             x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
@@ -164,13 +164,13 @@ class TestGroupCollectiveUtils(TestCase):
         unperm_idxs4 = []
         split_sizes4 = [1, 2, 3]
 
-        y4_ref = self._unpermute_tensor_ref(
-            input_tensor=x,
+        y4_ref = self._unpermute_output_ref(
+            output=x,
             unperm_index=self._calc_unpermute_index_tensor(
                 x, unperm_idxs4, split_sizes4
             ),
         )
-        y4 = unpermute_tensor(
+        y4 = unpermute_output(
             x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor([], dtype=torch.int32, device=self.device),
@@ -185,7 +185,7 @@ class TestGroupCollectiveUtils(TestCase):
         self.assertTrue(torch.equal(y4, y4_ref))
         self.assertTrue(torch.equal(y4, emp))
 
-    def test_reduce_to_tensor(self):
+    def test_reduce_output(self):
         # ---------    init data     --------- #
 
         h = 128
@@ -209,7 +209,7 @@ class TestGroupCollectiveUtils(TestCase):
             num_src_list=num_src_list,
         )
 
-        reduced_output_ref = self._reduce_to_tensor_ref(
+        reduced_output_ref = self._reduce_output_ref(
             output=output,
             a2a_output=a2a_output,
             reduce_index=reduce_index_tensor,
@@ -253,7 +253,8 @@ class TestGroupCollectiveUtils(TestCase):
             "total_size": total_size,
         }
 
-        reduced_output = sum_reduce_to_tensor(
+        # TODO: test other reduce ops
+        reduced_output = sum_reduce_output(
             output=output_ref,
             a2a_output=a2a_output,
             range_reduce_kwargs=range_reduce_kwargs,
@@ -261,8 +262,6 @@ class TestGroupCollectiveUtils(TestCase):
 
         # ---------    check     --------- #
 
-        # NOTE: since the add order is different, we can not expect all-equal but all-close
-        # self.assertTrue(torch.equal(reduced_output_ref, reduced_output))
         torch.testing.assert_close(
             reduced_output_ref,
             reduced_output,
@@ -556,16 +555,16 @@ class TestGroupCollectiveUtils(TestCase):
             for i in range(len(cu_seqlens))
         ]
 
-    def _unpermute_tensor_ref(
+    def _unpermute_output_ref(
         self,
-        input_tensor: torch.Tensor,
+        output: torch.Tensor,
         unperm_index: torch.LongTensor,
     ) -> torch.Tensor:
         """unpermute a2a output to output (deprecated as reference)
         as a post-processing func for group_cast
         """
 
-        return input_tensor.index_select(
+        return output.index_select(
             dim=0,
             index=unperm_index,
         )
@@ -713,7 +712,7 @@ class TestGroupCollectiveUtils(TestCase):
             a2a_output_unperm_index_tensor,
         )
 
-    def _reduce_to_tensor_ref(
+    def _reduce_output_ref(
         self,
         output: torch.Tensor,
         a2a_output: torch.Tensor,

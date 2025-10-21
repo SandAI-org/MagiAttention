@@ -49,7 +49,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_dispatch_layout_from_group_cast_meta,
     transfer_splits_and_dst_idxs_to_topk_idx,
-    unpermute_tensor,
+    unpermute_output,
 )
 from magi_attention.utils import pad_and_pack_tensors, setup_dist_env
 
@@ -528,8 +528,8 @@ def test_main(
                         if use_a2av_perm_idxs == "outside":
                             recv_x = recv_x[unperm_from_a2av_idx]
                         elif use_a2av_perm_idxs == "no":
-                            recv_x = unpermute_tensor(
-                                tensor=recv_x,
+                            recv_x = unpermute_output(
+                                output=recv_x,
                                 unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                             )
                         assert recv_x_from_a2av.shape == recv_x.shape  # type: ignore[union-attr]
@@ -632,8 +632,8 @@ def test_main(
                         if use_a2av_perm_idxs == "outside":
                             x_combine = x_combine[perm_to_a2av_idx]
                         elif use_a2av_perm_idxs == "no":
-                            x_combine = unpermute_tensor(
-                                tensor=x_combine,
+                            x_combine = unpermute_output(
+                                output=x_combine,
                                 unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
                             )
                         assert x_combine_before_to_a2av.shape == x_combine.shape
