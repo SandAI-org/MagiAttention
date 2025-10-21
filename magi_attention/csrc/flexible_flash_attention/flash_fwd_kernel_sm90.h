@@ -64,8 +64,7 @@ class FlashAttnFwdSm90 {
   using ClusterShape = typename CollectiveMainloop::ClusterShape;
   using MainloopArguments = typename CollectiveMainloop::Arguments;
   using MainloopParams = typename CollectiveMainloop::Params;
-  using BarrierQ =
-      std::conditional_t<Use_TMA_Q, cutlass::arch::ClusterTransactionBarrier, cutlass::arch::ClusterBarrier>;
+  using BarrierQ = std::conditional_t<Use_TMA_Q, cutlass::arch::ClusterTransactionBarrier, cutlass::arch::ClusterBarrier>;
 
   // Epilogue derived types
   using EpilogueArguments = typename CollectiveEpilogue::Arguments;
@@ -80,18 +79,15 @@ class FlashAttnFwdSm90 {
 
   static constexpr uint32_t NumLoadWarpGroups = 1;
   static constexpr uint32_t NumMmaWarpGroups = CUTE_STATIC_V(size(TiledMmaPV{})) / cutlass::NumThreadsPerWarpGroup;
-  static constexpr uint32_t MaxThreadsPerBlock =
-      CUTE_STATIC_V(size(TiledMmaPV{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
+  static constexpr uint32_t MaxThreadsPerBlock = CUTE_STATIC_V(size(TiledMmaPV{})) + (NumLoadWarpGroups * cutlass::NumThreadsPerWarpGroup);
   static constexpr uint32_t MinBlocksPerMultiprocessor = 1;
   static_assert(NumMmaWarpGroups == 1 || NumMmaWarpGroups == 2 || NumMmaWarpGroups == 3);
 
   /// Register requirement for Load and Math WGs
   // If we use cp.async to load K and V, we need more registers for the producer
   // WG.
-  static constexpr uint32_t LoadRegisterRequirement =
-      NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 40 : 40) : 32);
-  static constexpr uint32_t MmaRegisterRequirement =
-      NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 232 : 232) : 160);
+  static constexpr uint32_t LoadRegisterRequirement = NumMmaWarpGroups == 1 ? 56 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 40 : 40) : 32);
+  static constexpr uint32_t MmaRegisterRequirement = NumMmaWarpGroups == 1 ? 256 : (NumMmaWarpGroups == 2 ? (Use_TMA_KV ? 232 : 232) : 160);
   // If you want to print from the producer warp, you'd need to increase the
   // number of registers Otherwise you'll get CUDA error. static constexpr
   // uint32_t LoadRegisterRequirement = 40; static constexpr uint32_t
@@ -101,8 +97,8 @@ class FlashAttnFwdSm90 {
   // We overlap the shared memory for the mainloop and epilogue. However, we
   // only want smem_o to overlap with smem_v and nothing else, so we'll pad in
   // case sizeof(smem_o) > sizeof(smem_v).
-  static constexpr int mainloop_smem_padding_ = int(sizeof(typename CollectiveEpilogue::TensorStorage)) -
-      int(sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v)));
+  static constexpr int mainloop_smem_padding_ =
+      int(sizeof(typename CollectiveEpilogue::TensorStorage)) - int(sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_v)));
   static constexpr int mainloop_smem_padding = mainloop_smem_padding_ < 0 ? 0 : mainloop_smem_padding_;
   struct SharedStorage {
     struct TensorStorage : cute::aligned_struct<128, _1> {
@@ -163,10 +159,11 @@ class FlashAttnFwdSm90 {
     CUTLASS_TRACE_HOST("to_underlying_arguments(): Setting persistent grid SM count to " << sm_count);
 
     cutlass::KernelHardwareInfo hw_info{args.hw_info.device_id, sm_count};
-    return {CollectiveMainloop::to_underlying_arguments(args.mainloop),
-            CollectiveEpilogue::to_underlying_arguments(args.epilogue),
-            hw_info,
-            TileScheduler::to_underlying_arguments(args.scheduler)};
+    return {
+        CollectiveMainloop::to_underlying_arguments(args.mainloop),
+        CollectiveEpilogue::to_underlying_arguments(args.epilogue),
+        hw_info,
+        TileScheduler::to_underlying_arguments(args.scheduler)};
   }
 
   // Computes the kernel launch grid shape based on runtime parameters
@@ -217,8 +214,7 @@ class FlashAttnFwdSm90 {
 
     // We're counting on pipeline_k to call cutlass::arch::fence_barrier_init();
     PipelineParamsK pipeline_params_k;
-    pipeline_params_k.role =
-        warp_group_idx == 0 ? MainloopPipelineK::ThreadCategory::Producer : MainloopPipelineK::ThreadCategory::Consumer;
+    pipeline_params_k.role = warp_group_idx == 0 ? MainloopPipelineK::ThreadCategory::Producer : MainloopPipelineK::ThreadCategory::Consumer;
     if constexpr (Use_TMA_KV) {
       pipeline_params_k.transaction_bytes = CollectiveMainloop::TmaTransactionBytesK;
       pipeline_params_k.is_leader = warp_group_thread_idx == 0;
@@ -261,8 +257,7 @@ class FlashAttnFwdSm90 {
       __syncthreads();
     }
 
-    TileScheduler scheduler(
-        reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
+    TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
       using BlockMetaT = typename CollectiveMainloop::BlockMeta<true>;
@@ -299,9 +294,8 @@ class FlashAttnFwdSm90 {
       // cutlass::arch::wait_on_dependent_grids();
 
       // Load Q, K, V
-      for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0
-               ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
-               : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
+      for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
+                                                                                  : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
            work_tile_info.is_valid(params.scheduler);
            work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0
                ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
@@ -309,22 +303,12 @@ class FlashAttnFwdSm90 {
         BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
         // get block_coord without deterministic message
         auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
-        auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() {
-          scheduler.prefetch_next_work(params.scheduler, work_tile_info);
-        };
+        auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
         BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
-        bool has_tile_valid = mainloop.load(params.mainloop,
-                                            pipeline_k,
-                                            pipeline_v,
-                                            smem_pipe_write_k,
-                                            smem_pipe_write_v,
-                                            shared_storage,
-                                            scheduler_prefetch,
-                                            block_coord,
-                                            block_meta,
-                                            work_idx);
+        bool has_tile_valid = mainloop.load(
+            params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_coord, block_meta, work_idx);
 
         scheduler_prefetch();
         if (has_tile_valid) {
@@ -352,8 +336,7 @@ class FlashAttnFwdSm90 {
       int work_idx = 0;
 
       CUTLASS_PRAGMA_NO_UNROLL
-      for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
-           work_tile_info.is_valid(params.scheduler);
+      for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            // get_next_work will be called before the epilogue
       ) {
         // If there's tanh softcap, the scaling will be done before tanh.
@@ -372,58 +355,43 @@ class FlashAttnFwdSm90 {
 
         BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
-        bool has_tile_valid = mainloop.mma(params.mainloop,
-                                           pipeline_k,
-                                           pipeline_v,
-                                           smem_pipe_read_k,
-                                           smem_pipe_read_v,
-                                           tOrO,
-                                           softmax,
-                                           scores_scale,
-                                           threadIdx.x - MmaThreadOffset,
-                                           work_idx,
-                                           block_coord,
-                                           block_meta,
-                                           shared_storage);
+        bool has_tile_valid = mainloop.mma(
+            params.mainloop,
+            pipeline_k,
+            pipeline_v,
+            smem_pipe_read_k,
+            smem_pipe_read_v,
+            tOrO,
+            softmax,
+            scores_scale,
+            threadIdx.x - MmaThreadOffset,
+            work_idx,
+            block_coord,
+            block_meta,
+            shared_storage);
 
         // Do this here before the epilogue so that the next tile is ready to go.
         work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info);
         if (has_tile_valid) {
           block_coord = [&]() {
             if constexpr (MergeRange) {
-              return cute::make_tuple(get<0>(block_coord_raw),
-                                      get<1>(block_coord_raw),
-                                      params.mainloop.cu_batches[get<2>(block_coord_raw)]);
+              return cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), params.mainloop.cu_batches[get<2>(block_coord_raw)]);
             } else {
               return cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
             }
           }();
           if constexpr (!Deterministic) {
-            epilogue.store(params.epilogue,
-                           tOrO,
-                           softmax.row_sum,
-                           shared_storage,
-                           tiled_mma_pv,
-                           threadIdx.x - MmaThreadOffset,
-                           block_coord,
-                           block_meta.seqlen_info);
+            epilogue.store(params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
           } else {
-            epilogue.store(params.epilogue,
-                           tOrO,
-                           softmax.row_sum,
-                           shared_storage,
-                           tiled_mma_pv,
-                           threadIdx.x - MmaThreadOffset,
-                           block_coord_raw,
-                           block_meta.seqlen_info);
+            epilogue.store(
+                params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
           }
         } else {
           if constexpr (!Deterministic) {
             // Write 0 to gO and -inf to gLSE.
             epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
           } else {
-            epilogue.store_zero(
-                params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
+            epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
           }
         }
       }

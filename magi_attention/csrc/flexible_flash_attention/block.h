@@ -52,10 +52,7 @@ struct BlockMN {
     return {n_block_min, n_block_max};
   }
 
-  static CUTLASS_DEVICE cute::tuple<int, int> get_m_block_min_max(SeqlenInfo_t const& seqlen_info,
-                                                                  int const n_block,
-                                                                  int const bidb,
-                                                                  flash::AttnType const attn_type) {
+  static CUTLASS_DEVICE cute::tuple<int, int> get_m_block_min_max(SeqlenInfo_t const& seqlen_info, int const n_block, int const bidb, flash::AttnType const attn_type) {
     int const seqlen_q = seqlen_info.seqlen_q;
     int const seqlen_k = seqlen_info.seqlen_k;
     int m_block_max = cute::ceil_div(seqlen_q, kBlockM);

@@ -68,8 +68,7 @@ class FastZeroFillKernel {
   static_assert(kBlockM % kGmemThreadsPerRow == 0, "kBlockM must be a multiple of kGmemThreadsPerRow");
 
   // Layout of Epilogue threads, named GmemLayoutAtom
-  using GmemLayoutAtom = cute::Layout<Shape<Int<kBlockM / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
-                                      Stride<Int<kGmemThreadsPerRow>, _1>>;
+  using GmemLayoutAtom = cute::Layout<Shape<Int<kBlockM / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
 
   using GmemTiledCopyO = decltype(make_tiled_copy(
       Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, T_out>{},
