@@ -18,7 +18,7 @@ jobs:
       - name: Install clang-format-${{ env.LLVM_VERSION }}
         run: |
           sudo chmod +x ./scripts/install_clang_format.sh
-          sudo ./scripts/install_clang_format.sh
+          sudo ./scripts/install_clang_format.sh ${{ env.LLVM_VERSION }}
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
