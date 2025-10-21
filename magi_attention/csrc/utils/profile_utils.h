@@ -18,8 +18,8 @@
 #define CUDA_TIMER_H
 
 #include <cuda_runtime.h>
-#include <map>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 struct MagiEvents {
@@ -30,7 +30,7 @@ struct MagiEvents {
   static float elapsed_ms(const std::string& key);
 
  private:
-  static std::map<std::string, std::pair<cudaEvent_t, cudaEvent_t>> magi_events;
+  static std::unordered_map<std::string, std::pair<cudaEvent_t, cudaEvent_t>> magi_events;
 };
 
 #endif // CUDA_TIMER_H

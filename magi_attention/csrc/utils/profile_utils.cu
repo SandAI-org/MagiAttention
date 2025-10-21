@@ -19,7 +19,7 @@
 #include "cuda_check.h"
 #include "profile_utils.h"
 
-std::map<std::string, std::pair<cudaEvent_t, cudaEvent_t>> MagiEvents::magi_events;
+std::unordered_map<std::string, std::pair<cudaEvent_t, cudaEvent_t>> MagiEvents::magi_events;
 
 void MagiEvents::destroy() {
   for (auto const& [key, val] : magi_events) {

@@ -245,7 +245,6 @@ def prebuild_ffa_kernels() -> None:
     softcaps = [False]
     disable_atomic_opts = [False, True]
     deterministics = [False]
-    # profile_mode = [False]
 
     combos = itertools.product(
         directions,
