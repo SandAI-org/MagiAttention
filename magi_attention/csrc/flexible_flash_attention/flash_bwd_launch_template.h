@@ -35,14 +35,9 @@
 #include "static_switch.h"
 #include "tile_scheduler.hpp"
 #include "tile_size.h"
+#include "utils/profile_utils.h"
 
 using namespace cute;
-
-#define CUDA_CHECK(call)                                                                                       \
-  do {                                                                                                         \
-    cudaError_t err = call;                                                                                    \
-    TORCH_CHECK(err == cudaSuccess, "CUDA error in ", __FILE__, ":", __LINE__, ": ", cudaGetErrorString(err)); \
-  } while (0)
 
 template <int Arch,
           int kHeadDim,
@@ -65,10 +60,7 @@ template <int Arch,
           bool V_in_regs = false,
           bool RangeMerge = false,
           bool DisableBwdDkvAtomicReduction = false>
-void run_flash_bwd(Flash_bwd_params& params,
-                   cudaStream_t stream,
-                   const std::vector<cudaEvent_t>& start_events,
-                   const std::vector<cudaEvent_t>& end_events) {
+void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream, bool profile_mode) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
 
@@ -81,9 +73,8 @@ void run_flash_bwd(Flash_bwd_params& params,
                                                          /*Clear_dK=*/false,
                                                          /*Clear_dV=*/false>;
 
-  if (!start_events.empty()) {
-    CUDA_CHECK(cudaEventRecord(start_events[1], stream));
-    // std::cout << "start record for bwd 1" << std::endl;
+  if (profile_mode) {
+    MagiEvents::start("bwd_preprocess");
   }
   nvtxRangePushA("preprocess");
   typename PreprocessKernel::Arguments preprocess_args{static_cast<Element const*>(params.o_ptr),
@@ -113,14 +104,14 @@ void run_flash_bwd(Flash_bwd_params& params,
                                            preprocess_params,
                                            false /*launch_with_pdl*/);
   CHECK_CUDA_KERNEL_LAUNCH();
-  nvtxRangePop();
-  nvtxRangePushA("backward run");
-  if (!end_events.empty()) {
-    CUDA_CHECK(cudaEventRecord(end_events[1], stream));
+  if (profile_mode) {
+    MagiEvents::stop("bwd_preprocess");
   }
+  nvtxRangePop();
 
-  if (!start_events.empty()) {
-    CUDA_CHECK(cudaEventRecord(start_events[2], stream));
+  nvtxRangePushA("backward run");
+  if (profile_mode) {
+    MagiEvents::start("bwd_run");
   }
 
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
@@ -255,8 +246,8 @@ void run_flash_bwd(Flash_bwd_params& params,
   }
   CHECK_CUDA_KERNEL_LAUNCH();
   nvtxRangePop();
-  if (!end_events.empty()) {
-    CUDA_CHECK(cudaEventRecord(end_events[2], stream));
+  if (profile_mode) {
+    MagiEvents::stop("bwd_run");
   }
 }
 
@@ -267,10 +258,7 @@ template <int Arch,
           bool Has_softcap,
           bool DisableBwdDkvAtomicReduction,
           bool Deterministic>
-void run_mha_bwd_(Flash_bwd_params& params,
-                  cudaStream_t stream,
-                  const std::vector<cudaEvent_t>& start_events,
-                  const std::vector<cudaEvent_t>& end_events) {
+void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream, bool profile_mode) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
   static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
@@ -312,6 +300,6 @@ void run_mha_bwd_(Flash_bwd_params& params,
         /*AtomLayoutMdQ=*/AtomLayoutMdQ,
         /*V_in_regs=*/V_in_regs,
         /*RangeMerge=*/RangeMerge,
-        /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction>(params, stream, start_events, end_events);
+        /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction>(params, stream, profile_mode);
   });
 }

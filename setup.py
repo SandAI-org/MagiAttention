@@ -156,6 +156,7 @@ def build_ffa_utils_ext_module(
     sources = [
         f"{utils_dir_rel}/bindings.cpp",
         f"{utils_dir_rel}/unique_consecutive_pairs.cu",
+        f"{utils_dir_rel}/profile_utils.cu",
     ]
     include_dirs = [
         common_dir,
@@ -238,12 +239,13 @@ def prebuild_ffa_kernels() -> None:
 
     # determine the combinations of prebuild options
     directions = ["fwd", "bwd"]
-    head_dims = [64, 128]
-    compute_dtypes = [torch.bfloat16, torch.float16]
-    out_dtypes = [torch.float32, torch.bfloat16, torch.float16]
-    softcaps = [False, True]
+    head_dims = [128]
+    compute_dtypes = [torch.bfloat16]
+    out_dtypes = [torch.float32, torch.bfloat16]
+    softcaps = [False]
     disable_atomic_opts = [False, True]
-    deterministics = [False, True]
+    deterministics = [False]
+    # profile_mode = [False]
 
     combos = itertools.product(
         directions,
@@ -267,7 +269,7 @@ def prebuild_ffa_kernels() -> None:
             softcap=sc,
             disable_atomic_reduction=da,
             deterministic=det,
-            ref_block_size=None,
+            ref_block_size=(128, 128),
         )
         spec.build()
         src_dir = (jit_env.MAGI_ATTENTION_JIT_DIR / uri).resolve()

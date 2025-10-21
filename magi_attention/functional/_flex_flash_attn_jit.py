@@ -24,6 +24,18 @@ from magi_attention.common.jit import env as jit_env
 from magi_attention.common.jit.core import JitSpec, gen_jit_spec
 from magi_attention.common.jit.utils import write_if_different
 
+# isort: off
+# We need to import the CUDA kernels after importing torch
+is_ffa_utils_installed = False
+try:
+    from magi_attention import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
+
+    is_ffa_utils_installed = True
+except ImportError:
+    pass
+
+# isort: on
+
 _DTYPE_TO_CUTLASS = {
     torch.float16: "cutlass::half_t",
     torch.bfloat16: "cutlass::bfloat16_t",
@@ -196,6 +208,7 @@ def get_ffa_jit_spec(
     common_sources = [
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flex_flash_common.cpp",
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "fast_zero_fill.cu",
+        # jit_env.MAGI_ATTENTION_CSRC_UTILS_DIR / "profile_utils.cu",
     ]
 
     include_dirs = [
@@ -227,7 +240,12 @@ def get_ffa_jit_spec(
             extra_include_paths=[str(x) for x in include_dirs],
             needs_device_linking=False,
         )
-        return common_spec.build_and_get_objects()
+
+        common_objects = common_spec.build_and_get_objects()
+
+        utils_so_path = Path(flexible_flash_attention_utils_cuda.__file__)
+
+        return common_objects + [str(utils_so_path)]
 
     spec = gen_jit_spec(
         name=uri,

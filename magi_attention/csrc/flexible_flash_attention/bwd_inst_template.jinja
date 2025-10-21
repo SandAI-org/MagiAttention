@@ -6,6 +6,7 @@
 #include "flex_flash_common.hpp"
 #include "flash_bwd_launch_template.h"
 #include "flex_flash_bwd.hpp"
+#include "utils/profile_utils.h"
 
 // Compile-time constants provided by Jinja arguments
 static constexpr int kArch = {{ arch_sm_num }};
@@ -15,12 +16,6 @@ static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableDkvAtomic = {{ disable_atomic }};
 
-#define CUDA_CHECK(call)                                                      \
-do {                                                                          \
-    cudaError_t err = call;                                                   \
-    TORCH_CHECK(err == cudaSuccess, "CUDA error in ", __FILE__, ":", __LINE__, \
-                ": ", cudaGetErrorString(err));                               \
-} while (0)
 static constexpr bool kDeterministic = {{ deterministic }};
 
 // Runtime contract checks to ensure consistency with compile-time constraints
@@ -79,34 +74,13 @@ std::vector<at::Tensor> mha_bwd(
     std::optional<at::ScalarType> dv_type_,
     bool const deterministic,
     int const sm_margin,
-    std::optional<const std::vector<intptr_t>>& bwd_start_event_handles_,
-    std::optional<const std::vector<intptr_t>>& bwd_end_event_handles_) {
-  nvtxRangePushA("fwd prepare");
+    bool const profile_mode) {
+  nvtxRangePushA("bwd prepare");
   _check_runtime_contract_bwd(q, dk_type_, dv_type_, softcap, disable_bwd_dkv_atomic_reduction);
-
-  std::vector<cudaEvent_t> start_events;
-  std::vector<cudaEvent_t> end_events;
-
-  if (bwd_start_event_handles_.has_value() && bwd_end_event_handles_.has_value()) {
-    auto bwd_start_event_handles = bwd_start_event_handles_.value();
-    TORCH_CHECK(bwd_start_event_handles.size() == 3, 
-                "bwd_start_event_handles vector size must be 3, but got ", bwd_start_event_handles.size());
-    auto bwd_end_event_handles = bwd_end_event_handles_.value();
-    TORCH_CHECK(bwd_end_event_handles.size() == 3, 
-                "bwd_end_event_handles vector size must be 3, but got ", bwd_end_event_handles.size());
-    
-    for (size_t i = 0; i < 3; ++i) {
-            start_events.push_back(reinterpret_cast<cudaEvent_t>(bwd_start_event_handles[i]));
-            end_events.push_back(reinterpret_cast<cudaEvent_t>(bwd_end_event_handles[i]));
-    }
-  }
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation (including output tensor allocation)
-  // if (!start_events.empty()) {
-  //   CUDA_CHECK(cudaEventRecord(start_events[0], stream));
-  // }
   
   auto [params, dq, dk, dv] = prepare_mha_bwd(
       dout, q, k, v, out, dq_, dk_, dv_, softmax_lse, q_ranges, k_ranges,
@@ -114,12 +88,12 @@ std::vector<at::Tensor> mha_bwd(
       bwd_unique_count_, softmax_scale, softcap, disable_bwd_dkv_atomic_reduction,
       dq_type_, dk_type_, dv_type_, deterministic, sm_margin);
   nvtxRangePop();
-  if (!end_events.empty()) {
-    CUDA_CHECK(cudaEventRecord(end_events[0], stream));
+  if (profile_mode) {
+    MagiEvents::stop("bwd_prepare");
   }
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic>(params, stream, start_events, end_events);
+  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic>(params, stream, profile_mode);
 
   return {dq, dk, dv};
 }

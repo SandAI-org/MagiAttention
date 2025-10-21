@@ -197,8 +197,7 @@ def _flex_flash_attn_forward_compilable(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    fwd_start_cuda_events: list[int] | None,
-    fwd_end_cuda_events: list[int] | None,
+    profile_mode: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     q, k, v, q_ranges, k_ranges = [
@@ -237,8 +236,7 @@ def _flex_flash_attn_forward_compilable(
         out_type,
         deterministic,
         sm_margin,
-        fwd_start_cuda_events,
-        fwd_end_cuda_events,
+        profile_mode,
     )
 
 
@@ -263,8 +261,7 @@ def _flex_flash_attn_forward_compilable_fake(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    fwd_start_events: list[torch.cuda.Event] | None,
-    fwd_end_events: list[torch.cuda.Event] | None,
+    profile_mode: bool,
 ) -> None:
     pass
 
@@ -289,9 +286,10 @@ def _flex_flash_attn_forward(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    fwd_start_cuda_events: list[int] | None,
-    fwd_end_cuda_events: list[int] | None,
+    profile_mode: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if profile_mode:
+        flexible_flash_attention_utils_cuda.start_event("fwd_prepare")
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
@@ -344,8 +342,7 @@ def _flex_flash_attn_forward(
         out_type=out_type,
         deterministic=deterministic,
         sm_margin=sm_margin,
-        fwd_start_cuda_events=fwd_start_cuda_events,
-        fwd_end_cuda_events=fwd_end_cuda_events,
+        profile_mode=profile_mode,
     )
 
     return out, lse
@@ -383,8 +380,7 @@ def _flex_flash_attn_backward_compilable(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    bwd_start_events: list[int] | None,
-    bwd_end_events: list[int] | None,
+    profile_mode: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
@@ -430,8 +426,7 @@ def _flex_flash_attn_backward_compilable(
         dv_type,
         deterministic,
         sm_margin,
-        bwd_start_events,
-        bwd_end_events,
+        profile_mode,
     )
 
 
@@ -460,8 +455,7 @@ def _flex_flash_attn_backward_compilable_fake(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    bwd_start_events: list[torch.cuda.Event] | None,
-    bwd_end_events: list[torch.cuda.Event] | None,
+    profile_mode: bool,
 ) -> None:
     pass
 
@@ -491,9 +485,10 @@ def _flex_flash_attn_backward(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    bwd_start_cuda_events: list[int] | None,
-    bwd_end_cuda_events: list[int] | None,
+    profile_mode: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if profile_mode:
+        flexible_flash_attention_utils_cuda.start_event("bwd_prepare")
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
     dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
@@ -524,8 +519,7 @@ def _flex_flash_attn_backward(
         dv_type=dv_type,
         deterministic=deterministic,
         sm_margin=sm_margin,
-        bwd_start_events=bwd_start_cuda_events,
-        bwd_end_events=bwd_end_cuda_events,
+        profile_mode=profile_mode,
     )
 
     return dq, dk, dv
@@ -615,29 +609,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_fwd_atomic_reduction=False,
         auto_range_merge=False,
         ref_block_size=None,
-        fwd_start_events=None,
-        fwd_end_events=None,
-        bwd_start_events=None,
-        bwd_end_events=None,
+        profile_mode=False,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
-        merge_range_start_event, to_op_start_event = None, None
-        merge_range_end_event, to_op_end_event = None, None
-
-        (
-            merge_range_start_event,
-            to_op_start_event,
-            merge_range_end_event,
-            to_op_end_event,
-            fwd_start_cuda_events,
-            fwd_end_cuda_events,
-        ) = _prepare_events(fwd_start_events, fwd_end_events)
-
         if auto_range_merge:
-            if merge_range_start_event:
-                merge_range_start_event.record()
+            # if merge_range_start_event:
+            #    merge_range_start_event.record()
+            if profile_mode:
+                flexible_flash_attention_utils_cuda.start_event("fwd_range_merge")
+
             torch.cuda.nvtx.range_push("merge_range")
             (
                 merge_q_ranges,
@@ -648,8 +630,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 fwd_unique_count,
             ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
             torch.cuda.nvtx.range_pop()
-            if merge_range_end_event:
-                merge_range_end_event.record()
+
+            if profile_mode:
+                flexible_flash_attention_utils_cuda.stop_event("fwd_range_merge")
+
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -657,8 +641,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges = None
             fwd_qk_map = None
             fwd_unique_count = None
-        if merge_range_start_event:
-            fwd_start_events[1].record()
+
+        # if merge_range_start_event:
+        #    fwd_start_events[1].record()
 
         out, lse = _flex_flash_attn_forward(
             q,
@@ -679,16 +664,15 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
             deterministic,
             sm_margin,
-            fwd_start_cuda_events,
-            fwd_end_cuda_events,
+            profile_mode,
         )
 
-        if to_op_start_event:
-            to_op_start_event.record()
+        if profile_mode:
+            flexible_flash_attention_utils_cuda.start_event("fwd_cast")
         # Cast output to the same dtype as q
         out = out.to(q.dtype)
-        if to_op_end_event:
-            to_op_end_event.record()
+        if profile_mode:
+            flexible_flash_attention_utils_cuda.stop_event("fwd_cast")
 
         ctx.save_for_backward(
             q,
@@ -707,8 +691,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
         ctx.auto_range_merge = auto_range_merge
-        ctx.bwd_start_events = bwd_start_events
-        ctx.bwd_end_events = bwd_end_events
+        ctx.profile_mode = profile_mode
 
         return out, lse
 
@@ -724,7 +707,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             k_ranges,
             attn_type_map,
         ) = ctx.saved_tensors
-
+        """
         (
             merge_range_start_event,
             to_op_start_event,
@@ -733,10 +716,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             bwd_start_cuda_events,
             bwd_ent_cuda_events,
         ) = _prepare_events(ctx.bwd_start_events, ctx.bwd_end_events)
-
+        """
         if ctx.auto_range_merge:
-            if merge_range_start_event:
-                merge_range_start_event.record()
+            if ctx.profile_mode:
+                flexible_flash_attention_utils_cuda.start_event("bwd_range_merge")
+
             torch.cuda.nvtx.range_push("range_merge")
             (
                 merge_k_ranges,
@@ -747,8 +731,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 bwd_unique_count,
             ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
             torch.cuda.nvtx.range_pop()
-            if merge_range_end_event:
-                merge_range_end_event.record()
+
+            if ctx.profile_mode:
+                flexible_flash_attention_utils_cuda.stop_event("bwd_range_merge")
+
         else:
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
                 q_ranges,
@@ -756,8 +742,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 attn_type_map,
             )
             merge_k_ranges, bwd_kq_map, bwd_unique_count = None, None, None
-        if merge_range_start_event:
-            ctx.bwd_start_events[1].record()
 
         dq, dk, dv = _flex_flash_attn_backward(
             dout,
@@ -783,17 +767,16 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dv_type=torch.float32,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
-            bwd_start_cuda_events=bwd_start_cuda_events,
-            bwd_end_cuda_events=bwd_ent_cuda_events,
+            profile_mode=ctx.profile_mode,
         )
 
-        if to_op_start_event:
-            to_op_start_event.record()
+        if ctx.profile_mode:
+            flexible_flash_attention_utils_cuda.start_event("bwd_cast")
         dq = dq.to(q.dtype)
         dk = dk.to(k.dtype)
         dv = dv.to(v.dtype)
-        if to_op_start_event:
-            to_op_end_event.record()
+        if ctx.profile_mode:
+            flexible_flash_attention_utils_cuda.stop_event("bwd_cast")
 
         return (
             dq,  # q
@@ -833,10 +816,7 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: bool = False,
     auto_range_merge: bool = False,
     ref_block_size: tuple[int, int] | None = None,
-    fwd_start_events: list[torch.cuda.Event] | None = None,
-    fwd_end_events: list[torch.cuda.Event] | None = None,
-    bwd_start_events: list[torch.cuda.Event] | None = None,
-    bwd_end_events: list[torch.cuda.Event] | None = None,
+    profile_mode: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
@@ -1006,8 +986,5 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         auto_range_merge,
         ref_block_size,
-        fwd_start_events,
-        fwd_end_events,
-        bwd_start_events,
-        bwd_end_events,
+        profile_mode,
     )

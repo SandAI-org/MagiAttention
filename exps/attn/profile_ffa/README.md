@@ -76,7 +76,7 @@ Testing Config: {'seqlen': 8192, 'mask_type': 'full'}
 **Internal Timing Breakdown**
 | Operation   | Time (ms) | Description             |
 |-------------|-----------|-------------------------|
-| range_merge | 0.0000    | RangeMerge              |
+| range_merge | -1.0000   | RangeMerge              |
 | Prepare     | 0.0153    | prepare_mha_forward     |
 | Run         | 3.4125    | run_mha_forward         |
 | Fill        | 0.0119    | Fast_zero_fill          |
@@ -90,7 +90,7 @@ Testing Config: {'seqlen': 8192, 'mask_type': 'full'}
 **Internal Timing Breakdown**
 | Operation  | Time (ms) | Description             |
 |------------|-----------|-------------------------|
-| range_merge| 0.0000    | RangeMerge              |
+| range_merge| -1.0000   | RangeMerge              |
 | Prepare    | 0.1265    | prepare_mha_backward    |
 | Preprocess | 0.1050    | bwd_preprocess          |
 | Run        | 9.3409    | run_mha_backward        |

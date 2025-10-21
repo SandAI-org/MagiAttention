@@ -39,6 +39,18 @@ from magi_attention.utils.sparse_utils import (
     generate_ranges_from_block_mask,
 )
 
+# isort: off
+# We need to import the CUDA kernels after importing torch
+is_ffa_utils_installed = False
+try:
+    from magi_attention import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
+
+    is_ffa_utils_installed = True
+except ImportError:
+    pass
+
+# isort: on
+
 
 # -----------------------------------------------------------------------------
 # Common Helper Functions
@@ -245,8 +257,32 @@ def generate_block_sparse_qkv(
     return q, k, v
 
 
-fwd_labels = ["range_merge", "Prepare", "Run", "Fill", "to"]
-bwd_labels = ["range_merge", "Prepare", "Preprocess", "Run", "to"]
+fwd_event_keys = ["fwd_range_merge", "fwd_prepare", "fwd_run", "fwd_fill", "fwd_cast"]
+bwd_event_keys = [
+    "bwd_range_merge",
+    "bwd_prepare",
+    "bwd_preprocess",
+    "bwd_run",
+    "bwd_cast",
+]
+
+
+def collect_magi_event_timings(
+    event_keys: List[str],
+    timings_list: List[List[float]],
+):
+    """
+    Collects timings from the C++ MagiEvents profiler for a given list of event keys.
+    """
+    for i, key in enumerate(event_keys):
+        try:
+            # Fetch the time from the C++ static profiler
+            elapsed_time_ms = flexible_flash_attention_utils_cuda.elapsed_ms_event(key)
+            timings_list[i].append(elapsed_time_ms)
+        except Exception as e:
+            # Handle cases where an event might not have been recorded
+            print(f"Warning: Could not get time for event '{key}': {e}")
+            timings_list[i].append(0.0)
 
 
 # -----------------------------------------------------------------------------
@@ -267,13 +303,8 @@ def run_benchmark_framework(
     """
     print(f"\nStarting {test_name.upper()} benchmark...")
 
-    # Unpack common parameters
-    # nhq, hd = common_params["nhq"], common_params["hd"]
     warmup_iters, run_iters = common_params["warmup_iters"], common_params["run_iters"]
     # device = common_params["device"]
-
-    fwd_labels = ["range_merge", "Prepare", "Run", "Fill", "to"]
-    bwd_labels = ["range_merge", "Prepare", "Preprocess", "Run", "to"]
 
     with open(output_csv_path, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_header)
@@ -294,8 +325,6 @@ def run_benchmark_framework(
                     config, flops_meta, common_params
                 )
 
-                fwd_start_events, fwd_end_events = prepare_cuda_events(len(fwd_labels))
-                bwd_start_events, bwd_end_events = prepare_cuda_events(len(bwd_labels))
                 bench_fwd_start, bench_fwd_end = torch.cuda.Event(
                     enable_timing=True
                 ), torch.cuda.Event(enable_timing=True)
@@ -303,25 +332,16 @@ def run_benchmark_framework(
                     enable_timing=True
                 ), torch.cuda.Event(enable_timing=True)
 
-                ffa_args.update(
-                    {
-                        "fwd_start_events": fwd_start_events,
-                        "fwd_end_events": fwd_end_events,
-                        "bwd_start_events": bwd_start_events,
-                        "bwd_end_events": bwd_end_events,
-                        "disable_fwd_atomic_reduction": True,
-                    }
-                )
                 # Add block_size for sparse tests if available in config
                 if "block_size" in config:
                     ffa_args["ref_block_size"] = (
                         config["block_size"],
                         config["block_size"],
                     )
+                ffa_args["profile_mode"] = True
 
-                print(f"{ffa_args=}")
                 # B. Forward pass
-                fwd_timings: List[List[float]] = [[] for _ in fwd_labels]
+                fwd_timings: List[List[float]] = [[] for _ in fwd_event_keys]
                 total_fwd_times: List[float] = []
                 for _ in range(warmup_iters):
                     out, _ = ffa_func(q, k, v, **ffa_args)
@@ -330,18 +350,28 @@ def run_benchmark_framework(
                 for _ in range(run_iters):
                     bench_fwd_start.record()
                     rng = nvtx.start_range(message="forward_pass")
+
+                    # The ffa_func call now internally records all C++ events
                     out, _ = ffa_func(q, k, v, **ffa_args)
+
                     nvtx.end_range(rng)
                     bench_fwd_end.record()
                     torch.cuda.synchronize()
+
+                    # --- REFACTORED TIMING COLLECTION ---
+                    # Append total time
                     total_fwd_times.append(bench_fwd_start.elapsed_time(bench_fwd_end))
-                    collect_event_timings(fwd_start_events, fwd_end_events, fwd_timings)
+
+                    # Call the new function to collect all internal C++ event timings
+                    collect_magi_event_timings(fwd_event_keys, fwd_timings)
+
+                flexible_flash_attention_utils_cuda.destroy_event()
 
                 print_performance_results(
                     "FORWARD PERFORMANCE",
                     total_fwd_times,
                     fwd_timings,
-                    fwd_labels,
+                    fwd_event_keys,
                     flops=fwd_flops,
                 )
 
@@ -358,16 +388,17 @@ def run_benchmark_framework(
                     "latency_ms": f"{avg_total_fwd_ms:.4f}",
                     "tflops_per_sec": f"{tflops:.4f}",
                 }
-                for i, label in enumerate(fwd_labels):
-                    fwd_row[f"fwd_{label.lower()}_ms"] = (
+                for i, label in enumerate(fwd_event_keys):
+                    fwd_row[f"{label.lower()}_ms"] = (
                         f"{np.mean(fwd_timings[i]):.4f}" if fwd_timings[i] else "0.0000"
                     )
                 writer.writerow(fwd_row)
 
+                print("backward pass!")
                 # C. Backward pass
                 do = torch.rand_like(out)
 
-                bwd_timings: List[List[float]] = [[] for _ in fwd_labels]
+                bwd_timings: List[List[float]] = [[] for _ in bwd_event_keys]
                 total_bwd_times: List[float] = []
 
                 for _ in range(warmup_iters):
@@ -389,19 +420,28 @@ def run_benchmark_framework(
                         v.grad.zero_()
                     bench_bwd_start.record()
                     rng = nvtx.start_range(message="backward_pass")
+
+                    # The ffa_func call now internally records all C++ events
                     out.backward(do, retain_graph=True)
+
                     nvtx.end_range(rng)
-                    torch.cuda.nvtx.range_pop()
                     bench_bwd_end.record()
                     torch.cuda.synchronize()
+
+                    # --- REFACTORED TIMING COLLECTION ---
+                    # Append total time
                     total_bwd_times.append(bench_bwd_start.elapsed_time(bench_bwd_end))
-                    collect_event_timings(bwd_start_events, bwd_end_events, bwd_timings)
+
+                    # Call the new function to collect all internal C++ event timings
+                    collect_magi_event_timings(bwd_event_keys, bwd_timings)
+
+                flexible_flash_attention_utils_cuda.destroy_event()
 
                 print_performance_results(
                     "BACKWARD PERFORMANCE",
                     total_bwd_times,
                     bwd_timings,
-                    bwd_labels,
+                    bwd_event_keys,
                     flops=bwd_flops,
                 )
 
@@ -418,8 +458,8 @@ def run_benchmark_framework(
                     "latency_ms": f"{avg_total_bwd_ms:.4f}",
                     "tflops_per_sec": f"{tflops:.4f}",
                 }
-                for i, label in enumerate(bwd_labels):
-                    bwd_row[f"bwd_{label.lower()}_ms"] = (
+                for i, label in enumerate(bwd_event_keys):
+                    bwd_row[f"{label.lower()}_ms"] = (
                         f"{np.mean(bwd_timings[i]):.4f}" if bwd_timings[i] else "0.0000"
                     )
                 writer.writerow(bwd_row)
@@ -448,8 +488,8 @@ def run_dense_tests(args, common_params):
 
     config_keys = list(configs_to_test[0].keys())
     standard_keys = ["direction", "latency_ms", "tflops_per_sec"]
-    fwd_timing_keys = [f"fwd_{label.lower()}_ms" for label in fwd_labels]
-    bwd_timing_keys = [f"bwd_{label.lower()}_ms" for label in bwd_labels]
+    fwd_timing_keys = [f"{label.lower()}_ms" for label in fwd_event_keys]
+    bwd_timing_keys = [f"{label.lower()}_ms" for label in bwd_event_keys]
     csv_header = config_keys + standard_keys + fwd_timing_keys + bwd_timing_keys
 
     run_benchmark_framework(
@@ -478,8 +518,8 @@ def run_block_sparse_tests(args, common_params):
 
     config_keys = list(configs_to_test[0].keys())
     standard_keys = ["direction", "latency_ms", "tflops_per_sec"]
-    fwd_timing_keys = [f"fwd_{label.lower()}_ms" for label in fwd_labels]
-    bwd_timing_keys = [f"bwd_{label.lower()}_ms" for label in bwd_labels]
+    fwd_timing_keys = [f"{label.lower()}_ms" for label in fwd_event_keys]
+    bwd_timing_keys = [f"{label.lower()}_ms" for label in bwd_event_keys]
     csv_header = config_keys + standard_keys + fwd_timing_keys + bwd_timing_keys
 
     def calculate_sparse_flops(config, flops_meta, params):
