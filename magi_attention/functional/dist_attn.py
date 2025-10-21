@@ -248,6 +248,7 @@ class DistAttnRuntime:
                     disable_fwd_atomic_reduction=(
                         attn_arg.disable_fwd_atomic_reduction and out_acc is None
                     ),
+                    profile_mode=False,
                 )
 
         # maybe downcast out to q dtype for the host stage
@@ -518,6 +519,7 @@ class DistAttnRuntime:
                 softcap=softcap,
                 disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
                 sm_margin=self.bwd_sm_margin,
+                profile_mode=False,
             )
 
         # maybe downcast dq,dkv to q,kv dtype for the host stage
