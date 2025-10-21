@@ -17,7 +17,11 @@
 # Define the path to the clang-format executable.
 # You might need to adjust the version number (e.g., clang-format-15, clang-format-17)
 # or just "clang-format" if it's a generic link.
-CLANG_FORMAT_BIN="clang-format-21"
+
+# Read LLVM version from environment variable
+LLVM_VERSION=${LLVM_VERSION:-20}
+
+CLANG_FORMAT_BIN="clang-format-${LLVM_VERSION}"
 
 INSTALL_CMD="bash scripts/install_clang_format.sh"
 

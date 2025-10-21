@@ -34,22 +34,17 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_,
-          class Element,
-          class ElementAccum,
-          class ArchTag_,
-          bool Clear_dQ,
-          bool Clear_dK,
-          bool Clear_dV>
+template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQ, bool Clear_dK, bool Clear_dV>
 class FlashAttnBwdPreprocess {
  public:
   // Type Aliases
   using TileShape_MK = TileShape_MK_;
   using ArchTag = ArchTag_;
 
-  static_assert(std::is_same_v<Element, cutlass::half_t> && ArchTag::kMinComputeCapability >= 75 ||
-                std::is_same_v<Element, cutlass::bfloat16_t> && ArchTag::kMinComputeCapability >= 80 ||
-                std::is_same_v<Element, cutlass::float_e4m3_t> && ArchTag::kMinComputeCapability >= 89);
+  static_assert(
+      std::is_same_v<Element, cutlass::half_t> && ArchTag::kMinComputeCapability >= 75 ||
+      std::is_same_v<Element, cutlass::bfloat16_t> && ArchTag::kMinComputeCapability >= 80 ||
+      std::is_same_v<Element, cutlass::float_e4m3_t> && ArchTag::kMinComputeCapability >= 89);
 
   static constexpr uint32_t MaxThreadsPerBlock = 256;
   static constexpr uint32_t MinBlocksPerMultiprocessor = 2;
@@ -63,23 +58,20 @@ class FlashAttnBwdPreprocess {
   // it's just between threads in the same warp
   static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
   static constexpr int kGmemThreadsPerRow = kBlockKGmem / kGmemElemsPerLoad;
-  static_assert(MaxThreadsPerBlock % kGmemThreadsPerRow == 0,
-                "MaxThreadsPerBlock must be a multiple of kGmemThreadsPerRow");
-  using GmemLayoutAtom = Layout<Shape<Int<MaxThreadsPerBlock / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
-                                Stride<Int<kGmemThreadsPerRow>, _1>>;
-  using GmemTiledCopy =
-      decltype(make_tiled_copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
-                               GmemLayoutAtom{},
-                               Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per load
+  static_assert(MaxThreadsPerBlock % kGmemThreadsPerRow == 0, "MaxThreadsPerBlock must be a multiple of kGmemThreadsPerRow");
+  using GmemLayoutAtom = Layout<Shape<Int<MaxThreadsPerBlock / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
+  using GmemTiledCopy = decltype(make_tiled_copy(
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
+      GmemLayoutAtom{},
+      Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per load
 
   static constexpr int kGmemElemsPerLoadAccum = sizeof(cute::uint128_t) / sizeof(ElementAccum);
-  static_assert((kBlockM * kHeadDim / kGmemElemsPerLoadAccum) % MaxThreadsPerBlock == 0,
-                "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoadAccum");
+  static_assert((kBlockM * kHeadDim / kGmemElemsPerLoadAccum) % MaxThreadsPerBlock == 0, "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoadAccum");
   using GmemLayoutAtomAccum = Layout<Shape<Int<MaxThreadsPerBlock>>>;
-  using GmemTiledCopyAccum =
-      decltype(make_tiled_copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
-                               GmemLayoutAtomAccum{},
-                               Layout<Shape<Int<kGmemElemsPerLoadAccum>>>{})); // Val layout, 4 vals per store
+  using GmemTiledCopyAccum = decltype(make_tiled_copy(
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
+      GmemLayoutAtomAccum{},
+      Layout<Shape<Int<kGmemElemsPerLoadAccum>>>{})); // Val layout, 4 vals per store
 
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen_q, d, head)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
@@ -176,12 +168,10 @@ class FlashAttnBwdPreprocess {
     // auto shape_LSE = select<0, 2>(params.shape_O);
     // Initialize the tensors for O, dO, and LSE
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
-    Tensor gO =
-        local_tile(cute::domain_offset(make_coord(0, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+    Tensor gO = local_tile(cute::domain_offset(make_coord(0, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
 
     Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh);
-    Tensor gdO =
-        local_tile(cute::domain_offset(make_coord(0, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+    Tensor gdO = local_tile(cute::domain_offset(make_coord(0, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(0), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
@@ -238,8 +228,7 @@ class FlashAttnBwdPreprocess {
       dP_sum(mi) = flash::Allreduce<kGmemThreadsPerRow>::run(dP_sum_cur, sum_op);
     }
 
-    Tensor mdPsum =
-        make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(0, _, bidh); // total_q
+    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(0, _, bidh); // total_q
     Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
     if (get<1>(tOcO(_0{}, _0{}, _0{})) == 0) {
@@ -250,10 +239,8 @@ class FlashAttnBwdPreprocess {
       }
     }
 
-    Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(
-        0, _, bidh); // total_q
-    Tensor gLSElog2 =
-        local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
+    Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(0, _, bidh); // total_q
+    Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
     // We should not write back -inf because the subsequent calculation of scores would involve -inf - (-inf), which
     // results in NaN.

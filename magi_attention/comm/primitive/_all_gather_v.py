@@ -62,6 +62,8 @@ def all_gather_v(
     and return the gathered tensor 'x_gather',
     if not equally split along the dim, then gather indicated by the split sizes
 
+    NOTE: this primitive only supports sync op mode for now
+
     Args:
         x_local (torch.Tensor): the local tensor to be gathered
         group (dist.ProcessGroup): the process group to be used
@@ -69,7 +71,8 @@ def all_gather_v(
         split_sizes (list[int] | None): the split sizes along the dim,
             where len(split_sizes) should equal to the world size of the group,
                 and split_sizes[rank] is the dim size of this local tensor,
-                and sum(split_sizes) should equal to the dim size of the global tensor,
+                and sum(split_sizes) should equal to the dim size of the global tensor
+
             NOTE: if None, then all local tensors should share the same shape
 
     Returns:

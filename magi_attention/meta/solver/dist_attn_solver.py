@@ -23,7 +23,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
-from magi_attention.comm.primitive.utils import (
+from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
 )
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
@@ -1506,6 +1506,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             src_index_list=src_index_list,
             rank=self.cp_rank,
             world_size=self.cp_size,
+            group=self.cp_group,
             device_mesh=self.cp_mesh,
             deterministic=self.deterministic,
         )

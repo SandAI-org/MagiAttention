@@ -18,7 +18,10 @@ from typing import Any, Callable
 
 import torch
 import torch.distributed as dist
-from torch.testing._internal.common_distributed import MultiProcessTestCase
+from torch.testing._internal.common_distributed import (
+    TIMEOUT_OVERRIDE,
+    MultiProcessTestCase,
+)
 
 from .utils import switch_envvar_decorator
 
@@ -102,6 +105,11 @@ class DistTestBase(MultiProcessTestCase):
 
     def setUp(self) -> None:
         super().setUp()
+
+        timeout = getattr(self, "timeout", None)
+        if timeout is not None:
+            TIMEOUT_OVERRIDE.update({self.id().split(".")[-1]: timeout})
+
         self._spawn_processes()
         self._set_random_seed()
 

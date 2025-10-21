@@ -139,7 +139,10 @@ def merge_ranges(
         Unique Count:
          tensor(2, dtype=torch.int32)
     """
-    assert is_ffa_utils_installed, "FFA utils is not installed."
+    assert is_ffa_utils_installed, (
+        "The `flexible_flash_attention_utils_cuda` "
+        "extension module is not installed."
+    )
 
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]

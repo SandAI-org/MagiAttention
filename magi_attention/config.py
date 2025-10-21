@@ -15,6 +15,7 @@
 from dataclasses import dataclass
 
 import magi_attention
+from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
 from magi_attention.meta.solver.dispatch_solver import (
     BSDispatchAlg,
     DispatchAlg,
@@ -46,6 +47,7 @@ __all__ = [
     "OverlapAlg",
     "UniformOverlapAlg",
     "GreedyOverlapAlg",
+    "GrpCollConfig",
 ]
 
 
@@ -58,6 +60,9 @@ class DistAttnConfig:
     dispatch_config: DispatchConfig = DispatchConfig()
     # TODO: add distinct overlap config for fwd/bwd in the future
     overlap_config: OverlapConfig = OverlapConfig()
+    # NOTE: for now, grpcoll_config is only used when enabling native grpcoll
+    # by toggling the env variable ``MAGI_ATTENTION_NATIVE_GRPCOLL`` to ``1``
+    grpcoll_config: GrpCollConfig = GrpCollConfig()
 
     def __post_init__(self):
         if magi_attention.comm.is_qo_comm_enable():

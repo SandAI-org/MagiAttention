@@ -22,9 +22,15 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType, AttnRole
-from magi_attention.config import DistAttnConfig
+from magi_attention.config import (
+    DispatchConfig,
+    DistAttnConfig,
+    GrpCollConfig,
+    OverlapConfig,
+)
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta import (
@@ -32,7 +38,8 @@ from magi_attention.meta import (
     make_dispatch_meta_from_qk_ranges,
 )
 from magi_attention.meta.collection import DispatchMeta
-from magi_attention.meta.collection.calc_meta import AttnArg
+from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
+from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.solver.dist_attn_solver import (
     BaseDistAttnSolver,
     DistAttnSolver,
@@ -56,6 +63,7 @@ class DistAttnRuntimeKey:
     is_deterministic_mode_enable: bool
     is_hierarchical_comm_enable: bool
     is_qo_comm_enable: bool
+    is_native_grpcoll_enable: bool
 
 
 class DistAttnRuntimeMgr:
@@ -346,10 +354,33 @@ def init_dist_attn_runtime_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        # auto set other flags that might influence the runtime behavior
         is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
         is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
         is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
+        is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
     )
+
+
+def init_grpcoll_buffer(
+    comm_meta: CommMeta,
+    calc_meta: CalcMeta,
+    attn_solver: BaseDistAttnSolver,
+    grpcoll_config: GrpCollConfig,
+    cp_group: dist.ProcessGroup,
+) -> None:
+    if magi_attention.comm.is_native_grpcoll_enable():
+        if grpcoll_mgr.is_registered(cp_group):
+            # TODO: in the future, we might need to dynamically
+            # update the registered buffer according to the attn meta in the runtime
+            pass
+        else:
+            # TODO: in the future, we had better automatically decide
+            # the config to register the buffer similar to nccl
+            grpcoll_mgr.register_buffer(
+                group=cp_group,
+                config=grpcoll_config,
+            )
 
 
 def init_dist_attn_runtime_mgr(
@@ -447,8 +478,10 @@ def init_dist_attn_runtime_mgr(
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
 
+    # make dispatch meta
+    # to determine which rank should hold which chunks of seqlen
+    dispatch_config: DispatchConfig = dist_attn_config.dispatch_config
     if ref_dispatch_meta_q is None or ref_dispatch_meta_k is None:
-        # calculate dispatch meta to determine which rank should hold which chunks of seqlen
         # NOTE: in final, the dispatch meta is NOT supposed to contain any meta info about the mask
         # however, since in most of the distributed attention scenarios, the mask is static through the whole training pass
         # we can take advantage of this information to offer a better dispatch solution if permutable
@@ -467,7 +500,7 @@ def init_dist_attn_runtime_mgr(
             chunk_size=chunk_size,
             cp_size=cp_size,
             cp_rank=cp_rank,
-            dispatch_config=dist_attn_config.dispatch_config,
+            dispatch_config=dispatch_config,
             is_same_source=is_same_source,
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
@@ -476,7 +509,9 @@ def init_dist_attn_runtime_mgr(
         dispatch_meta_q = ref_dispatch_meta_q
         dispatch_meta_k = ref_dispatch_meta_k
 
-    # calculate comm meta and calc meta to organize the dist-attn calculation and communication
+    # make comm meta and calc meta
+    # to organize the dist-attn calculation and communication
+    overlap_config: OverlapConfig = dist_attn_config.overlap_config
     comm_meta, calc_meta, attn_solver = make_attn_meta_from_dispatch_meta(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -484,10 +519,20 @@ def init_dist_attn_runtime_mgr(
         dispatch_meta_q=dispatch_meta_q,
         dispatch_meta_k=dispatch_meta_k,
         cp_group=cp_group,
-        overlap_config=dist_attn_config.overlap_config,
+        overlap_config=overlap_config,
         cp_mesh=cp_mesh,
         num_heads_q=num_heads_q,
         num_heads_kv=num_heads_kv,
+    )
+
+    # init grpcoll buffer for native grpcoll kernels
+    grpcoll_config: GrpCollConfig = dist_attn_config.grpcoll_config
+    init_grpcoll_buffer(
+        comm_meta=comm_meta,
+        calc_meta=calc_meta,
+        attn_solver=attn_solver,
+        grpcoll_config=grpcoll_config,
+        cp_group=cp_group,
     )
 
     # init dist attn runtime

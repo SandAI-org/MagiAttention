@@ -46,8 +46,6 @@ class RunTimeMeta:
     q_ranges_tensor: torch.Tensor
     k_ranges_tensor: torch.Tensor
     attn_type_map_tensor: torch.Tensor
-    max_seqlen_q: int
-    max_seqlen_k: int
 
 
 # all-gather with dispatch to contiguous
@@ -233,8 +231,6 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
         # construct meta args
         block_num_q_per_head = cmp_topk_index_kv.shape[1]
         topk = cmp_topk_index_kv.shape[2]
-        max_seqlen_q = block_size_q
-        max_seqlen_k = block_size_kv
 
         # attn_type_map (torch.Tensor): Attention type map with dtype=torch.int32.
         #     0: full attention
@@ -287,8 +283,6 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             None,  # lse
             q_ranges_tensor,
             k_ranges_tensor,
-            max_seqlen_q,
-            max_seqlen_k,
             attn_type_map_tensor,
             *ffa_forward_args,
         )
@@ -303,8 +297,6 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, flatten_out, flatten_softmax_lse)
         ctx.total_gather_indices = total_gather_indices
         ctx.total_scatter_indices = total_scatter_indices
-        ctx.max_seqlen_q = max_seqlen_q
-        ctx.max_seqlen_k = max_seqlen_k
         ctx.q_ranges_tensor = q_ranges_tensor
         ctx.k_ranges_tensor = k_ranges_tensor
         ctx.cp_group = cp_group
@@ -379,8 +371,6 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
-            ctx.max_seqlen_q,
-            ctx.max_seqlen_k,
             attn_type_map_tensor,
             None,  # merge_k_ranges,
             None,  # bwd_kq_map,
@@ -467,8 +457,6 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             None,  # lse
             runtime_meta.q_ranges_tensor,
             runtime_meta.k_ranges_tensor,
-            runtime_meta.max_seqlen_q,
-            runtime_meta.max_seqlen_k,
             runtime_meta.attn_type_map_tensor,
             *ffa_forward_args,
         )
@@ -477,8 +465,6 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
         ctx.total_gather_indices = total_gather_indices
         ctx.total_scatter_indices = total_scatter_indices
         ctx.attn_type_map_tensor = runtime_meta.attn_type_map_tensor
-        ctx.max_seqlen_q = runtime_meta.max_seqlen_q
-        ctx.max_seqlen_k = runtime_meta.max_seqlen_k
         ctx.q_ranges_tensor = runtime_meta.q_ranges_tensor
         ctx.k_ranges_tensor = runtime_meta.k_ranges_tensor
         ctx.cp_group = cp_group
@@ -522,8 +508,6 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
-            ctx.max_seqlen_q,
-            ctx.max_seqlen_k,
             ctx.attn_type_map_tensor,
             None,  # merge_k_ranges,
             None,  # bwd_kq_map,
@@ -665,8 +649,6 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             None,  # lse
             runtime_meta.q_ranges_tensor,
             runtime_meta.k_ranges_tensor,
-            runtime_meta.max_seqlen_q,
-            runtime_meta.max_seqlen_k,
             attn_type_map_tensor,
             *ffa_forward_args,
         )
@@ -674,8 +656,6 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
         ctx.save_for_backward(q_cmp, k_cmp, v_cmp, out, softmax_lse)
         ctx.total_gather_indices = total_gather_indices
         ctx.total_scatter_indices = total_scatter_indices
-        ctx.max_seqlen_q = runtime_meta.max_seqlen_q
-        ctx.max_seqlen_k = runtime_meta.max_seqlen_k
         ctx.q_ranges_tensor = runtime_meta.q_ranges_tensor
         ctx.k_ranges_tensor = runtime_meta.k_ranges_tensor
         ctx.cp_group = cp_group
@@ -730,8 +710,6 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
-            ctx.max_seqlen_q,
-            ctx.max_seqlen_k,
             attn_type_map_tensor,
             None,  # merge_k_ranges,
             None,  # bwd_kq_map,
@@ -839,14 +817,7 @@ class USPAllGatherNSA:
             q_ranges_tensor=self.local_ranges_q.to_tensor(device),  # type: ignore[union-attr]
             k_ranges_tensor=self.ranges_k_cmp.to_tensor(device),  # type: ignore[union-attr]
             attn_type_map_tensor=None,
-            max_seqlen_q=self.local_ranges_q.max_seqlen,  # type: ignore[union-attr]
-            max_seqlen_k=self.ranges_k_cmp.max_seqlen,  # type: ignore[union-attr]
         )
-
-        # print(f"{self.local_ranges_q=}")
-        # print(f"{self.global_ranges_q=}")
-        # print(f"{self.ranges_k_cmp=}")
-        # print(f"{self.ranges_k=}")
 
         # compute runtime meta for FFAWinAGAttnFunc
         q_ranges_lst_win = []
@@ -876,25 +847,10 @@ class USPAllGatherNSA:
         k_ranges_tensor_win = torch.cat(k_ranges_lst_win, dim=0)
         attn_type_map_tensor_win = torch.cat(attn_type_map_lst_win, dim=0)
 
-        # TODO: cuda symchronize
-        max_seqlen_q_win = (
-            (q_ranges_tensor_win[:, 1] - q_ranges_tensor_win[:, 0]).max().item()
-        )
-        max_seqlen_k_win = (
-            (k_ranges_tensor_win[:, 1] - k_ranges_tensor_win[:, 0]).max().item()
-        )
-
-        # print(f"pre: {q_ranges_tensor_win=}")
-        # print(f"pre: {k_ranges_tensor_win=}")
-        # print(f"pre: {attn_type_map_tensor_win=}")
-        # print(f"pre: {max_seqlen_q_win=},{max_seqlen_k_win=}")
-
         self.win_runtime_meta = RunTimeMeta(  # type: ignore[assignment]
             q_ranges_tensor=q_ranges_tensor_win,
             k_ranges_tensor=k_ranges_tensor_win,
             attn_type_map_tensor=attn_type_map_tensor_win,
-            max_seqlen_q=max_seqlen_q_win,
-            max_seqlen_k=max_seqlen_k_win,
         )
 
     def dispatch_ranges(
@@ -1021,8 +977,6 @@ class USPAllGatherNSA:
                 None,
             )
 
-        # print(f"{out_cmp.shape=},{P_slc_idx.shape=}")
-
         with add_nvtx_event("FFATopkAGAttnFunc"):
             out_slc, lse_slc = FFATopkAGAttnFunc.apply(
                 q_layer,
@@ -1040,8 +994,6 @@ class USPAllGatherNSA:
                 None,
                 None,
             )
-
-        # print(f"{out_slc.shape=}")
 
         with add_nvtx_event("FFAWinAGAttnFunc"):
             out_win, lse_win = FFAWinAGAttnFunc.apply(
@@ -1063,8 +1015,6 @@ class USPAllGatherNSA:
             )
         # out_slc = torch.zeros_like(out_cmp)
         # out_win = torch.zeros_like(out_cmp)
-
-        # print(f"{out_win.shape=}")
 
         # t,h,3
         gate = self.gate_proj(q_layer)

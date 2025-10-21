@@ -13,6 +13,13 @@
 # limitations under the License.
 
 from enum import Enum
+from typing import Literal, TypeAlias
+
+import torch
+
+GroupReduceOp: TypeAlias = Literal["sum", "avg", "lse"]
+
+OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 class AttnType(Enum):

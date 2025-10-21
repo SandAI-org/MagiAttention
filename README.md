@@ -187,7 +187,7 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
 
   # --- Set up distributed environment --- #
 
-  rank, local_rank, world_size, world_group, device, seed = setup_dist_env()
+  rank, local_rank, world_size, num_nodes, num_local_ranks, world_group, device, seed = setup_dist_env()
 
   # --- Define attention config --- #
 

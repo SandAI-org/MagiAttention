@@ -14,17 +14,15 @@
 
 import unittest
 from collections import defaultdict
-from typing import Literal, TypeAlias
 from unittest import TestCase
 
 import torch
 
+from magi_attention.common.enum import GroupReduceOp, OutMaybeWithLSE
 from magi_attention.common.range_op import range_reduce
 from magi_attention.functional.utils import correct_attn_lse, correct_attn_out
 from magi_attention.testing import parameterize
 from magi_attention.utils import is_fp_dtype_at_least, max_fp_dtype
-
-OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 def range_reduce_ref(
@@ -33,7 +31,7 @@ def range_reduce_ref(
     input_ranges: torch.Tensor,
     output_ranges: torch.Tensor,
     dim: int = 0,
-    reduce_op: Literal["sum", "avg", "lse"] = "sum",
+    reduce_op: GroupReduceOp = "sum",
     reduce_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
@@ -46,7 +44,7 @@ def range_reduce_ref(
         input_ranges (torch.Tensor): Tensor of [start, end] ranges in the input
         output_ranges (torch.Tensor): Tensor of [start, end] ranges in the output
         dim (int, optional): Dimension along which to perform the reduction. Default is 0.
-        reduce_op (Literal["sum", "avg", "lse"]): the reduce operation to use. Defaults to "sum"
+        reduce_op (ReduceOp): the reduce operation to use. Defaults to "sum"
             - "sum": sum reduction
             - "avg": average reduction
             - "lse": log-sum-exp weighted average reduction, with lse correction
@@ -389,7 +387,7 @@ class TestRangeReduce(TestCase):
         output_ranges: torch.Tensor,
         dim: int = 0,
         deterministic: bool = False,
-        reduce_op: Literal["sum", "avg", "lse"] = "sum",
+        reduce_op: GroupReduceOp = "sum",
         reduce_dtype: torch.dtype | None = None,
         test_case: str = "",
     ):

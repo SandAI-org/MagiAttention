@@ -1175,7 +1175,7 @@ struct CollectiveMainloopBwdSm90 {
           cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
         }
         Tensor tPaP = smem_thr_copy_PdS.retile_S(rP); // ((Atom,AtomNum), MMA_N, MMA_N)
-        cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index())));
+        cute::copy(smem_tiled_copy_PdS, tPaP, tPsP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index())));
       }
       Tensor rdS = make_tensor_like<Element>(tdPrdP);
       flash::convert_type_out(tdPrdP, rdS);
@@ -1191,7 +1191,7 @@ struct CollectiveMainloopBwdSm90 {
       }
       // For hdim 64, It's faster to write to smem_dS first before the dV gemm
       Tensor tdSadS = smem_thr_copy_PdS.retile_S(rdS); // ((Atom,AtomNum), MMA_N, MMA_N)
-      cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index())));
+      cute::copy(smem_tiled_copy_PdS, tdSadS, tdSsdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index())));
 
       if constexpr (!Slice_dQKV_Mma) {
         // Most cases take this path, except for hdim256 where we want to slice to reduce register pressure
@@ -1200,14 +1200,14 @@ struct CollectiveMainloopBwdSm90 {
           flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_dKV, tdVrP, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
         } else {
           Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
-          Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()));
+          Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
           flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
         }
         // SMEM fence to make sure sdS is written before it's read by WGMMA
         cutlass::arch::fence_view_async_shared();
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
-        Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()));
+        Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/1, /*SwapAB=*/dQ_swapAB>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
         pipeline_do.consumer_release(smem_pipe_read_do_cur); // release dO
 
@@ -1216,7 +1216,7 @@ struct CollectiveMainloopBwdSm90 {
           flash::gemm</*zero_init=*/false, /*wg_wait=*/1>(tiled_mma_dKV, tdKrdS, tdKrQ(_, _, _, smem_pipe_read.index()), tdKrdK);
         } else {
           Tensor tdKrdS = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sdSt);
-          Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()));
+          Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
           flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB>(tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read.index()), tdKrdK);
         }
         if constexpr (dQacc_use_TMA) {
@@ -1284,14 +1284,14 @@ struct CollectiveMainloopBwdSm90 {
 
         static_assert(!(Slice_dQKV_Mma && Mma_dKV_is_RS));
         Tensor tdVrP = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sPt);
-        Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()));
+        Tensor tdVrP_cur = tdVrP(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
         flash::gemm</*zero_init=*/false, /*wg_wait=*/-1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(
             tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
 
         cutlass::arch::fence_view_async_shared();
         cutlass::arch::NamedBarrier::sync(NumMmaThreads, static_cast<uint32_t>(BwdNamedBarriers::PdS) /*id*/);
         Tensor tdQrdQ = partition_fragment_C(tiled_mma_dQ, select<!dQ_swapAB ? 0 : 2, !dQ_swapAB ? 2 : 0>(TileShape_MNK{}));
-        Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()));
+        Tensor tdQrdS_cur = tdQrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
         flash::gemm</*zero_init=*/true, /*wg_wait=*/-1, /*SwapAB=*/dQ_swapAB, /*M_slice=*/0>(tiled_mma_dQ, tdQrdS_cur, tdQrK, tdQrdQ);
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/1>(
             tiled_mma_dKV, tdVrP_cur, tdVrdO(_, _, _, smem_pipe_read_do_cur.index()), tdVrdV);
@@ -1303,7 +1303,7 @@ struct CollectiveMainloopBwdSm90 {
         }
 
         Tensor tdKrdS = mma_partition_fragment_AB</*A=*/!dKV_swapAB>(wg_mma_dKV, sdSt);
-        Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return<kStages_dS == 1>(_0{}, smem_pipe_read.index()));
+        Tensor tdKrdS_cur = tdKrdS(_, _, _, cute::conditional_return < kStages_dS == 1 > (_0{}, smem_pipe_read.index()));
         flash::gemm</*zero_init=*/false, /*wg_wait=*/1, /*SwapAB=*/dKV_swapAB, /*M_slice=*/0>(
             tiled_mma_dKV, tdKrdS_cur, tdKrQ(_, _, _, smem_pipe_read.index()), tdKrdK);
         pipeline_do.consumer_release(smem_pipe_read_do_cur); // release dO

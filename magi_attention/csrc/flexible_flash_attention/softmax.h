@@ -34,15 +34,8 @@ using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <bool zero_init = true,
-          typename Engine0,
-          typename Layout0,
-          typename Engine1,
-          typename Layout1,
-          typename Operator>
-__device__ __forceinline__ void thread_reduce_(Tensor<Engine0, Layout0> const& tensor,
-                                               Tensor<Engine1, Layout1>& summary,
-                                               Operator& op) {
+template <bool zero_init = true, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
+__device__ __forceinline__ void thread_reduce_(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& summary, Operator& op) {
   static_assert(Layout0::rank == 2, "Only support 2D Tensor");
   static_assert(Layout1::rank == 1, "Only support 1D Tensor");
   CUTE_STATIC_ASSERT_V(size<0>(summary) == size<0>(tensor));
@@ -56,9 +49,7 @@ __device__ __forceinline__ void thread_reduce_(Tensor<Engine0, Layout0> const& t
 }
 
 template <typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
-__device__ __forceinline__ void quad_allreduce_(Tensor<Engine0, Layout0>& dst,
-                                                Tensor<Engine1, Layout1>& src,
-                                                Operator& op) {
+__device__ __forceinline__ void quad_allreduce_(Tensor<Engine0, Layout0>& dst, Tensor<Engine1, Layout1>& src, Operator& op) {
   CUTE_STATIC_ASSERT_V(size(dst) == size(src));
 #pragma unroll
   for (int i = 0; i < size(dst); i++) {
@@ -66,15 +57,8 @@ __device__ __forceinline__ void quad_allreduce_(Tensor<Engine0, Layout0>& dst,
   }
 }
 
-template <bool zero_init = true,
-          typename Engine0,
-          typename Layout0,
-          typename Engine1,
-          typename Layout1,
-          typename Operator>
-__device__ __forceinline__ void reduce_(Tensor<Engine0, Layout0> const& tensor,
-                                        Tensor<Engine1, Layout1>& summary,
-                                        Operator& op) {
+template <bool zero_init = true, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
+__device__ __forceinline__ void reduce_(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& summary, Operator& op) {
   thread_reduce_<zero_init>(tensor, summary, op);
   quad_allreduce_(summary, summary, op);
 }
@@ -85,12 +69,7 @@ __device__ __forceinline__ void reduce_max(Tensor<Engine0, Layout0> const& tenso
   reduce_<zero_init>(tensor, max, max_op);
 }
 
-template <bool zero_init = true,
-          bool warp_reduce = true,
-          typename Engine0,
-          typename Layout0,
-          typename Engine1,
-          typename Layout1>
+template <bool zero_init = true, bool warp_reduce = true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
 __device__ __forceinline__ void reduce_sum(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& sum) {
   SumOp<float> sum_op;
   thread_reduce_<zero_init>(tensor, sum, sum_op);
@@ -100,16 +79,8 @@ __device__ __forceinline__ void reduce_sum(Tensor<Engine0, Layout0> const& tenso
 }
 
 // Apply the exp to all the elements.
-template <bool Scale_max = true,
-          bool Check_inf = true,
-          int Max_offset = 0,
-          typename Engine0,
-          typename Layout0,
-          typename Engine1,
-          typename Layout1>
-__forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0>& tensor,
-                                                 Tensor<Engine1, Layout1> const& max,
-                                                 const float scale) {
+template <bool Scale_max = true, bool Check_inf = true, int Max_offset = 0, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
+__forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0>& tensor, Tensor<Engine1, Layout1> const& max, const float scale) {
   // For FP8, we can subtract max by 8.0 so that the value after exp2 is in the range of [0, 256].
   // This lets us use more of the FP8 range (instead of just [0, 1]) to reduce underflow.
   static constexpr float max_offset = float(Max_offset); // We can only template on int, not float
@@ -120,9 +91,8 @@ __forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0>& tenso
   for (int mi = 0; mi < size<0>(tensor); ++mi) {
     // If max is -inf, then all elements must have been -inf (possibly due to masking).
     // We don't want (-inf - (-inf)) since that would give NaN.
-    const float max_scaled = Check_inf
-        ? (max(mi) == -INFINITY ? 0.f : (!Scale_max ? max(mi) : max(mi) * scale) - max_offset)
-        : (!Scale_max ? max(mi) : max(mi) * scale) - max_offset;
+    const float max_scaled =
+        Check_inf ? (max(mi) == -INFINITY ? 0.f : (!Scale_max ? max(mi) : max(mi) * scale) - max_offset) : (!Scale_max ? max(mi) : max(mi) * scale) - max_offset;
 #pragma unroll
     for (int ni = 0; ni < size<1>(tensor); ++ni) {
       // Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
@@ -191,8 +161,7 @@ struct Softmax {
         static constexpr float sum_scale = 1.f / float(1 << Max_offset);
         sum *= sum_scale;
       }
-      row_sum(mi) =
-          (sum == 0.f || sum != sum) ? -INFINITY : row_max(mi) * (softmax_scale_log2 * float(M_LN2)) + __logf(sum);
+      row_sum(mi) = (sum == 0.f || sum != sum) ? -INFINITY : row_max(mi) * (softmax_scale_log2 * float(M_LN2)) + __logf(sum);
     }
     return scores_scale;
   };

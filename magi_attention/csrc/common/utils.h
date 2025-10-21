@@ -162,9 +162,8 @@ CUTLASS_DEVICE auto convert_layout_acc_Aregs(Layout0 acc_layout) {
     static_assert(decltype(rank(get<0>(acc_layout)))::value == 3);
     if constexpr (sizeof(typename MMA_Traits::ValTypeA) == 2) {
       auto l = logical_divide(get<0, 2>(acc_layout), Tile<_2>{}); // ((2, N / 16))
-      return make_layout(make_layout(get<0, 0>(acc_layout), get<0, 1>(acc_layout), get<0, 0>(l)),
-                         get<1>(acc_layout),
-                         coalesce(make_layout(get<0, 1>(l), get<2>(acc_layout))));
+      return make_layout(
+          make_layout(get<0, 0>(acc_layout), get<0, 1>(acc_layout), get<0, 0>(l)), get<1>(acc_layout), coalesce(make_layout(get<0, 1>(l), get<2>(acc_layout))));
     } else {
       static_assert(sizeof(typename MMA_Traits::ValTypeA) == 1);
       static_assert(decltype(stride<0, 0>(acc_layout))::value == 1);
@@ -172,9 +171,10 @@ CUTLASS_DEVICE auto convert_layout_acc_Aregs(Layout0 acc_layout) {
       auto l = logical_divide(get<0, 2>(acc_layout), Tile<Layout<Shape<_2, _2>>>{}); // (((2, 2), N / 32))
       // This combines the first two modes (<0, 0> and <0, 1>) into one mode.
       // Will require register shuffling later to be correct.
-      return make_layout(make_layout(Layout<_4>{}, get<0, 0, 0>(l), get<0, 0, 1>(l)),
-                         get<1>(acc_layout),
-                         coalesce(make_layout(get<0, 1>(l), get<2>(acc_layout)))); // ((4, 2, 2), MMA_M, N / 32 * MMA_N)
+      return make_layout(
+          make_layout(Layout<_4>{}, get<0, 0, 0>(l), get<0, 0, 1>(l)),
+          get<1>(acc_layout),
+          coalesce(make_layout(get<0, 1>(l), get<2>(acc_layout)))); // ((4, 2, 2), MMA_M, N / 32 * MMA_N)
       // This combination is right but doesn't work with register shuffling.
       // return make_layout(make_layout(coalesce(make_layout(get<0, 0>(acc_layout), get<0, 0, 0>(l))), get<0,
       // 1>(acc_layout), get<0, 0, 1>(l)),
@@ -216,8 +216,7 @@ CUTLASS_DEVICE void convert_type_out(Tensor<Engine, Layout> const& tensor, Tenso
   // Somehow if we allocate out inside this function and return it, e2e is slower and the output can be wrong.
   using From_type = typename Engine::value_type;
   using To_type = typename EngineOut::value_type;
-  static constexpr int FragmentSize =
-      std::max(sizeof(From_type) / sizeof(To_type), sizeof(To_type) / sizeof(From_type));
+  static constexpr int FragmentSize = std::max(sizeof(From_type) / sizeof(To_type), sizeof(To_type) / sizeof(From_type));
   static_assert(CUTE_STATIC_V(size(tensor)) % FragmentSize == 0, "Fragment size does not vectorize properly");
   Tensor frag = recast<cutlass::Array<From_type, FragmentSize> const>(tensor);
   Tensor out_frg = recast<cutlass::Array<To_type, FragmentSize>>(out);
@@ -256,28 +255,18 @@ CUTLASS_DEVICE auto mma_partition_fragment_AB(Mma const& mma, Tensor0 const& ten
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <bool zero_init = false,
-          int wg_wait = 0,
-          bool SwapAB = false,
-          int M_slice = -1,
-          typename Tensor0,
-          typename Tensor1,
-          typename Tensor2,
-          typename TiledMma>
+template <bool zero_init = false, int wg_wait = 0, bool SwapAB = false, int M_slice = -1, typename Tensor0, typename Tensor1, typename Tensor2, typename TiledMma>
 CUTLASS_DEVICE void gemm(TiledMma& tiled_mma, Tensor0 const& tCrA, Tensor1 const& tCrB, Tensor2& tCrC) {
   if constexpr (M_slice >= 0) {
     static constexpr int MMA_M = decltype(size<1>(tCrC))::value;
     static_assert(M_slice < MMA_M);
     // After logical_divide, C has shape ((2,2,V), (MMA_M, 1), MMA_N)
-    Tensor tCrC_slice =
-        cute::logical_divide(tCrC, Shape<cute::Underscore, Int<MMA_M>>{})(_, make_coord(Int<M_slice>{}, _), _);
+    Tensor tCrC_slice = cute::logical_divide(tCrC, Shape<cute::Underscore, Int<MMA_M>>{})(_, make_coord(Int<M_slice>{}, _), _);
     if constexpr (!SwapAB) {
-      Tensor tCrA_slice =
-          cute::logical_divide(tCrA, Shape<cute::Underscore, Int<MMA_M>>{})(_, make_coord(Int<M_slice>{}, _), _);
+      Tensor tCrA_slice = cute::logical_divide(tCrA, Shape<cute::Underscore, Int<MMA_M>>{})(_, make_coord(Int<M_slice>{}, _), _);
       gemm<zero_init, wg_wait, SwapAB, /*M_slice=*/-1>(tiled_mma, tCrA_slice, tCrB, tCrC_slice);
     } else {
-      Tensor tCrB_slice =
-          cute::logical_divide(tCrB, Shape<cute::Underscore, Int<MMA_M>>{})(_, make_coord(Int<M_slice>{}, _), _);
+      Tensor tCrB_slice = cute::logical_divide(tCrB, Shape<cute::Underscore, Int<MMA_M>>{})(_, make_coord(Int<M_slice>{}, _), _);
       gemm<zero_init, wg_wait, SwapAB, /*M_slice=*/-1>(tiled_mma, tCrA, tCrB_slice, tCrC_slice);
     }
   } else {
@@ -340,43 +329,35 @@ CUTLASS_DEVICE void gemm(TiledMma& tiled_mma, Tensor0 const& tCrA, Tensor1 const
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <bool A_in_regs = false,
-          bool B_in_regs = false,
-          bool SwapAB = false,
-          typename Tensor0,
-          typename Tensor1,
-          typename Tensor2,
-          typename Tensor3,
-          typename Tensor4,
-          typename TiledMma,
-          typename TiledCopyA,
-          typename TiledCopyB,
-          typename ThrCopyA,
-          typename ThrCopyB,
-          typename Hook>
-CUTLASS_DEVICE void gemm_sm80(Tensor0& acc,
-                              Tensor1& tCrA,
-                              Tensor2& tCrB,
-                              Tensor3 const& tCsA,
-                              Tensor4 const& tCsB,
-                              TiledMma tiled_mma,
-                              TiledCopyA smem_tiled_copy_A,
-                              TiledCopyB smem_tiled_copy_B,
-                              ThrCopyA smem_thr_copy_A,
-                              ThrCopyB smem_thr_copy_B,
-                              Hook fn) {
+template <
+    bool A_in_regs = false,
+    bool B_in_regs = false,
+    bool SwapAB = false,
+    typename Tensor0,
+    typename Tensor1,
+    typename Tensor2,
+    typename Tensor3,
+    typename Tensor4,
+    typename TiledMma,
+    typename TiledCopyA,
+    typename TiledCopyB,
+    typename ThrCopyA,
+    typename ThrCopyB,
+    typename Hook>
+CUTLASS_DEVICE void gemm_sm80(
+    Tensor0& acc,
+    Tensor1& tCrA,
+    Tensor2& tCrB,
+    Tensor3 const& tCsA,
+    Tensor4 const& tCsB,
+    TiledMma tiled_mma,
+    TiledCopyA smem_tiled_copy_A,
+    TiledCopyB smem_tiled_copy_B,
+    ThrCopyA smem_thr_copy_A,
+    ThrCopyB smem_thr_copy_B,
+    Hook fn) {
   if constexpr (SwapAB) {
-    gemm_sm80<B_in_regs, A_in_regs>(acc,
-                                    tCrB,
-                                    tCrA,
-                                    tCsB,
-                                    tCsA,
-                                    tiled_mma,
-                                    smem_tiled_copy_B,
-                                    smem_tiled_copy_A,
-                                    smem_thr_copy_B,
-                                    smem_thr_copy_A,
-                                    fn);
+    gemm_sm80<B_in_regs, A_in_regs>(acc, tCrB, tCrA, tCsB, tCsA, tiled_mma, smem_tiled_copy_B, smem_tiled_copy_A, smem_thr_copy_B, smem_thr_copy_A, fn);
   } else {
     CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(acc)); // MMA_M
     CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(acc)); // MMA_N
@@ -413,20 +394,15 @@ CUTLASS_DEVICE void gemm_sm80(Tensor0& acc,
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <typename Tensor0,
-          typename Tensor1,
-          typename Tensor2,
-          typename Tensor3,
-          typename TiledMma,
-          typename TiledCopy,
-          typename ThrCopy>
-CUTLASS_DEVICE void gemm_rs_sm80(Tensor0& acc,
-                                 Tensor1& tCrA,
-                                 Tensor2& tCrB,
-                                 Tensor3 const& tCsB,
-                                 TiledMma tiled_mma,
-                                 TiledCopy smem_tiled_copy_B,
-                                 ThrCopy smem_thr_copy_B) {
+template <typename Tensor0, typename Tensor1, typename Tensor2, typename Tensor3, typename TiledMma, typename TiledCopy, typename ThrCopy>
+CUTLASS_DEVICE void gemm_rs_sm80(
+    Tensor0& acc,
+    Tensor1& tCrA,
+    Tensor2& tCrB,
+    Tensor3 const& tCsB,
+    TiledMma tiled_mma,
+    TiledCopy smem_tiled_copy_B,
+    ThrCopy smem_thr_copy_B) {
   CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(acc)); // MMA_M
   CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<2>(acc)); // MMA_N
   CUTE_STATIC_ASSERT_V(size<2>(tCrA) == size<2>(tCrB)); // MMA_K
@@ -463,82 +439,79 @@ CUTLASS_DEVICE void gemm_sm100(Atom& atom, TA const& tA, TB const& tB, TC&& tC) 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <class a_type,
-          class b_type,
-          class c_type,
-          int M,
-          int N,
-          UMMA::Major a_major,
-          UMMA::Major b_major,
-          UMMA::ScaleIn a_neg,
-          UMMA::ScaleIn b_neg,
-          class... TAs,
-          class... TMs>
+template <
+    class a_type,
+    class b_type,
+    class c_type,
+    int M,
+    int N,
+    UMMA::Major a_major,
+    UMMA::Major b_major,
+    UMMA::ScaleIn a_neg,
+    UMMA::ScaleIn b_neg,
+    class... TAs,
+    class... TMs>
 CUTE_HOST_DEVICE constexpr auto to_tiled_mma_sm100_ts(
-    TiledMMA<MMA_Atom<MMA_Traits<SM100_MMA_F8F6F4_SS,
-                                 a_type,
-                                 b_type,
-                                 c_type,
-                                 cute::C<M>,
-                                 cute::C<N>,
-                                 cute::integral_constant<UMMA::Major, a_major>,
-                                 cute::integral_constant<UMMA::Major, b_major>,
-                                 cute::integral_constant<UMMA::ScaleIn, a_neg>,
-                                 cute::integral_constant<UMMA::ScaleIn, b_neg>>,
-                      TAs...>,
-             TMs...>) {
-  return TiledMMA<
-      MMA_Atom<
-          MMA_Traits<
-              SM100_MMA_F8F6F4_TS<a_type, b_type, c_type, M, N, a_major, b_major, a_neg, b_neg, UMMA::Saturate::False>>,
-          TAs...>,
-      TMs...>{};
+    TiledMMA<
+        MMA_Atom<
+            MMA_Traits<
+                SM100_MMA_F8F6F4_SS,
+                a_type,
+                b_type,
+                c_type,
+                cute::C<M>,
+                cute::C<N>,
+                cute::integral_constant<UMMA::Major, a_major>,
+                cute::integral_constant<UMMA::Major, b_major>,
+                cute::integral_constant<UMMA::ScaleIn, a_neg>,
+                cute::integral_constant<UMMA::ScaleIn, b_neg>>,
+            TAs...>,
+        TMs...>) {
+  return TiledMMA<MMA_Atom<MMA_Traits<SM100_MMA_F8F6F4_TS<a_type, b_type, c_type, M, N, a_major, b_major, a_neg, b_neg, UMMA::Saturate::False>>, TAs...>, TMs...>{};
 }
 
-template <class a_type,
-          class b_type,
-          class c_type,
-          int M,
-          int N,
-          UMMA::Major a_major,
-          UMMA::Major b_major,
-          UMMA::ScaleIn a_neg,
-          UMMA::ScaleIn b_neg,
-          class... TAs,
-          class... TMs>
+template <
+    class a_type,
+    class b_type,
+    class c_type,
+    int M,
+    int N,
+    UMMA::Major a_major,
+    UMMA::Major b_major,
+    UMMA::ScaleIn a_neg,
+    UMMA::ScaleIn b_neg,
+    class... TAs,
+    class... TMs>
 CUTE_HOST_DEVICE constexpr auto to_tiled_mma_sm100_ts(
-    TiledMMA<MMA_Atom<SM100_MMA_F16BF16_SS<a_type, b_type, c_type, M, N, a_major, b_major, a_neg, b_neg>, TAs...>,
-             TMs...>) {
-  return TiledMMA<
-      MMA_Atom<
-          SM100_MMA_F16BF16_TS<a_type, b_type, c_type, M, N, a_major, b_major, a_neg, b_neg, UMMA::Saturate::False>,
-          TAs...>,
-      TMs...>{};
+    TiledMMA<MMA_Atom<SM100_MMA_F16BF16_SS<a_type, b_type, c_type, M, N, a_major, b_major, a_neg, b_neg>, TAs...>, TMs...>) {
+  return TiledMMA<MMA_Atom<SM100_MMA_F16BF16_TS<a_type, b_type, c_type, M, N, a_major, b_major, a_neg, b_neg, UMMA::Saturate::False>, TAs...>, TMs...>{};
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <bool Is_even_MN = true,
-          bool Is_even_K = true,
-          bool Clear_OOB_MN = false,
-          bool Clear_OOB_K = true,
-          class CopyAtom,
-          class TV,
-          class Tiler,
-          typename Engine0,
-          typename Layout0,
-          typename Engine1,
-          typename Layout1,
-          typename Engine2,
-          typename Layout2,
-          typename Engine3,
-          typename Layout3>
-CUTLASS_DEVICE void copy(TiledCopy<CopyAtom, TV, Tiler> const& tiled_copy,
-                         Tensor<Engine0, Layout0> const& S,
-                         Tensor<Engine1, Layout1>& D,
-                         Tensor<Engine2, Layout2> const& identity_MN,
-                         Tensor<Engine3, Layout3> const& predicate_K,
-                         const int max_MN = 0) {
+template <
+    bool Is_even_MN = true,
+    bool Is_even_K = true,
+    bool Clear_OOB_MN = false,
+    bool Clear_OOB_K = true,
+    class CopyAtom,
+    class TV,
+    class Tiler,
+    typename Engine0,
+    typename Layout0,
+    typename Engine1,
+    typename Layout1,
+    typename Engine2,
+    typename Layout2,
+    typename Engine3,
+    typename Layout3>
+CUTLASS_DEVICE void copy(
+    TiledCopy<CopyAtom, TV, Tiler> const& tiled_copy,
+    Tensor<Engine0, Layout0> const& S,
+    Tensor<Engine1, Layout1>& D,
+    Tensor<Engine2, Layout2> const& identity_MN,
+    Tensor<Engine3, Layout3> const& predicate_K,
+    const int max_MN = 0) {
   // Decay TiledCopy to CopyAtom
   auto copy_atom = static_cast<CopyAtom const&>(tiled_copy);
   CUTE_STATIC_ASSERT_V(rank(S) == Int<3>{});
@@ -548,8 +521,7 @@ CUTLASS_DEVICE void copy(TiledCopy<CopyAtom, TV, Tiler> const& tiled_copy,
   CUTE_STATIC_ASSERT_V(size<2>(S) == size<2>(D)); // MMA_K
   // There's no case where !Clear_OOB_K && Clear_OOB_MN
   static_assert(!(Clear_OOB_MN && !Clear_OOB_K));
-  auto has_with_bool =
-      cute::is_valid([](auto t) -> void_t<decltype(declval<typename decltype(t)::Traits>().with(true))> {}, copy_atom);
+  auto has_with_bool = cute::is_valid([](auto t) -> void_t<decltype(declval<typename decltype(t)::Traits>().with(true))> {}, copy_atom);
 #pragma unroll
   for (int m = 0; m < size<1>(S); ++m) {
     bool predicate_mn = Is_even_MN || get<0>(identity_MN(_0{}, m, _0{})) < max_MN;
@@ -599,29 +571,31 @@ CUTLASS_DEVICE void copy(TiledCopy<CopyAtom, TV, Tiler> const& tiled_copy,
   }
 }
 
-template <bool Is_even_MN = true,
-          bool Is_even_K = true,
-          bool Clear_OOB_MN = false,
-          bool Clear_OOB_K = true,
-          class CopyAtom,
-          class TV,
-          class Tiler,
-          typename Engine0,
-          typename Layout0,
-          typename Engine1,
-          typename Layout1,
-          typename Engine2,
-          typename Layout2,
-          typename Engine3,
-          typename Layout3,
-          typename Engine4,
-          typename Layout4>
-CUTLASS_DEVICE void copy2(TiledCopy<CopyAtom, TV, Tiler> const& tiled_copy,
-                          Tensor<Engine0, Layout0> const& S,
-                          Tensor<Engine1, Layout1>& D,
-                          Tensor<Engine2, Layout2> const& identity_MN,
-                          Tensor<Engine3, Layout3> const& predicate_K,
-                          Tensor<Engine4, Layout4> const& predicate_M) {
+template <
+    bool Is_even_MN = true,
+    bool Is_even_K = true,
+    bool Clear_OOB_MN = false,
+    bool Clear_OOB_K = true,
+    class CopyAtom,
+    class TV,
+    class Tiler,
+    typename Engine0,
+    typename Layout0,
+    typename Engine1,
+    typename Layout1,
+    typename Engine2,
+    typename Layout2,
+    typename Engine3,
+    typename Layout3,
+    typename Engine4,
+    typename Layout4>
+CUTLASS_DEVICE void copy2(
+    TiledCopy<CopyAtom, TV, Tiler> const& tiled_copy,
+    Tensor<Engine0, Layout0> const& S,
+    Tensor<Engine1, Layout1>& D,
+    Tensor<Engine2, Layout2> const& identity_MN,
+    Tensor<Engine3, Layout3> const& predicate_K,
+    Tensor<Engine4, Layout4> const& predicate_M) {
   // Decay TiledCopy to CopyAtom
   auto copy_atom = static_cast<CopyAtom const&>(tiled_copy);
   CUTE_STATIC_ASSERT_V(rank(S) == Int<3>{});
@@ -631,8 +605,7 @@ CUTLASS_DEVICE void copy2(TiledCopy<CopyAtom, TV, Tiler> const& tiled_copy,
   CUTE_STATIC_ASSERT_V(size<2>(S) == size<2>(D)); // MMA_K
   // There's no case where !Clear_OOB_K && Clear_OOB_MN
   static_assert(!(Clear_OOB_MN && !Clear_OOB_K));
-  auto has_with_bool =
-      cute::is_valid([](auto t) -> void_t<decltype(declval<typename decltype(t)::Traits>().with(true))> {}, copy_atom);
+  auto has_with_bool = cute::is_valid([](auto t) -> void_t<decltype(declval<typename decltype(t)::Traits>().with(true))> {}, copy_atom);
 #pragma unroll
   for (int m = 0; m < size<1>(S); ++m) {
     bool predicate_mn = Is_even_MN || predicate_M(m);

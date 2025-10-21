@@ -53,6 +53,10 @@ class TestFlexFlashAttn(DistTestBase):
     def world_size(self) -> int:
         return 8
 
+    @property
+    def timeout(self) -> int:
+        return 400
+
     def generate_non_overlapping_qk_pairs(
         self,
         total_seqlen_q: int,
@@ -813,9 +817,9 @@ class TestFlexFlashAttn(DistTestBase):
             "head_dim": 128,
         },
         {
-            "name": "gqa_nhq16_nhkv4_hd128",
-            "num_heads_q": 16,
-            "num_heads_kv": 4,
+            "name": "gqa_nhq32_nhkv1_hd128",
+            "num_heads_q": 32,
+            "num_heads_kv": 1,
             "head_dim": 128,
         },
         {
@@ -850,6 +854,39 @@ class TestFlexFlashAttn(DistTestBase):
                     ]
                 ),
                 "attn_type_map": [0],
+            },
+            {
+                "name": "varlen_full_1k",
+                "seqlen": 1024,
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 366],
+                        [366, 391],
+                        [391, 471],
+                        [471, 835],
+                        [835, 984],
+                        [984, 1005],
+                        [1005, 1017],
+                        [1017, 1020],
+                        [1020, 1023],
+                        [1023, 1024],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 366],
+                        [366, 391],
+                        [391, 471],
+                        [471, 835],
+                        [835, 984],
+                        [984, 1005],
+                        [1005, 1017],
+                        [1017, 1020],
+                        [1020, 1023],
+                        [1023, 1024],
+                    ]
+                ),
+                "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             },
             {
                 "name": "varlen_full_4k",
