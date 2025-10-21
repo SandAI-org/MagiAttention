@@ -205,7 +205,6 @@ def get_ffa_jit_spec(
     common_sources = [
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flex_flash_common.cpp",
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "fast_zero_fill.cu",
-        # jit_env.MAGI_ATTENTION_CSRC_UTILS_DIR / "profile_utils.cu",
     ]
 
     include_dirs = [
@@ -239,7 +238,7 @@ def get_ffa_jit_spec(
         )
 
         common_objects = common_spec.build_and_get_objects()
-
+        # add utils.so(Dynamic linking)
         utils_so_path = Path(flexible_flash_attention_utils_cuda.__file__)
 
         return common_objects + [str(utils_so_path)]

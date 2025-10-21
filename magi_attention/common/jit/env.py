@@ -67,7 +67,6 @@ _package_root = pathlib.Path(__file__).resolve().parents[2]
 
 MAGI_ATTENTION_CSRC_DIR = _package_root / "csrc"
 FLEXIBLE_FLASH_ATTENTION_CSRC_DIR = MAGI_ATTENTION_CSRC_DIR / "flexible_flash_attention"
-MAGI_ATTENTION_CSRC_UTILS_DIR = MAGI_ATTENTION_CSRC_DIR / "utils"
 MAGI_ATTENTION_INCLUDE_DIR = MAGI_ATTENTION_CSRC_DIR / "common"
 # MAGI_SRC_DIR = _package_root / "data" / "src"
 MAGI_ATTENTION_AOT_DIR = _package_root / "lib"
