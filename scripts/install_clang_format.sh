@@ -20,6 +20,8 @@ set -e
 LLVM_SH_URL="https://apt.llvm.org/llvm.sh"
 LLVM_SH_SCRIPT="llvm.sh"
 
+echo "Testing reading: env: ${LLVM_VERSION} | arg: $1"
+
 # Parse LLVM version from command-line argument
 if [ -n "$1" ]; then
     LLVM_VERSION=$1
