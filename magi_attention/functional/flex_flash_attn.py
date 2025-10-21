@@ -703,6 +703,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
             None,  # ref_block_size
+            None,  # profile_mode
         )
 
 
