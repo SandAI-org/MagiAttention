@@ -1384,7 +1384,7 @@ def get_dispatch_layout_from_group_cast_meta(
     num_nodes: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     ...
 
 
@@ -1398,7 +1398,7 @@ def get_dispatch_layout_from_group_cast_meta(
     num_nodes: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     ...
 
 
@@ -1412,12 +1412,11 @@ def get_dispatch_layout_from_group_cast_meta(
     num_nodes: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     from ._buffer import GrpCollBuffer
     from ._mgr import grpcoll_mgr
 
     num_ranks = group.size()
-    num_experts = num_ranks
 
     # TODO: support directly pass input_split_sizes and dst_indices
     # and no need to transfer to topk_idx first
@@ -1437,12 +1436,10 @@ def get_dispatch_layout_from_group_cast_meta(
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             _,  # event_overlap
         ) = buffer.get_dispatch_layout(
             topk_idx=topk_idx,
-            num_experts=num_experts,
             previous_event=None,
             async_finish=False,
             allocate_on_comm_stream=False,
@@ -1455,14 +1452,12 @@ def get_dispatch_layout_from_group_cast_meta(
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             _,  # event_overlap,
         ) = GrpCollBuffer.get_dispatch_meta_from_topk_idx(
             topk_idx=topk_idx,
             num_ranks=num_ranks,
             num_nodes=num_nodes,
-            num_experts=num_experts,
             previous_event=None,
             async_finish=False,
             allocate_on_meta_stream=False,
@@ -1471,7 +1466,6 @@ def get_dispatch_layout_from_group_cast_meta(
     return (
         num_tokens_per_rank,
         num_tokens_per_rdma_rank,
-        num_tokens_per_expert,
         is_token_in_rank,
     )
 

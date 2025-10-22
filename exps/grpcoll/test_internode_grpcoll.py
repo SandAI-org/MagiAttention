@@ -237,7 +237,7 @@ def test_main(
         is_token_in_rank,
         topk_idx,
         topk_weights,
-        num_tokens_per_expert,
+        _,  # num_tokens_per_expert
         range_gather_post_dispatch_kwargs,
         range_gather_pre_combine_kwargs,
     ) = transfer_group_cast_meta_to_dispatch_meta(
@@ -315,26 +315,12 @@ def test_main(
     # RDMA dispatch counts
     num_rdma_token_sent = num_tokens_per_rdma_rank.sum().item()
 
-    # Expert meta
-    gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
-    dist.all_reduce(gbl_num_tokens_per_expert, group=group)
-    if local_rank == 0:
-        print(
-            f"{gbl_num_tokens_per_expert=} | {gbl_num_tokens_per_expert.shape=}\n",
-            flush=True,
-        )
-    print(
-        f"[RANK {rank}]: {num_tokens_per_expert=} | {num_tokens_per_expert.shape=}\n",
-        flush=True,
-    )
-
     # test get dispatch layout from group cast meta
 
     # use host meta
     (
         ref_num_tokens_per_rank,
         ref_num_tokens_per_rdma_rank,
-        ref_num_tokens_per_expert,
         ref_is_token_in_rank,
     ) = get_dispatch_layout_from_group_cast_meta(
         input_split_sizes=input_split_size_list,
@@ -347,7 +333,6 @@ def test_main(
     (
         ref_num_tokens_per_rank_device,
         ref_num_tokens_per_rdma_rank_device,
-        ref_num_tokens_per_expert_device,
         ref_is_token_in_rank_device,
     ) = get_dispatch_layout_from_group_cast_meta(
         input_split_sizes=input_split_sizes,
@@ -359,11 +344,9 @@ def test_main(
     # assert close to layout ref
     assert torch.allclose(ref_num_tokens_per_rank, num_tokens_per_rank)
     assert torch.allclose(ref_num_tokens_per_rdma_rank, num_tokens_per_rdma_rank)
-    assert torch.allclose(ref_num_tokens_per_expert, num_tokens_per_expert)
     assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
     assert torch.allclose(ref_num_tokens_per_rank_device, num_tokens_per_rank)
     assert torch.allclose(ref_num_tokens_per_rdma_rank_device, num_tokens_per_rdma_rank)
-    assert torch.allclose(ref_num_tokens_per_expert_device, num_tokens_per_expert)
     assert torch.allclose(ref_is_token_in_rank_device, is_token_in_rank)
 
     # get dispatch layout from buffer as reference
@@ -388,7 +371,6 @@ def test_main(
     (
         ref_num_tokens_per_rank,
         ref_num_tokens_per_rdma_rank,
-        ref_num_tokens_per_expert,
         ref_is_token_in_rank,
         _,  # event_overlap,
     ) = buffer.get_dispatch_layout(layout_topk_idx, num_experts)
@@ -397,7 +379,6 @@ def test_main(
         f"[RANK {rank}]: {layout_topk_idx.shape=} | {layout_topk_idx=}\n"
         f"{ref_num_tokens_per_rank.shape=} | {ref_num_tokens_per_rank=}\n"
         f"{ref_num_tokens_per_rdma_rank.shape=} | {ref_num_tokens_per_rdma_rank=}\n"
-        f"{ref_num_tokens_per_expert.shape=} | {ref_num_tokens_per_expert=}\n"
         f"{ref_is_token_in_rank.shape=} | {ref_is_token_in_rank=}\n",
         flush=True,
     )
@@ -405,11 +386,10 @@ def test_main(
     # assert close to layout ref
     assert torch.allclose(ref_num_tokens_per_rank, num_tokens_per_rank)
     assert torch.allclose(ref_num_tokens_per_rdma_rank, num_tokens_per_rdma_rank)
-    assert torch.allclose(ref_num_tokens_per_expert, num_tokens_per_expert)
     assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
 
     # benchmark dispatch layout
-    t = bench(lambda: buffer.get_dispatch_layout(layout_topk_idx, num_experts))[0]
+    t = bench(lambda: buffer.get_dispatch_layout(layout_topk_idx))[0]
     if local_rank == 0:
         print(f"[layout] Kernel performance: {t * 1000:.3f} ms", flush=True)
         print("", flush=True)
@@ -452,7 +432,6 @@ def test_main(
                     "num_tokens_per_rank": num_tokens_per_rank,
                     "num_tokens_per_rdma_rank": num_tokens_per_rdma_rank,
                     "is_token_in_rank": is_token_in_rank,
-                    "num_tokens_per_expert": num_tokens_per_expert,
                     "config": config,
                     "async_finish": async_mode,
                     "post_perm_idx": perm_to_a2av_idx
@@ -813,7 +792,6 @@ def test_main(
         "num_tokens_per_rank": num_tokens_per_rank,
         "num_tokens_per_rdma_rank": num_tokens_per_rdma_rank,
         "is_token_in_rank": is_token_in_rank,
-        "num_tokens_per_expert": num_tokens_per_expert,
         "config": dispatch_config if dispatch_config is not None else config,
     }
     (

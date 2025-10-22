@@ -298,14 +298,19 @@ void Buffer::destroy() {
 // Core Kernel APIs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>> Buffer::get_dispatch_layout(
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> Buffer::get_dispatch_layout(
     const torch::Tensor& topk_idx,
-    int num_experts,
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream) {
   return Meta::get_dispatch_meta_from_topk_idx(
-      topk_idx, num_ranks, is_internode_available() ? num_rdma_ranks : 1, num_experts, previous_event, async, allocate_on_comm_stream, comm_stream);
+      /*topk_idx=*/topk_idx,
+      /*num_ranks=*/num_ranks,
+      /*num_rdma_ranks=*/is_internode_available() ? num_rdma_ranks : 1,
+      /*previous_event=*/previous_event,
+      /*async=*/async,
+      /*allocate_on_comm_stream=*/allocate_on_comm_stream,
+      /*meta_stream=*/comm_stream);
 }
 
 std::tuple<

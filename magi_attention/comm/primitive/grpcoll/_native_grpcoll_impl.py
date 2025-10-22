@@ -117,13 +117,11 @@ def native_group_cast_impl(
         num_tokens_per_rank = meta_dict["num_tokens_per_rank"]
         num_tokens_per_rdma_rank = meta_dict["num_tokens_per_rdma_rank"]
         is_token_in_rank = meta_dict["is_token_in_rank"]
-        num_tokens_per_expert = meta_dict["num_tokens_per_expert"]
         post_perm_idx = meta_dict["post_perm_idx"]
     else:
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
         ) = get_dispatch_layout_from_group_cast_meta(
             input_split_sizes=input_split_sizes,
@@ -157,7 +155,6 @@ def native_group_cast_impl(
         num_tokens_per_rank=num_tokens_per_rank,
         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
         is_token_in_rank=is_token_in_rank,
-        num_tokens_per_expert=num_tokens_per_expert,
         post_perm_idx=post_perm_idx,
         config=config,
         previous_event=None,

@@ -76,12 +76,9 @@ void get_dispatch_layout(
     const int64_t* topk_idx,
     int* num_tokens_per_rank,
     int* num_tokens_per_rdma_rank,
-    int* num_tokens_per_expert,
     bool* is_token_in_rank,
     int num_tokens,
-    int num_topk,
     int num_ranks,
-    int num_experts,
     cudaStream_t stream);
 
 void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx, int64_t* perm_to_a2av_idx, int num_ranks, int num_splits, cudaStream_t stream);

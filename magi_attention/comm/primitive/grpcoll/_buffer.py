@@ -247,13 +247,10 @@ class GrpCollBuffer:
         topk_idx: torch.Tensor,
         num_ranks: int,
         num_nodes: int,
-        num_experts: int,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_meta_stream: bool = False,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, EventOverlap
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, EventOverlap]:
         """
         Calculate the dispatch meta from the topk indices required for later communication.
 
@@ -268,24 +265,21 @@ class GrpCollBuffer:
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             event,
         ) = grpcoll.Meta.get_dispatch_meta_from_topk_idx(
             topk_idx,
             num_ranks,
             num_nodes,
-            num_experts,
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_meta_stream,
-            None,  # auto set hidden meta_stream
+            None,  # meta_stream, auto set
         )
 
         return (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             EventOverlap(event),
         )
@@ -333,7 +327,7 @@ class GrpCollBuffer:
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_meta_stream,
-            None,  # auto set hidden meta_stream
+            None,  # meta_stream, auto set
         )
 
         return (
@@ -344,20 +338,16 @@ class GrpCollBuffer:
     def get_dispatch_layout(
         self,
         topk_idx: torch.Tensor,
-        num_experts: int,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, EventOverlap
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, EventOverlap]:
         """
         Calculate the layout required for later communication.
 
         Arguments:
-            topk_idx: `[num_tokens, num_topk]`, dtype must be `torch.int64`, the expert indices selected by each token,
-                `-1` means no selections.
-            num_experts: the number of experts.
+            topk_idx: `[num_tokens, num_ranks]`, dtype must be `torch.int64`,
+                the rank indices selected by each token, `-1` means no selections.
             previous_event: the event to wait before actually executing the kernel.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
@@ -366,19 +356,16 @@ class GrpCollBuffer:
             num_tokens_per_rank: `[num_ranks]` with `torch.int`, the number of tokens to be sent to each rank.
             num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
                 rank (with the same GPU index), return `None` for intranode settings.
-            num_tokens_per_expert: `[num_experts]` with `torch.int`, the number of tokens to be sent to each expert.
             is_token_in_rank: `[num_tokens, num_ranks]` with `torch.bool`, whether a token be sent to a rank.
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             event,
         ) = self.runtime.get_dispatch_layout(
             topk_idx,
-            num_experts,
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,
@@ -387,7 +374,6 @@ class GrpCollBuffer:
         return (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             EventOverlap(event),
         )
@@ -400,7 +386,6 @@ class GrpCollBuffer:
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
-        num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
@@ -424,10 +409,6 @@ class GrpCollBuffer:
             num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
                 rank (with the same GPU index), return `None` for intranode settings.
             is_token_in_rank: `[num_tokens, num_ranks]` with `torch.bool`, whether a token be sent to a rank.
-            num_tokens_per_expert: `[num_experts]` with `torch.int`, the number of tokens to be sent to each expert.
-            topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices selected by each token,
-                `-1` means no selections.
-            topk_weights: `[num_tokens, num_topk]` with `torch.float`, the expert weights of each token to dispatch.
             post_perm_idx: `[num_recv_tokens]` with `torch.int64`, the post-permutation indices of each token,
                 i.e. recv_x[post_perm_idx] can recover to the original recv_x in rank order.
             config: the performance tuning config if given.
@@ -485,7 +466,7 @@ class GrpCollBuffer:
                 num_tokens_per_rank=num_tokens_per_rank,
                 num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
                 is_token_in_rank=is_token_in_rank,
-                num_tokens_per_expert=num_tokens_per_expert,
+                num_tokens_per_expert=num_tokens_per_rank,  # FIXME: remove expert concept
                 post_perm_idx=post_perm_idx,
                 previous_event=previous_event,
                 async_finish=async_finish,

@@ -287,7 +287,7 @@ def prepare_test_func_kwargs(
         is_token_in_rank,
         topk_idx,
         topk_weights,
-        num_tokens_per_expert,
+        _,  # num_tokens_per_expert
         range_gather_post_dispatch_kwargs,
         range_gather_pre_combine_kwargs,
     ) = transfer_group_cast_meta_to_dispatch_meta(
@@ -379,28 +379,12 @@ def prepare_test_func_kwargs(
         flush=True,
     )
 
-    # Expert meta
-    # num_tokens_per_expert[e]: the number of tokens sent to expert e by this rank
-    # gbl_num_tokens_per_expert[e]: the number of tokens sent to expert e by all ranks
-    gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
-    dist.all_reduce(gbl_num_tokens_per_expert, group=group)
-    if local_rank == 0:
-        print(
-            f"{gbl_num_tokens_per_expert=} | {gbl_num_tokens_per_expert.shape=}\n",
-            flush=True,
-        )
-    print(
-        f"[RANK {rank}]: {num_tokens_per_expert=} | {num_tokens_per_expert.shape=}\n",
-        flush=True,
-    )
-
     # test get dispatch layout from group cast meta
 
     # use host meta
     (
         ref_num_tokens_per_rank,
         _,  # ref_num_tokens_per_rdma_rank,
-        ref_num_tokens_per_expert,
         ref_is_token_in_rank,
     ) = get_dispatch_layout_from_group_cast_meta(
         input_split_sizes=input_split_size_list,
@@ -413,7 +397,6 @@ def prepare_test_func_kwargs(
     (
         ref_num_tokens_per_rank_device,
         _,  # ref_num_tokens_per_rdma_rank_device,
-        ref_num_tokens_per_expert_device,
         ref_is_token_in_rank_device,
     ) = get_dispatch_layout_from_group_cast_meta(
         input_split_sizes=input_split_sizes,
@@ -424,10 +407,8 @@ def prepare_test_func_kwargs(
 
     # assert close to layout ref
     assert torch.allclose(ref_num_tokens_per_rank, num_tokens_per_rank)
-    assert torch.allclose(ref_num_tokens_per_expert, num_tokens_per_expert)
     assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
     assert torch.allclose(ref_num_tokens_per_rank_device, num_tokens_per_rank)
-    assert torch.allclose(ref_num_tokens_per_expert_device, num_tokens_per_expert)
     assert torch.allclose(ref_is_token_in_rank_device, is_token_in_rank)
 
     # get dispatch layout from buffer as reference
@@ -452,26 +433,23 @@ def prepare_test_func_kwargs(
     (
         ref_num_tokens_per_rank,
         _,  # ref_num_tokens_per_rdma_rank,
-        ref_num_tokens_per_expert,
         ref_is_token_in_rank,
         _,  # event_overlap,
-    ) = buffer.get_dispatch_layout(layout_topk_idx, num_experts)
+    ) = buffer.get_dispatch_layout(layout_topk_idx)
 
     print(
         f"[RANK {rank}]: {layout_topk_idx.shape=} | {layout_topk_idx=}\n"
         f"{ref_num_tokens_per_rank.shape=} | {ref_num_tokens_per_rank=}\n"
-        f"{ref_num_tokens_per_expert.shape=} | {ref_num_tokens_per_expert=}\n"
         f"{ref_is_token_in_rank.shape=} | {ref_is_token_in_rank=}\n",
         flush=True,
     )
 
     # assert close to layout ref
     assert torch.allclose(ref_num_tokens_per_rank, num_tokens_per_rank)
-    assert torch.allclose(ref_num_tokens_per_expert, num_tokens_per_expert)
     assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
 
     # benchmark dispatch layout
-    t = bench(lambda: buffer.get_dispatch_layout(layout_topk_idx, num_experts))[0]
+    t = bench(lambda: buffer.get_dispatch_layout(layout_topk_idx))[0]
     if local_rank == 0:
         print(f"[layout] Kernel performance: {t * 1000:.3f} ms", flush=True)
         print("", flush=True)
@@ -491,7 +469,6 @@ def prepare_test_func_kwargs(
         combined_lse_gr_buf=combined_lse_gr_buf,
         is_token_in_rank=is_token_in_rank,
         num_tokens_per_rank=num_tokens_per_rank,
-        num_tokens_per_expert=num_tokens_per_expert,
         perm_to_a2av_idx=perm_to_a2av_idx_device,
         unperm_from_a2av_idx=unperm_from_a2av_idx_device,
         range_gather_post_dispatch_kwargs=range_gather_post_dispatch_kwargs,
@@ -533,7 +510,6 @@ def test_func(
     combined_lse_gr_buf: torch.Tensor | None = kwargs["combined_lse_gr_buf"]
     is_token_in_rank: torch.Tensor = kwargs["is_token_in_rank"]
     num_tokens_per_rank: torch.Tensor = kwargs["num_tokens_per_rank"]
-    num_tokens_per_expert: torch.Tensor = kwargs["num_tokens_per_expert"]
     perm_to_a2av_idx: torch.Tensor = kwargs["perm_to_a2av_idx"]
     unperm_from_a2av_idx: torch.Tensor = kwargs["unperm_from_a2av_idx"]
     range_gather_post_dispatch_kwargs: dict = kwargs[
@@ -545,12 +521,7 @@ def test_func(
     # prepare dispatch args
     # x: shape=[num_local_tokens, hidden_dim]
     # num_tokens_per_rank: shape=[num_ranks]: the number of tokens sent to each rank
-    # num_tokens_per_expert: shape=[num_experts]: the number of tokens sent to each expert
     # is_token_in_rank: shape=[num_local_tokens, num_ranks]: whether a local token should be sent to a rank
-    # NOTE: if using top-k, the above args can be
-    #   calculated by buffer.get_dispatch_layout(topk_idx, num_experts)
-    #   where the topk_idx: shape=[num_local_tokens, topk]: the global expert idx for each local token
-    #   but we don't have to pass the topk_idx into dispatch kernels
     common_dispatch_args = {  # w/o handle tensors
         "x": x,
         "recv_x": recv_x_gc_buf,
@@ -564,7 +535,6 @@ def test_func(
     dispatch_args = common_dispatch_args | {
         "is_token_in_rank": is_token_in_rank,
         "num_tokens_per_rank": num_tokens_per_rank,
-        "num_tokens_per_expert": num_tokens_per_expert,
     }
     if previous_mode:
         dispatch_args.update({"previous_event": buffer.capture()})
@@ -1097,7 +1067,6 @@ def test_main(
     x = test_kwargs["x"]
     num_tokens_per_rank = test_kwargs["num_tokens_per_rank"]
     is_token_in_rank = test_kwargs["is_token_in_rank"]
-    num_tokens_per_expert = test_kwargs["num_tokens_per_expert"]
 
     # fetch some constant test out for later usage
     handle = test_out["handle"]
@@ -1174,7 +1143,6 @@ def test_main(
         "x": x,
         "num_tokens_per_rank": num_tokens_per_rank,
         "is_token_in_rank": is_token_in_rank,
-        "num_tokens_per_expert": num_tokens_per_expert,
         "config": dispatch_config if dispatch_config is not None else config,
     }
     (

@@ -214,7 +214,6 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
         ) = get_dispatch_layout_from_group_cast_meta(
             input_split_sizes=self._group_cast_args_dict_packed["input_split_sizes"],
@@ -234,7 +233,6 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             num_tokens_per_rank=num_tokens_per_rank,
             num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
             is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
             post_perm_idx=post_perm_idx,
         )
 
