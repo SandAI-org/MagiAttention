@@ -1546,7 +1546,6 @@ __device__ int combine_token(
   // Reduce data
   if constexpr (kUseTMA) {
     constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + 16;
-    GRPCOLL_DEVICE_ASSERT(hidden_int4 % WARP_SIZE == 0);
 
     auto tma_load_buffer = [=](const int& i, const int& j) -> int4* {
       return reinterpret_cast<int4*>(smem_ptr + i * kNumTMABufferBytesPerStage + j * kNumTMALoadBytes);

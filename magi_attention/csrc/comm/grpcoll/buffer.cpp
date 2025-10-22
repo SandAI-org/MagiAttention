@@ -1217,7 +1217,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
   auto num_combined_tokens = static_cast<int>(is_combined_token_in_rank.size(0));
-  GRPCOLL_HOST_ASSERT((hidden * x.element_size()) % sizeof(int4) == 0);
+  GRPCOLL_HOST_ASSERT((hidden * x.element_size()) % sizeof(int4) == 0); // hidden_size should be aligned with int4
+  GRPCOLL_HOST_ASSERT(((hidden * x.element_size()) / sizeof(int4)) % WARP_SIZE == 0); // hidden_int4 % WARP_SIZE == 0
   GRPCOLL_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes());
   GRPCOLL_HOST_ASSERT(is_combined_token_in_rank.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels);
