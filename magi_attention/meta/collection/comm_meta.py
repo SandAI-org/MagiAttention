@@ -28,7 +28,6 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_output_meta_args,
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
-    _get_a2av_perm_idxs_from_group_cast_meta_ref,
     get_a2av_perm_idxs_from_group_cast_meta,
     get_dispatch_layout_from_group_cast_meta,
 )
@@ -230,16 +229,6 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             src_index=self._group_cast_args_dict_packed["src_index"],
             num_ranks=self.world_size,
         )
-        if magi_attention.is_sanity_check_enable():
-            _, post_perm_idx_ref = _get_a2av_perm_idxs_from_group_cast_meta_ref(
-                output_split_size_list=self._group_cast_args_dict_packed[
-                    "output_split_sizes"
-                ],
-                src_index_list=self._group_cast_args_dict_packed["src_index"],
-                num_ranks=self.world_size,
-            )
-
-            assert torch.equal(post_perm_idx, post_perm_idx_ref)
 
         self._group_cast_args_dict_packed["native_group_cast_meta_dict"] = dict(
             num_tokens_per_rank=num_tokens_per_rank,

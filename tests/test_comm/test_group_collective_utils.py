@@ -22,14 +22,13 @@ import torch
 from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_input_args,
     _calc_group_reduce_a2a_input_args,
-    _get_a2av_perm_idxs_from_group_cast_meta_ref,
     get_a2av_perm_idxs_from_group_cast_meta,
     sum_reduce_output,
     transfer_splits_and_dst_idxs_to_topk_idx,
     unpermute_output,
 )
 from magi_attention.testing import parameterize
-from magi_attention.utils import pad_and_pack_tensors
+from magi_attention.utils import pad_and_pack_tensors, perm_idxs2unperm_idxs
 
 
 class TestGroupCollectiveUtils(TestCase):
@@ -438,7 +437,7 @@ class TestGroupCollectiveUtils(TestCase):
         src_index_list = config["src_index_list"]
         world_size = config["world_size"]
 
-        _, ref_perm_to_a2av_idx = _get_a2av_perm_idxs_from_group_cast_meta_ref(
+        _, ref_perm_to_a2av_idx = self._get_a2av_perm_idxs_from_group_cast_meta_ref(
             output_split_size_list=output_split_size_list,
             src_index_list=src_index_list,
             num_ranks=world_size,
@@ -454,7 +453,6 @@ class TestGroupCollectiveUtils(TestCase):
         assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
 
         # use device meta
-
         output_split_sizes = torch.tensor(
             output_split_size_list,
             dtype=torch.int64,
@@ -900,6 +898,56 @@ class TestGroupCollectiveUtils(TestCase):
             a2a_output_reduce_ranges_list,
             output_size_ranges,
         )
+
+    def _get_a2av_perm_idxs_from_group_cast_meta_ref(
+        self,
+        output_split_size_list: list[int],
+        src_index_list: list[int],
+        num_ranks: int,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.int64,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # count the total split size of each rank
+        rank_split_sizes = [0] * num_ranks
+        for i in range(len(output_split_size_list)):
+            rank_split_sizes[src_index_list[i]] += output_split_size_list[i]
+
+        # count the global rank offset
+        a2av_rank_offsets = list(accumulate([0] + rank_split_sizes))[:-1]
+
+        # a2a_output[unperm_from_a2av_idx] => output
+        unperm_from_a2av_idx: list[int] = []
+        current_offset_within_rank = [0] * num_ranks
+        for i in range(len(output_split_size_list)):
+            target_size = output_split_size_list[i]
+            target_rank = src_index_list[i]
+
+            # get the start offset of the target buffer sent from the target rank
+            global_start_offset_in_output = (
+                a2av_rank_offsets[target_rank] + current_offset_within_rank[target_rank]
+            )
+            unperm_from_a2av_idx.extend(
+                range(
+                    global_start_offset_in_output,
+                    global_start_offset_in_output + target_size,
+                )
+            )
+            current_offset_within_rank[target_rank] += target_size
+
+        # output[perm_to_a2av_idx] => a2a_output
+        perm_to_a2av_idx = perm_idxs2unperm_idxs(unperm_from_a2av_idx)
+
+        # convert to tensor
+        (
+            unperm_from_a2av_idx,
+            perm_to_a2av_idx,
+        ) = torch.tensor(
+            unperm_from_a2av_idx + perm_to_a2av_idx,
+            dtype=dtype,
+            device=device,
+        ).chunk(2)
+
+        return unperm_from_a2av_idx, perm_to_a2av_idx
 
 
 if __name__ == "__main__":
