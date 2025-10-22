@@ -342,7 +342,7 @@ Buffer::intranode_group_cast(
   bool cached_mode = cached_rank_prefix_matrix.has_value();
 
   // TODO: support other num_ranks
-  GRPCOLL_HOST_ASSERT(num_ranks == 1 || num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
+  GRPCOLL_HOST_ASSERT(num_ranks != 5 && num_ranks != 7);
 
   // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
   GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -519,7 +519,8 @@ Buffer::intranode_group_cast(
           num_channels * num_ranks * sizeof(int) * 4 + // channel start/end offset + queue head/tail
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * recv_x.element_size() + // data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) // lse buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) + // lse buffer
+          sizeof(int4) // max padding bytes to align for vectorized data buffer
       <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
 
   // Launch dispatch kernel
@@ -601,7 +602,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     const std::string& reduce_op,
     bool acc_reduce) {
   // TODO: support other num_ranks
-  GRPCOLL_HOST_ASSERT(num_ranks == 1 || num_ranks == 2 || num_ranks == 4 || num_ranks == 8);
+  GRPCOLL_HOST_ASSERT(num_ranks != 5 && num_ranks != 7);
 
   // Transfer reduce ops
   ReduceOp reduce_op_ = str_to_reduce_op(reduce_op);
@@ -720,7 +721,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * x.element_size() + // data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) // lse buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) + // lse buffer
+          sizeof(int4) // max padding bytes to align for vectorized data buffer
       <= num_nvl_bytes);
 
   // Launch combine kernel

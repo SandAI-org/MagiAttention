@@ -47,7 +47,7 @@
 namespace magi_attn_comm::grpcoll {
 
 // TODO: support non-inplace updated template parameter
-template <typename dtype_t>
+template <typename dtype_t, size_t kAlignment = 1>
 struct Buffer {
  private:
   uint8_t* ptr;
@@ -58,9 +58,22 @@ struct Buffer {
   DEVICE_INLINE Buffer() : ptr(nullptr), total_bytes(0) {}
 
   DEVICE_INLINE Buffer(void*& gbl_ptr, int num_elems, int elem_offset = 0) {
-    total_bytes = num_elems * sizeof(dtype_t); // the total bytes of this slice of buffer
-    ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + elem_offset * sizeof(dtype_t); // the start ptr in this slice
-    gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes; // in-place update the gbl_ptr across this slice
+    total_bytes = num_elems * sizeof(dtype_t); // the total bytes of this block
+    ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + elem_offset * sizeof(dtype_t); // the start ptr within this block
+
+    // advance `ptr` to align the address to `kAlignment` bytes if necessary
+    size_t pad_bytes_to_align = 0;
+    if constexpr (kAlignment > 1) {
+      auto ptr_addr = reinterpret_cast<size_t>(ptr);
+      pad_bytes_to_align = ptr_addr % kAlignment;
+      if (pad_bytes_to_align != 0)
+        pad_bytes_to_align = kAlignment - pad_bytes_to_align;
+      ptr += pad_bytes_to_align;
+    }
+
+    // In-place advance the `gbl_ptr` across this block
+    // and further advance the pad bytes as the `ptr` if necessary
+    gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes + pad_bytes_to_align;
   }
 
   DEVICE_INLINE Buffer advance_also(void*& gbl_ptr) {

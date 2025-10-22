@@ -97,7 +97,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----    set up for native grpcoll   ---- #
 
         if magi_attention.comm.is_native_grpcoll_enable():
-            if self.world_size in (1, 2, 4, 8):
+            if self.world_size in (1, 2, 3, 4, 6, 8):
                 for nccl_group in self.nccl_groups:
                     grpcoll_mgr.register_buffer(
                         group=nccl_group,
@@ -113,7 +113,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----    clean up for native grpcoll   ---- #
 
         if magi_attention.comm.is_native_grpcoll_enable():
-            if self.world_size in (1, 2, 4, 8):
+            if self.world_size in (1, 2, 3, 4, 6, 8):
                 for nccl_group in self.nccl_groups:
                     grpcoll_mgr.release_buffer(group=nccl_group)
                     grpcoll_mgr.check_released(group=nccl_group)
@@ -706,7 +706,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         if magi_attention.comm.is_native_grpcoll_enable():
             # TODO: support other world sizes
-            if self.world_size not in (1, 2, 4, 8):
+            if self.world_size not in (1, 2, 3, 4, 6, 8):
                 return
             hidden_size_kv = num_heads[1] * head_dim
             if hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(dtype) != 0:

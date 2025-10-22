@@ -165,5 +165,7 @@ class GrpCollConfig:
             + num_channels * num_ranks * nvl_buffer_size * torch.int32.itemsize
             # lse data buffer
             + num_channels * num_ranks * nvl_buffer_size * num_heads * torch.float32.itemsize
+            # max padding bytes to align for vectorized token data buffer (int4)
+            + 16
         )
         # fmt: on

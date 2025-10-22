@@ -268,10 +268,11 @@ void dispatch(
   auto channel_tail_idx = Buffer<int>(ptr, /*num_elems=*/num_channels_total, /*elem_offset=*/channel_rank_offset);
 
   // Get channel data buffers
-  //  `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4
+  //  `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
   //  `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
   //  `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
-  auto channel_x_buffers = Buffer<int4>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
+  auto channel_x_buffers =
+      Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
   auto channel_src_idx_buffers = Buffer<int>(ptr, /*num_elems=*/num_channel_tokens_total, /*elem_offset=*/channel_rank_token_offset);
   auto channel_lse_buffers = Buffer<float>(ptr, /*num_elems=*/num_channel_tokens_total * num_heads, /*elem_offset=*/channel_rank_token_offset * num_heads);
 
@@ -634,8 +635,8 @@ void dispatch(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens) {
-  constexpr int kNumThreads = 768; // block size
-  constexpr int kNumWarps = kNumThreads / WARP_SIZE; // num warps per block
+  constexpr int kNumWarps = 24; // num warps per block
+  constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
   constexpr int kNumTMABytesPerWarp = 8192; // num bytes of TMA transfer per warp
   constexpr int kWarpCopyUnrollStages = 5; // warp-copy unroll stages
   constexpr int kNumTMAStages = 2; // num TMA stages
@@ -847,10 +848,10 @@ void combine(
     auto channel_tail_idx = Buffer<int>(ptr, num_channels_total, channel_rank_offset);
 
     // Get channel data buffers
-    // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4
+    // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
     // `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
     // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
-    auto channel_x_buffers = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
+    auto channel_x_buffers = Buffer<int4, sizeof(int4)>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
     auto channel_src_idx_buffers = Buffer<int>(ptr, num_channel_tokens_total, channel_rank_token_offset);
     Buffer<float> channel_lse_buffers;
     if constexpr (kReduceOp == ReduceOp::LSE)
@@ -1036,8 +1037,8 @@ void combine(
           st_relaxed_sys_global(channel_head_idx_ptr, last_head = min_head); // system scope, relaxed order
       }
     } else { // other warps except than warp0 handle the reduction
-      // Get channel data buffers for each rank
-      Buffer<int4> channel_x_buffers[kNumRanks];
+      // Prepare channel data buffers for each rank
+      Buffer<int4, sizeof(int4)> channel_x_buffers[kNumRanks];
       Buffer<float> channel_lse_buffers[kNumRanks];
 #pragma unroll
       for (int curr_rank = 0; curr_rank < kNumRanks; ++curr_rank) {
@@ -1052,8 +1053,8 @@ void combine(
         auto ptr = reinterpret_cast<void*>(static_cast<int8_t*>(buffer_ptrs[rank]) + 2 * num_channels_total * sizeof(int));
 
         // Get `channel_x_buffers` for curr rank
-        // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int
-        channel_x_buffers[curr_rank] = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
+        // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int, alignment=sizeof(int4)
+        channel_x_buffers[curr_rank] = Buffer<int4, sizeof(int4)>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
 
         // Get `channel_lse_buffers` for curr rank
         // if `kReduceOp == ReduceOp::LSE`
@@ -1310,8 +1311,8 @@ void combine(
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
     bool acc_reduce) {
-  constexpr int kNumThreads = 768; // block size
-  constexpr int kNumWarps = kNumThreads / WARP_SIZE; // num warps per block
+  constexpr int kNumWarps = 24; // num warps per block
+  constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
   constexpr int kNumTMABytesPerWarp = 4096; // num bytes of TMA transfer per warp
   constexpr int kMaxNumHeads = 128; // the maximum number of heads supported when `kReduceOp == ReduceOp::LSE`
   constexpr int kWarpCopyUnrollStages = 4; // warp-copy unroll stages

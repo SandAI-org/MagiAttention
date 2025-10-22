@@ -102,8 +102,12 @@ using namespace magi_attn_comm::grpcoll;
       case_macro(1);                                          \
     case 2:                                                   \
       case_macro(2);                                          \
+    case 3:                                                   \
+      case_macro(3);                                          \
     case 4:                                                   \
       case_macro(4);                                          \
+    case 6:                                                   \
+      case_macro(6);                                          \
     case 8:                                                   \
       case_macro(8);                                          \
     default:                                                  \
@@ -146,8 +150,12 @@ using namespace magi_attn_comm::grpcoll;
       case_macro(dtype, reduce_dtype, 1);                                     \
     case 2:                                                                   \
       case_macro(dtype, reduce_dtype, 2);                                     \
+    case 3:                                                                   \
+      case_macro(dtype, reduce_dtype, 3);                                     \
     case 4:                                                                   \
       case_macro(dtype, reduce_dtype, 4);                                     \
+    case 6:                                                                   \
+      case_macro(dtype, reduce_dtype, 6);                                     \
     case 8:                                                                   \
       case_macro(dtype, reduce_dtype, 8);                                     \
     default:                                                                  \
