@@ -326,7 +326,6 @@ Buffer::intranode_group_cast(
     std::optional<torch::Tensor>& recv_lse_buf,
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const torch::Tensor& is_token_in_rank,
-    const std::optional<torch::Tensor>& num_tokens_per_expert,
     int cached_num_recv_tokens,
     const std::optional<torch::Tensor>& cached_rank_prefix_matrix,
     const std::optional<torch::Tensor>& cached_channel_prefix_matrix,
@@ -348,7 +347,6 @@ Buffer::intranode_group_cast(
     GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix.has_value());
   } else {
     GRPCOLL_HOST_ASSERT(num_tokens_per_rank.has_value());
-    GRPCOLL_HOST_ASSERT(num_tokens_per_expert.has_value());
   }
 
   // Type checks
@@ -357,7 +355,6 @@ Buffer::intranode_group_cast(
     GRPCOLL_HOST_ASSERT(cached_rank_prefix_matrix->scalar_type() == torch::kInt32);
     GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix->scalar_type() == torch::kInt32);
   } else {
-    GRPCOLL_HOST_ASSERT(num_tokens_per_expert->scalar_type() == torch::kInt32);
     GRPCOLL_HOST_ASSERT(num_tokens_per_rank->scalar_type() == torch::kInt32);
   }
 
@@ -372,16 +369,12 @@ Buffer::intranode_group_cast(
     GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix->dim() == 2 and cached_channel_prefix_matrix->is_contiguous());
     GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix->size(0) == num_ranks and cached_channel_prefix_matrix->size(1) == num_channels);
   } else {
-    GRPCOLL_HOST_ASSERT(num_tokens_per_expert->dim() == 1 and num_tokens_per_expert->is_contiguous());
-    GRPCOLL_HOST_ASSERT(num_tokens_per_expert->size(0) % num_ranks == 0);
-    GRPCOLL_HOST_ASSERT(num_tokens_per_expert->size(0) / num_ranks <= NUM_MAX_LOCAL_EXPERTS);
     GRPCOLL_HOST_ASSERT(num_tokens_per_rank->dim() == 1 and num_tokens_per_rank->is_contiguous());
     GRPCOLL_HOST_ASSERT(num_tokens_per_rank->size(0) == num_ranks);
   }
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
   auto hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
-  auto num_experts = cached_mode ? 0 : static_cast<int>(num_tokens_per_expert->size(0)), num_local_experts = num_experts / num_ranks;
 
   // LSE checks
   float* lse_ptr = nullptr;
@@ -416,15 +409,21 @@ Buffer::intranode_group_cast(
   auto channel_prefix_matrix = torch::Tensor();
 
   // Barrier or send sizes
-  // To clean: channel start/end offset, head and tail
-  int num_memset_int = num_channels * num_ranks * 4;
+  int num_memset_int = num_channels * num_ranks * 4; // clean channel start/end offset, head and tail
   if (cached_mode) {
     num_recv_tokens = cached_num_recv_tokens;
     rank_prefix_matrix = cached_rank_prefix_matrix.value();
     channel_prefix_matrix = cached_channel_prefix_matrix.value();
 
     // Copy rank prefix matrix and clean flags
-    intranode::cached_notify_dispatch(rank_prefix_matrix.data_ptr<int>(), num_memset_int, buffer_ptrs_gpu, barrier_signal_ptrs_gpu, rank, num_ranks, comm_stream);
+    intranode::cached_notify_dispatch(
+        /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
+        /*num_memset_int=*/num_memset_int,
+        /*buffer_ptrs=*/buffer_ptrs_gpu,
+        /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
+        /*rank=*/rank,
+        /*num_ranks=*/num_ranks,
+        /*stream=*/comm_stream);
   } else {
     rank_prefix_matrix = torch::empty({num_ranks, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -432,21 +431,14 @@ Buffer::intranode_group_cast(
     // Send sizes
     // Meta information:
     //  - Size prefix by ranks, shaped as `[num_ranks, num_ranks]`
-    //  - Size prefix by experts (not used later), shaped as `[num_ranks, num_local_experts]`
     // NOTES: no more token dropping in this version
     *moe_recv_counter = -1;
-    for (int i = 0; i < num_local_experts; ++i)
-      moe_recv_expert_counter[i] = -1;
-    GRPCOLL_HOST_ASSERT(num_ranks * (num_ranks + num_local_experts) * sizeof(int) <= num_nvl_bytes);
     // TODO: make notify_dispatch an individual buffer API
     // to allow notifying in advance to enable cache mode amap
     intranode::notify_dispatch(
         /*num_tokens_per_rank=*/num_tokens_per_rank->data_ptr<int>(),
         /*moe_recv_counter_mapped=*/moe_recv_counter_mapped,
         /*num_ranks=*/num_ranks,
-        /*num_tokens_per_expert=*/num_tokens_per_expert->data_ptr<int>(),
-        /*moe_recv_expert_counter_mapped=*/moe_recv_expert_counter_mapped,
-        /*num_experts=*/num_experts,
         /*num_tokens=*/num_tokens,
         /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
         /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
@@ -464,19 +456,11 @@ Buffer::intranode_group_cast(
       num_recv_tokens = recv_x_buf->size(0);
     } else {
       // otherwise, synchronize num_recv_tokens
-      // as well as tokens per expert as a statistic meta info to return
-      // but no use for now
       auto start_time = std::chrono::high_resolution_clock::now();
       while (true) {
-        // Read total count
+        // Read if num_recv_tokens is ready
         num_recv_tokens = static_cast<int>(*moe_recv_counter);
-
-        // Read per-expert count
-        bool ready = (num_recv_tokens >= 0);
-        for (int i = 0; i < num_local_experts and ready; ++i)
-          ready &= moe_recv_expert_counter[i] >= 0;
-
-        if (ready)
+        if (num_recv_tokens >= 0)
           break;
 
         // Timeout check
@@ -580,7 +564,7 @@ Buffer::intranode_group_cast(
         t.record_stream(compute_stream);
     }
     // record optional tensors
-    for (auto& to : {lse, recv_lse, num_tokens_per_rank, num_tokens_per_expert, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
+    for (auto& to : {lse, recv_lse, num_tokens_per_rank, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();

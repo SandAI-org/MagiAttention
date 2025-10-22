@@ -53,9 +53,6 @@ template <int kNumRanks>
 __global__ void notify_dispatch(
     const int* num_tokens_per_rank,
     int* moe_recv_counter_mapped,
-    const int* num_tokens_per_expert,
-    int* moe_recv_expert_counter_mapped,
-    int num_experts,
     int num_tokens,
     int num_channels,
     const bool* is_token_in_rank,
@@ -69,29 +66,22 @@ __global__ void notify_dispatch(
   auto thread_id = static_cast<int>(threadIdx.x), num_threads = static_cast<int>(blockDim.x);
   auto lane_id = thread_id % WARP_SIZE, warp_id = thread_id / WARP_SIZE, num_warps = num_threads / WARP_SIZE;
 
-  if (sm_id == 0) {
+  if (sm_id == 0) { // the first SM for counting the `num_recv_tokens`, which will return back to CPU, and calculating `rank_size_prefix`
     // Barrier first
     barrier_block<kNumRanks, true>(barrier_signal_ptrs, rank);
 
-    int *per_rank_buffer, *per_expert_buffer;
-    if (thread_id < kNumRanks) {
-      // `per_rank_buffer` has shape (kNumRanks, kNumRanks)
-      // starting at the beginning of the buffer ptr of each rank
+    // `per_rank_buffer` has shape (kNumRanks, kNumRanks)
+    // starting at the beginning of the buffer ptr of each rank
+    int* per_rank_buffer;
+    if (thread_id < kNumRanks)
       per_rank_buffer = static_cast<int*>(buffer_ptrs[thread_id]);
-      per_expert_buffer = per_rank_buffer + kNumRanks * kNumRanks;
-    }
 
     // After this loop:
-    //  - `per_rank_buffer[rank][i, j]` means the number of tokens from rank i to rank j
-    //  - `per_expert_buffer[rank][i, j]` means the number of tokens from rank i to local expert j
-    int num_experts_per_rank = num_experts / kNumRanks;
+    //  - `per_rank_buffer[rank][i, j]`: the number of tokens from rank i to rank j
     if (thread_id < kNumRanks) {
 #pragma unroll
       for (int i = 0; i < kNumRanks; ++i)
         per_rank_buffer[rank * kNumRanks + i] = num_tokens_per_rank[i];
-#pragma unroll
-      for (int i = 0; i < num_experts_per_rank; ++i)
-        per_expert_buffer[rank * num_experts_per_rank + i] = num_tokens_per_expert[thread_id * num_experts_per_rank + i];
     }
 
     // Wait for all ranks to be finished
@@ -100,6 +90,7 @@ __global__ void notify_dispatch(
     // Sum per-rank counts and return to CPU
     // Also pre-compute the prefix sum for data sending
     auto local_per_rank_buffer = static_cast<int*>(buffer_ptrs[rank]);
+    auto buffer_ptr_after_rank_prefix = local_per_rank_buffer + kNumRanks * kNumRanks;
     if (thread_id < kNumRanks) {
 #pragma unroll
       for (int i = 1; i < kNumRanks; ++i)
@@ -108,30 +99,23 @@ __global__ void notify_dispatch(
         *moe_recv_counter_mapped = local_per_rank_buffer[(kNumRanks - 1) * kNumRanks + rank];
     }
 
-    // Sum per-experts counts and return to CPU
-    auto local_per_expert_buffer = local_per_rank_buffer + kNumRanks * kNumRanks;
-    if (thread_id < num_experts_per_rank) {
-      int sum = 0;
-#pragma unroll
-      for (int i = 0; i < kNumRanks; ++i)
-        sum += local_per_expert_buffer[i * num_experts_per_rank + thread_id];
-      moe_recv_expert_counter_mapped[thread_id] = sum;
-    }
     __syncthreads();
 
-// Copy rank size prefix matrix to another tensor
 #pragma unroll
+    // Copy `rank_size_prefix` matrix to an individual tensor
+    // where the original part left in buffer will be skipped in dispatch kernel
     for (int i = thread_id; i < kNumRanks * kNumRanks; i += num_threads)
       rank_prefix_matrix_copy[i] = local_per_rank_buffer[i];
 
-// Extra memset for later communication queue
 #pragma unroll
+    // Extra memset for later channel metadata
+    // including channel start/end offset, head and tail
     for (int i = thread_id; i < num_memset_int; i += num_threads)
-      local_per_expert_buffer[i] = 0;
+      buffer_ptr_after_rank_prefix[i] = 0;
 
     // Barrier
     barrier_block<kNumRanks>(barrier_signal_ptrs, rank);
-  } else {
+  } else { // the rest SMs are responsible for calculating the `channel_prefix_matrix`, `is_token_in_rank`
     int dst_rank = sm_id - 1;
     for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
       int token_start_idx, token_end_idx;
@@ -160,9 +144,6 @@ void notify_dispatch(
     const int* num_tokens_per_rank,
     int* moe_recv_counter_mapped,
     int num_ranks,
-    const int* num_tokens_per_expert,
-    int* moe_recv_expert_counter_mapped,
-    int num_experts,
     int num_tokens,
     const bool* is_token_in_rank,
     int* channel_prefix_matrix,
@@ -173,15 +154,14 @@ void notify_dispatch(
     int rank,
     cudaStream_t stream,
     int num_channels) {
+  constexpr int kNumThreads = 128;
+
 #define NOTIFY_DISPATCH_LAUNCH_CASE(ranks) \
   LAUNCH_KERNEL(                           \
       &cfg,                                \
       notify_dispatch<ranks>,              \
       num_tokens_per_rank,                 \
       moe_recv_counter_mapped,             \
-      num_tokens_per_expert,               \
-      moe_recv_expert_counter_mapped,      \
-      num_experts,                         \
       num_tokens,                          \
       num_channels,                        \
       is_token_in_rank,                    \
@@ -192,10 +172,6 @@ void notify_dispatch(
       barrier_signal_ptrs,                 \
       rank);                               \
   break
-
-  constexpr int kNumThreads = 128;
-  GRPCOLL_HOST_ASSERT(num_experts % num_ranks == 0);
-  GRPCOLL_HOST_ASSERT(num_experts / num_ranks <= kNumThreads and num_ranks <= kNumThreads);
 
   SETUP_LAUNCH_CONFIG(1 + num_ranks, kNumThreads, stream);
   SWITCH_RANKS(NOTIFY_DISPATCH_LAUNCH_CASE);

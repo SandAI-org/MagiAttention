@@ -177,7 +177,6 @@ struct Buffer {
       std::optional<torch::Tensor>& recv_lse_buf,
       const std::optional<torch::Tensor>& num_tokens_per_rank,
       const torch::Tensor& is_token_in_rank,
-      const std::optional<torch::Tensor>& num_tokens_per_expert,
       int cached_num_recv_tokens,
       const std::optional<torch::Tensor>& cached_rank_prefix_matrix,
       const std::optional<torch::Tensor>& cached_channel_prefix_matrix,

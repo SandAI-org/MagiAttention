@@ -504,7 +504,6 @@ class GrpCollBuffer:
             hidden_shape=hidden_shape,
             num_tokens_per_rank=num_tokens_per_rank,
             is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
             post_perm_idx=post_perm_idx,
             previous_event=previous_event,
             async_finish=async_finish,
@@ -629,7 +628,6 @@ class GrpCollBuffer:
         hidden_shape: torch.Size,
         num_tokens_per_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
-        num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
@@ -644,17 +642,12 @@ class GrpCollBuffer:
         if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollIntraHandle)
             num_tokens_per_rank = None
-            num_tokens_per_expert = None
             is_token_in_rank = handle.is_token_in_rank
             num_recv_tokens = handle.num_recv_tokens
             rank_prefix_matrix = handle.rank_prefix_matrix
             channel_prefix_matrix = handle.channel_prefix_matrix
         else:
-            assert (
-                num_tokens_per_rank is not None
-                and is_token_in_rank is not None
-                and num_tokens_per_expert is not None
-            )
+            assert num_tokens_per_rank is not None and is_token_in_rank is not None
             num_recv_tokens = 0
             rank_prefix_matrix = None
             channel_prefix_matrix = None
@@ -684,7 +677,6 @@ class GrpCollBuffer:
             recv_lse,
             num_tokens_per_rank,
             is_token_in_rank,
-            num_tokens_per_expert,
             num_recv_tokens,
             rank_prefix_matrix,
             channel_prefix_matrix,
