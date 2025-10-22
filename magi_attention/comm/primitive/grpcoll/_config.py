@@ -14,6 +14,8 @@
 
 from dataclasses import dataclass
 
+import torch
+
 
 class Config:
     ...
@@ -127,3 +129,41 @@ class GrpCollConfig:
         }
         assert num_ranks in config_map, f"Unsupported number of ranks: {num_ranks}"
         return config_map[num_ranks]
+
+    @staticmethod
+    def get_min_num_nvl_bytes(
+        num_sms: int,
+        num_ranks: int,
+        hidden_size: int,
+        nvl_buffer_size: int,
+        dtype: torch.dtype,
+        transfer_lse: bool = False,
+        num_heads: int | None = None,
+    ) -> int:
+        if transfer_lse:
+            assert (
+                num_heads is not None
+            ), "num_heads must be set when transfer_lse is True"
+            assert (
+                hidden_size % num_heads == 0
+            ), "hidden_size must be divisible by num_heads"
+        else:
+            num_heads = 0
+
+        assert num_sms % 2 == 0, "num_sms must be even"
+        num_channels = num_sms // 2
+
+        # fmt: off
+        return (
+            # rank prefix matrix
+            num_ranks * num_ranks * torch.int32.itemsize
+            # channel start/end offset + queue head/tail
+            + num_channels * num_ranks * torch.int32.itemsize * 4
+            # token data buffer
+            + num_channels * num_ranks * nvl_buffer_size * hidden_size * dtype.itemsize
+            # src idx
+            + num_channels * num_ranks * nvl_buffer_size * torch.int32.itemsize
+            # lse data buffer
+            + num_channels * num_ranks * nvl_buffer_size * num_heads * torch.float32.itemsize
+        )
+        # fmt: on

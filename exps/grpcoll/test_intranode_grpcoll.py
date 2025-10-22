@@ -987,11 +987,29 @@ def test_main(
     ):  # we only allow inside usage when passing padded out buffer
         assert use_a2av_perm_idxs == "inside"
 
+    # Config
+    config = GrpCollConfig(
+        num_sms=num_sms,  # num_sms, default 20
+        nvl_chunk_size=num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
+        nvl_buffer_size=num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
+        # num_max_rdma_chunked_send_tokens, default 6
+        # num_max_rdma_chunked_recv_tokens, default 256
+    )
+    min_num_nvl_bytes = GrpCollConfig.get_min_num_nvl_bytes(
+        num_sms=num_sms,
+        num_ranks=num_ranks,
+        hidden_size=hidden_size,
+        nvl_buffer_size=nvl_buffer_size,
+        dtype=dtype,
+        transfer_lse=cast_lse or reduce_op == "lse",
+        num_heads=num_heads,
+    )
+
     # print settings
     if local_rank == 0:
         print(
             (
-                f"[config] {num_sms=} | {num_channels=} | "
+                f"[config] {num_sms=} | {num_channels=} | {min_num_nvl_bytes=} ({min_num_nvl_bytes / 1024**2:.2f} MB)\n"
                 f"{num_experts=} | {num_tokens=} | {hidden_size=} | {dtype=} | "
                 f"{num_topk=} | {num_local_experts=} | {num_heads=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
@@ -1002,15 +1020,6 @@ def test_main(
             ),
             flush=True,
         )
-
-    # Config
-    config = GrpCollConfig(
-        num_sms=num_sms,  # num_sms, default 20
-        nvl_chunk_size=num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
-        nvl_buffer_size=num_max_nvl_chunked_recv_tokens,  # num_max_nvl_chunked_recv_tokens (nvl_buffer_size), default 256
-        # num_max_rdma_chunked_send_tokens, default 6
-        # num_max_rdma_chunked_recv_tokens, default 256
-    )
 
     # prepare test kwargs
     test_kwargs = prepare_test_func_kwargs(

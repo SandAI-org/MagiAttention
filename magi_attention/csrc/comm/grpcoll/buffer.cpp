@@ -516,12 +516,10 @@ Buffer::intranode_group_cast(
   // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT(
       num_ranks * num_ranks * sizeof(int) + // rank prefix matrix
-          num_channels * num_ranks * sizeof(int) + // channel start offset
-          num_channels * num_ranks * sizeof(int) + // channel end offset
-          num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
+          num_channels * num_ranks * sizeof(int) * 4 + // channel start/end offset + queue head/tail
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * recv_x.element_size() + // data buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // source index buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_heads // LSE buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) // lse buffer
       <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
 
   // Launch dispatch kernel
@@ -684,10 +682,9 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     pre_perm_idx_ptr = pre_perm_idx->data_ptr<int64_t>();
   }
 
+  // Launch barrier and reset queue head and tail
   // TODO: support notify_combine when the combine kernel is individually used
   // without relying on the symmetric dispatch called first and necessary handle given
-  // Launch barrier and reset queue head and tail
-  GRPCOLL_HOST_ASSERT(num_channels * num_ranks * sizeof(int) * 2 <= num_nvl_bytes);
   intranode::cached_notify_combine(
       /*buffer_ptrs=*/buffer_ptrs_gpu,
       /*send_head=*/send_head.data_ptr<int>(),
@@ -722,7 +719,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   GRPCOLL_HOST_ASSERT(
       num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * x.element_size() + // data buffer
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // source idx buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) // lse buffer
       <= num_nvl_bytes);
 
