@@ -402,7 +402,6 @@ class GrpCollBuffer:
         is_token_in_rank: torch.Tensor | None = None,
         num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
-        num_worst_tokens: int = 0,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
@@ -431,8 +430,6 @@ class GrpCollBuffer:
             topk_weights: `[num_tokens, num_topk]` with `torch.float`, the expert weights of each token to dispatch.
             post_perm_idx: `[num_recv_tokens]` with `torch.int64`, the post-permutation indices of each token,
                 i.e. recv_x[post_perm_idx] can recover to the original recv_x in rank order.
-            num_worst_tokens: the worst number of tokens to receive, if specified, there will be no CPU sync, and it
-                will be CUDA-graph compatible. Please also notice that this flag is for intranode only.
             config: the performance tuning config if given.
             previous_event: the event to wait before actually executing the kernel if given.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
@@ -509,7 +506,6 @@ class GrpCollBuffer:
             is_token_in_rank=is_token_in_rank,
             num_tokens_per_expert=num_tokens_per_expert,
             post_perm_idx=post_perm_idx,
-            num_worst_tokens=num_worst_tokens,
             previous_event=previous_event,
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
@@ -635,7 +631,6 @@ class GrpCollBuffer:
         is_token_in_rank: torch.Tensor | None = None,
         num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
-        num_worst_tokens: int = 0,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
@@ -694,7 +689,6 @@ class GrpCollBuffer:
             rank_prefix_matrix,
             channel_prefix_matrix,
             post_perm_idx,
-            num_worst_tokens,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_finish,

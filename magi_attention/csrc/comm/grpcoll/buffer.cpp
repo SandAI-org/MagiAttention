@@ -331,7 +331,6 @@ Buffer::intranode_group_cast(
     const std::optional<torch::Tensor>& cached_rank_prefix_matrix,
     const std::optional<torch::Tensor>& cached_channel_prefix_matrix,
     const std::optional<torch::Tensor>& post_perm_idx,
-    int num_worst_tokens,
     const Config& config,
     std::optional<EventHandle>& previous_event,
     bool async,
@@ -459,11 +458,7 @@ Buffer::intranode_group_cast(
         /*comm_stream=*/comm_stream,
         /*num_channels=*/num_channels);
 
-    if (num_worst_tokens > 0) {
-      // if num_worst_tokens is given,
-      // just allocate the worst case to avoid CPU sync
-      num_recv_tokens = num_worst_tokens;
-    } else if (recv_x_buf.has_value()) {
+    if (recv_x_buf.has_value()) {
       // if the recv buffer is given,
       // use its dim0 size as num_recv_tokens to avoid CPU sync
       num_recv_tokens = recv_x_buf->size(0);
@@ -564,7 +559,6 @@ Buffer::intranode_group_cast(
       /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
       /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
       /*num_tokens=*/num_tokens,
-      /*num_worst_tokens=*/num_worst_tokens,
       /*hidden_int4=*/hidden_int4,
       /*num_heads=*/num_heads,
       /*buffer_ptrs=*/buffer_ptrs_gpu,

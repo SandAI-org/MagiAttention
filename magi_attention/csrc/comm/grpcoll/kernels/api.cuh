@@ -130,7 +130,6 @@ void dispatch(
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
     int num_tokens,
-    int num_worst_tokens,
     int hidden_int4,
     int num_heads,
     void** buffer_ptrs,

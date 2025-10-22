@@ -182,7 +182,6 @@ struct Buffer {
       const std::optional<torch::Tensor>& cached_rank_prefix_matrix,
       const std::optional<torch::Tensor>& cached_channel_prefix_matrix,
       const std::optional<torch::Tensor>& post_perm_idx,
-      int num_worst_tokens,
       const Config& config,
       std::optional<EventHandle>& previous_event,
       bool async,
