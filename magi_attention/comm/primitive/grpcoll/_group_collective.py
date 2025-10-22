@@ -102,9 +102,15 @@ def group_cast(
         input_split_sizes (list[int] | torch.Tensor):
             the 1D size list / tensor to split the input tensor,
             where sum(input_split_sizes) == input_seqlen
+
         output_split_sizes (list[int] | torch.Tensor):
             the 1D size list / tensor to split the output tensor,
-            where sum(output_split_sizes) == output_seqlen
+            where sum(output_split_sizes) == output_seqlen, except that:
+            if the seqlen of output buffer is not accurately known but has a maximum value,
+            we actually allow sum(output_split_sizes) < output_seqlen,
+            where the right-padded entries in the output buffer are ignored,
+            which is helpful in some cases to avoid GPU-CPU sync
+
         dst_indices (list[list[int]] | torch.Tensor):
             the 2D destination rank indices list / tensor for each input split to send to,
 
@@ -114,24 +120,33 @@ def group_cast(
                 2. if dst_indices is a 2D tensor, then dst_indices.shape == [len(input_split_sizes), world_size],
                 and dst_indices[i, :] indicates the distinct destination ranks for the i-th input split to send to
                 where the right-padded entries should be filled with ``-1``
+
         src_index (list[int] | torch.Tensor):
             the 1D source rank index list / tensor for each output split to receive from,
             where len(src_index) == len(output_split_sizes)
 
-            NOTE: the order of the output splits are "stable",
-            i.e. the ones from the same source will be in the same order as the input splits
+            NOTE:
+                1. the order of the output splits are "stable",
+                i.e. the ones from the same source will be in the same order as the input splits
+                2. if the length of src_index is not accurately known but has a maximum value,
+                we actually allow src_index to be right-padded with invalid ``world_size``,
+                where the corr. entries in the output_split_sizes are also supposed to be right-padded with ``0``,
+                which is helpful in some cases to avoid GPU-CPU sync
 
         group (dist.ProcessGroup): the process group to comm
         async_op (bool): whether to use async op. Defaults to ``False``
-
         cast_lse (bool): whether to cast the log-sum-exp tensor along with the input tensor. Defaults to ``False``.
+
         input_lse (torch.Tensor | None): the log-sum-exp tensor w.r.t. the input tensor,
-            only required and used when ``cast_lse`` is ``True``
+            only required and used when ``cast_lse`` is ``True``,
         output_lse (torch.Tensor | None): the log-sum-exp tensor w.r.t. the output tensor,
             only required and used when ``cast_lse`` is ``True``
 
-            NOTE: the input/output lse tensors can have different dtype from the input/output tensors,
-            and for now we only support ``float32`` dtype for lse tensors.
+            NOTE:
+                1. the input/output lse tensors can have different dtypes from the ones of input/output tensors,
+                and for now we only support ``float32`` dtype for lse tensors.
+                2. the shapes of input/output lse tensors must be 3D shape as ``[seqlen, num_heads, head_dim]``,
+                which are also supposed to be aligned with the ones of input/output tensors semantically
 
         kwargs: additional keyword arguments, varying from different implementations
 
@@ -259,16 +274,28 @@ def group_reduce(
 
         input_split_sizes (list[int] | torch.Tensor):
             the 1D size list / tensor to split the input tensor,
-            where sum(input_split_sizes) == input_seqlen
+            where sum(input_split_sizes) == input_seqlen, except that:
+            if the seqlen of input buffer is not accurately known but has a maximum value,
+            we actually allow sum(input_split_sizes) < input_seqlen,
+            where the right-padded entries in the input buffer are ignored,
+            which is helpful in some cases to avoid GPU-CPU sync
+
         output_split_sizes (list[int] | torch.Tensor):
             the 1D size list / tensor to split the output tensor,
             where sum(output_split_sizes) == output_seqlen
+
         dst_index (list[int] | torch.Tensor):
             the 1D destination rank index list / tensor for each input split to send to,
             where len(dst_index) == len(input_split_sizes)
 
-            NOTE: the order of the input splits are "stable",
-            i.e. the ones to the same destination will be in the same order as the input splits
+            NOTE:
+                1. the order of the input splits are "stable",
+                i.e. the ones to the same destination will be in the same order as the input splits
+                2. if the length of dst_index is not accurately known but has a maximum value,
+                we actually allow dst_index to be right-padded with invalid ``world_size``,
+                where the corr. entries in the input_split_sizes are also supposed to be right-padded with ``0``,
+                which is helpful in some cases to avoid GPU-CPU sync
+
         src_indices (list[list[int]] | torch.Tensor):
             the 2D source rank indices list / tensor for each output split to reduce from,
 
@@ -282,7 +309,7 @@ def group_reduce(
                 the order to reduce to the same output split does not matter, except for numerical errors
 
         group (dist.ProcessGroup): the process group to comm
-        async_op (bool): whether to use async op. Defaults to False
+        async_op (bool): whether to use async op. Defaults to ``False``
         reduce_op (GroupReduceOp): the reduce operation to use. Defaults to "sum"
             - "sum": sum reduction
             - "avg": average reduction
@@ -292,6 +319,7 @@ def group_reduce(
                 if reduce_op is "lse", the user is required to pass "input_lse" and "output_lse",
                 and we only support input/output with shape [seqlen, num_heads, head_dim]
                 while input_lse/output_lse with shape [seqlen, num_heads] for now
+
         acc_reduce (bool): whether to accumulate the reduction to the given output buffer. Defaults to ``True``.
 
             NOTE:
@@ -304,8 +332,11 @@ def group_reduce(
         output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
             only required and used if reduce_op is "lse"
 
-            NOTE: the input/output lse tensors can have different dtype from the input/output tensors,
-            and for now we only support ``float32`` dtype for lse tensors.
+            NOTE:
+                1. the input/output lse tensors can have different dtypes from the ones of input/output tensors,
+                and for now we only support ``float32`` dtype for lse tensors.
+                2. the shapes of input/output lse tensors must be 3D shape as ``[seqlen, num_heads, head_dim]``,
+                which are also supposed to be aligned with the ones of input/output tensors semantically
 
         kwargs: additional keyword arguments, varying from different implementations
 

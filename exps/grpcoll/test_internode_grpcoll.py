@@ -34,6 +34,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+# mypy: disable-error-code="union-attr,index"
 import argparse
 import time
 
@@ -308,11 +309,11 @@ def test_main(
     )
     print(
         f"[RANK {rank}]: {num_tokens_per_rdma_rank=} | "
-        f"{num_tokens_per_rdma_rank.shape=}\n",  # type: ignore[union-attr]
+        f"{num_tokens_per_rdma_rank.shape=}\n",
         flush=True,
     )
     # RDMA dispatch counts
-    num_rdma_token_sent = num_tokens_per_rdma_rank.sum().item()  # type: ignore[union-attr]
+    num_rdma_token_sent = num_tokens_per_rdma_rank.sum().item()
 
     # Expert meta
     gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
@@ -395,7 +396,7 @@ def test_main(
     print(
         f"[RANK {rank}]: {layout_topk_idx.shape=} | {layout_topk_idx=}\n"
         f"{ref_num_tokens_per_rank.shape=} | {ref_num_tokens_per_rank=}\n"
-        f"{ref_num_tokens_per_rdma_rank.shape=} | {ref_num_tokens_per_rdma_rank=}\n"  # type: ignore[union-attr]
+        f"{ref_num_tokens_per_rdma_rank.shape=} | {ref_num_tokens_per_rdma_rank=}\n"
         f"{ref_num_tokens_per_expert.shape=} | {ref_num_tokens_per_expert=}\n"
         f"{ref_is_token_in_rank.shape=} | {ref_is_token_in_rank=}\n",
         flush=True,
@@ -515,7 +516,7 @@ def test_main(
                 # check in-place
                 if pass_out_buffer:
                     assert recv_x_gc_buf is not None
-                    assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()  # type: ignore[union-attr]
+                    assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()
 
                 # unpermute recv_x to the order indicated by
                 # output_split_size_list and src_index_list
@@ -524,7 +525,7 @@ def test_main(
                         # already permuted inside
                         pass
                     else:
-                        recv_x_from_a2av = recv_x.clone()  # type: ignore[union-attr]
+                        recv_x_from_a2av = recv_x.clone()
                         if use_a2av_perm_idxs == "outside":
                             recv_x = recv_x[unperm_from_a2av_idx]
                         elif use_a2av_perm_idxs == "no":
@@ -532,7 +533,7 @@ def test_main(
                                 output=recv_x,
                                 unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                             )
-                        assert recv_x_from_a2av.shape == recv_x.shape  # type: ignore[union-attr]
+                        assert recv_x_from_a2av.shape == recv_x.shape
 
                 # print
                 assert isinstance(handle, GrpCollInterHandle)
@@ -550,7 +551,7 @@ def test_main(
 
                 print(
                     (
-                        f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"  # type: ignore[union-attr]
+                        f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"
                         f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[0]
                         f"{rdma_channel_prefix_matrix.shape=} | {rdma_channel_prefix_matrix=}\n"  # handle[1]
                         f"{gbl_channel_prefix_matrix.shape=} | {gbl_channel_prefix_matrix=}\n"  # handle[2]
@@ -777,9 +778,9 @@ def test_main(
             print(
                 f"[tuning] Best dispatch "
                 f'({"FP8" if isinstance(current_x, tuple) else "BF16"}): '
-                f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "  # type: ignore[index]
-                f"RDMA chunk {best_results[2]}, transmit: {best_time * 1e6:.2f} us, "  # type: ignore[index]
-                f"notify: {best_results[3] * 1e6:.2f} us, "  # type: ignore[index]
+                f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "
+                f"RDMA chunk {best_results[2]}, transmit: {best_time * 1e6:.2f} us, "
+                f"notify: {best_results[3] * 1e6:.2f} us, "
                 f"BW: {rdma_send_bytes / 1e9 / best_time:.2f} GB/s (RDMA), "
                 f"{nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL)",
                 flush=True,
@@ -789,7 +790,7 @@ def test_main(
         # Gather the best config from rank 0 and the first test setting
         if best_dispatch_results is None:
             best_dispatch_results = torch.tensor(
-                [best_results[0], best_results[1], best_results[2]],  # type: ignore[index]
+                [best_results[0], best_results[1], best_results[2]],
                 dtype=torch.int32,
                 device="cuda",
             )
@@ -800,10 +801,10 @@ def test_main(
             dist.all_gather(all_best_results_list, best_dispatch_results, group=group)
             best_dispatch_results = all_best_results_list[0].tolist()
     dispatch_config = GrpCollConfig(
-        num_sms=best_dispatch_results[0],  # type: ignore[index]
-        nvl_chunk_size=best_dispatch_results[1],  # type: ignore[index]
+        num_sms=best_dispatch_results[0],
+        nvl_chunk_size=best_dispatch_results[1],
         nvl_buffer_size=nvl_buffer_size,
-        rdma_chunk_size=best_dispatch_results[2],  # type: ignore[index]
+        rdma_chunk_size=best_dispatch_results[2],
         rdma_buffer_size=rdma_buffer_size,
     )
 
@@ -866,10 +867,10 @@ def test_main(
 
     if local_rank == 0:
         print(
-            f"[tuning] Best combine: SMs {best_results[0]}, "  # type: ignore[index]
-            f"NVL chunk {best_results[1]}, RDMA chunk {best_results[2]}, "  # type: ignore[index]
+            f"[tuning] Best combine: SMs {best_results[0]}, "
+            f"NVL chunk {best_results[1]}, RDMA chunk {best_results[2]}, "
             f"transmit: {best_time * 1e6:.2f} us, "
-            f"notify: {best_results[3] * 1e6:.2f} us, "  # type: ignore[index]
+            f"notify: {best_results[3] * 1e6:.2f} us, "
             f"BW: {combine_bf16_rdma_recv_bytes / 1e9 / best_time:.2f} GB/s (RDMA), "
             f"{combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL)",
             flush=True,
@@ -920,7 +921,7 @@ def test_loop(args: argparse.Namespace):
                 f"[config] {num_nvl_bytes=} ({num_nvl_bytes / 1e9:.2f} GB) | "
                 f"{num_rdma_bytes=} ({num_rdma_bytes / 1e9:.2f} GB) | "
                 f"{num_nodes=} (num_rdma_ranks) | {num_ranks=} | "
-                f"{num_local_ranks=} | {group.size()=} | "  # type: ignore[union-attr]
+                f"{num_local_ranks=} | {group.size()=} | "
                 f" {num_sms=} | {num_qps_per_rank=} | "
                 f"{num_tokens=} | {hidden=} | {num_topk=} | "
                 f"{num_experts=} | {num_topk_groups=}\n\n\n"

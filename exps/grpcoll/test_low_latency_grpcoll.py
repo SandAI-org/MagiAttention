@@ -34,6 +34,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+# mypy: disable-error-code="union-attr,index"
 import argparse
 import random
 from functools import partial
@@ -320,7 +321,7 @@ def test_main(
                         )
                         all_topk_idx = torch.empty(
                             (num_ranks, num_tokens, num_topk),
-                            dtype=topk_idx.dtype,  # type: ignore[union-attr]
+                            dtype=topk_idx.dtype,
                             device="cuda",
                         )
                         dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
@@ -486,7 +487,7 @@ def test_main(
     num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
     num_dispatch_comm_bytes, num_combine_comm_bytes = 0, 0
     for i in range(num_tokens):
-        num_selections = (topk_idx[i] != -1).sum().item()  # type: ignore[index]
+        num_selections = (topk_idx[i] != -1).sum().item()
         num_dispatch_comm_bytes += num_fp8_bytes * num_selections
         num_combine_comm_bytes += num_bf16_bytes * num_selections
 

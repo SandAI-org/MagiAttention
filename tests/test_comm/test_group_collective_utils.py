@@ -410,6 +410,18 @@ class TestGroupCollectiveUtils(TestCase):
             # fmt: off
             {
                 "output_split_size_list": [
+                    8, 2, 4, 7, 2, 5,  # group1
+                    5, 9, 7, 0, 0, 0,  # group2
+                ],
+                "src_index_list": [
+                    1, 1, 0, 0, 6, 2,  # group1
+                    6, 7, 5, 8, 8, 8,  # group2
+                ],
+                "output_seqlen": 56,
+                "world_size": 8,
+            },
+            {
+                "output_split_size_list": [
                     185, 302, 354, 517, 127, 55,  # group1
                     915, 519, 1047, 535, 117, 97,  # group2
                     697, 741, 372, 577, 422, 53,  # group3
@@ -434,23 +446,33 @@ class TestGroupCollectiveUtils(TestCase):
     )
     def test_a2av_perm_idxs_from_group_cast_meta(self, config):
         output_split_size_list = config["output_split_size_list"]
+        actual_output_seqlen = sum(output_split_size_list)
         src_index_list = config["src_index_list"]
+        output_seqlen = config.get("output_seqlen", None) or actual_output_seqlen
         world_size = config["world_size"]
 
+        # get reference
         _, ref_perm_to_a2av_idx = self._get_a2av_perm_idxs_from_group_cast_meta_ref(
             output_split_size_list=output_split_size_list,
             src_index_list=src_index_list,
             num_ranks=world_size,
         )
+        assert ref_perm_to_a2av_idx.size(0) == actual_output_seqlen
+        assert ref_perm_to_a2av_idx.dtype == torch.int64
 
         # use host meta
         perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=output_split_size_list,
             src_index=src_index_list,
             num_ranks=world_size,
+            output_seqlen=output_seqlen,
         )
 
-        assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
+        assert perm_to_a2av_idx.size(0) == output_seqlen
+        assert perm_to_a2av_idx.dtype == torch.int64
+        assert torch.equal(
+            perm_to_a2av_idx[:actual_output_seqlen], ref_perm_to_a2av_idx
+        )
 
         # use device meta
         output_split_sizes = torch.tensor(
@@ -463,14 +485,18 @@ class TestGroupCollectiveUtils(TestCase):
             dtype=torch.int64,
             device="cuda",
         )
-
         perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=output_split_sizes,
             src_index=src_index,
             num_ranks=world_size,
+            output_seqlen=output_seqlen,
         )
 
-        assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
+        assert perm_to_a2av_idx.size(0) == output_seqlen
+        assert perm_to_a2av_idx.dtype == torch.int64
+        assert torch.equal(
+            perm_to_a2av_idx[:actual_output_seqlen], ref_perm_to_a2av_idx
+        )
 
     @parameterize(
         "config",
@@ -908,7 +934,7 @@ class TestGroupCollectiveUtils(TestCase):
         dtype: torch.dtype = torch.int64,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # count the total split size of each rank
-        rank_split_sizes = [0] * num_ranks
+        rank_split_sizes = [0] * (num_ranks + 1)
         for i in range(len(output_split_size_list)):
             rank_split_sizes[src_index_list[i]] += output_split_size_list[i]
 
@@ -917,7 +943,7 @@ class TestGroupCollectiveUtils(TestCase):
 
         # a2a_output[unperm_from_a2av_idx] => output
         unperm_from_a2av_idx: list[int] = []
-        current_offset_within_rank = [0] * num_ranks
+        current_offset_within_rank = [0] * (num_ranks + 1)
         for i in range(len(output_split_size_list)):
             target_size = output_split_size_list[i]
             target_rank = src_index_list[i]

@@ -34,6 +34,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+# mypy: disable-error-code="union-attr,index"
 import argparse
 import time
 from typing import Any
@@ -41,6 +42,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from magi_attention.api.functools import pad_at_dim
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
@@ -87,6 +89,7 @@ def prepare_test_func_kwargs(
     reduce_op: GroupReduceOp,
     pass_out_buffer: bool,
     pass_out_lse_buffer: bool,
+    pass_padded_out_buffer: bool,
     random_permute_output: bool,
     sim_gemm_weight: float,
     acc_reduce_out_buffer: bool,
@@ -175,13 +178,20 @@ def prepare_test_func_kwargs(
         (sum(output_split_size_list), *x.shape[1:]), dtype=dtype, device="cuda"
     )
     recv_x_gc_buf = recv_x_gc.clone() if pass_out_buffer else None
+    pad_size = num_tokens * num_ranks - sum(output_split_size_list)
+    if pass_out_buffer and pass_padded_out_buffer:
+        recv_x_gc_buf = pad_at_dim(recv_x_gc_buf, dim=0, pad_size=pad_size, value=-1)
 
     recv_lse_gc = (
         torch.empty((recv_x_gc.shape[0], lse.shape[1]), dtype=lse.dtype, device="cuda")
         if cast_lse and pass_out_lse_buffer
         else None
     )
-    recv_lse_gc_buf = recv_lse_gc.clone() if cast_lse and pass_out_lse_buffer else None  # type: ignore[union-attr]
+    recv_lse_gc_buf = recv_lse_gc.clone() if cast_lse and pass_out_lse_buffer else None
+    if cast_lse and pass_out_lse_buffer and pass_padded_out_buffer:
+        recv_lse_gc_buf = pad_at_dim(
+            recv_lse_gc_buf, dim=0, pad_size=pad_size, value=-1
+        )
 
     work_with_pf_gc = group_cast(
         input=x,
@@ -208,7 +218,8 @@ def prepare_test_func_kwargs(
 
     print(
         f"[RANK {rank}]: {recv_x_gc.shape=} | {recv_x_gc=}\n"
-        f"{recv_lse_gc_shape=} | {recv_lse_gc=}\n",
+        f"{recv_lse_gc_shape=} | {recv_lse_gc=}\n"
+        f"{pad_size=}\n",
         flush=True,
     )
 
@@ -217,9 +228,9 @@ def prepare_test_func_kwargs(
     combined_x_gr = torch.zeros_like(x)
     if acc_reduce_out_buffer:
         combined_x_gr += acc_reduce_constant
-
     combined_x_gr_buf = combined_x_gr.clone() if pass_out_buffer else None
-    lse_gr = recv_lse_gc.clone() if reduce_op == "lse" else None  # type: ignore[union-attr]
+
+    lse_gr = recv_lse_gc.clone() if reduce_op == "lse" else None
     combined_lse_gr = (
         torch.full(
             (combined_x_gr.shape[0], lse.shape[1]),
@@ -233,7 +244,7 @@ def prepare_test_func_kwargs(
         else None
     )
     combined_lse_gr_buf = (
-        combined_lse_gr.clone() if reduce_op == "lse" and pass_out_lse_buffer else None  # type: ignore[union-attr]
+        combined_lse_gr.clone() if reduce_op == "lse" and pass_out_lse_buffer else None
     )
 
     work_with_pf_gr = group_reduce(
@@ -317,14 +328,30 @@ def prepare_test_func_kwargs(
         output_split_sizes=output_split_sizes,
         src_index=src_index,
         num_ranks=num_ranks,
+        output_seqlen=recv_x_gc_buf.shape[0],
     )
-    unperm_from_a2av_idx_device = perm_idxs2unperm_idxs(perm_to_a2av_idx_device)
+    if pass_padded_out_buffer:
+        unperm_from_a2av_idx_device = perm_idxs2unperm_idxs(
+            perm_to_a2av_idx_device[: recv_x_gc.shape[0]]
+        )
+        unperm_from_a2av_idx_device = pad_at_dim(
+            unperm_from_a2av_idx_device,
+            dim=0,
+            pad_size=perm_to_a2av_idx_device.shape[0]
+            - unperm_from_a2av_idx_device.shape[0],
+            value=-1,
+        )
+    else:
+        unperm_from_a2av_idx_device = perm_idxs2unperm_idxs(perm_to_a2av_idx_device)
 
-    assert torch.equal(unperm_from_a2av_idx, unperm_from_a2av_idx_device)
-    assert torch.equal(perm_to_a2av_idx, perm_to_a2av_idx_device)
+    assert torch.equal(
+        unperm_from_a2av_idx, unperm_from_a2av_idx_device[: recv_x_gc.shape[0]]
+    )
+    assert torch.equal(perm_to_a2av_idx, perm_to_a2av_idx_device[: recv_x_gc.shape[0]])
 
     print(
-        f"[RANK {rank}]: {perm_to_a2av_idx=}\n" f"{unperm_from_a2av_idx=}\n",
+        f"[RANK {rank}]: {perm_to_a2av_idx_device.shape=} | {perm_to_a2av_idx_device=}\n"
+        f"{unperm_from_a2av_idx_device.shape=} | {unperm_from_a2av_idx_device=}\n",
         flush=True,
     )
 
@@ -465,8 +492,8 @@ def prepare_test_func_kwargs(
         is_token_in_rank=is_token_in_rank,
         num_tokens_per_rank=num_tokens_per_rank,
         num_tokens_per_expert=num_tokens_per_expert,
-        perm_to_a2av_idx=perm_to_a2av_idx,
-        unperm_from_a2av_idx=unperm_from_a2av_idx,
+        perm_to_a2av_idx=perm_to_a2av_idx_device,
+        unperm_from_a2av_idx=unperm_from_a2av_idx_device,
         range_gather_post_dispatch_kwargs=range_gather_post_dispatch_kwargs,
         range_gather_pre_combine_kwargs=range_gather_pre_combine_kwargs,
         gbl_num_tokens_per_rank=gbl_num_tokens_per_rank,
@@ -484,6 +511,7 @@ def test_func(
     reduce_op: GroupReduceOp,
     pass_out_buffer: bool,
     pass_out_lse_buffer: bool,
+    pass_padded_out_buffer: bool,
     random_permute_output: bool,
     use_a2av_perm_idxs: str,
     sim_gemm_weight: float,
@@ -496,12 +524,12 @@ def test_func(
     x: torch.Tensor = kwargs["x"]
     lse: torch.Tensor | None = kwargs["lse"]
     recv_x_gc: torch.Tensor = kwargs["recv_x_gc"]
-    recv_x_gc_buf: torch.Tensor = kwargs["recv_x_gc_buf"]
+    recv_x_gc_buf: torch.Tensor | None = kwargs["recv_x_gc_buf"]
     recv_lse_gc: torch.Tensor | None = kwargs["recv_lse_gc"]
     recv_lse_gc_buf: torch.Tensor | None = kwargs["recv_lse_gc_buf"]
     combined_x_gr: torch.Tensor = kwargs["combined_x_gr"]
     combined_lse_gr: torch.Tensor | None = kwargs["combined_lse_gr"]
-    combined_x_gr_buf: torch.Tensor = kwargs["combined_x_gr_buf"]
+    combined_x_gr_buf: torch.Tensor | None = kwargs["combined_x_gr_buf"]
     combined_lse_gr_buf: torch.Tensor | None = kwargs["combined_lse_gr_buf"]
     is_token_in_rank: torch.Tensor = kwargs["is_token_in_rank"]
     num_tokens_per_rank: torch.Tensor = kwargs["num_tokens_per_rank"]
@@ -545,9 +573,7 @@ def test_func(
 
     if local_rank == 0:
         print(
-            "\n# ------    Test Normal Intranode Dispatch   ------ #\n"
-            f'[testing] Running with {"FP8" if isinstance(x, tuple) else "BF16"}, '
-            f"(async={async_mode}, previous={previous_mode}) ...",
+            "\n# ------    Test Normal Intranode Dispatch   ------ #\n",
             flush=True,
         )
 
@@ -592,12 +618,12 @@ def test_func(
     # check recv_x in-place
     if pass_out_buffer:
         assert recv_x_gc_buf is not None
-        assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()  # type: ignore[union-attr]
+        assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()
 
     # check recv_lse in-place
     if cast_lse and pass_out_lse_buffer:
         assert recv_lse_gc_buf is not None
-        assert recv_lse_gc_buf.data_ptr() == recv_lse.data_ptr()  # type: ignore[union-attr]
+        assert recv_lse_gc_buf.data_ptr() == recv_lse.data_ptr()
 
     # unpermute recv_x to the order indicated by
     # output_split_size_list and src_index_list
@@ -619,20 +645,21 @@ def test_func(
 
             # recv_lse
             if cast_lse:
-                recv_lse_from_a2av = recv_lse.clone()  # type: ignore[union-attr]
+                recv_lse_from_a2av = recv_lse.clone()
                 if use_a2av_perm_idxs == "outside":
-                    recv_lse = recv_lse[unperm_from_a2av_idx]  # type: ignore[index]
+                    recv_lse = recv_lse[unperm_from_a2av_idx]
                 elif use_a2av_perm_idxs == "no":
-                    recv_lse = unpermute_output(  # type: ignore[union-attr]
+                    recv_lse = unpermute_output(
                         output=recv_lse,
                         unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                     )
-                assert recv_lse_from_a2av.shape == recv_lse.shape  # type: ignore[union-attr]
+                assert recv_lse_from_a2av.shape == recv_lse.shape
 
     # print
     assert isinstance(handle, GrpCollIntraHandle)
 
-    recv_lse_shape = recv_lse.shape if cast_lse else None  # type: ignore[union-attr]
+    actual_gc_output_seqlen = recv_x_gc.size(0)
+    recv_lse_shape = recv_lse.shape if cast_lse else None
     rank_prefix_matrix = handle.rank_prefix_matrix
     channel_prefix_matrix = handle.channel_prefix_matrix
     recv_channel_prefix_matrix = handle.recv_channel_prefix_matrix
@@ -649,15 +676,24 @@ def test_func(
             f"{recv_channel_prefix_matrix.shape=} | {recv_channel_prefix_matrix=}\n"
             f"{recv_src_idx.shape=} | {recv_src_idx=}\n"
             f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"
+            f"{perm_to_a2av_idx.shape=} | {perm_to_a2av_idx=}\n"
             f"After dipatch: {send_head.shape=} | {send_head=}\n\n"
         ),
         flush=True,
     )
 
     # check
-    assert torch.equal(recv_x, recv_x_gc)
+    if pass_padded_out_buffer:
+        assert recv_x.size(0) > actual_gc_output_seqlen
+        assert torch.equal(recv_x[:actual_gc_output_seqlen], recv_x_gc)
+    else:
+        assert torch.equal(recv_x, recv_x_gc)
     if cast_lse:
-        assert torch.equal(recv_lse, recv_lse_gc)
+        if pass_padded_out_buffer:
+            assert recv_lse.size(0) > actual_gc_output_seqlen
+            assert torch.equal(recv_lse[:actual_gc_output_seqlen], recv_lse_gc)
+        else:
+            assert torch.equal(recv_lse, recv_lse_gc)
     assert torch.equal(is_token_in_rank_handle, is_token_in_rank)
     assert torch.equal(channel_prefix_matrix[:, -1], num_tokens_per_rank)
     assert torch.equal(
@@ -666,14 +702,13 @@ def test_func(
     )
     assert torch.all(recv_channel_prefix_matrix[:, 0] == 0)
     assert torch.all(send_head[is_token_in_rank_handle == -1] == -1)
-    assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(
-        0
-    ), f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
+    assert perm_to_a2av_idx.size(0) == recv_x.size(0)
+    assert gbl_num_tokens_per_rank[rank].item() == actual_gc_output_seqlen
 
-    # check recv_lse
+    # specific check for recv_lse
     if cast_lse:
-        assert recv_lse.size(0) == recv_x.size(0) == recv_src_idx.size(0)  # type: ignore[union-attr]
-        num_heads = recv_lse.size(1)  # type: ignore[union-attr]
+        assert recv_lse.size(0) == recv_src_idx.size(0)
+        num_heads = recv_lse.size(1)
 
         if random_permute_output:
             if use_a2av_perm_idxs == "no":
@@ -690,10 +725,16 @@ def test_func(
         repeated_permed_recv_src_idx = (
             permed_recv_src_idx.repeat_interleave(repeats=num_heads, dim=0)
             .reshape(-1, num_heads)
-            .to(recv_lse.dtype)  # type: ignore[union-attr]
+            .to(recv_lse.dtype)
         )
 
-        assert torch.equal(recv_lse, repeated_permed_recv_src_idx)  # type: ignore[union-attr]
+        if pass_padded_out_buffer:
+            assert torch.equal(
+                recv_lse[:actual_gc_output_seqlen],
+                repeated_permed_recv_src_idx[:actual_gc_output_seqlen],
+            )
+        else:
+            assert torch.equal(recv_lse, repeated_permed_recv_src_idx)
 
     if local_rank == 0:
         print(
@@ -712,6 +753,10 @@ def test_func(
     # Test cached dispatch
     cached_dispatch_args = common_dispatch_args | {
         "handle": handle,
+        "recv_x": torch.empty_like(recv_x_gc_buf) if pass_out_buffer else None,
+        "recv_lse": torch.empty_like(recv_lse_gc_buf)
+        if cast_lse and pass_out_buffer
+        else None,
     }
     if previous_mode:
         cached_dispatch_args.update({"previous_event": buffer.capture()})
@@ -724,11 +769,24 @@ def test_func(
     event.current_stream_wait() if async_mode else ()
 
     # check recv_cache_x
-    assert torch.equal(recv_cached_x, recv_x)
+    if pass_padded_out_buffer:
+        assert recv_cached_x.size(0) > actual_gc_output_seqlen
+        assert torch.equal(
+            recv_cached_x[:actual_gc_output_seqlen], recv_x[:actual_gc_output_seqlen]
+        )
+    else:
+        assert torch.equal(recv_cached_x, recv_x)
 
     # check recv_cache_lse
     if cast_lse:
-        assert torch.equal(recv_cached_lse, recv_lse)
+        if pass_padded_out_buffer:
+            assert recv_cached_lse.size(0) > actual_gc_output_seqlen
+            assert torch.equal(
+                recv_cached_lse[:actual_gc_output_seqlen],
+                recv_lse[:actual_gc_output_seqlen],
+            )
+        else:
+            assert torch.equal(recv_cached_lse, recv_lse)
 
     if local_rank == 0:
         print(
@@ -746,7 +804,7 @@ def test_func(
 
     # simulate gemm
     x_combine = sim_gemm(recv_x, w=sim_gemm_weight)
-    lse_combine = recv_lse.clone() if reduce_op == "lse" else None  # type: ignore[union-attr]
+    lse_combine = recv_lse.clone() if reduce_op == "lse" else None
 
     # permute x/lse to the rank order
     if random_permute_output:
@@ -765,15 +823,15 @@ def test_func(
             assert x_combine_before_to_a2av.shape == x_combine.shape
 
             if reduce_op == "lse":
-                lse_combine_before_to_a2av = lse_combine.clone()  # type: ignore[union-attr]
+                lse_combine_before_to_a2av = lse_combine.clone()
                 if use_a2av_perm_idxs == "outside":
-                    lse_combine = lse_combine[perm_to_a2av_idx]  # type: ignore[index]
+                    lse_combine = lse_combine[perm_to_a2av_idx]
                 elif use_a2av_perm_idxs == "no":
-                    lse_combine = unpermute_output(  # type: ignore[union-attr]
+                    lse_combine = unpermute_output(
                         output=lse_combine,
                         unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
                     )
-                assert lse_combine_before_to_a2av.shape == lse_combine.shape  # type: ignore[union-attr]
+                assert lse_combine_before_to_a2av.shape == lse_combine.shape
 
     # prepare combine args
     send_head_copy = send_head.clone()
@@ -817,10 +875,10 @@ def test_func(
     # check combined_lse in-place
     if reduce_op == "lse" and pass_out_lse_buffer:
         assert combined_lse_gr_buf is not None
-        assert combined_lse_gr_buf.data_ptr() == combined_lse.data_ptr()  # type: ignore[union-attr]
+        assert combined_lse_gr_buf.data_ptr() == combined_lse.data_ptr()
 
     # print
-    combined_lse_shape = combined_lse.shape if reduce_op == "lse" else None  # type: ignore[union-attr]
+    combined_lse_shape = combined_lse.shape if reduce_op == "lse" else None
     print(
         (
             f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
@@ -884,7 +942,7 @@ def test_func(
 
     # For later tuning
     combine_nvl_send_bytes = dispatch_nvl_recv_bytes = (
-        recv_x.numel() * recv_x.dtype.itemsize
+        recv_x_gc.numel() * recv_x_gc.dtype.itemsize
     )
 
     return dict(
@@ -944,6 +1002,7 @@ def test_main(
 
     pass_out_buffer = True  # for both dispatch and combine
     pass_out_lse_buffer = True  # for both dispatch and combine
+    pass_padded_out_buffer = False  # for dispatch output and combine input
 
     acc_reduce_out_buffer = True
     acc_reduce_constant = rank
@@ -953,6 +1012,10 @@ def test_main(
     # choose from {"no", "outside", "inside"}
     use_a2av_perm_idxs = "inside"
     assert use_a2av_perm_idxs in ("no", "outside", "inside")
+    if (
+        pass_padded_out_buffer
+    ):  # we only allow inside usage when passing padded out buffer
+        assert use_a2av_perm_idxs == "inside"
 
     # print settings
     if local_rank == 0:
@@ -963,7 +1026,8 @@ def test_main(
                 f"{num_topk=} | {num_local_experts=} | {num_heads=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
-                f"{cast_lse=} | {reduce_op=} | {pass_out_buffer=} | {pass_out_lse_buffer=}\n"
+                f"{cast_lse=} | {reduce_op=}\n"
+                f"{pass_out_buffer=} | {pass_out_lse_buffer=} | {pass_padded_out_buffer=}\n"
                 f"{acc_reduce_out_buffer=} | {acc_reduce_constant=} | {use_a2av_perm_idxs=}\n"
             ),
             flush=True,
@@ -997,6 +1061,7 @@ def test_main(
         reduce_op=reduce_op,
         pass_out_buffer=pass_out_buffer,
         pass_out_lse_buffer=pass_out_lse_buffer,
+        pass_padded_out_buffer=pass_padded_out_buffer,
         random_permute_output=random_permute_output,
         sim_gemm_weight=sim_gemm_weight,
         acc_reduce_out_buffer=acc_reduce_out_buffer,
@@ -1017,6 +1082,7 @@ def test_main(
         reduce_op=reduce_op,
         pass_out_buffer=pass_out_buffer,
         pass_out_lse_buffer=pass_out_lse_buffer,
+        pass_padded_out_buffer=pass_padded_out_buffer,
         random_permute_output=random_permute_output,
         use_a2av_perm_idxs=use_a2av_perm_idxs,
         sim_gemm_weight=sim_gemm_weight,
@@ -1047,13 +1113,8 @@ def test_main(
         )
 
     best_dispatch_results = None
-    fp8_factor = (1 + 4 / 128) / 2
     best_time, best_results = 1e10, None
-    nvl_recv_bytes = (
-        (dispatch_nvl_recv_bytes * fp8_factor)
-        if isinstance(x, tuple)
-        else dispatch_nvl_recv_bytes
-    )
+    nvl_recv_bytes = dispatch_nvl_recv_bytes
     for nvl_chunk_size in tuple(range(4, 33, 2)) + (0,):
         if nvl_chunk_size > 0:
             config = GrpCollConfig(
@@ -1082,7 +1143,7 @@ def test_main(
         print(
             f"[tuning] Best dispatch "
             f'({"FP8" if isinstance(x, tuple) else "BF16"}): '
-            f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "  # type: ignore[index]
+            f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "
             f"{nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), "
             f"t: {best_time * 1e6:.2f} us",
             flush=True,
@@ -1092,7 +1153,7 @@ def test_main(
     # Gather the best config from rank 0 and the first test setting
     if best_dispatch_results is None:
         best_dispatch_results = torch.tensor(
-            [best_results[0], best_results[1]],  # type: ignore[index]
+            [best_results[0], best_results[1]],
             dtype=torch.int32,
             device="cuda",
         )
@@ -1105,8 +1166,8 @@ def test_main(
 
     # apply dispatch to get handle before combine
     dispatch_config = GrpCollConfig(
-        num_sms=best_dispatch_results[0],  # type: ignore[index]
-        nvl_chunk_size=best_dispatch_results[1],  # type: ignore[index]
+        num_sms=best_dispatch_results[0],
+        nvl_chunk_size=best_dispatch_results[1],
         nvl_buffer_size=nvl_buffer_size,
     )
     dispatch_args = {
@@ -1164,8 +1225,8 @@ def test_main(
 
     if local_rank == 0:
         print(
-            f"[tuning] Best combine: SMs {best_results[0]}, "  # type: ignore[index]
-            f"NVL chunk {best_results[1]}: "  # type: ignore[index]
+            f"[tuning] Best combine: SMs {best_results[0]}, "
+            f"NVL chunk {best_results[1]}: "
             f"{combine_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL), "
             f"t: {best_time * 1e6:.2f} us",
             flush=True,
@@ -1195,20 +1256,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 flush=True,
             )
 
-    # for original kernel, there're two limitation assertions for `num_nvl_bytes`:
-    # 1. num_ranks * (num_ranks + num_local_experts) * sizeof(int) <= num_nvl_bytes
-    # 2. num_ranks * num_ranks * sizeof(int) +  // Size prefix matrix
-    #    num_channels * num_ranks * sizeof(int) + // Channel start offset
-    #    num_channels * num_ranks * sizeof(int) + // Channel end offset
-    #    num_channels * num_ranks * sizeof(int) * 2 + // Queue head and tail
-    #    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * recv_x.element_size() + // Data buffer
-    #    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // Source index buffer
-    #    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(int64_t) + // Top-k index buffer
-    #    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_topk * sizeof(float) + // Top-k weight buffer
-    #    num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(float) * num_scales // FP8 scale buffer
-    #    <= num_nvl_bytes
     num_nvl_bytes = int(2e9)  # 2GB
-
     num_sms = 24
     num_qps_per_rank = ll_num_experts // num_ranks if test_ll_compatibility else 1
 

@@ -278,7 +278,7 @@ void dispatch(
 
   // Get buffer ptr of the recv rank
   // (the metadata of any pair of (sender, receiver) is all stored on the receiver side)
-  // and jumped across the temp rank prefix matrix, consumed in `notify_dispatch`
+  // and jump across the temp rank prefix matrix, consumed in `notify_dispatch`
   // `rank_prefix_matrix`: shape=(kNumRanks, kNumRanks), dtype=int
   auto ptr = reinterpret_cast<void*>(static_cast<int8_t*>(buffer_ptrs[recv_rank]) + kNumRanks * kNumRanks * sizeof(int));
 
@@ -873,17 +873,18 @@ void combine(
     // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4
     // `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
     // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
-    //  NOTES: we make sure that when `kReduceOp != ReduceOp::LSE`, `num_heads == 0` and `lse_buffers` is empty and not used
     auto channel_x_buffers = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
     auto channel_src_idx_buffers = Buffer<int>(ptr, num_channel_tokens_total, channel_rank_token_offset);
-    auto channel_lse_buffers = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
+    Buffer<float> channel_lse_buffers;
+    if constexpr (kReduceOp == ReduceOp::LSE)
+      channel_lse_buffers = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
 
     // Get rank offset
     // NOTES: `rank_prefix_matrix`: shape=(kNumRanks, kNumRanks), dtype=int
     //  is the same as the one in dispatch stage
     //  thus rank_prefix_matrix[:, rank]: the token end offsets sent by each rank to this rank in dispatch stage
     //  then, [rank_prefix_matrix[responsible_rank-1, rank], rank_prefix_matrix[responsible_rank, rank]) is the range of tokens in `x`
-    //  which we should return back to responsible_rank in combine stage
+    //  which we should return back to responsible_rank in combine stage by all warp groups for the responsible rank in all combine SMs
     int rank_offset = responsible_rank > 0 ? rank_prefix_matrix[(responsible_rank - 1) * kNumRanks + rank] : 0;
     int num_rank_tokens = rank_prefix_matrix[responsible_rank * kNumRanks + rank] - rank_offset;
 
@@ -893,7 +894,7 @@ void combine(
     //  thus channel_prefix_matrix[responsible_rank, :]: the token start offsets recv by responsible_rank for each channel to this rank in dispatch stage
     //  then, [channel_prefix_matrix[responsible_rank, responsible_channel], channel_prefix_matrix[responsible_rank, responsible_channel+1])
     //  is the local range of the responsible channel, for the tokens in `x`, recv by responsible_rank in dispatch stage
-    //  which we should return back to responsible_rank in combine stage
+    //  which we should return back to responsible_rank in combine stage by the warp group for the responsible rank in this combine SM
     int channel_offset = channel_prefix_matrix[responsible_rank_channel];
     int num_channel_tokens = (responsible_channel == num_channels - 1 ? num_rank_tokens : channel_prefix_matrix[responsible_rank_channel + 1]) - channel_offset;
 
@@ -1068,7 +1069,7 @@ void combine(
         const auto channel_rank_token_offset = channel_rank_offset * num_recv_buffer_tokens;
 
         // Get buffer ptr of the recv rank
-        // and jumped across the `head_idx` and `tail_idx`, loaded by warp0
+        // and jump across the `head_idx` and `tail_idx`, loaded by warp0
         //  `head_idx`: shape=(kNumChannels, kNumRanks), dtype=int
         //  `tail_idx`: shape=(kNumChannels, kNumRanks), dtype=int
         // TODO: move this ptr out of the loop, when the non-inplace updated Buffer is supported
@@ -1078,14 +1079,17 @@ void combine(
         // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int
         channel_x_buffers[curr_rank] = Buffer<int4>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
 
-        // Jumped across the `src_idx_buffers`, loaded by warp0
-        //  `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
-        ptr = reinterpret_cast<void*>(static_cast<int8_t*>(ptr) + num_channel_tokens_total * sizeof(int));
-
         // Get `channel_lse_buffers` for curr rank
-        // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
-        //  NOTES: we make sure that when `kReduceOp != ReduceOp::LSE`, `num_heads == 0` and `lse_buffers` is empty and not used
-        channel_lse_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
+        // if `kReduceOp == ReduceOp::LSE`
+        if constexpr (kReduceOp == ReduceOp::LSE) {
+          // Jump across the `src_idx_buffers`, loaded by warp0
+          //  `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
+          ptr = reinterpret_cast<void*>(static_cast<int8_t*>(ptr) + num_channel_tokens_total * sizeof(int));
+
+          // Get `channel_lse_buffers` for curr rank
+          // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
+          channel_lse_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
+        }
       }
 
       // Get reduce tasks
@@ -1099,13 +1103,12 @@ void combine(
       for (int64_t token_idx = token_start_idx + reduce_warp_id; token_idx < token_end_idx; token_idx += num_reduce_warps) { // warp-group strided
         // Read expected head for each rank
         int expected_head = -1;
-        if (responsible_rank < kNumRanks) { // the first `kNumRanks` lanes in each reduce warp load the expected head for each rank
+        if (responsible_rank < kNumRanks) // the first `kNumRanks` lanes in each reduce warp load the expected head for each rank
           // `send_head`: shape=(num_recv_tokens, kNumRanks), dtype=int
-          //  is the same as the one in dispatch stage
-          //  thus send_head[token_idx, r]: the token offset of token_idx for the responsible channel
+          //  is the one initialized in dispatch stage and updated in `cached_notify_combine`
+          //  where send_head[token_idx, r]: the token offset of token_idx for the responsible channel
           //  if it is sent to rank r in dispatch stage
           expected_head = ld_nc_global(send_head + token_idx * kNumRanks + responsible_rank); // non-cached load
-        }
 
         // Wait for expected head for each rank to be ready
         // i.e. the recv queue for each rank is non-empty
@@ -1134,14 +1137,14 @@ void combine(
 
         // Wait for all previous TMA stores to be finished
         // i.e. wait for all hidden values of last token is reduced
-        // and release all TMA slots for copying this token
+        // and release all TMA slots for reducing the current token
 #ifndef DISABLE_SM90_FEATURES
         if (lane_id == 0)
           tma_store_wait();
         __syncwarp();
 #endif
 
-        // Reduce `combined_lse` from `channel_lse_buffers`
+        // Reduce `combined_lse` from `channel_lse_buffers` first
         // if `kReduceOp == ReduceOp::LSE`
         if constexpr (kReduceOp == ReduceOp::LSE) {
           for (int h = lane_id; h < num_heads; h += WARP_SIZE) {
@@ -1196,7 +1199,7 @@ void combine(
           const int head_idx = kReduceOp == ReduceOp::LSE ? i * kDtypePerInt4 / head_dim : -1;
 
           // Load all recv partial hidden values from all src ranks
-          // REVIEW: why use a temp buffer here ?
+          // REVIEW: why use a temp buffer here instead of loading and reducing in one iteration ?
           int4 recv_hidval_int4[kNumRanks];
 #pragma unroll
           for (int j = 0; j < num_src_ranks; ++j)
