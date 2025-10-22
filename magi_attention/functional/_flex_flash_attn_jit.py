@@ -26,7 +26,9 @@ from magi_attention.common.jit.utils import write_if_different
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
+is_ffa_utils_installed = False
 try:
+    is_ffa_utils_installed = True
     from magi_attention import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
 except ImportError:
     pass
@@ -238,6 +240,11 @@ def get_ffa_jit_spec(
         )
 
         common_objects = common_spec.build_and_get_objects()
+        if flexible_flash_attention_utils_cuda is False:
+            raise ImportError(
+                "The 'flexible_flash_attention_utils_cuda' module could not be imported."
+                "This is a required dependency for JIT compilation. "
+            )
         # add utils.so(Dynamic linking)
         utils_so_path = Path(flexible_flash_attention_utils_cuda.__file__)
 
