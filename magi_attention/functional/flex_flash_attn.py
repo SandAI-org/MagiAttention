@@ -195,7 +195,7 @@ def _flex_flash_attn_forward_compilable(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    swap_ab: bool,
+    swap_ab: bool = False,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     q, k, v, q_ranges, k_ranges = [
@@ -288,7 +288,7 @@ def _flex_flash_attn_forward(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    swap_ab: bool,
+    swap_ab: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
@@ -614,7 +614,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             softmax_scale,
             softcap,
             disable_fwd_atomic_reduction,
-            q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
+            # q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
+            q.dtype,
             deterministic,
             sm_margin,
             swap_ab,

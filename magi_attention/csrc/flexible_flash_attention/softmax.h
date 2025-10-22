@@ -24,6 +24,8 @@
 
 #include <cute/tensor.hpp>
 
+#include <cutlass/arch/barrier.h>
+
 #include <cutlass/numeric_types.h>
 
 #include "utils.h"
@@ -53,6 +55,55 @@ __device__ __forceinline__ void thread_reduce_(Tensor<Engine0, Layout0> const& t
       summary(mi) = zero_init && ni == 0 ? tensor(mi, ni) : op(summary(mi), tensor(mi, ni));
     }
   }
+}
+
+template <typename Engine0, typename Layout0, typename Operator>
+__device__ __forceinline__ void warp_reduce_column_(Tensor<Engine0, Layout0>& tensor, Operator& op) {
+// reduce column registers of mma accumulator layout in a warp
+// after reduce, each thread has same result
+#pragma unroll
+  for (int ni = 0; ni < size<0>(tensor); ni++) {
+#pragma unroll
+    for (int offset = 4; offset <= 16; offset <<= 1) {
+      tensor(ni) = op(tensor(ni), __shfl_xor_sync(uint32_t(-1), tensor(ni), offset));
+    }
+  }
+}
+
+template <int NumMmaWarpGroups, int kNRows, typename Engine0, typename Layout0, typename Operator>
+__device__ __forceinline__ void warp_group_reduce_column_(Tensor<Engine0, Layout0>& tensor, Operator& op) {
+  // reduce column registers of mma accumulator layout in a warp group
+  // each thread have kNRows column, each row have 4 thread
+  __shared__ float shared_result[NumMmaWarpGroups][4][kNRows * 4];
+  // Get the current mma warp group index
+  // -1 is because one warp group is the producer
+  int const curr_WG = flash::canonical_warp_group_idx_nosync() - 1;
+  int lane = threadIdx.x % 32;
+  int warp_id = (threadIdx.x >> 5) & 0x3;
+#pragma unroll
+  for (int i = lane; i < kNRows * 4; i += 32) {
+    int tensor_index = i >> 2;
+    int low3 = i & 0x7;
+    // shmem index is the column id of mma result, each position only need one thread copy
+    int shmem_index = (i & (~0x7)) | (((low3 << 1) | (low3 >> 2)) & 0x7);
+    shared_result[curr_WG][warp_id][shmem_index] = tensor(tensor_index);
+  }
+  // Ensure that the shmem writes of the current thread
+  // are visible to other threads within the same warp group
+  __threadfence_block();
+  // Sync on the current mma warp group's named barrier, wait for write
+  cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup,
+                                    static_cast<uint32_t>(FwdNamedBarriers::WarpGroupSwapAB1) + curr_WG /*id*/);
+#pragma unroll
+  for (int ni = 0; ni < size<0>(tensor); ni++) {
+    // global index is the column id of register in mma result
+    int global_index = ((ni & (~0x1)) << 2) | ((threadIdx.x & 0x3) << 1) | (ni & 0x1);
+    tensor(ni) = op(op(shared_result[curr_WG][0][global_index], shared_result[curr_WG][1][global_index]),
+                    op(shared_result[curr_WG][2][global_index], shared_result[curr_WG][3][global_index]));
+  }
+  // Sync on the current mma warp group's named barrier, prevent overwrite
+  cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup,
+                                    static_cast<uint32_t>(FwdNamedBarriers::WarpGroupSwapAB1) + curr_WG /*id*/);
 }
 
 template <typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
@@ -143,19 +194,58 @@ struct Softmax {
 
   CUTLASS_DEVICE Softmax(float const softmax_scale_log2_) : softmax_scale_log2(softmax_scale_log2_) {};
 
-  template <bool Is_first, bool Check_inf = false, typename Tensor0>
+  template <bool Is_first, bool Check_inf = false, int NumMmaWarpGroups = 1, typename Tensor0>
   __forceinline__ __device__ TensorT max_get_scale(Tensor0& acc_s) {
     // Reshape acc_s from ((2, 2, V), MMA_M, MMA_N) to (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
     Tensor scores = make_tensor(acc_s.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(acc_s.layout()));
     static_assert(CUTE_STATIC_V(size<0>(scores)) == kNRows);
     TensorT scores_scale;
     if constexpr (Is_first) {
-      flash::template reduce_max</*zero_init=*/true>(scores, row_max);
-      cute::fill(scores_scale, 1.f);
+      if constexpr (!SwapAB) {
+        flash::template reduce_max</*zero_init=*/true>(scores, row_max);
+        cute::fill(scores_scale, 1.f);
+      } else {
+        MaxOp<float> max_op;
+        thread_reduce_</*zero_init=*/true>(scores, row_max, max_op);
+        warp_reduce_column_(row_max, max_op);
+        // if (blockIdx.x == 0 && threadIdx.x >= 128 && threadIdx.x < 256) {
+        //   for (int mi = 0; mi < 1; mi++) {
+        //     printf("row max before: %d %d %f\n",threadIdx.x - 128, mi, row_max(mi));
+        //   }
+        // }
+        warp_group_reduce_column_<NumMmaWarpGroups, kNRows>(row_max, max_op);
+        // if (blockIdx.x == 0 && threadIdx.x >= 128 && threadIdx.x < 256) {
+        //   for (int mi = 0; mi < 1; mi++) {
+        //     printf("row max after: %d %d %f\n",threadIdx.x - 128, mi, row_max(mi));
+        //   }
+        // }
+        if (blockIdx.x == 0 && threadIdx.x >= 128 && threadIdx.x < 256) {
+          for (int ni = 0; ni < size<1>(scores); ni++) {
+            // for (int mi = 0; mi < size<0>(scores); mi++) {
+            for (int mi = 0; mi < 1; mi++) {
+              // summary(mi) = zero_init && ni == 0 ? tensor(mi, ni) : op(summary(mi), tensor(mi, ni));
+              // printf("%d %d %d %f\n",threadIdx.x - 128, mi, ni, scores(mi, ni));
+            }
+          }
+          // for (int mi = 0; mi < size<0>(scores); mi++) {
+          for (int mi = 0; mi < 1; mi++) {
+            // printf("%d %d %f\n",threadIdx.x - 128, mi, row_max(mi));
+          }
+        }
+        cute::fill(scores_scale, 1.f);
+      }
     } else {
       Tensor scores_max_prev = make_fragment_like(row_max);
       cute::copy(row_max, scores_max_prev);
-      flash::template reduce_max</*zero_init=*/false>(scores, row_max);
+      if constexpr (!SwapAB) {
+        flash::template reduce_max</*zero_init=*/false>(scores, row_max);
+      } else {
+        // reduce max in column
+        MaxOp<float> max_op;
+        thread_reduce_</*zero_init=*/false>(scores, row_max, max_op);
+        warp_reduce_column_(row_max, max_op);
+        warp_group_reduce_column_<NumMmaWarpGroups, kNRows>(row_max, max_op);
+      }
 #pragma unroll
       for (int mi = 0; mi < size(row_max); ++mi) {
         float scores_max_cur = !Check_inf ? row_max(mi) : (row_max(mi) == -INFINITY ? 0.0f : row_max(mi));
@@ -174,12 +264,24 @@ struct Softmax {
     flash::template scale_apply_exp2</*Scale_max=*/true, Check_inf, Max_offset>(scores, row_max, softmax_scale_log2);
     // We don't do the reduce across threads here since we don't need to use the row_sum.
     // We do that reduce at the end when we need to normalize the softmax.
-    flash::reduce_sum</*zero_init=*/Is_first, /*warp_reduce=*/false>(scores, row_sum);
+    if constexpr (!SwapAB) {
+      flash::reduce_sum</*zero_init=*/Is_first, /*warp_reduce=*/false>(scores, row_sum);
+    } else {
+      SumOp<float> sum_op;
+      thread_reduce_</*zero_init=*/Is_first>(scores, row_sum, sum_op);
+    }
   };
 
+  template <int NumMmaWarpGroups = 1>
   __forceinline__ __device__ TensorT finalize(float const final_scale = 1.f) {
     SumOp<float> sum_op;
-    quad_allreduce_(row_sum, row_sum, sum_op);
+    if constexpr (!SwapAB) {
+      quad_allreduce_(row_sum, row_sum, sum_op);
+    } else {
+      // reduce sum in column
+      warp_reduce_column_(row_sum, sum_op);
+      warp_group_reduce_column_<NumMmaWarpGroups, kNRows>(row_sum, sum_op);
+    }
     TensorT scores_scale;
 #pragma unroll
     for (int mi = 0; mi < size(row_sum); ++mi) {

@@ -43,7 +43,8 @@ template <
     class BlockCoordType_,
     int NumEpilogueThreads_,
     bool DisableFwdAtomicReduction_,
-    bool Deterministic_ = false>
+    bool Deterministic_ = false,
+    bool SwapAB_ = false>
 struct CollectiveEpilogueFwd {
   // KblockM, Kheaddim, KblockN
   using TileShape_MNK_PV = TileShape_MNK_PV_;
@@ -55,12 +56,19 @@ struct CollectiveEpilogueFwd {
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool DisableFwdAtomicReduction = DisableFwdAtomicReduction_;
   static constexpr bool Deterministic = Deterministic_;
+  static constexpr bool SwapAB = SwapAB_;
 
   static_assert(ArchTag::kMinComputeCapability >= 90 || CUTE_STATIC_V(size(ClusterShape{})) == 1);
   // static_assert(sizeof(Element) <= 2);
 
   static constexpr int kBlockM = get<0>(TileShape_MNK_PV{});
   static constexpr int kHeadDim = get<1>(TileShape_MNK_PV{});
+
+  // when SwapAB == true, set the warp group overlap tileMMA size for kBlockM
+  static constexpr int TileSize_kBlockM = kBlockM == 8 ? kBlockM : kBlockM / 2;
+  using TileShape_MNK_PV_SwapAB_OP_SELECT = Shape<Int<kHeadDim>, Int<TileSize_kBlockM>, decltype(get<2>(TileShape_MNK_PV{}))>;
+
+  using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, TileShape_MNK_PV_SwapAB_OP_SELECT, TileShape_MNK_PV>;
 
   // TODO: Use finegrained TMA store for output, currently hardcoded to false
   using GmemTiledCopyOTMA = cute::SM90_TMA_STORE;
@@ -89,7 +97,8 @@ struct CollectiveEpilogueFwd {
   // Layout of Epilogue threads, named GmemLayoutAtom
   using GmemLayoutAtom = Layout<Shape<Int<NumEpilogueThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
   // kBlockM must be divisible by the 0-th dimension of GmemLayoutAtom to ensure correct tiling
-  static_assert(kBlockM % CUTE_STATIC_V(shape<0>(GmemLayoutAtom{})) == 0, "kBlockM must be a multiple of NumEpilogueThreads / kGmemThreadsPerRow");
+  // TODO CHECK
+  // static_assert(kBlockM % CUTE_STATIC_V(shape<0>(GmemLayoutAtom{})) == 0, "kBlockM must be a multiple of NumEpilogueThreads / kGmemThreadsPerRow");
 
   using GmemTiledCopyO = decltype(make_tiled_copy(
       Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
@@ -323,12 +332,19 @@ struct CollectiveEpilogueFwd {
   CUTLASS_DEVICE void store(
       Params const& params,
       FrgTensorO& tOrO,
-      FrgTensorLSE& lse,
+      FrgTensorLSE& lse, // softmax.row_sum
       SharedStorage& shared_storage,
       TiledMma tiled_mma,
       int thread_idx,
       BlockCoordType const& block_coord,
       flash::DistributedSeqlenInfo& seqlen_info) {
+    // if (threadIdx.x == 128) {
+    //   print("kBytePerRow\t\t"); print(kBytePerRow); print("\n");
+    //   print("kBlockKGmem\t\t"); print(kBlockKGmem); print("\n");
+    //   print("kGmemElemsPerStore\t\t"); print(kGmemElemsPerStore); print("\n");
+    //   print("kGmemThreadsPerRow\t\t"); print(kGmemThreadsPerRow); print("\n");
+    //   print("GmemLayoutAtom\t\t"); print(GmemLayoutAtom{}); print("\n");
+    // }
     // Get block coordinates for current job(tile)
     int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
@@ -363,16 +379,47 @@ struct CollectiveEpilogueFwd {
     auto thread_mma = tiled_mma.get_thread_slice(thread_idx);
 
     // (MMA,MMA_M,MMA_K)
-    Tensor taccOcO = thread_mma.partition_C(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})));
+    Tensor taccOcO = thread_mma.partition_C(cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV_Active{})));
     static_assert(decltype(size<0, 0>(taccOcO))::value == 2);
     static_assert(decltype(size<0, 1>(taccOcO))::value == 2);
 
     // (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
-    Tensor taccOcO_rowcol = make_tensor(taccOcO.data(), flash::convert_layout_acc_rowcol(taccOcO.layout()));
+    Tensor taccOcO_rowcol = make_tensor(taccOcO.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(taccOcO.layout()));
     Tensor taccOcO_row = taccOcO_rowcol(_, _0{});
+    Tensor taccOcO_col = taccOcO_rowcol(_0{}, _);
+    Tensor taccOcO_slice = [&]() { return taccOcO_row; }();
+    // DEBUG
+    // Tensor debugcO = cute::conditional_return<SwapAB>(make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDim>>{}), make_identity_tensor(Shape<Int<kHeadDim>,
+    // Int<kBlockM>>{}));
+    // {
+    //   auto thr_mma = tiled_mma.get_thread_slice(thread_idx);
+    //   Tensor tScS = thr_mma.partition_C(debugcO);
+    //   for (int i = 0; i < size(tOrO); ++i) {
+    //     if (int(get<0>(tScS(i))) >= 10 && int(get<0>(tScS(i))) < 14 && int(get<1>(tScS(i))) >= 10 && int(get<1>(tScS(i))) < 14) {
+    //       printf(
+    //           "tOrO input store: SwapAB: %d tOrO(%d, %d) = %f\n", SwapAB, int(get<0>(tScS(i))), int(get<1>(tScS(i))), static_cast<float>(tOrO(i)));
+    //     }
+    //   }
+    // }
 
     // MMA_M
-    CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_row));
+    CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_slice));
+
+    // if (threadIdx.x == 128 && blockIdx.x == 1) {
+    //   print("================== Debug taccOcO_slice ================\n");
+    //   cute::print_tensor(taccOcO_slice); print("\n");
+    //   print("TileShape_MNK_PV\n"); print(TileShape_MNK_PV{}); print("\n");
+    //   print("TileShape_MNK_PV_SwapAB_OP_SELECT\n"); print(TileShape_MNK_PV_SwapAB_OP_SELECT{}); print("\n");
+    //   print("tiled_mma\n"); print(tiled_mma); print("\n");
+    //   print("taccOcO.layout()\n"); print(taccOcO.layout()); print("\n");
+    //   print("taccOcO_rowcol.layout()\n"); print(taccOcO_rowcol.layout()); print("\n");
+    //   print("taccOcO_row.layout()\n"); print(taccOcO_row.layout()); print("\n");
+    //   print("taccOcO_col.layout()\n"); print(taccOcO_col.layout()); print("\n");
+    //   print("size(lse)\n"); print(size(lse)); print("\n");
+    //   print("lse.layout\n"); print(lse.layout()); print("\n");
+    //   print("size(taccOcO_slice))\n"); print(size(taccOcO_slice)); print("\n");
+    //   print("taccOcO_slice.layout\n"); print(taccOcO_slice.layout()); print("\n");
+    // }
 
     // Predicate for skipping correction
     // NOTE: Correction only need when we use atomic reduction
@@ -393,16 +440,25 @@ struct CollectiveEpilogueFwd {
         acquire_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
       }
       flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
-
 #pragma unroll
       for (int mi = 0; mi < size(lse_prev); ++mi) {
         // Load lse_prev from gmem -> smem, and calculate lse_final
-        int const row_block = get<0>(taccOcO_row(mi));
+        int const row_block = [&]() {
+          if constexpr (!SwapAB) {
+            return get<0>(taccOcO_slice(mi));
+          } else {
+            return get<1>(taccOcO_slice(mi));
+          }
+        }();
         int const row_batch = m_block * kBlockM + row_block;
         if (row_batch >= seqlen_o) {
           lse(mi) = -INFINITY;
         }
-
+        // if (threadIdx.x == 256 && blockIdx.x == 1) {
+        //   print("row_block: "); print(row_block);
+        //   print(", row_batch: "); print(row_batch);
+        //   print(", seqlen_o: "); print(seqlen_o); print("\n");
+        // }
         int const row_global = row_batch + offset_o;
         if (row_global < get<0>(params.shape_O)) {
           lse_prev(mi) = gLSE(row_block);
@@ -415,6 +471,17 @@ struct CollectiveEpilogueFwd {
           lse_final(mi) = correct_lse(lse_prev(mi), lse(mi));
         }
       }
+      // if (threadIdx.x == 256 && blockIdx.x == 1) {
+      //   print("================= gLSE ================\n");
+      //   cute::print_tensor(gLSE);
+      //   print("================= lse prev ================\n");
+      //   cute::print_tensor(lse_prev);
+      //   print("================= lse local ================\n");
+      //   cute::print_tensor(lse);
+      //   print("================= lse final ================\n");
+      //   cute::print_tensor(lse_final);
+      //   print("\n");
+      // }
 
       // A workaround to ensure that all threads get the correct lse_final, low performance
       flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
@@ -428,10 +495,24 @@ struct CollectiveEpilogueFwd {
 // Store correct lse_final to gmem
 #pragma unroll
     for (int mi = 0; mi < size(lse_final); ++mi) {
-      int const row_block = get<0>(taccOcO_row(mi));
+      int const row_block = [&]() {
+        if constexpr (!SwapAB) {
+          return get<0>(taccOcO_slice(mi));
+        } else {
+          return get<1>(taccOcO_slice(mi));
+        }
+      }();
       int const row_batch = m_block * kBlockM + row_block;
       if (row_batch < seqlen_o) {
-        if (get<1>(taccOcO_row(_0{})) == 0) {
+        int const col_id = [&]() {
+          if constexpr (!SwapAB) {
+            return get<1>(taccOcO_slice(_0{}));
+          } else {
+            return get<0>(taccOcO_slice(_0{}));
+          }
+        }();
+        // Each column is written back by one thread
+        if (col_id == 0) {
           gLSE(row_block) = lse_final(mi);
         }
       }
@@ -443,26 +524,93 @@ struct CollectiveEpilogueFwd {
 
     if (!skip_correction) {
       // TODO: need reduce compute for pO, and add predicate k for pO
-      Tensor cO = cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})); // (BLK_M,BLK_K) -> (blk_m,blk_k)
-      Tensor pO = make_tensor<bool>(make_shape(size<0>(cO), size<1>(cO)), make_stride(_1{}, _0{}));
+      Tensor cO = [&]() {
+        if constexpr (!SwapAB) {
+          return cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})); // (BLK_M,BLK_K) -> (blk_m,blk_k)
+        } else {
+          return cute::make_identity_tensor(select<1, 0>(TileShape_MNK_PV{})); // (BLK_K,BLK_M) -> (blk_k,blk_m)
+        }
+      }();
+      Tensor pO = [&]() {
+        if constexpr (!SwapAB) {
+          return make_tensor<bool>(make_shape(size<0>(cO), size<1>(cO)), make_stride(_1{}, _0{}));
+        } else {
+          // When SwapAB, we swap the stride to create a transposed view of pO
+          return make_tensor<bool>(make_shape(size<0>(cO), size<1>(cO)), make_stride(_0{}, _1{}));
+        }
+      }();
       int bound = get<0>(params.shape_O) - (offset_o + m_block * kBlockM);
+      if constexpr (!SwapAB) {
 #pragma unroll
-      for (int n = 0; n < size<0>(pO); ++n) {
-        pO(n, _0{}) = get<0>(cO(n, _0{})) < bound;
+        for (int n = 0; n < size<0>(pO); ++n) {
+          pO(n, _0{}) = get<0>(cO(n, _0{})) < bound;
+        }
+      } else {
+#pragma unroll
+        for (int n = 0; n < size<1>(pO); ++n) {
+          pO(_0{}, n) = get<1>(cO(_0{}, n)) < bound;
+        }
       }
       Tensor tOpO = thr_copy_O.partition_D(pO);
 
       // Define tOrPrevO, tOrPrevO_copy_view, tOgPrevO
       Tensor tOrPrevO = make_fragment_like(tOrO);
       Tensor tOrPrevO_copy_view = thr_copy_O.retile_D(tOrPrevO);
-      Tensor tOgPrevO = thr_copy_O.partition_S(gO);
+      Tensor tOgPrevO = [&]() {
+        if constexpr (!SwapAB) {
+          return thr_copy_O.partition_S(gO);
+        } else {
+          // When SwapAB is true, transpose gO by swapping shape and stride dimensions
+          auto gO_transposed = make_tensor(
+              gO.data(),
+              cute::make_layout(
+                  cute::make_shape(get<1>(gO.layout().shape()), get<0>(gO.layout().shape())),
+                  cute::make_stride(get<1>(gO.layout().stride()), get<0>(gO.layout().stride()))));
+          return thr_copy_O.partition_S(gO_transposed);
+        }
+      }();
 
       // Copy prev O from gmem to smem
       cute::copy_if(tOpO, tOgPrevO, tOrPrevO_copy_view);
 
+      // if (threadIdx.x == 256 && blockIdx.x == 1) {
+      //   print("================= tiled_copy_O ================\n");
+      //   print(tiled_copy_O); print("\n");
+      //   print("================= gO ================\n");
+      //   cute::print_tensor(gO);
+      //   print("================= tOgPrevO ================\n");
+      //   cute::print_tensor(tOgPrevO);
+      //   print("================= tOrPrevO ================\n");
+      //   cute::print_tensor(tOrPrevO);
+      //   print("================= tOrPrevO_copy_view ================\n");
+      //   cute::print_tensor(tOrPrevO_copy_view);
+      //   print("================= pO ================\n");
+      //   cute::print_tensor(pO);
+      //   print("================= tOpO ================\n");
+      //   cute::print_tensor(tOpO);
+      //   print("\n");
+      // }
+
       // Correct output
-      Tensor tOrPrevO_rowcol = make_tensor(tOrPrevO.data(), flash::convert_layout_acc_rowcol(tOrPrevO.layout()));
-      Tensor tOrO_rowcol = make_tensor(tOrO.data(), flash::convert_layout_acc_rowcol(tOrO.layout()));
+      Tensor tOrPrevO_rowcol = make_tensor(tOrPrevO.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tOrPrevO.layout()));
+      Tensor tOrO_rowcol = make_tensor(tOrO.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tOrO.layout()));
+      // if (threadIdx.x == 128 && blockIdx.x == 1) {
+      //   print("tOrO.layout()"); print(tOrO.layout()); print("\n");
+      //   print("tOrO_rowcol.layout()"); print(tOrO_rowcol.layout()); print("\n");
+      // }
+
+      // {
+      //   auto thr_mma = tiled_mma.get_thread_slice(thread_idx);
+      //   Tensor tScS = thr_mma.partition_C(debugcO);
+      //   for (int i = 0; i < size(tOrO); ++i) {
+      //     if (int(get<0>(tScS(i))) >= 10 && int(get<0>(tScS(i))) < 14 && int(get<1>(tScS(i))) >= 10 && int(get<1>(tScS(i))) < 14) {
+      //       printf(
+      //           "tOrO before correct_output: SwapAB: %d tOrO(%d, %d) = %f\n", SwapAB, int(get<0>(tScS(i))), int(get<1>(tScS(i))), static_cast<float>(tOrO(i)));
+      //     }
+      //   }
+      // }
+
+      // TO CHECK
       correct_output(tOrPrevO_rowcol, tOrO_rowcol, lse_prev, lse, lse_final);
     }
 
@@ -486,7 +634,19 @@ struct CollectiveEpilogueFwd {
       Tensor tOrFinalO = make_tensor_like<Element>(tOrO);
       flash::convert_type_out(tOrO, tOrFinalO);
       Tensor tOrO_copy_view = thr_copy_O.retile_S(tOrFinalO);
-      Tensor tOsO = thr_copy_O.partition_D(sO);
+      Tensor tOsO = [&]() {
+        if constexpr (!SwapAB) {
+          return thr_copy_O.partition_D(sO);
+        } else {
+          // Create transposed view of sO by swapping shape and stride
+          auto sO_transposed = make_tensor(
+              sO.data(),
+              cute::make_layout(
+                  cute::make_shape(get<1>(sO.layout().shape()), get<0>(sO.layout().shape())),
+                  cute::make_stride(get<1>(sO.layout().stride()), get<0>(sO.layout().stride()))));
+          return thr_copy_O.partition_D(sO_transposed);
+        }
+      }();
       // Tensor tOsO = thr_copy_O.partition_D(sO_pi);
       cute::copy(tiled_copy_O, tOrO_copy_view, tOsO);
       flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);

@@ -53,7 +53,8 @@ template <int Arch,
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
-  static constexpr bool MmaPV_is_RS = true;
+  // if SwapAB, mma V @ P is SS mode
+  static constexpr bool MmaPV_is_RS = !SwapAB;
   static constexpr bool IntraWGOverlap = true;
 
   static constexpr int kStages = 2;
@@ -88,7 +89,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
                                                           typename Scheduler::BlockCoordType,
                                                           CollectiveMainloop::NumMmaThreads,
                                                           DisableFwdAtomicReduction,
-                                                          Deterministic>;
+                                                          Deterministic,
+                                                          SwapAB>;
   using AttnKernel = flash::enable_sm90_or_later<
       flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
 

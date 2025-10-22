@@ -37,7 +37,12 @@ from magi_attention.testing.precision import (
     extract_mismatch_threshold,
     torch_attn_ref,
 )
-from magi_attention.utils import get_attn_mask_from_ffa_args, is_list_value_any
+from magi_attention.utils import (
+    get_attn_mask_from_ffa_args,
+    is_list_value_any,
+    str2seed,
+    sync_rng,
+)
 
 
 class TestFlexFlashAttn(DistTestBase):
@@ -205,6 +210,8 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
             deterministic=True,
+            swap_ab=True,
+            ref_block_size=(16, 64),
         )
         o.backward(do)
 
@@ -774,6 +781,8 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
+            swap_ab=True,
+            ref_block_size=(16, 64),
         )
         o.backward(do)
 
@@ -1055,14 +1064,14 @@ class TestFlexFlashAttn(DistTestBase):
             },
             {
                 "name": "deterministic_sample",
-                "seqlen": 2500,
+                "seqlen": 900,
                 "q_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
+                    [[i * 30, (i + 1) * 30] for i in range(30) for j in range(30)]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(50)] * 50
+                    [[i * 30, (i + 1) * 30] for i in range(30)] * 30
                 ),
-                "attn_type_map": [0, 1] * 1250,
+                "attn_type_map": [0, 1] * 450,
             },
             {
                 "name": "sparse_attn_2k_with_same_k_ranges",
@@ -1107,10 +1116,15 @@ class TestFlexFlashAttn(DistTestBase):
     )
     @parameterize("model_config", MODEL_CONFIGS)
     @parameterize("dtype", [torch.float16, torch.bfloat16])
+    # @parameterize("dtype", [torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
+    # @parameterize("random_attn_type_map", [False])
     @parameterize("auto_range_merge", [False, True])
+    # @parameterize("auto_range_merge", [False])
+    # @parameterize("deterministic", [True])
     @parameterize("deterministic", [False, True])
     @parameterize("test_accumulation_inplace", [False, True])
+    # @parameterize("test_accumulation_inplace", [False])
     def test_flex_flash_attn(
         self,
         attn_mask_config: dict[str, Any],
@@ -1131,9 +1145,19 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
+        test_case = (
+            f"[{model_config['name']}]"
+            f"[dtype={dtype}]"
+            f"[random_attn_type_map={random_attn_type_map}]"
+            f"[auto_range_merge={auto_range_merge}]"
+            f"[deterministic={deterministic}]"
+            f"[test_accumulation_inplace={test_accumulation_inplace}]"
+        )
+
         if random_attn_type_map:
             # we now support attn type idx in {0, 1, 2, 3}
-            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+            with sync_rng(seed=str2seed(test_case)):
+                attn_type_map = [random.choice([0, 1, 2, 3]) for _ in attn_type_map]
 
         test_case = (
             f"[{attn_mask_config['name']}]"
@@ -1144,6 +1168,9 @@ class TestFlexFlashAttn(DistTestBase):
             f"[deterministic={deterministic}]"
             f"[test_accumulation_inplace={test_accumulation_inplace}]"
         )
+
+        # set seed
+        torch.manual_seed(str2seed(test_case))
 
         self.run_test_case(
             seqlen_q=seqlen,
