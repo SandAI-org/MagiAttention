@@ -48,7 +48,7 @@ from magi_attention.comm.primitive.grpcoll._handle import GrpCollInterHandle
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
-    get_dispatch_layout_from_group_cast_meta,
+    get_native_group_cast_meta,
     transfer_splits_and_dst_idxs_to_topk_idx,
     unpermute_output,
 )
@@ -322,7 +322,7 @@ def test_main(
         ref_num_tokens_per_rank,
         ref_num_tokens_per_rdma_rank,
         ref_is_token_in_rank,
-    ) = get_dispatch_layout_from_group_cast_meta(
+    ) = get_native_group_cast_meta(
         input_split_sizes=input_split_size_list,
         dst_indices=dst_indices_list,
         group=group,
@@ -334,7 +334,7 @@ def test_main(
         ref_num_tokens_per_rank_device,
         ref_num_tokens_per_rdma_rank_device,
         ref_is_token_in_rank_device,
-    ) = get_dispatch_layout_from_group_cast_meta(
+    ) = get_native_group_cast_meta(
         input_split_sizes=input_split_sizes,
         dst_indices=dst_indices,
         group=group,
@@ -373,7 +373,7 @@ def test_main(
         ref_num_tokens_per_rdma_rank,
         ref_is_token_in_rank,
         _,  # event_overlap,
-    ) = buffer.get_dispatch_layout(layout_topk_idx, num_experts)
+    ) = buffer.get_group_cast_meta(layout_topk_idx, num_experts)
 
     print(
         f"[RANK {rank}]: {layout_topk_idx.shape=} | {layout_topk_idx=}\n"
@@ -389,7 +389,7 @@ def test_main(
     assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
 
     # benchmark dispatch layout
-    t = bench(lambda: buffer.get_dispatch_layout(layout_topk_idx))[0]
+    t = bench(lambda: buffer.get_group_cast_meta(layout_topk_idx))[0]
     if local_rank == 0:
         print(f"[layout] Kernel performance: {t * 1000:.3f} ms", flush=True)
         print("", flush=True)

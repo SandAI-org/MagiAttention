@@ -72,7 +72,7 @@ void finalize();
 // Layout kernels
 namespace layout {
 
-void get_dispatch_layout(
+void get_group_cast_meta(
     const int64_t* topk_idx,
     int* num_tokens_per_rank,
     int* num_tokens_per_rdma_rank,

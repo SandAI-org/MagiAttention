@@ -27,8 +27,8 @@ from ._handle import GrpCollHandle
 from ._mgr import grpcoll_mgr
 from .utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
-    get_dispatch_layout_from_group_cast_meta,
     get_group_reduce_handle_from_sym_group_cast,
+    get_native_group_cast_meta,
     maybe_lazy_init_buffer,
 )
 
@@ -123,7 +123,7 @@ def native_group_cast_impl(
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
             is_token_in_rank,
-        ) = get_dispatch_layout_from_group_cast_meta(
+        ) = get_native_group_cast_meta(
             input_split_sizes=input_split_sizes,
             dst_indices=dst_indices,
             group=group,

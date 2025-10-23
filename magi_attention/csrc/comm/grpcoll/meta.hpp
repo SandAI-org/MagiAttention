@@ -28,7 +28,7 @@
 
 namespace magi_attn_comm::grpcoll {
 struct Meta {
-  static std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> get_dispatch_meta_from_topk_idx(
+  static std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> get_group_cast_meta_from_topk_idx(
       const torch::Tensor& topk_idx,
       int num_ranks,
       int num_rdma_ranks,
@@ -66,7 +66,7 @@ struct Meta {
     if (num_rdma_ranks > 1)
       num_tokens_per_rdma_rank = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
-    layout::get_dispatch_layout(
+    layout::get_group_cast_meta(
         /*topk_idx=*/topk_idx.data_ptr<int64_t>(),
         /*num_tokens_per_rank=*/num_tokens_per_rank.data_ptr<int>(),
         /*num_tokens_per_rdma_rank=*/num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,

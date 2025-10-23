@@ -29,7 +29,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
     get_a2av_perm_idxs_from_group_cast_meta,
-    get_dispatch_layout_from_group_cast_meta,
+    get_native_group_cast_meta,
 )
 from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import format_dict_field, format_list_field
@@ -215,7 +215,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
             is_token_in_rank,
-        ) = get_dispatch_layout_from_group_cast_meta(
+        ) = get_native_group_cast_meta(
             input_split_sizes=self._group_cast_args_dict_packed["input_split_sizes"],
             dst_indices=self._group_cast_args_dict_packed["dst_indices"],
             group=self.group,

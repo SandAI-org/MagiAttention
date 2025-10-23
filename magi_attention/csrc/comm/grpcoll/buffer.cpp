@@ -298,12 +298,12 @@ void Buffer::destroy() {
 // Core Kernel APIs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> Buffer::get_dispatch_layout(
+std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> Buffer::get_group_cast_meta(
     const torch::Tensor& topk_idx,
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream) {
-  return Meta::get_dispatch_meta_from_topk_idx(
+  return Meta::get_group_cast_meta_from_topk_idx(
       /*topk_idx=*/topk_idx,
       /*num_ranks=*/num_ranks,
       /*num_rdma_ranks=*/is_internode_available() ? num_rdma_ranks : 1,
@@ -1769,7 +1769,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Meta class
   py::class_<grpcoll::Meta>(grpcoll_submodule, "Meta")
-      .def_static("get_dispatch_meta_from_topk_idx", &grpcoll::Meta::get_dispatch_meta_from_topk_idx)
+      .def_static("get_group_cast_meta_from_topk_idx", &grpcoll::Meta::get_group_cast_meta_from_topk_idx)
       .def_static("get_a2av_perm_idx_from_src_idx", &grpcoll::Meta::get_a2av_perm_idx_from_src_idx);
 
   // Buffer class
@@ -1786,7 +1786,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_comm_stream", &grpcoll::Buffer::get_comm_stream)
       .def("sync", &grpcoll::Buffer::sync)
       .def("destroy", &grpcoll::Buffer::destroy)
-      .def("get_dispatch_layout", &grpcoll::Buffer::get_dispatch_layout)
+      .def("get_group_cast_meta", &grpcoll::Buffer::get_group_cast_meta)
       .def("intranode_group_cast", &grpcoll::Buffer::intranode_group_cast)
       .def("intranode_group_reduce", &grpcoll::Buffer::intranode_group_reduce)
       .def("internode_group_cast", &grpcoll::Buffer::internode_group_cast)

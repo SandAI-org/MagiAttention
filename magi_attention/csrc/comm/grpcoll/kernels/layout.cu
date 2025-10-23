@@ -47,7 +47,7 @@ namespace magi_attn_comm::grpcoll {
 namespace layout {
 
 template <int kNumThreads, int kNumRanksPerSM>
-__global__ void get_dispatch_layout(
+__global__ void get_group_cast_meta(
     const int64_t* topk_idx,
     int* num_tokens_per_rank,
     int* num_tokens_per_rdma_rank,
@@ -148,7 +148,7 @@ __global__ void get_dispatch_layout(
   }
 }
 
-void get_dispatch_layout(
+void get_group_cast_meta(
     const int64_t* topk_idx,
     int* num_tokens_per_rank,
     int* num_tokens_per_rdma_rank,
@@ -162,7 +162,7 @@ void get_dispatch_layout(
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   LAUNCH_KERNEL(
-      &cfg, (get_dispatch_layout<kNumThreads, kNumRanksPerSM>), topk_idx, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens, num_ranks);
+      &cfg, (get_group_cast_meta<kNumThreads, kNumRanksPerSM>), topk_idx, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens, num_ranks);
 }
 
 template <int kNumThreads, int kMaxNumRanks>

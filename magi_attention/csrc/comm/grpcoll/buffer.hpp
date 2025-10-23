@@ -152,7 +152,7 @@ struct Buffer {
 
   void destroy();
 
-  std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> get_dispatch_layout(
+  std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> get_group_cast_meta(
       const torch::Tensor& topk_idx,
       std::optional<EventHandle>& previous_event,
       bool async,

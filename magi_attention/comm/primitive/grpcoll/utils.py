@@ -1375,7 +1375,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
 
 
 @overload
-def get_dispatch_layout_from_group_cast_meta(
+def get_native_group_cast_meta(
     input_split_sizes: list[int],
     dst_indices: list[list[int]],
     group: dist.ProcessGroup,
@@ -1389,7 +1389,7 @@ def get_dispatch_layout_from_group_cast_meta(
 
 
 @overload
-def get_dispatch_layout_from_group_cast_meta(
+def get_native_group_cast_meta(
     input_split_sizes: torch.Tensor,
     dst_indices: torch.Tensor,
     group: dist.ProcessGroup,
@@ -1403,7 +1403,7 @@ def get_dispatch_layout_from_group_cast_meta(
 
 
 @nvtx.instrument_nvtx
-def get_dispatch_layout_from_group_cast_meta(
+def get_native_group_cast_meta(
     input_split_sizes: list[int] | torch.Tensor,
     dst_indices: list[list[int]] | torch.Tensor,
     group: dist.ProcessGroup,
@@ -1438,7 +1438,7 @@ def get_dispatch_layout_from_group_cast_meta(
             num_tokens_per_rdma_rank,
             is_token_in_rank,
             _,  # event_overlap
-        ) = buffer.get_dispatch_layout(
+        ) = buffer.get_group_cast_meta(
             topk_idx=topk_idx,
             previous_event=None,
             async_finish=False,
@@ -1454,7 +1454,7 @@ def get_dispatch_layout_from_group_cast_meta(
             num_tokens_per_rdma_rank,
             is_token_in_rank,
             _,  # event_overlap,
-        ) = GrpCollBuffer.get_dispatch_meta_from_topk_idx(
+        ) = GrpCollBuffer.get_group_cast_meta_from_topk_idx(
             topk_idx=topk_idx,
             num_ranks=num_ranks,
             num_nodes=num_nodes,

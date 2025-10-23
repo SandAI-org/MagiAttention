@@ -242,7 +242,7 @@ class GrpCollBuffer:
         return tensor[: size.numel()].view(size)
 
     @classmethod
-    def get_dispatch_meta_from_topk_idx(
+    def get_group_cast_meta_from_topk_idx(
         cls,
         topk_idx: torch.Tensor,
         num_ranks: int,
@@ -255,7 +255,7 @@ class GrpCollBuffer:
         Calculate the dispatch meta from the topk indices required for later communication.
 
         NOTE:
-            1. this is for now a static replacement API for `buffer.get_dispatch_layout`
+            1. this is for now a static replacement API for `buffer.get_group_cast_meta`
             when the buffer runtime is not available.
 
             2. this API is excuted not on the buffer comm stream but on a hidden `meta_stream`
@@ -267,7 +267,7 @@ class GrpCollBuffer:
             num_tokens_per_rdma_rank,
             is_token_in_rank,
             event,
-        ) = grpcoll.Meta.get_dispatch_meta_from_topk_idx(
+        ) = grpcoll.Meta.get_group_cast_meta_from_topk_idx(
             topk_idx,
             num_ranks,
             num_nodes,
@@ -335,7 +335,7 @@ class GrpCollBuffer:
             EventOverlap(event),
         )
 
-    def get_dispatch_layout(
+    def get_group_cast_meta(
         self,
         topk_idx: torch.Tensor,
         previous_event: EventOverlap | None = None,
@@ -364,7 +364,7 @@ class GrpCollBuffer:
             num_tokens_per_rdma_rank,
             is_token_in_rank,
             event,
-        ) = self.runtime.get_dispatch_layout(
+        ) = self.runtime.get_group_cast_meta(
             topk_idx,
             getattr(previous_event, "event", None),
             async_finish,
