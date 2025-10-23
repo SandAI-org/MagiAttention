@@ -74,7 +74,7 @@ struct CollectiveEpilogueFwd {
   using GmemTiledCopyOTMA = cute::SM90_TMA_STORE;
 
   // These are for storing the output tensor without TMA (e.g., for setting output to zero)
-  static constexpr int kGmemElemsPerStore = sizeof(cute::uint128_t) / sizeof(Element);
+  static constexpr int kGmemElemsPerStore = kBlockM >= 32 ? sizeof(cute::uint128_t) / sizeof(Element) : sizeof(cute::uint64_t) / sizeof(Element);
   static_assert(kHeadDim % kGmemElemsPerStore == 0, "Headdim must be a multiple of kGmemElemsPerStore");
   // We want each "row" to have 64 elements (128 bytes, i.e. 1 cache line). We want each thread to have 4 elements
   // in the M direction and 2 elements in the K direction. In the case of PackGQA, this reduces the number of times
@@ -89,7 +89,8 @@ struct CollectiveEpilogueFwd {
   static constexpr int kGmemThreadsPerRow = kBlockKGmem / kGmemElemsPerStore;
 
   // If PackGQA, we split the work of compute O_ptr among threads in the same row, so we need this to within a warp
-  static_assert(cutlass::NumThreadsPerWarp % kGmemThreadsPerRow == 0);
+  // remove assert because no PackGQA
+  // static_assert(cutlass::NumThreadsPerWarp % kGmemThreadsPerRow == 0);
 
   // Number of epilogue threads must be a multiple of kGmemThreadsPerRow
   static_assert(NumEpilogueThreads % kGmemThreadsPerRow == 0, "NumEpilogueThreads must be a multiple of kGmemThreadsPerRow");
@@ -98,12 +99,13 @@ struct CollectiveEpilogueFwd {
   using GmemLayoutAtom = Layout<Shape<Int<NumEpilogueThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
   // kBlockM must be divisible by the 0-th dimension of GmemLayoutAtom to ensure correct tiling
   // TODO CHECK
-  // static_assert(kBlockM % CUTE_STATIC_V(shape<0>(GmemLayoutAtom{})) == 0, "kBlockM must be a multiple of NumEpilogueThreads / kGmemThreadsPerRow");
+  static_assert(kBlockM % CUTE_STATIC_V(shape<0>(GmemLayoutAtom{})) == 0, "kBlockM must be a multiple of NumEpilogueThreads / kGmemThreadsPerRow");
 
-  using GmemTiledCopyO = decltype(make_tiled_copy(
-      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
-      GmemLayoutAtom{},
-      Layout<Shape<_1, Int<kGmemElemsPerStore>>>{})); // Val layout, 8 or 16 vals per store
+  using GmemTileCopyAtomO = std::
+      conditional_t<kBlockM >= 32, Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>, Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<64>, Element>>;
+
+  using GmemTiledCopyO =
+      decltype(make_tiled_copy(GmemTileCopyAtomO{}, GmemLayoutAtom{}, Layout<Shape<_1, Int<kGmemElemsPerStore>>>{})); // Val layout, 8 or 16 vals per store
 
   using SmemLayoutAtomOTMA =
       decltype(cutlass::gemm::collective::detail::
@@ -616,6 +618,9 @@ struct CollectiveEpilogueFwd {
 
     // Initialize gmem_tiled_copy_O
     GmemTiledCopyO gmem_tiled_copy_O;
+    // if (threadIdx.x == 128 && blockIdx.x == 1) {
+    //   cute::print_latex(gmem_tiled_copy_O);
+    // }
     auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
 
     // Initialize tOcO and tOpO to predict OOB access
