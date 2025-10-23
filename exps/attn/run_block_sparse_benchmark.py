@@ -248,8 +248,8 @@ def sparse_attn_benchmark(
                 except Exception as e:
                     if "CUDA out of memory" not in str(e):
                         print(
-                            f"Error occured before running {attn_impl} with \
-                            {q_block_size} q_block_size, {k_block_size} k_block_size "
+                            f"Error occured before running {attn_impl} with "
+                            f"{q_block_size=}, {k_block_size=} "
                             f"when {seqlen=}, {hd=} during {wd}: {e=}"
                         )
                         raise e
@@ -292,7 +292,8 @@ def sparse_attn_benchmark(
                 except Exception as e:
                     if "CUDA out of memory" not in str(e):
                         print(
-                            f"Error occured before running {attn_impl} with {q_block_size} mask "
+                            f"Error occured before running {attn_impl} with "
+                            f"{q_block_size=}, {k_block_size=} "
                             f"when {seqlen=}, {hd=} during {wd}: {e=}"
                         )
                         raise e
@@ -341,7 +342,8 @@ def sparse_attn_benchmark(
                 except Exception as e:
                     if "CUDA out of memory" not in str(e):
                         print(
-                            f"Error occured before running {attn_impl} with {q_block_size} mask "
+                            f"Error occured before running {attn_impl} with "
+                            f"{q_block_size=}, {k_block_size=} "
                             f"when {seqlen=}, {hd=} during {wd}: {e=}"
                         )
                         raise e
@@ -408,7 +410,7 @@ def sparse_attn_benchmark(
                 )
             except Exception as e:
                 print(
-                    f"Error occured before running {attn_impl} with {q_block_size} q_block_size, {k_block_size} k_block_size "
+                    f"Error occured before running {attn_impl} with {q_block_size=}, {k_block_size=} "
                     f"when {seqlen=}, {hd=} during {wd}: {e=}"
                 )
                 is_attn_impl_support_this_mask = False
@@ -459,7 +461,8 @@ def sparse_attn_benchmark(
             except Exception as e:
                 if "CUDA out of memory" not in str(e):
                     print(
-                        f"Error occured before running {attn_impl} with {q_block_size} mask "
+                        f"Error occured before running {attn_impl} with "
+                        f"{q_block_size=}, {k_block_size=} "
                         f"when {seqlen=}, {hd=} during {wd}: {e=}"
                     )
                     raise e
@@ -482,7 +485,8 @@ def sparse_attn_benchmark(
                     except Exception as e:
                         if "CUDA out of memory" not in str(e):
                             print(
-                                f"Error occured before running {attn_impl} with {q_block_size} mask "
+                                f"Error occured before running {attn_impl} with "
+                                f"{q_block_size=}, {k_block_size=} "
                                 f"when {seqlen=}, {hd=} during {wd}: {e=}"
                             )
                             raise e
@@ -518,8 +522,8 @@ def sparse_attn_benchmark(
                 except Exception as e:
                     if "CUDA out of memory" not in str(e):
                         print(
-                            f"Error occured before running {attn_impl} with \
-                            {q_block_size} q_block_size, {k_block_size} k_block_size "
+                            f"Error occured before running {attn_impl} with "
+                            f"{q_block_size=}, {k_block_size=} "
                             f"when {seqlen=}, {hd=} during {wd}: {e=}"
                         )
                         raise e
@@ -561,8 +565,8 @@ def sparse_attn_benchmark(
             except Exception as e:
                 if "CUDA out of memory" not in str(e):
                     print(
-                        f"Error occured before running {attn_impl} with \
-                        {q_block_size} q_block_size, {k_block_size} k_block_size "
+                        f"Error occured before running {attn_impl} with "
+                        f"{q_block_size=}, {k_block_size=} "
                         f"when {seqlen=}, {hd=} during {wd}: {e=}"
                     )
                     perf_dict = {
@@ -576,7 +580,7 @@ def sparse_attn_benchmark(
                     "mem": [-1, -1, -1],
                 }
                 print(
-                    f"Error occured before running {attn_impl} with {q_block_size} q_block_size, {k_block_size} k_block_size "
+                    f"Error occured before running {attn_impl} with {q_block_size=}, {k_block_size=} "
                     f"when {seqlen=}, {hd=} during {wd}: {e=}"
                 )
     else:
