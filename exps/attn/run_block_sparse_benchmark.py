@@ -47,10 +47,13 @@ wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
 nhqs = [8]
 num_groups = [1]
-# compare variable QK block size
-q_block_sizes = [64, 64, 64, 64, 64]
-k_block_sizes = [64, 32, 16, 8, 1]
-# compare same QK block size
+# small K block
+# q_block_sizes = [64, 64, 64, 64, 64]
+# k_block_sizes = [64, 32, 16, 8, 1]
+# small Q block
+q_block_sizes = [64, 32, 16, 8]
+k_block_sizes = [64, 64, 64, 64]
+# large Q block and K block
 # q_block_sizes = [64, 128]
 # k_block_sizes = [64, 128]
 
@@ -226,7 +229,9 @@ def sparse_attn_benchmark(
             )
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
-            ref_q_block_size = q_block_size
+            # TODO: SwapAB will change this constraint
+            # Tile_M must be a multiple of 64
+            ref_q_block_size = q_block_size if q_block_size >= 64 else 64
             # Tile_K must be a multiple of 16
             ref_k_block_size = k_block_size if k_block_size >= 16 else 16
 
