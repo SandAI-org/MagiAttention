@@ -36,8 +36,7 @@ struct DistributedSeqlenInfo {
   DistributedSeqlenInfo() : offset_q(0), offset_k(0), seqlen_q(0), seqlen_k(0), q_ranges(nullptr), k_ranges(nullptr) {}
 
   CUTLASS_DEVICE
-  DistributedSeqlenInfo(int const bidb, int2 const* q_ranges, int2 const* k_ranges)
-      : q_ranges(q_ranges), k_ranges(k_ranges) {
+  DistributedSeqlenInfo(int const bidb, int2 const* q_ranges, int2 const* k_ranges) : q_ranges(q_ranges), k_ranges(k_ranges) {
     int2 q_range = q_ranges[bidb];
     int2 k_range = k_ranges[bidb];
     offset_q = q_range.x;

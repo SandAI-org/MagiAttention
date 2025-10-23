@@ -19,7 +19,9 @@ make clean
 make html
 ```
 
-#### Step4: Download build/html and view it in your browser
+#### Step4: Preview docs
+
+Download `build/html` and open `index.html` to preview the docs it in your browser locally
 
 
 ## PyData Theme

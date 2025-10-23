@@ -92,8 +92,6 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
     const at::Tensor& softmax_lse,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
-    int max_seqlen_q,
-    int max_seqlen_k,
     std::optional<const at::Tensor>& attn_type_map_,
     std::optional<const at::Tensor>& merge_k_ranges_,
     std::optional<const at::Tensor>& bwd_kq_map_,
@@ -208,8 +206,6 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   int const kBlockN = std::get<1>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
   // Get rounded max_seqlen
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
-  int const max_seqlen_q_rounded = round_multiple(max_seqlen_q, kBlockM);
-  int const max_seqlen_k_rounded = round_multiple(max_seqlen_k, kBlockN);
 
   // Determine output dtype for dq
   at::ScalarType dq_type = dq_type_.has_value() ? dq_type_.value() : (dq_.has_value() ? dq_.value().scalar_type() : at::ScalarType::Float);
@@ -271,16 +267,16 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   }
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
-  // Need softmax_d and softmax_lse_log2 to have max_seqlen_q_rounded since we
-  // want its address to be aligned by 16/8 bytes for TMA / LDG.64
-  at::Tensor softmax_d = torch::empty({batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
-  at::Tensor softmax_lse_log2 = torch::empty({batch_size, num_heads_qo, max_seqlen_q_rounded}, opts.dtype(at::kFloat));
+
+  // add a new dimension(4) for TMA alignment(16bytes)
+  // actually, we only use index 0 of dimension 4.
+  int const total_q_rounded = round_multiple(total_q + kBlockM - 1, kBlockM);
+
+  at::Tensor softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
+  at::Tensor softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
 
   // Create tile_count_semaphore tensor, used to count the number of tiles
-  at::Tensor tile_count_semaphore;
-  tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
-
-  // Initialize determin_range_locks tensor, the shape is same as range_locks
+  at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
   at::Tensor determin_range_locks = torch::empty({(total_k + kBlockN - 1) / kBlockN + 1, num_heads_kv * 2}, opts.dtype(torch::kInt32));
   at::Tensor dq_determin_range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo * 2}, opts.dtype(torch::kInt32));
   // Initialize determin_conflict_state, num_sm rows, ceil_div(total_k, kBlockN) + 1 columns
@@ -300,12 +296,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   set_params_dgrad(
       params,
       batch_size,
-      max_seqlen_q,
-      max_seqlen_k,
-      max_seqlen_q_rounded,
-      max_seqlen_k_rounded,
       total_q,
       total_k,
+      total_q_rounded,
       num_heads_qo,
       num_heads_kv,
       head_size,

@@ -50,8 +50,6 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     std::optional<at::Tensor>& softmax_lse_,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
-    int max_seqlen_q,
-    int max_seqlen_k,
     std::optional<const at::Tensor>& attn_type_map_,
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
@@ -150,8 +148,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   // Define a helper function to round up to multiple of m
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
   int const head_size_rounded = round_up_headdim(head_size);
-  int const max_seqlen_q_rounded = round_multiple(max_seqlen_q, 128);
-  int const max_seqlen_k_rounded = round_multiple(max_seqlen_k, 128);
+  int const total_q_rounded = round_multiple(total_q + 128 - 1, 128);
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
@@ -224,12 +221,9 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   set_params_fprop(
       params,
       batch_size,
-      max_seqlen_q,
-      max_seqlen_k,
-      max_seqlen_q_rounded,
-      max_seqlen_k_rounded,
       total_q,
       total_k,
+      total_q_rounded,
       num_heads_qo,
       num_heads_kv,
       head_size,

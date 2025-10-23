@@ -17,9 +17,15 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-LLVM_VERSION="21"
 LLVM_SH_URL="https://apt.llvm.org/llvm.sh"
 LLVM_SH_SCRIPT="llvm.sh"
+
+# Parse LLVM version from command-line argument
+if [ -n "$1" ]; then
+    LLVM_VERSION=$1
+else
+    LLVM_VERSION=20
+fi
 
 echo "======================================================"
 echo " Starting LLVM and clang-format-${LLVM_VERSION} installation "
@@ -88,8 +94,10 @@ if command_exists update-alternatives; then
     # if it's the first or highest priority. If not, a manual `--config` might be needed.
     # For now, we'll just inform the user if it's not the current default.
     if ! update-alternatives --query clang-format | grep -q "link currently points to /usr/bin/clang-format-${LLVM_VERSION}"; then
-        echo "Note: If 'clang-format' does not point to version ${LLVM_VERSION}, you might need to manually select it:"
+        echo "======================================================"
+        echo "Note: If 'clang-format' does not point to version ${LLVM_VERSION}, you might need to manually select it via:"
         echo "   sudo update-alternatives --config clang-format"
+        echo "======================================================"
     fi
 else
     echo "Warning: update-alternatives command not found. You may need to manually link clang-format."
@@ -100,3 +108,8 @@ echo "======================================================"
 echo " LLVM and clang-format-${LLVM_VERSION} installation completed! "
 echo " You can now use 'clang-format --version' or 'clang-format-${LLVM_VERSION} --version'."
 echo "======================================================"
+
+# Final check for clang-format version
+echo "Checking installed clang-format version:"
+clang-format --version || true # Add || true to prevent script exit if clang-format is not in PATH or fails for some reason.
+clang-format-${LLVM_VERSION} --version || true

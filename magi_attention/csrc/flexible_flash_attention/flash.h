@@ -68,8 +68,7 @@ struct Flash_fwd_params : public Qkv_params {
 
   // Dimensions params
   int b, d, d_rounded;
-  int max_seqlen_q, max_seqlen_k, max_seqlen_q_rounded, max_seqlen_k_rounded;
-  int total_q, total_k;
+  int total_q, total_k, total_q_rounded;
 
   // The scaling factors for the kernel.
   float scale_softmax;
@@ -153,10 +152,10 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction>
+template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction, bool Deterministic>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
 
-template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction>
+template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
 
 template <typename T_out, uint32_t kHeadDim>

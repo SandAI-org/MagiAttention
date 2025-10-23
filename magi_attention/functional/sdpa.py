@@ -139,6 +139,8 @@ def sdpa_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     attn_arg: AttnArg,
+    softmax_scale: float | None = None,
+    softcap: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """SDPA forward function
 
@@ -152,6 +154,10 @@ def sdpa_fwd(
 
         attn_arg (AttnArg): attention arguments for ffa
 
+        softmax_scale (float, optional): softmax scale.
+            Defaults to None to use default value: 1/sqrt(head_dim)
+        softcap (float, optional): softcap. Defaults to 0.
+
     Returns:
         torch.Tensor: out with shape [num_tokens_q, num_heads_q, head_dim]
             or [batch_size, num_heads_q, num_tokens_q, head_dim]
@@ -159,6 +165,8 @@ def sdpa_fwd(
         torch.Tensor: lse with shape [num_tokens_q, num_heads_q]
             or [batch_size, num_heads_q, num_tokens_q]
     """
+    assert softcap == 0.0, "non-zero softcap is not supported by now"
+
     rearrange = len(q.shape) == 3  # from [t, nh, hd] to [1, nh, t, hd]
 
     if rearrange:
@@ -180,7 +188,7 @@ def sdpa_fwd(
         v,
         attn_mask=attn_mask,
         is_causal=False,
-        softmax_scale=q.shape[-1] ** -0.5,
+        softmax_scale=softmax_scale,
     )
 
     if rearrange:
@@ -324,6 +332,8 @@ def sdpa_bwd(
     o: torch.Tensor,
     lse: torch.Tensor,
     attn_arg: AttnArg,
+    softmax_scale: float | None = None,
+    softcap: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """SDPA backward function
 
@@ -342,6 +352,10 @@ def sdpa_bwd(
             or [batch_size, num_heads_q, num_tokens_q]
         attn_arg (AttnArg): attention arguments for ffa
 
+        softmax_scale (float, optional): softmax scale.
+            Defaults to None to use default value: 1/sqrt(head_dim)
+        softcap (float, optional): softcap. Defaults to 0.
+
     Returns:
         torch.Tensor: dq with shape [num_tokens_q, num_heads_q, head_dim]
             or [batch_size, num_heads_q, num_tokens_q, head_dim]
@@ -352,6 +366,8 @@ def sdpa_bwd(
         torch.Tensor: dv with shape [num_tokens_kv, num_heads_kv, head_dim]
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
     """
+    assert softcap == 0.0, "non-zero softcap is not supported by now"
+
     rearrange = len(q.shape) == 3  # from [t, nh, hd] to [1, nh, t, hd]
 
     if rearrange:
@@ -376,7 +392,7 @@ def sdpa_bwd(
         lse=lse,
         attn_mask=attn_mask,
         is_causal=False,
-        softmax_scale=q.shape[-1] ** -0.5,
+        softmax_scale=softmax_scale,
     )
 
     if rearrange:

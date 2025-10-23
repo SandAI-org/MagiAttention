@@ -43,17 +43,12 @@ q_ranges_tensor = torch.tensor([[0, 1024], [1024, 2048]], dtype=torch.int32, dev
 k_ranges_tensor = torch.tensor([[0, 1024], [0, 2048]], dtype=torch.int32, device=device)
 attn_type_map_tensor = torch.tensor([0, 1], dtype=torch.int32, device=device) # full mask for 1st slice, causal mask for 2nd
 
-max_seqlen_q = 1024 # Max length of all q_ranges (2048 - 1024 = 1024)
-max_seqlen_k = 2048 # Max length of all k_ranges (2048 - 0 = 2048)
-
 # --- Attention computation --- #
 
 out, _ = flex_flash_attn_func( # the second return value is `lse` (log-sum-exp), known as the online-softmax correction factor
     q, k, v,
     q_ranges=q_ranges_tensor,
     k_ranges=k_ranges_tensor,
-    max_seqlen_q=max_seqlen_q,
-    max_seqlen_k=max_seqlen_k,
     attn_type_map=attn_type_map_tensor,
     softmax_scale=None, # defaults to 1/sqrt(head_dim)
 )
@@ -76,7 +71,7 @@ from magi_attention.utils import setup_dist_env, clearup_dist_env
 
 # --- Set up distributed environment --- #
 
-rank, local_rank, world_size, world_group, device, seed = setup_dist_env()
+rank, local_rank, world_size, num_nodes, num_local_ranks, world_group, device, seed = setup_dist_env()
 
 # --- Define attention config --- #
 

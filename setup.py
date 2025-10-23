@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import glob
+import importlib
+import importlib.resources
 import itertools
 import os
 import shutil
@@ -45,6 +47,10 @@ FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 # Skip building CUDA extension modules
 SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
 
+# NOTE: this flag now only used for magi_attn_comm to disable sm90 features
+# to be compatible with other architectures such as sm80
+DISABLE_SM90_FEATURES = os.getenv("MAGI_ATTENTION_DISABLE_SM90_FEATURES", "0") == "1"
+
 # We no longer build the flexible_flash_attention_cuda module
 # instead, we only pre-build some common options with ref_block_size=None if PREBUILD_FFA is True
 # and leave others built in jit mode
@@ -55,6 +61,9 @@ PREBUILD_FFA_JOBS = int(os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", "256"))
 SKIP_FFA_UTILS_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD", "0") == "1"
 SKIP_MAGI_ATTN_EXT_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD", "0") == "1"
+)
+SKIP_MAGI_ATTN_COMM_BUILD = (
+    os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD", "0") == "1"
 )
 
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
@@ -109,6 +118,15 @@ def get_cuda_bare_metal_version(cuda_dir) -> tuple[str, Version]:
     bare_metal_version = parse(output[release_idx].split(",")[0])
 
     return raw_output, bare_metal_version
+
+
+# Copied from https://github.com/deepseek-ai/DeepEP/blob/main/setup.py
+# Wheel specific: The wheels only include the soname of the host library (libnvshmem_host.so.X)
+def get_nvshmem_host_lib_name():
+    for path in importlib.resources.files("nvidia.nvshmem").iterdir():
+        for file in path.rglob("libnvshmem_host.so.*"):
+            return file.name
+    raise ModuleNotFoundError("libnvshmem_host.so not found")
 
 
 def check_if_cuda_home_none(global_option: str) -> None:
@@ -179,8 +197,8 @@ def build_ffa_utils_ext_module(
     return maybe_make_magi_cuda_extension(
         name="flexible_flash_attention_utils_cuda",
         sources=sources,
-        extra_compile_args=extra_compile_args,
         include_dirs=include_dirs,
+        extra_compile_args=extra_compile_args,
         is_skipped=SKIP_FFA_UTILS_BUILD,
     )
 
@@ -205,9 +223,152 @@ def build_magi_attn_ext_module(
     return maybe_make_magi_cuda_extension(
         name="magi_attn_ext",
         sources=sources,
-        extra_compile_args=extra_compile_args,
         include_dirs=include_dirs,
+        extra_compile_args=extra_compile_args,
         is_skipped=SKIP_MAGI_ATTN_EXT_BUILD,
+    )
+
+
+def build_magi_attn_comm_module(
+    repo_dir: Path,
+    csrc_dir: Path,
+    common_dir: Path,
+) -> CUDAExtension | None:
+    # ---   for grpcoll submodule   --- #
+
+    # find nvshmem
+    disable_nvshmem = False
+    nvshmem_dir = os.getenv("NVSHMEM_DIR", None)
+    nvshmem_host_lib = "libnvshmem_host.so"
+    if nvshmem_dir is None:
+        try:
+            nvshmem_dir = importlib.util.find_spec(  # type: ignore[union-attr,index]
+                "nvidia.nvshmem"
+            ).submodule_search_locations[0]
+            nvshmem_host_lib = get_nvshmem_host_lib_name()
+            import nvidia.nvshmem as nvshmem  # noqa: F401
+
+            if is_in_info_stage():
+                print(
+                    f"`NVSHMEM_DIR` is not specified, thus found from system module: {nvshmem_dir}"
+                )
+        except (ModuleNotFoundError, AttributeError, IndexError):
+            if is_in_info_stage():
+                warnings.warn(
+                    "Since `NVSHMEM_DIR` is not specified, and the system nvshmem module is not installed, "
+                    "then all relative features used in native group collective comm kernels are disabled\n"
+                )
+            disable_nvshmem = True
+    else:
+        if is_in_info_stage():
+            print(f"Found specified `NVSHMEM_DIR`: {nvshmem_dir}")
+        disable_nvshmem = False
+
+    if not disable_nvshmem:
+        assert os.path.exists(
+            nvshmem_dir  # type: ignore[arg-type]
+        ), f"The specified NVSHMEM directory does not exist: {nvshmem_dir}"
+
+    magi_attn_comm_dir_abs = csrc_dir / "comm"
+    grpcoll_dir_abs = magi_attn_comm_dir_abs / "grpcoll"
+    grpcoll_dir_rel = grpcoll_dir_abs.relative_to(repo_dir)
+
+    # init sources
+    sources = [
+        f"{grpcoll_dir_rel}/buffer.cpp",
+        f"{grpcoll_dir_rel}/kernels/runtime.cu",
+        f"{grpcoll_dir_rel}/kernels/layout.cu",
+        f"{grpcoll_dir_rel}/kernels/intranode.cu",
+    ]
+
+    # init include dirs
+    include_dirs = [common_dir, grpcoll_dir_abs]
+
+    # init extra compile args
+    cxx_flags = [
+        "-O3",
+        "-Wno-deprecated-declarations",
+        "-Wno-unused-variable",
+        "-Wno-sign-compare",
+        "-Wno-reorder",
+        "-Wno-attributes",
+    ]
+    nvcc_flags = [
+        "-O3",
+        "-Xcompiler",
+        "-O3",
+        "-gencode",
+        "arch=compute_90,code=sm_90",
+    ]  # Explicitly specify sm_90
+
+    # extend flags, dirs and args
+    library_dirs = []
+    nvcc_dlink = []
+    extra_link_args = []
+    if disable_nvshmem:
+        cxx_flags.append("-DDISABLE_NVSHMEM")
+        nvcc_flags.append("-DDISABLE_NVSHMEM")
+    else:
+        sources.extend(
+            [
+                f"{grpcoll_dir_rel}/kernels/internode.cu",
+                f"{grpcoll_dir_rel}/kernels/internode_ll.cu",
+            ]
+        )
+        include_dirs.extend([f"{nvshmem_dir}/include"])  # type: ignore[list-item]
+        library_dirs.extend([f"{nvshmem_dir}/lib"])
+        nvcc_dlink.extend(["-dlink", f"-L{nvshmem_dir}/lib", "-lnvshmem_device"])
+        extra_link_args.extend(
+            [
+                f"-l:{nvshmem_host_lib}",
+                "-l:libnvshmem_device.a",
+                f"-Wl,-rpath,{nvshmem_dir}/lib",
+            ]
+        )
+
+    if DISABLE_SM90_FEATURES:
+        # Prefer A100
+        os.environ["TORCH_CUDA_ARCH_LIST"] = os.getenv("TORCH_CUDA_ARCH_LIST", "8.0")
+
+        # Disable some SM90 features: FP8, launch methods, and TMA
+        cxx_flags.append("-DDISABLE_SM90_FEATURES")
+        nvcc_flags.append("-DDISABLE_SM90_FEATURES")
+
+        # Disable internode and low-latency kernels
+        assert disable_nvshmem
+    else:
+        # Prefer H800 series
+        os.environ["TORCH_CUDA_ARCH_LIST"] = os.getenv("TORCH_CUDA_ARCH_LIST", "9.0")
+
+        # CUDA 12 flags
+        nvcc_flags.extend(["-rdc=true", "--ptxas-options=--register-usage-level=10"])
+
+    # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
+    if os.environ["TORCH_CUDA_ARCH_LIST"].strip() != "9.0":
+        assert int(os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", 1)) == 1
+        os.environ["DISABLE_AGGRESSIVE_PTX_INSTRS"] = "1"
+
+    # Disable aggressive PTX instructions
+    if int(os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1")):
+        cxx_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
+        nvcc_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
+
+    # Put them together
+    extra_compile_args = {
+        "cxx": cxx_flags,
+        "nvcc": nvcc_flags,
+    }
+    if len(nvcc_dlink) > 0:
+        extra_compile_args["nvcc_dlink"] = nvcc_dlink
+
+    return maybe_make_magi_cuda_extension(
+        name="magi_attn_comm",
+        include_dirs=include_dirs,
+        library_dirs=library_dirs,
+        sources=sources,
+        extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args,
+        is_skipped=SKIP_MAGI_ATTN_COMM_BUILD,
     )
 
 
@@ -243,6 +404,7 @@ def prebuild_ffa_kernels() -> None:
     out_dtypes = [torch.float32, torch.bfloat16, torch.float16]
     softcaps = [False, True]
     disable_atomic_opts = [False, True]
+    deterministics = [False, True]
 
     combos = itertools.product(
         directions,
@@ -251,11 +413,12 @@ def prebuild_ffa_kernels() -> None:
         out_dtypes,
         softcaps,
         disable_atomic_opts,
+        deterministics,
     )
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
-        direction, h, cdtype, odtype, sc, da = args
+        direction, h, cdtype, odtype, sc, da, det = args
         spec, uri = get_ffa_jit_spec(
             arch=(9, 0),
             direction=direction,
@@ -264,6 +427,7 @@ def prebuild_ffa_kernels() -> None:
             output_dtype=odtype,
             softcap=sc,
             disable_atomic_reduction=da,
+            deterministic=det,
             ref_block_size=None,
         )
         spec.build()
@@ -317,6 +481,15 @@ if not SKIP_CUDA_BUILD:
     )
     if ffa_utils_ext_module is not None:
         ext_modules.append(ffa_utils_ext_module)
+
+    # build magi attn comm module
+    magi_attn_comm_module = build_magi_attn_comm_module(
+        repo_dir=repo_dir,
+        csrc_dir=csrc_dir,
+        common_dir=common_dir,
+    )
+    if magi_attn_comm_module is not None:
+        ext_modules.append(magi_attn_comm_module)
 else:
     print(f"{title_left_str}Skipping CUDA build{title_right_str}")
 

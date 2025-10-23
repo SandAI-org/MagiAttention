@@ -152,6 +152,7 @@ class TestDynamicAttnSolver(DistTestBase):
 
             solver = DynamicAttnSolver(
                 algorithm=algorithm,
+                cp_group=self.process_group,
                 total_seqlen_q=total_seqlen_q,
                 total_seqlen_k=total_seqlen_k,
                 host_ranges_q=host_q_ranges_global_this_rank,
@@ -169,7 +170,7 @@ class TestDynamicAttnSolver(DistTestBase):
                     f"solve: {algorithm_type=}, {heads_config=}, {mask_type=}, {q_ranges=}, {k_ranges=}, {attn_mask_type=}"
                 )
             solver.solve(
-                q_ranges=q_ranges, k_ranges=k_ranges, mask_types=attn_mask_type
+                q_ranges=q_ranges, k_ranges=k_ranges, attn_mask_type=attn_mask_type
             )
 
             # --------------      verify results      -------------- #

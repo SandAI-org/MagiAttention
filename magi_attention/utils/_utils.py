@@ -91,7 +91,7 @@ def setup_dist_env(
     backend: str = "nccl",
     base_seed: int | None = None,
     seed_bias: Callable = lambda rank: 0,
-) -> tuple[int, int, int, dist.ProcessGroup, int, int | None]:
+) -> tuple[int, int, int, int, int, dist.ProcessGroup, int, int | None]:
     """set up distributed environment with the specified process group backend,
     NOTE: the test script using this func to set up should be executed through torchrun
 
@@ -101,29 +101,38 @@ def setup_dist_env(
         seed_bias (Callable, optional): the seed bias func for each rank. Defaults to lambda rank: 0, i.e., no bias.
 
     Returns:
-        rank, local_rank, world_size, world_group, device, seed
+        rank, local_rank, world_size, num_nodes, num_local_ranks, world_group, device, seed
     """
-    rank = int(os.environ["RANK"])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
+    # extract the distributed environment info
+    num_nodes = int(os.environ.get("NNODES", "1"))
+    num_local_ranks = int(os.environ.get("NPROC_PER_NODE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+
+    # setup device
     torch.cuda.set_device(local_rank)
     device = torch.cuda.current_device()
 
+    # init process group
     dist.init_process_group(
         backend=backend,
         rank=rank,
         world_size=world_size,
     )
 
+    # set random seed
     seed = None
     if base_seed is not None:
         seed = base_seed + seed_bias(rank)
-        torch.manual_seed(seed)
+        set_random_seed(seed)
 
     return (
         rank,
         local_rank,
         world_size,
+        num_nodes,
+        num_local_ranks,
         dist.group.WORLD,
         device,
         seed,
@@ -275,6 +284,66 @@ def is_list_type_all(
         _type = type(_list[0])
 
     return all(isinstance(x, _type) for x in _list)
+
+
+def pad_and_pack_tensors(
+    tensors: list[torch.Tensor],
+    target_length: int,
+    padding_value: float = 0.0,
+    dtype: torch.dtype = None,
+    device: torch.device = None,
+) -> torch.Tensor:
+    """
+    Right Pads a list of 1D tensors to a target length and packs them into a 2D tensor.
+
+    Args:
+        tensors: A list of 1D torch.Tensor objects.
+        target_length: The desired length for each padded tensor (e.g., num_ranks).
+        padding_value: The value to use for padding. Defaults to 0.0.
+        dtype: The desired data type of the output tensor. If None,
+               it will be inferred from the input tensors.
+        device: The desired device of the output tensor. If None,
+                it will be inferred from the input tensors.
+
+    Returns:
+        A 2D torch.Tensor where each row is a padded input tensor.
+        The shape will be (len(tensors), target_length).
+    """
+    if not tensors:
+        return torch.empty(0, target_length, dtype=dtype, device=device)
+
+    # Infer dtype and device if not provided
+    if dtype is None:
+        dtype = tensors[0].dtype
+    if device is None:
+        device = tensors[0].device
+
+    num_tensors = len(tensors)
+
+    # Create the output 2D tensor initialized with the padding value
+    packed_tensor = torch.full(
+        (num_tensors, target_length),
+        fill_value=padding_value,
+        dtype=dtype,
+        device=device,
+    )
+
+    for i, tensor in enumerate(tensors):
+        if tensor.dim() != 1:
+            raise ValueError(f"Input tensor at index {i} is not 1D: {tensor.dim()}D")
+
+        current_length = tensor.numel()
+        if current_length > target_length:
+            raise ValueError(
+                f"Tensor at index {i} has length {current_length}, "
+                f"which is greater than target_length {target_length}. "
+                "Cannot pad to a smaller length."
+            )
+
+        # Copy the original tensor into the corresponding row of the packed tensor
+        packed_tensor[i, :current_length] = tensor
+
+    return packed_tensor
 
 
 def transpose_matrix(matrix: list[list[Any]]) -> list[list[Any]]:

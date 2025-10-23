@@ -21,7 +21,7 @@ from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DispatchConfig, MinHeapDispatchAlg
 from magi_attention.functional import dispatch_func, undispatch_func
-from magi_attention.meta import calc_dispatch_meta_from_qk_ranges
+from magi_attention.meta import make_dispatch_meta_from_qk_ranges
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.utils import cu_seqlens2seqlens, seqlens2cu_seqlens
 
@@ -95,7 +95,7 @@ class TestDispatcher(DistTestBase):
         # --------------      compute meta       -------------- #
 
         assert self.world_size % 2 == 0
-        meta_q, meta_k, buckets_per_rank = calc_dispatch_meta_from_qk_ranges(
+        meta_q, meta_k = make_dispatch_meta_from_qk_ranges(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
@@ -109,8 +109,6 @@ class TestDispatcher(DistTestBase):
             is_q_permutable=is_q_permutable,
             is_k_permutable=is_k_permutable,
         )
-
-        self.assertEqual(len(buckets_per_rank), cp_size)
 
         # --------------      dispatch to get host q, k       -------------- #
 

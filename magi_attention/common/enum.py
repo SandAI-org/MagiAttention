@@ -13,6 +13,13 @@
 # limitations under the License.
 
 from enum import Enum
+from typing import Literal, TypeAlias
+
+import torch
+
+GroupReduceOp: TypeAlias = Literal["sum", "avg", "lse"]
+
+OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
 
 class AttnType(Enum):
@@ -37,6 +44,42 @@ class AttnMaskType(Enum):
     CAUSAL = "causal"
     BICAUSAL = "bi_causal"
     INVCAUSAL = "inv_causal"
+
+    _FROM_INT_MAP: dict[int, "AttnMaskType"]
+    _TO_INT_MAP: dict["AttnMaskType", int]
+
+    @classmethod
+    def _lazy_init_from_int_map(cls) -> None:
+        if "_FROM_INT_MAP" in cls.__dict__:
+            return
+
+        cls._FROM_INT_MAP = {
+            0: cls.FULL,
+            1: cls.CAUSAL,
+            2: cls.INVCAUSAL,
+            3: cls.BICAUSAL,
+        }
+
+    @classmethod
+    def _lazy_init_to_int_map(cls) -> None:
+        if "_TO_INT_MAP" in cls.__dict__:
+            return
+
+        cls._TO_INT_MAP = {
+            cls.FULL: 0,
+            cls.CAUSAL: 1,
+            cls.INVCAUSAL: 2,
+            cls.BICAUSAL: 3,
+        }
+
+    @classmethod
+    def from_int_type(cls, int_type: int) -> "AttnMaskType":
+        cls._lazy_init_from_int_map()
+        return cls._FROM_INT_MAP[int_type]  # type: ignore[index]
+
+    def to_int_type(self) -> int:
+        self.__class__._lazy_init_to_int_map()
+        return self._TO_INT_MAP[self]
 
 
 class AttnOverlapMode(Enum):

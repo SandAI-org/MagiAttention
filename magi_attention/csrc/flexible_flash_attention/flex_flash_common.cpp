@@ -19,12 +19,9 @@
 void set_params_fprop(
     Flash_fwd_params& params,
     const size_t b,
-    const size_t max_seqlen_q,
-    const size_t max_seqlen_k,
-    const size_t max_seqlen_q_rounded,
-    const size_t max_seqlen_k_rounded,
     const size_t total_q,
     const size_t total_k,
+    const size_t total_q_rounded,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -104,12 +101,9 @@ void set_params_fprop(
   params.merge_batch_size = merge_batch_size;
   params.h_qo = h_qo;
   params.h_kv = h_kv;
-  params.max_seqlen_q = max_seqlen_q;
-  params.max_seqlen_k = max_seqlen_k;
-  params.max_seqlen_q_rounded = max_seqlen_q_rounded;
-  params.max_seqlen_k_rounded = max_seqlen_k_rounded;
   params.total_q = total_q;
   params.total_k = total_k;
+  params.total_q_rounded = total_q_rounded;
   params.d = d;
   params.d_rounded = d_rounded;
   // Set the different scale values.
@@ -124,12 +118,9 @@ void set_params_fprop(
 void set_params_dgrad(
     Flash_bwd_params& params,
     const size_t b,
-    const size_t max_seqlen_q,
-    const size_t max_seqlen_k,
-    const size_t max_seqlen_q_rounded,
-    const size_t max_seqlen_k_rounded,
     const size_t total_q,
     const size_t total_k,
+    const size_t total_q_rounded,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -165,12 +156,9 @@ void set_params_dgrad(
   set_params_fprop(
       params,
       b,
-      max_seqlen_q,
-      max_seqlen_k,
-      max_seqlen_q_rounded,
-      max_seqlen_k_rounded,
       total_q,
       total_k,
+      total_q_rounded,
       h_qo,
       h_kv,
       d,

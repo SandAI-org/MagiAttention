@@ -83,14 +83,7 @@ class AttnRectangles:
         attn_q_ranges = AttnRanges.from_ranges(q_ranges, check)
         attn_k_ranges = AttnRanges.from_ranges(k_ranges, check)
         attn_mask_type = [
-            {
-                0: AttnMaskType.FULL,
-                1: AttnMaskType.CAUSAL,
-                2: AttnMaskType.INVCAUSAL,
-                3: AttnMaskType.BICAUSAL,
-            }[i]
-            if isinstance(i, int)
-            else i
+            AttnMaskType.from_int_type(i) if isinstance(i, int) else i
             for i in mask_types
         ]
 

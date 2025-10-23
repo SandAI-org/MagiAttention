@@ -42,13 +42,14 @@ template <int kBlockM, int kBlockN, typename TiledMma, bool SwapAB = false>
 struct Mask {
   // Apply mask to the tensor tSrS based on attention type and sequence lengths
   template <bool Seqlenk_mask = false, typename Engine, typename Layout>
-  CUTLASS_DEVICE void apply(Tensor<Engine, Layout>& tSrS,
-                            const int m_block,
-                            const int n_block,
-                            const flash::AttnType attn_type,
-                            const int thread_idx,
-                            const int seqlen_q,
-                            const int seqlen_k) const {
+  CUTLASS_DEVICE void apply(
+      Tensor<Engine, Layout>& tSrS,
+      const int m_block,
+      const int n_block,
+      const flash::AttnType attn_type,
+      const int thread_idx,
+      const int seqlen_q,
+      const int seqlen_k) const {
     static_assert(Layout::rank == 3, "Only support 3D Tensor");
     auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
     auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
@@ -59,13 +60,10 @@ struct Mask {
     // Create identity tensor for block shape
     Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
     Tensor tScS = thread_mma.partition_C(cS);
-    Tensor tSrS_rowcol =
-        make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
-    Tensor tScS_rowcol =
-        make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tScS.layout()));
+    Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
+    Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tScS.layout()));
     Tensor t0ScS = thread0_mma.partition_C(cS);
-    Tensor t0ScS_rowcol =
-        make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
+    Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
 
     // Use the column indices of thread0 for comparison, known at compile time
     int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
@@ -93,8 +91,7 @@ struct Mask {
 #pragma unroll
         for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
           int const row_idx = get<Row>(tScS_rowcol(m, _0{})) + m_block * kBlockM;
-          int const col_limit_right = !Seqlenk_mask ? row_idx + causal_row_offset
-                                                    : __viaddmin_s32(row_idx, causal_row_offset, seqlenk_col_limit);
+          int const col_limit_right = !Seqlenk_mask ? row_idx + causal_row_offset : __viaddmin_s32(row_idx, causal_row_offset, seqlenk_col_limit);
 #pragma unroll
           for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
             if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= col_limit_right) {

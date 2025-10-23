@@ -22,14 +22,26 @@ from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
 import magi_attention.testing
-from magi_attention import init_dist_attn_runtime_mgr
-from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnRole
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.config import DistAttnConfig
+from magi_attention.config import (
+    DispatchConfig,
+    DistAttnConfig,
+    MinHeapDispatchAlg,
+    OverlapConfig,
+    SequentialDispatchAlg,
+)
+from magi_attention.dist_attn_runtime_mgr import (
+    DistAttnRuntimeMgr,
+    init_dist_attn_runtime_mgr,
+)
 from magi_attention.functional.flex_flash_attn import flex_flash_attn_func
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
+from magi_attention.testing.precision import EPSILON, torch_attn_ref
+from magi_attention.testing.utils import enable_sdpa_backend_decorator
+from magi_attention.utils import get_attn_mask_from_ffa_args
 
 
 class TestDistAttnRuntimeMgr(DistTestBase):
@@ -62,6 +74,10 @@ class TestDistAttnRuntimeMgr(DistTestBase):
     @property
     def nccl_group(self) -> dist.ProcessGroup:
         return self.nccl_groups[0]
+
+    @property
+    def device(self) -> int:
+        return torch.cuda.current_device()
 
     @property
     def world_size(self) -> int:
@@ -196,7 +212,6 @@ class TestDistAttnRuntimeMgr(DistTestBase):
                         [2230, 2566],
                     ]
                 ),
-                "is_causal_mapping": [False] * 8,
                 "total_seqlen_q": 12288,
                 "total_seqlen_k": 12288,
                 "total_seqlen_xattn_k": 2566,
@@ -459,8 +474,6 @@ class TestDistAttnRuntimeMgr(DistTestBase):
                 dtype=torch.int32,
                 device=torch.cuda.current_device(),
             ),
-            max_seqlen_q=xattn_q_ranges.max_seqlen,
-            max_seqlen_k=xattn_k_ranges.max_seqlen,
         )
 
         local_o, _ = flex_flash_attn_func(
@@ -497,6 +510,470 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             total_o_ref,
             test_case="cross-attn forward out",
         )
+
+    @enable_sdpa_backend_decorator
+    @skip_if_lt_x_gpu(4)
+    @with_comms
+    @parameterize(
+        "test_config",
+        [
+            # causal attn with total seqlen 1k
+            {
+                "test_case": "causal attn with total seqlen 1k",
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 1024],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 1024],
+                    ]
+                ),
+                "attn_mask_type": [AttnMaskType.CAUSAL],
+                "dist_attn_config": DistAttnConfig(),
+                "dispatch_q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 1024],
+                    ]
+                ),
+                "dispatch_k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 1024],
+                    ]
+                ),
+                "dispatch_attn_mask_type": [AttnMaskType.FULL],
+                "dispatch_dist_attn_config": DistAttnConfig(),
+                "total_seqlen_q": 1024,
+                "total_seqlen_k": 1024,
+                "chunk_size": 32,
+            },
+            # varlen full attn with total seqlen 1k
+            {
+                "test_case": "varlen full attn with total seqlen 1k",
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 128],
+                        [128, 256],
+                        [256, 384],
+                        [384, 512],
+                        [512, 640],
+                        [640, 768],
+                        [768, 896],
+                        [896, 1024],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [896, 1024],
+                        [768, 896],
+                        [640, 768],
+                        [512, 640],
+                        [384, 512],
+                        [256, 384],
+                        [128, 256],
+                        [0, 128],
+                    ]
+                ),
+                "attn_mask_type": [AttnMaskType.FULL] * 8,
+                "dist_attn_config": DistAttnConfig(
+                    dispatch_config=DispatchConfig(
+                        alg=MinHeapDispatchAlg(),
+                    ),
+                    overlap_config=OverlapConfig(
+                        enable=True,
+                        mode=AttnOverlapMode.STATIC,
+                        degree=4,
+                    ),
+                ),
+                "dispatch_q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 1024],
+                    ]
+                ),
+                "dispatch_k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 1024],
+                    ]
+                ),
+                "dispatch_attn_mask_type": [AttnMaskType.FULL],
+                "dispatch_dist_attn_config": DistAttnConfig(),
+                "total_seqlen_q": 1024,
+                "total_seqlen_k": 1024,
+                "chunk_size": 128,
+            },
+            # varlen block causal with total seqlen 960
+            {
+                "test_case": "varlen block causal with total seqlen 960",
+                "q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 128],
+                        [128, 256],
+                        [256, 384],
+                        [384, 512],
+                        [512, 640],
+                        [640, 768],
+                        [768, 960],
+                    ]
+                ),
+                "k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 128],
+                        [0, 256],
+                        [0, 384],
+                        [0, 512],
+                        [512, 640],
+                        [512, 768],
+                        [768, 960],
+                    ]
+                ),
+                "attn_mask_type": [AttnMaskType.FULL] * 7,
+                "dist_attn_config": DistAttnConfig(
+                    dispatch_config=DispatchConfig(
+                        alg=MinHeapDispatchAlg(),
+                    ),
+                    overlap_config=OverlapConfig(
+                        enable=True,
+                        mode=AttnOverlapMode.DYNAMIC,
+                        degree=None,
+                    ),
+                ),
+                "dispatch_q_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [256, 384],
+                        [384, 512],
+                        [512, 768],
+                        [768, 960],
+                    ]
+                ),
+                "dispatch_dist_attn_config": DistAttnConfig(
+                    dispatch_config=DispatchConfig(
+                        alg=SequentialDispatchAlg(),
+                    ),
+                    overlap_config=OverlapConfig(
+                        enable=True,
+                        mode=AttnOverlapMode.STATIC,
+                        degree=2,
+                    ),
+                ),
+                "dispatch_k_ranges": AttnRanges.from_ranges(
+                    [
+                        [0, 256],
+                        [0, 384],
+                        [0, 512],
+                        [512, 768],
+                        [768, 960],
+                    ]
+                ),
+                "dispatch_attn_mask_type": [AttnMaskType.FULL] * 2
+                + [AttnMaskType.CAUSAL] * 3,
+                "total_seqlen_q": 960,
+                "total_seqlen_k": 960,
+                "chunk_size": 16,
+            },
+        ],
+    )
+    def test_ref_dispatch_meta(
+        self,
+        test_config: dict[str, Any],
+    ):
+        q_ranges: AttnRanges = test_config["q_ranges"]
+        k_ranges: AttnRanges = test_config["k_ranges"]
+        attn_mask_type: list[AttnMaskType] = test_config["attn_mask_type"]
+        dist_attn_config: DistAttnConfig = test_config["dist_attn_config"]
+        dispatch_q_ranges: AttnRanges = test_config["dispatch_q_ranges"]
+        dispatch_k_ranges: AttnRanges = test_config["dispatch_k_ranges"]
+        dispatch_attn_mask_type: list[AttnMaskType] = test_config[
+            "dispatch_attn_mask_type"
+        ]
+        dispatch_dist_attn_config: DistAttnConfig = test_config[
+            "dispatch_dist_attn_config"
+        ]
+        total_seqlen_q: int = test_config["total_seqlen_q"]
+        total_seqlen_k: int = test_config["total_seqlen_k"]
+        chunk_size: int = test_config["chunk_size"]
+
+        # use dispatch mask to init dist attn runtime mgr
+        dispatch_dist_attn_runtime_mgr = init_dist_attn_runtime_mgr(
+            q_ranges=dispatch_q_ranges,
+            k_ranges=dispatch_k_ranges,
+            attn_mask_type=dispatch_attn_mask_type,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            chunk_size=chunk_size,
+            cp_group=self.nccl_group,
+            cp_mesh=self.device_mesh,
+            dist_attn_config=dispatch_dist_attn_config,
+            is_same_source=True,
+            is_q_permutable=True,
+            is_k_permutable=True,
+        )
+
+        # extract the dispatch meta as the ref
+        ref_dispatch_meta_q = dispatch_dist_attn_runtime_mgr.dispatch_meta_q
+        ref_dispatch_meta_k = dispatch_dist_attn_runtime_mgr.dispatch_meta_k
+
+        # use the real mask to init dist attn runtime mgr
+        # with ref dispatch meta w.r.t. the dispatch mask
+        dist_attn_runtime_mgr = init_dist_attn_runtime_mgr(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            chunk_size=chunk_size,
+            cp_group=self.nccl_group,
+            cp_mesh=self.device_mesh,
+            dist_attn_config=dist_attn_config,
+            is_same_source=True,
+            is_q_permutable=True,
+            is_k_permutable=True,
+            ref_dispatch_meta_q=ref_dispatch_meta_q,
+            ref_dispatch_meta_k=ref_dispatch_meta_k,
+        )
+
+        # check attributes
+        assert dist_attn_runtime_mgr.dispatch_meta_q == ref_dispatch_meta_q
+        assert dist_attn_runtime_mgr.dispatch_meta_k == ref_dispatch_meta_k
+        assert torch.equal(
+            dist_attn_runtime_mgr.get_position_ids(attn_role=AttnRole.QUERY),
+            dispatch_dist_attn_runtime_mgr.get_position_ids(attn_role=AttnRole.QUERY),
+        )
+        assert torch.equal(
+            dist_attn_runtime_mgr.get_position_ids(attn_role=AttnRole.KEY),
+            dispatch_dist_attn_runtime_mgr.get_position_ids(attn_role=AttnRole.KEY),
+        )
+
+        # check calc_attn results
+        # NOTE: native grpcoll does not support fp64
+        if not magi_attention.comm.is_native_grpcoll_enable():
+            self._calc_attn_with_mgr_and_assert_close_to_ref(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_mask_type=attn_mask_type,
+                total_seqlen_q=total_seqlen_q,
+                total_seqlen_k=total_seqlen_k,
+                dist_attn_runtime_mgr=dist_attn_runtime_mgr,
+                dtype=torch.float64,
+                test_case=test_config["test_case"],
+            )
+
+    def _calc_attn_with_mgr_and_assert_close_to_ref(
+        self,
+        q_ranges: AttnRanges,
+        k_ranges: AttnRanges,
+        attn_mask_type: list[AttnMaskType],
+        total_seqlen_q: int,
+        total_seqlen_k: int,
+        dist_attn_runtime_mgr: DistAttnRuntimeMgr,
+        num_heads_q: int = 16,
+        num_heads_kv: int = 4,
+        head_dim: int = 128,
+        dtype: torch.dtype = torch.float64,
+        run_bwd: bool = True,
+        test_case: str = "",
+    ):
+        total_q = torch.randn(
+            total_seqlen_q,
+            num_heads_q,
+            head_dim,
+            device=self.device,
+            dtype=dtype,
+            requires_grad=run_bwd,
+        )
+        total_k = torch.randn(
+            total_seqlen_k,
+            num_heads_kv,
+            head_dim,
+            device=self.device,
+            dtype=dtype,
+            requires_grad=run_bwd,
+        )
+        total_v = torch.randn(
+            total_seqlen_k,
+            num_heads_kv,
+            head_dim,
+            device=self.device,
+            dtype=dtype,
+            requires_grad=run_bwd,
+        )
+        dist.all_reduce(total_q.data, group=self.nccl_group)
+        dist.all_reduce(total_k.data, group=self.nccl_group)
+        dist.all_reduce(total_v.data, group=self.nccl_group)
+
+        local_q = dist_attn_runtime_mgr.dispatch_qo(total_q)
+        local_k = dist_attn_runtime_mgr.dispatch_kv(total_k)
+        local_v = dist_attn_runtime_mgr.dispatch_kv(total_v)
+
+        local_out, _ = dist_attn_runtime_mgr.calc_attn(local_q, local_k, local_v)
+
+        total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
+
+        if run_bwd:
+            grad_total_out = torch.randn_like(total_out).detach()
+            dist.all_reduce(grad_total_out.data, group=self.nccl_group)
+            total_out.backward(grad_total_out)
+            grad_total_q, grad_total_k, grad_total_v = (
+                total_q.grad,
+                total_k.grad,
+                total_v.grad,
+            )
+        else:
+            grad_total_q = None
+            grad_total_k = None
+            grad_total_v = None
+            grad_total_out = None
+
+        attn_type_map: list[int] = list(map(AttnMaskType.to_int_type, attn_mask_type))
+
+        self._assert_close_to_torch_ref(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            total_q=total_q,
+            total_k=total_k,
+            total_v=total_v,
+            total_out=total_out,
+            grad_total_q=grad_total_q,
+            grad_total_k=grad_total_k,
+            grad_total_v=grad_total_v,
+            grad_total_out=grad_total_out,
+            run_bwd=run_bwd,
+            test_case=test_case,
+        )
+
+    def _assert_close_to_torch_ref(
+        self,
+        q_ranges: AttnRanges,
+        k_ranges: AttnRanges,
+        attn_type_map: list[int],
+        total_seqlen_q: int,
+        total_seqlen_k: int,
+        total_q: torch.Tensor,
+        total_k: torch.Tensor,
+        total_v: torch.Tensor,
+        total_out: torch.Tensor,
+        grad_total_q: torch.Tensor | None,
+        grad_total_k: torch.Tensor | None,
+        grad_total_v: torch.Tensor | None,
+        grad_total_out: torch.Tensor | None,
+        run_bwd: bool,
+        test_case: str = "",
+    ) -> None:
+        # -----   customize tolerance threshold  ---- #
+
+        o_atol = EPSILON
+        o_rtol = EPSILON
+
+        dq_atol = EPSILON
+        dq_rtol = EPSILON
+
+        dk_atol = EPSILON
+        dk_rtol = EPSILON
+
+        dv_atol = EPSILON
+        dv_rtol = EPSILON
+
+        # -----   build attn mask   ---- #
+
+        mask = get_attn_mask_from_ffa_args(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            device=self.device,
+        )
+
+        # -----   ref1. torch ref with high precision (fp32)   ---- #
+
+        total_q.grad, total_k.grad, total_v.grad = None, None, None
+
+        total_out_ref_high_precision = torch_attn_ref(
+            q=total_q,
+            k=total_k,
+            v=total_v,
+            mask=mask,
+            layout="thd",
+            high_precision=True,
+        )
+
+        if run_bwd:
+            total_out_ref_high_precision.backward(grad_total_out)
+            (
+                grad_total_q_ref_high_precision,
+                grad_total_k_ref_high_precision,
+                grad_total_v_ref_high_precision,
+            ) = (
+                total_q.grad,
+                total_k.grad,
+                total_v.grad,
+            )
+
+        # -----   init error message list   ---- #
+
+        err_msg_list: list[str] = []
+
+        # -----   assert close for fwd out   ---- #
+
+        try:
+            magi_attention.testing.assert_close(
+                total_out,
+                total_out_ref_high_precision,
+                atol=o_atol,
+                rtol=o_rtol,
+                test_case=f"{test_case} => o",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
+
+        if run_bwd:
+            # -----   assert close for bwd dq   ---- #
+
+            try:
+                magi_attention.testing.assert_close(
+                    grad_total_q,
+                    grad_total_q_ref_high_precision,
+                    atol=dq_atol,
+                    rtol=dq_rtol,
+                    test_case=f"{test_case} => dq",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
+
+            # -----   assert close for bwd dk   ---- #
+
+            try:
+                magi_attention.testing.assert_close(
+                    grad_total_k,
+                    grad_total_k_ref_high_precision,
+                    atol=dk_atol,
+                    rtol=dk_rtol,
+                    test_case=f"{test_case} => dk",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
+
+            # -----   assert close for bwd dv   ---- #
+
+            try:
+                magi_attention.testing.assert_close(
+                    grad_total_v,
+                    grad_total_v_ref_high_precision,
+                    atol=dv_atol,
+                    rtol=dv_rtol,
+                    test_case=f"{test_case} => dv",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
+
+        # -----   raise error if any error occurs   ---- #
+
+        if err_msg_list:
+            raise AssertionError("\n\n".join(err_msg_list))
 
 
 if __name__ == "__main__":

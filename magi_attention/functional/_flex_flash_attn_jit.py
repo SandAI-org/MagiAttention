@@ -68,6 +68,7 @@ def get_ffa_uri(
     output_dtype: torch.dtype,
     softcap: bool,
     disable_atomic_reduction: bool,
+    deterministic: bool,
     kblock_m: int | None,
     kblock_n: int | None,
     swap_ab: bool,
@@ -80,10 +81,11 @@ def get_ffa_uri(
         f"{direction}_"
         f"{head_dim}hd_"
         f"compute_{_dtype_name(compute_dtype)}_"
-        f"out_{_dtype_name(output_dtype)}_"
-        f"{'softcap' if softcap else 'nosoftcap'}_"
-        f"{'noatomic' if disable_atomic_reduction else 'atomic'}"
-        f"_{'swapab' if swap_ab else 'noswapab'}"
+        f"out_{_dtype_name(output_dtype)}"
+        f"{'_softcap' if softcap else ''}"
+        f"{'' if disable_atomic_reduction else '_atomic'}"
+        f"{'_deterministic' if deterministic else ''}"
+        f"{'_swapab' if swap_ab else ''}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -149,6 +151,7 @@ def get_ffa_jit_spec(
     output_dtype: torch.dtype,
     softcap: bool,
     disable_atomic_reduction: bool,
+    deterministic: bool,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
 ) -> tuple[JitSpec, str]:
@@ -175,6 +178,7 @@ def get_ffa_jit_spec(
         output_dtype,
         softcap,
         disable_atomic_reduction,
+        deterministic,
         kblock_m,
         kblock_n,
         swap_ab,
@@ -204,6 +208,7 @@ def get_ffa_jit_spec(
         head_dim=head_dim,
         has_softcap=str(has_softcap).lower(),
         disable_atomic=str(disable_atomic).lower(),
+        deterministic=str(deterministic).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
         swap_ab=str(swap_ab).lower(),
@@ -272,6 +277,7 @@ def get_ffa_jit_mod(
     output_dtype: torch.dtype,
     softcap: bool,
     disable_atomic_reduction: bool,
+    deterministic: bool,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
 ) -> Any:
@@ -287,6 +293,7 @@ def get_ffa_jit_mod(
         output_dtype,
         softcap,
         disable_atomic_reduction,
+        deterministic,
         ref_block_size,
         swap_ab,
     )

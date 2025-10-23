@@ -137,7 +137,10 @@ def merge_ranges(
         Unique Count:
          tensor(2, dtype=torch.int32)
     """
-    assert is_ffa_utils_installed, "FFA utils is not installed."
+    assert is_ffa_utils_installed, (
+        "The `flexible_flash_attention_utils_cuda` "
+        "extension module is not installed."
+    )
 
     sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
     sorted_outer_ranges = outer_ranges[sorted_idx]
@@ -181,8 +184,6 @@ def _flex_flash_attn_forward_compilable(
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
     attn_type_map: torch.Tensor,
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
@@ -210,6 +211,7 @@ def _flex_flash_attn_forward_compilable(
         or (q.dtype if disable_fwd_atomic_reduction else torch.float32),
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_fwd_atomic_reduction,
+        deterministic=deterministic,
         ref_block_size=(kblock_m, kblock_n)
         if kblock_m is not None and kblock_n is not None
         else None,
@@ -224,8 +226,6 @@ def _flex_flash_attn_forward_compilable(
         lse,
         q_ranges,
         k_ranges,
-        max_seqlen_q,
-        max_seqlen_k,
         attn_type_map,
         merge_q_ranges,
         qk_map,
@@ -248,8 +248,6 @@ def _flex_flash_attn_forward_compilable_fake(
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
     attn_type_map: torch.Tensor,
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
@@ -275,8 +273,6 @@ def _flex_flash_attn_forward(
     lse: torch.Tensor | None,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
     attn_type_map: torch.Tensor,
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
@@ -331,8 +327,6 @@ def _flex_flash_attn_forward(
         lse=lse,
         q_ranges=q_ranges,
         k_ranges=k_ranges,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
         attn_type_map=attn_type_map,
         merge_q_ranges=merge_q_ranges,
         qk_map=qk_map,
@@ -371,8 +365,6 @@ def _flex_flash_attn_backward_compilable(
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
     attn_type_map: torch.Tensor,
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
@@ -396,6 +388,7 @@ def _flex_flash_attn_backward_compilable(
         or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
+        deterministic=deterministic,
     )
 
     dout, q, k, v, out_, q_ranges, k_ranges = [
@@ -418,8 +411,6 @@ def _flex_flash_attn_backward_compilable(
         lse,
         q_ranges,
         k_ranges,
-        max_seqlen_q,
-        max_seqlen_k,
         attn_type_map,
         merge_k_ranges,
         bwd_kq_map,
@@ -448,8 +439,6 @@ def _flex_flash_attn_backward_compilable_fake(
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
     attn_type_map: torch.Tensor,
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
@@ -479,8 +468,6 @@ def _flex_flash_attn_backward(
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
     attn_type_map: torch.Tensor,
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
@@ -512,8 +499,6 @@ def _flex_flash_attn_backward(
         lse=lse,
         q_ranges=q_ranges,
         k_ranges=k_ranges,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
         attn_type_map=attn_type_map,
         merge_k_ranges=merge_k_ranges,
         bwd_kq_map=bwd_kq_map,
@@ -543,8 +528,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         v,
         q_ranges,
         k_ranges,
-        max_seqlen_q,
-        max_seqlen_k,
         attn_type_map,
         softmax_scale,
         softcap=0.0,
@@ -557,13 +540,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
-
-        assert isinstance(
-            max_seqlen_q, int
-        ), "max_seqlen_q must be an int, otherwise would lead to performance degradation"
-        assert isinstance(
-            max_seqlen_k, int
-        ), "max_seqlen_k must be an int, otherwise would lead to performance degradation"
 
         if auto_range_merge:
             (
@@ -604,8 +580,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # lse
             fwd_q_ranges,
             fwd_k_ranges,
-            max_seqlen_q,
-            max_seqlen_k,
             fwd_attn_type_map,
             merge_q_ranges,
             fwd_qk_map,
@@ -643,8 +617,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 q, k, v, out, lse, bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map
             )
 
-        ctx.max_seqlen_q = max_seqlen_q
-        ctx.max_seqlen_k = max_seqlen_k
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
         ctx.deterministic = deterministic
@@ -696,8 +668,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             lse,
             bwd_q_ranges,
             bwd_k_ranges,
-            ctx.max_seqlen_q,
-            ctx.max_seqlen_k,
             bwd_attn_type_map,
             merge_k_ranges,
             bwd_kq_map,
@@ -722,8 +692,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dv,  # v
             None,  # q_ranges
             None,  # k_ranges
-            None,  # max_seqlen_q
-            None,  # max_seqlen_k
             None,  # attn_type_map
             None,  # softmax_scale
             None,  # softcap
@@ -745,8 +713,6 @@ def flex_flash_attn_func(
     v: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
-    max_seqlen_q: int,
-    max_seqlen_k: int,
     attn_type_map: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
@@ -767,8 +733,6 @@ def flex_flash_attn_func(
         v (torch.Tensor): Value tensor.
         q_ranges (torch.Tensor): query ranges tensor to represent the attn mask.
         k_ranges (torch.Tensor): key ranges tensor to represent the attn mask.
-        max_seqlen_q (int): Maximum sequence length of q_ranges.
-        max_seqlen_k (int): Maximum sequence length of k_ranges.
         attn_type_map (torch.Tensor): Attention type map tenspr with dtype=torch.int32.
             The values specify the attention type for each token:
 
@@ -779,9 +743,10 @@ def flex_flash_attn_func(
 
             More information about the attention type map can be found in the ``Note`` below.
 
-        softmax_scale (float, optional): Softmax scale, defaults to 1/sqrt(head_dim).
-        softcap (float, optional): Softcap value, defaults to 0.
-        deterministic (bool, optional): Whether to use deterministic attention, defaults to False.
+        softmax_scale (float, optional): Softmax scale.
+            Defaults to ``None`` to use: ``1/sqrt(head_dim)``.
+        softcap (float, optional): Softcap. Defaults to ``0.0``.
+        deterministic (bool, optional): Whether to use deterministic attention. Defaults to ``False``.
         sm_margin (int, optional): the amount of SMs(streaming multiprocessors) reserved for communication.
         disable_fwd_atomic_reduction (bool):
             Whether to disable forward atomic reduction:
@@ -791,7 +756,8 @@ def flex_flash_attn_func(
                 For example, q_ranges = ``[[0, 15], [10, 20], [20, 30]]`` has overlap because
                 ``[0, 15]`` and ``[10, 20]`` intersect. While q_ranges = ``[[0, 15], [15, 20], [20, 30]]`` has no overlap.
 
-        auto_range_merge (bool, optional): Whether to automatically merge k_ranges for the same q_range, defaults to False.
+        auto_range_merge (bool, optional): Whether to automatically merge k_ranges for the same q_range.
+            Defaults to ``False``.
 
             **Note:** This flag is usually used in sparse attention cases but still under development.
 
@@ -917,8 +883,6 @@ def flex_flash_attn_func(
         v,
         q_ranges,
         k_ranges,
-        max_seqlen_q,
-        max_seqlen_k,
         attn_type_map,
         softmax_scale,
         softcap,

@@ -17,8 +17,11 @@ import torch.distributed as dist
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.comm.primitive import all_gather_v
-from magi_attention.comm.primitive._all_gather_v import _split_dims, _trans_with_dim0
+from magi_attention.comm.primitive._all_gather_v import (
+    _split_dims,
+    _trans_with_dim0,
+    all_gather_v,
+)
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 
 

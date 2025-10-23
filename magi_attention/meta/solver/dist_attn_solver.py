@@ -23,7 +23,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
-from magi_attention.comm.primitive.utils import (
+from magi_attention.comm.primitive.grpcoll.utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
 )
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
@@ -49,6 +49,7 @@ from magi_attention.utils import (
 )
 from magi_attention.utils._utils import argsort
 
+from .._make_dispatch_meta import make_bucket_per_rank_from_qk_ranges
 from .overlap_solver import OverlapConfig, OverlapSolver, OverlapStageCost
 from .slice_maker import HostAttnSliceMaker, RemoteAttnSliceMaker
 
@@ -139,11 +140,23 @@ class DistAttnSolver(BaseDistAttnSolver):
 
     def solve(
         self,
-        bucket_per_rank: list[AttnBucket],
+        q_ranges: AttnRanges,
+        k_ranges: AttnRanges,
+        attn_mask_type: list[AttnMaskType],
         dispatch_meta_q: DispatchMeta,
         dispatch_meta_k: DispatchMeta,
     ) -> None:
-        bucket_this_rank = bucket_per_rank[self.cp_rank]
+        # init bucket this rank from dispatch_meta_q
+        # assuming it is self-attn scenarios and the partitions of q,k are the same
+        if magi_attention.is_sanity_check_enable():
+            assert dispatch_meta_q.partitions == dispatch_meta_k.partitions
+        bucket_this_rank = self._make_bucket_this_rank(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            dispatch_meta=dispatch_meta_q,
+        )
+
         # init host / remote q/k ranges global for this rank
         (
             host_q_ranges_global_this_rank,
@@ -195,6 +208,23 @@ class DistAttnSolver(BaseDistAttnSolver):
     @property
     def is_solved(self) -> bool:
         return self._is_solved
+
+    def _make_bucket_this_rank(
+        self,
+        q_ranges: AttnRanges,
+        k_ranges: AttnRanges,
+        attn_mask_type: list[AttnMaskType],
+        dispatch_meta: DispatchMeta,
+    ) -> AttnBucket:
+        bucket_per_rank = make_bucket_per_rank_from_qk_ranges(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            dispatch_meta=dispatch_meta,
+        )
+        bucket_this_rank = bucket_per_rank[self.cp_rank]
+
+        return bucket_this_rank
 
     @nvtx.instrument_nvtx
     def _init_host_remote_ranges_global_this_rank(
@@ -1476,6 +1506,7 @@ class DistAttnSolver(BaseDistAttnSolver):
             src_index_list=src_index_list,
             rank=self.cp_rank,
             world_size=self.cp_size,
+            group=self.cp_group,
             device_mesh=self.cp_mesh,
             deterministic=self.deterministic,
         )
@@ -1539,14 +1570,6 @@ class DistAttnSolver(BaseDistAttnSolver):
                     for attn_slice in remote_rank_entry_this_stage_this_rank.attn_calc_remote_slice_local_list
                 )
 
-        # init masktype -> int map
-        masktype_to_idx_map = {
-            AttnMaskType.FULL: 0,
-            AttnMaskType.CAUSAL: 1,
-            AttnMaskType.INVCAUSAL: 2,
-            AttnMaskType.BICAUSAL: 3,
-        }
-
         # ---   build local attn args   --- #
 
         host_slice_local_list = (
@@ -1560,7 +1583,7 @@ class DistAttnSolver(BaseDistAttnSolver):
                 [attn_slice.k_range for attn_slice in host_slice_local_list]  # type: ignore[arg-type]
             ),
             attn_type_map=[
-                masktype_to_idx_map[attn_slice.mask_type]  # type: ignore
+                attn_slice.mask_type.to_int_type()  # type: ignore
                 for attn_slice in host_slice_local_list
             ],
             total_area=sum(attn_slice.area for attn_slice in host_slice_local_list),
@@ -1584,7 +1607,7 @@ class DistAttnSolver(BaseDistAttnSolver):
                         [attn_slice.k_range for attn_slice in remote_slice_local_list]  # type: ignore[arg-type]
                     ),
                     attn_type_map=[
-                        masktype_to_idx_map[attn_slice.mask_type]  # type: ignore
+                        attn_slice.mask_type.to_int_type()  # type: ignore
                         for attn_slice in remote_slice_local_list
                     ],
                     total_area=sum(

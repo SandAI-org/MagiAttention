@@ -601,8 +601,6 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                 q_ranges=q_ranges,
                 k_ranges=k_ranges,
                 attn_type_map=attn_type_map,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
             )
 
         if wd == "bwd":

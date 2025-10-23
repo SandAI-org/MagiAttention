@@ -130,7 +130,7 @@ class DynamicPersistentTileScheduler {
       int batch_idx = lane + bidb_start;
       if (batch_idx >= actual_num_batches)
         return 0;
-      int2 range = params.ranges[batch_idx]; // CHECK out of range？？？
+      int2 range = params.ranges[batch_idx];
       int seqlen = batch_idx < actual_num_batches ? range.y - range.x : 0;
       return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen, kBlock) : 0;
     };

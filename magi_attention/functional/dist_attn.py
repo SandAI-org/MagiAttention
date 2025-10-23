@@ -18,7 +18,7 @@ import torch
 import torch.distributed as dist
 
 import magi_attention
-from magi_attention.comm.primitive import group_cast_collective, group_reduce_collective
+from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import WorkWithPostProcessFn
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
@@ -145,6 +145,8 @@ class DistAttnRuntime:
         out_acc: torch.Tensor | None = None,
         lse_acc: torch.Tensor | None = None,
         overlap_stage: int | None = None,
+        softmax_scale: float | None = None,
+        softcap: float = 0.0,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Apply forward partial attention with given q,kv for the given overlap stage
@@ -155,6 +157,10 @@ class DistAttnRuntime:
             out_acc (torch.Tensor, optional): accumulative buffer for out
             lse_acc (torch.Tensor, optional): accumulative buffer for lse
             overlap_stage (int, optional): given overlap stage. Defaults to None.
+
+            softmax_scale (float, optional): softmax scale.
+                Defaults to None to use default value: 1/sqrt(head_dim)
+            softcap (float, optional): softcap. Defaults to 0.
 
         Returns:
             out (torch.Tensor | None): partial out, or None if skipped
@@ -200,6 +206,9 @@ class DistAttnRuntime:
 
         # attention forward pass
         k, v = self._maybe_chunk_kv(kv)
+        _softmax_scale: float = (
+            q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
+        )
         with nvtx.add_nvtx_event(
             f"attn-fwd: "
             f"{attn_arg.total_area=} | "
@@ -212,6 +221,8 @@ class DistAttnRuntime:
                     k=k,
                     v=v,
                     attn_arg=attn_arg,
+                    softmax_scale=_softmax_scale,
+                    softcap=softcap,
                 )
             else:
                 partial_out, partial_lse = _flex_flash_attn_forward(
@@ -225,9 +236,9 @@ class DistAttnRuntime:
                     qk_map=None,
                     fwd_unique_count=None,
                     ref_block_size=None,
-                    softmax_scale=q.shape[-1] ** -0.5,
+                    softmax_scale=_softmax_scale,
                     deterministic=self.deterministic,
-                    softcap=0.0,
+                    softcap=softcap,
                     sm_margin=self.fwd_sm_margin,
                     # NOTE: increase the partial out precision temporarily,
                     # to reduce the error caused by the out correction
@@ -399,6 +410,8 @@ class DistAttnRuntime:
         lse: torch.Tensor,
         dq_acc: torch.Tensor | None = None,
         overlap_stage: int | None = None,
+        softmax_scale: float | None = None,
+        softcap: float = 0.0,
     ) -> tuple[torch.Tensor | None, FusedOrTupleTensor | None]:
         """
         Apply backward partial attention with given qo_do,kv,lse for the given overlap stage
@@ -409,6 +422,10 @@ class DistAttnRuntime:
             lse (torch.Tensor): current lse
             dq_acc (torch.Tensor, optional): accumulative buffer for dq
             overlap_stage (int, optional): given overlap stage. Defaults to None.
+
+            softmax_scale (float, optional): softmax scale.
+                Defaults to None to use default value: 1/sqrt(head_dim)
+            softcap (float, optional): softcap. Defaults to 0.
 
         Returns:
             partial_dq (torch.Tensor | None): partial dq, or None if skipped
@@ -456,6 +473,9 @@ class DistAttnRuntime:
         # attention backward pass
         q, o, do = self._maybe_chunk_qo_do(qo_do)
         k, v = self._maybe_chunk_kv(kv)
+        _softmax_scale: float = (
+            q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
+        )
         if magi_attention.is_sdpa_backend_enable():
             partial_dq, partial_dk, partial_dv = sdpa_bwd(
                 do=do,
@@ -465,6 +485,8 @@ class DistAttnRuntime:
                 o=o,
                 lse=lse,
                 attn_arg=attn_arg,
+                softmax_scale=_softmax_scale,
+                softcap=softcap,
             )
             partial_dkv = self._maybe_concat_kv(partial_dk, partial_dv)
         else:
@@ -491,9 +513,9 @@ class DistAttnRuntime:
                 merge_k_ranges=None,
                 bwd_kq_map=None,
                 bwd_unique_count=None,
-                softmax_scale=q.shape[-1] ** -0.5,
+                softmax_scale=_softmax_scale,
                 deterministic=self.deterministic,
-                softcap=0.0,
+                softcap=softcap,
                 disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
                 sm_margin=self.bwd_sm_margin,
             )
@@ -787,7 +809,7 @@ class DistAttnRuntime:
         )
 
         # launch group cast kernel
-        remote_kv_work = group_cast_collective(
+        remote_kv_work = group_cast(
             input=local_kv,
             output=remote_kv_buffer,
             **group_cast_args,
@@ -846,7 +868,7 @@ class DistAttnRuntime:
         )
 
         # launch group cast kernel
-        remote_q_work = group_cast_collective(
+        remote_q_work = group_cast(
             input=local_q,
             output=remote_q_buffer,
             **group_cast_args,
@@ -910,7 +932,7 @@ class DistAttnRuntime:
         )
 
         # launch group cast kernel
-        remote_qo_do_work = group_cast_collective(
+        remote_qo_do_work = group_cast(
             input=local_qo_do,
             output=remote_qo_do_buffer,
             **group_cast_args,
@@ -973,7 +995,7 @@ class DistAttnRuntime:
         )
 
         # launch group cast kernel
-        remote_lse_work = group_cast_collective(
+        remote_lse_work = group_cast(
             input=local_lse,
             output=remote_lse_buffer,
             **group_cast_args,
@@ -1034,7 +1056,7 @@ class DistAttnRuntime:
                 partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
 
             # launch group-reduce kernel
-            partial_out_lse_reduce_work = group_reduce_collective(
+            partial_out_lse_reduce_work = group_reduce(
                 input=partial_remote_out,
                 input_lse=partial_remote_lse,
                 output=partial_local_out,
@@ -1103,7 +1125,7 @@ class DistAttnRuntime:
             partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)  # type: ignore[union-attr]
 
         # launch group-reduce kernel
-        partial_dkv_reduce_work = group_reduce_collective(
+        partial_dkv_reduce_work = group_reduce(
             input=partial_remote_dkv,
             output=partial_local_dkv,
             **group_reduce_args,
@@ -1153,7 +1175,7 @@ class DistAttnRuntime:
                 partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
 
             # launch group-reduce kernel
-            partial_dq_reduce_work = group_reduce_collective(
+            partial_dq_reduce_work = group_reduce(
                 input=partial_remote_dq,
                 output=partial_local_dq,
                 **group_reduce_args,
@@ -1264,6 +1286,8 @@ class DistAttnFunc(torch.autograd.Function):
         local_k: torch.Tensor,
         local_v: torch.Tensor,
         dist_attn_runtime: DistAttnRuntime,
+        softmax_scale: float | None = None,
+        softcap: float = 0.0,
     ):
         """
         Distributed Attention forward function
@@ -1273,6 +1297,10 @@ class DistAttnFunc(torch.autograd.Function):
             local_k (torch.Tensor): local k tensor
             local_v (torch.Tensor): local v tensor
             dist_attn_runtime(DistAttnRuntime): dist attn runtime
+
+            softmax_scale (float, optional): softmax scale.
+                Defaults to None to use default value: 1/sqrt(head_dim)
+            softcap (float, optional): softcap. Defaults to 0.
 
         Returns:
             local_out (torch.Tensor): local out tensor
@@ -1299,6 +1327,8 @@ class DistAttnFunc(torch.autograd.Function):
             q=local_q,
             kv=local_kv,
             overlap_stage=None,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
         )
         assert partial_local_out is not None and partial_local_lse is not None
 
@@ -1322,13 +1352,15 @@ class DistAttnFunc(torch.autograd.Function):
             ) = dist_attn_runtime.apply_fwd_partial_attn(
                 q=curr_remote_q,
                 kv=curr_remote_kv,
-                overlap_stage=ith_overlap_stage,
                 out_acc=partial_local_out
                 if dist_attn_runtime.fwd_out_lse_use_acc
                 else None,
                 lse_acc=partial_local_lse
                 if dist_attn_runtime.fwd_out_lse_use_acc
                 else None,
+                overlap_stage=ith_overlap_stage,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
             )
 
             # reduce ith partial out with partial lse
@@ -1352,6 +1384,8 @@ class DistAttnFunc(torch.autograd.Function):
 
         ctx.save_for_backward(local_q, local_kv, local_out, local_lse)
         ctx.dist_attn_runtime = dist_attn_runtime
+        ctx.softmax_scale = softmax_scale
+        ctx.softcap = softcap
 
         return local_out, local_lse
 
@@ -1359,6 +1393,8 @@ class DistAttnFunc(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
         local_q, local_kv, local_out, local_lse = ctx.saved_tensors
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
+        softmax_scale: float | None = ctx.softmax_scale
+        softcap: float = ctx.softcap
 
         # get local qo_do,kv,lse and pre-fetch qo_do,kv,lse for remote stage(s)
         (
@@ -1382,6 +1418,8 @@ class DistAttnFunc(torch.autograd.Function):
             kv=local_kv,
             lse=local_lse,
             overlap_stage=None,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
         )
         assert partial_local_dq is not None and partial_local_dkv is not None
 
@@ -1411,6 +1449,8 @@ class DistAttnFunc(torch.autograd.Function):
                 lse=curr_remote_lse,
                 dq_acc=partial_local_dq if dist_attn_runtime.bwd_dq_use_acc else None,
                 overlap_stage=ith_overlap_stage,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
             )
 
             # reduce ith partial dq,dkv
@@ -1434,7 +1474,14 @@ class DistAttnFunc(torch.autograd.Function):
             ref_local_dkv=local_kv,
         )
 
-        return local_dq, local_dk, local_dv, None, None
+        return (
+            local_dq,
+            local_dk,
+            local_dv,
+            None,  # dist_attn_runtime
+            None,  # softmax_scale
+            None,  # softcap
+        )
 
 
 def dist_attn_func(
@@ -1442,6 +1489,8 @@ def dist_attn_func(
     k: torch.Tensor,
     v: torch.Tensor,
     dist_attn_runtime: DistAttnRuntime,
+    softmax_scale: float | None = None,
+    softcap: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Distributed attention autograd function
 
@@ -1450,6 +1499,10 @@ def dist_attn_func(
         k (torch.Tensor): local k
         v (torch.Tensor): local v
         dist_attn_runtime (DistAttnRuntime): distributed attention runtime
+
+        softmax_scale (float, optional): softmax scale.
+            Defaults to None to use default value: 1/sqrt(head_dim)
+        softcap (float, optional): softcap. Defaults to 0.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: local out and local lse
@@ -1461,4 +1514,11 @@ def dist_attn_func(
         out: [num_tokens_q_local, num_heads_q, head_dim]
         lse: [num_tokens_q_local, num_heads_q]
     """
-    return DistAttnFunc.apply(q, k, v, dist_attn_runtime)
+    return DistAttnFunc.apply(
+        q,
+        k,
+        v,
+        dist_attn_runtime,
+        softmax_scale,
+        softcap,
+    )

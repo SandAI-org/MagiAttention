@@ -11,16 +11,14 @@ jobs:
       matrix:
         python-version: ['3.10', '3.11', '3.12']
     runs-on: ubuntu-latest
+    env:
+      LLVM_VERSION: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install clang-format-${{ env.LLVM_VERSION }}
-        env:
-          LLVM_VERSION: 21
         run: |
           sudo chmod +x ./scripts/install_clang_format.sh
-          sudo ./scripts/install_clang_format.sh
-          clang-format-${{ env.LLVM_VERSION }} --version
-          clang-format --version
+          sudo ./scripts/install_clang_format.sh ${{ env.LLVM_VERSION }}
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

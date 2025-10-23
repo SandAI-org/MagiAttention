@@ -25,7 +25,6 @@ from magi_attention.config import DistAttnConfig
 from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeDict,
     DistAttnRuntimeKey,
-    DistAttnRuntimeMgr,
     init_dist_attn_runtime_key,
     init_dist_attn_runtime_mgr,
 )
@@ -66,7 +65,7 @@ def magi_attn_varlen_key(
         cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
         cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
 
-        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
+        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by ``chunk_size * cp_size``.
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
@@ -74,26 +73,41 @@ def magi_attn_varlen_key(
             **NOTE**: for process group, we only support nccl backend for now,
             and for device mesh, we only support 1D or 2D mesh for now.
 
-        causal (bool, optional): if True, all attn_mask_type is CAUSAL. else, determine masktype with ``window_size``.
-            Defaults to False.
+        causal (bool, optional): if ``True``, all mask types are set to ``CAUSAL``,
+            otherwise, determine the mask types by ``window_size``. Defaults to ``False``.
         window_size (tuple[int, int], optional): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
             Defaults to be ``(-1, -1)``.
+
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
         DistAttnRuntimeKey: the key points to the inner DistAttnRuntimeMgr.
 
     Example:
+        >>> import torch
+        >>> import torch.distributed as dist
+        >>> from magi_attention.api import magi_attn_varlen_key, dispatch, undispatch, calc_attn
+        >>> from magi_attention.api.functools import compute_pad_size
+        >>> from magi_attention.config import (
+        ...     DistAttnConfig,
+        ...     DispatchConfig,
+        ...     OverlapConfig,
+        ...     MinHeapDispatchAlg,
+        ...     UniformOverlapAlg
+        ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
+        >>>
+        >>> # Generate a DistAttnRuntimeKey to dispatch for flash-attn-varlen style mask
         >>> dist_attn_runtime_key = magi_attn_varlen_key(
         ...     cu_seqlen_q=torch.tensor(
-                    [0, 2048, 4096], dtype=torch.int32
-                ),
+        ...         [0, 2048, 4096], dtype=torch.int32
+        ...     ),
         ...     cu_seqlen_k=torch.tensor(
-                    [0, 2048, 4096], dtype=torch.int32
-                ),
-        ...     pad_size=compute_pad_size(4096, 4, 512), # seqlne, cp_size, chunk_size
+        ...         [0, 2048, 4096], dtype=torch.int32
+        ...     ),
+        ...     pad_size=compute_pad_size(4096, 4, 512), # seqlen, cp_size, chunk_size
         ...     chunk_size=512,
         ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
         ...     causal=False,
@@ -110,15 +124,20 @@ def magi_attn_varlen_key(
         ...         ),
         ...     ),
         ... )
-        >>> # Dispatch global query tensor to local query tensor
-        >>> local_q = dispatch(total_q, dist_attn_runtime_key)
-        >>> # Dispatch global key tensor to local key tensor
-        >>> local_k = dispatch(total_k, dist_attn_runtime_key)
-        >>> # Dispatch global value tensor to local value tensor
-        >>> local_v = dispatch(total_v, dist_attn_runtime_key)
-        >>> # Calculate local attention result
+        >>>
+        >>> # Dispatch several tensors with the same key
+        >>> local_x, local_label, local_rope = [
+        ...     dispatch(tensor, dist_attn_runtime_key)
+        ...     for tensor in [total_x, total_label, total_rope]
+        ... ]
+        >>>
+        >>> # Apply QKV projection
+        >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
+        >>>
+        >>> # Calculate local attention
         >>> local_out, _ = calc_attn(local_q, local_k, local_v, dist_attn_runtime_key)
-        >>> # Gather local attention results to global result
+        >>>
+        >>> # Gather local attention outputs to total output if needed
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
     # infer q_ranges, k_ranges and others from cu_seqlens_q, cu_seqlens_k and causal
@@ -165,7 +184,7 @@ def magi_attn_varlen_dispatch(
     window_size: tuple[int, int] = (-1, -1),
     dist_attn_config: DistAttnConfig = DistAttnConfig(),
 ):
-    """This is a flash_attn_varlen like interface, to
+    """This is a flash-attn-varlen like interface, to
     generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k, causal and window_size,
     further calculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
     finally pad and dispatch the input tensor to local tensor.
@@ -176,7 +195,7 @@ def magi_attn_varlen_dispatch(
         cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
         cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
 
-        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
+        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by ``chunk_size * cp_size``.
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
@@ -184,12 +203,13 @@ def magi_attn_varlen_dispatch(
             **NOTE**: for process group, we only support nccl backend for now,
             and for device mesh, we only support 1D or 2D mesh for now.
 
-        causal (bool, optional): if True, all attn_mask_type is CAUSAL. else, determine masktype with ``window_size``.
-            Defaults to False.
+        causal (bool, optional): if ``True``, all mask types are set to ``CAUSAL``,
+            otherwise, determine the mask types by ``window_size``. Defaults to ``False``.
         window_size (tuple[int, int], optional): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
             Defaults to be ``(-1, -1)``.
+
         dist_attn_config (DistAttnConfig): dist attn config.
 
     Returns:
@@ -198,13 +218,27 @@ def magi_attn_varlen_dispatch(
             - key (DistAttnRuntimeKey): the key points to the inner DistAttnRuntimeMgr.
 
     Example:
+        >>> import torch
+        >>> import torch.distributed as dist
+        >>> from magi_attention.api import magi_attn_varlen_dispatch, undispatch, calc_attn
+        >>> from magi_attention.api.functools import compute_pad_size
+        >>> from magi_attention.config import (
+        ...     DistAttnConfig,
+        ...     DispatchConfig,
+        ...     OverlapConfig,
+        ...     MinHeapDispatchAlg,
+        ...     UniformOverlapAlg
+        ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
+        >>>
+        >>> # Generate a DistAttnRuntimeKey and dispatch the input for flash-attn-varlen style mask
         >>> local_x, dist_attn_runtime_key = magi_attn_varlen_dispatch(
         ...     x=torch.randn(
         ...         4096,  # seqlen
         ...         2048,  # hidden_size
-        ...         device=device,
-        ...         dtype=dtype,
-        ...         requires_grad = True
+        ...         device="cuda",
+        ...         dtype=torch.bfloat16,
+        ...         requires_grad=True
         ...     ),
         ...     cu_seqlen_q=torch.tensor(
         ...         [0, 2048, 4096], dtype=torch.int32
@@ -229,10 +263,14 @@ def magi_attn_varlen_dispatch(
         ...         ),
         ...     ),
         ... )
+        >>>
+        >>> # Apply QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
-        >>> # Do local attention computation
+        >>>
+        >>> # Calculate local attention
         >>> local_out, _ = calc_attn(local_q, local_k, local_v, dist_attn_runtime_key)
-        >>> # Gather local attention results to global result
+        >>>
+        >>> # Gather local attention outputs to total output if needed
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
     key = magi_attn_varlen_key(
@@ -270,16 +308,16 @@ def magi_attn_flex_key(
     calculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.
 
     Args:
-        x (torch.Tensor): input tensor
-        q_ranges (AttnRanges): global query ranges in the ref attn mask
-        k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]): attn mask type (list)
+        q_ranges (AttnRanges): the global query ranges
+        k_ranges (AttnRanges): the global key ranges
+        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]):
+            the global attn mask type (list)
             represented by str or enum ``AttnMaskType`` or their mixed combination
 
-        total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
-        total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
+        total_seqlen_q (int): the total seqlen of query
+        total_seqlen_k (int): the total seqlen of key
 
-        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
+        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by ``chunk_size * cp_size``.
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
@@ -313,6 +351,21 @@ def magi_attn_flex_key(
             b. ``q`` is unpermutable due to self-attn, but ``k`` is permutable even in a different way.
 
     Example:
+        >>> import torch
+        >>> import torch.distributed as dist
+        >>> from magi_attention.api import magi_attn_flex_key, dispatch, undispatch, calc_attn
+        >>> from magi_attention.api.functools import compute_pad_size
+        >>> from magi_attention.config import (
+        ...     DistAttnConfig,
+        ...     DispatchConfig,
+        ...     OverlapConfig,
+        ...     MinHeapDispatchAlg,
+        ...     UniformOverlapAlg
+        ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
+        >>> from magi_attention.common import AttnRanges
+        >>>
+        >>> # Generate a DistAttnRuntimeKey to dispatch for arbitrary mask represented by attn-slices
         >>> dist_attn_runtime_key = magi_attn_flex_key(
         ...     q_ranges=AttnRanges.from_ranges([[0, 2048], [2048, 4096]]),
         ...     k_ranges=AttnRanges.from_ranges([[0, 2048], [0, 4096]]),
@@ -337,25 +390,30 @@ def magi_attn_flex_key(
         ...         ),
         ...     ),
         ... )
-        >>> # Dispatch global query tensor to local query tensor
-        >>> local_q = dispatch(total_q, dist_attn_runtime_key)
-        >>> # Dispatch global key tensor to local key tensor
-        >>> local_k = dispatch(total_k, dist_attn_runtime_key)
-        >>> # Dispatch global value tensor to local value tensor
-        >>> local_v = dispatch(total_v, dist_attn_runtime_key)
-        >>> # Calculate local attention result
+        >>>
+        >>> # Dispatch several tensors with the same key
+        >>> local_x, local_label, local_rope = [
+        ...     dispatch(tensor, dist_attn_runtime_key)
+        ...     for tensor in [total_x, total_label, total_rope]
+        ... ]
+        >>>
+        >>> # Apply QKV projection
+        >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
+        >>>
+        >>> # Calculate local attention
         >>> local_out, _ = calc_attn(local_q, local_k, local_v, dist_attn_runtime_key)
-        >>> # Gather local attention results to global result
+        >>>
+        >>> # Gather local attention outputs to total output if needed
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
-    # Validate total_seqlen
+    # validate total_seqlen
     assert q_ranges.end <= total_seqlen_q and k_ranges.end <= total_seqlen_k, (
         f"The maximum endpoint in ranges must be less than total_seqlen, "
         f"but got {q_ranges.end=} when {total_seqlen_q=}, "
         f"and got {k_ranges.end=} when {total_seqlen_k=}"
     )
 
-    # Validate and transform attn_mask_type
+    # validate and transform attn_mask_type
     attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
     assert is_list_type_all(attn_mask_type, (str, AttnMaskType)), (
         f"attn_mask_type must be a list of str or AttnMaskType or their mixed combination, "
@@ -369,7 +427,7 @@ def magi_attn_flex_key(
         f"but got {len(attn_mask_type)=} and {len(q_ranges)=}"
     )
 
-    # Validate process group (or device mesh)
+    # validate process group (or device mesh)
     if isinstance(cp_group_or_mesh, dist.ProcessGroup):
         assert not magi_attention.comm.is_hierarchical_comm_enable(), (
             "A 2D cp_mesh must be provided when hierarchical comm is enabled, "
@@ -391,8 +449,9 @@ def magi_attn_flex_key(
             f"but got {type(cp_group_or_mesh)=}"
         )
 
-    # Apply padding at seq_dim(dim 0）
+    # apply padding
     if pad_size > 0:
+        # apply padding to the mask with the empty slice
         q_ranges, k_ranges, attn_mask_type = apply_padding(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
@@ -400,7 +459,7 @@ def magi_attn_flex_key(
             total_seqlen=total_seqlen_q,
             pad_size=pad_size,
         )
-
+        # also apply padding to total_seqlen
         total_seqlen_q += pad_size
         total_seqlen_k += pad_size
 
@@ -460,15 +519,17 @@ def magi_attn_flex_dispatch(
 
     Args:
         x (torch.Tensor): input tensor
-        q_ranges (AttnRanges): global query ranges in the ref attn mask
-        k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]): attn mask type (list)
+
+        q_ranges (AttnRanges): the global query ranges
+        k_ranges (AttnRanges): the global key ranges
+        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]):
+            the global attn mask type (list)
             represented by str or enum ``AttnMaskType`` or their mixed combination
 
-        total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
-        total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
+        total_seqlen_q (int): the total seqlen of query
+        total_seqlen_k (int): the total seqlen of key
 
-        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by chunk_size * cp_size,
+        pad_size (int): the size to pad along seq_dim. The seq_len need to be divisable by ``chunk_size * cp_size``.
         chunk_size (int): chunk size to chunk the input tensor x along the seqlen dim for dispatch
             to control the granularity of computation load-balance.
 
@@ -504,13 +565,28 @@ def magi_attn_flex_dispatch(
             b. ``q`` is unpermutable due to self-attn, but ``k`` is permutable even in a different way.
 
     Example:
+        >>> import torch
+        >>> import torch.distributed as dist
+        >>> from magi_attention.api import magi_attn_flex_dispatch, undispatch, calc_attn
+        >>> from magi_attention.api.functools import compute_pad_size
+        >>> from magi_attention.config import (
+        ...     DistAttnConfig,
+        ...     DispatchConfig,
+        ...     OverlapConfig,
+        ...     MinHeapDispatchAlg,
+        ...     UniformOverlapAlg
+        ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
+        >>> from magi_attention.common import AttnRanges
+        >>>
+        >>> # Generate a DistAttnRuntimeKey and dispatch the input for arbitrary mask represented by attn-slices
         >>> local_x, dist_attn_runtime_key = magi_attn_flex_dispatch(
         ...     x = torch.randn(
         ...         4096,   # seqlen
         ...         2048,   # hidden_size
-        ...         device=device,
-        ...         dtype=dtype,
-        ...         requires_grad = True
+        ...         device="cuda",
+        ...         dtype=torch.bfloat16,
+        ...         requires_grad=True
         ...     ),
         ...     q_ranges=AttnRanges.from_ranges([[0, 2048], [2048, 4096]]),
         ...     k_ranges=AttnRanges.from_ranges([[0, 2048], [0, 4096]]),
@@ -535,10 +611,14 @@ def magi_attn_flex_dispatch(
         ...     is_q_permutable=True,
         ...     is_k_permutable=True,
         ... )
+        >>>
+        >>> # Apply QKV projection
         >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
-        >>> # Do local attention computation
+        >>>
+        >>> # Calculate local attention
         >>> local_out, _ = calc_attn(local_q, local_k, local_v, dist_attn_runtime_key)
-        >>> # Gather local attention results to global result
+        >>>
+        >>> # Gather local attention outputs to total output if needed
         >>> total_out = undispatch(local_out, dist_attn_runtime_key)
     """
     key = magi_attn_flex_key(
@@ -574,7 +654,8 @@ def dispatch(
     Args:
         x (torch.Tensor): global input tensor.
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
-            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+            as one argument for many other magi_attention APIs,
+            about which the users may have no bother to care.
         pad_value (float): the specific value to pad to input tensor. Defaults to 0.
 
     Returns:
@@ -585,7 +666,7 @@ def dispatch(
     """
     mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
-        raise ValueError("The DistAttnRuntimeKey does not exist!")
+        raise ValueError("The dist attn runtime key does not exist!")
 
     pad_size = key.pad_size
     padded_x = pad_at_dim(x, 0, pad_size, value=pad_value)
@@ -603,7 +684,8 @@ def undispatch(
     Args:
         x (torch.Tensor): local tensor
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
-            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+            as one argument for many other magi_attention APIs,
+            about which the users may have no bother to care.
 
     Returns:
         torch.Tensor: the undispatched and unpadded tensor.
@@ -613,7 +695,7 @@ def undispatch(
     """
     mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
-        raise ValueError("The DistAttnRuntimeKey does not exist!")
+        raise ValueError("The dist attn runtime key does not exist!")
 
     total_x = mgr.undispatch_qo(x)
     pad_size = key.pad_size
@@ -627,30 +709,50 @@ def calc_attn(
     k: torch.Tensor,
     v: torch.Tensor,
     key: DistAttnRuntimeKey,
+    softmax_scale: float | None = None,
+    softcap: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Do attention computation.
+    Apply attention computation.
 
     Args:
-        q (torch.Tensor): Query tensor of shape ``(num_tokens_q, num_heads, head_dim)``.
-        k (torch.Tensor): Key tensor of shape ``(num_tokens_k, num_heads, head_dim)``.
-        v (torch.Tensor): Value tensor of shape ``(num_tokens_v, num_heads, head_dim)``.
+        q (torch.Tensor): local query tensor.
+        k (torch.Tensor): local key tensor.
+        v (torch.Tensor): local value tensor.
         key (DistAttnRuntimeKey): the object that holds some inner meta data
-            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+            as one argument for many other magi_attention APIs,
+            about which the users may have no bother to care.
+
+        softmax_scale (float, optional): softmax scale.
+            Defaults to ``None`` to use: ``1/sqrt(head_dim)``.
+        softcap (float, optional): softcap. Defaults to ``0.0``.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
-            - out (torch.Tensor): Attention output tensor of shape.
-            - lse (torch.Tensor): Log-sum-exp values for numerical stability.
+            - out (torch.Tensor): local output tensor.
+            - lse (torch.Tensor): local log-sum-exp tensor.
+
+    Shapes:
+        - q: [num_tokens_q_local, num_heads_q, head_dim]
+        - k: [num_tokens_kv_local, num_heads_kv, head_dim]
+        - v: [num_tokens_kv_local, num_heads_kv, head_dim]
+        - out: [num_tokens_q_local, num_heads_q, head_dim]
+        - lse: [num_tokens_q_local, num_heads_q]
 
     Raises:
         ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
     mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
-        raise ValueError("The DistAttnRuntimeKey does not exist!")
+        raise ValueError("The dist attn runtime key does not exist!")
 
-    return mgr.calc_attn(q, k, v)
+    return mgr.calc_attn(
+        q=q,
+        k=k,
+        v=v,
+        softmax_scale=softmax_scale,
+        softcap=softcap,
+    )
 
 
 def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
@@ -659,14 +761,18 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
 
     Args:
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
-            as one argument for many other magi_attention APIs, about which the users may have no bother to care.
+            as one argument for many other magi_attention APIs,
+            about which the users may have no bother to care.
 
     Returns:
         torch.Tensor: postion ids of local tensor w.r.t. global tensor.
+
+    Raises:
+        ValueError: If the provided ``key`` does not exist in ``dist_attn_runtime_dict``.
     """
-    mgr: DistAttnRuntimeMgr = dist_attn_runtime_dict.get(key)
+    mgr = dist_attn_runtime_dict.get(key)
     if mgr is None:
-        raise ValueError("The DistAttnRuntimeKey does not exist!")
+        raise ValueError("The dist attn runtime key does not exist!")
 
     return mgr.get_position_ids()
 
@@ -682,4 +788,351 @@ def get_most_recent_key() -> DistAttnRuntimeKey:
     Returns:
         DistAttnRuntimeKey: the most recent inserted key.
     """
-    return dist_attn_runtime_dict.get_most_recent_key()
+
+    key = dist_attn_runtime_dict.get_most_recent_key()
+    if key is None:
+        raise ValueError("The dist attn runtime dict is empty!")
+
+    return key
+
+
+def make_varlen_key_for_new_mask_after_dispatch(
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    key_for_dispatch: DistAttnRuntimeKey,
+    causal: bool = False,
+    window_size: tuple[int, int] = (-1, -1),
+    dist_attn_config: DistAttnConfig | None = None,
+) -> DistAttnRuntimeKey:
+    """Make a new dist attn runtime key for a new mask after dispatch
+    with the given arguments for the new mask in flash-attn-varlen style and the key used for dispatch
+
+    NOTE: this API is useful when you want to apply more than one masks
+    within the same training pass, if your model adopts hybrid-attn structure,
+    in which case, we can only choose one of the masks to dispatch,
+    while the others're supposed to reuse the same dispatch solution
+    with different meta arguments for computation and communication
+
+    WARNING: in such case, we can not guarantee all the masks are load-balanced in computation
+    and optimized in communication.
+
+    Args:
+        cu_seqlens_q (torch.Tensor): Cumulative sequence lengths for queries.
+        cu_seqlens_k (torch.Tensor): Cumulative sequence lengths for keys.
+
+        key_for_dispatch (DistAttnRuntimeKey): the key used for dispatch
+        causal (bool, optional): whether the varlen attention mask is causal. Defaults to ``False``.
+        window_size (tuple[int, int], optional): window_size of sliding window mask
+            which represents ``[window_size_left, window_size_right]``. The parameter is effective only
+            when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.
+            Defaults to be ``(-1, -1)``.
+
+        dist_attn_config (DistAttnConfig, optional): the optional new dist attn config,
+
+            NOTE: if not provided, we will use the same config as the ``key_for_dispatch``,
+            and if provided, the dispatch config of the new dist attn config won't be applied to the new mask
+
+    Returns:
+        DistAttnRuntimeKey: the new dist attn runtime key
+            for new mask with the same dispatch solution as the ``key_for_dispatch``
+
+    Example:
+        >>> import torch
+        >>> import torch.distributed as dist
+        >>> from magi_attention.api import magi_attn_varlen_key, dispatch, undispatch, calc_attn
+        >>> from magi_attention.api import make_varlen_key_for_new_mask_after_dispatch
+        >>> from magi_attention.api.functools import compute_pad_size
+        >>> from magi_attention.config import (
+        ...     DistAttnConfig,
+        ...     DispatchConfig,
+        ...     OverlapConfig,
+        ...     MinHeapDispatchAlg,
+        ...     UniformOverlapAlg
+        ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
+        >>>
+        >>> # Generate a DistAttnRuntimeKey to dispatch for flash-attn-varlen style mask
+        >>> # in the following case, we use a causal mask as the key for dispatch, thus it will consider
+        >>> # computation load-balance, communication optimization and computation-communication overlap
+        >>> # according to the causal mask pattern
+        >>> key_for_dispatch = magi_attn_varlen_key(
+        ...     cu_seqlen_q=torch.tensor(
+        ...         [0, 4096], dtype=torch.int32
+        ...     ),
+        ...     cu_seqlen_k=torch.tensor(
+        ...         [0, 4096], dtype=torch.int32
+        ...     ),
+        ...     pad_size=compute_pad_size(4096, 4, 512), # seqlen, cp_size, chunk_size
+        ...     chunk_size=512,
+        ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
+        ...     causal=True,
+        ...     window_size=(-1, -1),
+        ...     dist_attn_config=DistAttnConfig(
+        ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+        ...         overlap_config=OverlapConfig(
+        ...             enable=True,
+        ...             mode=AttnOverlapMode.STATIC,
+        ...             degree=2,
+        ...             min_chunk_size=512,
+        ...             max_num_chunks=64,
+        ...             alg=UniformOverlapAlg(),
+        ...         ),
+        ...     ),
+        ... )
+        >>>
+        >>> # Dispatch several tensors with the same key_for_dispatch
+        >>> local_x, local_label, local_rope = [
+        ...     dispatch(tensor, key_for_dispatch)
+        ...     for tensor in [total_x, total_label, total_rope]
+        ... ]
+        >>>
+        >>> # Make a new dist attn runtime key from key_for_dispatch
+        >>> # for a new mask, such as a sliding window causal mask below,
+        >>> # with the same dispatch solution as the causal mask used for dispatch,
+        >>> # i.e. this new key share the same dispatch meta as key_for_dispatch
+        >>> # but it can handle the computation and communication of the new mask
+        >>> # and calculate attn correctly as well, though no optimization is applied for now
+        >>> new_key_for_swa_mask = make_varlen_key_for_new_mask_after_dispatch(
+        ...     cu_seqlens_q=torch.tensor([0, 4096], dtype=torch.int32),
+        ...     cu_seqlens_k=torch.tensor([0, 4096], dtype=torch.int32),
+        ...     causal=False,
+        ...     window_size=(512, 0), # sliding window causal mask
+        ...     key_for_dispatch=key_for_dispatch,
+        ... )
+        >>>
+        >>> # Apply QKV projection
+        >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
+        >>>
+        >>> # Calculate local attention for the mask used to dispatch with key_for_dispatch
+        >>> local_out1, _ = calc_attn(local_q, local_k, local_v, key_for_dispatch)
+        >>>
+        >>> # Calculate local attention for the new swa mask with the new key
+        >>> # w/o undispatching back and dispatching again to avoid OOM
+        >>> local_out2, _ = calc_attn(local_q, local_k, local_v, new_key_for_swa_mask)
+        >>>
+        >>> # Gather local attention outputs to total output if needed
+        >>> total_out1 = undispatch(local_out1, key_for_dispatch)
+        >>> total_out2 = undispatch(local_out2, new_key_for_swa_mask)
+    """
+    # infer q_ranges, k_ranges and others from cu_seqlens_q, cu_seqlens_k and causal
+    (
+        q_ranges,
+        k_ranges,
+        attn_mask_type,
+        _,  # total_seqlen_q
+        _,  # total_seqlen_k
+    ) = infer_attn_mask_from_cu_seqlens(
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        causal=causal,
+        window_size=window_size,
+    )
+
+    return make_flex_key_for_new_mask_after_dispatch(
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        key_for_dispatch=key_for_dispatch,
+        dist_attn_config=dist_attn_config,
+    )
+
+
+def make_flex_key_for_new_mask_after_dispatch(
+    q_ranges: AttnRanges,
+    k_ranges: AttnRanges,
+    attn_mask_type: GeneralAttnMaskType,
+    key_for_dispatch: DistAttnRuntimeKey,
+    dist_attn_config: DistAttnConfig | None = None,
+) -> DistAttnRuntimeKey:
+    """Make a new dist attn runtime key for a new mask after dispatch
+    with the given arguments for the new mask and the key used for dispatch
+
+    NOTE: this API is useful when you want to apply more than one masks
+    within the same training pass, if your model adopts hybrid-attn structure,
+    in which case, we can only choose one of the masks to dispatch,
+    while the others're supposed to reuse the same dispatch solution
+    with different meta arguments for computation and communication
+
+    WARNING: in such case, we can not guarantee all the masks are load-balanced in computation
+    and optimized in communication for now. However, we are working on it with the dynamic dist-attn solver
+    to optimize the computation and communication for each distinct mask with the same dispatch solution
+
+    Args:
+        q_ranges (AttnRanges): the global query ranges
+        k_ranges (AttnRanges): the global key ranges
+        attn_mask_type (str | AttnMaskType | list[str | AttnMaskType]):
+            the global attn mask type (list)
+            represented by str or enum ``AttnMaskType`` or their mixed combination
+
+        key_for_dispatch (DistAttnRuntimeKey): the key used for dispatch
+
+        dist_attn_config (DistAttnConfig, optional): the optional new dist attn config,
+
+            NOTE: if not provided, we will use the same config as the ``key_for_dispatch``,
+            and if provided, the dispatch config of the new dist attn config won't be applied to the new mask
+
+    Returns:
+        DistAttnRuntimeKey: the new dist attn runtime key
+            for new mask with the same dispatch solution as the ``key_for_dispatch``
+
+    Example:
+        >>> import torch
+        >>> import torch.distributed as dist
+        >>> from magi_attention.api import magi_attn_flex_key, dispatch, undispatch, calc_attn
+        >>> from magi_attention.api import make_flex_key_for_new_mask_after_dispatch
+        >>> from magi_attention.api.functools import compute_pad_size
+        >>> from magi_attention.config import (
+        ...     DistAttnConfig,
+        ...     DispatchConfig,
+        ...     OverlapConfig,
+        ...     MinHeapDispatchAlg,
+        ...     UniformOverlapAlg
+        ... )
+        >>> from magi_attention.common.enum import AttnOverlapMode
+        >>> from magi_attention.common import AttnRanges
+        >>>
+        >>> # Generate a DistAttnRuntimeKey to dispatch for arbitrary mask represented by attn-slices
+        >>> # in the following case, we use a causal mask as the key for dispatch, thus it will consider
+        >>> # computation load-balance, communication optimization and computation-communication overlap
+        >>> # according to the causal mask pattern
+        >>> key_for_dispatch = magi_attn_flex_key(
+        ...     q_ranges=AttnRanges.from_ranges([[0, 4096]]),
+        ...     k_ranges=AttnRanges.from_ranges([[0, 4096]]),
+        ...     attn_mask_type="causal",
+        ...     total_seqlen_q=4096,
+        ...     total_seqlen_k=4096,
+        ...     pad_size=compute_pad_size(4096, 4, 512),  # seqlen, cp_size, chunk_size
+        ...     chunk_size=512,
+        ...     cp_group_or_mesh=dist.new_group(list(range(4)), backend="nccl"),
+        ...     is_same_source=True,
+        ...     is_q_permutable=True,
+        ...     is_k_permutable=True,
+        ...     dist_attn_config=DistAttnConfig(
+        ...         dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
+        ...         overlap_config=OverlapConfig(
+        ...             enable=True,
+        ...             mode=AttnOverlapMode.STATIC,
+        ...             degree=2,
+        ...             min_chunk_size=512,
+        ...             max_num_chunks=64,
+        ...             alg=UniformOverlapAlg(),
+        ...         ),
+        ...     ),
+        ... )
+        >>>
+        >>> # Dispatch several tensors with the same key_for_dispatch
+        >>> local_x, local_label, local_rope = [
+        ...     dispatch(tensor, key_for_dispatch)
+        ...     for tensor in [total_x, total_label, total_rope]
+        ... ]
+        >>>
+        >>> # Make a new dist attn runtime key from key_for_dispatch
+        >>> # for a new mask, such as a sliding window causal mask below,
+        >>> # with the same dispatch solution as the causal mask used for dispatch,
+        >>> # i.e. this new key share the same dispatch meta as key_for_dispatch
+        >>> # but it can handle the computation and communication of the new mask
+        >>> # and calculate attn correctly as well, though no optimization is applied for now
+        >>> new_key_for_swa_mask = make_flex_key_for_new_mask_after_dispatch(
+        ...     q_ranges=AttnRanges.from_ranges([[0, 512], [512, 4096]]),
+        ...     k_ranges=AttnRanges.from_ranges([[0, 512], [0, 4096]]),
+        ...     attn_mask_type=["causal", "bi_causal"], # sliding window causal mask
+        ...     key_for_dispatch=key_for_dispatch,
+        ... )
+        >>>
+        >>> # Apply QKV projection
+        >>> local_q, local_k, local_v = q_project(local_x), k_project(local_x), v_project(local_x)
+        >>>
+        >>> # Calculate local attention for the mask used to dispatch with key_for_dispatch
+        >>> local_out1, _ = calc_attn(local_q, local_k, local_v, key_for_dispatch)
+        >>>
+        >>> # Calculate local attention for the new swa mask with the new key
+        >>> # w/o undispatching back and dispatching again to avoid OOM
+        >>> local_out2, _ = calc_attn(local_q, local_k, local_v, new_key_for_swa_mask)
+        >>>
+        >>> # Gather local attention outputs to total output if needed
+        >>> total_out1 = undispatch(local_out1, key_for_dispatch)
+        >>> total_out2 = undispatch(local_out2, new_key_for_swa_mask)
+    """
+    # validate and transform attn_mask_type
+    attn_mask_type = wrap_to_list(attn_mask_type, broadcast_to_length=q_ranges.size)
+    assert is_list_type_all(attn_mask_type, (str, AttnMaskType)), (
+        f"attn_mask_type must be a list of str or AttnMaskType or their mixed combination, "
+        f"but got {attn_mask_type=}"
+    )
+    attn_mask_type = [  # transform str to AttnMaskType, might raise ValueError
+        AttnMaskType(type_name) for type_name in attn_mask_type
+    ]
+    assert len(attn_mask_type) == len(q_ranges), (
+        f"the length of attn_mask_type must be same as q_ranges, "
+        f"but got {len(attn_mask_type)=} and {len(q_ranges)=}"
+    )
+
+    # extract the common attributes from the key for dispatch
+    total_seqlen_q = key_for_dispatch.total_seqlen_q  # already padded
+    total_seqlen_k = key_for_dispatch.total_seqlen_k  # already padded
+    pad_size = key_for_dispatch.pad_size
+    chunk_size = key_for_dispatch.chunk_size
+    cp_group = key_for_dispatch.cp_group
+    cp_mesh = key_for_dispatch.cp_mesh
+    new_dist_attn_config = DistAttnConfig(
+        dispatch_config=key_for_dispatch.dist_attn_config.dispatch_config,  # reuse the dispatch config
+        overlap_config=dist_attn_config.overlap_config
+        if dist_attn_config is not None
+        else key_for_dispatch.dist_attn_config.overlap_config,
+    )
+
+    # extract the common attributes from the mgr for dispatch
+    mgr = dist_attn_runtime_dict.get(key_for_dispatch)
+    if mgr is None:
+        raise ValueError("The dist attn runtime key for dispatch does not exist!")
+    ref_dispatch_meta_q = mgr.dispatch_meta_q
+    ref_dispatch_meta_k = mgr.dispatch_meta_k
+    is_same_source = mgr.is_same_source
+    is_q_permutable = mgr.is_q_permutable
+    is_k_permutable = mgr.is_k_permutable
+
+    # apply padding
+    if pad_size > 0:
+        # apply padding to the new mask with the empty slice
+        q_ranges, k_ranges, attn_mask_type = apply_padding(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            total_seqlen=total_seqlen_q - pad_size,
+            pad_size=pad_size,
+        )
+
+    # init new dist attn runtime key
+    new_key = init_dist_attn_runtime_key(
+        q_ranges=q_ranges,
+        k_ranges=k_ranges,
+        attn_mask_type=attn_mask_type,
+        total_seqlen_q=total_seqlen_q,
+        total_seqlen_k=total_seqlen_k,
+        pad_size=pad_size,
+        chunk_size=chunk_size,
+        cp_group=cp_group,
+        cp_mesh=cp_mesh,
+        dist_attn_config=new_dist_attn_config,
+    )
+
+    # init new dist attn runtime mgr and map it to the new key
+    if new_key not in dist_attn_runtime_dict.keys():
+        dist_attn_runtime_dict[new_key] = init_dist_attn_runtime_mgr(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            chunk_size=chunk_size,
+            cp_group=cp_group,
+            is_same_source=is_same_source,
+            is_q_permutable=is_q_permutable,
+            is_k_permutable=is_k_permutable,
+            dist_attn_config=new_dist_attn_config,
+            cp_mesh=cp_mesh,
+            ref_dispatch_meta_q=ref_dispatch_meta_q,
+            ref_dispatch_meta_k=ref_dispatch_meta_k,
+        )
+
+    return new_key

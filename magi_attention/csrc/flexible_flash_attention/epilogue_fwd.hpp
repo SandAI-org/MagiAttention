@@ -340,13 +340,6 @@ struct CollectiveEpilogueFwd {
       int thread_idx,
       BlockCoordType const& block_coord,
       flash::DistributedSeqlenInfo& seqlen_info) {
-    // if (threadIdx.x == 128) {
-    //   print("kBytePerRow\t\t"); print(kBytePerRow); print("\n");
-    //   print("kBlockKGmem\t\t"); print(kBlockKGmem); print("\n");
-    //   print("kGmemElemsPerStore\t\t"); print(kGmemElemsPerStore); print("\n");
-    //   print("kGmemThreadsPerRow\t\t"); print(kGmemThreadsPerRow); print("\n");
-    //   print("GmemLayoutAtom\t\t"); print(GmemLayoutAtom{}); print("\n");
-    // }
     // Get block coordinates for current job(tile)
     int m_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);

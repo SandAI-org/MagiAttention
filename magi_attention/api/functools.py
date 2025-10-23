@@ -76,7 +76,7 @@ def infer_varlen_mask_from_batch(
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
-            A pair of 1D tensors (cu_seqlens_q, cu_seqlens_k), each of shape (batch_size + 1,),
+            A pair of 1D tensors (cu_seqlens_q, cu_seqlens_k), each of shape ``[batch_size + 1,]``,
             representing the cumulative sequence lengths for the queries and keys respectively.
     """
     cu_seqlens_q = torch.arange(0, batch_size + 1) * seq_len
@@ -99,9 +99,9 @@ def pad_at_dim(
         x (torch.Tensor): Input tensor to be padded.
         dim (int): The dimension along which to apply padding.
         pad_size (int): The number of values to pad.
-        value (float, optional): The padding value. Default is 0.
-        side (str, optional): Side on which to apply the padding, either "left" or "right".
-            Default is "right".
+        value (float, optional): The padding value. Defaults to ``0.0``.
+        side (str, optional): Side on which to apply the padding, either ``left`` or ``right``.
+            Defaults to ``right``.
 
     Returns:
         torch.Tensor: The padded tensor with the same number of dimensions as the input.
@@ -337,7 +337,7 @@ def infer_attn_mask_from_cu_seqlens(
     Args:
         cu_seqlens_q (torch.Tensor): cumulative sequence lengths for queries
         cu_seqlens_k (torch.Tensor): cumulative sequence lengths for keys
-        causal (bool, optional): whether the varlen attention mask is causal. Defaults to False.
+        causal (bool, optional): whether the varlen attention mask is causal. Defaults to ``False``.
         window_size (tuple[int, int], optional): window_size of sliding window mask
             which represents ``[window_size_left, window_size_right]``. The parameter is effective only
             when ``causal`` is ``False``; when ``causal`` is ``True``, it is required to be ``(-1, -1)``.

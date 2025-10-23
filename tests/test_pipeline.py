@@ -25,11 +25,13 @@ from torch.testing._internal.common_utils import run_tests
 import magi_attention
 import magi_attention.testing
 from magi_attention import init_dist_attn_runtime_mgr
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
     DistAttnConfig,
+    GrpCollConfig,
     MinHeapDispatchAlg,
     OverlapConfig,
     UniformOverlapAlg,
@@ -102,13 +104,35 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         else:
             self.device_mesh = None
 
+        # -----    set up for native grpcoll   ---- #
+
+        if magi_attention.comm.is_native_grpcoll_enable():
+            if self.world_size in (2, 4, 8):
+                for nccl_group in self.nccl_groups:
+                    grpcoll_mgr.register_buffer(
+                        group=nccl_group,
+                        config=GrpCollConfig(
+                            num_nvl_bytes=int(2e9)
+                            * self.world_size
+                            // 8,  # 2GB for 8 ranks
+                        ),
+                    )
+                    grpcoll_mgr.check_registered(group=nccl_group)
+
+    def destroy_pg(self):
+        # -----    clean up for native grpcoll   ---- #
+
+        if magi_attention.comm.is_native_grpcoll_enable():
+            if self.world_size in (2, 4, 8):
+                for nccl_group in self.nccl_groups:
+                    grpcoll_mgr.release_buffer(group=nccl_group)
+                    grpcoll_mgr.check_released(group=nccl_group)
+
+        super().destroy_pg()
+
     @property
     def device(self) -> int:
         return torch.cuda.current_device()
-
-    @property
-    def process_group(self):
-        return dist.distributed_c10d._get_default_group()
 
     @property
     def nccl_group(self) -> dist.ProcessGroup:
@@ -445,7 +469,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     )
     @parameterize(
         "num_heads",
-        [(6, 6), (6, 2)],  # mha  # gqa
+        [
+            (6, 6),  # mha
+            (6, 2),  # gqa
+        ],
     )
     @parameterize(
         "head_dim",
@@ -501,6 +528,20 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if overlap_config[NAME] != "disable_mso":
                 return
 
+        # -----    skip for native grpcoll   ---- #
+
+        if magi_attention.comm.is_native_grpcoll_enable():
+            # TODO: support other dtypes besides bf16
+            if dtype != torch.bfloat16:
+                return
+            # TODO: support other world sizes
+            if self.world_size not in (2, 4, 8):
+                return
+            # FIXME: figure out the alignment requirement
+            hidden_size_kv = num_heads[1] * head_dim
+            if hidden_size_kv % 256 != 0:
+                return
+
         # -----    construct test case name   ---- #
 
         assert (
@@ -513,6 +554,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}]"
         )
+        test_case_seed = str2seed(test_case)
 
         # -----    contruct config from test cases   ---- #
 
@@ -522,7 +564,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         if random_type_mapping:
             # NOTE: to test causal mapping, we design a mode to just use random `attn_type_mapping`
             # instead of hard-coded config in the test cases
-            with sync_rng(seed=str2seed(test_case)):
+            with sync_rng(seed=test_case_seed):
                 attn_type_mapping = [
                     random.choice([0, 1, 2, 3]) for _ in attn_type_mapping
                 ]
@@ -542,6 +584,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_seqlen_k: int = attn_config["total_seqlen_k"]
         chunk_size: int = attn_config["chunk_size"]
         num_heads_q, num_heads_kv = num_heads
+        softmax_scale = (  # choose softmax_scale by rule
+            None if test_case_seed % 2 == 0 else (1 / head_dim)
+        )
+        softcap = 0.0  # not supported for test
 
         dist_attn_config = DistAttnConfig(
             dispatch_config=DispatchConfig(
@@ -568,19 +614,16 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     corr_factor=get_a2a_corr_factor(self.world_size),
                 ),
             ),
+            # NOTE: this config is useless for this test
+            # since we already register/release buffer in `init_pg`/`destroy_pg`
+            grpcoll_config=GrpCollConfig(),
         )
 
         # -----   init attn_mask_type ----- #
 
-        attn_mask_type = [
-            {
-                0: AttnMaskType.FULL,
-                1: AttnMaskType.CAUSAL,
-                2: AttnMaskType.INVCAUSAL,
-                3: AttnMaskType.BICAUSAL,
-            }[i]
-            for i in attn_type_mapping
-        ]
+        attn_mask_type: list[AttnMaskType] = list(
+            map(AttnMaskType.from_int_type, attn_type_mapping)
+        )
 
         # -----    run pipeline test   ---- #
 
@@ -662,7 +705,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dist.barrier()
                 torch.cuda.synchronize()
 
-            local_out, _ = dist_attn_runtime_mgr.calc_attn(local_q, local_k, local_v)
+            local_out, _ = dist_attn_runtime_mgr.calc_attn(
+                q=local_q,
+                k=local_k,
+                v=local_v,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+            )
 
             # -----   undispatch local o to global o   ---- #
 
@@ -696,12 +745,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if not self.profile_mode:
                 # -----   assert close to torch ref   ---- #
 
-                self.assert_close_to_torch_ref(
+                self._assert_close_to_torch_ref(
                     q_ranges=q_ranges,
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_mapping,
                     total_seqlen_q=total_seqlen_q,
                     total_seqlen_k=total_seqlen_k,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
                     total_q=total_q,
                     total_k=total_k,
                     total_v=total_v,
@@ -715,13 +766,15 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     test_case=test_case,
                 )
 
-    def assert_close_to_torch_ref(
+    def _assert_close_to_torch_ref(
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
         attn_type_map: list[int],
         total_seqlen_q: int,
         total_seqlen_k: int,
+        softmax_scale: float | None,
+        softcap: float,
         total_q: torch.Tensor,
         total_k: torch.Tensor,
         total_v: torch.Tensor,
@@ -773,6 +826,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             k=total_k,
             v=total_v,
             mask=mask,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
             layout="thd",
             high_precision=True,
         )
@@ -798,6 +853,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             k=total_k,
             v=total_v,
             mask=mask,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
             layout="thd",
             high_precision=False,
         )

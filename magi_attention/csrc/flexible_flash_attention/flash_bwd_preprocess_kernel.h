@@ -34,22 +34,17 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_,
-          class Element,
-          class ElementAccum,
-          class ArchTag_,
-          bool Clear_dQ,
-          bool Clear_dK,
-          bool Clear_dV>
+template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQ, bool Clear_dK, bool Clear_dV>
 class FlashAttnBwdPreprocess {
  public:
   // Type Aliases
   using TileShape_MK = TileShape_MK_;
   using ArchTag = ArchTag_;
 
-  static_assert(std::is_same_v<Element, cutlass::half_t> && ArchTag::kMinComputeCapability >= 75 ||
-                std::is_same_v<Element, cutlass::bfloat16_t> && ArchTag::kMinComputeCapability >= 80 ||
-                std::is_same_v<Element, cutlass::float_e4m3_t> && ArchTag::kMinComputeCapability >= 89);
+  static_assert(
+      std::is_same_v<Element, cutlass::half_t> && ArchTag::kMinComputeCapability >= 75 ||
+      std::is_same_v<Element, cutlass::bfloat16_t> && ArchTag::kMinComputeCapability >= 80 ||
+      std::is_same_v<Element, cutlass::float_e4m3_t> && ArchTag::kMinComputeCapability >= 89);
 
   static constexpr uint32_t MaxThreadsPerBlock = 256;
   static constexpr uint32_t MinBlocksPerMultiprocessor = 2;
@@ -63,28 +58,25 @@ class FlashAttnBwdPreprocess {
   // it's just between threads in the same warp
   static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
   static constexpr int kGmemThreadsPerRow = kBlockKGmem / kGmemElemsPerLoad;
-  static_assert(MaxThreadsPerBlock % kGmemThreadsPerRow == 0,
-                "MaxThreadsPerBlock must be a multiple of kGmemThreadsPerRow");
-  using GmemLayoutAtom = Layout<Shape<Int<MaxThreadsPerBlock / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
-                                Stride<Int<kGmemThreadsPerRow>, _1>>;
-  using GmemTiledCopy =
-      decltype(make_tiled_copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
-                               GmemLayoutAtom{},
-                               Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per load
+  static_assert(MaxThreadsPerBlock % kGmemThreadsPerRow == 0, "MaxThreadsPerBlock must be a multiple of kGmemThreadsPerRow");
+  using GmemLayoutAtom = Layout<Shape<Int<MaxThreadsPerBlock / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
+  using GmemTiledCopy = decltype(make_tiled_copy(
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, Element>{},
+      GmemLayoutAtom{},
+      Layout<Shape<_1, Int<kGmemElemsPerLoad>>>{})); // Val layout, 8 or 16 vals per load
 
   static constexpr int kGmemElemsPerLoadAccum = sizeof(cute::uint128_t) / sizeof(ElementAccum);
-  static_assert((kBlockM * kHeadDim / kGmemElemsPerLoadAccum) % MaxThreadsPerBlock == 0,
-                "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoadAccum");
+  static_assert((kBlockM * kHeadDim / kGmemElemsPerLoadAccum) % MaxThreadsPerBlock == 0, "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoadAccum");
   using GmemLayoutAtomAccum = Layout<Shape<Int<MaxThreadsPerBlock>>>;
-  using GmemTiledCopyAccum =
-      decltype(make_tiled_copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
-                               GmemLayoutAtomAccum{},
-                               Layout<Shape<Int<kGmemElemsPerLoadAccum>>>{})); // Val layout, 4 vals per store
+  using GmemTiledCopyAccum = decltype(make_tiled_copy(
+      Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
+      GmemLayoutAtomAccum{},
+      Layout<Shape<Int<kGmemElemsPerLoadAccum>>>{})); // Val layout, 4 vals per store
 
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen_q, d, head)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
-  using ShapedPsum = cute::Shape<int32_t, int32_t, int32_t>; // (max_seqlen_q, head, batch)
-  using StridedPsum = cute::Stride<_1, int64_t, int64_t>;
+  using ShapedPsum = cute::Shape<_4, int32_t, int32_t>; // (4, total_seqlen, head)
+  using StridedPsum = cute::Stride<_1, _4, int64_t>;
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (total_q, head)
   using StrideLSE = cute::Stride<int64_t, _1>;
 
@@ -105,6 +97,8 @@ class FlashAttnBwdPreprocess {
     StridedPsum const stride_LSE_log2;
     int2 const* q_ranges;
     int2 const* k_ranges;
+    int const total_q;
+    int const total_q_rounded;
   };
 
   // Kernel entry point API
@@ -124,6 +118,8 @@ class FlashAttnBwdPreprocess {
     StridedPsum const stride_LSE_log2;
     int2 const* q_ranges = nullptr;
     int2 const* k_ranges = nullptr;
+    int const total_q;
+    int const total_q_rounded;
   };
 
   // Convert to underlying arguments. In this case, a simple copy for the aliased type.
@@ -144,6 +140,8 @@ class FlashAttnBwdPreprocess {
         args.stride_LSE_log2,
         args.q_ranges,
         args.k_ranges,
+        args.total_q,
+        args.total_q_rounded,
     };
   }
 
@@ -163,40 +161,22 @@ class FlashAttnBwdPreprocess {
      * kernel-launch error. What's worse, this error may not be explicitly raised, resulting in the kernel being
      * skipped.
      */
-    // int const m_block = blockIdx.x;
-    // int const bidh = blockIdx.y;
-    // int const bidb = blockIdx.z;
     int const m_block = blockIdx.y;
     int const bidh = blockIdx.z;
-    int const bidb = blockIdx.x;
-
-    // Initialize the seqlen info
-    flash::DistributedSeqlenInfo seqlen_info(bidb, params.q_ranges, params.k_ranges);
-    int const seqlen_o = seqlen_info.seqlen_q;
-
-    // Early return if the current block is out of range
-    if (m_block * kBlockM >= seqlen_o) {
-      return;
-    }
 
     // TODO: remove to params
     // auto shape_LSE = select<0, 2>(params.shape_O);
-
     // Initialize the tensors for O, dO, and LSE
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
-    Tensor gO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mO),
-                           TileShape_MK{},
-                           make_coord(m_block, _0{})); // (M, K)
-    Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh);
-    Tensor gdO = local_tile(cute::domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdO),
-                            TileShape_MK{},
-                            make_coord(m_block, _0{})); // (M, K)
-    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
-    Tensor gLSE = local_tile(
-        cute::domain_offset(make_coord(seqlen_info.offset_q), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
+    Tensor gO = local_tile(cute::domain_offset(make_coord(0, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
 
-    // REVIEW(littsk): why use infinity here, instead of -infinity ?
-    float lse = thread_idx < seqlen_o - m_block * kBlockM && thread_idx < kBlockM ? gLSE(thread_idx) : INFINITY;
+    Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh);
+    Tensor gdO = local_tile(cute::domain_offset(make_coord(0, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
+    Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
+    Tensor gLSE = local_tile(cute::domain_offset(make_coord(0), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block));
+
+    // mask the oob lse as INFINITY.
+    float lse = thread_idx < params.total_q - m_block * kBlockM && thread_idx < kBlockM ? gLSE(thread_idx) : INFINITY;
 
     // Initialize the tiled copy for O and dO
     GmemTiledCopy gmem_tiled_copy_O;
@@ -220,9 +200,9 @@ class FlashAttnBwdPreprocess {
     Tensor tOrO = make_fragment_like(tOgO);
     Tensor tOrdO = make_fragment_like(tOgdO);
     flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true, /*Clearn_OOB_K=*/true>(
-        gmem_tiled_copy_O, tOgO, tOrO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
+        gmem_tiled_copy_O, tOgO, tOrO, tOcO, tOpO, params.total_q - m_block * kBlockM);
     flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/true, /*Clearn_OOB_K=*/true>(
-        gmem_tiled_copy_O, tOgdO, tOrdO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
+        gmem_tiled_copy_O, tOgdO, tOrdO, tOcO, tOpO, params.total_q - m_block * kBlockM);
     // if (threadIdx.x == 222) { printf("bidx = %d, bidy = %d, bidz = %d, seqlen_o = %d, m_block = %d, seqlen_o -
     // m_block * kBlockM = %d, tOgO addr = %p\n", blockIdx.x, blockIdx.y, blockIdx.z, seqlen_o, m_block, seqlen_o -
     // m_block * kBlockM, &tOgO(0));}
@@ -248,23 +228,23 @@ class FlashAttnBwdPreprocess {
       dP_sum(mi) = flash::Allreduce<kGmemThreadsPerRow>::run(dP_sum_cur, sum_op);
     }
 
-    Tensor mdPsum =
-        make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(_, bidh, bidb);
+    Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_dPsum, params.stride_dPsum)(0, _, bidh); // total_q
     Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block));
+
     if (get<1>(tOcO(_0{}, _0{}, _0{})) == 0) {
 #pragma unroll
       for (int mi = 0; mi < size(dP_sum); ++mi) {
         int const row = get<0>(tOcO(_0{}, mi, _0{}));
-        gdPsum(row) = row < seqlen_o - m_block * kBlockM ? dP_sum(mi) : 0;
+        gdPsum(row) = row < params.total_q - m_block * kBlockM ? dP_sum(mi) : 0;
       }
     }
 
-    int const seqlen_rounded = cute::round_up(seqlen_o, kBlockM);
-    Tensor mLSElog2 =
-        make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(_, bidh, bidb);
-    Tensor gLSElog2 =
-        local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
-    if (thread_idx < seqlen_rounded - m_block * kBlockM && thread_idx < kBlockM) {
+    Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(0, _, bidh); // total_q
+    Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
+
+    // We should not write back -inf because the subsequent calculation of scores would involve -inf - (-inf), which
+    // results in NaN.
+    if (thread_idx < params.total_q_rounded - m_block * kBlockM && thread_idx < kBlockM) {
       gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
     }
 

@@ -756,13 +756,7 @@ struct CollectiveMainloopFwdSm90 {
 
     TiledMmaQK_Active tiled_mma_qk;
     TiledMmaPV_Active tiled_mma_pv;
-    // if (threadIdx.x == 128) {
-    // print("SmemLayoutP\n"); print(SmemLayoutP{}); print("\n");
-    // print("tiled_mma_qk\n"); print(tiled_mma_qk); print("\n");
-    // print("tiled_mma_pv\n"); print(tiled_mma_pv); print("\n");
-    // print_latex(tiled_mma_qk);
-    // print("NumMmaThreads"); print(NumMmaThreads); print("\n");
-    // }
+
     if constexpr (!MmaQK_is_RS) {
       static_assert(
           stride<0>(typename TiledMmaQK_Active::ALayout{}) == 0 and stride<0>(typename TiledMmaQK_Active::BLayout{}) == 0 and

@@ -32,6 +32,8 @@ def scatter_v(
     and return the scattered tensor 'x_scatter',
     if not equally split along the dim, then scatter indicated by the split sizes
 
+    NOTE: this primitive only supports sync op mode for now
+
     Args:
         x_global (torch.Tensor): the global tensor to be scattered
         group (dist.ProcessGroup): the process group to be used

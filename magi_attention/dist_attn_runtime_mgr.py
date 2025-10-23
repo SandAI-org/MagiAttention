@@ -22,17 +22,24 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention
+from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType, AttnRole
-from magi_attention.config import DistAttnConfig
+from magi_attention.config import (
+    DispatchConfig,
+    DistAttnConfig,
+    GrpCollConfig,
+    OverlapConfig,
+)
 from magi_attention.functional.dispatch import dispatch_func, undispatch_func
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta import (
-    calc_attn_meta_from_dispatch_meta,
-    calc_dispatch_meta_from_qk_ranges,
+    make_attn_meta_from_dispatch_meta,
+    make_dispatch_meta_from_qk_ranges,
 )
 from magi_attention.meta.collection import DispatchMeta
-from magi_attention.meta.collection.calc_meta import AttnArg
+from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
+from magi_attention.meta.collection.comm_meta import CommMeta
 from magi_attention.meta.solver.dist_attn_solver import (
     BaseDistAttnSolver,
     DistAttnSolver,
@@ -56,18 +63,18 @@ class DistAttnRuntimeKey:
     is_deterministic_mode_enable: bool
     is_hierarchical_comm_enable: bool
     is_qo_comm_enable: bool
+    is_native_grpcoll_enable: bool
 
 
 class DistAttnRuntimeMgr:
     def __init__(
         self,
-        cp_group: dist.ProcessGroup,
         dispatch_meta_q: DispatchMeta,
         dispatch_meta_k: DispatchMeta,
-        chunk_size: int,
         dist_attn_config: DistAttnConfig,
         attn_solver: BaseDistAttnSolver,
         dist_attn_runtime: DistAttnRuntime,
+        cp_group: dist.ProcessGroup,
         *,
         ref_q_ranges: AttnRanges,
         ref_k_ranges: AttnRanges,
@@ -78,7 +85,6 @@ class DistAttnRuntimeMgr:
         self.cp_group = cp_group
         self.dispatch_meta_q = dispatch_meta_q
         self.dispatch_meta_k = dispatch_meta_k
-        self.chunk_size = chunk_size
         self.dist_attn_config = dist_attn_config
         self.attn_solver = attn_solver
 
@@ -126,9 +132,21 @@ class DistAttnRuntimeMgr:
         return k_or_v
 
     def calc_attn(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        softmax_scale: float | None = None,
+        softcap: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return dist_attn_func(q, k, v, self.dist_attn_runtime)
+        return dist_attn_func(
+            q=q,
+            k=k,
+            v=v,
+            dist_attn_runtime=self.dist_attn_runtime,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
+        )
 
     def get_xattn_args(
         self,
@@ -249,7 +267,6 @@ class DistAttnRuntimeMgr:
         return (
             self.dispatch_meta_q,
             self.dispatch_meta_k,
-            self.chunk_size,
             self.dist_attn_config,
             self.attn_solver,
             self.dist_attn_runtime,
@@ -261,7 +278,6 @@ class DistAttnRuntimeMgr:
         ) == (
             other.dispatch_meta_q,
             other.dispatch_meta_k,
-            other.chunk_size,
             other.dist_attn_config,
             other.attn_solver,
             other.dist_attn_runtime,
@@ -276,13 +292,16 @@ class DistAttnRuntimeMgr:
 
 
 class DistAttnRuntimeDict(OrderedDict):
-    """A fixed-length dictionary that evicts the least recently used item (LRU policy) when capacity is exceeded"""
+    """
+    A fixed-length ordered dictionary to map DistAttnRuntimeKey to DistAttnRuntimeMgr
+    which evicts the least recently used item (LRU policy) when capacity is exceeded
+    """
 
     def __init__(self, max_size: int, *args, **kwargs):
         self.max_size = max_size
         super().__init__(*args, **kwargs)
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: DistAttnRuntimeKey, value: DistAttnRuntimeMgr):
         # If key exists, delete it first (to ensure it moves to end)
         if key in self:
             del self[key]
@@ -292,7 +311,7 @@ class DistAttnRuntimeDict(OrderedDict):
         # Insert new key-value pair (automatically added to end)
         super().__setitem__(key, value)
 
-    def get(self, key, default=None):
+    def get(self, key: DistAttnRuntimeKey, default=None) -> DistAttnRuntimeMgr | None:
         # Override get method to move accessed items to end (marking as recently used)
         if key in self:
             value = super().__getitem__(key)
@@ -301,7 +320,7 @@ class DistAttnRuntimeDict(OrderedDict):
             return value
         return default
 
-    def get_most_recent_key(self):
+    def get_most_recent_key(self) -> DistAttnRuntimeKey | None:
         """
         Gets and returns the most recently added or accessed key.
         If the dictionary is empty, returns None.
@@ -335,16 +354,39 @@ def init_dist_attn_runtime_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        # auto set other flags that might influence the runtime behavior
         is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
         is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
         is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
+        is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
     )
+
+
+def init_grpcoll_buffer(
+    comm_meta: CommMeta,
+    calc_meta: CalcMeta,
+    attn_solver: BaseDistAttnSolver,
+    grpcoll_config: GrpCollConfig,
+    cp_group: dist.ProcessGroup,
+) -> None:
+    if magi_attention.comm.is_native_grpcoll_enable():
+        if grpcoll_mgr.is_registered(cp_group):
+            # TODO: in the future, we might need to dynamically
+            # update the registered buffer according to the attn meta in the runtime
+            pass
+        else:
+            # TODO: in the future, we had better automatically decide
+            # the config to register the buffer similar to nccl
+            grpcoll_mgr.register_buffer(
+                group=cp_group,
+                config=grpcoll_config,
+            )
 
 
 def init_dist_attn_runtime_mgr(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
-    attn_mask_type: AttnMaskType | list[AttnMaskType],
+    attn_mask_type: list[AttnMaskType],
     total_seqlen_q: int,
     total_seqlen_k: int,
     chunk_size: int,
@@ -356,16 +398,18 @@ def init_dist_attn_runtime_mgr(
     cp_mesh: DeviceMesh | None = None,
     num_heads_q: int = 1,
     num_heads_kv: int = 1,
+    ref_dispatch_meta_q: DispatchMeta | None = None,
+    ref_dispatch_meta_k: DispatchMeta | None = None,
 ) -> DistAttnRuntimeMgr:
     """
 
     Args:
-        q_ranges (AttnRanges): global query ranges in the ref attn mask
-        k_ranges (AttnRanges): global key ranges in the ref attn mask
-        attn_mask_type (AttnMaskType | list[AttnMaskType]): attn mask type (list)
+        q_ranges (AttnRanges): the global query ranges
+        k_ranges (AttnRanges): the global key ranges
+        attn_mask_type (list[AttnMaskType]): the global attn mask type list
 
-        total_seqlen_q (int): the total seqlen of query (i.e. number of rows in the ref attn mask)
-        total_seqlen_k (int): the total seqlen of key (i.e. number of columns in the ref attn mask)
+        total_seqlen_q (int): the total seqlen of query
+        total_seqlen_k (int): the total seqlen of key
 
         chunk_size (int): chunk size to chunk the permutable tensor
 
@@ -399,7 +443,7 @@ def init_dist_attn_runtime_mgr(
         >>> dist_attn_runtime_mgr = init_dist_attn_runtime_mgr(
         ...     q_ranges=AttnRanges.from_ranges([[0, 2048], [2048, 4096]]),
         ...     k_ranges=AttnRanges.from_ranges([[0, 2048], [0, 4096]]),
-        ...     attn_mask_type=AttnMaskType.FULL,
+        ...     attn_mask_type=[AttnMaskType.FULL, AttnMaskType.CAUSAL],
         ...     total_seqlen_q=4096,
         ...     total_seqlen_k=4096,
         ...     chunk_size=512,
@@ -434,35 +478,61 @@ def init_dist_attn_runtime_mgr(
     cp_size = dist.get_world_size(cp_group)
     cp_rank = dist.get_rank(cp_group)
 
-    # calculate dispatch meta to determine which rank should hold which chunks of seqlen
-    dispatch_meta_q, dispatch_meta_k, attn_buckets = calc_dispatch_meta_from_qk_ranges(
-        q_ranges=q_ranges,
-        k_ranges=k_ranges,
-        attn_mask_type=attn_mask_type,
-        total_seqlen_q=total_seqlen_q,
-        total_seqlen_k=total_seqlen_k,
-        chunk_size=chunk_size,
-        cp_size=cp_size,
-        cp_rank=cp_rank,
-        dispatch_config=dist_attn_config.dispatch_config,
-        is_same_source=is_same_source,
-        is_q_permutable=is_q_permutable,
-        is_k_permutable=is_k_permutable,
-    )
+    # make dispatch meta
+    # to determine which rank should hold which chunks of seqlen
+    dispatch_config: DispatchConfig = dist_attn_config.dispatch_config
+    if ref_dispatch_meta_q is None or ref_dispatch_meta_k is None:
+        # NOTE: in final, the dispatch meta is NOT supposed to contain any meta info about the mask
+        # however, since in most of the distributed attention scenarios, the mask is static through the whole training pass
+        # we can take advantage of this information to offer a better dispatch solution if permutable
+        # so as to help reducing communication overhead while keep computation load-balance
+        # therefore here, we will also pass the actual or initial mask info to the dispatch solver
+        # as the arguments for some dispatch algorithms
+        (
+            dispatch_meta_q,
+            dispatch_meta_k,
+        ) = make_dispatch_meta_from_qk_ranges(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_mask_type=attn_mask_type,
+            total_seqlen_q=total_seqlen_q,
+            total_seqlen_k=total_seqlen_k,
+            chunk_size=chunk_size,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+            dispatch_config=dispatch_config,
+            is_same_source=is_same_source,
+            is_q_permutable=is_q_permutable,
+            is_k_permutable=is_k_permutable,
+        )
+    else:
+        dispatch_meta_q = ref_dispatch_meta_q
+        dispatch_meta_k = ref_dispatch_meta_k
 
-    # calculate comm meta and calc meta to organize the dist-attn calculation and communication
-    comm_meta, calc_meta, attn_solver = calc_attn_meta_from_dispatch_meta(
+    # make comm meta and calc meta
+    # to organize the dist-attn calculation and communication
+    overlap_config: OverlapConfig = dist_attn_config.overlap_config
+    comm_meta, calc_meta, attn_solver = make_attn_meta_from_dispatch_meta(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
         attn_mask_type=attn_mask_type,
         dispatch_meta_q=dispatch_meta_q,
         dispatch_meta_k=dispatch_meta_k,
-        bucket_per_rank=attn_buckets,
         cp_group=cp_group,
-        overlap_config=dist_attn_config.overlap_config,
+        overlap_config=overlap_config,
         cp_mesh=cp_mesh,
         num_heads_q=num_heads_q,
         num_heads_kv=num_heads_kv,
+    )
+
+    # init grpcoll buffer for native grpcoll kernels
+    grpcoll_config: GrpCollConfig = dist_attn_config.grpcoll_config
+    init_grpcoll_buffer(
+        comm_meta=comm_meta,
+        calc_meta=calc_meta,
+        attn_solver=attn_solver,
+        grpcoll_config=grpcoll_config,
+        cp_group=cp_group,
     )
 
     # init dist attn runtime
@@ -475,13 +545,12 @@ def init_dist_attn_runtime_mgr(
 
     # init dist attn runtime mgr
     dist_attn_runtime_mgr = DistAttnRuntimeMgr(
-        cp_group,
-        dispatch_meta_q,
-        dispatch_meta_k,
-        chunk_size,
-        dist_attn_config,
-        attn_solver,
-        dist_attn_runtime,
+        dispatch_meta_q=dispatch_meta_q,
+        dispatch_meta_k=dispatch_meta_k,
+        dist_attn_config=dist_attn_config,
+        attn_solver=attn_solver,
+        dist_attn_runtime=dist_attn_runtime,
+        cp_group=cp_group,
         ref_q_ranges=q_ranges,
         ref_k_ranges=k_ranges,
         is_same_source=is_same_source,

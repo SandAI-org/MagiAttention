@@ -1,7 +1,18 @@
 # Benchmark Experiments for MagiAttention
 
 
-## Kernel-Level Attention Performance and Flexibility
+## Attention Kernel Benchmark
+
+
+### Baseline Tests for Correctness
+
+basic running command:
+
+```bash
+pytest exps/attn/tests
+```
+
+### Normal Attention Performance and Flexibility
 
 TODO ... (add more instructions to reproduce the experiments)
 
@@ -13,7 +24,7 @@ cd exps/attn
 bash run_benchmark.sh
 ```
 
-## Kernel-Level Block Sparse Attention Performance
+### Block Sparse Attention Performance and Flexibility
 
 ```bash
 cd exps/attn
@@ -21,7 +32,18 @@ cd exps/attn
 bash run_block_sparse_benchmark.sh
 ```
 
-## Module-Level Distributed Attention Performance and Scalability
+## Distributed Attention Module Benchmark
+
+
+### Baseline Tests for Correctness
+
+basic running command:
+
+```bash
+pytest exps/dist_attn/tests
+```
+
+### Performance and Scalability
 
 TODO ... (add more instructions to reproduce the experiments)
 
@@ -30,19 +52,20 @@ basic running command:
 ```bash
 cd exps/dist_attn
 
-export PYTHONPATH="${PYTHONPATH}:/path/to/MagiAttention/"
-
 bash run_benchmark.sh
 ```
 
-## Baseline Tests for Correctness
+
+## Communication Kernel Benchmark
+
+### Native Group Collective Integration Tests and Performance Tuning
+
+TODO ... (add more instructions to reproduce the experiments)
 
 basic running command:
 
 ```bash
-cd exps/dist_attn/tests
+cd exps/grpcoll
 
-export PYTHONPATH="${PYTHONPATH}:/path/to/MagiAttention/"
-
-pytest test_baseline_attn.py
+bash run_grpcoll_test.sh
 ```

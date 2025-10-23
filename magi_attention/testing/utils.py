@@ -63,3 +63,11 @@ switch_deterministic_mode_context = partial(
 switch_deterministic_mode_decorator = switch_envvar_decorator(
     envvar_name="MAGI_ATTENTION_DETERMINISTIC_MODE"
 )
+
+enable_sdpa_backend_context = partial(
+    switch_envvar_context, envvar_name="MAGI_ATTENTION_SDPA_BACKEND"
+)
+
+enable_sdpa_backend_decorator = switch_envvar_decorator(
+    envvar_name="MAGI_ATTENTION_SDPA_BACKEND"
+)

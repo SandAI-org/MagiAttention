@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# TODO: move these to tools to avoid import magi_attention during setup
+
 from . import core, cpp_ext, env, utils
 
 __all__ = ["env", "core", "utils", "cpp_ext"]
