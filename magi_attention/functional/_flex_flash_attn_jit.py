@@ -244,7 +244,7 @@ def get_ffa_jit_spec(
 
         assert is_ffa_utils_installed, (
             "The `flexible_flash_attention_utils_cuda` "
-            "extension module is not installed."
+            "extension module is not installed. "
             "This is a required dependency for JIT compilation."
         )
         # add utils.so(Dynamic linking)
