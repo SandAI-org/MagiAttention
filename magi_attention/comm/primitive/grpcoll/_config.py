@@ -75,7 +75,7 @@ class GrpCollConfig:
         )
 
     @staticmethod
-    def get_default_dispatch_config(num_ranks: int) -> "GrpCollConfig":
+    def get_default_group_cast_config(num_ranks: int) -> "GrpCollConfig":
         """
         Get a recommended dispatch config.
 
@@ -103,7 +103,7 @@ class GrpCollConfig:
         return config_map[num_ranks]
 
     @staticmethod
-    def get_default_combine_config(num_ranks: int) -> "GrpCollConfig":
+    def get_default_group_reduce_config(num_ranks: int) -> "GrpCollConfig":
         """
         Get a recommended combine config.
 

@@ -396,7 +396,7 @@ class GrpCollBuffer:
         recv_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, GrpCollIntraHandle, EventOverlap]:
         """
-        Dispatch tokens to different ranks, both intranode and internode settings are supported.
+        Group cast tokens to different ranks, both intranode and internode settings are supported.
         Intranode kernels require all the ranks should be visible via NVLink.
         Internode kernels require the ranks in a node should be visible via NVLink, while the ranks with the same GPU
             index should be visible via RDMA.
@@ -445,7 +445,7 @@ class GrpCollBuffer:
 
         # Default config
         config = (
-            GrpCollConfig.get_default_dispatch_config(self.group_size)
+            GrpCollConfig.get_default_group_cast_config(self.group_size)
             if config is None
             else config
         )
@@ -498,7 +498,7 @@ class GrpCollBuffer:
         self,
         x: torch.Tensor,
         handle: GrpCollHandle,
-        combined_x: torch.Tensor | None = None,
+        reduced_x: torch.Tensor | None = None,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         pre_perm_idx: torch.Tensor | None = None,
@@ -507,10 +507,10 @@ class GrpCollBuffer:
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
         lse: torch.Tensor | None = None,
-        combined_lse: torch.Tensor | None = None,
+        reduced_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
         """
-        Combine (reduce) tokens (addition **without** weights) from different ranks, both intranode and internode
+        Group reduce tokens (addition **without** weights) from different ranks, both intranode and internode
             settings are supported.
         Intranode kernels require all the ranks should be visible via NVLink.
         Internode kernels require the ranks in a node should be visible via NVLink, while the ranks with the same GPU
@@ -519,12 +519,12 @@ class GrpCollBuffer:
         Arguments:
             x: `[num_tokens, hidden]` with `torch.bfloat16`, the tokens to send for reducing to its original ranks.
             handle: a must-set communication handle, you can obtain this from the dispatch function.
-            combined_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
+            reduced_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
             reduce_op (GroupReduceOp): the reduce operation to use. Defaults to "sum"
                 - "sum": sum reduction
                 - "avg": average reduction
                 - "lse": log-sum-exp weighted average reduction, with lse correction
-            acc_reduce (bool): whether to accumulate the reduction to the given combined_x buffer. Defaults to False.
+            acc_reduce (bool): whether to accumulate the reduction to the given reduced_x buffer. Defaults to False.
             config: the performance tuning config.
             previous_event: the event to wait before actually executing the kernel.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
@@ -533,29 +533,29 @@ class GrpCollBuffer:
             lse: the logsumexp of each token in `x` for each attention head,
                 with shape `[num_tokens, num_heads]`, to be sent along with `x`,
                 only required and used when `reduce_op` is "lse".
-            combined_lse: the logsumexp of each token in `combined_x` for each attention head,
-                with shape `[num_recv_tokens, num_heads]`, to be received and reduced along with `combined_x`,
+            reduced_lse: the logsumexp of each token in `reduced_x` for each attention head,
+                with shape `[num_recv_tokens, num_heads]`, to be received and reduced along with `reduced_x`,
                 when `reduce_op` is "lse".
 
         Returns:
-            combined_x: the reduced token from its dispatched ranks.
-            combined_lse: the reduced logsumexp of each token in `combined_x` for each attention head
+            reduced_x: the reduced token from its dispatched ranks.
+            reduced_lse: the reduced logsumexp of each token in `reduced_x` for each attention head
                 if `reduce_op` is "lse", otherwise `None`.
             event: the event after executing the kernel (valid only if `async_finish` is set).
         """
-        is_out_buf_given = combined_x is not None
+        is_out_buf_given = reduced_x is not None
 
         hidden_shape = x.shape[1:]
         hidden_size = math.prod(hidden_shape)
         if is_out_buf_given:
-            assert combined_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
+            assert reduced_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
                 "The hidden shape (except dim0) of input and output buffer should be the same, "
-                f"but got {x.shape=}, {combined_x.shape=}."  # type: ignore[union-attr]
+                f"but got {x.shape=}, {reduced_x.shape=}."  # type: ignore[union-attr]
             )
 
         # Default config
         config = (
-            GrpCollConfig.get_default_combine_config(self.group_size)
+            GrpCollConfig.get_default_group_reduce_config(self.group_size)
             if config is None
             else config
         )
@@ -563,13 +563,13 @@ class GrpCollBuffer:
         # View input/output to 2D shape
         x = x.view(-1, hidden_size)
         if is_out_buf_given:
-            combined_x = combined_x.view(-1, hidden_size)  # type: ignore[union-attr]
+            reduced_x = reduced_x.view(-1, hidden_size)  # type: ignore[union-attr]
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
             return self._internode_group_reduce(
                 x=x,
-                combined_x=combined_x,
+                reduced_x=reduced_x,
                 config=config,
                 handle=handle,
                 hidden_shape=hidden_shape,
@@ -580,13 +580,13 @@ class GrpCollBuffer:
                 async_finish=async_finish,
                 allocate_on_comm_stream=allocate_on_comm_stream,
                 lse=lse,
-                combined_lse=combined_lse,
+                reduced_lse=reduced_lse,
             )
 
         # Intranode
         return self._intranode_group_reduce(
             x=x,
-            combined_x=combined_x,
+            reduced_x=reduced_x,
             config=config,
             handle=handle,
             hidden_shape=hidden_shape,
@@ -597,7 +597,7 @@ class GrpCollBuffer:
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
             lse=lse,
-            combined_lse=combined_lse,
+            reduced_lse=reduced_lse,
         )
 
     def _intranode_group_cast(
@@ -692,7 +692,7 @@ class GrpCollBuffer:
     def _intranode_group_reduce(
         self,
         x: torch.Tensor,
-        combined_x: torch.Tensor | None,
+        reduced_x: torch.Tensor | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
@@ -703,7 +703,7 @@ class GrpCollBuffer:
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
         lse: torch.Tensor | None = None,
-        combined_lse: torch.Tensor | None = None,
+        reduced_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
         """Intranode group reduce implementation"""
 
@@ -713,18 +713,18 @@ class GrpCollBuffer:
             assert lse is not None, "lse should not be None when `reduce_op == lse`"
         else:  # no need to reduce lse, even passed in
             lse = None
-            combined_lse = None
+            reduced_lse = None
 
         # Launch the intranode group reduce kernel
         (
-            combined_x,
-            combined_lse,
+            reduced_x,
+            reduced_lse,
             event,
         ) = self.runtime.intranode_group_reduce(
             x,
-            combined_x,
+            reduced_x,
             lse,
-            combined_lse,
+            reduced_lse,
             pre_perm_idx,
             handle.recv_src_idx,  # src_idx
             handle.rank_prefix_matrix,  # rank_prefix_matrix
@@ -739,9 +739,9 @@ class GrpCollBuffer:
         )
 
         # View output to hidden shape
-        combined_x = combined_x.view(-1, *hidden_shape)
+        reduced_x = reduced_x.view(-1, *hidden_shape)
 
-        return (combined_x, combined_lse, EventOverlap(event))
+        return (reduced_x, reduced_lse, EventOverlap(event))
 
     def _internode_group_cast(
         self,
@@ -866,7 +866,7 @@ class GrpCollBuffer:
     def _internode_group_reduce(
         self,
         x: torch.Tensor,
-        combined_x: torch.Tensor | None,
+        reduced_x: torch.Tensor | None,
         config: GrpCollConfig,
         handle: GrpCollHandle,
         hidden_shape: torch.Size,
@@ -877,7 +877,7 @@ class GrpCollBuffer:
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
         lse: torch.Tensor | None = None,
-        combined_lse: torch.Tensor | None = None,
+        reduced_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
         """Internode group reduce implementation"""
 
@@ -892,20 +892,20 @@ class GrpCollBuffer:
             assert lse is not None, "lse should not be None when `reduce_op == lse`"
         else:  # no need to reduce lse, even passed in
             lse = None
-            # combined_lse = None
+            # reduced_lse = None
 
         # Launch the internode group reduce kernel
         (
-            combined_x,
+            reduced_x,
             event,
         ) = self.runtime.internode_group_reduce(
             x,
-            combined_x,
+            reduced_x,
             None,  # topk_weights
             None,  # bias_0
             None,  # bias_1
             handle.recv_src_meta,  # src_meta
-            handle.is_token_in_rank,  # is_combined_token_in_rank
+            handle.is_token_in_rank,  # is_reduced_token_in_rank
             handle.recv_rdma_channel_prefix_matrix,  # rdma_channel_prefix_matrix
             handle.recv_rdma_rank_prefix_sum,  # rdma_rank_prefix_sum
             handle.recv_gbl_channel_prefix_matrix,  # gbl_channel_prefix_matrix
@@ -920,9 +920,9 @@ class GrpCollBuffer:
         )
 
         # View output to hidden shape
-        combined_x = combined_x.view(-1, *hidden_shape)
+        reduced_x = reduced_x.view(-1, *hidden_shape)
 
-        return (combined_x, None, EventOverlap(event))  # combined_lse
+        return (reduced_x, None, EventOverlap(event))  # reduced_lse
 
     # NOTE: remain original low-latency interface here for future potential usage,
     # which won't be exposed to users for now, but guaranteed its compatibility internally

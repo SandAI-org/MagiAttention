@@ -621,7 +621,7 @@ def test_main(
                 # prepare combine args
                 combine_args = {
                     "x": x_combine,
-                    "combined_x": combined_x_gr_buf,
+                    "reduced_x": combined_x_gr_buf,
                     "handle": handle,
                     "config": config,
                     "async_finish": async_mode,
@@ -817,7 +817,7 @@ def test_main(
             )
             tune_args = {
                 "x": recv_x,
-                "combined_x": combined_x_buf,
+                "reduced_x": combined_x_buf,
                 "handle": handle,
                 "config": config,
                 "reduce_op": "sum",

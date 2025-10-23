@@ -807,7 +807,7 @@ def test_func(
     send_head_copy = send_head.clone()
     combine_args = {
         "x": x_combine,
-        "combined_x": combined_x_gr_buf,
+        "reduced_x": combined_x_gr_buf,
         "handle": handle,
         "config": config,
         "async_finish": async_mode,
@@ -816,7 +816,7 @@ def test_func(
         # NOTE: still perm_to_a2av_idx, instead of unperm_to_a2av_idx
         "pre_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
         "lse": lse_combine,
-        "combined_lse": combined_lse_gr_buf,
+        "reduced_lse": combined_lse_gr_buf,
     }
     if previous_mode:
         combine_args.update({"previous_event": buffer.capture()})
@@ -1101,7 +1101,7 @@ def test_main(
                 nvl_buffer_size=nvl_buffer_size,
             )
         else:  # Test default config as well
-            config = GrpCollConfig.get_default_dispatch_config(num_ranks)
+            config = GrpCollConfig.get_default_group_cast_config(num_ranks)
         tune_args = {
             "x": x,
             "handle": handle,
@@ -1181,10 +1181,10 @@ def test_main(
                 nvl_buffer_size=nvl_buffer_size,
             )
         else:  # Test default config as well
-            config = GrpCollConfig.get_default_combine_config(num_ranks)
+            config = GrpCollConfig.get_default_group_reduce_config(num_ranks)
         tune_args = {
             "x": recv_x,
-            "combined_x": combined_x_buf,
+            "reduced_x": combined_x_buf,
             "handle": handle,
             "config": config,
             "reduce_op": "sum",

@@ -419,7 +419,7 @@ Buffer::intranode_group_cast(
     channel_prefix_matrix = cached_channel_prefix_matrix.value();
 
     // Copy rank prefix matrix and clean flags
-    intranode::cached_notify_dispatch(
+    intranode::cached_notify_group_cast(
         /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
         /*num_memset_int=*/num_memset_int,
         /*buffer_ptrs=*/buffer_ptrs_gpu,
@@ -436,9 +436,9 @@ Buffer::intranode_group_cast(
     //  - Size prefix by ranks, shaped as `[num_ranks, num_ranks]`
     // NOTES: no more token dropping in this version
     *moe_recv_counter = -1;
-    // TODO: make notify_dispatch an individual buffer API
+    // TODO: make notify_group_cast an individual buffer API
     // to allow notifying in advance to enable cache mode amap
-    intranode::notify_dispatch(
+    intranode::notify_group_cast(
         /*num_tokens_per_rank=*/num_tokens_per_rank->data_ptr<int>(),
         /*moe_recv_counter_mapped=*/moe_recv_counter_mapped,
         /*num_ranks=*/num_ranks,
@@ -521,11 +521,11 @@ Buffer::intranode_group_cast(
           sizeof(int4) // max padding bytes to align for vectorized data buffer
       <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
 
-  // Launch dispatch kernel
-  /** FIXME: we find out the dispatch kernel cannot be picked until the ffa kernel is finished,
+  // Launch group_cast kernel
+  /** FIXME: we find out the group_cast kernel cannot be picked until the ffa kernel is finished,
    * if the ffa kernel is picked first and the sm_margin is not large enough
-   * e.g. if the dispatch kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 33 SMs,
-   * otherwise the dispatch kernel will wait until the ffa kernel is finished,
+   * e.g. if the group_cast kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 33 SMs,
+   * otherwise the group_cast kernel will wait until the ffa kernel is finished,
    * the same phenomenon happens with the combine kernel as well
    *
    * later, we've already figured out this phenomenon is due to
@@ -533,7 +533,7 @@ Buffer::intranode_group_cast(
    * and also cluster launch pattern (which requires the SMs in one cluster to belong to the same TPC or GPC),
    * but we don't know how to exactly fix this issue by now
    */
-  intranode::dispatch(
+  intranode::group_cast(
       /*recv_x=*/recv_x.data_ptr(),
       /*recv_lse=*/recv_lse_ptr,
       /*recv_src_idx=*/recv_src_idx.data_ptr<int>(),
@@ -585,9 +585,9 @@ Buffer::intranode_group_cast(
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::intranode_group_reduce(
     const torch::Tensor& x,
-    std::optional<torch::Tensor>& combined_x_buf,
+    std::optional<torch::Tensor>& reduced_x_buf,
     const std::optional<torch::Tensor>& lse,
-    std::optional<torch::Tensor>& combined_lse_buf,
+    std::optional<torch::Tensor>& reduced_lse_buf,
     const std::optional<torch::Tensor>& pre_perm_idx,
     const torch::Tensor& src_idx,
     const torch::Tensor& rank_prefix_matrix,
@@ -614,7 +614,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   int num_channels = config.num_sms / 2;
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
-  auto num_combined_tokens = static_cast<int>(send_head.size(0));
+  auto num_reduced_tokens = static_cast<int>(send_head.size(0));
   GRPCOLL_HOST_ASSERT(src_idx.size(0) == num_tokens);
   GRPCOLL_HOST_ASSERT(send_head.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(rank_prefix_matrix.size(0) == num_ranks and rank_prefix_matrix.size(1) == num_ranks);
@@ -638,9 +638,9 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   }
 
   int num_heads = 0; // NOTES: when `reduce_op != ReduceOp::LSE`, num_heads is set to 0 and consumes empty buffer
-  auto combined_lse = std::optional<torch::Tensor>();
+  auto reduced_lse = std::optional<torch::Tensor>();
   float* lse_ptr = nullptr;
-  float* combined_lse_ptr = nullptr;
+  float* reduced_lse_ptr = nullptr;
   int64_t* pre_perm_idx_ptr = nullptr;
   if (lse.has_value()) {
     GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::LSE); // no point to transfer lse if reduce_op != ReduceOp::LSE
@@ -650,24 +650,24 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     num_heads = static_cast<int>(lse->size(1));
     lse_ptr = lse->data_ptr<float>();
 
-    if (combined_lse_buf.has_value()) {
-      GRPCOLL_HOST_ASSERT(combined_lse_buf->dim() == 2 and combined_lse_buf->is_contiguous());
-      GRPCOLL_HOST_ASSERT(combined_lse_buf->scalar_type() == lse->scalar_type());
-      GRPCOLL_HOST_ASSERT(combined_lse_buf->size(0) == num_combined_tokens && combined_lse_buf->size(1) == num_heads);
-      combined_lse.emplace(combined_lse_buf.value());
+    if (reduced_lse_buf.has_value()) {
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->dim() == 2 and reduced_lse_buf->is_contiguous());
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->scalar_type() == lse->scalar_type());
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->size(0) == num_reduced_tokens && reduced_lse_buf->size(1) == num_heads);
+      reduced_lse.emplace(reduced_lse_buf.value());
     } else {
-      GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if combined_lse_buf is not provided
+      GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if reduced_lse_buf is not provided
       /** NOTE: different from ep, for group-reduce with reduce_op == ReduceOp::LSE,
-       * some token in combined_lse might not reduce anything,
+       * some token in reduced_lse might not reduce anything,
        * since the corr. token has no destination rank in the corr. group-cast
-       * so we have to "-inf"-initialize combined_lse, instead of empty initialization
-       * however, we handle the "-inf" initialization inside the combine kernel
+       * so we have to "-inf"-initialize reduced_lse, instead of empty initialization
+       * however, we handle the "-inf" initialization inside the group_reduce kernel
        * thus here, we still use empty initialization
        */
-      combined_lse = torch::empty({num_combined_tokens, num_heads}, lse->options());
+      reduced_lse = torch::empty({num_reduced_tokens, num_heads}, lse->options());
     }
 
-    combined_lse_ptr = combined_lse->data_ptr<float>();
+    reduced_lse_ptr = reduced_lse->data_ptr<float>();
   } else {
     GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE); // lse must be provided when reduce_op == ReduceOp::LSE
   }
@@ -679,36 +679,36 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   }
 
   // Launch barrier and reset queue head and tail
-  // TODO: support notify_combine when the combine kernel is individually used
-  // without relying on the symmetric dispatch called first and necessary handle given
-  intranode::cached_notify_combine(
+  // TODO: support notify_group_reduce when the group_reduce kernel is individually used
+  // without relying on the symmetric group_cast called first and necessary handle given
+  intranode::cached_notify_group_reduce(
       /*buffer_ptrs=*/buffer_ptrs_gpu,
       /*send_head=*/send_head.data_ptr<int>(),
       /*num_channels=*/num_channels,
-      /*num_recv_tokens=*/num_combined_tokens,
+      /*num_recv_tokens=*/num_reduced_tokens,
       /*num_memset_int=*/num_channels * num_ranks * 2,
       /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
       /*rank=*/rank,
       /*num_ranks=*/num_ranks,
       /*comm_stream=*/comm_stream);
 
-  // Allocate combined_x buffer
-  auto combined_x = torch::Tensor();
-  if (combined_x_buf.has_value()) {
-    GRPCOLL_HOST_ASSERT(combined_x_buf->dim() == 2 and combined_x_buf->is_contiguous());
-    GRPCOLL_HOST_ASSERT(combined_x_buf->scalar_type() == x.scalar_type());
-    GRPCOLL_HOST_ASSERT(combined_x_buf->size(0) == num_combined_tokens and combined_x_buf->size(1) == hidden_size);
-    combined_x = combined_x_buf.value();
+  // Allocate reduced_x buffer
+  auto reduced_x = torch::Tensor();
+  if (reduced_x_buf.has_value()) {
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->dim() == 2 and reduced_x_buf->is_contiguous());
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->scalar_type() == x.scalar_type());
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->size(0) == num_reduced_tokens and reduced_x_buf->size(1) == hidden_size);
+    reduced_x = reduced_x_buf.value();
   } else {
-    GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if combined_x_buf is not provided
+    GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if reduced_x_buf is not provided
     /** NOTE: different from ep, for group-reduce,
-     * some token in combined_x might not reduce anything,
+     * some token in reduced_x might not reduce anything,
      * since the corr. token has no destination rank in the corr. group-cast
-     * so we have to zero-initialize combined_x, instead of empty initialization
-     * however, we handle the zero initialization inside the combine kernel
+     * so we have to zero-initialize reduced_x, instead of empty initialization
+     * however, we handle the zero initialization inside the group_reduce kernel
      * thus here, we still use empty initialization
      */
-    combined_x = torch::empty({num_combined_tokens, hidden_size}, x.options());
+    reduced_x = torch::empty({num_reduced_tokens, hidden_size}, x.options());
   }
 
   // Check if the buffer size is enough
@@ -720,23 +720,23 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
           sizeof(int4) // max padding bytes to align for vectorized data buffer
       <= num_nvl_bytes);
 
-  // Launch combine kernel
-  /** FIXME: we find out the combine kernel cannot be picked until the ffa kernel is finished,
+  // Launch group_reduce kernel
+  /** FIXME: we find out the group_reduce kernel cannot be picked until the ffa kernel is finished,
    * if the ffa kernel is picked first and the sm_margin is not large enough
-   * e.g. if the combine kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 33 SMs,
-   * otherwise the combine kernel will wait until the ffa kernel is finished,
-   * the same phenomenon happens with the dispatch kernel as well
+   * e.g. if the group_reduce kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 33 SMs,
+   * otherwise the group_reduce kernel will wait until the ffa kernel is finished,
+   * the same phenomenon happens with the group_cast kernel as well
    *
    * later, we've already figured out this phenomenon is due to
    * both cooperative launch pattern (which at least requires 24 SMs to be launched at the same time),
    * and also cluster launch pattern (which requires the SMs in one cluster to belong to the same TPC or GPC),
    * but we don't know how to exactly fix this issue by now
    */
-  intranode::combine(
+  intranode::group_reduce(
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
       /*reduce_op=*/reduce_op_,
-      /*combined_x=*/combined_x.data_ptr(),
-      /*combined_lse=*/combined_lse_ptr,
+      /*reduced_x=*/reduced_x.data_ptr(),
+      /*reduced_lse=*/reduced_lse_ptr,
       /*x=*/x.data_ptr(),
       /*lse=*/lse_ptr,
       /*pre_perm_idx=*/pre_perm_idx_ptr,
@@ -745,7 +745,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
       /*send_head=*/send_head.data_ptr<int>(),
       /*num_tokens=*/num_tokens,
-      /*num_recv_tokens=*/num_combined_tokens,
+      /*num_recv_tokens=*/num_reduced_tokens,
       /*hidden_size=*/hidden_size,
       /*num_heads=*/num_heads,
       /*buffer_ptrs=*/buffer_ptrs_gpu,
@@ -762,13 +762,13 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   if (async) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     // record tensors
-    for (auto& t : {x, combined_x, src_idx, send_head, rank_prefix_matrix, channel_prefix_matrix}) {
+    for (auto& t : {x, reduced_x, src_idx, send_head, rank_prefix_matrix, channel_prefix_matrix}) {
       t.record_stream(comm_stream);
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
     }
     // record optional tensors
-    for (auto& to : {lse, combined_lse, pre_perm_idx}) {
+    for (auto& to : {lse, reduced_lse, pre_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
@@ -781,7 +781,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   if (allocate_on_comm_stream)
     at::cuda::setCurrentCUDAStream(compute_stream);
 
-  return {combined_x, combined_lse, event};
+  return {reduced_x, reduced_lse, event};
 }
 
 std::tuple<

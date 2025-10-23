@@ -88,7 +88,7 @@ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx
 // Intranode kernels
 namespace intranode {
 
-void notify_dispatch(
+void notify_group_cast(
     const int* num_tokens_per_rank,
     int* moe_recv_counter_mapped,
     int num_ranks,
@@ -103,7 +103,7 @@ void notify_dispatch(
     cudaStream_t stream,
     int num_sms);
 
-void cached_notify_dispatch(
+void cached_notify_group_cast(
     const int* rank_prefix_matrix,
     int num_memset_int,
     void** buffer_ptrs,
@@ -112,7 +112,7 @@ void cached_notify_dispatch(
     int num_ranks,
     cudaStream_t stream);
 
-void dispatch(
+void group_cast(
     void* recv_x,
     float* recv_lse,
     int* recv_src_idx,
@@ -134,7 +134,7 @@ void dispatch(
     int num_max_send_tokens,
     int num_recv_buffer_tokens);
 
-void cached_notify_combine(
+void cached_notify_group_reduce(
     void** buffer_ptrs,
     int* send_head,
     int num_channels,
@@ -145,11 +145,11 @@ void cached_notify_combine(
     int num_ranks,
     cudaStream_t stream);
 
-void combine(
+void group_reduce(
     cudaDataType_t dtype,
     ReduceOp reduce_op,
-    void* combined_x,
-    float* combined_lse,
+    void* group_reduced_x,
+    float* group_reduced_lse,
     const void* x,
     const float* lse,
     const int64_t* pre_perm_idx,

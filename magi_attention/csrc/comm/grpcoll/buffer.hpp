@@ -187,9 +187,9 @@ struct Buffer {
 
   std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> intranode_group_reduce(
       const torch::Tensor& x,
-      std::optional<torch::Tensor>& combined_x_buf,
+      std::optional<torch::Tensor>& reduced_x_buf,
       const std::optional<torch::Tensor>& lse,
-      std::optional<torch::Tensor>& combined_lse_buf,
+      std::optional<torch::Tensor>& reduced_lse_buf,
       const std::optional<torch::Tensor>& pre_perm_idx,
       const torch::Tensor& src_idx,
       const torch::Tensor& rank_prefix_matrix,
