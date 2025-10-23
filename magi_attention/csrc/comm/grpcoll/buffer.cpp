@@ -339,10 +339,8 @@ Buffer::intranode_group_cast(
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream) {
+  // Determine if we are using chunked mode
   bool cached_mode = cached_rank_prefix_matrix.has_value();
-
-  // TODO: support other num_ranks
-  GRPCOLL_HOST_ASSERT(num_ranks != 5 && num_ranks != 7);
 
   // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
   GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -601,9 +599,6 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
     bool acc_reduce) {
-  // TODO: support other num_ranks
-  GRPCOLL_HOST_ASSERT(num_ranks != 5 && num_ranks != 7);
-
   // Transfer reduce ops
   ReduceOp reduce_op_ = str_to_reduce_op(reduce_op);
 

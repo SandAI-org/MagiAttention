@@ -95,7 +95,6 @@ using namespace magi_attn_comm::grpcoll;
 #endif
 #endif
 
-// TODO: support other num_ranks
 #define SWITCH_RANKS(case_macro)                              \
   switch (num_ranks) {                                        \
     case 1:                                                   \
@@ -106,10 +105,37 @@ using namespace magi_attn_comm::grpcoll;
       case_macro(3);                                          \
     case 4:                                                   \
       case_macro(4);                                          \
+    case 5:                                                   \
+      case_macro(5);                                          \
     case 6:                                                   \
       case_macro(6);                                          \
+    case 7:                                                   \
+      case_macro(7);                                          \
     case 8:                                                   \
       case_macro(8);                                          \
+    default:                                                  \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported num_ranks"); \
+  }                                                           \
+  while (false)
+
+#define SWITCH_RANKS_WITH_WARPS(case_macro)                   \
+  switch (num_ranks) {                                        \
+    case 1:                                                   \
+      case_macro(1, 24);                                      \
+    case 2:                                                   \
+      case_macro(2, 24);                                      \
+    case 3:                                                   \
+      case_macro(3, 24);                                      \
+    case 4:                                                   \
+      case_macro(4, 24);                                      \
+    case 5:                                                   \
+      case_macro(5, 20);                                      \
+    case 6:                                                   \
+      case_macro(6, 24);                                      \
+    case 7:                                                   \
+      case_macro(7, 21);                                      \
+    case 8:                                                   \
+      case_macro(8, 24);                                      \
     default:                                                  \
       GRPCOLL_HOST_ASSERT(false and "Unsupported num_ranks"); \
   }                                                           \
@@ -133,10 +159,20 @@ using namespace magi_attn_comm::grpcoll;
 
 #define SWITCH_RANKS_WITH_DTYPE(dtype, case_macro)            \
   switch (num_ranks) {                                        \
+    case 1:                                                   \
+      case_macro(dtype, 1);                                   \
     case 2:                                                   \
       case_macro(dtype, 2);                                   \
+    case 3:                                                   \
+      case_macro(dtype, 3);                                   \
     case 4:                                                   \
       case_macro(dtype, 4);                                   \
+    case 5:                                                   \
+      case_macro(dtype, 5);                                   \
+    case 6:                                                   \
+      case_macro(dtype, 6);                                   \
+    case 7:                                                   \
+      case_macro(dtype, 7);                                   \
     case 8:                                                   \
       case_macro(dtype, 8);                                   \
     default:                                                  \
@@ -144,36 +180,17 @@ using namespace magi_attn_comm::grpcoll;
   }                                                           \
   while (false)
 
-#define SWITCH_RANKS_WITH_DTYPE_REDUCE_DTYPE(dtype, reduce_dtype, case_macro) \
-  switch (num_ranks) {                                                        \
-    case 1:                                                                   \
-      case_macro(dtype, reduce_dtype, 1);                                     \
-    case 2:                                                                   \
-      case_macro(dtype, reduce_dtype, 2);                                     \
-    case 3:                                                                   \
-      case_macro(dtype, reduce_dtype, 3);                                     \
-    case 4:                                                                   \
-      case_macro(dtype, reduce_dtype, 4);                                     \
-    case 6:                                                                   \
-      case_macro(dtype, reduce_dtype, 6);                                     \
-    case 8:                                                                   \
-      case_macro(dtype, reduce_dtype, 8);                                     \
-    default:                                                                  \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported num_ranks");                 \
-  }                                                                           \
-  while (false)
-
-#define SWITCH_REDUCE_OP_WITH_DTYPES_RANKS(dtype, reduce_dtype, num_ranks, case_macro) \
-  switch (reduce_op) {                                                                 \
-    case ReduceOp::SUM:                                                                \
-      case_macro(dtype, reduce_dtype, num_ranks, ReduceOp::SUM);                       \
-    case ReduceOp::AVG:                                                                \
-      case_macro(dtype, reduce_dtype, num_ranks, ReduceOp::AVG);                       \
-    case ReduceOp::LSE:                                                                \
-      case_macro(dtype, reduce_dtype, num_ranks, ReduceOp::LSE);                       \
-    default:                                                                           \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported reduce op");                          \
-  }                                                                                    \
+#define SWITCH_REDUCE_OP_WITH_DTYPES(dtype, reduce_dtype, case_macro) \
+  switch (reduce_op) {                                                \
+    case ReduceOp::SUM:                                               \
+      case_macro(dtype, reduce_dtype, ReduceOp::SUM);                 \
+    case ReduceOp::AVG:                                               \
+      case_macro(dtype, reduce_dtype, ReduceOp::AVG);                 \
+    case ReduceOp::LSE:                                               \
+      case_macro(dtype, reduce_dtype, ReduceOp::LSE);                 \
+    default:                                                          \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported reduce op");         \
+  }                                                                   \
   while (false)
 
 #define SWITCH_DTYPES(case_macro)                         \

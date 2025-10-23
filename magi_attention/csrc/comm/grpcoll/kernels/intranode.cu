@@ -216,7 +216,7 @@ void cached_notify_dispatch(
 
 template <int kNumRanks, int kNumThreads, int kWarpCopyUnrollStages, int kNumTMAStages, int kNumTMABytesPerWarp>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
-void dispatch(
+void dispatch_kernel(
     int4* recv_x,
     float* recv_lse,
     int* recv_src_idx,
@@ -614,6 +614,73 @@ void dispatch(
   }
 }
 
+template <int kNumRanks, int kNumWarps>
+void launch_dispatch(
+    void* recv_x,
+    float* recv_lse,
+    int* recv_src_idx,
+    int* recv_channel_offset,
+    int* send_head,
+    const int64_t* post_perm_idx,
+    const void* x,
+    const float* lse,
+    const bool* is_token_in_rank,
+    const int* channel_prefix_matrix,
+    int num_tokens,
+    int hidden_int4,
+    int num_heads,
+    void** buffer_ptrs,
+    int rank,
+    cudaStream_t stream,
+    int num_sms,
+    int num_max_send_tokens,
+    int num_recv_buffer_tokens) {
+  constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
+  constexpr int kNumTMABytesPerWarp = 8192; // num bytes of TMA transfer per warp
+  constexpr int kWarpCopyUnrollStages = 5; // warp-copy unroll stages
+  constexpr int kNumTMAStages = 2; // num TMA stages
+
+#ifndef DISABLE_SM90_FEATURES
+  GRPCOLL_HOST_ASSERT(hidden_int4 % kNumTMAStages == 0);
+  int hidden_bytes_per_stage = (hidden_int4 / kNumTMAStages) * sizeof(int4);
+  GRPCOLL_HOST_ASSERT(hidden_bytes_per_stage + sizeof(uint64_t) <= kNumTMABytesPerWarp); // TMA buffer + mbarrier per warp
+  constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
+#endif
+
+#define DISPATCH_LAUNCH_CASE                                                                                          \
+  {                                                                                                                   \
+    auto kernel = dispatch_kernel<kNumRanks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp>; \
+    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                                                \
+    LAUNCH_KERNEL(                                                                                                    \
+        &cfg,                                                                                                         \
+        kernel,                                                                                                       \
+        reinterpret_cast<int4*>(recv_x),                                                                              \
+        recv_lse,                                                                                                     \
+        recv_src_idx,                                                                                                 \
+        recv_channel_offset,                                                                                          \
+        send_head,                                                                                                    \
+        post_perm_idx,                                                                                                \
+        reinterpret_cast<const int4*>(x),                                                                             \
+        lse,                                                                                                          \
+        is_token_in_rank,                                                                                             \
+        channel_prefix_matrix,                                                                                        \
+        num_tokens,                                                                                                   \
+        hidden_int4,                                                                                                  \
+        num_heads,                                                                                                    \
+        buffer_ptrs,                                                                                                  \
+        rank,                                                                                                         \
+        num_max_send_tokens,                                                                                          \
+        num_recv_buffer_tokens);                                                                                      \
+  }
+
+  // Even-numbered SMs for sending, odd-numbered SMs for receiving
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+  SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
+  DISPATCH_LAUNCH_CASE;
+
+#undef DISPATCH_LAUNCH_CASE
+}
+
 void dispatch(
     void* recv_x,
     float* recv_lse,
@@ -635,52 +702,34 @@ void dispatch(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens) {
-  constexpr int kNumWarps = 24; // num warps per block
-  constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
-  constexpr int kNumTMABytesPerWarp = 8192; // num bytes of TMA transfer per warp
-  constexpr int kWarpCopyUnrollStages = 5; // warp-copy unroll stages
-  constexpr int kNumTMAStages = 2; // num TMA stages
-
-#ifndef DISABLE_SM90_FEATURES
-  GRPCOLL_HOST_ASSERT(hidden_int4 % kNumTMAStages == 0);
-  int hidden_bytes_per_stage = (hidden_int4 / kNumTMAStages) * sizeof(int4);
-  GRPCOLL_HOST_ASSERT(hidden_bytes_per_stage + sizeof(uint64_t) <= kNumTMABytesPerWarp); // TMA buffer + mbarrier per warp
-  constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
-#endif
-
-#define DISPATCH_LAUNCH_CASE(num_ranks)                                                                        \
-  {                                                                                                            \
-    auto kernel = dispatch<num_ranks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp>; \
-    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                                         \
-    LAUNCH_KERNEL(                                                                                             \
-        &cfg,                                                                                                  \
-        kernel,                                                                                                \
-        reinterpret_cast<int4*>(recv_x),                                                                       \
-        recv_lse,                                                                                              \
-        recv_src_idx,                                                                                          \
-        recv_channel_offset,                                                                                   \
-        send_head,                                                                                             \
-        post_perm_idx,                                                                                         \
-        reinterpret_cast<const int4*>(x),                                                                      \
-        lse,                                                                                                   \
-        is_token_in_rank,                                                                                      \
-        channel_prefix_matrix,                                                                                 \
-        num_tokens,                                                                                            \
-        hidden_int4,                                                                                           \
-        num_heads,                                                                                             \
-        buffer_ptrs,                                                                                           \
-        rank,                                                                                                  \
-        num_max_send_tokens,                                                                                   \
-        num_recv_buffer_tokens);                                                                               \
-  }                                                                                                            \
+#define LAUNCH_INTRANODE_DISPATCH(num_ranks, num_warps) \
+  {                                                     \
+    launch_dispatch<num_ranks, num_warps>(              \
+        recv_x,                                         \
+        recv_lse,                                       \
+        recv_src_idx,                                   \
+        recv_channel_offset,                            \
+        send_head,                                      \
+        post_perm_idx,                                  \
+        x,                                              \
+        lse,                                            \
+        is_token_in_rank,                               \
+        channel_prefix_matrix,                          \
+        num_tokens,                                     \
+        hidden_int4,                                    \
+        num_heads,                                      \
+        buffer_ptrs,                                    \
+        rank,                                           \
+        stream,                                         \
+        num_sms,                                        \
+        num_max_send_tokens,                            \
+        num_recv_buffer_tokens);                        \
+  }                                                     \
   break
 
-  // Even-numbered SMs for sending, odd-numbered SMs for receiving
-  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
-  SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  SWITCH_RANKS(DISPATCH_LAUNCH_CASE);
+  SWITCH_RANKS_WITH_WARPS(LAUNCH_INTRANODE_DISPATCH);
 
-#undef DISPATCH_LAUNCH_CASE
+#undef LAUNCH_INTRANODE_DISPATCH
 }
 
 template <int kNumRanks>
@@ -772,7 +821,7 @@ template <
     int kMaxNumHeads,
     bool kAccReduce>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
-void combine(
+void combine_kernel(
     dtype_t* combined_x,
     float* combined_lse,
     const dtype_t* x,
@@ -1287,6 +1336,90 @@ void combine(
   }
 }
 
+template <int kNumRanks, int kNumWarps, bool kAccReduce>
+void launch_combine(
+    cudaDataType_t dtype,
+    ReduceOp reduce_op,
+    void* combined_x,
+    float* combined_lse,
+    const void* x,
+    const float* lse,
+    const int64_t* pre_perm_idx,
+    const int* src_idx,
+    const int* rank_prefix_matrix,
+    const int* channel_prefix_matrix,
+    int* send_head,
+    int num_tokens,
+    int num_recv_tokens,
+    int hidden_size,
+    int num_heads,
+    void** buffer_ptrs,
+    int rank,
+    cudaStream_t stream,
+    int num_sms,
+    int num_max_send_tokens,
+    int num_recv_buffer_tokens) {
+  constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
+  constexpr int kNumTMABytesPerWarp = 4096; // num bytes of TMA transfer per warp
+  constexpr int kMaxNumHeads = 128; // the maximum number of heads supported when `kReduceOp == ReduceOp::LSE`
+  constexpr int kWarpCopyUnrollStages = 4; // warp-copy unroll stages
+  constexpr int kNumTMAStages = 8; // num TMA stages
+
+#ifndef DISABLE_SM90_FEATURES
+  GRPCOLL_STATIC_ASSERT(kNumTMAStages * WARP_SIZE * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid TMA buffer count"); // TMA buffer per warp
+  constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
+#endif
+
+  // NOTES: when `kReduceOp != ReduceOp::LSE`,
+  // num_heads should be 0 to let `lse_buffers` empty
+  if (reduce_op != ReduceOp::LSE)
+    GRPCOLL_HOST_ASSERT(num_heads == 0);
+  else
+    GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
+
+#define COMBINE_LAUNCH_CASE(dtype, reduce_dtype, reduce_op)                                                                                                          \
+  {                                                                                                                                                                  \
+    auto kernel =                                                                                                                                                    \
+        combine_kernel<dtype, reduce_dtype, reduce_op, kNumRanks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp, kMaxNumHeads, kAccReduce>; \
+    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                                                                                               \
+    LAUNCH_KERNEL(                                                                                                                                                   \
+        &cfg,                                                                                                                                                        \
+        kernel,                                                                                                                                                      \
+        reinterpret_cast<dtype*>(combined_x),                                                                                                                        \
+        combined_lse,                                                                                                                                                \
+        reinterpret_cast<const dtype*>(x),                                                                                                                           \
+        lse,                                                                                                                                                         \
+        pre_perm_idx,                                                                                                                                                \
+        src_idx,                                                                                                                                                     \
+        rank_prefix_matrix,                                                                                                                                          \
+        channel_prefix_matrix,                                                                                                                                       \
+        send_head,                                                                                                                                                   \
+        num_tokens,                                                                                                                                                  \
+        num_recv_tokens,                                                                                                                                             \
+        hidden_size,                                                                                                                                                 \
+        num_heads,                                                                                                                                                   \
+        buffer_ptrs,                                                                                                                                                 \
+        rank,                                                                                                                                                        \
+        num_max_send_tokens,                                                                                                                                         \
+        num_recv_buffer_tokens);                                                                                                                                     \
+  }                                                                                                                                                                  \
+  break
+
+#define COMBINE_REDUCE_OP_LAUNCH_CASE(dtype, reduce_dtype)                  \
+  {                                                                         \
+    SWITCH_REDUCE_OP_WITH_DTYPES(dtype, reduce_dtype, COMBINE_LAUNCH_CASE); \
+  }                                                                         \
+  break
+
+  // Even-numbered SMs for sending, odd-numbered SMs for receiving
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+  SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
+  SWITCH_DTYPES_REDUCE_DTYPES(COMBINE_REDUCE_OP_LAUNCH_CASE);
+
+#undef COMBINE_REDUCE_OP_LAUNCH_CASE
+#undef COMBINE_LAUNCH_CASE
+}
+
 void combine(
     cudaDataType_t dtype,
     ReduceOp reduce_op,
@@ -1311,69 +1444,46 @@ void combine(
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
     bool acc_reduce) {
-  constexpr int kNumWarps = 24; // num warps per block
-  constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
-  constexpr int kNumTMABytesPerWarp = 4096; // num bytes of TMA transfer per warp
-  constexpr int kMaxNumHeads = 128; // the maximum number of heads supported when `kReduceOp == ReduceOp::LSE`
-  constexpr int kWarpCopyUnrollStages = 4; // warp-copy unroll stages
-  constexpr int kNumTMAStages = 8; // num TMA stages
+#define LAUNCH_INTRANODE_COMBINE(num_ranks, num_warps, acc_reduce) \
+  {                                                                \
+    launch_combine<num_ranks, num_warps, acc_reduce>(              \
+        dtype,                                                     \
+        reduce_op,                                                 \
+        combined_x,                                                \
+        combined_lse,                                              \
+        x,                                                         \
+        lse,                                                       \
+        pre_perm_idx,                                              \
+        src_idx,                                                   \
+        rank_prefix_matrix,                                        \
+        channel_prefix_matrix,                                     \
+        send_head,                                                 \
+        num_tokens,                                                \
+        num_recv_tokens,                                           \
+        hidden_size,                                               \
+        num_heads,                                                 \
+        buffer_ptrs,                                               \
+        rank,                                                      \
+        stream,                                                    \
+        num_sms,                                                   \
+        num_max_send_tokens,                                       \
+        num_recv_buffer_tokens);                                   \
+  }
 
-#ifndef DISABLE_SM90_FEATURES
-  GRPCOLL_STATIC_ASSERT(kNumTMAStages * WARP_SIZE * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid TMA buffer count"); // TMA buffer per warp
-  constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
-#endif
-
-  // NOTES: when `kReduceOp != ReduceOp::LSE`,
-  // num_heads should be 0 to let `lse_buffers` empty
-  if (reduce_op != ReduceOp::LSE)
-    GRPCOLL_HOST_ASSERT(num_heads == 0);
-  else
-    GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
-
-#define COMBINE_LAUNCH_CASE(dtype, reduce_dtype, num_ranks, reduce_op)                                                                                             \
-  {                                                                                                                                                                \
-    auto kernel = combine<dtype, reduce_dtype, reduce_op, num_ranks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp, kMaxNumHeads, false>; \
-    if (acc_reduce)                                                                                                                                                \
-      kernel = combine<dtype, reduce_dtype, reduce_op, num_ranks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp, kMaxNumHeads, true>;     \
-    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                                                                                             \
-    LAUNCH_KERNEL(                                                                                                                                                 \
-        &cfg,                                                                                                                                                      \
-        kernel,                                                                                                                                                    \
-        reinterpret_cast<dtype*>(combined_x),                                                                                                                      \
-        combined_lse,                                                                                                                                              \
-        reinterpret_cast<const dtype*>(x),                                                                                                                         \
-        lse,                                                                                                                                                       \
-        pre_perm_idx,                                                                                                                                              \
-        src_idx,                                                                                                                                                   \
-        rank_prefix_matrix,                                                                                                                                        \
-        channel_prefix_matrix,                                                                                                                                     \
-        send_head,                                                                                                                                                 \
-        num_tokens,                                                                                                                                                \
-        num_recv_tokens,                                                                                                                                           \
-        hidden_size,                                                                                                                                               \
-        num_heads,                                                                                                                                                 \
-        buffer_ptrs,                                                                                                                                               \
-        rank,                                                                                                                                                      \
-        num_max_send_tokens,                                                                                                                                       \
-        num_recv_buffer_tokens);                                                                                                                                   \
-  }                                                                                                                                                                \
+#define LAUNCH_INTRANODE_COMBINE_WITH_RANKS_WARPS(num_ranks, num_warps) \
+  {                                                                     \
+    if (acc_reduce) {                                                   \
+      LAUNCH_INTRANODE_COMBINE(num_ranks, num_warps, true);             \
+    } else {                                                            \
+      LAUNCH_INTRANODE_COMBINE(num_ranks, num_warps, false);            \
+    }                                                                   \
+  }                                                                     \
   break
 
-#define COMBINE_REDUCE_OP_LAUNCH_CASE(dtype, reduce_dtype, num_ranks)                      \
-  SWITCH_REDUCE_OP_WITH_DTYPES_RANKS(dtype, reduce_dtype, num_ranks, COMBINE_LAUNCH_CASE); \
-  break
+  SWITCH_RANKS_WITH_WARPS(LAUNCH_INTRANODE_COMBINE_WITH_RANKS_WARPS);
 
-#define COMBINE_DTYPE_LAUNCH_CASE(dtype, reduce_dtype)                                      \
-  SWITCH_RANKS_WITH_DTYPE_REDUCE_DTYPE(dtype, reduce_dtype, COMBINE_REDUCE_OP_LAUNCH_CASE); \
-  break
-
-  // Even-numbered SMs for sending, odd-numbered SMs for receiving
-  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
-  SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  SWITCH_DTYPES_REDUCE_DTYPES(COMBINE_DTYPE_LAUNCH_CASE);
-
-#undef COMBINE_DTYPE_LAUNCH_CASE
-#undef COMBINE_LAUNCH_CASE
+#undef LAUNCH_INTRANODE_COMBINE_WITH_RANKS_WARPS
+#undef LAUNCH_INTRANODE_COMBINE
 }
 
 } // namespace intranode
