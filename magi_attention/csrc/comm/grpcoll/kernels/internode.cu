@@ -133,7 +133,7 @@ DEVICE_INLINE void nvshmem_sync_with_same_gpu_idx(const nvshmem_team_t& rdma_tea
 template <bool kLowLatencyMode, int kNumRDMARanks>
 __global__ void notify_dispatch(
     const int* num_tokens_per_rank,
-    int* moe_recv_counter_mapped,
+    int* grpcoll_recv_counter_mapped,
     int num_ranks,
     const int* num_tokens_per_rdma_rank,
     int* moe_recv_rdma_counter_mapped,
@@ -305,9 +305,9 @@ __global__ void notify_dispatch(
         sum += nvl_recv_num_tokens_per_rank.buffer(src_nvl_rank)[src_rdma_rank];
         recv_gbl_rank_prefix_sum[i] = sum;
       }
-      while (ld_volatile_global(moe_recv_counter_mapped) != -1)
+      while (ld_volatile_global(grpcoll_recv_counter_mapped) != -1)
         ;
-      *moe_recv_counter_mapped = sum;
+      *grpcoll_recv_counter_mapped = sum;
     }
     if (thread_id < num_nvl_experts) {
       int sum = 0;
@@ -378,7 +378,7 @@ __global__ void notify_dispatch(
 
 void notify_dispatch(
     const int* num_tokens_per_rank,
-    int* moe_recv_counter_mapped,
+    int* grpcoll_recv_counter_mapped,
     int num_ranks,
     const int* num_tokens_per_rdma_rank,
     int* moe_recv_rdma_counter_mapped,
@@ -412,7 +412,7 @@ void notify_dispatch(
         &cfg,                                                                                                                      \
         notify_dispatch_func,                                                                                                      \
         num_tokens_per_rank,                                                                                                       \
-        moe_recv_counter_mapped,                                                                                                   \
+        grpcoll_recv_counter_mapped,                                                                                               \
         num_ranks,                                                                                                                 \
         num_tokens_per_rdma_rank,                                                                                                  \
         moe_recv_rdma_counter_mapped,                                                                                              \

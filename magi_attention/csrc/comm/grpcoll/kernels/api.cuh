@@ -90,7 +90,7 @@ namespace intranode {
 
 void notify_group_cast(
     const int* num_tokens_per_rank,
-    int* moe_recv_counter_mapped,
+    int* grpcoll_recv_counter_mapped,
     int num_ranks,
     int num_tokens,
     const bool* is_token_in_rank,
@@ -179,7 +179,7 @@ int get_source_meta_bytes();
 
 void notify_dispatch(
     const int* num_tokens_per_rank,
-    int* moe_recv_counter_mapped,
+    int* grpcoll_recv_counter_mapped,
     int num_ranks,
     const int* num_tokens_per_rdma_rank,
     int* moe_recv_rdma_counter_mapped,

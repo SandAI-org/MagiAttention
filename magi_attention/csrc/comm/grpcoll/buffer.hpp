@@ -108,16 +108,21 @@ struct Buffer {
   // Workspace
   void* workspace = nullptr;
 
-  // Host-side MoE info
-  volatile int* moe_recv_counter = nullptr;
-  int* moe_recv_counter_mapped = nullptr;
+  // Host-side rank-level counter for num_recv_tokens_this_rank
+  volatile int* grpcoll_recv_counter = nullptr;
+  // Device-side rank-level mapped counter for num_recv_tokens_this_rank
+  int* grpcoll_recv_counter_mapped = nullptr;
 
-  // Host-side expert-level MoE info
+  // TODO: remove this counter
+  // Host-side expert-level counter for num_recv_tokens_per_local_expert_this_rank
   volatile int* moe_recv_expert_counter = nullptr;
+  // Device-side expert-level mapped counter for num_recv_tokens_per_local_expert_this_rank
   int* moe_recv_expert_counter_mapped = nullptr;
 
-  // Host-side RDMA-level MoE info
+  // TODO: rename this counter
+  // Host-side RDMA-level counter for num_recv_tokens_this_node
   volatile int* moe_recv_rdma_counter = nullptr;
+  // Device-side RDMA-level mapped counter for num_recv_tokens_this_node
   int* moe_recv_rdma_counter_mapped = nullptr;
 
  public:

@@ -135,18 +135,18 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
   CUDA_CHECK(cudaMalloc(&workspace, NUM_WORKSPACE_BYTES));
   CUDA_CHECK(cudaMemsetAsync(workspace, 0, NUM_WORKSPACE_BYTES, comm_stream));
 
-  // Initialize MoE counter (pinned host memory with its device ptr)
-  CUDA_CHECK(cudaMallocHost(&moe_recv_counter, sizeof(int64_t), cudaHostAllocMapped));
-  CUDA_CHECK(cudaHostGetDevicePointer(&moe_recv_counter_mapped, const_cast<int*>(moe_recv_counter), 0));
-  *moe_recv_counter = -1;
+  // Initialize `num_recv_tokens_this_rank` counter (pinned host memory with its device ptr)
+  CUDA_CHECK(cudaMallocHost(&grpcoll_recv_counter, sizeof(int64_t), cudaHostAllocMapped));
+  CUDA_CHECK(cudaHostGetDevicePointer(&grpcoll_recv_counter_mapped, const_cast<int*>(grpcoll_recv_counter), 0));
+  *grpcoll_recv_counter = -1;
 
-  // Initialize MoE expert-level counter for each local expert (pinned host memory with its device ptr)
+  // Initialize `num_recv_tokens_per_local_expert_this_rank` counter array (pinned host memory with its device ptr)
   CUDA_CHECK(cudaMallocHost(&moe_recv_expert_counter, sizeof(int) * NUM_MAX_LOCAL_EXPERTS, cudaHostAllocMapped));
   CUDA_CHECK(cudaHostGetDevicePointer(&moe_recv_expert_counter_mapped, const_cast<int*>(moe_recv_expert_counter), 0));
   for (int i = 0; i < NUM_MAX_LOCAL_EXPERTS; ++i)
     moe_recv_expert_counter[i] = -1;
 
-  // Initialize MoE RDMA-level counter (pinned host memory with its device ptr)
+  // Initialize `num_recv_tokens_this_node` counter (pinned host memory with its device ptr)
   if (num_rdma_ranks > 0) {
     CUDA_CHECK(cudaMallocHost(&moe_recv_rdma_counter, sizeof(int), cudaHostAllocMapped));
     CUDA_CHECK(cudaHostGetDevicePointer(&moe_recv_rdma_counter_mapped, const_cast<int*>(moe_recv_rdma_counter), 0));
@@ -283,11 +283,9 @@ void Buffer::destroy() {
   }
 #endif
 
-  // Free workspace and MoE counter
+  // Free workspace and counters
   CUDA_CHECK(cudaFree(workspace));
-  CUDA_CHECK(cudaFreeHost(const_cast<int*>(moe_recv_counter)));
-
-  // Free chunked mode staffs
+  CUDA_CHECK(cudaFreeHost(const_cast<int*>(grpcoll_recv_counter)));
   CUDA_CHECK(cudaFreeHost(const_cast<int*>(moe_recv_expert_counter)));
 
   destroyed = true;
@@ -435,12 +433,12 @@ Buffer::intranode_group_cast(
     // Meta information:
     //  - Size prefix by ranks, shaped as `[num_ranks, num_ranks]`
     // NOTES: no more token dropping in this version
-    *moe_recv_counter = -1;
+    *grpcoll_recv_counter = -1;
     // TODO: make notify_group_cast an individual buffer API
     // to allow notifying in advance to enable cache mode amap
     intranode::notify_group_cast(
         /*num_tokens_per_rank=*/num_tokens_per_rank->data_ptr<int>(),
-        /*moe_recv_counter_mapped=*/moe_recv_counter_mapped,
+        /*grpcoll_recv_counter_mapped=*/grpcoll_recv_counter_mapped,
         /*num_ranks=*/num_ranks,
         /*num_tokens=*/num_tokens,
         /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
@@ -462,7 +460,7 @@ Buffer::intranode_group_cast(
       auto start_time = std::chrono::high_resolution_clock::now();
       while (true) {
         // Read if num_recv_tokens is ready
-        num_recv_tokens = static_cast<int>(*moe_recv_counter);
+        num_recv_tokens = static_cast<int>(*grpcoll_recv_counter);
         if (num_recv_tokens >= 0)
           break;
 
@@ -971,12 +969,12 @@ Buffer::internode_group_cast(
     recv_gbl_rank_prefix_sum = torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
     // Send sizes
-    *moe_recv_counter = -1, *moe_recv_rdma_counter = -1;
+    *grpcoll_recv_counter = -1, *moe_recv_rdma_counter = -1;
     for (int i = 0; i < num_local_experts; ++i)
       moe_recv_expert_counter[i] = -1;
     internode::notify_dispatch(
         num_tokens_per_rank->data_ptr<int>(),
-        moe_recv_counter_mapped,
+        grpcoll_recv_counter_mapped,
         num_ranks,
         num_tokens_per_rdma_rank->data_ptr<int>(),
         moe_recv_rdma_counter_mapped,
@@ -1009,7 +1007,7 @@ Buffer::internode_group_cast(
     auto start_time = std::chrono::high_resolution_clock::now();
     while (true) {
       // Read total count
-      num_recv_tokens = static_cast<int>(*moe_recv_counter);
+      num_recv_tokens = static_cast<int>(*grpcoll_recv_counter);
       num_rdma_recv_tokens = static_cast<int>(*moe_recv_rdma_counter);
 
       // Read per-expert count

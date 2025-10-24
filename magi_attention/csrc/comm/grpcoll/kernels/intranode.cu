@@ -52,7 +52,7 @@ namespace intranode {
 template <int kNumRanks>
 __global__ void notify_group_cast(
     const int* num_tokens_per_rank,
-    int* moe_recv_counter_mapped,
+    int* grpcoll_recv_counter_mapped,
     int num_tokens,
     int num_channels,
     const bool* is_token_in_rank,
@@ -96,7 +96,7 @@ __global__ void notify_group_cast(
       for (int i = 1; i < kNumRanks; ++i)
         local_per_rank_buffer[i * kNumRanks + thread_id] += local_per_rank_buffer[(i - 1) * kNumRanks + thread_id];
       if (thread_id == rank)
-        *moe_recv_counter_mapped = local_per_rank_buffer[(kNumRanks - 1) * kNumRanks + rank];
+        *grpcoll_recv_counter_mapped = local_per_rank_buffer[(kNumRanks - 1) * kNumRanks + rank];
     }
 
     __syncthreads();
@@ -142,7 +142,7 @@ __global__ void notify_group_cast(
 
 void notify_group_cast(
     const int* num_tokens_per_rank,
-    int* moe_recv_counter_mapped,
+    int* grpcoll_recv_counter_mapped,
     int num_ranks,
     int num_tokens,
     const bool* is_token_in_rank,
@@ -161,7 +161,7 @@ void notify_group_cast(
       &cfg,                                  \
       notify_group_cast<ranks>,              \
       num_tokens_per_rank,                   \
-      moe_recv_counter_mapped,               \
+      grpcoll_recv_counter_mapped,           \
       num_tokens,                            \
       num_channels,                          \
       is_token_in_rank,                      \
