@@ -28,6 +28,7 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.utils.sparse_utils import (
+    choose_ref_block,
     flatten_block_mask,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
@@ -230,10 +231,7 @@ def sparse_attn_benchmark(
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
             # TODO: SwapAB will change this constraint
-            # Tile_M must be a multiple of 64
-            ref_q_block_size = q_block_size if q_block_size >= 64 else 64
-            # Tile_K must be a multiple of 16
-            ref_k_block_size = k_block_size if k_block_size >= 16 else 16
+            ref_block_size = choose_ref_block((q_block_size, k_block_size))
 
             def fn():
                 return ffa_func(
@@ -244,7 +242,7 @@ def sparse_attn_benchmark(
                     k_ranges=k_ranges,
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
-                    ref_block_size=[ref_q_block_size, ref_k_block_size],
+                    ref_block_size=ref_block_size,
                 )
 
             if wd == "bwd":
