@@ -36,15 +36,8 @@ using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <bool zero_init = true,
-          typename Engine0,
-          typename Layout0,
-          typename Engine1,
-          typename Layout1,
-          typename Operator>
-__device__ __forceinline__ void thread_reduce_(Tensor<Engine0, Layout0> const& tensor,
-                                               Tensor<Engine1, Layout1>& summary,
-                                               Operator& op) {
+template <bool zero_init = true, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
+__device__ __forceinline__ void thread_reduce_(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& summary, Operator& op) {
   static_assert(Layout0::rank == 2, "Only support 2D Tensor");
   static_assert(Layout1::rank == 1, "Only support 1D Tensor");
   CUTE_STATIC_ASSERT_V(size<0>(summary) == size<0>(tensor));
@@ -92,24 +85,21 @@ __device__ __forceinline__ void warp_group_reduce_column_(Tensor<Engine0, Layout
   // are visible to other threads within the same warp group
   __threadfence_block();
   // Sync on the current mma warp group's named barrier, wait for write
-  cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup,
-                                    static_cast<uint32_t>(FwdNamedBarriers::WarpGroupSwapAB1) + curr_WG /*id*/);
+  cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(FwdNamedBarriers::WarpGroupSwapAB1) + curr_WG /*id*/);
 #pragma unroll
   for (int ni = 0; ni < size<0>(tensor); ni++) {
     // global index is the column id of register in mma result
     int global_index = ((ni & (~0x1)) << 2) | ((threadIdx.x & 0x3) << 1) | (ni & 0x1);
-    tensor(ni) = op(op(shared_result[curr_WG][0][global_index], shared_result[curr_WG][1][global_index]),
-                    op(shared_result[curr_WG][2][global_index], shared_result[curr_WG][3][global_index]));
+    tensor(ni) =
+        op(op(shared_result[curr_WG][0][global_index], shared_result[curr_WG][1][global_index]),
+           op(shared_result[curr_WG][2][global_index], shared_result[curr_WG][3][global_index]));
   }
   // Sync on the current mma warp group's named barrier, prevent overwrite
-  cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup,
-                                    static_cast<uint32_t>(FwdNamedBarriers::WarpGroupSwapAB1) + curr_WG /*id*/);
+  cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(FwdNamedBarriers::WarpGroupSwapAB1) + curr_WG /*id*/);
 }
 
 template <typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
-__device__ __forceinline__ void quad_allreduce_(Tensor<Engine0, Layout0>& dst,
-                                                Tensor<Engine1, Layout1>& src,
-                                                Operator& op) {
+__device__ __forceinline__ void quad_allreduce_(Tensor<Engine0, Layout0>& dst, Tensor<Engine1, Layout1>& src, Operator& op) {
   CUTE_STATIC_ASSERT_V(size(dst) == size(src));
 #pragma unroll
   for (int i = 0; i < size(dst); i++) {
@@ -117,15 +107,8 @@ __device__ __forceinline__ void quad_allreduce_(Tensor<Engine0, Layout0>& dst,
   }
 }
 
-template <bool zero_init = true,
-          typename Engine0,
-          typename Layout0,
-          typename Engine1,
-          typename Layout1,
-          typename Operator>
-__device__ __forceinline__ void reduce_(Tensor<Engine0, Layout0> const& tensor,
-                                        Tensor<Engine1, Layout1>& summary,
-                                        Operator& op) {
+template <bool zero_init = true, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
+__device__ __forceinline__ void reduce_(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& summary, Operator& op) {
   thread_reduce_<zero_init>(tensor, summary, op);
   quad_allreduce_(summary, summary, op);
 }
@@ -136,12 +119,7 @@ __device__ __forceinline__ void reduce_max(Tensor<Engine0, Layout0> const& tenso
   reduce_<zero_init>(tensor, max, max_op);
 }
 
-template <bool zero_init = true,
-          bool warp_reduce = true,
-          typename Engine0,
-          typename Layout0,
-          typename Engine1,
-          typename Layout1>
+template <bool zero_init = true, bool warp_reduce = true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
 __device__ __forceinline__ void reduce_sum(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& sum) {
   SumOp<float> sum_op;
   thread_reduce_<zero_init>(tensor, sum, sum_op);
@@ -151,16 +129,8 @@ __device__ __forceinline__ void reduce_sum(Tensor<Engine0, Layout0> const& tenso
 }
 
 // Apply the exp to all the elements.
-template <bool Scale_max = true,
-          bool Check_inf = true,
-          int Max_offset = 0,
-          typename Engine0,
-          typename Layout0,
-          typename Engine1,
-          typename Layout1>
-__forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0>& tensor,
-                                                 Tensor<Engine1, Layout1> const& max,
-                                                 const float scale) {
+template <bool Scale_max = true, bool Check_inf = true, int Max_offset = 0, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
+__forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0>& tensor, Tensor<Engine1, Layout1> const& max, const float scale) {
   // For FP8, we can subtract max by 8.0 so that the value after exp2 is in the range of [0, 256].
   // This lets us use more of the FP8 range (instead of just [0, 1]) to reduce underflow.
   static constexpr float max_offset = float(Max_offset); // We can only template on int, not float
@@ -171,9 +141,8 @@ __forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0>& tenso
   for (int mi = 0; mi < size<0>(tensor); ++mi) {
     // If max is -inf, then all elements must have been -inf (possibly due to masking).
     // We don't want (-inf - (-inf)) since that would give NaN.
-    const float max_scaled = Check_inf
-        ? (max(mi) == -INFINITY ? 0.f : (!Scale_max ? max(mi) : max(mi) * scale) - max_offset)
-        : (!Scale_max ? max(mi) : max(mi) * scale) - max_offset;
+    const float max_scaled =
+        Check_inf ? (max(mi) == -INFINITY ? 0.f : (!Scale_max ? max(mi) : max(mi) * scale) - max_offset) : (!Scale_max ? max(mi) : max(mi) * scale) - max_offset;
 #pragma unroll
     for (int ni = 0; ni < size<1>(tensor); ++ni) {
       // Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
@@ -293,8 +262,7 @@ struct Softmax {
         static constexpr float sum_scale = 1.f / float(1 << Max_offset);
         sum *= sum_scale;
       }
-      row_sum(mi) =
-          (sum == 0.f || sum != sum) ? -INFINITY : row_max(mi) * (softmax_scale_log2 * float(M_LN2)) + __logf(sum);
+      row_sum(mi) = (sum == 0.f || sum != sum) ? -INFINITY : row_max(mi) * (softmax_scale_log2 * float(M_LN2)) + __logf(sum);
     }
     return scores_scale;
   };
@@ -302,8 +270,7 @@ struct Softmax {
   template <typename Tensor1>
   __forceinline__ __device__ void rescale_o(Tensor1& acc_o, TensorT const& scores_scale) {
     // Reshape acc_o from (MMA=4, MMA_M, MMA_K) to (nrow=(2, MMA_M), ncol=(2, MMA_K))
-    Tensor acc_o_rowcol =
-        make_tensor(acc_o.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(acc_o.layout()));
+    Tensor acc_o_rowcol = make_tensor(acc_o.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(acc_o.layout()));
     static_assert(CUTE_STATIC_V(size<0>(acc_o_rowcol)) == kNRows);
 #pragma unroll
     for (int mi = 0; mi < size<0>(acc_o_rowcol); ++mi) {
