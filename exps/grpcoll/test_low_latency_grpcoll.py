@@ -58,7 +58,7 @@ from grpcoll_utils import (
     init_dist,
     per_token_cast_back,
     sim_gemm,
-    transfer_group_cast_meta_to_dispatch_meta,
+    transfer_native_group_cast_meta,
 )
 
 
@@ -170,7 +170,7 @@ def test_main(
         _,  # num_tokens_per_expert
         range_gather_post_dispatch_kwargs,
         _,  # range_gather_pre_combine_kwargs
-    ) = transfer_group_cast_meta_to_dispatch_meta(
+    ) = transfer_native_group_cast_meta(
         rank=rank,
         num_ranks=num_ranks,
         num_nodes=1,

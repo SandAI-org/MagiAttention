@@ -297,12 +297,12 @@ void Buffer::destroy() {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> Buffer::get_group_cast_meta(
-    const torch::Tensor& topk_idx,
+    const torch::Tensor& t2r_idx,
     std::optional<EventHandle>& previous_event,
     bool async,
     bool allocate_on_comm_stream) {
-  return Meta::get_group_cast_meta_from_topk_idx(
-      /*topk_idx=*/topk_idx,
+  return Meta::get_group_cast_meta_from_t2r_idx(
+      /*t2r_idx=*/t2r_idx,
       /*num_ranks=*/num_ranks,
       /*num_rdma_ranks=*/is_internode_available() ? num_rdma_ranks : 1,
       /*previous_event=*/previous_event,
@@ -1767,7 +1767,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Meta class
   py::class_<grpcoll::Meta>(grpcoll_submodule, "Meta")
-      .def_static("get_group_cast_meta_from_topk_idx", &grpcoll::Meta::get_group_cast_meta_from_topk_idx)
+      .def_static("get_group_cast_meta_from_t2r_idx", &grpcoll::Meta::get_group_cast_meta_from_t2r_idx)
       .def_static("get_a2av_perm_idx_from_src_idx", &grpcoll::Meta::get_a2av_perm_idx_from_src_idx);
 
   // Buffer class

@@ -242,9 +242,9 @@ class GrpCollBuffer:
         return tensor[: size.numel()].view(size)
 
     @classmethod
-    def get_group_cast_meta_from_topk_idx(
+    def get_group_cast_meta_from_t2r_idx(
         cls,
-        topk_idx: torch.Tensor,
+        t2r_idx: torch.Tensor,
         num_ranks: int,
         num_nodes: int,
         previous_event: EventOverlap | None = None,
@@ -267,8 +267,8 @@ class GrpCollBuffer:
             num_tokens_per_rdma_rank,
             is_token_in_rank,
             event,
-        ) = grpcoll.Meta.get_group_cast_meta_from_topk_idx(
-            topk_idx,
+        ) = grpcoll.Meta.get_group_cast_meta_from_t2r_idx(
+            t2r_idx,
             num_ranks,
             num_nodes,
             getattr(previous_event, "event", None),
@@ -337,7 +337,7 @@ class GrpCollBuffer:
 
     def get_group_cast_meta(
         self,
-        topk_idx: torch.Tensor,
+        t2r_idx: torch.Tensor,
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
@@ -346,7 +346,7 @@ class GrpCollBuffer:
         Calculate the layout required for later communication.
 
         Arguments:
-            topk_idx: `[num_tokens, num_ranks]`, dtype must be `torch.int64`,
+            t2r_idx: `[num_tokens, num_ranks]`, dtype must be `torch.int64`,
                 the rank indices selected by each token, `-1` means no selections.
             previous_event: the event to wait before actually executing the kernel.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
@@ -365,7 +365,7 @@ class GrpCollBuffer:
             is_token_in_rank,
             event,
         ) = self.runtime.get_group_cast_meta(
-            topk_idx,
+            t2r_idx,
             getattr(previous_event, "event", None),
             async_finish,
             allocate_on_comm_stream,

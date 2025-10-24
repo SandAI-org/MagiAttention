@@ -28,16 +28,16 @@
 
 namespace magi_attn_comm::grpcoll {
 struct Meta {
-  static std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> get_group_cast_meta_from_topk_idx(
-      const torch::Tensor& topk_idx,
+  static std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> get_group_cast_meta_from_t2r_idx(
+      const torch::Tensor& t2r_idx,
       int num_ranks,
       int num_rdma_ranks,
       std::optional<EventHandle>& previous_event,
       bool async,
       bool allocate_on_meta_stream,
       std::optional<at::cuda::CUDAStream> meta_stream) {
-    GRPCOLL_HOST_ASSERT(topk_idx.dim() == 2);
-    GRPCOLL_HOST_ASSERT(topk_idx.is_contiguous());
+    GRPCOLL_HOST_ASSERT(t2r_idx.dim() == 2);
+    GRPCOLL_HOST_ASSERT(t2r_idx.is_contiguous());
     GRPCOLL_HOST_ASSERT(num_ranks > 0);
 
     // Get meta stream
@@ -58,8 +58,8 @@ struct Meta {
       stream_wait(meta_stream_, compute_stream);
     }
 
-    auto num_tokens = static_cast<int>(topk_idx.size(0));
-    GRPCOLL_HOST_ASSERT(topk_idx.size(1) == num_ranks);
+    auto num_tokens = static_cast<int>(t2r_idx.size(0));
+    GRPCOLL_HOST_ASSERT(t2r_idx.size(1) == num_ranks);
     auto num_tokens_per_rank = torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     auto num_tokens_per_rdma_rank = std::optional<torch::Tensor>();
     auto is_token_in_rank = torch::empty({num_tokens, num_ranks}, dtype(torch::kBool).device(torch::kCUDA));
@@ -67,7 +67,7 @@ struct Meta {
       num_tokens_per_rdma_rank = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
     layout::get_group_cast_meta(
-        /*topk_idx=*/topk_idx.data_ptr<int64_t>(),
+        /*t2r_idx=*/t2r_idx.data_ptr<int64_t>(),
         /*num_tokens_per_rank=*/num_tokens_per_rank.data_ptr<int>(),
         /*num_tokens_per_rdma_rank=*/num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
         /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
@@ -80,7 +80,7 @@ struct Meta {
     if (async) {
       event = EventHandle(meta_stream_);
       // record tensors on meta stream
-      for (auto& t : {topk_idx, num_tokens_per_rank, is_token_in_rank}) {
+      for (auto& t : {t2r_idx, num_tokens_per_rank, is_token_in_rank}) {
         t.record_stream(meta_stream_);
         if (allocate_on_meta_stream)
           t.record_stream(compute_stream);

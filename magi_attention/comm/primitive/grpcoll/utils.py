@@ -1156,7 +1156,7 @@ def get_group_reduce_handle_from_sym_group_cast(
     group: dist.ProcessGroup,
     async_op: bool = False,
     output_seqlen: int | None = None,
-    topk_idx: torch.Tensor | None = None,
+    t2r_idx: torch.Tensor | None = None,
 ) -> GrpCollHandle:
     from ._buffer import GrpCollBuffer
     from ._native_grpcoll_impl import native_group_cast_impl
@@ -1205,7 +1205,7 @@ def get_group_reduce_handle_from_sym_group_cast(
         async_op=async_op,
         # additional kwargs
         native_grpcoll_handle_dict=native_grpcoll_handle_dict,
-        topk_idx=topk_idx,
+        t2r_idx=t2r_idx,
         output_seqlen=sym_gc_output_seqlen,
     )
     sym_work_gc.wait_post_process()
@@ -1276,7 +1276,7 @@ def _varlen_for_each_copy_triton(
 
 
 @overload
-def transfer_splits_and_dst_idxs_to_topk_idx(
+def transfer_splits_and_dst_idxs_to_t2r_idx(
     input_split_sizes: list[int],
     dst_indices: list[list[int]],
     num_ranks: int,
@@ -1288,7 +1288,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
 
 
 @overload
-def transfer_splits_and_dst_idxs_to_topk_idx(
+def transfer_splits_and_dst_idxs_to_t2r_idx(
     input_split_sizes: torch.Tensor,
     dst_indices: torch.Tensor,
     num_ranks: int,
@@ -1300,7 +1300,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
 
 
 @nvtx.instrument_nvtx
-def transfer_splits_and_dst_idxs_to_topk_idx(
+def transfer_splits_and_dst_idxs_to_t2r_idx(
     input_split_sizes: list[int] | torch.Tensor,
     dst_indices: list[list[int]] | torch.Tensor,
     num_ranks: int,
@@ -1338,7 +1338,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
             all_meta_size_list
         )
 
-        topk_idx = torch.full(
+        t2r_idx = torch.full(
             (num_splits, num_ranks),  # assuming num_local_experts == 1
             fill_value=-1,
             dtype=dtype,
@@ -1346,7 +1346,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
         )
 
         _varlen_for_each_copy_triton(
-            dst=topk_idx,
+            dst=t2r_idx,
             src=dst_indices_tensor,
             num_dst=num_dst_tensor,
             cu_num_dst=cu_num_dst_tensor,
@@ -1356,7 +1356,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
         # NOTE: had better pass input_seqlen to avoid gpu-cpu sync
         if input_seqlen is None:
             input_seqlen = input_split_sizes.sum().item()  # type: ignore[union-attr]
-        topk_idx = dst_indices.to(dtype=dtype, device=device)  # type: ignore[union-attr]
+        t2r_idx = dst_indices.to(dtype=dtype, device=device)  # type: ignore[union-attr]
         split_size_tensor = input_split_sizes.to(device=device)  # type: ignore[union-attr]
     else:
         raise ValueError(
@@ -1365,13 +1365,13 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
         )
 
     # shape: (num_splits, num_ranks) -> (input_seqlen, num_ranks)
-    topk_idx = topk_idx.repeat_interleave(
+    t2r_idx = t2r_idx.repeat_interleave(
         split_size_tensor,
         dim=0,
         output_size=input_seqlen,
     )
 
-    return topk_idx
+    return t2r_idx
 
 
 @overload
@@ -1379,7 +1379,7 @@ def get_native_group_cast_meta(
     input_split_sizes: list[int],
     dst_indices: list[list[int]],
     group: dist.ProcessGroup,
-    topk_idx: torch.Tensor | None = None,
+    t2r_idx: torch.Tensor | None = None,
     input_seqlen: int | None = None,
     num_nodes: int | None = None,
     device: str = "cuda",
@@ -1393,7 +1393,7 @@ def get_native_group_cast_meta(
     input_split_sizes: torch.Tensor,
     dst_indices: torch.Tensor,
     group: dist.ProcessGroup,
-    topk_idx: torch.Tensor | None = None,
+    t2r_idx: torch.Tensor | None = None,
     input_seqlen: int | None = None,
     num_nodes: int | None = None,
     device: str = "cuda",
@@ -1407,7 +1407,7 @@ def get_native_group_cast_meta(
     input_split_sizes: list[int] | torch.Tensor,
     dst_indices: list[list[int]] | torch.Tensor,
     group: dist.ProcessGroup,
-    topk_idx: torch.Tensor | None = None,
+    t2r_idx: torch.Tensor | None = None,
     input_seqlen: int | None = None,
     num_nodes: int | None = None,
     device: str = "cuda",
@@ -1419,9 +1419,9 @@ def get_native_group_cast_meta(
     num_ranks = group.size()
 
     # TODO: support directly pass input_split_sizes and dst_indices
-    # and no need to transfer to topk_idx first
-    if topk_idx is None:
-        topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+    # and no need to transfer to t2r_idx first
+    if t2r_idx is None:
+        t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
             input_split_sizes=input_split_sizes,
             dst_indices=dst_indices,
             num_ranks=num_ranks,
@@ -1439,7 +1439,7 @@ def get_native_group_cast_meta(
             is_token_in_rank,
             _,  # event_overlap
         ) = buffer.get_group_cast_meta(
-            topk_idx=topk_idx,
+            t2r_idx=t2r_idx,
             previous_event=None,
             async_finish=False,
             allocate_on_comm_stream=False,
@@ -1454,8 +1454,8 @@ def get_native_group_cast_meta(
             num_tokens_per_rdma_rank,
             is_token_in_rank,
             _,  # event_overlap,
-        ) = GrpCollBuffer.get_group_cast_meta_from_topk_idx(
-            topk_idx=topk_idx,
+        ) = GrpCollBuffer.get_group_cast_meta_from_t2r_idx(
+            t2r_idx=t2r_idx,
             num_ranks=num_ranks,
             num_nodes=num_nodes,
             previous_event=None,

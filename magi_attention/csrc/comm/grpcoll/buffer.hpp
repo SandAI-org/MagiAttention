@@ -158,7 +158,7 @@ struct Buffer {
   void destroy();
 
   std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> get_group_cast_meta(
-      const torch::Tensor& topk_idx,
+      const torch::Tensor& t2r_idx,
       std::optional<EventHandle>& previous_event,
       bool async,
       bool allocate_on_comm_stream);

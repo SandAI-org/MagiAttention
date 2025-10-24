@@ -128,10 +128,10 @@ def native_group_cast_impl(
             dst_indices=dst_indices,
             group=group,
             input_seqlen=input_seqlen,
-            # HACK: leave a slot for topk_idx
+            # HACK: leave a slot for t2r_idx
             # since for now, we transfer the group_cast meta to it inside anyway
-            # which is helpful in the ep/nsa communication scenarios
-            topk_idx=kwargs.pop("topk_idx", None),
+            # which is helpful in the token-level communication scenarios such as ep, nsa
+            t2r_idx=kwargs.pop("t2r_idx", None),
         )
 
         # for group-cast, perm_to_a2av_idx is the post_perm_idx
@@ -272,7 +272,7 @@ def native_group_reduce_impl(
             group=group,
             async_op=async_op,
             output_seqlen=output_seqlen,
-            topk_idx=kwargs.pop("topk_idx", None),
+            t2r_idx=kwargs.pop("t2r_idx", None),
         )
 
     # transfer symmetric group-cast meta args to dispatch meta args

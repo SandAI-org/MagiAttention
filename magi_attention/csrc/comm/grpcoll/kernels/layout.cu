@@ -48,7 +48,7 @@ namespace layout {
 
 template <int kNumThreads, int kNumRanksPerSM>
 __global__ void get_group_cast_meta(
-    const int64_t* topk_idx,
+    const int64_t* t2r_idx,
     int* num_tokens_per_rank,
     int* num_tokens_per_rdma_rank,
     bool* is_token_in_rank,
@@ -93,11 +93,11 @@ __global__ void get_group_cast_meta(
       num_tokens_per_rdma_rank_per_thread[thread_id][i] = 0;
 #pragma unroll
     for (int i = thread_id; i < num_tokens; i += kNumThreads) {
-      auto shifted_topk_idx = topk_idx + i * num_ranks;
+      auto shifted_t2r_idx = t2r_idx + i * num_ranks;
       int is_in_rank[kNumRanksPerSM] = {0}, is_in_rdma_rank[kNumRDMARanksPerSM] = {0};
 #pragma unroll
       for (int j = 0, local_rank_idx, global_rank_idx; j < num_ranks; ++j) {
-        global_rank_idx = static_cast<int>(shifted_topk_idx[j]);
+        global_rank_idx = static_cast<int>(shifted_t2r_idx[j]);
         if (rank_begin_idx <= global_rank_idx and global_rank_idx < rank_end_idx) {
           local_rank_idx = global_rank_idx - rank_begin_idx;
           is_in_rank[local_rank_idx]++, is_in_rdma_rank[local_rank_idx / NUM_MAX_NVL_PEERS]++;
@@ -149,7 +149,7 @@ __global__ void get_group_cast_meta(
 }
 
 void get_group_cast_meta(
-    const int64_t* topk_idx,
+    const int64_t* t2r_idx,
     int* num_tokens_per_rank,
     int* num_tokens_per_rdma_rank,
     bool* is_token_in_rank,
@@ -162,7 +162,7 @@ void get_group_cast_meta(
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   LAUNCH_KERNEL(
-      &cfg, (get_group_cast_meta<kNumThreads, kNumRanksPerSM>), topk_idx, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens, num_ranks);
+      &cfg, (get_group_cast_meta<kNumThreads, kNumRanksPerSM>), t2r_idx, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens, num_ranks);
 }
 
 template <int kNumThreads, int kMaxNumRanks>

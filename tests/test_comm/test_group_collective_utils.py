@@ -24,7 +24,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_reduce_a2a_input_args,
     get_a2av_perm_idxs_from_group_cast_meta,
     sum_reduce_output,
-    transfer_splits_and_dst_idxs_to_topk_idx,
+    transfer_splits_and_dst_idxs_to_t2r_idx,
     unpermute_output,
 )
 from magi_attention.testing import parameterize
@@ -527,13 +527,13 @@ class TestGroupCollectiveUtils(TestCase):
             # fmt: on
         ],
     )
-    def test_transfer_splits_and_dst_idxs_to_topk_idxs(self, config):
+    def test_transfer_splits_and_dst_idxs_to_t2r_idx(self, config):
         input_split_size_list = config["input_split_size_list"]
         dst_indices_list = config["dst_indices_list"]
         world_size = config["world_size"]
 
         # use host meta as ref
-        ref_topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+        ref_t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
             input_split_sizes=input_split_size_list,
             dst_indices=dst_indices_list,
             num_ranks=world_size,
@@ -561,13 +561,13 @@ class TestGroupCollectiveUtils(TestCase):
             device="cuda",
         )
 
-        topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+        t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
             input_split_sizes=input_split_sizes,
             dst_indices=dst_indices,
             num_ranks=world_size,
         )
 
-        assert torch.equal(topk_idx, ref_topk_idx)
+        assert torch.equal(t2r_idx, ref_t2r_idx)
 
     def _seqlens2curanges(
         self,

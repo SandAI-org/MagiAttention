@@ -378,7 +378,7 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
     x[:, :valid_len] = sorted_bin_idx[:, :valid_len]
 
 
-def transfer_group_cast_meta_to_dispatch_meta(
+def transfer_native_group_cast_meta(
     rank: int,
     num_ranks: int,
     num_nodes: int,

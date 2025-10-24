@@ -49,7 +49,7 @@ from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.comm.primitive.grpcoll.utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
     get_native_group_cast_meta,
-    transfer_splits_and_dst_idxs_to_topk_idx,
+    transfer_splits_and_dst_idxs_to_t2r_idx,
     unpermute_output,
 )
 from magi_attention.utils import pad_and_pack_tensors, setup_dist_env
@@ -66,7 +66,7 @@ from grpcoll_utils import (
     per_token_cast_to_fp8,
     perm_idxs2unperm_idxs,
     sim_gemm,
-    transfer_group_cast_meta_to_dispatch_meta,
+    transfer_native_group_cast_meta,
 )
 
 
@@ -240,7 +240,7 @@ def test_main(
         _,  # num_tokens_per_expert
         range_gather_post_dispatch_kwargs,
         range_gather_pre_combine_kwargs,
-    ) = transfer_group_cast_meta_to_dispatch_meta(
+    ) = transfer_native_group_cast_meta(
         rank=rank,
         num_ranks=num_ranks,
         num_nodes=num_nodes,
@@ -353,30 +353,30 @@ def test_main(
     assert num_experts == num_ranks
 
     # use host meta
-    layout_topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+    layout_t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
         input_split_sizes=input_split_size_list,
         dst_indices=dst_indices_list,
         num_ranks=num_ranks,
     )
 
     # use device meta
-    layout_topk_idx_device = transfer_splits_and_dst_idxs_to_topk_idx(
+    layout_t2r_idx_device = transfer_splits_and_dst_idxs_to_t2r_idx(
         input_split_sizes=input_split_sizes,
         dst_indices=dst_indices,
         num_ranks=num_ranks,
     )
 
-    assert torch.equal(layout_topk_idx, layout_topk_idx_device)
+    assert torch.equal(layout_t2r_idx, layout_t2r_idx_device)
 
     (
         ref_num_tokens_per_rank,
         ref_num_tokens_per_rdma_rank,
         ref_is_token_in_rank,
         _,  # event_overlap,
-    ) = buffer.get_group_cast_meta(layout_topk_idx, num_experts)
+    ) = buffer.get_group_cast_meta(layout_t2r_idx, num_experts)
 
     print(
-        f"[RANK {rank}]: {layout_topk_idx.shape=} | {layout_topk_idx=}\n"
+        f"[RANK {rank}]: {layout_t2r_idx.shape=} | {layout_t2r_idx=}\n"
         f"{ref_num_tokens_per_rank.shape=} | {ref_num_tokens_per_rank=}\n"
         f"{ref_num_tokens_per_rdma_rank.shape=} | {ref_num_tokens_per_rdma_rank=}\n"
         f"{ref_is_token_in_rank.shape=} | {ref_is_token_in_rank=}\n",
@@ -389,7 +389,7 @@ def test_main(
     assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
 
     # benchmark dispatch layout
-    t = bench(lambda: buffer.get_group_cast_meta(layout_topk_idx))[0]
+    t = bench(lambda: buffer.get_group_cast_meta(layout_t2r_idx))[0]
     if local_rank == 0:
         print(f"[layout] Kernel performance: {t * 1000:.3f} ms", flush=True)
         print("", flush=True)

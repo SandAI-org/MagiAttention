@@ -73,7 +73,7 @@ void finalize();
 namespace layout {
 
 void get_group_cast_meta(
-    const int64_t* topk_idx,
+    const int64_t* t2r_idx,
     int* num_tokens_per_rank,
     int* num_tokens_per_rdma_rank,
     bool* is_token_in_rank,
