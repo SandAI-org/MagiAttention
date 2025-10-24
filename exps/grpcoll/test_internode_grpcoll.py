@@ -193,7 +193,7 @@ def test_main(
         device="cuda",
     )
 
-    # get ref dispatch output by group-cast
+    # get ref group_cast output by group-cast
     recv_x_gc = torch.empty(
         (sum(output_split_size_list), *x.shape[1:]), dtype=torch.bfloat16, device="cuda"
     )
@@ -210,36 +210,36 @@ def test_main(
     recv_x_gc = work_with_pf_gc.wait_post_process(recv_x_gc)
     print(f"[RANK {rank}]: {recv_x_gc.shape=} | {recv_x_gc=}\n", flush=True)
 
-    # get ref combine output by group-reduce
+    # get ref group_reduce output by group-reduce
     x_gr = sim_gemm(recv_x_gc, w=sim_gemm_weight)
-    combined_x_gr = torch.zeros_like(x)
+    reduced_x_gr = torch.zeros_like(x)
     if acc_reduce_out_buffer:
-        combined_x_gr += acc_reduce_constant
-    combined_x_gr_buf = combined_x_gr.clone() if pass_out_buffer else None
+        reduced_x_gr += acc_reduce_constant
+    reduced_x_gr_buf = reduced_x_gr.clone() if pass_out_buffer else None
     work_with_pf_gr = group_reduce(
         input=x_gr,
-        output=combined_x_gr,
+        output=reduced_x_gr,
         input_split_sizes=output_split_size_list,
         output_split_sizes=input_split_size_list,
         dst_index=src_index_list,
         src_indices=dst_indices_list,
         group=group,
     )
-    combined_x_gr = work_with_pf_gr.wait_post_process(combined_x_gr)
-    print(f"[RANK {rank}]: {combined_x_gr.shape=} | {combined_x_gr=}\n", flush=True)
+    reduced_x_gr = work_with_pf_gr.wait_post_process(reduced_x_gr)
+    print(f"[RANK {rank}]: {reduced_x_gr.shape=} | {reduced_x_gr=}\n", flush=True)
 
-    # transfer group-cast meta args to dispatch meta args
+    # transfer group-cast meta args to group_cast meta args
     (
         rank_idx,
         rdma_rank_idx,
         num_tokens_per_rank,
         num_tokens_per_rdma_rank,
         is_token_in_rank,
-        topk_idx,
-        topk_weights,
+        _,  # topk_idx
+        _,  # topk_weights
         _,  # num_tokens_per_expert
-        range_gather_post_dispatch_kwargs,
-        range_gather_pre_combine_kwargs,
+        range_gather_post_group_cast_kwargs,
+        range_gather_pre_group_reduce_kwargs,
     ) = transfer_native_group_cast_meta(
         rank=rank,
         num_ranks=num_ranks,
@@ -256,13 +256,12 @@ def test_main(
     print(
         f"[RANK {rank}]: {input_split_size_list=} | {dst_indices_list=} | "
         f"{output_split_size_list=} | {src_index_list=} | {sum(output_split_size_list)=}\n",
-        f"[RANK {rank}]: {topk_idx=} | {topk_weights=}\n",
         f"[RANK {rank}]: {rank_idx=} | {rdma_rank_idx=}\n",
         flush=True,
     )
 
     # get perm/unperm idxs to/from a2av through group-cast meta args
-    # which is used to replace the post-dispatch range_gather and pre-combine range_gather
+    # which is used to replace the post-group_cast range_gather and pre-group_reduce range_gather
 
     # use host meta
     perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
@@ -312,10 +311,10 @@ def test_main(
         f"{num_tokens_per_rdma_rank.shape=}\n",
         flush=True,
     )
-    # RDMA dispatch counts
+    # RDMA group_cast counts
     num_rdma_token_sent = num_tokens_per_rdma_rank.sum().item()
 
-    # test get dispatch layout from group cast meta
+    # test get group_cast layout from group cast meta
 
     # use host meta
     (
@@ -349,7 +348,7 @@ def test_main(
     assert torch.allclose(ref_num_tokens_per_rdma_rank_device, num_tokens_per_rdma_rank)
     assert torch.allclose(ref_is_token_in_rank_device, is_token_in_rank)
 
-    # get dispatch layout from buffer as reference
+    # get group_cast layout from buffer as reference
     assert num_experts == num_ranks
 
     # use host meta
@@ -388,7 +387,7 @@ def test_main(
     assert torch.allclose(ref_num_tokens_per_rdma_rank, num_tokens_per_rdma_rank)
     assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
 
-    # benchmark dispatch layout
+    # benchmark group_cast layout
     t = bench(lambda: buffer.get_group_cast_meta(layout_t2r_idx))[0]
     if local_rank == 0:
         print(f"[layout] Kernel performance: {t * 1000:.3f} ms", flush=True)
@@ -396,7 +395,7 @@ def test_main(
     group.barrier()
     time.sleep(1)
 
-    # Test dispatch
+    # Test group_cast
     def check_data(check_x, recv_gbl_rank_prefix_sum):
         if distinct_token or random_permute_output:
             # distinct token cannot use this check
@@ -413,11 +412,11 @@ def test_main(
             for current_x in (x,):
                 if local_rank == 0:
                     print(
-                        "\n# ------    Test Internode Dispatch   ------ #\n",
+                        "\n# ------    Test Internode Group Cast   ------ #\n",
                         flush=True,
                     )
 
-                # prepare dispatch args
+                # prepare group_cast args
                 if local_rank == 0:
                     print(
                         f"[testing] Running with "
@@ -426,7 +425,7 @@ def test_main(
                         flush=True,
                         end="",
                     )
-                dispatch_args = {
+                group_cast_args = {
                     "x": current_x,
                     "recv_x": recv_x_gc_buf,
                     "num_tokens_per_rank": num_tokens_per_rank,
@@ -439,25 +438,25 @@ def test_main(
                     else None,
                 }
                 if previous_mode:
-                    dispatch_args.update({"previous_event": buffer.capture()})
+                    group_cast_args.update({"previous_event": buffer.capture()})
 
-                # dispatch
+                # group_cast
                 # recv_x: shape=[num_recv_tokens, hidden_dim]:
                 #   the recv tokens for this rank (in rank order just like a2a output,
                 #   while the boundary is indicated by rank_prefix_matrix)
-                # handle: the tuple of some meta tensors that will be passed to combine or cached dispatch
+                # handle: the tuple of some meta tensors that will be passed to group_reduce or cached group_cast
                 # handle[0] (is_token_in_rank): shape=[num_tokens, num_ranks]
                 # handle[1] (rdma_channel_prefix_matrix): shape=[num_rdma_ranks, num_channels]:
                 #   rdma_channel_prefix_matrix[r, :]: the prefix sum of send token end idxs sent by
-                #   each send-channel to rdma rank r calculated in notify_dispatch
+                #   each send-channel to rdma rank r calculated in notify_group_cast
                 # handle[2] (gbl_channel_prefix_matrix): shape=[num_ranks, num_channels]:
                 #   gbl_channel_prefix_matrix[r, :]: the prefix sum of send token end idxs sent by
-                #   each send-channel to rank r calculated in notify_dispatch
+                #   each send-channel to rank r calculated in notify_group_cast
                 # handle[3] (recv_rdma_channel_prefix_matrix): shape=[num_rdma_ranks, num_channels]:
                 #   recv_rdma_channel_prefix_matrix[r, :]: the prefix sum of recv token end idxs recv by
                 #   each recv-channel from rdma rank r
                 # handle[4] (recv_rdma_rank_prefix_sum): shape=[num_rdma_ranks,]:
-                #   the prefix sum of the number of tokens to recv from each rdma rank calculated in notify_dispatch
+                #   the prefix sum of the number of tokens to recv from each rdma rank calculated in notify_group_cast
                 # handle[5] (recv_gbl_channel_prefix_matrix): shape=[num_ranks, num_channels]:
                 #   recv_gbl_channel_prefix_matrix[r, :]: the prefix sum of recv token start idxs recv by
                 #   each recv-channel from global rank r
@@ -465,7 +464,7 @@ def test_main(
                 #   i.e. recv_gbl_channel_prefix_matrix[r, 0] does not start from 0 except for r == 0
                 # handle[6] (recv_gbl_rank_prefix_sum): shape=[num_ranks,]:
                 #   the prefix sum of the number of tokens to recv from each global rank,
-                #   thus recv_gbl_rank_prefix_sum[-1] == num_recv_tokens calculated in notify_dispatch
+                #   thus recv_gbl_rank_prefix_sum[-1] == num_recv_tokens calculated in notify_group_cast
                 # handle[7] (recv_src_meta): shape=[num_recv_tokens, sizeof(internode::SourceMeta)=8]:
                 #   the source meta for each recv token,
                 #   where a SourceMeta struct object stores the src_rdma_rank
@@ -487,7 +486,7 @@ def test_main(
                     _,  # recv_lse
                     handle,
                     event,
-                ) = buffer.group_cast(**dispatch_args)
+                ) = buffer.group_cast(**group_cast_args)
 
                 # wait
                 event.current_stream_wait() if async_mode else ()
@@ -510,7 +509,7 @@ def test_main(
                         elif use_a2av_perm_idxs == "no":
                             recv_x = unpermute_output(
                                 output=recv_x,
-                                unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
+                                unperm_after_a2a_kwargs=range_gather_post_group_cast_kwargs,
                             )
                         assert recv_x_from_a2av.shape == recv_x.shape
 
@@ -565,25 +564,25 @@ def test_main(
 
                 if local_rank == 0:
                     print(
-                        "\n# ------    Test Internode Cached Dispatch   ------ #\n",
+                        "\n# ------    Test Internode Cached Group Cast   ------ #\n",
                         flush=True,
                     )
 
-                # Test cached dispatch (must without top-k staffs)
-                dispatch_args = {
+                # Test cached group_cast (must without top-k staffs)
+                group_cast_args = {
                     "x": current_x,
                     "handle": handle,
                     "config": config,
                     "async_finish": async_mode,
                 }
                 if previous_mode:
-                    dispatch_args.update({"previous_event": buffer.capture()})
+                    group_cast_args.update({"previous_event": buffer.capture()})
                 (
                     recv_cached_x,
                     _,  # recv_cached_lse
                     _,  # handle
                     event,
-                ) = buffer.group_cast(**dispatch_args)
+                ) = buffer.group_cast(**group_cast_args)
                 event.current_stream_wait() if async_mode else ()
                 recv_cached_x = (
                     per_token_cast_back(*recv_cached_x)
@@ -595,12 +594,12 @@ def test_main(
 
                 if local_rank == 0:
                     print(
-                        "\n# ------    Test Internode Combine   ------ #\n",
+                        "\n# ------    Test Internode Group Reduce   ------ #\n",
                         flush=True,
                     )
 
                 # simulate gemm
-                x_combine = sim_gemm(recv_x, w=sim_gemm_weight)
+                x_group_reduce = sim_gemm(recv_x, w=sim_gemm_weight)
 
                 # permute x to the rank order
                 if random_permute_output:
@@ -608,20 +607,22 @@ def test_main(
                         # will permute inside
                         pass
                     else:
-                        x_combine_before_to_a2av = x_combine.clone()
+                        x_group_reduce_before_to_a2av = x_group_reduce.clone()
                         if use_a2av_perm_idxs == "outside":
-                            x_combine = x_combine[perm_to_a2av_idx]
+                            x_group_reduce = x_group_reduce[perm_to_a2av_idx]
                         elif use_a2av_perm_idxs == "no":
-                            x_combine = unpermute_output(
-                                output=x_combine,
-                                unperm_after_a2a_kwargs=range_gather_pre_combine_kwargs,
+                            x_group_reduce = unpermute_output(
+                                output=x_group_reduce,
+                                unperm_after_a2a_kwargs=range_gather_pre_group_reduce_kwargs,
                             )
-                        assert x_combine_before_to_a2av.shape == x_combine.shape
+                        assert (
+                            x_group_reduce_before_to_a2av.shape == x_group_reduce.shape
+                        )
 
-                # prepare combine args
-                combine_args = {
-                    "x": x_combine,
-                    "reduced_x": combined_x_gr_buf,
+                # prepare group_reduce args
+                group_reduce_args = {
+                    "x": x_group_reduce,
+                    "reduced_x": reduced_x_gr_buf,
                     "handle": handle,
                     "config": config,
                     "async_finish": async_mode,
@@ -633,58 +634,58 @@ def test_main(
                     else None,
                 }
                 if previous_mode:
-                    combine_args.update({"previous_event": buffer.capture()})
+                    group_reduce_args.update({"previous_event": buffer.capture()})
 
-                # combine
-                # combined_x: shape=[num_tokens, hidden_size]: combined_x[i]:
+                # group_reduce
+                # reduced_x: shape=[num_tokens, hidden_size]: reduced_x[i]:
                 #   the ith token's sum-reduction result of top-k experts
                 #   NOTE: the send_rdma_head will be modified in-place in internode::cached_notify
                 #       for the entries == -1 to the position of next valid token (encoded to -p-1)
-                #       since the combine kernel needs to know the channel position when iterating at this token,
+                #       since the group_reduce kernel needs to know the channel position when iterating at this token,
                 #       even though it is not sent to the target rdma rank
                 #   NOTE: the send_nvl_head will be modified in-place in internode::cached_notify
                 #       for the entries == -1 to the position of next valid token (encoded to -p-1)
-                #       since the combine kernel needs to know the channel position when iterating at this token,
+                #       since the group_reduce kernel needs to know the channel position when iterating at this token,
                 #       even though it is not sent to the target rdma rank
                 (
-                    combined_x,
-                    _,  # combined_lse
+                    reduced_x,
+                    _,  # reduced_lse
                     event,
-                ) = buffer.group_reduce(**combine_args)
+                ) = buffer.group_reduce(**group_reduce_args)
 
                 # wait
                 event.current_stream_wait() if async_mode else ()
 
                 # check in-place
                 if pass_out_buffer:
-                    assert combined_x_gr_buf is not None
-                    assert combined_x_gr_buf.data_ptr() == combined_x.data_ptr()
+                    assert reduced_x_gr_buf is not None
+                    assert reduced_x_gr_buf.data_ptr() == reduced_x.data_ptr()
 
                 # print
                 print(
                     (
-                        f"\n[RANK {rank}]: {combined_x.shape=} | {combined_x=}\n"
-                        f"Before combine: {send_rdma_head.shape=} | {send_rdma_head=}\n\n"
-                        f"Before combine: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"
+                        f"\n[RANK {rank}]: {reduced_x.shape=} | {reduced_x=}\n"
+                        f"Before group_reduce: {send_rdma_head.shape=} | {send_rdma_head=}\n\n"
+                        f"Before group_reduce: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"
                     ),
                     flush=True,
                 )
 
                 # check
-                torch.testing.assert_close(combined_x, combined_x_gr)
+                torch.testing.assert_close(reduced_x, reduced_x_gr)
 
                 send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
-                check_x = combined_x.float() / send_token_nums
+                check_x = reduced_x.float() / send_token_nums
                 ref_x = x_pure_rand if current_x is x_pure_rand else x
                 ref_x = sim_gemm(ref_x, w=sim_gemm_weight)
-                # if acc_reduce, the combined token should add with a constant rank bias
+                # if acc_reduce, the reduced token should add with a constant rank bias
                 if acc_reduce_out_buffer:
                     ref_x += acc_reduce_constant / send_token_nums
 
-                # if some token is not sent to any rank, the combined token should be 0
+                # if some token is not sent to any rank, the reduced token should be 0
                 if min_num_dst_ranks == 0:
                     zero_num_dst_ranks_mask = (send_token_nums == 0.0).expand_as(
-                        combined_x
+                        reduced_x
                     )
                     check_x[zero_num_dst_ranks_mask] = (
                         acc_reduce_constant if acc_reduce_out_buffer else 0.0
@@ -697,10 +698,10 @@ def test_main(
                 assert diff < 5e-6, f"{check_x} != {ref_x} with ({diff=})"
 
                 # For later tuning
-                dispatch_bf16_rdma_send_bytes = num_rdma_token_sent * hidden * 2
-                dispatch_bf16_nvl_recv_bytes = recv_x.numel() * 2
-                combine_bf16_nvl_send_bytes = dispatch_bf16_nvl_recv_bytes
-                combine_bf16_rdma_recv_bytes = dispatch_bf16_rdma_send_bytes
+                group_cast_bf16_rdma_send_bytes = num_rdma_token_sent * hidden * 2
+                group_cast_bf16_nvl_recv_bytes = recv_x.numel() * 2
+                group_reduce_bf16_nvl_send_bytes = group_cast_bf16_nvl_recv_bytes
+                group_reduce_bf16_rdma_recv_bytes = group_cast_bf16_rdma_send_bytes
 
     if local_rank == 0:
         print("passed", flush=True)
@@ -709,20 +710,20 @@ def test_main(
     torch.cuda.synchronize()
     dist.barrier()
 
-    # Tune dispatch performance
-    best_dispatch_results = None
+    # Tune group_cast performance
+    best_group_cast_results = None
     fp8_factor = (1 + 4 / 128) / 2
     for current_x in (x,):  # (x_e4m3, x):
         best_time, best_results = 1e10, None
         rdma_send_bytes = (
-            (dispatch_bf16_rdma_send_bytes * fp8_factor)
+            (group_cast_bf16_rdma_send_bytes * fp8_factor)
             if isinstance(current_x, tuple)
-            else dispatch_bf16_rdma_send_bytes
+            else group_cast_bf16_rdma_send_bytes
         )
         nvl_recv_bytes = (
-            (dispatch_bf16_nvl_recv_bytes * fp8_factor)
+            (group_cast_bf16_nvl_recv_bytes * fp8_factor)
             if isinstance(current_x, tuple)
-            else dispatch_bf16_nvl_recv_bytes
+            else group_cast_bf16_nvl_recv_bytes
         )
         for nvl_chunk_size in range(4, 45, 4):
             for rdma_chunk_size in range(4, 33, 4):
@@ -755,7 +756,7 @@ def test_main(
                     )
         if local_rank == 0:
             print(
-                f"[tuning] Best dispatch "
+                f"[tuning] Best group_cast "
                 f'({"FP8" if isinstance(current_x, tuple) else "BF16"}): '
                 f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "
                 f"RDMA chunk {best_results[2]}, transmit: {best_time * 1e6:.2f} us, "
@@ -767,32 +768,32 @@ def test_main(
             print("", flush=True)
 
         # Gather the best config from rank 0 and the first test setting
-        if best_dispatch_results is None:
-            best_dispatch_results = torch.tensor(
+        if best_group_cast_results is None:
+            best_group_cast_results = torch.tensor(
                 [best_results[0], best_results[1], best_results[2]],
                 dtype=torch.int32,
                 device="cuda",
             )
             all_best_results_list = [
-                torch.zeros_like(best_dispatch_results)
+                torch.zeros_like(best_group_cast_results)
                 for _ in range(torch.distributed.get_world_size())
             ]
-            dist.all_gather(all_best_results_list, best_dispatch_results, group=group)
-            best_dispatch_results = all_best_results_list[0].tolist()
-    dispatch_config = GrpCollConfig(
-        num_sms=best_dispatch_results[0],
-        nvl_chunk_size=best_dispatch_results[1],
+            dist.all_gather(all_best_results_list, best_group_cast_results, group=group)
+            best_group_cast_results = all_best_results_list[0].tolist()
+    group_cast_config = GrpCollConfig(
+        num_sms=best_group_cast_results[0],
+        nvl_chunk_size=best_group_cast_results[1],
         nvl_buffer_size=nvl_buffer_size,
-        rdma_chunk_size=best_dispatch_results[2],
+        rdma_chunk_size=best_group_cast_results[2],
         rdma_buffer_size=rdma_buffer_size,
     )
 
-    dispatch_args = {
+    group_cast_args = {
         "x": x,
         "num_tokens_per_rank": num_tokens_per_rank,
         "num_tokens_per_rdma_rank": num_tokens_per_rdma_rank,
         "is_token_in_rank": is_token_in_rank,
-        "config": dispatch_config if dispatch_config is not None else config,
+        "config": group_cast_config if group_cast_config is not None else config,
     }
     (
         recv_x,
@@ -800,12 +801,12 @@ def test_main(
         handle,
         _,  # event
     ) = buffer.group_cast(
-        **dispatch_args
+        **group_cast_args
     )  # type: ignore[assignment]
 
-    # Tune combine performance
+    # Tune group_reduce performance
     best_time, best_results = 1e10, None
-    combined_x_buf = torch.zeros_like(x) if pass_out_buffer else None
+    reduced_x_buf = torch.zeros_like(x) if pass_out_buffer else None
     for nvl_chunk_size in range(1, 8, 1):
         for rdma_chunk_size in range(12 if num_nodes == 2 else 8, 33, 4):
             config = GrpCollConfig(
@@ -817,7 +818,7 @@ def test_main(
             )
             tune_args = {
                 "x": recv_x,
-                "reduced_x": combined_x_buf,
+                "reduced_x": reduced_x_buf,
                 "handle": handle,
                 "config": config,
                 "reduce_op": "sum",
@@ -831,8 +832,8 @@ def test_main(
                     f"[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}, "
                     f"RDMA chunk {rdma_chunk_size}, transmit: {t * 1e6:.2f} us, "
                     f"notify: {notify_t * 1e6:.2f} us, "
-                    f"BW: {combine_bf16_rdma_recv_bytes / 1e9 / t:.2f} GB/s (RDMA), "
-                    f"{combine_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL) ",
+                    f"BW: {group_reduce_bf16_rdma_recv_bytes / 1e9 / t:.2f} GB/s (RDMA), "
+                    f"{group_reduce_bf16_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL) ",
                     flush=True,
                 )
                 if t < best_time:
@@ -845,12 +846,12 @@ def test_main(
 
     if local_rank == 0:
         print(
-            f"[tuning] Best combine: SMs {best_results[0]}, "
+            f"[tuning] Best group_reduce: SMs {best_results[0]}, "
             f"NVL chunk {best_results[1]}, RDMA chunk {best_results[2]}, "
             f"transmit: {best_time * 1e6:.2f} us, "
             f"notify: {best_results[3] * 1e6:.2f} us, "
-            f"BW: {combine_bf16_rdma_recv_bytes / 1e9 / best_time:.2f} GB/s (RDMA), "
-            f"{combine_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL)",
+            f"BW: {group_reduce_bf16_rdma_recv_bytes / 1e9 / best_time:.2f} GB/s (RDMA), "
+            f"{group_reduce_bf16_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL)",
             flush=True,
         )
         print("", flush=True)
