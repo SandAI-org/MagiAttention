@@ -83,7 +83,7 @@ std::vector<at::Tensor> mha_fwd(
       q, k, v, out_, softmax_lse_, q_ranges, k_ranges,
       attn_type_map_, merge_q_ranges_, qk_map_,
       unique_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
-      out_type_, deterministic, sm_margin);
+      out_type_, deterministic, sm_margin, kBlockM);
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 

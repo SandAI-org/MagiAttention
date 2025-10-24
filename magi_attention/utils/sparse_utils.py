@@ -587,17 +587,15 @@ def choose_ref_block(
     if swap_ab:
         raise NotImplementedError("SwapAB Attention is not supported yet.")
     else:
-        # Tile_M must be a multiple of 64 and >= q_block_size
+        # Tile_M must be a multiple of 64
         if q_block_size >= 64:
-            # Round up to nearest multiple of 64
-            ref_q_block_size = ((q_block_size + 63) // 64) * 64
+            ref_q_block_size = min(192, ((q_block_size + 63) // 64) * 64)
         else:
             ref_q_block_size = 64
 
-        # Tile_K must be a multiple of 16 and >= k_block_size
+        # Tile_K must be a multiple of 16
         if k_block_size >= 16:
-            # Round up to nearest multiple of 16
-            ref_k_block_size = ((k_block_size + 15) // 16) * 16
+            ref_k_block_size = min(256, ((k_block_size + 15) // 16) * 16)
         else:
             ref_k_block_size = 16
 
