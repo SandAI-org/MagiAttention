@@ -199,6 +199,7 @@ def native_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -219,6 +220,7 @@ def native_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -238,6 +240,7 @@ def native_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -304,7 +307,7 @@ def native_group_reduce_impl(
         previous_event=None,
         async_op=async_op,
         allocate_on_comm_stream=False,
-        comm_dtype=None,  # TODO
+        comm_dtype=comm_dtype,
         lse=input_lse,
         reduced_lse=output_lse,
     )

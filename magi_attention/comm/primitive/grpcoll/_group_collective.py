@@ -221,6 +221,7 @@ def group_reduce(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -241,6 +242,7 @@ def group_reduce(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -261,6 +263,7 @@ def group_reduce(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -327,6 +330,8 @@ def group_reduce(
                 Otherwise, the output buffer must be given and the initial value will be accumulated
                 w.r.t. the reduction operation according to the ``reduce_op``.
 
+        comm_dtype (torch.dtype | None): the communication dtype. Defaults to `input.dtype` if not given.
+
         input_lse (torch.Tensor | None): the log-sum-exp tensor for the input tensor,
             only required and used if reduce_op is "lse"
         output_lse (torch.Tensor | None): the log-sum-exp tensor for the output tensor,
@@ -345,7 +350,8 @@ def group_reduce(
     """
 
     if magi_attention.comm.is_hierarchical_comm_enable():
-        # NOTE: a workaround to reduce inter-comm overhead by hierarchical group-reduce
+        # NOTE: a workaround to reduce inter-comm overhead by hierarchical group collective
+        # which might be deprecated when the native hierarchical group collective is ready
         return hier_group_reduce_impl_with_a2av(
             input_tensor=input,
             output_tensor=output,
@@ -357,13 +363,15 @@ def group_reduce(
             async_op=async_op,
             reduce_op=reduce_op,
             acc_reduce=acc_reduce,
+            comm_dtype=comm_dtype,
             input_lse=input_lse,
             output_lse=output_lse,
             **kwargs,
         )
 
     if magi_attention.comm.is_native_grpcoll_enable():
-        # NOTE: a feature under early development
+        # NOTE: the new feature under development
+        # which might be the default implementation in the future
         return native_group_reduce_impl(
             input=input,
             output=output,
@@ -375,12 +383,13 @@ def group_reduce(
             async_op=async_op,
             reduce_op=reduce_op,
             acc_reduce=acc_reduce,
+            comm_dtype=comm_dtype,
             input_lse=input_lse,
             output_lse=output_lse,
             **kwargs,
         )
 
-    # fall back to the a2a-v implementation
+    # fall back to the original a2a-v implementation
     return a2av_group_reduce_impl(
         input=input,
         output=output,
@@ -392,6 +401,7 @@ def group_reduce(
         async_op=async_op,
         reduce_op=reduce_op,
         acc_reduce=acc_reduce,
+        comm_dtype=comm_dtype,
         input_lse=input_lse,
         output_lse=output_lse,
         **kwargs,

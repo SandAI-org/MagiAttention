@@ -627,7 +627,7 @@ def hier_group_cast_impl_with_a2av(
     assert (
         not magi_attention.comm.is_native_grpcoll_enable()
     ), "A2A-based hierarchical group-cast is not compatible with native grpcoll implementation"
-    assert async_op, "A2A-based hierarchical group-cast only supports async_op for now"
+    assert async_op, "A2A-based hierarchical group-cast only supports async_op"
     assert (
         output_tensor is not None
     ), "A2A-based hierarchical group-cast only supports output is given"
@@ -637,9 +637,7 @@ def hier_group_cast_impl_with_a2av(
         "A2A-based hierarchical group-cast only supports host meta interface, "
         "thus the input_split_sizes, output_split_sizes, dst_indices, src_index should all be list type"
     )
-    assert (
-        not cast_lse
-    ), "A2A-based hierarchical group-cast does not support lse cast for now"
+    assert not cast_lse, "A2A-based hierarchical group-cast does not support lse cast"
 
     # check shapes
     assert len(input_split_sizes) == len(dst_indices), (
@@ -1148,6 +1146,7 @@ def hier_group_reduce_impl_with_a2av(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -1168,6 +1167,7 @@ def hier_group_reduce_impl_with_a2av(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -1187,6 +1187,7 @@ def hier_group_reduce_impl_with_a2av(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -1201,12 +1202,13 @@ def hier_group_reduce_impl_with_a2av(
     assert (
         acc_reduce and output_tensor is not None
     ), "A2A-based hierarchical group-reduce only supports acc_reduce=True and output is given"
-    assert (
-        async_op
-    ), "A2A-based hierarchical group-reduce only supports async_op for now"
+    assert async_op, "A2A-based hierarchical group-reduce only supports async_op"
     assert (
         reduce_op == "sum"
-    ), "A2A-based hierarchical group-reduce only supports sum reduction by now"
+    ), "A2A-based hierarchical group-reduce only supports sum reduction"
+    assert (
+        comm_dtype is None or comm_dtype == input_tensor.dtype
+    ), "A2A-based hierarchical group-reduce does not support comm_dtype different from input.dtype"
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_index, src_indices], list
     ), (

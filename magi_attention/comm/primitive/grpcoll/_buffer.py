@@ -530,7 +530,7 @@ class GrpCollBuffer:
             previous_event: the event to wait before actually executing the kernel.
             async_op: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
-            comm_dtype: the communication dtype, set to `x.dtype` if not given.
+            comm_dtype: the communication dtype. Defaults to `x.dtype` if not given.
 
             lse: the logsumexp of each token in `x` for each attention head,
                 with shape `[num_tokens, num_heads]`, to be sent along with `x`,

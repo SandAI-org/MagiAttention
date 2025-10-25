@@ -195,6 +195,7 @@ def a2av_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -215,6 +216,7 @@ def a2av_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -234,6 +236,7 @@ def a2av_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -252,6 +255,9 @@ def a2av_group_reduce_impl(
         "A2A-based group-reduce only supports host meta interface, "
         "thus the input_split_sizes, output_split_sizes, dst_index, src_indice should all be list type"
     )
+    assert (
+        comm_dtype is None or comm_dtype == input.dtype
+    ), "A2A-based group-reduce dose not support comm_dtype different from input.dtype"
 
     # check shapes
     assert len(input_split_sizes) == len(dst_index), (

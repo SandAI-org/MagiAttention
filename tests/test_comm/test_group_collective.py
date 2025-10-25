@@ -381,13 +381,14 @@ class TestGroupCollective(DistTestBase):
         use_native_grpcoll: bool,
         async_op: bool,
     ):
-        test_case_name = (
-            f"{test_case['name']=} x {dtype=} x "
-            f"{use_hier_comm=} x {use_native_grpcoll=} x "
-            f"{async_op=}"
-        )
         cast_lse = test_case.get("cast_lse", False)
         max_output_seqlen = test_case.get("max_output_seqlen", None)
+
+        test_case_name = (
+            f"{test_case['name']=} x {dtype=} x "
+            f"{use_hier_comm=} x {use_native_grpcoll=} x {async_op=} x "
+            f"{cast_lse=} x {max_output_seqlen=}"
+        )
 
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
@@ -887,7 +888,16 @@ class TestGroupCollective(DistTestBase):
         ],
     )
     @parameterize(
-        "dtype", [torch.bfloat16, torch.float16, torch.float32, torch.float64]
+        "dtypes",
+        [  # (dtype, comm_dtype)
+            (torch.bfloat16, torch.bfloat16),
+            (torch.float16, None),
+            (torch.float32, torch.float32),
+            # TODO
+            # (torch.float32, torch.bfloat16),
+            # (torch.float32, torch.float16),
+            (torch.float64, None),
+        ],
     )
     @parameterize("use_hier_comm", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
@@ -896,21 +906,24 @@ class TestGroupCollective(DistTestBase):
     def test_group_reduce(
         self,
         test_case: dict[str, Any],
-        dtype: torch.dtype,
+        dtypes: tuple[torch.dtype, torch.dtype | None],  # (dtype, comm_dtype)
         use_hier_comm: bool,
         use_native_grpcoll: bool,
         deterministic: bool,
         async_op: bool,
     ):
-        test_case_name = (
-            f"{test_case['name']=} x {dtype=} x "
-            f"{use_hier_comm=} x {use_native_grpcoll=} x "
-            f"{deterministic=} x {async_op=}"
-        )
+        dtype, comm_dtype = dtypes
         reduce_op = test_case["reduce_op"]
         acc_reduce = test_case["acc_reduce"]
         is_lse_reduce = reduce_op == "lse"
         max_input_seqlen = test_case.get("max_input_seqlen", None)
+
+        test_case_name = (
+            f"{test_case['name']=} x {dtype=} x {comm_dtype=} x "
+            f"{use_hier_comm=} x {use_native_grpcoll=} x "
+            f"{deterministic=} x {async_op=} x "
+            f"{reduce_op=} x {acc_reduce=} x {max_input_seqlen=}"
+        )
 
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
@@ -937,6 +950,12 @@ class TestGroupCollective(DistTestBase):
         # skip when max_input_seqlen is given
         if max_input_seqlen is not None:
             # TODO: support max_input_seqlen for other implementations
+            if not use_native_grpcoll:
+                return
+
+        # skip when dtype != comm_dtype
+        if comm_dtype is not None and dtype != comm_dtype:
+            # TODO: support specific comm dtype for other implementations
             if not use_native_grpcoll:
                 return
 
@@ -1076,6 +1095,7 @@ class TestGroupCollective(DistTestBase):
                 async_op=async_op,
                 reduce_op=reduce_op,
                 acc_reduce=acc_reduce,
+                comm_dtype=comm_dtype,
                 input_lse=send_lse_buffer,
                 output_lse=recv_lse_buffer_before_reduce,
                 deterministic=deterministic,
