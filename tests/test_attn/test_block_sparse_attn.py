@@ -30,6 +30,7 @@ from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import assert_close, calc_inf_norm
 from magi_attention.utils.sparse_utils import (
+    choose_ref_block,
     flatten_block_mask,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
@@ -53,6 +54,10 @@ class TestBlockSparseAttn(DistTestBase):
     def world_size(self) -> int:
         return 8
 
+    @property
+    def timeout(self) -> int:
+        return 600  # Increase timeout for JIT compilation
+
     def check_deterministic(
         self,
         q: torch.Tensor,
@@ -63,6 +68,7 @@ class TestBlockSparseAttn(DistTestBase):
         k_ranges_tensor,
         attn_type_map_tensor,
         auto_range_merge,
+        ref_block_size,
         test_case,
         o_ref: torch.Tensor,
         dq_ref: torch.Tensor,
@@ -84,6 +90,7 @@ class TestBlockSparseAttn(DistTestBase):
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
             deterministic=True,
+            ref_block_size=ref_block_size,
         )
         o.backward(do)
 
@@ -331,8 +338,9 @@ class TestBlockSparseAttn(DistTestBase):
         flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
 
         if uniform:
+            q_block_size, k_block_size = block_size
             q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
-                flat_block_sparse_mask, block_size, block_size
+                flat_block_sparse_mask, q_block_size, k_block_size
             )
         else:
             q_ranges_tensor, k_ranges_tensor = generate_ranges_from_var_block_mask(
@@ -364,6 +372,7 @@ class TestBlockSparseAttn(DistTestBase):
         v.grad = None
         """
 
+        ref_block_size = choose_ref_block(block_size)
         o, _ = flex_flash_attn_func(
             q,
             k,
@@ -372,6 +381,7 @@ class TestBlockSparseAttn(DistTestBase):
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
             auto_range_merge=True,
+            ref_block_size=ref_block_size,
         )
 
         o = rearrange(o, "(b h s) 1 d -> b s h d", b=1, s=s, h=h)
@@ -388,6 +398,7 @@ class TestBlockSparseAttn(DistTestBase):
                     k_ranges_tensor=k_ranges_tensor,
                     attn_type_map_tensor=attn_type_map_tensor,
                     auto_range_merge=True,
+                    ref_block_size=ref_block_size,
                     test_case=test_case,
                     o_ref=o,
                     dq_ref=q.grad,
@@ -417,8 +428,9 @@ class TestBlockSparseAttn(DistTestBase):
         k = rearrange(k, "b s h d -> b h s d")
         v = rearrange(v, "b s h d -> b h s d")
         if uniform:
+            q_block_size, k_block_size = block_size
             sdpa_mask_4d = get_sdpa_mask_from_block_sparse_mask(
-                block_mask, seqlen, seqlen, block_size, block_size
+                block_mask, seqlen, seqlen, q_block_size, k_block_size
             )
         else:
             sdpa_mask_4d = get_sdpa_mask_from_var_block_mask(
@@ -588,17 +600,19 @@ class TestBlockSparseAttn(DistTestBase):
         seqlen: int,
         sparsity_ratio: float,
         sparsity_granularity: str,
-        block_size: Optional[int] = None,
-        average_block_size: Optional[int] = None,
-        min_block_size: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, int, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        block_size: Optional[Tuple[int, int]] = None,
+        average_block_size: Optional[Tuple[int, int]] = None,
+        min_block_size: Optional[Tuple[int, int]] = None,
+    ) -> Tuple[
+        torch.Tensor, Tuple[int, int], Optional[torch.Tensor], Optional[torch.Tensor]
+    ]:
         """
         Helper function to generate either uniform or variable block sparse patterns.
 
         Returns:
             A tuple containing:
             - block_mask (torch.Tensor): The generated sparse mask.
-            - main_block_size (int): The block size to use for reference functions.
+            - block_sizes (Tuple[int, int]): Q block size and K/V block size.
             - block_row_sz (torch.Tensor or None): Row block sizes for variable patterns.
             - block_col_sz (torch.Tensor or None): Column block sizes for variable patterns.
         """
@@ -607,8 +621,9 @@ class TestBlockSparseAttn(DistTestBase):
                 block_size is not None
             ), "`block_size` is required for 'uniform' test type."
 
-            num_q_blocks = seqlen // block_size
-            num_kv_blocks = seqlen // block_size
+            q_block_size, k_block_size = block_size
+            num_q_blocks = seqlen // q_block_size
+            num_kv_blocks = seqlen // k_block_size
             block_mask, _ = generate_block_sparse_pattern(
                 num_q_heads=num_heads_q,
                 num_kv_heads=num_heads_kv,
@@ -627,8 +642,10 @@ class TestBlockSparseAttn(DistTestBase):
                 min_block_size is not None
             ), "`min_block_size` is required for 'variable' test type."
 
-            num_q_blocks = seqlen // average_block_size
-            num_kv_blocks = seqlen // average_block_size
+            q_avg_block_size, k_avg_block_size = average_block_size
+            min_q_block_size, min_k_block_size = min_block_size
+            num_q_blocks = seqlen // q_avg_block_size
+            num_kv_blocks = seqlen // k_avg_block_size
             (
                 block_mask,
                 block_row_sz,
@@ -640,8 +657,8 @@ class TestBlockSparseAttn(DistTestBase):
                 seqlen_k=seqlen,
                 num_q_blocks=num_q_blocks,
                 num_kv_blocks=num_kv_blocks,
-                min_q_block_size=min_block_size,
-                min_kv_block_size=min_block_size,
+                min_q_block_size=min_q_block_size,
+                min_kv_block_size=min_k_block_size,
                 sparsity=sparsity_ratio,
                 mode=sparsity_granularity,
                 device="cuda",
@@ -684,10 +701,32 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize(
         "block_config",
         [
-            {"type": "uniform", "size": 64, "avg_size": None, "min_size": None},
-            {"type": "uniform", "size": 128, "avg_size": None, "min_size": None},
-            {"type": "variable", "size": None, "avg_size": 64, "min_size": 16},
-            {"type": "variable", "size": None, "avg_size": 128, "min_size": 16},
+            # Uniform blocks with same Q/K block size
+            {"type": "uniform", "q_size": 64, "k_size": 64},
+            {"type": "uniform", "q_size": 128, "k_size": 128},
+            # Small Q block sizes
+            {"type": "uniform", "q_size": 32, "k_size": 64},
+            {"type": "uniform", "q_size": 16, "k_size": 64},
+            {"type": "uniform", "q_size": 8, "k_size": 64},
+            # Small K block sizes
+            {"type": "uniform", "q_size": 64, "k_size": 32},
+            {"type": "uniform", "q_size": 64, "k_size": 16},
+            {"type": "uniform", "q_size": 64, "k_size": 8},
+            # Variable blocks
+            {
+                "type": "variable",
+                "q_size": 64,
+                "k_size": 64,
+                "min_q_size": 16,
+                "min_k_size": 16,
+            },
+            {
+                "type": "variable",
+                "q_size": 128,
+                "k_size": 128,
+                "min_q_size": 16,
+                "min_k_size": 16,
+            },
         ],
     )
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
@@ -714,18 +753,29 @@ class TestBlockSparseAttn(DistTestBase):
             return
 
         test_type = block_config["type"]
-        block_size = block_config["size"]
-        average_block_size = block_config["avg_size"]
-        min_block_size = block_config["min_size"]
+        q_block_size = block_config["q_size"]
+        k_block_size = block_config["k_size"]
 
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
 
+        # Prepare inputs
+        if test_type == "uniform":
+            block_size = (q_block_size, k_block_size)
+            average_block_size = None
+            min_block_size = None
+        else:  # variable
+            block_size = None
+            average_block_size = (q_block_size, k_block_size)
+            min_q_block_size = block_config["min_q_size"]
+            min_k_block_size = block_config["min_k_size"]
+            min_block_size = (min_q_block_size, min_k_block_size)
+
         # Generate the appropriate sparse pattern using the helper
         (
             block_mask,
-            main_block_size,
+            block_sizes,
             block_row_sz,
             block_col_sz,
         ) = self._generate_sparse_pattern(
@@ -741,10 +791,11 @@ class TestBlockSparseAttn(DistTestBase):
         )
 
         # Construct a descriptive test case name
+        q_bs, k_bs = block_sizes
         block_info = (
-            f"block_size={main_block_size}"
+            f"block_size=({q_bs},{k_bs})"
             if test_type == "uniform"
-            else f"avg_block_size={main_block_size}"
+            else f"avg_block_size=({q_bs},{k_bs})"
         )
         test_case = (
             f"[{model_config['name']}]"
@@ -786,7 +837,7 @@ class TestBlockSparseAttn(DistTestBase):
             v=v,
             grad_output=do,
             seqlen=seqlen,
-            block_size=main_block_size,
+            block_size=block_sizes,
             block_mask=block_mask,
             head_wise=sparsity_granularity,
             nhq=num_heads_q,
