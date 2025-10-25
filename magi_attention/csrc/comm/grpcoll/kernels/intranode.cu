@@ -994,8 +994,8 @@ void group_reduce_kernel(
           UNROLLED_WARP_CAST_COPY(
               /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
               /*LANE_ID=*/lane_id,
-              /*N=*/hidden_int4,
-              /*NLOAD=*/kCommDtypePerDtype,
+              /*N=*/hidden_int4_comm,
+              /*M=*/kCommDtypePerDtype,
               /*DST=*/token_ptr_in_queue_int4,
               /*SRC=*/token_ptr_in_x_int4,
               /*LD_FUNC=*/ld_nc_global, // non-cached load

@@ -84,6 +84,7 @@ def prepare_test_func_kwargs(
     num_experts: int,
     num_local_experts: int,
     dtype: torch.dtype,
+    comm_dtype: torch.dtype | None,
     distinct_token: bool,
     cast_lse: bool,
     reduce_op: GroupReduceOp,
@@ -247,11 +248,15 @@ def prepare_test_func_kwargs(
         reduced_lse_gr.clone() if reduce_op == "lse" and pass_out_lse_buffer else None
     )
 
+    if reduce_op == "lse":
+        x_gr = x_gr.view(-1, num_heads, head_dim)
+        reduced_x_gr = reduced_x_gr.view(-1, num_heads, head_dim)
+
+    comm_dtype = comm_dtype or x.dtype
+
     work_with_pf_gr = group_reduce(
-        input=x_gr.view(-1, num_heads, head_dim) if reduce_op == "lse" else x_gr,
-        output=reduced_x_gr.view(-1, num_heads, head_dim)
-        if reduce_op == "lse"
-        else reduced_x_gr,
+        input=x_gr,
+        output=reduced_x_gr,
         input_split_sizes=output_split_size_list,
         output_split_sizes=input_split_size_list,
         dst_index=src_index_list,
@@ -265,16 +270,19 @@ def prepare_test_func_kwargs(
 
     if reduce_op == "lse":
         reduced_x_gr, reduced_lse_gr = work_with_pf_gr.wait_post_process(
-            reduced_x_gr.view(-1, num_heads, head_dim), reduced_lse_gr
+            reduced_x_gr, reduced_lse_gr
         )
         reduced_lse_gr_shape = reduced_lse_gr.shape
+        reduced_lse_gr_dtype = reduced_lse_gr.dtype
         reduced_x_gr = reduced_x_gr.view(-1, hidden_size)
     else:
         reduced_x_gr = work_with_pf_gr.wait_post_process(reduced_x_gr)
         reduced_lse_gr_shape = None
+        reduced_lse_gr_dtype = None
+
     print(
-        f"[RANK {rank}]: {reduced_x_gr.shape=} | {reduced_x_gr=}\n"
-        f"{reduced_lse_gr_shape=} | {reduced_lse_gr=}\n",
+        f"[RANK {rank}]: {reduced_x_gr.shape=} | {reduced_x_gr.dtype=} | {reduced_x_gr=}\n"
+        f"{reduced_lse_gr_shape=} | {reduced_lse_gr_dtype=} | {reduced_lse_gr=}\n",
         flush=True,
     )
 
@@ -466,6 +474,7 @@ def prepare_test_func_kwargs(
         reduced_x_gr_buf=reduced_x_gr_buf,
         reduced_lse_gr=reduced_lse_gr,
         reduced_lse_gr_buf=reduced_lse_gr_buf,
+        comm_dtype=comm_dtype,
         is_token_in_rank=is_token_in_rank,
         num_tokens_per_rank=num_tokens_per_rank,
         perm_to_a2av_idx=perm_to_a2av_idx_device,
@@ -507,6 +516,7 @@ def test_func(
     reduced_lse_gr: torch.Tensor | None = kwargs["reduced_lse_gr"]
     reduced_x_gr_buf: torch.Tensor | None = kwargs["reduced_x_gr_buf"]
     reduced_lse_gr_buf: torch.Tensor | None = kwargs["reduced_lse_gr_buf"]
+    comm_dtype: torch.dtype = kwargs["comm_dtype"]
     is_token_in_rank: torch.Tensor = kwargs["is_token_in_rank"]
     num_tokens_per_rank: torch.Tensor = kwargs["num_tokens_per_rank"]
     perm_to_a2av_idx: torch.Tensor = kwargs["perm_to_a2av_idx"]
@@ -814,6 +824,7 @@ def test_func(
         "async_op": async_mode,
         "reduce_op": reduce_op,
         "acc_reduce": acc_reduce_out_buffer,
+        "comm_dtype": comm_dtype,
         # NOTE: still perm_to_a2av_idx, instead of unperm_to_a2av_idx
         "pre_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
         "lse": lse_group_reduce,
@@ -861,7 +872,14 @@ def test_func(
 
     # check reduced_x
     match x.dtype:
-        case torch.bfloat16 | torch.float32 | torch.float64:
+        case torch.float32:
+            if comm_dtype != torch.float32:  # low-precision comm
+                torch.testing.assert_close(
+                    reduced_x, reduced_x_gr, atol=1e-8, rtol=5e-3
+                )
+            else:
+                torch.testing.assert_close(reduced_x, reduced_x_gr)
+        case torch.bfloat16 | torch.float64:
             torch.testing.assert_close(reduced_x, reduced_x_gr)
         case torch.float16:
             torch.testing.assert_close(reduced_x, reduced_x_gr, atol=1e-8, rtol=5e-3)
@@ -950,7 +968,7 @@ def test_main(
     nvl_buffer_size = num_max_nvl_chunked_recv_tokens = 256
 
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
-    dtype = torch.bfloat16  # TODO: make it parameterizable
+    dtype = torch.float32  # TODO: make it parameterizable
     assert dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64)
 
     # Remake the hidden size to control
@@ -973,19 +991,27 @@ def test_main(
 
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
-    pass_padded_out_buffer = False  # for group_cast output and group_reduce input
+    pass_padded_out_buffer = False  # set to True to use max buffer for group_cast output and group_reduce input
 
     acc_reduce_out_buffer = True
     acc_reduce_constant = rank
     if acc_reduce_out_buffer:
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"
 
+    # set to True to use bf16/fp16 precision for comm when the input/output is fp32
+    use_lp_comm_dtype_for_reduce = True
+    if use_lp_comm_dtype_for_reduce:
+        assert dtype == torch.float32
+        comm_dtype = torch.bfloat16
+    else:
+        comm_dtype = None
+
     # choose from {"no", "outside", "inside"}
     use_a2av_perm_idxs = "inside"
     assert use_a2av_perm_idxs in ("no", "outside", "inside")
-    if (
-        pass_padded_out_buffer
-    ):  # we only allow inside usage when passing padded out buffer
+
+    # we only allow inside usage when passing padded out buffer
+    if pass_padded_out_buffer:
         assert use_a2av_perm_idxs == "inside"
 
     # Config
@@ -1011,7 +1037,7 @@ def test_main(
         print(
             (
                 f"[config] {num_sms=} | {num_channels=} | {min_num_nvl_bytes=} ({min_num_nvl_bytes / 1024**2:.2f} MB)\n"
-                f"{num_experts=} | {num_tokens=} | {hidden_size=} | {dtype=} | "
+                f"{num_experts=} | {num_tokens=} | {hidden_size=} | {dtype=} | {comm_dtype=}\n"
                 f"{num_topk=} | {num_local_experts=} | {num_heads=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
@@ -1036,6 +1062,7 @@ def test_main(
         num_experts=num_experts,
         num_local_experts=num_local_experts,
         dtype=dtype,
+        comm_dtype=comm_dtype,
         distinct_token=distinct_token,
         cast_lse=cast_lse,
         reduce_op=reduce_op,

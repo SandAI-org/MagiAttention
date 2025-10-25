@@ -53,6 +53,9 @@
 
 #define GLOBAL_LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK, MIN_BLOCKS_PER_SM) __global__ __launch_bounds__(MAX_THREADS_PER_BLOCK, MIN_BLOCKS_PER_SM)
 
+// Warp-copy `N` elements from `SRC` to `DST`
+// using loading function `LD_FUNC` and storing function `ST_FUNC`
+// with an unroll factor of `UNROLL_FACTOR`
 #define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC, ST_FUNC)                                                   \
   {                                                                                                                                 \
     constexpr int kUnRollLoopStride = WARP_SIZE * (UNROLL_FACTOR);                                                                  \
@@ -68,25 +71,27 @@
       ST_FUNC(__dst + __i, LD_FUNC(__src + __i));                                                                                   \
   }
 
-#define UNROLLED_WARP_CAST_COPY(UNROLL_FACTOR, LANE_ID, N, NLOAD, DST, SRC, LD_FUNC, ST_FUNC, CAST_FUNC)                                            \
-  {                                                                                                                                                 \
-    constexpr int kUnRollLoopStride = WARP_SIZE * (UNROLL_FACTOR) * (NLOAD);                                                                        \
-    const int __unroll_loop_iters = ((N) / kUnRollLoopStride) * kUnRollLoopStride;                                                                  \
-    typename std::remove_reference<decltype(LD_FUNC((SRC) + 0))>::type __unroll_buf[(UNROLL_FACTOR) * (NLOAD)];                                     \
-    auto __src = (SRC);                                                                                                                             \
-    auto __dst = (DST);                                                                                                                             \
-    for (int __i = (LANE_ID); __i < __unroll_loop_iters; __i += kUnRollLoopStride) {                                                                \
-      _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) {                                                                           \
-        _Pragma("unroll") for (int __k = 0; __k < (NLOAD); ++__k) __unroll_buf[__j * (NLOAD) + __k] =                                               \
-            LD_FUNC(__src + __j * WARP_SIZE * (NLOAD) + (__i - (LANE_ID)) + (LANE_ID) * (NLOAD) + __k);                                             \
-      }                                                                                                                                             \
-      _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j)                                                                             \
-          ST_FUNC(__dst + __j * WARP_SIZE + (__i - (LANE_ID)) / (NLOAD) + (LANE_ID), CAST_FUNC(__unroll_buf + __j * (NLOAD)));                      \
-    }                                                                                                                                               \
-    for (int __i = __unroll_loop_iters + (LANE_ID); __i < (N); __i += WARP_SIZE * (NLOAD)) {                                                        \
-      _Pragma("unroll") for (int __k = 0; __k < (NLOAD); ++__k) __unroll_buf[__k] = LD_FUNC(__src + (__i - (LANE_ID)) + (LANE_ID) * (NLOAD) + __k); \
-      ST_FUNC(__dst + (__i - (LANE_ID)) / (NLOAD) + (LANE_ID), CAST_FUNC(__unroll_buf));                                                            \
-    }                                                                                                                                               \
+// Warp-copy `N * M` elements from `SRC` and cast to `N` elements in `DST`
+// using loading function `LD_FUNC`, storing function `ST_FUNC`,
+// and casting function `CAST_FUNC`, which (down)casts each `M` contiguous elements into one
+// with an unroll factor of `UNROLL_FACTOR`
+#define UNROLLED_WARP_CAST_COPY(UNROLL_FACTOR, LANE_ID, N, M, DST, SRC, LD_FUNC, ST_FUNC, CAST_FUNC)                                                 \
+  {                                                                                                                                                  \
+    constexpr int kUnRollLoopStride = WARP_SIZE * (UNROLL_FACTOR);                                                                                   \
+    const int __unroll_loop_iters = ((N) / kUnRollLoopStride) * kUnRollLoopStride;                                                                   \
+    typename std::remove_reference<decltype(LD_FUNC((SRC) + 0))>::type __unroll_buf[(UNROLL_FACTOR) * (M)];                                          \
+    auto __src = (SRC);                                                                                                                              \
+    auto __dst = (DST);                                                                                                                              \
+    for (int __i = (LANE_ID); __i < __unroll_loop_iters; __i += kUnRollLoopStride) {                                                                 \
+      _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) {                                                                            \
+        _Pragma("unroll") for (int __k = 0; __k < (M); ++__k) __unroll_buf[__j * (M) + __k] = LD_FUNC(__src + (__j * WARP_SIZE + __i) * (M) + __k);  \
+      }                                                                                                                                              \
+      _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) ST_FUNC(__dst + __j * WARP_SIZE + __i, CAST_FUNC(__unroll_buf + __j * (M))); \
+    }                                                                                                                                                \
+    for (int __i = __unroll_loop_iters + (LANE_ID); __i < (N); __i += WARP_SIZE) {                                                                   \
+      _Pragma("unroll") for (int __k = 0; __k < (M); ++__k) __unroll_buf[__k] = LD_FUNC(__src + __i * (M) + __k);                                    \
+      ST_FUNC(__dst + __i, CAST_FUNC(__unroll_buf));                                                                                                 \
+    }                                                                                                                                                \
   }
 
 namespace magi_attn_comm::grpcoll {

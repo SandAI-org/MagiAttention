@@ -298,8 +298,8 @@ def build_magi_attn_comm_module(
         "-Xcompiler",
         "-O3",
         "-gencode",
-        "arch=compute_90,code=sm_90",
-    ]  # Explicitly specify sm_90
+        "arch=compute_90,code=sm_90",  # Explicitly specify sm_90
+    ]
 
     # extend flags, dirs and args
     library_dirs = []
