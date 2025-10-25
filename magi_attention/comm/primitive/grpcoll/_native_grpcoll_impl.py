@@ -304,6 +304,7 @@ def native_group_reduce_impl(
         previous_event=None,
         async_finish=async_op,
         allocate_on_comm_stream=False,
+        comm_dtype=None,  # TODO
         lse=input_lse,
         reduced_lse=output_lse,
     )

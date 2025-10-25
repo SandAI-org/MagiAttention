@@ -811,6 +811,7 @@ void cached_notify_group_reduce(
 
 template <
     typename dtype_t,
+    typename comm_dtype_t,
     typename reduce_dtype_t,
     ReduceOp kReduceOp,
     int kNumRanks,
@@ -1336,9 +1337,8 @@ void group_reduce_kernel(
   }
 }
 
-template <int kNumRanks, int kNumWarps, bool kAccReduce>
+template <typename dtype_t, typename comm_dtype_t, typename reduce_dtype_t, int kNumRanks, int kNumWarps, bool kAccReduce>
 void launch_group_reduce(
-    cudaDataType_t dtype,
     ReduceOp reduce_op,
     void* reduced_x,
     float* reduced_lse,
@@ -1377,53 +1377,48 @@ void launch_group_reduce(
   else
     GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
 
-#define GROUP_REDUCE_LAUNCH_CASE(dtype, reduce_dtype, reduce_op) \
-  {                                                              \
-    auto kernel = group_reduce_kernel<                           \
-        dtype,                                                   \
-        reduce_dtype,                                            \
-        reduce_op,                                               \
-        kNumRanks,                                               \
-        kNumThreads,                                             \
-        kWarpCopyUnrollStages,                                   \
-        kNumTMAStages,                                           \
-        kNumTMABytesPerWarp,                                     \
-        kMaxNumHeads,                                            \
-        kAccReduce>;                                             \
-    SET_SHARED_MEMORY_FOR_TMA(kernel);                           \
-    LAUNCH_KERNEL(                                               \
-        &cfg,                                                    \
-        kernel,                                                  \
-        reinterpret_cast<dtype*>(reduced_x),                     \
-        reduced_lse,                                             \
-        reinterpret_cast<const dtype*>(x),                       \
-        lse,                                                     \
-        pre_perm_idx,                                            \
-        src_idx,                                                 \
-        rank_prefix_matrix,                                      \
-        channel_prefix_matrix,                                   \
-        send_head,                                               \
-        num_tokens,                                              \
-        num_recv_tokens,                                         \
-        hidden_size,                                             \
-        num_heads,                                               \
-        buffer_ptrs,                                             \
-        rank,                                                    \
-        num_max_send_tokens,                                     \
-        num_recv_buffer_tokens);                                 \
-  }                                                              \
-  break
-
-#define GROUP_REDUCE_REDUCE_OP_LAUNCH_CASE(dtype, reduce_dtype)                  \
-  {                                                                              \
-    SWITCH_REDUCE_OP_WITH_DTYPES(dtype, reduce_dtype, GROUP_REDUCE_LAUNCH_CASE); \
-  }                                                                              \
+#define GROUP_REDUCE_LAUNCH_CASE(reduce_op)    \
+  {                                            \
+    auto kernel = group_reduce_kernel<         \
+        dtype_t,                               \
+        comm_dtype_t,                          \
+        reduce_dtype_t,                        \
+        reduce_op,                             \
+        kNumRanks,                             \
+        kNumThreads,                           \
+        kWarpCopyUnrollStages,                 \
+        kNumTMAStages,                         \
+        kNumTMABytesPerWarp,                   \
+        kMaxNumHeads,                          \
+        kAccReduce>;                           \
+    SET_SHARED_MEMORY_FOR_TMA(kernel);         \
+    LAUNCH_KERNEL(                             \
+        &cfg,                                  \
+        kernel,                                \
+        reinterpret_cast<dtype_t*>(reduced_x), \
+        reduced_lse,                           \
+        reinterpret_cast<const dtype_t*>(x),   \
+        lse,                                   \
+        pre_perm_idx,                          \
+        src_idx,                               \
+        rank_prefix_matrix,                    \
+        channel_prefix_matrix,                 \
+        send_head,                             \
+        num_tokens,                            \
+        num_recv_tokens,                       \
+        hidden_size,                           \
+        num_heads,                             \
+        buffer_ptrs,                           \
+        rank,                                  \
+        num_max_send_tokens,                   \
+        num_recv_buffer_tokens);               \
+  }                                            \
   break
 
   // Even-numbered SMs for sending, odd-numbered SMs for receiving
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  SWITCH_DTYPES_REDUCE_DTYPES(GROUP_REDUCE_REDUCE_OP_LAUNCH_CASE);
+  SWITCH_REDUCE_OPS(GROUP_REDUCE_LAUNCH_CASE);
 
 #undef GROUP_REDUCE_REDUCE_OP_LAUNCH_CASE
 #undef GROUP_REDUCE_LAUNCH_CASE
@@ -1431,6 +1426,7 @@ void launch_group_reduce(
 
 void group_reduce(
     cudaDataType_t dtype,
+    cudaDataType_t comm_dtype,
     ReduceOp reduce_op,
     void* reduced_x,
     float* reduced_lse,
@@ -1453,45 +1449,51 @@ void group_reduce(
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
     bool acc_reduce) {
-#define LAUNCH_INTRANODE_GROUP_REDUCE(num_ranks, num_warps, acc_reduce) \
-  {                                                                     \
-    launch_group_reduce<num_ranks, num_warps, acc_reduce>(              \
-        dtype,                                                          \
-        reduce_op,                                                      \
-        reduced_x,                                                      \
-        reduced_lse,                                                    \
-        x,                                                              \
-        lse,                                                            \
-        pre_perm_idx,                                                   \
-        src_idx,                                                        \
-        rank_prefix_matrix,                                             \
-        channel_prefix_matrix,                                          \
-        send_head,                                                      \
-        num_tokens,                                                     \
-        num_recv_tokens,                                                \
-        hidden_size,                                                    \
-        num_heads,                                                      \
-        buffer_ptrs,                                                    \
-        rank,                                                           \
-        stream,                                                         \
-        num_sms,                                                        \
-        num_max_send_tokens,                                            \
-        num_recv_buffer_tokens);                                        \
-  }
-
-#define LAUNCH_INTRANODE_GROUP_REDUCE_WITH_RANKS_WARPS(num_ranks, num_warps) \
-  {                                                                          \
-    if (acc_reduce) {                                                        \
-      LAUNCH_INTRANODE_GROUP_REDUCE(num_ranks, num_warps, true);             \
-    } else {                                                                 \
-      LAUNCH_INTRANODE_GROUP_REDUCE(num_ranks, num_warps, false);            \
-    }                                                                        \
-  }                                                                          \
+#define LAUNCH_INTRANODE_GROUP_REDUCE(dtype, comm_dtype, reduce_dtype, num_ranks, num_warps, acc_reduce) \
+  {                                                                                                      \
+    launch_group_reduce<dtype, comm_dtype, reduce_dtype, num_ranks, num_warps, acc_reduce>(              \
+        reduce_op,                                                                                       \
+        reduced_x,                                                                                       \
+        reduced_lse,                                                                                     \
+        x,                                                                                               \
+        lse,                                                                                             \
+        pre_perm_idx,                                                                                    \
+        src_idx,                                                                                         \
+        rank_prefix_matrix,                                                                              \
+        channel_prefix_matrix,                                                                           \
+        send_head,                                                                                       \
+        num_tokens,                                                                                      \
+        num_recv_tokens,                                                                                 \
+        hidden_size,                                                                                     \
+        num_heads,                                                                                       \
+        buffer_ptrs,                                                                                     \
+        rank,                                                                                            \
+        stream,                                                                                          \
+        num_sms,                                                                                         \
+        num_max_send_tokens,                                                                             \
+        num_recv_buffer_tokens);                                                                         \
+  }                                                                                                      \
   break
 
-  SWITCH_RANKS_WITH_WARPS(LAUNCH_INTRANODE_GROUP_REDUCE_WITH_RANKS_WARPS);
+#define GROUP_REDUCE_DTYPE_LAUNCH_CASE(...)                                                \
+  {                                                                                        \
+    SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(LAUNCH_INTRANODE_GROUP_REDUCE, ##__VA_ARGS__); \
+  }
 
-#undef LAUNCH_INTRANODE_GROUP_REDUCE_WITH_RANKS_WARPS
+#define GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE(num_ranks, num_warps)  \
+  {                                                                \
+    if (acc_reduce) {                                              \
+      GROUP_REDUCE_DTYPE_LAUNCH_CASE(num_ranks, num_warps, true);  \
+    } else {                                                       \
+      GROUP_REDUCE_DTYPE_LAUNCH_CASE(num_ranks, num_warps, false); \
+    }                                                              \
+  }                                                                \
+  break
+
+  SWITCH_RANKS_WITH_WARPS(GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE);
+
+#undef GROUP_REDUCE_DTYPE_LAUNCH_CASE
+#undef GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE
 #undef LAUNCH_INTRANODE_GROUP_REDUCE
 }
 

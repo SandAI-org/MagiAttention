@@ -506,6 +506,7 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
+        comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
@@ -517,7 +518,7 @@ class GrpCollBuffer:
             index should be visible via RDMA.
 
         Arguments:
-            x: `[num_tokens, hidden]` with `torch.bfloat16`, the tokens to send for reducing to its original ranks.
+            x: `[num_tokens, hidden_size]`, the tokens to send for reducing to its original ranks.
             handle: a must-set communication handle, you can obtain this from the dispatch function.
             reduced_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
             reduce_op (GroupReduceOp): the reduce operation to use. Defaults to "sum"
@@ -529,6 +530,7 @@ class GrpCollBuffer:
             previous_event: the event to wait before actually executing the kernel.
             async_finish: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
+            comm_dtype: the communication dtype, set to `x.dtype` if not given.
 
             lse: the logsumexp of each token in `x` for each attention head,
                 with shape `[num_tokens, num_heads]`, to be sent along with `x`,
@@ -579,6 +581,7 @@ class GrpCollBuffer:
                 previous_event=previous_event,
                 async_finish=async_finish,
                 allocate_on_comm_stream=allocate_on_comm_stream,
+                comm_dtype=comm_dtype,
                 lse=lse,
                 reduced_lse=reduced_lse,
             )
@@ -596,6 +599,7 @@ class GrpCollBuffer:
             previous_event=previous_event,
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
+            comm_dtype=comm_dtype,
             lse=lse,
             reduced_lse=reduced_lse,
         )
@@ -702,6 +706,7 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
+        comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
@@ -736,6 +741,7 @@ class GrpCollBuffer:
             allocate_on_comm_stream,
             reduce_op,
             acc_reduce,
+            comm_dtype,
         )
 
         # View output to hidden shape
@@ -876,15 +882,20 @@ class GrpCollBuffer:
         previous_event: EventOverlap | None = None,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
+        comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
         """Internode group reduce implementation"""
 
-        # TODO: Support pre_perm_idx for internode group reduce
+        # TODO: support pre_perm_idx for internode group reduce
         assert (
             pre_perm_idx is None
         ), "Internode group reduce does not support `pre_perm_idx`"
+        # TODO: support specific comm dtype for internode group reduce
+        assert (
+            comm_dtype is None
+        ), "Internode group reduce does not support `comm_dtype`"
 
         assert isinstance(handle, GrpCollInterHandle)
 
@@ -967,7 +978,7 @@ class GrpCollBuffer:
             low-latency kernels' result tensors at a single moment.
 
         Arguments:
-            x: `torch.Tensor` with `torch.bfloat16`, shaped as `[num_tokens, hidden]`, only several hidden shapes are
+            x: `torch.Tensor` with `torch.bfloat16`, shaped as `[num_tokens, hidden_size]`, only several hidden shapes are
                 supported. The number of tokens to be dispatched must be less than `num_max_dispatch_tokens_per_rank`.
             topk_idx: `torch.Tensor` with `torch.int64`, shaped as `[num_tokens, num_topk]`, only several top-k shapes
                 are supported. `-1` indices (not selecting any expert) are supported.
@@ -988,14 +999,14 @@ class GrpCollBuffer:
         Returns:
             recv_x: a tensor or tuple with received tokens for each expert.
                 With `use_fp8=True`: the first element is a `torch.Tensor` shaped as
-                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.float8_e4m3fn`.
+                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden_size]` with `torch.float8_e4m3fn`.
                 The second tensor is the corresponding scales for the first element with shape
                 `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden // 128]` with `torch.float`,
                 if `use_ue8m0=False`. With `use_ue8m0=True`, the second one is packed and shaped as
                 `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden // 512]` with type `torch.int`.
                 Notice that, the last-two-dimension of the scaling tensors are in column-major for TMA compatibility.
                 With `use_fp8=False`, the result would be a tensor shaped as
-                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`.
+                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden_size]` with `torch.bfloat16`.
                 Moreover, not all tokens are valid, only some of the `num_max_dispatch_tokens_per_rank * num_ranks` are,
                 as we do not synchronize CPU received count with GPU (also not incompatible with CUDA graph if synced).
             recv_count: a tensor shaped `[num_local_experts]` with type `torch.int`, indicating how many tokens each
@@ -1069,7 +1080,7 @@ class GrpCollBuffer:
             low-latency kernels' result tensors at a single moment.
 
         Arguments:
-            x: `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`,
+            x: `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden_size]` with `torch.bfloat16`,
                 the local calculated tokens to be sent to this original rank and reduced.
             topk_idx: `[num_combined_tokens, num_topk]` with `torch.int64`, the expert indices selected by the dispatched
                 tokens. `-1` indices (not selecting any expert) are supported. Note that, `num_combined_tokens` equals
@@ -1087,7 +1098,7 @@ class GrpCollBuffer:
             out: the in-place output tensor, if set, the kernel will write the result to this tensor and return it directly.
 
         Returns:
-            combined_x: the reduced token tensor, with shape `[num_combined_tokens, hidden]` and type `torch.bfloat16`.
+            combined_x: the reduced token tensor, with shape `[num_combined_tokens, hidden_size]` and type `torch.bfloat16`.
             event: the event after executing the kernel (valid only if `async_finish` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
@@ -1136,7 +1147,7 @@ class GrpCollBuffer:
 
         Returns:
             buffer: the raw RDMA low-latency buffer as a BF16 PyTorch tensor with shape
-                `[num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden]`, you should fill this buffer
+                `[num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden_size]`, you should fill this buffer
                 by yourself.
         """
         (

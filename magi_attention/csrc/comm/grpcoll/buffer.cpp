@@ -596,9 +596,14 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     bool async,
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
-    bool acc_reduce) {
+    bool acc_reduce,
+    std::optional<c10::ScalarType> comm_dtype) {
   // Transfer reduce ops
   ReduceOp reduce_op_ = str_to_reduce_op(reduce_op);
+
+  // Transfer dtypes
+  auto x_dtype = at::cuda::ScalarTypeToCudaDataType(x.scalar_type());
+  auto comm_dtype_ = at::cuda::ScalarTypeToCudaDataType(comm_dtype.value_or(x.scalar_type()));
 
   // Check tensors
   GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
@@ -731,7 +736,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
    * but we don't know how to exactly fix this issue by now
    */
   intranode::group_reduce(
-      /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
+      /*dtype=*/x_dtype,
+      /*comm_dtype=*/comm_dtype_,
       /*reduce_op=*/reduce_op_,
       /*reduced_x=*/reduced_x.data_ptr(),
       /*reduced_lse=*/reduced_lse_ptr,

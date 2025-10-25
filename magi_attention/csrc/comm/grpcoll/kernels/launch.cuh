@@ -180,17 +180,17 @@ using namespace magi_attn_comm::grpcoll;
   }                                                           \
   while (false)
 
-#define SWITCH_REDUCE_OP_WITH_DTYPES(dtype, reduce_dtype, case_macro) \
-  switch (reduce_op) {                                                \
-    case ReduceOp::SUM:                                               \
-      case_macro(dtype, reduce_dtype, ReduceOp::SUM);                 \
-    case ReduceOp::AVG:                                               \
-      case_macro(dtype, reduce_dtype, ReduceOp::AVG);                 \
-    case ReduceOp::LSE:                                               \
-      case_macro(dtype, reduce_dtype, ReduceOp::LSE);                 \
-    default:                                                          \
-      GRPCOLL_HOST_ASSERT(false and "Unsupported reduce op");         \
-  }                                                                   \
+#define SWITCH_REDUCE_OPS(case_macro)                         \
+  switch (reduce_op) {                                        \
+    case ReduceOp::SUM:                                       \
+      case_macro(ReduceOp::SUM);                              \
+    case ReduceOp::AVG:                                       \
+      case_macro(ReduceOp::AVG);                              \
+    case ReduceOp::LSE:                                       \
+      case_macro(ReduceOp::LSE);                              \
+    default:                                                  \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported reduce op"); \
+  }                                                           \
   while (false)
 
 #define SWITCH_DTYPES(case_macro)                         \
@@ -221,6 +221,34 @@ using namespace magi_attn_comm::grpcoll;
     default:                                              \
       GRPCOLL_HOST_ASSERT(false and "Unsupported dtype"); \
   }                                                       \
+  while (false)
+
+#define SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(case_macro, ...)                   \
+  switch (dtype) {                                                                 \
+    case CUDA_R_16BF:                                                              \
+      GRPCOLL_HOST_ASSERT(comm_dtype == CUDA_R_16BF and "Unsupported comm dtype"); \
+      case_macro(nv_bfloat16, nv_bfloat16, float, ##__VA_ARGS__);                  \
+    case CUDA_R_16F:                                                               \
+      GRPCOLL_HOST_ASSERT(comm_dtype == CUDA_R_16F and "Unsupported comm dtype");  \
+      case_macro(half, half, float, ##__VA_ARGS__);                                \
+    case CUDA_R_32F:                                                               \
+      switch (comm_dtype) {                                                        \
+        case CUDA_R_16BF:                                                          \
+          case_macro(float, nv_bfloat16, float, ##__VA_ARGS__);                    \
+        case CUDA_R_16F:                                                           \
+          case_macro(float, half, float, ##__VA_ARGS__);                           \
+        case CUDA_R_32F:                                                           \
+          case_macro(float, float, float, ##__VA_ARGS__);                          \
+        default:                                                                   \
+          GRPCOLL_HOST_ASSERT(false and "Unsupported comm dtype");                 \
+      }                                                                            \
+      break;                                                                       \
+    case CUDA_R_64F:                                                               \
+      GRPCOLL_HOST_ASSERT(comm_dtype == CUDA_R_64F and "Unsupported comm dtype");  \
+      case_macro(double, double, double, ##__VA_ARGS__);                           \
+    default:                                                                       \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported dtype");                          \
+  }                                                                                \
   while (false)
 
 // TODO: support other hidden sizes

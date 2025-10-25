@@ -205,7 +205,8 @@ struct Buffer {
       bool async,
       bool allocate_on_comm_stream,
       const std::string& reduce_op,
-      bool acc_reduce);
+      bool acc_reduce,
+      std::optional<c10::ScalarType> comm_dtype);
 
   std::tuple<
       torch::Tensor,

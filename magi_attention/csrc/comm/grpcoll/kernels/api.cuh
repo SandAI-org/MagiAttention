@@ -147,6 +147,7 @@ void cached_notify_group_reduce(
 
 void group_reduce(
     cudaDataType_t dtype,
+    cudaDataType_t comm_dtype,
     ReduceOp reduce_op,
     void* group_reduced_x,
     float* group_reduced_lse,
