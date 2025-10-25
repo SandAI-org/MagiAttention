@@ -248,7 +248,7 @@ class GrpCollBuffer:
         num_ranks: int,
         num_nodes: int,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_meta_stream: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, EventOverlap]:
         """
@@ -272,7 +272,7 @@ class GrpCollBuffer:
             num_ranks,
             num_nodes,
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_meta_stream,
             None,  # meta_stream, auto set
         )
@@ -292,7 +292,7 @@ class GrpCollBuffer:
         output_seqlen: int,
         num_ranks: int,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_meta_stream: bool = False,
     ) -> tuple[torch.Tensor, EventOverlap]:
         """
@@ -305,7 +305,7 @@ class GrpCollBuffer:
             num_ranks (int): the number of ranks
             previous_event (EventOverlap | None, optional):
                 the event to wait before actually executing the kernel. Defaults to None.
-            async_finish (bool, optional):
+            async_op (bool, optional):
                 the current stream will not wait for the meta kernels to be finished if set. Defaults to False.
             allocate_on_meta_stream (bool, optional):
                 control whether all the allocated tensors' ownership to be on the hidden meta stream. Defaults to False.
@@ -313,7 +313,7 @@ class GrpCollBuffer:
         Returns:
             perm_to_a2av_idxs (torch.Tensor): the permutation indices to transfer the output buffer to all2all-v rank order,
                 i.e. output[perm_to_a2av_idxs] => a2av_output
-            event (EventOverlap): the event after executing the kernel (valid only if `async_finish` is set).
+            event (EventOverlap): the event after executing the kernel (valid only if `async_op` is set).
         """
 
         (
@@ -325,7 +325,7 @@ class GrpCollBuffer:
             output_seqlen,  # num_tokens
             num_ranks,
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_meta_stream,
             None,  # meta_stream, auto set
         )
@@ -339,7 +339,7 @@ class GrpCollBuffer:
         self,
         t2r_idx: torch.Tensor,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, EventOverlap]:
         """
@@ -349,7 +349,7 @@ class GrpCollBuffer:
             t2r_idx: `[num_tokens, num_ranks]`, dtype must be `torch.int64`,
                 the rank indices selected by each token, `-1` means no selections.
             previous_event: the event to wait before actually executing the kernel.
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            async_op: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
 
         Returns:
@@ -357,7 +357,7 @@ class GrpCollBuffer:
             num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
                 rank (with the same GPU index), return `None` for intranode settings.
             is_token_in_rank: `[num_tokens, num_ranks]` with `torch.bool`, whether a token be sent to a rank.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
+            event: the event after executing the kernel (valid only if `async_op` is set).
         """
         (
             num_tokens_per_rank,
@@ -367,7 +367,7 @@ class GrpCollBuffer:
         ) = self.runtime.get_group_cast_meta(
             t2r_idx,
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_comm_stream,
         )
 
@@ -389,7 +389,7 @@ class GrpCollBuffer:
         post_perm_idx: torch.Tensor | None = None,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
@@ -413,7 +413,7 @@ class GrpCollBuffer:
                 i.e. recv_x[post_perm_idx] can recover to the original recv_x in rank order.
             config: the performance tuning config if given.
             previous_event: the event to wait before actually executing the kernel if given.
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            async_op: the current stream will not wait for the communication kernels to be finished if set.
                 Defaults to `False`.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
                 Defaults to `False`.
@@ -431,7 +431,7 @@ class GrpCollBuffer:
             recv_x: received tokens, the same type and tuple as the input `x`, but the number of tokens equals to the
                 received token count.
             handle: the returned communication handle.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
+            event: the event after executing the kernel (valid only if `async_op` is set).
         """
         is_out_buf_given = recv_x is not None
 
@@ -469,7 +469,7 @@ class GrpCollBuffer:
                 num_tokens_per_expert=num_tokens_per_rank,  # FIXME: remove expert concept
                 post_perm_idx=post_perm_idx,
                 previous_event=previous_event,
-                async_finish=async_finish,
+                async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
                 cast_lse=cast_lse,
                 lse=lse,
@@ -487,7 +487,7 @@ class GrpCollBuffer:
             is_token_in_rank=is_token_in_rank,
             post_perm_idx=post_perm_idx,
             previous_event=previous_event,
-            async_finish=async_finish,
+            async_op=async_op,
             allocate_on_comm_stream=allocate_on_comm_stream,
             cast_lse=cast_lse,
             lse=lse,
@@ -504,7 +504,7 @@ class GrpCollBuffer:
         pre_perm_idx: torch.Tensor | None = None,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
@@ -528,7 +528,7 @@ class GrpCollBuffer:
             acc_reduce (bool): whether to accumulate the reduction to the given reduced_x buffer. Defaults to False.
             config: the performance tuning config.
             previous_event: the event to wait before actually executing the kernel.
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            async_op: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
             comm_dtype: the communication dtype, set to `x.dtype` if not given.
 
@@ -543,7 +543,7 @@ class GrpCollBuffer:
             reduced_x: the reduced token from its dispatched ranks.
             reduced_lse: the reduced logsumexp of each token in `reduced_x` for each attention head
                 if `reduce_op` is "lse", otherwise `None`.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
+            event: the event after executing the kernel (valid only if `async_op` is set).
         """
         is_out_buf_given = reduced_x is not None
 
@@ -579,7 +579,7 @@ class GrpCollBuffer:
                 acc_reduce=acc_reduce,
                 pre_perm_idx=pre_perm_idx,
                 previous_event=previous_event,
-                async_finish=async_finish,
+                async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
                 comm_dtype=comm_dtype,
                 lse=lse,
@@ -597,7 +597,7 @@ class GrpCollBuffer:
             acc_reduce=acc_reduce,
             pre_perm_idx=pre_perm_idx,
             previous_event=previous_event,
-            async_finish=async_finish,
+            async_op=async_op,
             allocate_on_comm_stream=allocate_on_comm_stream,
             comm_dtype=comm_dtype,
             lse=lse,
@@ -615,7 +615,7 @@ class GrpCollBuffer:
         is_token_in_rank: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
@@ -668,7 +668,7 @@ class GrpCollBuffer:
             post_perm_idx,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_comm_stream,
         )
 
@@ -704,7 +704,7 @@ class GrpCollBuffer:
         acc_reduce: bool = False,
         pre_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
@@ -737,7 +737,7 @@ class GrpCollBuffer:
             handle.send_head,  # send_head
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_comm_stream,
             reduce_op,
             acc_reduce,
@@ -762,7 +762,7 @@ class GrpCollBuffer:
         num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
@@ -840,7 +840,7 @@ class GrpCollBuffer:
             recv_gbl_rank_prefix_sum,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_comm_stream,
         )
 
@@ -880,7 +880,7 @@ class GrpCollBuffer:
         acc_reduce: bool = False,
         pre_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
@@ -924,7 +924,7 @@ class GrpCollBuffer:
             handle.send_nvl_head,  # send_nvl_head
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_comm_stream,
             reduce_op,
             acc_reduce,
@@ -965,7 +965,7 @@ class GrpCollBuffer:
         use_fp8: bool = True,
         round_scale: bool = False,
         use_ue8m0: bool = False,
-        async_finish: bool = False,
+        async_op: bool = False,
         return_recv_hook: bool = False,
     ) -> tuple[
         tuple[torch.Tensor, torch.Tensor], torch.Tensor, tuple, EventOverlap, Callable
@@ -991,7 +991,7 @@ class GrpCollBuffer:
                 the received data will be a tuple of FP8 tensor and scaling factors.
             round_scale: whether round the scaling factors into power of 2.
             use_ue8m0: whether use UE8M0 as scaling factor format (available only with `round_scale=True`).
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            async_op: the current stream will not wait for the communication kernels to be finished if set.
             return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
                 If you do not set this flag, the kernel will ensure the data's arrival.
@@ -1012,7 +1012,7 @@ class GrpCollBuffer:
             recv_count: a tensor shaped `[num_local_experts]` with type `torch.int`, indicating how many tokens each
                 expert receives. As mentioned before, not all tokens are valid in `recv_x`.
             handle: the communication handle to be used in the `low_latency_combine` function.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
+            event: the event after executing the kernel (valid only if `async_op` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         (
@@ -1032,7 +1032,7 @@ class GrpCollBuffer:
             use_fp8,
             round_scale,
             use_ue8m0,
-            async_finish,
+            async_op,
             return_recv_hook,
         )
         handle = (
@@ -1056,7 +1056,7 @@ class GrpCollBuffer:
             (packed_recv_x, packed_recv_x_scales) if use_fp8 else packed_recv_x,
             packed_recv_count,
             handle,
-            EventOverlap(event, tensors_to_record if async_finish else None),  # type: ignore[arg-type]
+            EventOverlap(event, tensors_to_record if async_op else None),  # type: ignore[arg-type]
             hook,
         )
 
@@ -1068,7 +1068,7 @@ class GrpCollBuffer:
         handle: tuple,
         use_logfmt: bool = False,
         zero_copy: bool = False,
-        async_finish: bool = False,
+        async_op: bool = False,
         return_recv_hook: bool = False,
         out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, EventOverlap, Callable]:
@@ -1091,7 +1091,7 @@ class GrpCollBuffer:
             use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format (10 bits).
             zero_copy: whether the tensor is already copied into the RDMA buffer, should be cooperative
                 with `get_next_low_latency_combine_buffer`.
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            async_op: the current stream will not wait for the communication kernels to be finished if set.
             return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
                 If you do not set this flag, the kernel will ensure the data's arrival.
@@ -1099,7 +1099,7 @@ class GrpCollBuffer:
 
         Returns:
             combined_x: the reduced token tensor, with shape `[num_combined_tokens, hidden_size]` and type `torch.bfloat16`.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
+            event: the event after executing the kernel (valid only if `async_op` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         (
@@ -1119,7 +1119,7 @@ class GrpCollBuffer:
             num_experts,
             use_logfmt,
             zero_copy,
-            async_finish,
+            async_op,
             return_recv_hook,
             out,
         )
@@ -1133,7 +1133,7 @@ class GrpCollBuffer:
         )
         return (
             combined_x,
-            EventOverlap(event, tensors_to_record if async_finish else None),  # type: ignore[arg-type]
+            EventOverlap(event, tensors_to_record if async_op else None),  # type: ignore[arg-type]
             hook,
         )
 

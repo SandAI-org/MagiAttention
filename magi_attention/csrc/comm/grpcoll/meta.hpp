@@ -33,7 +33,7 @@ struct Meta {
       int num_ranks,
       int num_rdma_ranks,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_meta_stream,
       std::optional<at::cuda::CUDAStream> meta_stream) {
     GRPCOLL_HOST_ASSERT(t2r_idx.dim() == 2);
@@ -47,7 +47,7 @@ struct Meta {
     // NOTES: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
     if (allocate_on_meta_stream) {
-      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async);
+      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
       at::cuda::setCurrentCUDAStream(meta_stream_);
     }
 
@@ -77,7 +77,7 @@ struct Meta {
 
     // Wait streams
     std::optional<EventHandle> event;
-    if (async) {
+    if (async_op) {
       event = EventHandle(meta_stream_);
       // record tensors on meta stream
       for (auto& t : {t2r_idx, num_tokens_per_rank, is_token_in_rank}) {
@@ -108,7 +108,7 @@ struct Meta {
       int num_tokens,
       int num_ranks,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_meta_stream,
       std::optional<at::cuda::CUDAStream> meta_stream) {
     GRPCOLL_HOST_ASSERT(output_split_sizes.dim() == 1 && src_idx.dim() == 1);
@@ -123,7 +123,7 @@ struct Meta {
     // NOTES: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
     if (allocate_on_meta_stream) {
-      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async);
+      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
       at::cuda::setCurrentCUDAStream(meta_stream_);
     }
 
@@ -151,7 +151,7 @@ struct Meta {
 
     // Wait streams
     std::optional<EventHandle> event;
-    if (async) {
+    if (async_op) {
       event = EventHandle(meta_stream_);
       for (auto& t : {output_split_sizes, src_idx, perm_to_a2av_idx}) {
         t.record_stream(meta_stream_);

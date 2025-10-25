@@ -299,14 +299,14 @@ void Buffer::destroy() {
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> Buffer::get_group_cast_meta(
     const torch::Tensor& t2r_idx,
     std::optional<EventHandle>& previous_event,
-    bool async,
+    bool async_op,
     bool allocate_on_comm_stream) {
   return Meta::get_group_cast_meta_from_t2r_idx(
       /*t2r_idx=*/t2r_idx,
       /*num_ranks=*/num_ranks,
       /*num_rdma_ranks=*/is_internode_available() ? num_rdma_ranks : 1,
       /*previous_event=*/previous_event,
-      /*async=*/async,
+      /*async_op=*/async_op,
       /*allocate_on_comm_stream=*/allocate_on_comm_stream,
       /*meta_stream=*/comm_stream);
 }
@@ -335,7 +335,7 @@ Buffer::intranode_group_cast(
     const std::optional<torch::Tensor>& post_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
-    bool async,
+    bool async_op,
     bool allocate_on_comm_stream) {
   // Determine if we are using chunked mode
   bool cached_mode = cached_rank_prefix_matrix.has_value();
@@ -393,7 +393,7 @@ Buffer::intranode_group_cast(
   // NOTES: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
-    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async);
+    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
     at::cuda::setCurrentCUDAStream(comm_stream);
   }
 
@@ -555,7 +555,7 @@ Buffer::intranode_group_cast(
 
   // Record or wait streams
   std::optional<EventHandle> event;
-  if (async) { // Record tensors on non-allocated stream
+  if (async_op) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     // record tensors
     for (auto& t : {x, recv_x, is_token_in_rank, rank_prefix_matrix, channel_prefix_matrix, recv_src_idx, recv_channel_prefix_matrix, send_head}) {
@@ -593,7 +593,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     const torch::Tensor& send_head,
     const Config& config,
     std::optional<EventHandle>& previous_event,
-    bool async,
+    bool async_op,
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
     bool acc_reduce,
@@ -629,7 +629,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   // NOTES: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
-    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async);
+    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
     at::cuda::setCurrentCUDAStream(comm_stream);
   }
 
@@ -763,7 +763,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
 
   // Record or wait streams
   std::optional<EventHandle> event;
-  if (async) { // Record tensors on non-allocated stream
+  if (async_op) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     // record tensors
     for (auto& t : {x, reduced_x, src_idx, send_head, rank_prefix_matrix, channel_prefix_matrix}) {
@@ -820,7 +820,7 @@ Buffer::internode_group_cast(
     const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
     const Config& config,
     std::optional<EventHandle>& previous_event,
-    bool async,
+    bool async_op,
     bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
   // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
@@ -917,7 +917,7 @@ Buffer::internode_group_cast(
   // NOTES: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
-    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async);
+    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
     at::cuda::setCurrentCUDAStream(comm_stream);
   }
 
@@ -1118,7 +1118,7 @@ Buffer::internode_group_cast(
 
   // Record or wait streams
   std::optional<EventHandle> event;
-  if (async) { // Record tensors on non-allocated stream
+  if (async_op) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     // record tensors
     for (auto& t : {x, is_token_in_rank, recv_x, rdma_channel_prefix_matrix, recv_rdma_rank_prefix_sum, gbl_channel_prefix_matrix, recv_gbl_rank_prefix_sum}) {
@@ -1189,7 +1189,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     const torch::Tensor& combined_nvl_head,
     const Config& config,
     std::optional<EventHandle>& previous_event,
-    bool async,
+    bool async_op,
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
     bool acc_reduce) {
@@ -1232,7 +1232,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   // NOTES: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
-    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async);
+    GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
     at::cuda::setCurrentCUDAStream(comm_stream);
   }
 
@@ -1352,7 +1352,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
 
   // Record or wait streams
   std::optional<EventHandle> event;
-  if (async) { // Record tensors on non-allocated stream
+  if (async_op) { // Record tensors on non-allocated stream
     event = EventHandle(comm_stream);
     // record tensors
     for (auto& t :
@@ -1403,7 +1403,7 @@ Buffer::low_latency_dispatch(
     bool use_fp8,
     bool round_scale,
     bool use_ue8m0,
-    bool async,
+    bool async_op,
     bool return_recv_hook) {
 #ifndef DISABLE_NVSHMEM
   GRPCOLL_HOST_ASSERT(low_latency_mode);
@@ -1436,7 +1436,7 @@ Buffer::low_latency_dispatch(
   // NOTES: the hook mode will always use the default stream
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   auto launch_stream = return_recv_hook ? compute_stream : comm_stream;
-  GRPCOLL_HOST_ASSERT(not(async and return_recv_hook));
+  GRPCOLL_HOST_ASSERT(not(async_op and return_recv_hook));
   if (not return_recv_hook)
     stream_wait(launch_stream, compute_stream);
 
@@ -1503,7 +1503,7 @@ Buffer::low_latency_dispatch(
 
   // Wait streams
   std::optional<EventHandle> event;
-  if (async) {
+  if (async_op) {
     // NOTES: we must ensure the all tensors will not be deallocated before the stream-wait happens,
     // so in Python API, we must wrap all tensors into the event handle.
     event = EventHandle(launch_stream);
@@ -1534,7 +1534,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
     int num_experts,
     bool use_logfmt,
     bool zero_copy,
-    bool async,
+    bool async_op,
     bool return_recv_hook,
     const std::optional<torch::Tensor>& out) {
 #ifndef DISABLE_NVSHMEM
@@ -1570,7 +1570,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
   // NOTES: the hook mode will always use the default stream
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   auto launch_stream = return_recv_hook ? compute_stream : comm_stream;
-  GRPCOLL_HOST_ASSERT(not(async and return_recv_hook));
+  GRPCOLL_HOST_ASSERT(not(async_op and return_recv_hook));
   if (not return_recv_hook)
     stream_wait(launch_stream, compute_stream);
 
@@ -1618,7 +1618,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
 
   // Wait streams
   std::optional<EventHandle> event;
-  if (async) {
+  if (async_op) {
     // NOTES: we must ensure the all tensors will not be deallocated before the stream-wait happens,
     // so in Python API, we must wrap all tensors into the event handle.
     event = EventHandle(launch_stream);

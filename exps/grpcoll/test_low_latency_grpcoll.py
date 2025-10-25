@@ -254,7 +254,7 @@ def test_main(
                                 round_scale=round_scale,
                                 use_ue8m0=use_ue8m0,
                                 cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-                                async_finish=not return_recv_hook,
+                                async_op=not return_recv_hook,
                                 return_recv_hook=return_recv_hook,
                             )
 
@@ -418,7 +418,7 @@ def test_main(
                                 topk_weights,
                                 handle,
                                 use_logfmt=use_logfmt,
-                                async_finish=not return_recv_hook,
+                                async_op=not return_recv_hook,
                                 zero_copy=zero_copy,
                                 return_recv_hook=return_recv_hook,
                                 out=out,
@@ -469,7 +469,7 @@ def test_main(
             num_experts,
             cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
             use_fp8=True,
-            async_finish=False,
+            async_op=False,
             return_recv_hook=return_recv_hook,
         )
         large_gemm_with_hook(hook) if return_recv_hook else None

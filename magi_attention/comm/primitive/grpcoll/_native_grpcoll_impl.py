@@ -158,7 +158,7 @@ def native_group_cast_impl(
         post_perm_idx=post_perm_idx,
         config=config,
         previous_event=None,
-        async_finish=async_op,
+        async_op=async_op,
         allocate_on_comm_stream=False,
         cast_lse=cast_lse,
         lse=input_lse,
@@ -302,7 +302,7 @@ def native_group_reduce_impl(
         pre_perm_idx=pre_perm_idx,
         config=config,
         previous_event=None,
-        async_finish=async_op,
+        async_op=async_op,
         allocate_on_comm_stream=False,
         comm_dtype=None,  # TODO
         lse=input_lse,

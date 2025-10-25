@@ -160,7 +160,7 @@ struct Buffer {
   std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> get_group_cast_meta(
       const torch::Tensor& t2r_idx,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_comm_stream);
 
   std::tuple<
@@ -187,7 +187,7 @@ struct Buffer {
       const std::optional<torch::Tensor>& post_perm_idx,
       const Config& config,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_comm_stream);
 
   std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> intranode_group_reduce(
@@ -202,7 +202,7 @@ struct Buffer {
       const torch::Tensor& send_head,
       const Config& config,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_comm_stream,
       const std::string& reduce_op,
       bool acc_reduce,
@@ -240,7 +240,7 @@ struct Buffer {
       const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
       const Config& config,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_comm_stream);
 
   std::tuple<torch::Tensor, std::optional<EventHandle>> internode_group_reduce(
@@ -258,7 +258,7 @@ struct Buffer {
       const torch::Tensor& combined_nvl_head,
       const Config& config,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_comm_stream,
       const std::string& reduce_op,
       bool acc_reduce);
@@ -275,7 +275,7 @@ struct Buffer {
       bool use_fp8,
       bool round_scale,
       bool use_ue8m0,
-      bool async,
+      bool async_op,
       bool return_recv_hook);
 
   std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>> low_latency_combine(
@@ -288,7 +288,7 @@ struct Buffer {
       int num_experts,
       bool use_logfmt,
       bool zero_copy,
-      bool async,
+      bool async_op,
       bool return_recv_hook,
       const std::optional<torch::Tensor>& out = std::nullopt);
 

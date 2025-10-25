@@ -527,7 +527,7 @@ def test_func(
         "x": x,
         "recv_x": recv_x_gc_buf,
         "config": config,
-        "async_finish": async_mode,
+        "async_op": async_mode,
         "post_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
         "cast_lse": cast_lse,
         "lse": lse,
@@ -811,7 +811,7 @@ def test_func(
         "reduced_x": reduced_x_gr_buf,
         "handle": handle,
         "config": config,
-        "async_finish": async_mode,
+        "async_op": async_mode,
         "reduce_op": reduce_op,
         "acc_reduce": acc_reduce_out_buffer,
         # NOTE: still perm_to_a2av_idx, instead of unperm_to_a2av_idx

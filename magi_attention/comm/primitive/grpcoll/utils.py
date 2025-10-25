@@ -1441,7 +1441,7 @@ def get_native_group_cast_meta(
         ) = buffer.get_group_cast_meta(
             t2r_idx=t2r_idx,
             previous_event=None,
-            async_finish=False,
+            async_op=False,
             allocate_on_comm_stream=False,
         )
     else:
@@ -1459,7 +1459,7 @@ def get_native_group_cast_meta(
             num_ranks=num_ranks,
             num_nodes=num_nodes,
             previous_event=None,
-            async_finish=False,
+            async_op=False,
             allocate_on_meta_stream=False,
         )
 
@@ -1549,7 +1549,7 @@ def get_a2av_perm_idxs_from_group_cast_meta(
         num_ranks=num_ranks,
         output_seqlen=output_seqlen,
         previous_event=None,
-        async_finish=False,
+        async_op=False,
         allocate_on_meta_stream=False,
     )
 
