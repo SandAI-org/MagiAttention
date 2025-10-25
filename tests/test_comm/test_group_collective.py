@@ -893,9 +893,8 @@ class TestGroupCollective(DistTestBase):
             (torch.bfloat16, torch.bfloat16),
             (torch.float16, None),
             (torch.float32, torch.float32),
-            # TODO
-            # (torch.float32, torch.bfloat16),
-            # (torch.float32, torch.float16),
+            (torch.float32, torch.bfloat16),
+            (torch.float32, torch.float16),
             (torch.float64, None),
         ],
     )
