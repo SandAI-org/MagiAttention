@@ -375,6 +375,7 @@ Buffer::intranode_group_cast(
   }
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
+  GRPCOLL_HOST_ASSERT((hidden_size * x.element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
   auto hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
 
   // LSE checks
@@ -384,7 +385,7 @@ Buffer::intranode_group_cast(
     GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
     GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
     GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens);
-    GRPCOLL_HOST_ASSERT(hidden_size % lse->size(1) == 0); // NOTES: hidden size should be divisible by num_heads
+    GRPCOLL_HOST_ASSERT(hidden_size % lse->size(1) == 0); // hidden size should be divisible by num_heads
     num_heads = static_cast<int>(lse->size(1));
     lse_ptr = static_cast<float*>(lse->data_ptr());
   }
@@ -601,9 +602,11 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   // Transfer reduce ops
   ReduceOp reduce_op_ = str_to_reduce_op(reduce_op);
 
-  // Transfer dtypes
-  auto x_dtype = at::cuda::ScalarTypeToCudaDataType(x.scalar_type());
-  auto comm_dtype_ = at::cuda::ScalarTypeToCudaDataType(comm_dtype.value_or(x.scalar_type()));
+  // Transfer dtypes and item sizes in bytes
+  auto x_dtype = x.scalar_type();
+  auto x_elem_size = c10::elementSize(x_dtype);
+  auto comm_dtype_ = comm_dtype.value_or(x_dtype);
+  auto comm_elem_size = c10::elementSize(comm_dtype_);
 
   // Check tensors
   GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
@@ -622,8 +625,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   GRPCOLL_HOST_ASSERT(send_head.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(rank_prefix_matrix.size(0) == num_ranks and rank_prefix_matrix.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(channel_prefix_matrix.size(0) == num_ranks and channel_prefix_matrix.size(1) == num_channels);
-  GRPCOLL_HOST_ASSERT((hidden_size * x.element_size()) % sizeof(int4) == 0); // hidden_size should be aligned with int4
-  GRPCOLL_HOST_ASSERT(((hidden_size * x.element_size()) / sizeof(int4)) % WARP_SIZE == 0); // hidden_int4 % WARP_SIZE == 0
+  GRPCOLL_HOST_ASSERT((hidden_size * comm_elem_size) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
+  GRPCOLL_HOST_ASSERT(((hidden_size * comm_elem_size) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
 
   // Allocate all tensors on comm stream if set
   // NOTES: do not allocate tensors upfront!
@@ -649,8 +652,10 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::LSE); // no point to transfer lse if reduce_op != ReduceOp::LSE
     GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
     GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
-    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0);
+    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0); // hidden size should be divisible by num_heads
     num_heads = static_cast<int>(lse->size(1));
+    auto head_dim = hidden_size / num_heads;
+    GRPCOLL_HOST_ASSERT(head_dim % (sizeof(int4) / comm_elem_size) == 0); // each group of elems with dtype `comm_dtype` in one int4 should share the same head
     lse_ptr = lse->data_ptr<float>();
 
     if (reduced_lse_buf.has_value()) {
@@ -699,7 +704,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   auto reduced_x = torch::Tensor();
   if (reduced_x_buf.has_value()) {
     GRPCOLL_HOST_ASSERT(reduced_x_buf->dim() == 2 and reduced_x_buf->is_contiguous());
-    GRPCOLL_HOST_ASSERT(reduced_x_buf->scalar_type() == x.scalar_type());
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->scalar_type() == x_dtype);
     GRPCOLL_HOST_ASSERT(reduced_x_buf->size(0) == num_reduced_tokens and reduced_x_buf->size(1) == hidden_size);
     reduced_x = reduced_x_buf.value();
   } else {
@@ -717,7 +722,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT(
       num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * x.element_size() + // data buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * comm_elem_size + // data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) + // lse buffer
           sizeof(int4) // max padding bytes to align for vectorized data buffer
@@ -736,8 +741,8 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
    * but we don't know how to exactly fix this issue by now
    */
   intranode::group_reduce(
-      /*dtype=*/x_dtype,
-      /*comm_dtype=*/comm_dtype_,
+      /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
+      /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
       /*reduce_op=*/reduce_op_,
       /*reduced_x=*/reduced_x.data_ptr(),
       /*reduced_lse=*/reduced_lse_ptr,
@@ -1218,8 +1223,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
   auto num_combined_tokens = static_cast<int>(is_combined_token_in_rank.size(0));
-  GRPCOLL_HOST_ASSERT((hidden * x.element_size()) % sizeof(int4) == 0); // hidden_size should be aligned with int4
-  GRPCOLL_HOST_ASSERT(((hidden * x.element_size()) / sizeof(int4)) % WARP_SIZE == 0); // hidden_int4 % WARP_SIZE == 0
+  GRPCOLL_HOST_ASSERT((hidden * x.element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
+  GRPCOLL_HOST_ASSERT(((hidden * x.element_size()) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
   GRPCOLL_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes());
   GRPCOLL_HOST_ASSERT(is_combined_token_in_rank.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels);

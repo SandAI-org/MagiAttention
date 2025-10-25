@@ -40,6 +40,7 @@
 
 #pragma once
 
+#include "configs.cuh"
 #include "exception.cuh"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -52,18 +53,41 @@
 
 #define GLOBAL_LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK, MIN_BLOCKS_PER_SM) __global__ __launch_bounds__(MAX_THREADS_PER_BLOCK, MIN_BLOCKS_PER_SM)
 
-#define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC, ST_FUNC)                                               \
-  {                                                                                                                             \
-    constexpr int kLoopStride = 32 * (UNROLL_FACTOR);                                                                           \
-    typename std::remove_reference<decltype(LD_FUNC((SRC) + 0))>::type unrolled_values[(UNROLL_FACTOR)];                        \
-    auto __src = (SRC);                                                                                                         \
-    auto __dst = (DST);                                                                                                         \
-    for (int __i = (LANE_ID); __i < ((N) / kLoopStride) * kLoopStride; __i += kLoopStride) {                                    \
-      _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) unrolled_values[__j] = LD_FUNC(__src + __i + __j * 32); \
-      _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) ST_FUNC(__dst + __i + __j * 32, unrolled_values[__j]);  \
-    }                                                                                                                           \
-    for (int __i = ((N) / kLoopStride) * kLoopStride + (LANE_ID); __i < (N); __i += 32)                                         \
-      ST_FUNC(__dst + __i, LD_FUNC(__src + __i));                                                                               \
+#define UNROLLED_WARP_COPY(UNROLL_FACTOR, LANE_ID, N, DST, SRC, LD_FUNC, ST_FUNC)                                                      \
+  {                                                                                                                                    \
+    constexpr int kLoopStride = WARP_SIZE * (UNROLL_FACTOR);                                                                           \
+    const int unrolled_loop_iters = ((N) / kLoopStride) * kLoopStride;                                                                 \
+    typename std::remove_reference<decltype(LD_FUNC((SRC) + 0))>::type unrolled_values[(UNROLL_FACTOR)];                               \
+    auto __src = (SRC);                                                                                                                \
+    auto __dst = (DST);                                                                                                                \
+    for (int __i = (LANE_ID); __i < unrolled_loop_iters; __i += kLoopStride) {                                                         \
+      _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) unrolled_values[__j] = LD_FUNC(__src + __j * WARP_SIZE + __i); \
+      _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) ST_FUNC(__dst + __j * WARP_SIZE + __i, unrolled_values[__j]);  \
+    }                                                                                                                                  \
+    for (int __i = unrolled_loop_iters + (LANE_ID); __i < (N); __i += WARP_SIZE)                                                       \
+      ST_FUNC(__dst + __i, LD_FUNC(__src + __i));                                                                                      \
+  }
+
+#define UNROLLED_WARP_CAST_COPY(UNROLL_FACTOR, LANE_ID, N, NLOAD, DST, SRC, LD_FUNC, ST_FUNC, CAST_FUNC)                       \
+  {                                                                                                                            \
+    constexpr int kLoopStride = WARP_SIZE * (UNROLL_FACTOR) * (NLOAD);                                                         \
+    const int unrolled_loop_iters = ((N) / kLoopStride) * kLoopStride;                                                         \
+    typename std::remove_reference<decltype(LD_FUNC((SRC) + 0))>::type unrolled_values[(UNROLL_FACTOR) * (NLOAD)];             \
+    auto __src = (SRC);                                                                                                        \
+    auto __dst = (DST);                                                                                                        \
+    for (int __i = (LANE_ID); __i < unrolled_loop_iters; __i += kLoopStride) {                                                 \
+      _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) {                                                      \
+        _Pragma("unroll") for (int __k = 0; __k < (NLOAD); ++__k) unrolled_values[__j * (NLOAD) + __k] =                       \
+            LD_FUNC(__src + __j * WARP_SIZE * (NLOAD) + __k * WARP_SIZE + __i);                                                \
+      }                                                                                                                        \
+      _Pragma("unroll") for (int __j = 0; __j < (UNROLL_FACTOR); ++__j) {                                                      \
+        ST_FUNC(__dst + __j * WARP_SIZE + __i, CAST_FUNC(unrolled_values + __j));                                              \
+      }                                                                                                                        \
+    }                                                                                                                          \
+    for (int __i = unrolled_loop_iters + (LANE_ID); __i < (N); __i += WARP_SIZE * (NLOAD)) {                                   \
+      _Pragma("unroll") for (int __j = 0; __j < (NLOAD); ++__j) unrolled_values[__j] = LD_FUNC(__src + __j * WARP_SIZE + __i); \
+      ST_FUNC(__dst + __i, CAST_FUNC(unrolled_values));                                                                        \
+    }                                                                                                                          \
   }
 
 namespace magi_attn_comm::grpcoll {
@@ -787,6 +811,25 @@ DEVICE_INLINE void unpack2(const dtype_b_t& packed, dtype_a_t& x, dtype_a_t& y) 
   GRPCOLL_STATIC_ASSERT(sizeof(dtype_a_t) * 2 == sizeof(dtype_b_t), "Invalid dtypes");
   auto unpacked_ptr = reinterpret_cast<const dtype_a_t*>(&packed);
   x = unpacked_ptr[0], y = unpacked_ptr[1];
+}
+
+template <typename dtype_t, typename lp_dtype_t, typename vec_dtype_t>
+DEVICE_INLINE vec_dtype_t vec_downcast(vec_dtype_t* vec_ptr) {
+  constexpr int kDtypePerVec = sizeof(vec_dtype_t) / sizeof(dtype_t);
+  constexpr int kLowPrecisionDtypePerDtype = sizeof(dtype_t) / sizeof(lp_dtype_t);
+
+  vec_dtype_t downcast_val_vec;
+  lp_dtype_t* downcast_val_ptr_lp = reinterpret_cast<lp_dtype_t*>(&downcast_val_vec);
+
+#pragma unroll
+  for (int i = 0; i < kLowPrecisionDtypePerDtype; ++i) {
+    dtype_t* ith_dtype_ptr = reinterpret_cast<dtype_t*>(vec_ptr + i);
+#pragma unroll
+    for (int j = 0; j < kDtypePerVec; ++j)
+      downcast_val_ptr_lp[i * kDtypePerVec + j] = static_cast<lp_dtype_t>(ith_dtype_ptr[j]);
+  }
+
+  return downcast_val_vec;
 }
 
 constexpr float kFP8Margin = 1e-4;

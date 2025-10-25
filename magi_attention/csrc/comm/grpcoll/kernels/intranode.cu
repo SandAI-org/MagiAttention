@@ -636,9 +636,9 @@ void launch_group_cast(
     int num_max_send_tokens,
     int num_recv_buffer_tokens) {
   constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
-  constexpr int kNumTMABytesPerWarp = 8192; // num bytes of TMA transfer per warp
   constexpr int kWarpCopyUnrollStages = 5; // warp-copy unroll stages
   constexpr int kNumTMAStages = 2; // num TMA stages
+  constexpr int kNumTMABytesPerWarp = 8192; // num bytes of TMA transfer per warp
 
 #ifndef DISABLE_SM90_FEATURES
   GRPCOLL_HOST_ASSERT(hidden_int4 % kNumTMAStages == 0);
@@ -853,8 +853,12 @@ void group_reduce_kernel(
 
   // Get dtype Info
   GRPCOLL_STATIC_ASSERT(sizeof(int4) % sizeof(dtype_t) == 0, "Invalid vectorization");
+  GRPCOLL_STATIC_ASSERT(sizeof(dtype_t) % sizeof(comm_dtype_t) == 0, "Invalid (dtype_t, comm_dtype_t)");
   constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
+  constexpr int kCommDtypePerDtype = sizeof(dtype_t) / sizeof(comm_dtype_t);
+  constexpr int kCommDtypePerInt4 = kCommDtypePerDtype * kDtypePerInt4;
   const int hidden_int4 = hidden_size / kDtypePerInt4;
+  const int hidden_int4_comm = hidden_int4 / kCommDtypePerDtype;
 
   // Cast from `dtype_t` to `int4`
   auto x_int4 = reinterpret_cast<const int4*>(x);
@@ -863,10 +867,10 @@ void group_reduce_kernel(
   // Get copy info
 #ifndef DISABLE_SM90_FEATURES
   // Get TMA copy info
-
   // Prepare TMA buffer in dynamic shared memory for this warp
   extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
   auto tma_buffer = smem_buffer + warp_id * kNumTMABytesPerWarp;
+  constexpr int kTMAStoreBytesPerWarp = WARP_SIZE * kCommDtypePerDtype * sizeof(int4); // the number of bytes per warp when using tma store
 #endif
 
   if (is_sender) {
@@ -898,10 +902,10 @@ void group_reduce_kernel(
     auto channel_tail_idx = Buffer<int>(ptr, num_channels_total, channel_rank_offset);
 
     // Get channel data buffers
-    // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
+    // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4_comm), dtype=int4, alignment=sizeof(int4)
     // `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
     // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
-    auto channel_x_buffers = Buffer<int4, sizeof(int4)>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
+    auto channel_x_buffers = Buffer<int4, sizeof(int4)>(ptr, num_channel_tokens_total * hidden_int4_comm, channel_rank_token_offset * hidden_int4_comm);
     auto channel_src_idx_buffers = Buffer<int>(ptr, num_channel_tokens_total, channel_rank_token_offset);
     Buffer<float> channel_lse_buffers;
     if constexpr (kReduceOp == ReduceOp::LSE)
@@ -973,18 +977,33 @@ void group_reduce_kernel(
         auto token_ptr_in_x_int4 = x_int4 + token_idx_in_x * hidden_int4;
 
         // Get the token ptr in the recv queue
-        auto token_ptr_in_queue_int4 = channel_x_buffers.buffer() + dst_slot_idx * hidden_int4;
+        auto token_ptr_in_queue_int4 = channel_x_buffers.buffer() + dst_slot_idx * hidden_int4_comm;
 
         // Warp-copy this token from send buffer to the recv queue
-        UNROLLED_WARP_COPY(
-            /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
-            /*LANE_ID=*/lane_id,
-            /*N=*/hidden_int4,
-            /*DST=*/token_ptr_in_queue_int4,
-            /*SRC=*/token_ptr_in_x_int4,
-            /*LD_FUNC=*/ld_nc_global, // non-cached load
-            /*ST_FUNC=*/st_na_global // non-cached store
-        );
+        if constexpr (std::is_same_v<dtype_t, comm_dtype_t>) { // same comm dtype as `x.dtype`, so each int4 in `x` should copy to one int4 in queue
+          UNROLLED_WARP_COPY(
+              /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
+              /*LANE_ID=*/lane_id,
+              /*N=*/hidden_int4,
+              /*DST=*/token_ptr_in_queue_int4,
+              /*SRC=*/token_ptr_in_x_int4,
+              /*LD_FUNC=*/ld_nc_global, // non-cached load
+              /*ST_FUNC=*/st_na_global // non-cached store
+          );
+        } else { // low precision comm dtype, so each `kCommDtypePerDtype` int4 in `x` should copy to one int4 in queue
+          UNROLLED_WARP_CAST_COPY(
+              /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
+              /*LANE_ID=*/lane_id,
+              /*N=*/hidden_int4,
+              /*NLOAD=*/kCommDtypePerDtype,
+              /*DST=*/token_ptr_in_queue_int4,
+              /*SRC=*/token_ptr_in_x_int4,
+              /*LD_FUNC=*/ld_nc_global, // non-cached load
+              /*ST_FUNC=*/st_na_global, // non-cached store
+              /*CAST_FUNC=*/(vec_downcast</*dtype_t=*/dtype_t, /*lp_dtype_t=*/comm_dtype_t, /*vec_dtype_t=*/int4>) // downcast from dtype_t to comm_dtype_t, given a
+                                                                                                                   // `kCommDtypePerDtype` int4 ptr
+          );
+        }
 
         // Copy channel src idx by lane0
         // NOTES: `src_idx` is actually the `recv_src_idx` in group_cast stage
@@ -1103,8 +1122,8 @@ void group_reduce_kernel(
         auto ptr = reinterpret_cast<void*>(static_cast<int8_t*>(buffer_ptrs[rank]) + 2 * num_channels_total * sizeof(int));
 
         // Get `channel_x_buffers` for curr rank
-        // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int, alignment=sizeof(int4)
-        channel_x_buffers[curr_rank] = Buffer<int4, sizeof(int4)>(ptr, num_channel_tokens_total * hidden_int4, channel_rank_token_offset * hidden_int4);
+        // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4_comm), dtype=int, alignment=sizeof(int4)
+        channel_x_buffers[curr_rank] = Buffer<int4, sizeof(int4)>(ptr, num_channel_tokens_total * hidden_int4_comm, channel_rank_token_offset * hidden_int4_comm);
 
         // Get `channel_lse_buffers` for curr rank
         // if `kReduceOp == ReduceOp::LSE`
@@ -1216,58 +1235,67 @@ void group_reduce_kernel(
           __syncwarp();
         }
 
-#pragma unroll
         // Reduce this token by all the received partial token from all src ranks
-        for (int i = lane_id; i < hidden_int4; i += WARP_SIZE) { // warp-strided
+        // NOTES: we guarantee that `hidden_int4_comm` is a multiple of `WARP_SIZE`
+        // so that all lanes in warp will always enter the loop together
+        // to make `__syncwarp` hang-free and tma store bytes constant
+        int4* reduced_token_ptr_int4 = reduced_x_int4 + token_idx * hidden_int4;
+#pragma unroll
+        for (int i = lane_id; i < hidden_int4_comm; i += WARP_SIZE) { // warp-strided
           // Get the hidden value ptr of `int_4` to reduce to in `reduced_x`
-          int4* reduce_hidval_ptr_int4 = reduced_x_int4 + token_idx * hidden_int4 + i;
+          int4* reduce_hidval_ptr_int4 = reduced_token_ptr_int4 + i * kCommDtypePerDtype;
 
           // Get the optional head idx, valid and used only when `kReduceOp == ReduceOp::LSE`
-          const int head_idx = kReduceOp == ReduceOp::LSE ? i * kDtypePerInt4 / head_dim : -1;
+          // NOTES: we guarantee that each `kCommDtypePerInt4` of elems share the same head
+          const int head_idx = kReduceOp == ReduceOp::LSE ? i * kCommDtypePerInt4 / head_dim : -1;
 
           // Load all recv partial hidden values from all src ranks
           // REVIEW: why use a temp buffer here instead of loading and reducing in one iteration ?
           int4 recv_hidval_int4[kNumRanks];
 #pragma unroll
           for (int j = 0; j < num_src_ranks; ++j)
-            recv_hidval_int4[j] = ld_nc_global(channel_x_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * hidden_int4 + i);
+            recv_hidval_int4[j] = ld_nc_global(channel_x_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * hidden_int4_comm + i);
 
           // Prepare high-precision reduce buffer for this hidden value
-          reduce_dtype_t hp_hidval_reduce_buf[kDtypePerInt4];
+          reduce_dtype_t hp_hidval_reduce_buf[kCommDtypePerInt4];
 
           // Initialize the high-precision reduce buffer
           if constexpr (kAccReduce) { // if in `kAccReduce` mode
             // Initialize the high-precision reduce buffer
             // with the old value in `reduced_x`
             auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
-            foreach_assign<reduce_dtype_t, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
+            foreach_assign<reduce_dtype_t, dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
 
             // Rescale the initial old value in advance
             // if `kReduceOp == ReduceOp::LSE`
             if constexpr (kReduceOp == ReduceOp::LSE) {
               reduce_dtype_t rescale_weight = shared_old_lse_rescale_weight_buf[reduce_warp_id][head_idx];
-              foreach_mul<reduce_dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, rescale_weight);
+              foreach_mul<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, rescale_weight);
             }
           } else { // not in `kAccReduce` mode
             // Zero-initialize the high-precision reduce buffer
-            foreach_fill<reduce_dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, 0);
+            foreach_fill<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, 0);
           }
 
           // Reduce all recv partial hidden values from all src ranks
           // to the high-precision reduce buffer
           if constexpr (kReduceOp == ReduceOp::LSE) {
-            // TODO: optimize the repeated load of each head of lse with shared memory
+            // FIXME: the bank conflict is very severe here,
+            // since all lanes in one warp are very likely to share the same `head_idx`
             reduce_dtype_t reduced_lse_val = shared_reduced_lse_buf[reduce_warp_id][head_idx];
             for (int j = 0; j < num_src_ranks; ++j) {
-              auto jth_recv_hidval_dtype = reinterpret_cast<const dtype_t*>(&recv_hidval_int4[j]);
+              auto jth_recv_hidval_comm_dtype = reinterpret_cast<const comm_dtype_t*>(&recv_hidval_int4[j]);
+              // TODO: optimize the repeated load of each head of lse with dynamic shared memory
+              // but be careful of the high occupancy of the tma buffer
               auto jth_recv_lse = __ldg(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + head_idx);
-              foreach_reduce_lse<reduce_dtype_t, dtype_t, float, kDtypePerInt4>(hp_hidval_reduce_buf, reduced_lse_val, jth_recv_hidval_dtype, jth_recv_lse);
+              foreach_reduce_lse<reduce_dtype_t, comm_dtype_t, float, kCommDtypePerInt4>(
+                  hp_hidval_reduce_buf, reduced_lse_val, jth_recv_hidval_comm_dtype, jth_recv_lse);
             }
           } else if constexpr (kReduceOp == ReduceOp::SUM || kReduceOp == ReduceOp::AVG) {
 #pragma unroll
             for (int j = 0; j < num_src_ranks; ++j) {
-              auto jth_recv_hidval_dtype = reinterpret_cast<const dtype_t*>(&recv_hidval_int4[j]);
-              foreach_reduce_add<reduce_dtype_t, dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, jth_recv_hidval_dtype);
+              auto jth_recv_hidval_comm_dtype = reinterpret_cast<const comm_dtype_t*>(&recv_hidval_int4[j]);
+              foreach_reduce_add<reduce_dtype_t, comm_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, jth_recv_hidval_comm_dtype);
             }
 
             if constexpr (kReduceOp == ReduceOp::AVG) {
@@ -1275,14 +1303,14 @@ void group_reduce_kernel(
               if constexpr (kAccReduce) // if in `kAccReduce` mode, the old value also counts
                 ++num_reduces;
               if (num_reduces > 1) // average by dividing non-trivial `num_reduces`
-                foreach_div<reduce_dtype_t, kDtypePerInt4>(hp_hidval_reduce_buf, static_cast<reduce_dtype_t>(num_reduces));
+                foreach_div<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, static_cast<reduce_dtype_t>(num_reduces));
             }
           }
 
           // Cast the high-precision reduced value back to `dtype_t`
-          int4 reduced_hidval_int4;
-          dtype_t* reduced_hidval_ptr_dtype = reinterpret_cast<dtype_t*>(&reduced_hidval_int4);
-          foreach_assign<dtype_t, reduce_dtype_t, kDtypePerInt4>(reduced_hidval_ptr_dtype, hp_hidval_reduce_buf);
+          int4 reduced_hidval_int4[kCommDtypePerDtype];
+          dtype_t* reduced_hidval_ptr_dtype = reinterpret_cast<dtype_t*>(reduced_hidval_int4);
+          foreach_assign<dtype_t, reduce_dtype_t, kCommDtypePerInt4>(reduced_hidval_ptr_dtype, hp_hidval_reduce_buf);
 
           // Copy the reduced hidden value to `reduced_x`
 #ifndef DISABLE_SM90_FEATURES
@@ -1294,8 +1322,10 @@ void group_reduce_kernel(
 
           // Copy the reduced hidden value to the TMA slot for current TMA stage
           const int tma_stage_idx = (i / WARP_SIZE) % kNumTMAStages;
-          auto tma_ptr_int4_cur_stage = reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * WARP_SIZE;
-          tma_ptr_int4_cur_stage[lane_id] = reduced_hidval_int4;
+          auto tma_ptr_int4_cur_stage = reinterpret_cast<int4*>(tma_buffer) + tma_stage_idx * WARP_SIZE * kCommDtypePerDtype;
+#pragma unroll
+          for (int l = 0; l < kCommDtypePerDtype; ++l)
+            tma_ptr_int4_cur_stage[lane_id * kCommDtypePerDtype + l] = reduced_hidval_int4[l];
 
           // Fence TMA store to wait the TMA buffer for each lane to be ready
           // NOTES: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
@@ -1304,16 +1334,15 @@ void group_reduce_kernel(
 
           // Store all the reduced hidden values for all lanes from TMA slot to `reduced_x`
           if (lane_id == 0) {
-            auto tma_bytes = min(WARP_SIZE, hidden_int4 - i) * static_cast<int>(sizeof(int4));
             tma_store_1d(
                 /*smem_ptr=*/tma_ptr_int4_cur_stage,
                 /*gmem_ptr=*/reduce_hidval_ptr_int4,
-                /*num_bytes=*/tma_bytes,
+                /*num_bytes=*/kTMAStoreBytesPerWarp,
                 /*evict_first=*/false);
           }
           __syncwarp();
 #else
-          *reduce_hidval_ptr_int4 = reduced_hidval_int4;
+          foreach_assign<int4, int4, kCommDtypePerDtype>(reduce_hidval_ptr_int4, reduced_hidval_int4);
 #endif
         }
 
@@ -1360,13 +1389,15 @@ void launch_group_reduce(
     int num_max_send_tokens,
     int num_recv_buffer_tokens) {
   constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
-  constexpr int kNumTMABytesPerWarp = 4096; // num bytes of TMA transfer per warp
   constexpr int kMaxNumHeads = 128; // the maximum number of heads supported when `kReduceOp == ReduceOp::LSE`
   constexpr int kWarpCopyUnrollStages = 4; // warp-copy unroll stages
-  constexpr int kNumTMAStages = 8; // num TMA stages
+  constexpr int kCommDtypePerDtype = sizeof(dtype_t) / sizeof(comm_dtype_t); // num comm_dtype_t elems per dtype_t
+  GRPCOLL_STATIC_ASSERT(kCommDtypePerDtype == 1 || kCommDtypePerDtype == 2 || kCommDtypePerDtype == 4, "Invalid (dtype_t, comm_dtype_t)");
+  constexpr int kNumTMAStages = 8 / kCommDtypePerDtype; // num TMA stages
+  constexpr int kNumTMABytesPerWarp = 4096; // num bytes of TMA transfer per warp
 
 #ifndef DISABLE_SM90_FEATURES
-  GRPCOLL_STATIC_ASSERT(kNumTMAStages * WARP_SIZE * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid TMA buffer count"); // TMA buffer per warp
+  GRPCOLL_STATIC_ASSERT(kNumTMAStages * WARP_SIZE * kCommDtypePerDtype * sizeof(int4) <= kNumTMABytesPerWarp, "Invalid TMA buffer count"); // TMA buffer per warp
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 

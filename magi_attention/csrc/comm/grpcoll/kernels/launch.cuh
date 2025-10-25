@@ -223,6 +223,7 @@ using namespace magi_attn_comm::grpcoll;
   }                                                       \
   while (false)
 
+// comm_dtype <= dtype <= reduce_dtype
 #define SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(case_macro, ...)                   \
   switch (dtype) {                                                                 \
     case CUDA_R_16BF:                                                              \
