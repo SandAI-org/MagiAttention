@@ -121,7 +121,7 @@ class DynamicPersistentTileScheduler {
   DynamicPersistentTileScheduler(SharedStorage* const smem_scheduler) : work_info_smem(smem_scheduler) {};
 
   CUTLASS_DEVICE
-  WorkTileInfo tile_idx_to_work_tile(Params const& params, int next_tile_idx, WorkTileInfo const& current_work, bool flag = false) const {
+  WorkTileInfo tile_idx_to_work_tile(Params const& params, int next_tile_idx, WorkTileInfo const& current_work) const {
     int lane = threadIdx.x % cutlass::NumThreadsPerWarp;
 
     // Helper function to calculate how many blocks are needed to compute the current batch
@@ -257,7 +257,13 @@ class DynamicPersistentTileScheduler {
   template <bool IsProducerWarp = false>
   CUTLASS_DEVICE WorkTileInfo get_initial_work(Params const& params) const {
     if constexpr (IsProducerWarp) {
-      WorkTileInfo work_info = tile_idx_to_work_tile(params, int(blockIdx.x), {0, 0, 0, 0});
+      WorkTileInfo work_info = [&]() {
+        if constexpr (!Deterministic) {
+          return tile_idx_to_work_tile(params, int(blockIdx.x), {0, 0, 0, 0});
+        } else {
+          return tile_idx_to_work_tile(params, int(blockIdx.x), {0, 0, 0, 0, cute::make_tuple(0, 0, 0)});
+        }
+      }();
       if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
         if constexpr (!Deterministic) {
           *work_info_smem = make_int4(work_info.tile_idx, work_info.block, work_info.bidh, work_info.bidb);
@@ -270,7 +276,11 @@ class DynamicPersistentTileScheduler {
       flash::named_barrier_arrive(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier1 /*id*/); // TileCountSmemFull
       return work_info;
     } else {
-      return get_next_work<false>(params, {0, 0, 0, 0});
+      if constexpr (!Deterministic) {
+        return get_next_work<false>(params, {0, 0, 0, 0});
+      } else {
+        return get_next_work<false>(params, {0, 0, 0, 0, cute::make_tuple(0, 0, 0)});
+      }
     }
   }
 
@@ -303,7 +313,7 @@ class DynamicPersistentTileScheduler {
       } else {
         WorkTileInfo work_info = {
             __shfl_sync(0xffffffff, current_work.tile_idx, 1 /*lane*/), current_work.block, current_work.bidh, current_work.bidb, cute::make_tuple(0, 0, 0)};
-        work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info, true);
+        work_info = tile_idx_to_work_tile(params, new_tile_idx, work_info);
         flash::named_barrier_sync(NumThreads, cutlass::arch::ReservedNamedBarriers::StreamkBarrier0 /*id*/); // TileCountSmemEmpty
         if (threadIdx.x % cutlass::NumThreadsPerWarp == 0) {
           *work_info_smem = thrust::make_pair(

@@ -126,12 +126,8 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr auto make_tiled_mma_qk_active() {
     if constexpr (SwapAB) {
       // TiledMmaQK_SwapAB
-      return cute::make_tiled_mma(
-          std::conditional_t<
-              !MmaQK_is_RS,
-              decltype(cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK_SwapAB_OP_SELECT>()),
-              decltype(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_SwapAB_OP_SELECT>())>{},
-          AtomLayoutQK_SwapAB{});
+      // Q @ K is always SS when SwapAB
+      return cute::make_tiled_mma(cute::GMMA::ss_op_selector<Element, Element, ElementAccum, TileShape_MNK_SwapAB_OP_SELECT>(), AtomLayoutQK_SwapAB{});
     } else {
       // TiledMmaQK
       return cute::make_tiled_mma(
@@ -175,6 +171,7 @@ struct CollectiveMainloopFwdSm90 {
   using TiledMmaPV_Active = decltype(make_tiled_mma_pv_active());
 
   // REVIEW: do we still need TiledMmaPV_RS any more ?
+  // no use so note it down
   // using TiledMmaPV_RS =
   //     decltype(cute::make_tiled_mma(cute::GMMA::rs_op_selector<Element, Element, ElementAccum, TileShape_MNK_PV, GMMA::Major::K, MmaMajorV>(), AtomLayoutPV{}));
 
@@ -850,19 +847,7 @@ struct CollectiveMainloopFwdSm90 {
       }
     };
 
-    auto write_P_to_smem = [&](auto& tOrP) {
-      if constexpr (!SwapAB) {
-        // Normal mode: direct copy
-        cute::copy(smem_tiled_copy_P, smem_thr_copy_P.retile_S(tOrP), tPsP);
-      } else {
-        // SwapAB mode: tPsP is already transposed, so direct copy achieves transposed write
-        cute::copy(smem_tiled_copy_P, smem_thr_copy_P.retile_S(tOrP), tPsP);
-      }
-      // if (threadIdx.x == 128) {
-      //   print("smem_tiled_copy_P\n"); print(smem_tiled_copy_P); print("\n");
-      //   print("smem_thr_copy_P.retile_S(tOrP)\n"); print(smem_thr_copy_P.retile_S(tOrP)); print("\n");
-      // }
-    };
+    auto write_P_to_smem = [&](auto& tOrP) { cute::copy(smem_tiled_copy_P, smem_thr_copy_P.retile_S(tOrP), tPsP); };
 
     auto arrive_on_P_write_barrier = [&] {
       cutlass::arch::fence_view_async_shared();
@@ -960,20 +945,6 @@ struct CollectiveMainloopFwdSm90 {
       flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrK(_, _, _, smem_pipe_read_k.index()), tSrQ, tSrS);
     }
     warpgroup_wait<0>();
-    // DEBUGP
-    // Tensor cS = cute::conditional_return<SwapAB>(make_identity_tensor(Shape<Int<kBlockN>, Int<kBlockM>>{}), make_identity_tensor(Shape<Int<kBlockM>,
-    // Int<kBlockN>>{}));
-    // {
-    //   auto thr_mma = tiled_mma_qk.get_thread_slice(thread_idx);
-    //   Tensor tScS = thr_mma.partition_C(cS);
-    //   for (int i = 0; i < size(tSrS); ++i) {
-    //     if (int(get<0>(tScS(i))) >= 32 && int(get<0>(tScS(i))) < 36 && int(get<1>(tScS(i))) >= 32 && int(get<1>(tScS(i))) < 36) {
-    //       printf(
-    //           "tSrS before softmax: %d bidb: %d m_block: %d tSrS(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tScS(i))),
-    //           int(get<1>(tScS(i))), static_cast<float>(tSrS(i)));
-    //     }
-    //   }
-    // }
     // The first block of k has been consumed, notify producer that this buffer can be reused
     consumer_release(pipeline_k, smem_pipe_read_k);
 
@@ -984,18 +955,6 @@ struct CollectiveMainloopFwdSm90 {
     //     print_tensor(tSrS);
     //     printf("============================================ tSrS m_block: %d ==============================\n", m_block);
     // }
-    // DEBUGP
-    // {
-    //   auto thr_mma = tiled_mma_qk.get_thread_slice(thread_idx);
-    //   Tensor tScS = thr_mma.partition_C(cS);
-    //   for (int i = 0; i < size(tSrS); ++i) {
-    //     if (int(get<0>(tScS(i))) >= 32 && int(get<0>(tScS(i))) < 36 && int(get<1>(tScS(i))) >= 32 && int(get<1>(tScS(i))) < 36) {
-    //       printf(
-    //           "tSrS after scoremod_premask_fn: %d bidb: %d m_block: %d tSrS(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tScS(i))),
-    //           int(get<1>(tScS(i))), static_cast<float>(tSrS(i)));
-    //     }
-    //   }
-    // }
     // Apply mask
     boundary_mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
@@ -1003,37 +962,12 @@ struct CollectiveMainloopFwdSm90 {
     //     print_tensor(tSrS);
     //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
     // }
-    // DEBUGP
-    // {
-    //   auto thr_mma = tiled_mma_qk.get_thread_slice(thread_idx);
-    //   Tensor tScS = thr_mma.partition_C(cS);
-    //   for (int i = 0; i < size(tSrS); ++i) {
-    //     if (int(get<0>(tScS(i))) >= 32 && int(get<0>(tScS(i))) < 36 && int(get<1>(tScS(i))) >= 32 && int(get<1>(tScS(i))) < 36) {
-    //       printf(
-    //           "tSrS after mask: %d bidb: %d m_block: %d tSrS(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tScS(i))),
-    //           int(get<1>(tScS(i))), static_cast<float>(tSrS(i)));
-    //     }
-    //   }
-    // }
     // Get row-max and row-sum of tSrS
     cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true, NumMmaWarpGroups>(tSrS), scores_scale);
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
     //     print_tensor(scores_scale);
     //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
-    // }
-
-    // DEBUGP
-    // {
-    //   auto thr_mma = tiled_mma_qk.get_thread_slice(thread_idx);
-    //   Tensor tScS = thr_mma.partition_C(cS);
-    //   for (int i = 0; i < size(tSrS); ++i) {
-    //     if (int(get<0>(tScS(i))) >= 32 && int(get<0>(tScS(i))) < 36 && int(get<1>(tScS(i))) >= 32 && int(get<1>(tScS(i))) < 36) {
-    //       printf(
-    //           "tSrS after max_get_scale: %d bidb: %d m_block: %d tSrS(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tScS(i))),
-    //           int(get<1>(tScS(i))), static_cast<float>(tSrS(i)));
-    //     }
-    //   }
     // }
 
     // Apply exponential to tSrS
@@ -1044,44 +978,13 @@ struct CollectiveMainloopFwdSm90 {
     //     printf("============================================ tSrS after online_softmax m_block: %d ==============================\n", m_block);
     // }
 
-    // DEBUGP
-    // {
-    //   auto thr_mma = tiled_mma_qk.get_thread_slice(thread_idx);
-    //   Tensor tScS = thr_mma.partition_C(cS);
-    //   for (int i = 0; i < size(tSrS); ++i) {
-    //     if (int(get<0>(tScS(i))) >= 32 && int(get<0>(tScS(i))) < 36 && int(get<1>(tScS(i))) >= 32 && int(get<1>(tScS(i))) < 36) {
-    //       printf(
-    //           "tSrS after online_softmax: %d bidb: %d m_block: %d tSrS(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tScS(i))),
-    //           int(get<1>(tScS(i))), static_cast<float>(tSrS(i)));
-    //     }
-    //   }
-    // }
-
     // Convert layout and type from tSrS to tOrP which will be used in MmaPV
     Tensor tOrP = [&]() {
       Tensor tOrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmaPV_Active>(tSrS.layout()));
-      // if (threadIdx.x == 128) {
-      //   print("tSrS.layout\n"); print(tSrS.layout()); print("\n");
-      //   print("convert layout\n"); print(flash::convert_layout_acc_Aregs<TiledMmaPV_Active>(tSrS.layout())); print("\n");
-      // }
       Tensor tOrP = make_tensor_like<Element>(tOrP_acc);
       convert_type_out(tOrP_acc, tOrP);
       return tOrP;
     }();
-    // DEBUGP
-    // {
-    //   auto thr_mma = tiled_mma_qk.get_thread_slice(thread_idx);
-    //   Tensor tScS = thr_mma.partition_C(cS);
-    //   for (int i = 0; i < size(tOrP); ++i) {
-    //     if (int(get<0>(tScS(i))) >= 32 && int(get<0>(tScS(i))) < 36 && int(get<1>(tScS(i))) >= 32 && int(get<1>(tScS(i))) < 36) {
-    //       printf(
-    //           "tSrS before wr2shmem: %d bidb: %d m_block: %d tSrS(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tScS(i))),
-    //           int(get<1>(tScS(i))), static_cast<float>(tSrS(i)));
-    //     }
-    //     // if (int(get<0>(tScS(i))) == int(get<1>(tScS(i)))) tOrP(i) = Element(1.0f);
-    //     // else tOrP(i) = Element(0.0f);
-    //   }
-    // }
 
     // Write tOrP to smem
     if constexpr (!MmaPV_is_RS) {
@@ -1103,7 +1006,6 @@ struct CollectiveMainloopFwdSm90 {
         static constexpr bool Check_inf = decltype(check_inf_type)::value;
 
         // Partition the fragment C tensor into a new tensor tSrS, which is used to store the result of the Q@K matrix multiplication for n_block
-        // Tensor tSrS = partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
         Tensor tSrS = [&]() {
           if constexpr (!SwapAB) {
             return partition_fragment_C(tiled_mma_qk, select<0, 1>(TileShape_MNK{}));
@@ -1145,11 +1047,8 @@ struct CollectiveMainloopFwdSm90 {
           }
         } else {
           // Do v @ p of n_block + 1
-          if constexpr (MmaPV_is_RS) {
-            flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrV(_, _, _, smem_pipe_read_v.index()), tOrP, tOrO);
-          } else {
-            flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrV(_, _, _, smem_pipe_read_v.index()), tOsP, tOrO);
-          }
+          // V @ P is always SS when SwapAB
+          flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrV(_, _, _, smem_pipe_read_v.index()), tOsP, tOrO);
         }
 
         // Arrive on the next mma warp group's named barrier
@@ -1273,19 +1172,6 @@ struct CollectiveMainloopFwdSm90 {
     // Signal that the current stage's V smem has been used up, can continue loading subsequent V
     consumer_wait(pipeline_v, smem_pipe_read_v);
 
-    // DEBUGP
-    // {
-    //   auto thr_mma = tiled_mma_qk.get_thread_slice(thread_idx);
-    //   Tensor tScS = thr_mma.partition_C(cS);
-    //   for (int i = 0; i < size(tOrP); ++i) {
-    //     if (int(get<0>(tScS(i))) >= 32 && int(get<0>(tScS(i))) < 36 && int(get<1>(tScS(i))) >= 32 && int(get<1>(tScS(i))) < 36) {
-    //       printf(
-    //           "Before PV MMA\t\t SwapAB: %d bidb: %d m_block: %d tOrP(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tScS(i))),
-    //           int(get<1>(tScS(i))), static_cast<float>(tOrP(i)));
-    //     }
-    //   }
-    // }
-
     if constexpr (!SwapAB) {
       // Do P @ V for the most left n_block
       if constexpr (MmaPV_is_RS) {
@@ -1295,11 +1181,7 @@ struct CollectiveMainloopFwdSm90 {
       }
     } else {
       // Do V @ P for the most left n_block
-      if constexpr (MmaPV_is_RS) {
-        flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrV(_, _, _, smem_pipe_read_v.index()), tOrP, tOrO);
-      } else {
-        flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrV(_, _, _, smem_pipe_read_v.index()), tOsP, tOrO);
-      }
+      flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(tiled_mma_pv, tOrV(_, _, _, smem_pipe_read_v.index()), tOsP, tOrO);
     }
 
     // Get the final scores_scale
@@ -1316,15 +1198,6 @@ struct CollectiveMainloopFwdSm90 {
     // Wait for P @ V of the most left n_block to finish
     warpgroup_wait<0>();
 
-    // DEBUGP
-    // Tensor cO = cute::conditional_return<SwapAB>(make_identity_tensor(Shape<Int<kHeadDim>, Int<kBlockM>>{}), make_identity_tensor(Shape<Int<kBlockM>,
-    // Int<kHeadDim>>{})); auto thr_mma = tiled_mma_pv.get_thread_slice(thread_idx); Tensor tOcO = thr_mma.partition_C(cO); for (int i = 0; i < size(tOrO); ++i) {
-    //   if (int(get<0>(tOcO(i))) >= 32 && int(get<0>(tOcO(i))) < 36 && int(get<1>(tOcO(i))) >= 32 && int(get<1>(tOcO(i))) < 36) {
-    //     printf(
-    //         "After PV MMA\t\t SwapAB: %d bidb: %d m_block: %d tOrO(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tOcO(i))),
-    //         int(get<1>(tOcO(i))), tOrO(i));
-    //   }
-    // }
     // Signal that the current stage's V smem has been used up, can continue loading subsequent V
     consumer_release(pipeline_v, smem_pipe_read_v);
     ++work_idx;
@@ -1332,14 +1205,6 @@ struct CollectiveMainloopFwdSm90 {
     // Rescale tOrO
     softmax.rescale_o(tOrO, scores_scale);
 
-    // DEBUGP
-    // for (int i = 0; i < size(tOrO); ++i) {
-    //   if (int(get<0>(tOcO(i))) >= 32 && int(get<0>(tOcO(i))) < 36 && int(get<1>(tOcO(i))) >= 32 && int(get<1>(tOcO(i))) < 36) {
-    //     printf(
-    //         "After rescale\t\t SwapAB: %d bidb: %d m_block: %d tOrO(%d, %d) = %f\n", SwapAB, block_meta.bidb, block_meta.m_block, int(get<0>(tOcO(i))),
-    //         int(get<1>(tOcO(i))), tOrO(i));
-    //   }
-    // }
     return true;
   }
 };

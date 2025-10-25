@@ -295,7 +295,6 @@ class FlashAttnFwdSm90 {
       }
 
       // cutlass::arch::wait_on_dependent_grids();
-      // int for_loop_cnt = 0;
       // Load Q, K, V
       for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
                                                                                   : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
@@ -337,15 +336,10 @@ class FlashAttnFwdSm90 {
       mainloop.mma_init();
 
       int work_idx = 0;
-      // int for_loop_cnt = 0;
       CUTLASS_PRAGMA_NO_UNROLL
       for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler); work_tile_info.is_valid(params.scheduler);
            // get_next_work will be called before the epilogue
       ) {
-        // for_loop_cnt++;
-        // if (for_loop_cnt == 2) {
-        //   return;
-        // }
         // If there's tanh softcap, the scaling will be done before tanh.
         float softmax_scale_log2 = params.mainloop.softmax_scale_log2;
         // TODO: support SwapAB
@@ -400,9 +394,7 @@ class FlashAttnFwdSm90 {
             epilogue.store(
                 params.epilogue, tOrO, softmax.row_sum, shared_storage, tiled_mma_pv, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
           }
-          // return;
         } else {
-          // return;
           if constexpr (!Deterministic) {
             // Write 0 to gO and -inf to gLSE.
             epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord, block_meta.seqlen_info);
@@ -410,9 +402,7 @@ class FlashAttnFwdSm90 {
             epilogue.store_zero(params.epilogue, threadIdx.x - MmaThreadOffset, block_coord_raw, block_meta.seqlen_info);
           }
         }
-        // return;
       }
-      // return;
       epilogue.store_tail();
     }
   }

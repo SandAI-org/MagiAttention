@@ -98,7 +98,6 @@ struct CollectiveEpilogueFwd {
   // Layout of Epilogue threads, named GmemLayoutAtom
   using GmemLayoutAtom = Layout<Shape<Int<NumEpilogueThreads / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>, Stride<Int<kGmemThreadsPerRow>, _1>>;
   // kBlockM must be divisible by the 0-th dimension of GmemLayoutAtom to ensure correct tiling
-  // TODO CHECK
   static_assert(kBlockM % CUTE_STATIC_V(shape<0>(GmemLayoutAtom{})) == 0, "kBlockM must be a multiple of NumEpilogueThreads / kGmemThreadsPerRow");
 
   using GmemTileCopyAtomO = std::
@@ -334,7 +333,7 @@ struct CollectiveEpilogueFwd {
   CUTLASS_DEVICE void store(
       Params const& params,
       FrgTensorO& tOrO,
-      FrgTensorLSE& lse, // softmax.row_sum
+      FrgTensorLSE& lse,
       SharedStorage& shared_storage,
       TiledMma tiled_mma,
       int thread_idx,
@@ -380,41 +379,10 @@ struct CollectiveEpilogueFwd {
 
     // (nrow=(2, MMA_M), ncol=(2, V, MMA_N))
     Tensor taccOcO_rowcol = make_tensor(taccOcO.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(taccOcO.layout()));
-    Tensor taccOcO_row = taccOcO_rowcol(_, _0{});
-    Tensor taccOcO_col = taccOcO_rowcol(_0{}, _);
-    Tensor taccOcO_slice = [&]() { return taccOcO_row; }();
-    // DEBUG
-    // Tensor debugcO = cute::conditional_return<SwapAB>(make_identity_tensor(Shape<Int<kBlockM>, Int<kHeadDim>>{}), make_identity_tensor(Shape<Int<kHeadDim>,
-    // Int<kBlockM>>{}));
-    // {
-    //   auto thr_mma = tiled_mma.get_thread_slice(thread_idx);
-    //   Tensor tScS = thr_mma.partition_C(debugcO);
-    //   for (int i = 0; i < size(tOrO); ++i) {
-    //     if (int(get<0>(tScS(i))) >= 10 && int(get<0>(tScS(i))) < 14 && int(get<1>(tScS(i))) >= 10 && int(get<1>(tScS(i))) < 14) {
-    //       printf(
-    //           "tOrO input store: SwapAB: %d tOrO(%d, %d) = %f\n", SwapAB, int(get<0>(tScS(i))), int(get<1>(tScS(i))), static_cast<float>(tOrO(i)));
-    //     }
-    //   }
-    // }
+    Tensor taccOcO_slice = taccOcO_rowcol(_, _0{});
 
     // MMA_M
     CUTE_STATIC_ASSERT_V(size(lse) == size(taccOcO_slice));
-
-    // if (threadIdx.x == 128 && blockIdx.x == 1) {
-    //   print("================== Debug taccOcO_slice ================\n");
-    //   cute::print_tensor(taccOcO_slice); print("\n");
-    //   print("TileShape_MNK_PV\n"); print(TileShape_MNK_PV{}); print("\n");
-    //   print("TileShape_MNK_PV_SwapAB_OP_SELECT\n"); print(TileShape_MNK_PV_SwapAB_OP_SELECT{}); print("\n");
-    //   print("tiled_mma\n"); print(tiled_mma); print("\n");
-    //   print("taccOcO.layout()\n"); print(taccOcO.layout()); print("\n");
-    //   print("taccOcO_rowcol.layout()\n"); print(taccOcO_rowcol.layout()); print("\n");
-    //   print("taccOcO_row.layout()\n"); print(taccOcO_row.layout()); print("\n");
-    //   print("taccOcO_col.layout()\n"); print(taccOcO_col.layout()); print("\n");
-    //   print("size(lse)\n"); print(size(lse)); print("\n");
-    //   print("lse.layout\n"); print(lse.layout()); print("\n");
-    //   print("size(taccOcO_slice))\n"); print(size(taccOcO_slice)); print("\n");
-    //   print("taccOcO_slice.layout\n"); print(taccOcO_slice.layout()); print("\n");
-    // }
 
     // Predicate for skipping correction
     // NOTE: Correction only need when we use atomic reduction
@@ -435,6 +403,7 @@ struct CollectiveEpilogueFwd {
         acquire_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
       }
       flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+
 #pragma unroll
       for (int mi = 0; mi < size(lse_prev); ++mi) {
         // Load lse_prev from gmem -> smem, and calculate lse_final
@@ -449,11 +418,7 @@ struct CollectiveEpilogueFwd {
         if (row_batch >= seqlen_o) {
           lse(mi) = -INFINITY;
         }
-        // if (threadIdx.x == 256 && blockIdx.x == 1) {
-        //   print("row_block: "); print(row_block);
-        //   print(", row_batch: "); print(row_batch);
-        //   print(", seqlen_o: "); print(seqlen_o); print("\n");
-        // }
+
         int const row_global = row_batch + offset_o;
         if (row_global < get<0>(params.shape_O)) {
           lse_prev(mi) = gLSE(row_block);
@@ -466,17 +431,6 @@ struct CollectiveEpilogueFwd {
           lse_final(mi) = correct_lse(lse_prev(mi), lse(mi));
         }
       }
-      // if (threadIdx.x == 256 && blockIdx.x == 1) {
-      //   print("================= gLSE ================\n");
-      //   cute::print_tensor(gLSE);
-      //   print("================= lse prev ================\n");
-      //   cute::print_tensor(lse_prev);
-      //   print("================= lse local ================\n");
-      //   cute::print_tensor(lse);
-      //   print("================= lse final ================\n");
-      //   cute::print_tensor(lse_final);
-      //   print("\n");
-      // }
 
       // A workaround to ensure that all threads get the correct lse_final, low performance
       flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
@@ -568,52 +522,15 @@ struct CollectiveEpilogueFwd {
       // Copy prev O from gmem to smem
       cute::copy_if(tOpO, tOgPrevO, tOrPrevO_copy_view);
 
-      // if (threadIdx.x == 256 && blockIdx.x == 1) {
-      //   print("================= tiled_copy_O ================\n");
-      //   print(tiled_copy_O); print("\n");
-      //   print("================= gO ================\n");
-      //   cute::print_tensor(gO);
-      //   print("================= tOgPrevO ================\n");
-      //   cute::print_tensor(tOgPrevO);
-      //   print("================= tOrPrevO ================\n");
-      //   cute::print_tensor(tOrPrevO);
-      //   print("================= tOrPrevO_copy_view ================\n");
-      //   cute::print_tensor(tOrPrevO_copy_view);
-      //   print("================= pO ================\n");
-      //   cute::print_tensor(pO);
-      //   print("================= tOpO ================\n");
-      //   cute::print_tensor(tOpO);
-      //   print("\n");
-      // }
-
       // Correct output
       Tensor tOrPrevO_rowcol = make_tensor(tOrPrevO.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tOrPrevO.layout()));
       Tensor tOrO_rowcol = make_tensor(tOrO.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tOrO.layout()));
-      // if (threadIdx.x == 128 && blockIdx.x == 1) {
-      //   print("tOrO.layout()"); print(tOrO.layout()); print("\n");
-      //   print("tOrO_rowcol.layout()"); print(tOrO_rowcol.layout()); print("\n");
-      // }
 
-      // {
-      //   auto thr_mma = tiled_mma.get_thread_slice(thread_idx);
-      //   Tensor tScS = thr_mma.partition_C(debugcO);
-      //   for (int i = 0; i < size(tOrO); ++i) {
-      //     if (int(get<0>(tScS(i))) >= 10 && int(get<0>(tScS(i))) < 14 && int(get<1>(tScS(i))) >= 10 && int(get<1>(tScS(i))) < 14) {
-      //       printf(
-      //           "tOrO before correct_output: SwapAB: %d tOrO(%d, %d) = %f\n", SwapAB, int(get<0>(tScS(i))), int(get<1>(tScS(i))), static_cast<float>(tOrO(i)));
-      //     }
-      //   }
-      // }
-
-      // TO CHECK
       correct_output(tOrPrevO_rowcol, tOrO_rowcol, lse_prev, lse, lse_final);
     }
 
     // Initialize gmem_tiled_copy_O
     GmemTiledCopyO gmem_tiled_copy_O;
-    // if (threadIdx.x == 128 && blockIdx.x == 1) {
-    //   cute::print_latex(gmem_tiled_copy_O);
-    // }
     auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
 
     // Initialize tOcO and tOpO to predict OOB access

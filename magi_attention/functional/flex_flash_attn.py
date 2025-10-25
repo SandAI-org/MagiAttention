@@ -588,8 +588,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             softmax_scale,
             softcap,
             disable_fwd_atomic_reduction,
-            # q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
-            q.dtype,
+            q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
             deterministic,
             sm_margin,
             swap_ab,

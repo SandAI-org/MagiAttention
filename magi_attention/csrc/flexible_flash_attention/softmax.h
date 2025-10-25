@@ -177,30 +177,7 @@ struct Softmax {
         MaxOp<float> max_op;
         thread_reduce_</*zero_init=*/true>(scores, row_max, max_op);
         warp_reduce_column_(row_max, max_op);
-        // if (blockIdx.x == 0 && threadIdx.x >= 128 && threadIdx.x < 256) {
-        //   for (int mi = 0; mi < 1; mi++) {
-        //     printf("row max before: %d %d %f\n",threadIdx.x - 128, mi, row_max(mi));
-        //   }
-        // }
         warp_group_reduce_column_<NumMmaWarpGroups, kNRows>(row_max, max_op);
-        // if (blockIdx.x == 0 && threadIdx.x >= 128 && threadIdx.x < 256) {
-        //   for (int mi = 0; mi < 1; mi++) {
-        //     printf("row max after: %d %d %f\n",threadIdx.x - 128, mi, row_max(mi));
-        //   }
-        // }
-        if (blockIdx.x == 0 && threadIdx.x >= 128 && threadIdx.x < 256) {
-          for (int ni = 0; ni < size<1>(scores); ni++) {
-            // for (int mi = 0; mi < size<0>(scores); mi++) {
-            for (int mi = 0; mi < 1; mi++) {
-              // summary(mi) = zero_init && ni == 0 ? tensor(mi, ni) : op(summary(mi), tensor(mi, ni));
-              // printf("%d %d %d %f\n",threadIdx.x - 128, mi, ni, scores(mi, ni));
-            }
-          }
-          // for (int mi = 0; mi < size<0>(scores); mi++) {
-          for (int mi = 0; mi < 1; mi++) {
-            // printf("%d %d %f\n",threadIdx.x - 128, mi, row_max(mi));
-          }
-        }
         cute::fill(scores_scale, 1.f);
       }
     } else {
