@@ -37,7 +37,12 @@ from magi_attention.testing.precision import (
     extract_mismatch_threshold,
     torch_attn_ref,
 )
-from magi_attention.utils import get_attn_mask_from_ffa_args, is_list_value_any
+from magi_attention.utils import (
+    get_attn_mask_from_ffa_args,
+    is_list_value_any,
+    str2seed,
+    sync_rng,
+)
 
 
 class TestFlexFlashAttn(DistTestBase):
@@ -182,6 +187,8 @@ class TestFlexFlashAttn(DistTestBase):
         k_ranges_tensor,
         attn_type_map_tensor,
         auto_range_merge,
+        swap_ab,
+        ref_block_size,
         test_case,
         o_ref: torch.Tensor,
         dq_ref: torch.Tensor,
@@ -205,6 +212,8 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
             deterministic=True,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
         )
         o.backward(do)
 
@@ -689,6 +698,8 @@ class TestFlexFlashAttn(DistTestBase):
         auto_range_merge,
         deterministic,
         test_accumulation_inplace,
+        swap_ab,
+        ref_block_size,
         test_case,
     ):
         if auto_range_merge and deterministic:
@@ -699,6 +710,9 @@ class TestFlexFlashAttn(DistTestBase):
         # thus we skip here and will fix it asap
         if is_list_value_any(attn_type_map, 3):
             return
+
+        # set seed
+        torch.manual_seed(str2seed(test_case))
 
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
@@ -758,6 +772,8 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map_tensor,
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
         )
         o.backward(do)
 
@@ -774,6 +790,8 @@ class TestFlexFlashAttn(DistTestBase):
                 k_ranges_tensor=k_ranges_tensor,
                 attn_type_map_tensor=attn_type_map_tensor,
                 auto_range_merge=auto_range_merge,
+                swap_ab=swap_ab,
+                ref_block_size=ref_block_size,
                 test_case=test_case,
                 o_ref=o,
                 dq_ref=q.grad,
@@ -1070,14 +1088,14 @@ class TestFlexFlashAttn(DistTestBase):
             },
             {
                 "name": "deterministic_sample",
-                "seqlen": 2500,
+                "seqlen": 900,
                 "q_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
+                    [[i * 30, (i + 1) * 30] for i in range(30) for j in range(30)]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(50)] * 50
+                    [[i * 30, (i + 1) * 30] for i in range(30)] * 30
                 ),
-                "attn_type_map": [0, 1] * 1250,
+                "attn_type_map": [0, 1] * 450,
             },
             {
                 "name": "sparse_attn_2k_with_same_k_ranges",
@@ -1120,6 +1138,31 @@ class TestFlexFlashAttn(DistTestBase):
             },
         ],
     )
+    @parameterize(
+        "swap_ab_config",
+        [
+            {
+                "swap_ab": False,
+                "ref_block_size": None,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (8, 64),
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (16, 64),
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (32, 64),
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+            },
+        ],
+    )
     @parameterize("model_config", MODEL_CONFIGS)
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
@@ -1129,6 +1172,7 @@ class TestFlexFlashAttn(DistTestBase):
     def test_flex_flash_attn(
         self,
         attn_mask_config: dict[str, Any],
+        swap_ab_config: dict[str, Any],
         model_config: dict[str, Any],
         dtype: torch.dtype,
         random_attn_type_map: bool,
@@ -1146,10 +1190,22 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
+        test_case = (
+            f"[{model_config['name']}]"
+            f"[dtype={dtype}]"
+            f"[random_attn_type_map={random_attn_type_map}]"
+            f"[auto_range_merge={auto_range_merge}]"
+            f"[deterministic={deterministic}]"
+            f"[test_accumulation_inplace={test_accumulation_inplace}]"
+        )
+
         if random_attn_type_map:
             # we now support attn type idx in {0, 1, 2, 3}
-            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+            with sync_rng(seed=str2seed(test_case)):
+                attn_type_map = [random.choice([0, 1, 2, 3]) for _ in attn_type_map]
 
+        swap_ab = swap_ab_config["swap_ab"]
+        ref_block_size = swap_ab_config["ref_block_size"]
         test_case = (
             f"[{attn_mask_config['name']}]"
             f"[{model_config['name']}]"
@@ -1158,6 +1214,8 @@ class TestFlexFlashAttn(DistTestBase):
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[test_accumulation_inplace={test_accumulation_inplace}]"
+            f"[swap_ab={swap_ab}]"
+            f"[ref_block_size={ref_block_size}]"
         )
 
         self.run_test_case(
@@ -1171,6 +1229,8 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
             test_case=test_case,
         )
 
@@ -1236,6 +1296,31 @@ class TestFlexFlashAttn(DistTestBase):
             # },
         ],
     )
+    @parameterize(
+        "swap_ab_config",
+        [
+            {
+                "swap_ab": False,
+                "ref_block_size": None,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (8, 64),
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (16, 64),
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (32, 64),
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+            },
+        ],
+    )
     @parameterize("num_pairs", [10, 100, 1000])  # the max qk range pairs to generate
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize(
@@ -1248,6 +1333,7 @@ class TestFlexFlashAttn(DistTestBase):
         self,
         model_config: dict[str, Any],
         generate_config: dict[str, Any],
+        swap_ab_config: dict[str, Any],
         num_pairs: int,
         dtype: torch.dtype,
         attn_type: int,
@@ -1286,6 +1372,9 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
+        swap_ab = swap_ab_config["swap_ab"]
+        ref_block_size = swap_ab_config["ref_block_size"]
+
         test_case = (
             f"[{model_config['name']}]"
             f"[{generate_config['name']}]"
@@ -1295,6 +1384,8 @@ class TestFlexFlashAttn(DistTestBase):
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[test_accumulation_inplace={test_accumulation_inplace}"
+            f"[swap_ab={swap_ab}]"
+            f"[ref_block_size={ref_block_size}]"
         )
 
         self.run_test_case(
@@ -1308,6 +1399,8 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
             test_case=test_case,
         )
 
