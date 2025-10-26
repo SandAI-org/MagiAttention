@@ -214,17 +214,17 @@ void cached_notify_group_cast(
 #undef CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE
 }
 
-template <int kNumRanks, int kNumThreads, int kWarpCopyUnrollStages, int kNumTMAStages, int kNumTMABytesPerWarp>
+template <int kNumRanks, int kNumThreads, int kWarpCopyUnrollStages, int kNumTMAStages, int kNumTMABytesPerWarp, bool kCastLSE>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void group_cast_kernel(
     int4* recv_x,
     float* recv_lse,
+    const int4* x,
+    const float* lse,
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
     const int64_t* post_perm_idx,
-    const int4* x,
-    const float* lse,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
     int num_tokens,
@@ -271,6 +271,7 @@ void group_cast_kernel(
   //  `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
   //  `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
   //  `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
+  //  NOTES: we gurantee that `num_heads` will be `0` if `kCastLSE` is `false` to make `lse_buffers` empty
   auto channel_x_buffers =
       Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
   auto channel_src_idx_buffers = Buffer<int>(ptr, /*num_elems=*/num_channel_tokens_total, /*elem_offset=*/channel_rank_token_offset);
@@ -401,11 +402,13 @@ void group_cast_kernel(
           if (lane_id == 0)
             channel_src_idx_buffers[dst_slot_idx] = static_cast<int>(token_idx);
 
-#pragma unroll
           // Warp-strided copy `lse` to `channel_lse` by this warp
           // which is used to fill `recv_lse` by the receiver
-          for (int i = lane_id; i < num_heads; i += WARP_SIZE) {
-            channel_lse_buffers[dst_slot_idx * num_heads + i] = __ldg(lse + token_idx * num_heads + i);
+          // if `kCastLSE` is `true`
+          if constexpr (kCastLSE) {
+#pragma unroll
+            for (int i = lane_id; i < num_heads; i += WARP_SIZE)
+              channel_lse_buffers[dst_slot_idx * num_heads + i] = __ldg(lse + token_idx * num_heads + i);
           }
         }
 
@@ -573,20 +576,23 @@ void group_cast_kernel(
            chunk_idx += num_recv_threads_per_rank) // warp-group strided
         recv_src_idx[total_offset + chunk_idx - cached_channel_head_idx] = ld_nc_global(channel_src_idx_buffers.buffer() + chunk_idx % num_recv_buffer_tokens);
 
-#pragma unroll 4
       // Thread-copy `channel_lse` stored by the sender to `recv_lse`
-      for (int i = recv_thread_id_in_rank; i < num_recv_tokens * num_heads; i += num_recv_threads_per_rank) { // warp-group strided
-        int chunk_idx = i / num_heads, head_idx = i % num_heads;
+      // if `kCastLSE` is `true`
+      if constexpr (kCastLSE) {
+#pragma unroll 4
+        for (int i = recv_thread_id_in_rank; i < num_recv_tokens * num_heads; i += num_recv_threads_per_rank) { // warp-group strided
+          int chunk_idx = i / num_heads, head_idx = i % num_heads;
 
-        // Determine the final destination token idx in the recv buffer
-        auto token_idx_in_recv_x = static_cast<int64_t>(total_offset + chunk_idx);
-        token_idx_in_recv_x = post_perm_idx == nullptr ? token_idx_in_recv_x : post_perm_idx[token_idx_in_recv_x];
+          // Determine the final destination token idx in the recv buffer
+          auto token_idx_in_recv_x = static_cast<int64_t>(total_offset + chunk_idx);
+          token_idx_in_recv_x = post_perm_idx == nullptr ? token_idx_in_recv_x : post_perm_idx[token_idx_in_recv_x];
 
-        // Get the token ptr in the recv queue
-        int token_idx_in_queue = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
-        auto token_ptr_in_queue = channel_lse_buffers.buffer() + token_idx_in_queue * num_heads + head_idx;
+          // Get the token ptr in the recv queue
+          int token_idx_in_queue = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
+          auto token_ptr_in_queue = channel_lse_buffers.buffer() + token_idx_in_queue * num_heads + head_idx;
 
-        recv_lse[token_idx_in_recv_x * num_heads + head_idx] = ld_nc_global(token_ptr_in_queue);
+          recv_lse[token_idx_in_recv_x * num_heads + head_idx] = ld_nc_global(token_ptr_in_queue);
+        }
       }
 
       // Update head idx for the responsible rank w.r.t. the responsible channel
@@ -618,12 +624,12 @@ template <int kNumRanks, int kNumWarps>
 void launch_group_cast(
     void* recv_x,
     float* recv_lse,
+    const void* x,
+    const float* lse,
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
     const int64_t* post_perm_idx,
-    const void* x,
-    const float* lse,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
     int num_tokens,
@@ -647,49 +653,59 @@ void launch_group_cast(
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
-#define GROUP_CAST_LAUNCH_CASE                                                                                          \
-  {                                                                                                                     \
-    auto kernel = group_cast_kernel<kNumRanks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp>; \
-    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                                                  \
-    LAUNCH_KERNEL(                                                                                                      \
-        &cfg,                                                                                                           \
-        kernel,                                                                                                         \
-        reinterpret_cast<int4*>(recv_x),                                                                                \
-        recv_lse,                                                                                                       \
-        recv_src_idx,                                                                                                   \
-        recv_channel_offset,                                                                                            \
-        send_head,                                                                                                      \
-        post_perm_idx,                                                                                                  \
-        reinterpret_cast<const int4*>(x),                                                                               \
-        lse,                                                                                                            \
-        is_token_in_rank,                                                                                               \
-        channel_prefix_matrix,                                                                                          \
-        num_tokens,                                                                                                     \
-        hidden_int4,                                                                                                    \
-        num_heads,                                                                                                      \
-        buffer_ptrs,                                                                                                    \
-        rank,                                                                                                           \
-        num_max_send_tokens,                                                                                            \
-        num_recv_buffer_tokens);                                                                                        \
+#define GROUP_CAST_LAUNCH_CASE(cast_lse)                                                                                          \
+  {                                                                                                                               \
+    auto kernel = group_cast_kernel<kNumRanks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp, cast_lse>; \
+    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                                                            \
+    LAUNCH_KERNEL(                                                                                                                \
+        &cfg,                                                                                                                     \
+        kernel,                                                                                                                   \
+        reinterpret_cast<int4*>(recv_x),                                                                                          \
+        recv_lse,                                                                                                                 \
+        reinterpret_cast<const int4*>(x),                                                                                         \
+        lse,                                                                                                                      \
+        recv_src_idx,                                                                                                             \
+        recv_channel_offset,                                                                                                      \
+        send_head,                                                                                                                \
+        post_perm_idx,                                                                                                            \
+        is_token_in_rank,                                                                                                         \
+        channel_prefix_matrix,                                                                                                    \
+        num_tokens,                                                                                                               \
+        hidden_int4,                                                                                                              \
+        num_heads,                                                                                                                \
+        buffer_ptrs,                                                                                                              \
+        rank,                                                                                                                     \
+        num_max_send_tokens,                                                                                                      \
+        num_recv_buffer_tokens);                                                                                                  \
+  }
+
+#define GROUP_CAST_CAST_LSE_LAUNCH_CASE \
+  {                                     \
+    if (num_heads == 0) {               \
+      GROUP_CAST_LAUNCH_CASE(false);    \
+    } else {                            \
+      GROUP_CAST_LAUNCH_CASE(true);     \
+    }                                   \
   }
 
   // Even-numbered SMs for sending, odd-numbered SMs for receiving
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  GROUP_CAST_LAUNCH_CASE;
+  GROUP_CAST_CAST_LSE_LAUNCH_CASE;
 
+#undef GROUP_CAST_CAST_LSE_LAUNCH_CASE
 #undef GROUP_CAST_LAUNCH_CASE
 }
 
 void group_cast(
     void* recv_x,
     float* recv_lse,
+    const void* x,
+    const float* lse,
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
     const int64_t* post_perm_idx,
-    const void* x,
-    const float* lse,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
     int num_tokens,
@@ -707,12 +723,12 @@ void group_cast(
     launch_group_cast<num_ranks, num_warps>(              \
         recv_x,                                           \
         recv_lse,                                         \
+        x,                                                \
+        lse,                                              \
         recv_src_idx,                                     \
         recv_channel_offset,                              \
         send_head,                                        \
         post_perm_idx,                                    \
-        x,                                                \
-        lse,                                              \
         is_token_in_rank,                                 \
         channel_prefix_matrix,                            \
         num_tokens,                                       \
@@ -1368,7 +1384,6 @@ void group_reduce_kernel(
 
 template <typename dtype_t, typename comm_dtype_t, typename reduce_dtype_t, int kNumRanks, int kNumWarps, bool kAccReduce>
 void launch_group_reduce(
-    ReduceOp reduce_op,
     void* reduced_x,
     float* reduced_lse,
     const void* x,
@@ -1387,7 +1402,8 @@ void launch_group_reduce(
     cudaStream_t stream,
     int num_sms,
     int num_max_send_tokens,
-    int num_recv_buffer_tokens) {
+    int num_recv_buffer_tokens,
+    ReduceOp reduce_op) {
   constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
   constexpr int kMaxNumHeads = 128; // the maximum number of heads supported when `kReduceOp == ReduceOp::LSE`
   constexpr int kWarpCopyUnrollStages = 4; // warp-copy unroll stages
@@ -1456,9 +1472,6 @@ void launch_group_reduce(
 }
 
 void group_reduce(
-    cudaDataType_t dtype,
-    cudaDataType_t comm_dtype,
-    ReduceOp reduce_op,
     void* reduced_x,
     float* reduced_lse,
     const void* x,
@@ -1479,11 +1492,13 @@ void group_reduce(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
-    bool acc_reduce) {
+    bool acc_reduce,
+    cudaDataType_t dtype,
+    cudaDataType_t comm_dtype,
+    ReduceOp reduce_op) {
 #define LAUNCH_INTRANODE_GROUP_REDUCE(dtype, comm_dtype, reduce_dtype, num_ranks, num_warps, acc_reduce) \
   {                                                                                                      \
     launch_group_reduce<dtype, comm_dtype, reduce_dtype, num_ranks, num_warps, acc_reduce>(              \
-        reduce_op,                                                                                       \
         reduced_x,                                                                                       \
         reduced_lse,                                                                                     \
         x,                                                                                               \
@@ -1502,7 +1517,8 @@ void group_reduce(
         stream,                                                                                          \
         num_sms,                                                                                         \
         num_max_send_tokens,                                                                             \
-        num_recv_buffer_tokens);                                                                         \
+        num_recv_buffer_tokens,                                                                          \
+        reduce_op);                                                                                      \
   }                                                                                                      \
   break
 

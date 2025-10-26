@@ -535,12 +535,12 @@ Buffer::intranode_group_cast(
   intranode::group_cast(
       /*recv_x=*/recv_x.data_ptr(),
       /*recv_lse=*/recv_lse_ptr,
+      /*x=*/x.data_ptr(),
+      /*lse=*/lse_ptr,
       /*recv_src_idx=*/recv_src_idx.data_ptr<int>(),
       /*recv_channel_offset=*/recv_channel_prefix_matrix.data_ptr<int>(),
       /*send_head=*/send_head.data_ptr<int>(),
       /*post_perm_idx=*/post_perm_idx_ptr,
-      /*x=*/x.data_ptr(),
-      /*lse=*/lse_ptr,
       /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
       /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
       /*num_tokens=*/num_tokens,
@@ -741,9 +741,6 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
    * but we don't know how to exactly fix this issue by now
    */
   intranode::group_reduce(
-      /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
-      /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
-      /*reduce_op=*/reduce_op_,
       /*reduced_x=*/reduced_x.data_ptr(),
       /*reduced_lse=*/reduced_lse_ptr,
       /*x=*/x.data_ptr(),
@@ -764,7 +761,10 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
       /*num_sms=*/config.num_sms,
       /*num_max_send_tokens=*/config.num_max_nvl_chunked_send_tokens,
       /*num_recv_buffer_tokens=*/config.num_max_nvl_chunked_recv_tokens,
-      /*acc_reduce=*/acc_reduce);
+      /*acc_reduce=*/acc_reduce,
+      /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
+      /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
+      /*reduce_op=*/reduce_op_);
 
   // Record or wait streams
   std::optional<EventHandle> event;

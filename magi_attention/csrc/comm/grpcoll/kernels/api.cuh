@@ -115,12 +115,12 @@ void cached_notify_group_cast(
 void group_cast(
     void* recv_x,
     float* recv_lse,
+    const void* x,
+    const float* lse,
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
     const int64_t* post_perm_idx,
-    const void* x,
-    const float* lse,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
     int num_tokens,
@@ -146,11 +146,8 @@ void cached_notify_group_reduce(
     cudaStream_t stream);
 
 void group_reduce(
-    cudaDataType_t dtype,
-    cudaDataType_t comm_dtype,
-    ReduceOp reduce_op,
-    void* group_reduced_x,
-    float* group_reduced_lse,
+    void* reduced_x,
+    float* reduced_lse,
     const void* x,
     const float* lse,
     const int64_t* pre_perm_idx,
@@ -169,7 +166,10 @@ void group_reduce(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens,
-    bool acc_reduce);
+    bool acc_reduce,
+    cudaDataType_t dtype,
+    cudaDataType_t comm_dtype,
+    ReduceOp reduce_op);
 
 } // namespace intranode
 
