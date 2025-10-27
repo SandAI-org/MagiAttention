@@ -357,8 +357,10 @@ Buffer::intranode_group_cast(
   int num_groups = 1;
   if (x_2nd.has_value())
     ++num_groups;
-  if (x_3rd.has_value())
+  if (x_3rd.has_value()) {
+    GRPCOLL_HOST_ASSERT(num_groups == 2);
     ++num_groups;
+  }
   GRPCOLL_HOST_ASSERT(num_groups <= 3);
 
   // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
@@ -521,7 +523,7 @@ Buffer::intranode_group_cast(
       GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->size(0) == num_recv_tokens && recv_x_buf_2nd->size(1) == hidden_size);
       recv_x_2nd.emplace(recv_x_buf_2nd.value());
     } else {
-      recv_x_2nd = torch::empty({num_recv_tokens, hidden_size}, x.options());
+      recv_x_2nd = torch::empty({num_recv_tokens, hidden_size}, x_2nd->options());
     }
     x_ptr_2nd = x_2nd->data_ptr();
     recv_x_ptr_2nd = recv_x_2nd->data_ptr();
@@ -537,7 +539,7 @@ Buffer::intranode_group_cast(
       GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->size(0) == num_recv_tokens && recv_x_buf_3rd->size(1) == hidden_size);
       recv_x_3rd.emplace(recv_x_buf_3rd.value());
     } else {
-      recv_x_3rd = torch::empty({num_recv_tokens, hidden_size}, x.options());
+      recv_x_3rd = torch::empty({num_recv_tokens, hidden_size}, x_3rd->options());
     }
     x_ptr_3rd = x_3rd->data_ptr();
     recv_x_ptr_3rd = recv_x_3rd->data_ptr();

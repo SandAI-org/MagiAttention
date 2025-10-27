@@ -738,10 +738,6 @@ void launch_group_cast(
 #endif
 
   GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 3, "Invalid kNumDataGroups");
-  if constexpr (kNumDataGroups > 1)
-    GRPCOLL_HOST_ASSERT(recv_x_2nd != nullptr && x_2nd != nullptr);
-  if constexpr (kNumDataGroups > 2)
-    GRPCOLL_HOST_ASSERT(recv_x_3rd != nullptr && x_3rd != nullptr);
 
 #define GROUP_CAST_LAUNCH_CASE(cast_lse)                                                                                                          \
   {                                                                                                                                               \
