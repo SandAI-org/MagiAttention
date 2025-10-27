@@ -85,8 +85,7 @@ def is_qo_comm_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_QO_COMM", "0") == "1"
 
 
-# TODO: rename by removing "ffa"
-def is_ffa_fwd_high_precision_reduce_enable() -> bool:
+def is_fwd_high_precision_reduce_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable high-precision (fp32) reduce
     for partial out during dist-attn forward
@@ -102,13 +101,10 @@ def is_ffa_fwd_high_precision_reduce_enable() -> bool:
 
     3. this feature works for out only when enabling qo comm
     """
-    return (
-        os.environ.get("MAGI_ATTENTION_FFA_FORWARD_HIGH_PRECISION_REDUCE", "0") == "1"
-    )
+    return os.environ.get("MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE", "0") == "1"
 
 
-# TODO: rename by removing "ffa"
-def is_ffa_bwd_high_precision_reduce_enable() -> bool:
+def is_bwd_high_precision_reduce_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable high-precision (fp32) reduce
     for partial dq,dk,dv during dist-attn backward
@@ -122,9 +118,7 @@ def is_ffa_bwd_high_precision_reduce_enable() -> bool:
 
     2. this feature works for dq only when enabling qo comm
     """
-    return (
-        os.environ.get("MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE", "0") == "1"
-    )
+    return os.environ.get("MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE", "0") == "1"
 
 
 def is_native_grpcoll_enable() -> bool:

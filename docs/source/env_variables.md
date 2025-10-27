@@ -44,7 +44,7 @@ thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
 
-**MAGI_ATTENTION_FFA_FORWARD_HIGH_PRECISION_REDUCE**
+**MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE**
 
 Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial out during dist-attn forward
 to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
@@ -58,7 +58,7 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 ```
 
 
-**MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE**
+**MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE**
 
 Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial dq,dk,dv during dist-attn backward
 to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.

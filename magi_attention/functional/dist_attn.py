@@ -82,9 +82,7 @@ class DistAttnRuntime:
         # we won't downcast partial out to q dtype before group-reduce comm,
         # to trade-off double comm overhead for increased precision and less dtype-cast overhead
         # and this works for out only when `is_qo_comm_enable` is ``True``
-        self.fwd_hp_reduce = (
-            magi_attention.comm.is_ffa_fwd_high_precision_reduce_enable()
-        )
+        self.fwd_hp_reduce = magi_attention.comm.is_fwd_high_precision_reduce_enable()
 
         # NOTE: when neither using sdpa backend nor qo comm,
         # we will use accumulative buffer for partial out and lse
@@ -112,9 +110,7 @@ class DistAttnRuntime:
         # we won't downcast downcast partial dq,dk,dv to q,k,v dtype before group-reduce comm,
         # to trade-off double comm overhead for increased precision and less dtype-cast overhead
         # and this works for dq only when `is_qo_comm_enable` is ``True``
-        self.bwd_hp_reduce = (
-            magi_attention.comm.is_ffa_bwd_high_precision_reduce_enable()
-        )
+        self.bwd_hp_reduce = magi_attention.comm.is_bwd_high_precision_reduce_enable()
 
         # NOTE: when neither using sdpa backend nor qo comm
         # we will use accumulative buffer for partial dq
