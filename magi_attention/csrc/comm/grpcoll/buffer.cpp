@@ -530,7 +530,7 @@ Buffer::intranode_group_cast(
   // Allocate 3rd recv_x buffer and assign the ptr if needed
   auto recv_x_3rd = std::optional<torch::Tensor>();
   void *x_ptr_3rd = nullptr, *recv_x_ptr_3rd = nullptr;
-  if (num_groups > 1) {
+  if (num_groups > 2) {
     if (recv_x_buf_3rd.has_value()) {
       GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->dim() == 2 && recv_x_buf_3rd->is_contiguous());
       GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->scalar_type() == x_3rd->scalar_type());
