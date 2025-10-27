@@ -85,6 +85,7 @@ def is_qo_comm_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_QO_COMM", "0") == "1"
 
 
+# TODO: rename by removing "ffa"
 def is_ffa_fwd_high_precision_reduce_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable high-precision (fp32) reduce
@@ -106,6 +107,7 @@ def is_ffa_fwd_high_precision_reduce_enable() -> bool:
     )
 
 
+# TODO: rename by removing "ffa"
 def is_ffa_bwd_high_precision_reduce_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable high-precision (fp32) reduce

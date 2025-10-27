@@ -188,19 +188,18 @@ class DistAttnRuntime:
         if attn_arg.can_skip(is_bwd=False):
             partial_out, partial_lse = None, None
             if is_host_stage:
-                hp_init_dtype = max_fp_dtype(q.dtype, torch.float32)
                 # NOTE: we can NOT use empty_like here,
                 # since when all attn computations are skipped for certain q range
                 # we have nowhere to zero-fill it
                 partial_out = torch.zeros_like(
                     q,
-                    dtype=q.dtype if self.fwd_local_out_lp_init else hp_init_dtype,
+                    dtype=self._maybe_hp_dtype(q.dtype, not self.fwd_local_out_lp_init),
                     device=q.device,
                 )
                 partial_lse = torch.full(
                     (q.size(0), q.size(1)),
                     fill_value=float("-inf"),
-                    dtype=hp_init_dtype,  # lse always in high-precision
+                    dtype=self._maybe_hp_dtype(q.dtype),  # lse always in high-precision
                     device=q.device,
                 )
             return partial_out, partial_lse
@@ -459,15 +458,13 @@ class DistAttnRuntime:
                 # we need to zeros initialize them since they might be reduced later
                 partial_dq = torch.zeros_like(
                     q,
-                    dtype=q.dtype
-                    if self.bwd_local_dq_lp_init
-                    else max_fp_dtype(q.dtype, torch.float32),
+                    dtype=self._maybe_hp_dtype(q.dtype, not self.bwd_local_dq_lp_init),
                 )
                 partial_dkv = torch.zeros_like(
                     kv,
-                    dtype=kv.dtype
-                    if self.bwd_local_dkv_lp_init
-                    else max_fp_dtype(kv.dtype, torch.float32),
+                    dtype=self._maybe_hp_dtype(
+                        kv.dtype, not self.bwd_local_dkv_lp_init
+                    ),
                 )
             return partial_dq, partial_dkv
 
@@ -1042,15 +1039,18 @@ class DistAttnRuntime:
 
             # init remote dkv buffer
             if partial_remote_out is None:  # skipped
-                hp_init_dtype = max_fp_dtype(ref_remote_out.dtype, torch.float32)
                 partial_remote_out = torch.empty_like(
                     ref_remote_out,
-                    dtype=hp_init_dtype if self.fwd_hp_reduce else ref_remote_out.dtype,
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_out.dtype, self.fwd_hp_reduce
+                    ),
                     device=ref_remote_out.device,
                 )
                 partial_remote_lse = torch.empty(
                     (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
-                    dtype=hp_init_dtype,  # lse always in high-precision
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_out.dtype
+                    ),  # lse always in high-precision
                     device=ref_remote_out.device,
                 )
             elif not self.fwd_hp_reduce:
@@ -1118,9 +1118,7 @@ class DistAttnRuntime:
         if partial_remote_dkv is None:  # skipped
             partial_remote_dkv = torch.empty_like(
                 ref_remote_dkv,
-                dtype=max_fp_dtype(ref_remote_dkv.dtype, torch.float32)
-                if self.bwd_hp_reduce
-                else ref_remote_dkv.dtype,
+                dtype=self._maybe_hp_dtype(ref_remote_dkv.dtype, self.bwd_hp_reduce),
             )
         elif not self.bwd_hp_reduce:
             partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)
@@ -1168,9 +1166,7 @@ class DistAttnRuntime:
             if partial_remote_dq is None:  # skipped
                 partial_remote_dq = torch.empty_like(
                     ref_remote_dq,
-                    dtype=max_fp_dtype(ref_remote_dq.dtype, torch.float32)
-                    if self.bwd_hp_reduce
-                    else ref_remote_dq.dtype,
+                    dtype=self._maybe_hp_dtype(ref_remote_dq.dtype, self.bwd_hp_reduce),
                 )
             elif not self.bwd_hp_reduce:
                 partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
@@ -1242,6 +1238,11 @@ class DistAttnRuntime:
         into q, o, do tensor views along the seqlen dim
         """
         return torch.chunk(qo_do, 3, dim=0) if self.concat_qo_do else qo_do
+
+    def _maybe_hp_dtype(
+        self, dtype: torch.dtype, need_hp_dtype: bool = True
+    ) -> torch.dtype:
+        return max_fp_dtype(dtype, torch.float32) if need_hp_dtype else dtype
 
     def _reset_work_list(self):
         self.remote_q_work_with_buffer_per_stage: list[WorkWithBuffer] = [
