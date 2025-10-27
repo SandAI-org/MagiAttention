@@ -76,6 +76,7 @@ class DistAttnRuntime:
         self.fwd_sm_margin = magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
 
         # NOTE: we now always concat kv together for comm
+        # TODO: use concat_kv=False when enabling native grpcoll
         self.concat_kv = True
 
         # NOTE: when enabling FFA fwd high precision reduce,
@@ -408,6 +409,19 @@ class DistAttnRuntime:
 
         return local_out, local_lse
 
+    def save_tensors_for_bwd(
+        self,
+        ctx,
+        local_q: torch.Tensor,
+        local_kv: FusedOrTupleTensor,
+        local_out: torch.Tensor,
+        local_lse: torch.Tensor,
+    ) -> None:
+        if self.concat_kv:  # local_kv is a fused tensor
+            ctx.save_for_backward(local_q, local_kv, local_out, local_lse)
+        else:  # local_kv are tupled tensors
+            ctx.save_for_backward(local_q, *local_kv, local_out, local_lse)
+
     # ----------    API for bwd   --------- #
 
     @nvtx.instrument_nvtx
@@ -446,8 +460,7 @@ class DistAttnRuntime:
             partial_dq: [num_tokens_q, num_heads_q, head_dim]
             partial_dkv: [num_tokens_kv*2, num_heads_kv, head_dim]
         """
-        assert self.concat_kv, "only support concat_kv"
-        assert self.concat_dkv, "only support concat_dkv"
+        assert self.concat_dkv, "Only supports concat_dkv"
 
         is_host_stage = self.is_host_stage(overlap_stage)
 
@@ -501,7 +514,14 @@ class DistAttnRuntime:
         else:
             # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
             # and we need to zero-initialize partial_dkv since it needs to be reduced
-            partial_dkv = torch.zeros_like(kv, dtype=self.hp_dtype)
+            if self.concat_kv:  # kv is a fused tensor
+                partial_dkv = torch.zeros_like(kv, dtype=self.hp_dtype)
+            else:  # kv are tupled tensors
+                partial_dkv = torch.zeros(
+                    (k.shape[0] * 2, *k.shape[1:]),
+                    dtype=self.hp_dtype,
+                    device=k.device,
+                )
             partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
             partial_dq, partial_dk, partial_dv = _flex_flash_attn_backward(
                 dout=do,
@@ -678,9 +698,9 @@ class DistAttnRuntime:
     def prepare_reduced_local_dq_dk_dv(
         self,
         partial_local_dq: torch.Tensor,
-        partial_local_dkv: torch.Tensor,
+        partial_local_dkv: FusedOrTupleTensor,
         ref_local_dq: torch.Tensor,
-        ref_local_dkv: torch.Tensor,
+        ref_local_dkv: FusedOrTupleTensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Prepare the final reduced local dq,dk,dv
@@ -689,11 +709,12 @@ class DistAttnRuntime:
 
         Args:
             partial_local_dq (torch.Tensor): partial local dq to be reduced
-            partial_local_dkv (torch.Tensor): partial local dkv to be reduced
+            partial_local_dkv (FusedOrTupleTensor):
+                partial local dkv fused or tupled tensor to be reduced
             ref_local_dq (torch.Tensor):
                 reference local dq, to provide meta info like dtype and shape
-            ref_local_dkv (torch.Tensor):
-                reference local dkv, to provide meta info like dtype and shape
+            ref_local_dkv (FusedOrTupleTensor):
+                reference local dkv fused or tupled tensor, to provide meta info like dtype and shape
 
         Returns:
             local_dq (torch.Tensor): reduced local dq tensor
@@ -716,7 +737,11 @@ class DistAttnRuntime:
             )
 
         # cast final local dkv to kv dtype
-        local_dkv = partial_local_dkv.to(ref_local_dkv.dtype)
+        local_dkv = partial_local_dkv.to(
+            ref_local_dkv.dtype
+            if self.concat_kv  # ref_local_dkv is a fused tensor
+            else ref_local_dkv[0].dtype  # ref_local_dkv are tupled tensors
+        )
 
         # chunk final local dkv into dk and dv
         local_dk, local_dv = self._maybe_chunk(local_dkv, num_chunks=2)
@@ -725,6 +750,17 @@ class DistAttnRuntime:
         self._reset_work_list()
 
         return local_dq, local_dk, local_dv
+
+    def load_tensors_from_fwd(
+        self, ctx
+    ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor, torch.Tensor]:
+        if self.concat_kv:  # local kv is a fused tensor
+            local_q, local_kv, local_out, local_lse = ctx.saved_tensors
+        else:  # local kv are tupled tensors
+            local_q, local_k, local_v, local_out, local_lse = ctx.saved_tensors
+            local_kv = (local_k, local_v)
+
+        return local_q, local_kv, local_out, local_lse
 
     # ----------    common API   --------- #
 
@@ -783,23 +819,42 @@ class DistAttnRuntime:
             remote_kv_buffer: [num_tokens_kv_remote_i*2, num_heads_kv, head_dim],
                 for i = 0, 1, ..., overlap_degree - 1
         """
-        assert self.concat_kv, "only support concat_kv"
-        _, num_heads, head_dim = local_kv.shape
+        if self.concat_kv:
+            _, num_heads, head_dim = local_kv.shape
+            dtype = local_kv.dtype
+            device = local_kv.device
+        else:
+            _, num_heads, head_dim = local_kv[0].shape
+            dtype = local_kv[0].dtype
+            device = local_kv[0].device
 
         # get the group-cast args for kv
-        group_cast_args = self.comm_meta.kv_group_collective_args_list[
-            overlap_stage
-        ].to_group_cast_args()
-        remote_kv_seqlen = self.comm_meta.num_remote_kv_tokens_per_stage[overlap_stage]
+        if self.concat_kv:  # reuse dkv's comm meta with packed args
+            group_cast_args = self.comm_meta.dkv_group_collective_args_list[
+                overlap_stage
+            ].to_group_cast_args()
+            remote_kv_seqlen = self.comm_meta.num_remote_dkv_tokens_per_stage[
+                overlap_stage
+            ]
+        else:  # use kv's comm meta with packless args
+            group_cast_args = self.comm_meta.kv_group_collective_args_list[
+                overlap_stage
+            ].to_group_cast_args()
+            remote_kv_seqlen = self.comm_meta.num_remote_kv_tokens_per_stage[
+                overlap_stage
+            ]
+            remote_kv_seqlen *= 2  # still x2 to allocate once
 
         # init remote kv buffer
         remote_kv_buffer = torch.empty(
             remote_kv_seqlen,
             num_heads,
             head_dim,
-            dtype=local_kv.dtype,
-            device=local_kv.device,
+            dtype=dtype,
+            device=device,
         )
+        if not self.concat_kv:  # chunk to k,v individual buffers
+            remote_kv_buffer = self._maybe_chunk(remote_kv_buffer, num_chunks=2)
 
         # launch group cast kernel
         remote_kv_work = group_cast(
@@ -912,7 +967,7 @@ class DistAttnRuntime:
             )
             return remote_qo_do_lse_work, remote_qo_do_lse_buffer
 
-        assert self.concat_qo_do, "only support concat_qo_do"
+        assert self.concat_qo_do, "Only supports concat_qo_do"
         _, num_heads, head_dim = local_qo_do.shape
 
         if magi_attention.comm.is_native_grpcoll_enable():
@@ -1124,25 +1179,41 @@ class DistAttnRuntime:
         Returns:
             partial_dkv_reduce_work (WorkWithPostProcessFn): partial dkv group-reduce work
         """
-        assert self.concat_dkv, "only support concat_dkv"
+        assert self.concat_dkv, "Only supports concat_dkv"
 
         # get the group-reduce args for dkv
-        group_reduce_args = self.comm_meta.kv_group_collective_args_list[
+        group_reduce_args = self.comm_meta.dkv_group_collective_args_list[
             overlap_stage
         ].to_group_reduce_args()
 
         # init remote dkv buffer and comm dtype
         if magi_attention.comm.is_native_grpcoll_enable():
-            if partial_remote_dkv is None:
-                # skipped for this rank, but still reduced from other ranks
-                partial_remote_dkv = torch.empty_like(
-                    ref_remote_dkv,
-                    dtype=self._maybe_hp_dtype(
-                        ref_remote_dkv.dtype
-                    ),  # dkv always in high-precision
+            if self.concat_kv:  # ref_remote_dkv is a fused tensor
+                if partial_remote_dkv is None:
+                    # skipped for this rank, but still reduced from other ranks
+                    partial_remote_dkv = torch.empty_like(
+                        ref_remote_dkv,
+                        dtype=self._maybe_hp_dtype(
+                            ref_remote_dkv.dtype
+                        ),  # dkv always in high-precision
+                    )
+                comm_dtype = self._maybe_hp_dtype(
+                    ref_remote_dkv.dtype, self.bwd_hp_reduce
                 )
-            comm_dtype = self._maybe_hp_dtype(ref_remote_dkv.dtype, self.bwd_hp_reduce)
+            else:  # ref_remote_dkv are tupled tensors
+                ref_remote_dk, _ = self._maybe_chunk(ref_remote_dkv, num_chunks=2)
+                partial_remote_dkv = torch.empty(
+                    (ref_remote_dk.shape[0] * 2, *ref_remote_dk.shape[1:]),
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_dk.dtype
+                    ),  # dkv always in high-precision
+                    device=ref_remote_dk.device,
+                )
+                comm_dtype = self._maybe_hp_dtype(
+                    ref_remote_dk.dtype, self.bwd_hp_reduce
+                )
         else:
+            assert self.concat_kv, "Only supports concat_kv with non-native grpcoll"
             if partial_remote_dkv is None:
                 # skipped for this rank, but still reduced from other ranks
                 partial_remote_dkv = torch.empty_like(
@@ -1422,7 +1493,13 @@ class DistAttnFunc(torch.autograd.Function):
             ref_local_out=local_q,
         )
 
-        ctx.save_for_backward(local_q, local_kv, local_out, local_lse)
+        dist_attn_runtime.save_tensors_for_bwd(
+            ctx,
+            local_q=local_q,
+            local_kv=local_kv,
+            local_out=local_out,
+            local_lse=local_lse,
+        )
         ctx.dist_attn_runtime = dist_attn_runtime
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
@@ -1431,8 +1508,13 @@ class DistAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
-        local_q, local_kv, local_out, local_lse = ctx.saved_tensors
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
+        (
+            local_q,
+            local_kv,
+            local_out,
+            local_lse,
+        ) = dist_attn_runtime.load_tensors_from_fwd(ctx)
         softmax_scale: float | None = ctx.softmax_scale
         softcap: float = ctx.softcap
 
