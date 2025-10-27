@@ -38,6 +38,7 @@ from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import assert_close
 from magi_attention.testing.utils import switch_envvar_context
+from magi_attention.utils import wrap_to_list
 
 
 class TestGroupCollective(DistTestBase):
@@ -365,6 +366,72 @@ class TestGroupCollective(DistTestBase):
                     [2, 2, 1, 1, 4, 4],
                 ],
             },
+            {
+                "name": "group_cast_with_2nd_group_with_lse",
+                "world_size": 4,
+                "cast_lse": True,
+                "num_groups": 2,
+                "send_buffer_per_rank": [
+                    [0, 1, 2, 3],
+                    [4, 5, 6, 7],
+                    [8, 9, 10, 11],
+                    [12, 13, 14, 15],
+                ],
+                "send_buffer_2nd_per_rank": [
+                    [0.2, 1.4, 2.6, 3.8],
+                    [4.1, 5.3, 6.5, 7.7],
+                    [8.2, 9.4, 10.6, 11.8],
+                    [12.1, 13.3, 14.5, 15.7],
+                ],
+                "send_lse_buffer_per_rank": [
+                    [0.1, 1.2, 2.3, 3.4],
+                    [4.5, 5.6, 6.7, 7.8],
+                    [8.9, 9.1, 10.2, 11.3],
+                    [12.4, 13.5, 14.6, 15.7],
+                ],
+                "expected_recv_buffer_per_rank": [
+                    [5, 9, 13, 0, 1],
+                    [0, 1, 10, 11, 2, 12, 13],
+                    [2, 6, 7, 14, 15],
+                    [8, 9, 4, 5],
+                ],
+                "expected_recv_buffer_2nd_per_rank": [
+                    [5.3, 9.4, 13.3, 0.2, 1.4],
+                    [0.2, 1.4, 10.6, 11.8, 2.6, 12.1, 13.3],
+                    [2.6, 6.5, 7.7, 14.5, 15.7],
+                    [8.2, 9.4, 4.1, 5.3],
+                ],
+                "expected_recv_lse_buffer_per_rank": [
+                    [5.6, 9.1, 13.5, 0.1, 1.2],
+                    [0.1, 1.2, 10.2, 11.3, 2.3, 12.4, 13.5],
+                    [2.3, 6.7, 7.8, 14.6, 15.7],
+                    [8.9, 9.1, 4.5, 5.6],
+                ],
+                "input_split_size_list_per_rank": [
+                    [2, 1, 1],
+                    [1, 1, 2],
+                    [1, 1, 2],
+                    [1, 1, 2],
+                ],
+                "output_split_size_list_per_rank": [
+                    [1, 1, 1, 2],
+                    [2, 2, 1, 1, 1],
+                    [1, 2, 2],
+                    [1, 1, 1, 1],
+                ],
+                "dst_indices_list_per_rank": [
+                    [[0, 1], [1, 2], []],
+                    [[3], [0, 3], [2]],
+                    [[3], [0, 3], [1]],
+                    [[1], [0, 1], [2]],
+                ],
+                "src_index_list_per_rank": [
+                    [1, 2, 3, 0],
+                    [0, 2, 0, 3, 3],
+                    [0, 1, 3],
+                    [2, 2, 1, 1],
+                ],
+            },
         ],
     )
     @parameterize(
@@ -383,6 +450,8 @@ class TestGroupCollective(DistTestBase):
     ):
         cast_lse = test_case.get("cast_lse", False)
         max_output_seqlen = test_case.get("max_output_seqlen", None)
+        num_groups = test_case.get("num_groups", 1)
+        assert num_groups <= 3
 
         test_case_name = (
             f"{test_case['name']=} x {dtype=} x "
@@ -409,6 +478,12 @@ class TestGroupCollective(DistTestBase):
         # skip when max_output_seqlen is given
         if max_output_seqlen is not None:
             # TODO: support max_output_seqlen for other implementations
+            if not use_native_grpcoll:
+                return
+
+        # skip when num_groups > 1
+        if num_groups > 1:
+            # TODO: support num_groups > 1 for other implementations
             if not use_native_grpcoll:
                 return
 
@@ -466,6 +541,7 @@ class TestGroupCollective(DistTestBase):
             dtype=dtype,
             device=self.device,
         )
+
         if max_output_seqlen is not None:
             recv_buffer = pad_at_dim(
                 recv_buffer,
@@ -474,6 +550,31 @@ class TestGroupCollective(DistTestBase):
                 value=-1,
             )
             assert recv_buffer.shape[0] == max_output_seqlen
+
+        if num_groups > 1:
+            send_buffer = [send_buffer]
+            expected_recv_buffer = [expected_recv_buffer]
+            recv_buffer = [recv_buffer]
+
+            send_buffer.append(
+                torch.tensor(
+                    test_case["send_buffer_2nd_per_rank"][self.rank],
+                    dtype=dtype,
+                    device=self.device,
+                )
+                .repeat_interleave(repeats=self.hidden_size, dim=0)
+                .reshape(-1, self.num_heads, self.head_dim)
+            )
+            expected_recv_buffer.append(
+                torch.tensor(
+                    test_case["expected_recv_buffer_2nd_per_rank"][self.rank],
+                    dtype=dtype,
+                    device=self.device,
+                )
+                .repeat_interleave(repeats=self.hidden_size, dim=0)
+                .reshape(-1, self.num_heads, self.head_dim)
+            )
+            recv_buffer.append(recv_buffer[0].clone())
 
         if cast_lse:
             # prepare lse buffer with shape [seqlen, num_heads]
@@ -558,13 +659,18 @@ class TestGroupCollective(DistTestBase):
         err_msg_list = []
         try:
             recv_buffer = post_process_outputs[0] if cast_lse else post_process_outputs
-            assert_close(
-                recv_buffer[:actual_output_seqlen],
-                expected_recv_buffer,
-                atol=1e-8,
-                rtol=1e-6,
-                test_case="group-cast recv buffer",
-            )
+            recv_buffer = wrap_to_list(recv_buffer)
+            expected_recv_buffer = wrap_to_list(expected_recv_buffer)
+            for ith_recv_buffer, ith_expected_recv_buffer in zip(
+                recv_buffer, expected_recv_buffer
+            ):
+                assert_close(
+                    ith_recv_buffer[:actual_output_seqlen],
+                    ith_expected_recv_buffer,
+                    atol=1e-8,
+                    rtol=1e-6,
+                    test_case="group-cast recv buffer",
+                )
         except Exception as e:
             err_msg_list.append(
                 f"For group-cast: {test_case_name=}, recv buffer is failed due to error: \n{e}\n"

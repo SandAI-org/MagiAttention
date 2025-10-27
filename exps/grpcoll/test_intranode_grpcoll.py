@@ -83,6 +83,7 @@ def prepare_test_func_kwargs(
     num_input_splits: int,
     num_experts: int,
     num_local_experts: int,
+    num_data_groups: int,
     dtype: torch.dtype,
     comm_dtype: torch.dtype | None,
     distinct_token: bool,
@@ -463,6 +464,14 @@ def prepare_test_func_kwargs(
     group.barrier()
     time.sleep(1)
 
+    # prepare other data groups
+    if num_data_groups > 1:
+        x_2nd = x.clone() + 1
+        recv_x_gc_2nd = recv_x_gc.clone() + 1
+    else:
+        x_2nd = None
+        recv_x_gc_2nd = None
+
     return dict(
         x=x,
         lse=lse,
@@ -470,6 +479,8 @@ def prepare_test_func_kwargs(
         recv_x_gc_buf=recv_x_gc_buf,
         recv_lse_gc=recv_lse_gc,
         recv_lse_gc_buf=recv_lse_gc_buf,
+        x_2nd=x_2nd,
+        recv_x_gc_2nd=recv_x_gc_2nd,
         reduced_x_gr=reduced_x_gr,
         reduced_x_gr_buf=reduced_x_gr_buf,
         reduced_lse_gr=reduced_lse_gr,
@@ -512,6 +523,8 @@ def test_func(
     recv_x_gc_buf: torch.Tensor | None = kwargs["recv_x_gc_buf"]
     recv_lse_gc: torch.Tensor | None = kwargs["recv_lse_gc"]
     recv_lse_gc_buf: torch.Tensor | None = kwargs["recv_lse_gc_buf"]
+    x_2nd: torch.Tensor | None = kwargs["x_2nd"]
+    recv_x_gc_2nd: torch.Tensor | None = kwargs["recv_x_gc_2nd"]
     reduced_x_gr: torch.Tensor = kwargs["reduced_x_gr"]
     reduced_lse_gr: torch.Tensor | None = kwargs["reduced_lse_gr"]
     reduced_x_gr_buf: torch.Tensor | None = kwargs["reduced_x_gr_buf"]
@@ -533,9 +546,19 @@ def test_func(
     # x: shape=[num_local_tokens, hidden_dim]
     # num_tokens_per_rank: shape=[num_ranks]: the number of tokens sent to each rank
     # is_token_in_rank: shape=[num_local_tokens, num_ranks]: whether a local token should be sent to a rank
-    common_group_cast_args = {  # w/o handle tensors
-        "x": x,
-        "recv_x": recv_x_gc_buf,
+    x_list, recv_x_gc_list = [x], [recv_x_gc]
+    recv_x_gc_buf_list = [recv_x_gc_buf] if pass_out_buffer else None
+    num_data_groups = 1
+    if x_2nd is not None and recv_x_gc_2nd is not None:
+        num_data_groups += 1
+        x_list.append(x_2nd)
+        recv_x_gc_list.append(recv_x_gc_2nd)
+        if pass_out_buffer:
+            recv_x_gc_buf_list.append(recv_x_gc_buf.clone())
+
+    common_group_cast_args: dict[str, Any] = {  # w/o handle tensors
+        "x": x if num_data_groups == 1 else x_list,
+        "recv_x": recv_x_gc_buf if num_data_groups == 1 else recv_x_gc_buf_list,
         "config": config,
         "async_op": async_mode,
         "post_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
@@ -543,7 +566,7 @@ def test_func(
         "lse": lse,
         "recv_lse": recv_lse_gc_buf,
     }
-    group_cast_args = common_group_cast_args | {
+    group_cast_args: dict[str, Any] = common_group_cast_args | {
         "is_token_in_rank": is_token_in_rank,
         "num_tokens_per_rank": num_tokens_per_rank,
     }
@@ -587,12 +610,12 @@ def test_func(
     #   and if is_token_in_rank[i, r] == -1, then send_head[i, r] == -1
     #   as well (and should be ignored in the cu_seqlens above)
     (
-        recv_x,
+        recv_x_list,
         recv_lse,
         handle,
         event,
     ) = buffer.group_cast(**group_cast_args)
-    recv_x = recv_x[0]
+    recv_x = recv_x_list[0]
 
     # wait
     event.current_stream_wait() if async_mode else ()
@@ -601,6 +624,13 @@ def test_func(
     if pass_out_buffer:
         assert recv_x_gc_buf is not None
         assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()
+
+        for i in range(1, num_data_groups):
+            assert recv_x_gc_buf_list[i] is not None
+            assert recv_x_gc_buf_list[i].data_ptr() == recv_x_list[i].data_ptr()
+            print(
+                f"\n[RANK {rank}]: {i}-th group of recv_x_gc_buf: {recv_x_gc_buf_list[i]=}\n"
+            )
 
     # check recv_lse in-place
     if cast_lse and pass_out_lse_buffer:
@@ -624,6 +654,17 @@ def test_func(
                     unperm_after_a2a_kwargs=range_gather_post_group_cast_kwargs,
                 )
             assert recv_x_from_a2av.shape == recv_x.shape
+
+            for i in range(1, num_data_groups):
+                ith_recv_x_from_a2av = recv_x_list[i].clone()
+                if use_a2av_perm_idxs == "outside":
+                    recv_x_list[i] = recv_x_list[i][unperm_from_a2av_idx]
+                elif use_a2av_perm_idxs == "no":
+                    recv_x_list[i] = unpermute_output(
+                        output=recv_x_list[i],
+                        unperm_after_a2a_kwargs=range_gather_post_group_cast_kwargs,
+                    )
+                assert ith_recv_x_from_a2av.shape == recv_x_list[i].shape
 
             # recv_lse
             if cast_lse:
@@ -668,8 +709,15 @@ def test_func(
     if pass_padded_out_buffer:
         assert recv_x.size(0) > actual_gc_output_seqlen
         assert torch.equal(recv_x[:actual_gc_output_seqlen], recv_x_gc)
+        for i in range(1, num_data_groups):
+            assert recv_x_list[i].size(0) > actual_gc_output_seqlen
+            assert torch.equal(
+                recv_x_list[i][:actual_gc_output_seqlen], recv_x_gc_list[i]
+            )
     else:
         assert torch.equal(recv_x, recv_x_gc)
+        for i in range(1, num_data_groups):
+            assert torch.equal(recv_x_list[i], recv_x_gc_list[i])
     if cast_lse:
         if pass_padded_out_buffer:
             assert recv_lse.size(0) > actual_gc_output_seqlen
@@ -733,12 +781,13 @@ def test_func(
         )
 
     # Test cached group_cast
-    cached_group_cast_args = common_group_cast_args | {
-        "handle": handle,
+    cached_group_cast_args: dict[str, Any] = common_group_cast_args | {
+        "x": x,
         "recv_x": torch.empty_like(recv_x_gc_buf) if pass_out_buffer else None,
         "recv_lse": torch.empty_like(recv_lse_gc_buf)
         if cast_lse and pass_out_buffer
         else None,
+        "handle": handle,
     }
     if previous_mode:
         cached_group_cast_args.update({"previous_event": buffer.capture()})
@@ -987,6 +1036,8 @@ def test_main(
     random_permute_output = True  # set to False to make the output / input of group-cast / group-reduce in a2a rank order
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
+    num_data_groups = 2  # set this > 1 to allow transfer multiple data groups together within the same kernel
+    assert 1 <= num_data_groups <= 3
 
     cast_lse = True
     reduce_op: GroupReduceOp = "lse"  # choose from {"sum", "avg", "lse"}
@@ -1042,7 +1093,7 @@ def test_main(
             (
                 f"[config] {num_sms=} | {num_channels=} | {min_num_nvl_bytes=} ({min_num_nvl_bytes / 1024**2:.2f} MB)\n"
                 f"{num_experts=} | {num_tokens=} | {hidden_size=} | {dtype=} | {comm_dtype=}\n"
-                f"{num_topk=} | {num_local_experts=} | {num_heads=}\n"
+                f"{num_topk=} | {num_local_experts=} | {num_heads=} | {num_data_groups=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
                 f"{cast_lse=} | {reduce_op=}\n"
@@ -1065,6 +1116,7 @@ def test_main(
         num_input_splits=num_input_splits,
         num_experts=num_experts,
         num_local_experts=num_local_experts,
+        num_data_groups=num_data_groups,
         dtype=dtype,
         comm_dtype=comm_dtype,
         distinct_token=distinct_token,
