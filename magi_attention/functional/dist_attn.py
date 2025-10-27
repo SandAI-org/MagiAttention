@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: disable-error-code="union-attr,list-item"
 from typing import Any, TypeAlias
 
 import torch
@@ -464,9 +465,9 @@ class DistAttnRuntime:
                 )
                 partial_dkv = torch.zeros_like(
                     kv,
-                    dtype=kv.dtype  # type: ignore[union-attr]
+                    dtype=kv.dtype
                     if self.bwd_local_dkv_lp_init
-                    else max_fp_dtype(kv.dtype, torch.float32),  # type: ignore[union-attr]
+                    else max_fp_dtype(kv.dtype, torch.float32),
                 )
             return partial_dq, partial_dkv
 
@@ -526,7 +527,7 @@ class DistAttnRuntime:
                 partial_dq = partial_dq.to(q.dtype)
 
             if self.bwd_local_dkv_lp_init:
-                partial_dkv = partial_dkv.to(kv.dtype)  # type: ignore[union-attr]
+                partial_dkv = partial_dkv.to(kv.dtype)
 
         return partial_dq, partial_dkv
 
@@ -791,7 +792,7 @@ class DistAttnRuntime:
                 for i = 0, 1, ..., overlap_degree - 1
         """
         assert self.concat_kv, "only support concat_kv"
-        _, num_heads, head_dim = local_kv.shape  # type: ignore[union-attr]
+        _, num_heads, head_dim = local_kv.shape
 
         # get the group-cast args for kv
         group_cast_args = self.comm_meta.kv_group_collective_args_list[
@@ -804,8 +805,8 @@ class DistAttnRuntime:
             remote_kv_seqlen,
             num_heads,
             head_dim,
-            dtype=local_kv.dtype,  # type: ignore[union-attr]
-            device=local_kv.device,  # type: ignore[union-attr]
+            dtype=local_kv.dtype,
+            device=local_kv.device,
         )
 
         # launch group cast kernel
@@ -912,7 +913,7 @@ class DistAttnRuntime:
             return remote_qo_do_work, remote_qo_do_buffer
 
         assert self.concat_qo_do, "only support concat_qo_do"
-        _, num_heads, head_dim = local_qo_do.shape  # type: ignore[union-attr]
+        _, num_heads, head_dim = local_qo_do.shape
 
         # get the group-cast args for q,o,do
         group_cast_args = self.comm_meta.qo_do_group_collective_args_list[
@@ -927,8 +928,8 @@ class DistAttnRuntime:
             remote_qo_do_seqlen,
             num_heads,
             head_dim,
-            dtype=local_qo_do.dtype,  # type: ignore[union-attr]
-            device=local_qo_do.device,  # type: ignore[union-attr]
+            dtype=local_qo_do.dtype,
+            device=local_qo_do.device,
         )
 
         # launch group cast kernel
@@ -1117,12 +1118,12 @@ class DistAttnRuntime:
         if partial_remote_dkv is None:  # skipped
             partial_remote_dkv = torch.empty_like(
                 ref_remote_dkv,
-                dtype=max_fp_dtype(ref_remote_dkv.dtype, torch.float32)  # type: ignore[union-attr]
+                dtype=max_fp_dtype(ref_remote_dkv.dtype, torch.float32)
                 if self.bwd_hp_reduce
-                else ref_remote_dkv.dtype,  # type: ignore[union-attr]
+                else ref_remote_dkv.dtype,
             )
         elif not self.bwd_hp_reduce:
-            partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)  # type: ignore[union-attr]
+            partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)
 
         # launch group-reduce kernel
         partial_dkv_reduce_work = group_reduce(
@@ -1244,25 +1245,25 @@ class DistAttnRuntime:
 
     def _reset_work_list(self):
         self.remote_q_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # fwd
         self.remote_kv_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # fwd + bwd
         self.partial_out_lse_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # fwd
         self.remote_lse_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # bwd
         self.remote_qo_do_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # bwd
         self.partial_dq_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # bwd
         self.partial_dkv_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # bwd
 
     def __eq__(self, other: Any) -> bool:
