@@ -75,7 +75,7 @@ class DistAttnRuntime:
 
         self.fwd_sm_margin = magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
 
-        # NOTE: we now always concat kv and dkv together for comm
+        # NOTE: we now always concat kv together for comm
         self.concat_kv = True
 
         # NOTE: when enabling FFA fwd high precision reduce,
@@ -105,6 +105,10 @@ class DistAttnRuntime:
         # ----------    flags for bwd   --------- #
 
         self.bwd_sm_margin = magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
+
+        # NOTE: we now always concat dkv together for comm
+        # since the dkv buffer is initialized by our own logic
+        self.concat_dkv = True
 
         # NOTE: we concat q,o,do in dist-attn bwd when qo comm is enabled
         self.concat_qo_do = magi_attention.comm.is_qo_comm_enable()
@@ -209,7 +213,7 @@ class DistAttnRuntime:
             return partial_out, partial_lse
 
         # attention forward pass
-        k, v = self._maybe_chunk_kv(kv)
+        k, v = self._maybe_chunk(kv, num_chunks=2)
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
@@ -285,7 +289,7 @@ class DistAttnRuntime:
 
         # wait for host/remote qkv prepared for current stage
         if is_host_stage:
-            local_kv = self._maybe_concat_kv(*local_kv)
+            local_kv = self._maybe_concat(*local_kv, need_concat=self.concat_kv)
             curr_q = local_q
             curr_kv = local_kv
         else:
@@ -443,6 +447,7 @@ class DistAttnRuntime:
             partial_dkv: [num_tokens_kv*2, num_heads_kv, head_dim]
         """
         assert self.concat_kv, "only support concat_kv"
+        assert self.concat_dkv, "only support concat_dkv"
 
         is_host_stage = self.is_host_stage(overlap_stage)
 
@@ -457,7 +462,7 @@ class DistAttnRuntime:
         if attn_arg.can_skip(is_bwd=True):
             partial_dq, partial_dkv = None, None
             if is_host_stage:
-                q, _, _ = self._maybe_chunk_qo_do(qo_do)
+                q, _, _ = self._maybe_chunk(qo_do, num_chunks=3)
                 # NOTE: if local_dq and local_dkv calculation are skipped,
                 # we need to zero-initialize them since they might be reduced later
                 partial_dq = torch.zeros_like(
@@ -473,8 +478,8 @@ class DistAttnRuntime:
             return partial_dq, partial_dkv
 
         # attention backward pass
-        q, o, do = self._maybe_chunk_qo_do(qo_do)
-        k, v = self._maybe_chunk_kv(kv)
+        q, o, do = self._maybe_chunk(qo_do, num_chunks=3)
+        k, v = self._maybe_chunk(kv, num_chunks=2)
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
@@ -490,12 +495,14 @@ class DistAttnRuntime:
                 softmax_scale=_softmax_scale,
                 softcap=softcap,
             )
-            partial_dkv = self._maybe_concat_kv(partial_dk, partial_dv)
+            partial_dkv = self._maybe_concat(
+                partial_dk, partial_dv, need_concat=self.concat_dkv
+            )
         else:
             # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
             # and we need to zero-initialize partial_dkv since it needs to be reduced
             partial_dkv = torch.zeros_like(kv, dtype=self.hp_dtype)
-            partial_dk, partial_dv = self._maybe_chunk_kv(partial_dkv)
+            partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
             partial_dq, partial_dk, partial_dv = _flex_flash_attn_backward(
                 dout=do,
                 q=q,
@@ -560,7 +567,9 @@ class DistAttnRuntime:
 
         # wait for host/remote qo_do,kv,lse prepared for current stage
         if is_host_stage:
-            local_qo_do = self._maybe_concat_qo_do(*local_qo_do)
+            local_qo_do = self._maybe_concat(
+                *local_qo_do, need_concat=self.concat_qo_do
+            )
             curr_qo_do, curr_kv, curr_lse = local_qo_do, local_kv, local_lse
         else:
             curr_remote_stage = self.get_curr_remote_stage(overlap_stage)
@@ -655,7 +664,7 @@ class DistAttnRuntime:
         )
 
         # reduce ith partial dq
-        ref_remote_q, _, _ = self._maybe_chunk_qo_do(ref_remote_qo_do)
+        ref_remote_q, _, _ = self._maybe_chunk(ref_remote_qo_do, num_chunks=3)
         (
             self.partial_dq_reduce_work_per_stage[overlap_stage]
         ) = self._reduce_partial_dq(
@@ -710,7 +719,7 @@ class DistAttnRuntime:
         local_dkv = partial_local_dkv.to(ref_local_dkv.dtype)
 
         # chunk final local dkv into dk and dv
-        local_dk, local_dv = self._maybe_chunk_kv(local_dkv)
+        local_dk, local_dv = self._maybe_chunk(local_dkv, num_chunks=2)
 
         # reset the temporary work list
         self._reset_work_list()
@@ -1115,7 +1124,7 @@ class DistAttnRuntime:
         Returns:
             partial_dkv_reduce_work (WorkWithPostProcessFn): partial dkv group-reduce work
         """
-        assert self.concat_kv, "only support concat_kv"
+        assert self.concat_dkv, "only support concat_dkv"
 
         # get the group-reduce args for dkv
         group_reduce_args = self.comm_meta.kv_group_collective_args_list[
@@ -1240,48 +1249,30 @@ class DistAttnRuntime:
 
         return partial_dq_reduce_work
 
-    def _maybe_concat_kv(
+    def _maybe_concat(
         self,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        *x: torch.Tensor,
+        need_concat: bool = False,
     ) -> FusedOrTupleTensor:
         """
-        Maybe concatenate k, v tensors
-        into a fused or tupled kv along the seqlen dim
+        Maybe concatenate given tensors
+        into a fused tensor along first dim
+        if `need_concat` is ``True``
+        otherwise return the tupled tensors
         """
-        return torch.cat([k, v], dim=0) if self.concat_kv else (k, v)
+        return torch.cat(x, dim=0) if need_concat else x
 
-    def _maybe_chunk_kv(
+    def _maybe_chunk(
         self,
-        kv: FusedOrTupleTensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x: FusedOrTupleTensor,
+        num_chunks: int,
+    ) -> tuple[torch.Tensor, ...]:
         """
-        Maybe chunk the kv fused or tupled tensor
-        into k, v tensor views along the seqlen dim
+        Maybe chunk the fused tensor
+        into the tupled tensor views along the seqlen dim
+        if it is concatenated before
         """
-        return torch.chunk(kv, 2, dim=0) if self.concat_kv else kv
-
-    def _maybe_concat_qo_do(
-        self,
-        q: torch.Tensor,
-        o: torch.Tensor,
-        do: torch.Tensor,
-    ) -> FusedOrTupleTensor:
-        """
-        Maybe concatenate q, o, do tensors
-        into a fused or tupled qo_do along the seqlen dim
-        """
-        return torch.cat([q, o, do], dim=0) if self.concat_qo_do else (q, o, do)
-
-    def _maybe_chunk_qo_do(
-        self,
-        qo_do: FusedOrTupleTensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Maybe chunk the qo_do fused or tupled tensor
-        into q, o, do tensor views along the seqlen dim
-        """
-        return torch.chunk(qo_do, 3, dim=0) if self.concat_qo_do else qo_do
+        return torch.chunk(x, num_chunks, dim=0) if isinstance(x, torch.Tensor) else x
 
     def _maybe_hp_dtype(
         self, dtype: torch.dtype, need_hp_dtype: bool = True
