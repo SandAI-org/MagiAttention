@@ -70,6 +70,7 @@ class DistAttnRuntime:
         self.prefetch_stage_by_stage = (
             magi_attention.is_cuda_device_max_connections_one()
         )
+        self.hp_dtype = torch.float32
 
         # ----------    flags for fwd   --------- #
 
@@ -93,10 +94,13 @@ class DistAttnRuntime:
             and not magi_attention.is_sdpa_backend_enable()
         )
 
-        # NOTE: when enabling qo comm and disabling FFA fwd high precision reduce
+        # NOTE: when enabling qo comm
+        # and neither using native grpcoll nor enabling FFA fwd high precision reduce
         # we're supposed to initialize the partial local out in low precision
         self.fwd_local_out_lp_init = (
-            magi_attention.comm.is_qo_comm_enable() and not self.fwd_hp_reduce
+            magi_attention.comm.is_qo_comm_enable()
+            and not magi_attention.comm.is_native_grpcoll_enable()
+            and not self.fwd_hp_reduce
         )
 
         # ----------    flags for bwd   --------- #
@@ -120,12 +124,17 @@ class DistAttnRuntime:
             and not magi_attention.is_sdpa_backend_enable()
         )
 
-        # NOTE: when disabling FFA bwd high precision reduce
+        # NOTE: when neither using native grpcoll nor enabling FFA bwd high precision reduce
         # we're supposed to initialize the partial local dk,dv in low precision
         # and the same applies to dq if enabling qo comm
-        self.bwd_local_dkv_lp_init = not self.bwd_hp_reduce
+        self.bwd_local_dkv_lp_init = (
+            not magi_attention.comm.is_native_grpcoll_enable()
+            and not self.bwd_hp_reduce
+        )
         self.bwd_local_dq_lp_init = (
-            magi_attention.comm.is_qo_comm_enable() and not self.bwd_hp_reduce
+            magi_attention.comm.is_qo_comm_enable()
+            and not magi_attention.comm.is_native_grpcoll_enable()
+            and not self.bwd_hp_reduce
         )
 
         # ----------    internal temporary work list   --------- #
@@ -236,9 +245,9 @@ class DistAttnRuntime:
                     deterministic=self.deterministic,
                     softcap=softcap,
                     sm_margin=self.fwd_sm_margin,
-                    # NOTE: increase the partial out precision temporarily,
-                    # to reduce the error caused by the out correction
-                    out_type=torch.float32,
+                    # NOTE: always use high-precision for the partial out,
+                    # to reduce the error caused by the out/lse correction
+                    out_type=self.hp_dtype,
                     # NOTE: when using accumulative buffer, we need to always enable atomic reduction
                     # unless it is the first call when accumulative buffer is still None
                     disable_fwd_atomic_reduction=(
@@ -451,7 +460,7 @@ class DistAttnRuntime:
             if is_host_stage:
                 q, _, _ = self._maybe_chunk_qo_do(qo_do)
                 # NOTE: if local_dq and local_dkv calculation are skipped,
-                # we need to zeros initialize them since they might be reduced later
+                # we need to zero-initialize them since they might be reduced later
                 partial_dq = torch.zeros_like(
                     q,
                     dtype=self._maybe_hp_dtype(q.dtype, not self.bwd_local_dq_lp_init),
@@ -486,7 +495,7 @@ class DistAttnRuntime:
         else:
             # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
             # and we need to zero-initialize partial_dkv since it needs to be reduced
-            partial_dkv = torch.zeros_like(kv, dtype=torch.float32)
+            partial_dkv = torch.zeros_like(kv, dtype=self.hp_dtype)
             partial_dk, partial_dv = self._maybe_chunk_kv(partial_dkv)
             partial_dq, partial_dk, partial_dv = _flex_flash_attn_backward(
                 dout=do,
@@ -498,11 +507,11 @@ class DistAttnRuntime:
                 dq=dq_acc,  # directly reduce to dq_acc
                 dk=partial_dk,
                 dv=partial_dv,
-                # NOTE: increase the partial dq, dkv precision temporarily,
+                # NOTE: always use high precision for the partial dq, dkv
                 # to reduce the error caused by the atomic reduction inside the kernel
-                dq_type=torch.float32,
-                dk_type=torch.float32,
-                dv_type=torch.float32,
+                dq_type=self.hp_dtype,
+                dk_type=self.hp_dtype,
+                dv_type=self.hp_dtype,
                 **attn_arg.to_ffa_args(is_bwd=True),
                 merge_k_ranges=None,
                 bwd_kq_map=None,
@@ -1033,24 +1042,50 @@ class DistAttnRuntime:
                 overlap_stage
             ].to_group_reduce_args()
 
-            # init remote dkv buffer
-            if partial_remote_out is None:  # skipped
-                partial_remote_out = torch.empty_like(
-                    ref_remote_out,
-                    dtype=self._maybe_hp_dtype(
-                        ref_remote_out.dtype, self.fwd_hp_reduce
-                    ),
-                    device=ref_remote_out.device,
+            # init remote out/lse buffer and comm dtype
+            if magi_attention.comm.is_native_grpcoll_enable():
+                if partial_remote_out is None:
+                    # skipped for this rank, but still reduced from other ranks
+                    partial_remote_out = torch.empty_like(
+                        ref_remote_out,
+                        dtype=self._maybe_hp_dtype(
+                            ref_remote_out.dtype
+                        ),  # out always in high-precision
+                        device=ref_remote_out.device,
+                    )
+                    partial_remote_lse = torch.empty(
+                        (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
+                        dtype=self._maybe_hp_dtype(
+                            ref_remote_out.dtype
+                        ),  # lse always in high-precision
+                        device=ref_remote_out.device,
+                    )
+                comm_dtype = self._maybe_hp_dtype(
+                    ref_remote_out.dtype, self.fwd_hp_reduce
                 )
-                partial_remote_lse = torch.empty(
-                    (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
-                    dtype=self._maybe_hp_dtype(
-                        ref_remote_out.dtype
-                    ),  # lse always in high-precision
-                    device=ref_remote_out.device,
-                )
-            elif not self.fwd_hp_reduce:
-                partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
+            else:
+                if partial_remote_out is None:
+                    # skipped for this rank, but still reduced from other ranks
+                    partial_remote_out = torch.empty_like(
+                        ref_remote_out,
+                        dtype=self._maybe_hp_dtype(
+                            ref_remote_out.dtype, self.fwd_hp_reduce
+                        ),
+                        device=ref_remote_out.device,
+                    )
+                    partial_remote_lse = torch.empty(
+                        (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
+                        dtype=self._maybe_hp_dtype(
+                            ref_remote_out.dtype
+                        ),  # lse always in high-precision
+                        device=ref_remote_out.device,
+                    )
+                elif not self.fwd_hp_reduce:
+                    # downcast to the same dtype as out
+                    partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
+
+                # non-native grpcoll only supports the same comm dtype as input/output
+                comm_dtype = None
 
             # launch group-reduce kernel
             partial_out_lse_reduce_work = group_reduce(
@@ -1061,13 +1096,13 @@ class DistAttnRuntime:
                 **group_reduce_args,
                 group=self.cp_group_gr,
                 async_op=True,
+                comm_dtype=comm_dtype,
             )
         else:
             if not self.fwd_out_lse_use_acc and partial_remote_out is not None:
                 # the partial remote out and lse have NOT been reduced to
                 # partial local out and lse by neither ffa fwd kernel nor group-reduce
                 # thus we need to manually reduce here
-
                 correct_attn_fwd_result(
                     out_list=[partial_local_out, partial_remote_out],
                     lse_list=[partial_local_lse, partial_remote_lse],
@@ -1110,14 +1145,32 @@ class DistAttnRuntime:
             overlap_stage
         ].to_group_reduce_args()
 
-        # init remote dkv buffer
-        if partial_remote_dkv is None:  # skipped
-            partial_remote_dkv = torch.empty_like(
-                ref_remote_dkv,
-                dtype=self._maybe_hp_dtype(ref_remote_dkv.dtype, self.bwd_hp_reduce),
-            )
-        elif not self.bwd_hp_reduce:
-            partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)
+        # init remote dkv buffer and comm dtype
+        if magi_attention.comm.is_native_grpcoll_enable():
+            if partial_remote_dkv is None:
+                # skipped for this rank, but still reduced from other ranks
+                partial_remote_dkv = torch.empty_like(
+                    ref_remote_dkv,
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_dkv.dtype
+                    ),  # dkv always in high-precision
+                )
+            comm_dtype = self._maybe_hp_dtype(ref_remote_dkv.dtype, self.bwd_hp_reduce)
+        else:
+            if partial_remote_dkv is None:
+                # skipped for this rank, but still reduced from other ranks
+                partial_remote_dkv = torch.empty_like(
+                    ref_remote_dkv,
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_dkv.dtype, self.bwd_hp_reduce
+                    ),
+                )
+            elif not self.bwd_hp_reduce:
+                # downcast to the same dtype as kv
+                partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)
+
+            # non-native grpcoll only supports the same comm dtype as input/output
+            comm_dtype = None
 
         # launch group-reduce kernel
         partial_dkv_reduce_work = group_reduce(
@@ -1126,6 +1179,7 @@ class DistAttnRuntime:
             **group_reduce_args,
             group=self.cp_group_gr,
             async_op=True,
+            comm_dtype=comm_dtype,
         )
 
         return partial_dkv_reduce_work
@@ -1158,14 +1212,34 @@ class DistAttnRuntime:
                 overlap_stage
             ].to_group_reduce_args()
 
-            # init remote dq buffer
-            if partial_remote_dq is None:  # skipped
-                partial_remote_dq = torch.empty_like(
-                    ref_remote_dq,
-                    dtype=self._maybe_hp_dtype(ref_remote_dq.dtype, self.bwd_hp_reduce),
+            # init remote dq buffer and comm dtype
+            if magi_attention.comm.is_native_grpcoll_enable():
+                if partial_remote_dq is None:
+                    # skipped for this rank, but still reduced from other ranks
+                    partial_remote_dq = torch.empty_like(
+                        ref_remote_dq,
+                        dtype=self._maybe_hp_dtype(
+                            ref_remote_dq.dtype
+                        ),  # dq always in high-precision
+                    )
+                comm_dtype = self._maybe_hp_dtype(
+                    ref_remote_dq.dtype, self.bwd_hp_reduce
                 )
-            elif not self.bwd_hp_reduce:
-                partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
+            else:
+                if partial_remote_dq is None:
+                    # skipped for this rank, but still reduced from other ranks
+                    partial_remote_dq = torch.empty_like(
+                        ref_remote_dq,
+                        dtype=self._maybe_hp_dtype(
+                            ref_remote_dq.dtype, self.bwd_hp_reduce
+                        ),
+                    )
+                elif not self.bwd_hp_reduce:
+                    # downcast to the same dtype as q
+                    partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
+
+                # non-native grpcoll only supports the same comm dtype as input/output
+                comm_dtype = None
 
             # launch group-reduce kernel
             partial_dq_reduce_work = group_reduce(
@@ -1174,6 +1248,7 @@ class DistAttnRuntime:
                 **group_reduce_args,
                 group=self.cp_group_gr,
                 async_op=True,
+                comm_dtype=comm_dtype,
             )
         else:
             if not self.bwd_dq_use_acc and partial_remote_dq is not None:
@@ -1238,7 +1313,13 @@ class DistAttnRuntime:
     def _maybe_hp_dtype(
         self, dtype: torch.dtype, need_hp_dtype: bool = True
     ) -> torch.dtype:
-        return max_fp_dtype(dtype, torch.float32) if need_hp_dtype else dtype
+        """Maybe return higher precision dtype at least as `self.hp_dtype`
+        for the given `dtype`, if `need_hp_dtype` is ``True``
+
+        NOTE: for the `dtype` that is already higher than `self.hp_dtype`,
+        this function will always return the same `dtype`, no matter the `need_hp_dtype`
+        """
+        return max_fp_dtype(dtype, self.hp_dtype) if need_hp_dtype else dtype
 
     def _reset_work_list(self):
         self.remote_q_work_with_buffer_per_stage: list[WorkWithBuffer] = [
