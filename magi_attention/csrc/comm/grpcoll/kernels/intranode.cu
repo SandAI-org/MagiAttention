@@ -214,13 +214,18 @@ void cached_notify_group_cast(
 #undef CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE
 }
 
-template <int kNumRanks, int kNumThreads, int kWarpCopyUnrollStages, int kNumTMAStages, int kNumTMABytesPerWarp, bool kCastLSE>
+template <int kNumDataGroups, int kNumRanks, int kNumThreads, int kWarpCopyUnrollStages, int kNumTMAStages, int kNumTMABytesPerWarp, bool kCastLSE>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void group_cast_kernel(
+    /* 1st group of input / output data*/
     int4* recv_x,
     float* recv_lse,
     const int4* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    int4* recv_x_2nd,
+    const int4* x_2nd,
+    /* other metadata */
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
@@ -276,6 +281,14 @@ void group_cast_kernel(
       Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
   auto channel_src_idx_buffers = Buffer<int>(ptr, /*num_elems=*/num_channel_tokens_total, /*elem_offset=*/channel_rank_token_offset);
   auto channel_lse_buffers = Buffer<float>(ptr, /*num_elems=*/num_channel_tokens_total * num_heads, /*elem_offset=*/channel_rank_token_offset * num_heads);
+
+  // Get channel data buffers for other groups
+  //  `x_buffers_2nd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
+  constexpr bool is_2nd_group_exists = kNumDataGroups > 1;
+  Buffer<int4, sizeof(int4)> channel_x_buffers_2nd;
+  if constexpr (is_2nd_group_exists)
+    channel_x_buffers_2nd =
+        Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
 
   // Get copy info
 #ifndef DISABLE_SM90_FEATURES
@@ -384,18 +397,36 @@ void group_cast_kernel(
 
         // Pick (round-robin) one warp for the responsible rank to send this token
         if (cached_channel_tail_idx % num_send_warps_per_rank == send_warp_id_in_rank) {
+          // Get the token ptr in the send buffer and the recv queue
+          int4* token_ptr_in_queue_array[kNumDataGroups];
+          const int4* token_ptr_in_x_array[kNumDataGroups];
+
+          // for the 1st group
+          token_ptr_in_queue_array[0] = channel_x_buffers.buffer() + dst_slot_idx * hidden_int4;
+          token_ptr_in_x_array[0] = x + token_idx * hidden_int4;
+
+          // for the 2nd group if exists
+          if constexpr (is_2nd_group_exists) {
+            token_ptr_in_queue_array[1] = channel_x_buffers_2nd.buffer() + dst_slot_idx * hidden_int4;
+            token_ptr_in_x_array[1] = x_2nd + token_idx * hidden_int4;
+          }
+
+#pragma unroll
           // Warp-copy this token from send buffer to the recv queue
-          auto token_ptr_in_queue = channel_x_buffers.buffer() + dst_slot_idx * hidden_int4; // token idx in the recv queue
-          auto token_ptr_in_x = x + token_idx * hidden_int4; // global token idx in the send buffer
-          UNROLLED_WARP_COPY(
-              /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
-              /*LANE_ID=*/lane_id,
-              /*N=*/hidden_int4,
-              /*DST=*/token_ptr_in_queue,
-              /*SRC=*/token_ptr_in_x,
-              /*LD_FUNC=*/__ldg, // read-only load, REVIEW: why not use `ld_nc_global` here ?
-              /*ST_FUNC=*/st_na_global // non-cached store
-          );
+          for (int i = 0; i < kNumDataGroups; ++i) {
+            auto token_ptr_in_queue = token_ptr_in_queue_array[i];
+            auto token_ptr_in_x = token_ptr_in_x_array[i];
+
+            UNROLLED_WARP_COPY(
+                /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
+                /*LANE_ID=*/lane_id,
+                /*N=*/hidden_int4,
+                /*DST=*/token_ptr_in_queue,
+                /*SRC=*/token_ptr_in_x,
+                /*LD_FUNC=*/__ldg, // read-only load, REVIEW: why not use `ld_nc_global` here ?
+                /*ST_FUNC=*/st_na_global // non-cached store
+            );
+          }
 
           // Copy channel src idx by lane0
           // which will be used to fill `recv_src_idx` by the receiver
@@ -517,56 +548,80 @@ void group_cast_kernel(
         auto token_idx_in_recv_x = static_cast<int64_t>(total_offset + chunk_idx); // original token idx in recv buffer in rank order
         token_idx_in_recv_x = post_perm_idx == nullptr ? token_idx_in_recv_x : post_perm_idx[token_idx_in_recv_x];
 
-        // Get the token ptr in the recv buffer
-        auto token_ptr_in_recv_x_int4 = recv_x + token_idx_in_recv_x * hidden_int4;
-
-        // Get the token ptr in the recv queue
+        // Get the token idx in the recv queue
         int token_idx_in_queue = (cached_channel_head_idx + chunk_idx) % num_recv_buffer_tokens;
-        auto token_ptr_in_queue_int4 = channel_x_buffers.buffer() + token_idx_in_queue * hidden_int4;
+
+        // Get the token ptr in the recv buffer and the recv queue
+        int4* token_ptr_in_recv_x_int4_array[kNumDataGroups];
+        int4* token_ptr_in_queue_int4_array[kNumDataGroups];
+
+        // for the 1st group
+        token_ptr_in_recv_x_int4_array[0] = recv_x + token_idx_in_recv_x * hidden_int4;
+        token_ptr_in_queue_int4_array[0] = channel_x_buffers.buffer() + token_idx_in_queue * hidden_int4;
+
+        // for the 2nd group if exists
+        if constexpr (is_2nd_group_exists) {
+          token_ptr_in_recv_x_int4_array[1] = recv_x_2nd + token_idx_in_recv_x * hidden_int4;
+          token_ptr_in_queue_int4_array[1] = channel_x_buffers_2nd.buffer() + token_idx_in_queue * hidden_int4;
+        }
 
         // Copy this token from recv queue to recv buffer
 #ifndef DISABLE_SM90_FEATURES
 #pragma unroll
         // TMA-copy
-        for (int i = 0; i < kNumTMAStages; ++i) // multiple TMA stages
-          if (lane_id == 0) { // the lane0 in this warp issues the TMA
-            // Wait for all previous TMA stores to be finished
-            // REVIEW: can we use multiple buffers for multiple stages ?
-            tma_store_wait();
+        for (int i = 0; i < kNumDataGroups; ++i) {
+          auto token_ptr_in_recv_x_int4 = token_ptr_in_recv_x_int4_array[i];
+          auto token_ptr_in_queue_int4 = token_ptr_in_queue_int4_array[i];
 
-            // Load the token from recv queue to shared memory
-            tma_load_1d(
-                /*smem_ptr=*/tma_buffer,
-                /*gmem_ptr=*/token_ptr_in_queue_int4 + i * hidden_int4_per_stage,
-                /*mbar_ptr=*/tma_mbarrier,
-                /*num_bytes=*/hidden_bytes_per_stage,
-                /*evict_first=*/true // evict the read-once token in recv queue first from L2 cache
-            );
+#pragma unroll
+          // multiple TMA stages
+          for (int j = 0; j < kNumTMAStages; ++j) {
+            if (lane_id == 0) { // only the lane0 in this warp issues the TMA
+              // Wait for all previous TMA stores to be finished
+              // REVIEW: can we use multiple buffers for multiple stages ?
+              tma_store_wait();
 
-            // Barrier the last load above to be finished before the next store below
-            // NOTES: TMA stage will be inplace updated
-            mbarrier_arrive_and_expect_tx(/*mbar_ptr=*/tma_mbarrier, /*num_bytes=*/hidden_bytes_per_stage);
-            mbarrier_wait(/*mbar_ptr=*/tma_mbarrier, /*stage=*/tma_stage, /*num_tma_stages=*/kNumTMAStages);
+              // Load the token from recv queue to shared memory
+              tma_load_1d(
+                  /*smem_ptr=*/tma_buffer,
+                  /*gmem_ptr=*/token_ptr_in_queue_int4 + j * hidden_int4_per_stage,
+                  /*mbar_ptr=*/tma_mbarrier,
+                  /*num_bytes=*/hidden_bytes_per_stage,
+                  /*evict_first=*/true // evict the read-once token in recv queue first from L2 cache
+              );
 
-            // Store the token from shared memory to recv buffer
-            tma_store_1d(
-                /*smem_ptr=*/tma_buffer,
-                /*gmem_ptr=*/token_ptr_in_recv_x_int4 + i * hidden_int4_per_stage,
-                /*num_bytes=*/hidden_bytes_per_stage,
-                /*evict_first=*/false);
+              // Barrier the last load above to be finished before the next store below
+              // NOTES: TMA stage will be inplace updated
+              mbarrier_arrive_and_expect_tx(/*mbar_ptr=*/tma_mbarrier, /*num_bytes=*/hidden_bytes_per_stage);
+              mbarrier_wait(/*mbar_ptr=*/tma_mbarrier, /*stage=*/tma_stage, /*num_tma_stages=*/kNumTMAStages);
+
+              // Store the token from shared memory to recv buffer
+              tma_store_1d(
+                  /*smem_ptr=*/tma_buffer,
+                  /*gmem_ptr=*/token_ptr_in_recv_x_int4 + j * hidden_int4_per_stage,
+                  /*num_bytes=*/hidden_bytes_per_stage,
+                  /*evict_first=*/false);
+            }
           }
+        }
         __syncwarp();
 #else
+#pragma unroll
         // Warp-copy
-        UNROLLED_WARP_COPY(
-            /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
-            /*LANE_ID=*/lane_id,
-            /*N=*/hidden_int4,
-            /*DST=*/token_ptr_in_recv_x_int4,
-            /*SRC=*/token_ptr_in_queue_int4,
-            /*LD_FUNC=*/ld_nc_global, // non-cached load
-            /*ST_FUNC=*/st_na_global // non-cached store
-        );
+        for (int i = 0; i < kNumDataGroups; ++i) {
+          auto token_ptr_in_recv_x_int4 = token_ptr_in_recv_x_int4_array[i];
+          auto token_ptr_in_queue_int4 = token_ptr_in_queue_int4_array[i];
+
+          UNROLLED_WARP_COPY(
+              /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
+              /*LANE_ID=*/lane_id,
+              /*N=*/hidden_int4,
+              /*DST=*/token_ptr_in_recv_x_int4,
+              /*SRC=*/token_ptr_in_queue_int4,
+              /*LD_FUNC=*/ld_nc_global, // non-cached load
+              /*ST_FUNC=*/st_na_global // non-cached store
+          );
+        }
 #endif
       }
 
@@ -620,12 +675,17 @@ void group_cast_kernel(
   }
 }
 
-template <int kNumRanks, int kNumWarps>
+template <int kNumDataGroups, int kNumRanks, int kNumWarps>
 void launch_group_cast(
+    /* 1st group of input / output data*/
     void* recv_x,
     float* recv_lse,
     const void* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    void* recv_x_2nd,
+    const void* x_2nd,
+    /* other metadata */
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
@@ -653,30 +713,36 @@ void launch_group_cast(
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
-#define GROUP_CAST_LAUNCH_CASE(cast_lse)                                                                                          \
-  {                                                                                                                               \
-    auto kernel = group_cast_kernel<kNumRanks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp, cast_lse>; \
-    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                                                            \
-    LAUNCH_KERNEL(                                                                                                                \
-        &cfg,                                                                                                                     \
-        kernel,                                                                                                                   \
-        reinterpret_cast<int4*>(recv_x),                                                                                          \
-        recv_lse,                                                                                                                 \
-        reinterpret_cast<const int4*>(x),                                                                                         \
-        lse,                                                                                                                      \
-        recv_src_idx,                                                                                                             \
-        recv_channel_offset,                                                                                                      \
-        send_head,                                                                                                                \
-        post_perm_idx,                                                                                                            \
-        is_token_in_rank,                                                                                                         \
-        channel_prefix_matrix,                                                                                                    \
-        num_tokens,                                                                                                               \
-        hidden_int4,                                                                                                              \
-        num_heads,                                                                                                                \
-        buffer_ptrs,                                                                                                              \
-        rank,                                                                                                                     \
-        num_max_send_tokens,                                                                                                      \
-        num_recv_buffer_tokens);                                                                                                  \
+  GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 3, "Invalid kNumDataGroups");
+  if constexpr (kNumDataGroups > 1)
+    GRPCOLL_HOST_ASSERT(recv_x_2nd != nullptr && x_2nd != nullptr);
+
+#define GROUP_CAST_LAUNCH_CASE(cast_lse)                                                                                                          \
+  {                                                                                                                                               \
+    auto kernel = group_cast_kernel<kNumDataGroups, kNumRanks, kNumThreads, kWarpCopyUnrollStages, kNumTMAStages, kNumTMABytesPerWarp, cast_lse>; \
+    SET_SHARED_MEMORY_FOR_TMA(kernel);                                                                                                            \
+    LAUNCH_KERNEL(                                                                                                                                \
+        &cfg,                                                                                                                                     \
+        kernel,                                                                                                                                   \
+        reinterpret_cast<int4*>(recv_x),                                                                                                          \
+        recv_lse,                                                                                                                                 \
+        reinterpret_cast<const int4*>(x),                                                                                                         \
+        lse,                                                                                                                                      \
+        reinterpret_cast<int4*>(recv_x_2nd),                                                                                                      \
+        reinterpret_cast<const int4*>(x_2nd),                                                                                                     \
+        recv_src_idx,                                                                                                                             \
+        recv_channel_offset,                                                                                                                      \
+        send_head,                                                                                                                                \
+        post_perm_idx,                                                                                                                            \
+        is_token_in_rank,                                                                                                                         \
+        channel_prefix_matrix,                                                                                                                    \
+        num_tokens,                                                                                                                               \
+        hidden_int4,                                                                                                                              \
+        num_heads,                                                                                                                                \
+        buffer_ptrs,                                                                                                                              \
+        rank,                                                                                                                                     \
+        num_max_send_tokens,                                                                                                                      \
+        num_recv_buffer_tokens);                                                                                                                  \
   }
 
 #define GROUP_CAST_CAST_LSE_LAUNCH_CASE \
@@ -698,10 +764,15 @@ void launch_group_cast(
 }
 
 void group_cast(
+    /* 1st group of input / output data*/
     void* recv_x,
     float* recv_lse,
     const void* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    void* recv_x_2nd,
+    const void* x_2nd,
+    /* other metadata */
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
@@ -711,6 +782,7 @@ void group_cast(
     int num_tokens,
     int hidden_int4,
     int num_heads,
+    int num_groups,
     void** buffer_ptrs,
     int rank,
     int num_ranks,
@@ -718,33 +790,42 @@ void group_cast(
     int num_sms,
     int num_max_send_tokens,
     int num_recv_buffer_tokens) {
-#define LAUNCH_INTRANODE_GROUP_CAST(num_ranks, num_warps) \
-  {                                                       \
-    launch_group_cast<num_ranks, num_warps>(              \
-        recv_x,                                           \
-        recv_lse,                                         \
-        x,                                                \
-        lse,                                              \
-        recv_src_idx,                                     \
-        recv_channel_offset,                              \
-        send_head,                                        \
-        post_perm_idx,                                    \
-        is_token_in_rank,                                 \
-        channel_prefix_matrix,                            \
-        num_tokens,                                       \
-        hidden_int4,                                      \
-        num_heads,                                        \
-        buffer_ptrs,                                      \
-        rank,                                             \
-        stream,                                           \
-        num_sms,                                          \
-        num_max_send_tokens,                              \
-        num_recv_buffer_tokens);                          \
-  }                                                       \
+#define LAUNCH_INTRANODE_GROUP_CAST(num_groups, num_ranks, num_warps) \
+  {                                                                   \
+    launch_group_cast<num_groups, num_ranks, num_warps>(              \
+        recv_x,                                                       \
+        recv_lse,                                                     \
+        x,                                                            \
+        lse,                                                          \
+        recv_x_2nd,                                                   \
+        x_2nd,                                                        \
+        recv_src_idx,                                                 \
+        recv_channel_offset,                                          \
+        send_head,                                                    \
+        post_perm_idx,                                                \
+        is_token_in_rank,                                             \
+        channel_prefix_matrix,                                        \
+        num_tokens,                                                   \
+        hidden_int4,                                                  \
+        num_heads,                                                    \
+        buffer_ptrs,                                                  \
+        rank,                                                         \
+        stream,                                                       \
+        num_sms,                                                      \
+        num_max_send_tokens,                                          \
+        num_recv_buffer_tokens);                                      \
+  }                                                                   \
   break
 
-  SWITCH_RANKS_WITH_WARPS(LAUNCH_INTRANODE_GROUP_CAST);
+#define GROUP_CAST_DATA_GROUPS_LAUNCH_CASE(...)                     \
+  {                                                                 \
+    SWITCH_DATA_GROUPS(LAUNCH_INTRANODE_GROUP_CAST, ##__VA_ARGS__); \
+  }                                                                 \
+  break
 
+  SWITCH_RANKS_WITH_WARPS(GROUP_CAST_DATA_GROUPS_LAUNCH_CASE);
+
+#undef GROUP_CAST_DATA_GROUPS_LAUNCH_CASE
 #undef LAUNCH_INTRANODE_GROUP_CAST
 }
 
@@ -839,10 +920,12 @@ template <
     bool kAccReduce>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
 void group_reduce_kernel(
+    /* input / output data */
     dtype_t* reduced_x,
     float* reduced_lse,
     const dtype_t* x,
     const float* lse,
+    /* other metadata */
     const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,
@@ -1384,10 +1467,12 @@ void group_reduce_kernel(
 
 template <typename dtype_t, typename comm_dtype_t, typename reduce_dtype_t, int kNumRanks, int kNumWarps, bool kAccReduce>
 void launch_group_reduce(
+    /* input / output data */
     void* reduced_x,
     float* reduced_lse,
     const void* x,
     const float* lse,
+    /* other metadata */
     const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,
@@ -1472,10 +1557,12 @@ void launch_group_reduce(
 }
 
 void group_reduce(
+    /* input / output data */
     void* reduced_x,
     float* reduced_lse,
     const void* x,
     const float* lse,
+    /* other metadata */
     const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,

@@ -18,7 +18,7 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.common.enum import GroupReduceOp
-from magi_attention.utils import nvtx
+from magi_attention.utils import nvtx, wrap_to_list
 
 from ...work import GeneralWork, WorkWithPostProcessFn
 from ._buffer import GrpCollBuffer
@@ -103,10 +103,17 @@ def native_group_cast_impl(
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
     assert config is not None and buffer is not None
 
+    # pack input and output
+    input: list[torch.Tensor] = wrap_to_list(input)
+    output: list[torch.Tensor] | None = (
+        wrap_to_list(output) if output is not None else output
+    )
+    num_groups = len(input)
+
     # get meta dict and handle
-    input_seqlen: int = input.size(0)
+    input_seqlen: int = input[0].size(0)
     output_seqlen: int | None = (
-        output.size(0) if output is not None else kwargs.pop("output_seqlen", None)
+        output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
     meta_dict: dict[str, Any] = kwargs.pop("native_group_cast_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
@@ -164,6 +171,10 @@ def native_group_cast_impl(
         lse=input_lse,
         recv_lse=output_lse,
     )
+
+    # unpack recv_x
+    if num_groups == 1:
+        recv_x = recv_x[0]
 
     # HACK: prepare handle for symmetric group-reduce or cached group-cast
     handle_dict["group_cast"] = handle

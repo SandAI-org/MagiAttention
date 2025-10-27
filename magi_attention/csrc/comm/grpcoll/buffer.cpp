@@ -312,7 +312,10 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::opti
 }
 
 std::tuple<
+    /* 1st group of output data */
     torch::Tensor,
+    std::optional<torch::Tensor>,
+    /* 2nd group of output data */
     std::optional<torch::Tensor>,
     /* handle */
     torch::Tensor,
@@ -323,10 +326,15 @@ std::tuple<
     /* event */
     std::optional<EventHandle>>
 Buffer::intranode_group_cast(
+    /* 1st group of input / output data*/
     const torch::Tensor& x,
     std::optional<torch::Tensor>& recv_x_buf,
     const std::optional<torch::Tensor>& lse,
     std::optional<torch::Tensor>& recv_lse_buf,
+    /* 2nd group of input / output data*/
+    const std::optional<torch::Tensor>& x_2nd,
+    std::optional<torch::Tensor>& recv_x_buf_2nd,
+    /* other metadata */
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const torch::Tensor& is_token_in_rank,
     int cached_num_recv_tokens,
@@ -339,6 +347,12 @@ Buffer::intranode_group_cast(
     bool allocate_on_comm_stream) {
   // Determine if we are using chunked mode
   bool cached_mode = cached_rank_prefix_matrix.has_value();
+
+  // Get the number of data groups
+  int num_groups = 1;
+  if (x_2nd.has_value())
+    ++num_groups;
+  GRPCOLL_HOST_ASSERT(num_groups <= 3);
 
   // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
   GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
@@ -361,7 +375,11 @@ Buffer::intranode_group_cast(
 
   // Shape and contiguous checks
   GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
-  GRPCOLL_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0); // NOTES: hidden size should be aligned with int4
+  GRPCOLL_HOST_ASSERT((x.size(1) * x.element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
+  if (num_groups > 1) {
+    GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous());
+    GRPCOLL_HOST_ASSERT((x_2nd->size(1) * x_2nd->element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
+  }
   GRPCOLL_HOST_ASSERT(is_token_in_rank.dim() == 2 and is_token_in_rank.is_contiguous());
   GRPCOLL_HOST_ASSERT(is_token_in_rank.size(0) == x.size(0) and is_token_in_rank.size(1) == num_ranks);
   if (cached_mode) {
@@ -375,7 +393,6 @@ Buffer::intranode_group_cast(
   }
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
-  GRPCOLL_HOST_ASSERT((hidden_size * x.element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
   auto hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
 
   // LSE checks
@@ -387,10 +404,10 @@ Buffer::intranode_group_cast(
     GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens);
     GRPCOLL_HOST_ASSERT(hidden_size % lse->size(1) == 0); // hidden size should be divisible by num_heads
     num_heads = static_cast<int>(lse->size(1));
-    lse_ptr = static_cast<float*>(lse->data_ptr());
+    lse_ptr = lse->data_ptr<float>();
   }
 
-  // Allocate all tensors on comm stream if set
+  // Set current stream to comm stream if needed
   // NOTES: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
@@ -483,21 +500,40 @@ Buffer::intranode_group_cast(
     recv_x = torch::empty({num_recv_tokens, hidden_size}, x.options());
   }
 
-  // Allocate new tensors
+  // Allocate 2nd recv_x buffer and assign the ptr if needed
+  auto recv_x_2nd = std::optional<torch::Tensor>();
+  void *x_ptr_2nd = nullptr, *recv_x_ptr_2nd = nullptr;
+  if (num_groups > 1) {
+    if (recv_x_buf_2nd.has_value()) {
+      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->dim() == 2 && recv_x_buf_2nd->is_contiguous());
+      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->scalar_type() == x_2nd->scalar_type());
+      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->size(0) == num_recv_tokens && recv_x_buf_2nd->size(1) == hidden_size);
+      recv_x_2nd.emplace(recv_x_buf_2nd.value());
+    } else {
+      recv_x_2nd = torch::empty({num_recv_tokens, hidden_size}, x.options());
+    }
+
+    x_ptr_2nd = x_2nd->data_ptr();
+    recv_x_ptr_2nd = recv_x_2nd->data_ptr();
+  }
+
+  // Allocate metadata tensors
   auto recv_lse = std::optional<torch::Tensor>();
   auto recv_src_idx = torch::empty({num_recv_tokens}, dtype(torch::kInt32).device(torch::kCUDA));
   auto recv_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
   auto send_head = torch::empty({num_tokens, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
-  // Assign pointers
+  // Assign ptr for post_perm_idx if needed
   int64_t* post_perm_idx_ptr = nullptr;
-  float* recv_lse_ptr = nullptr;
   if (post_perm_idx.has_value()) {
     GRPCOLL_HOST_ASSERT(post_perm_idx->scalar_type() == torch::kInt64);
     GRPCOLL_HOST_ASSERT(post_perm_idx->dim() == 1);
     GRPCOLL_HOST_ASSERT(post_perm_idx->size(0) == num_recv_tokens);
     post_perm_idx_ptr = post_perm_idx->data_ptr<int64_t>();
   }
+
+  // Allocate recv_lse buffer and assign the ptr if needed
+  float* recv_lse_ptr = nullptr;
   if (lse.has_value()) {
     if (recv_lse_buf.has_value()) {
       GRPCOLL_HOST_ASSERT(recv_lse_buf->dim() == 2 && recv_lse_buf->is_contiguous());
@@ -507,14 +543,14 @@ Buffer::intranode_group_cast(
     } else {
       recv_lse = torch::empty({num_recv_tokens, num_heads}, lse->options());
     }
-    recv_lse_ptr = static_cast<float*>(recv_lse->data_ptr());
+    recv_lse_ptr = recv_lse->data_ptr<float>();
   }
 
   // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT(
       num_ranks * num_ranks * sizeof(int) + // rank prefix matrix
           num_channels * num_ranks * sizeof(int) * 4 + // channel start/end offset + queue head/tail
-          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * recv_x.element_size() + // data buffer
+          num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * recv_x.element_size() * num_groups + // data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) + // lse buffer
           sizeof(int4) // max padding bytes to align for vectorized data buffer
@@ -537,6 +573,8 @@ Buffer::intranode_group_cast(
       /*recv_lse=*/recv_lse_ptr,
       /*x=*/x.data_ptr(),
       /*lse=*/lse_ptr,
+      /*recv_x_2nd=*/recv_x_ptr_2nd,
+      /*x_2nd=*/x_ptr_2nd,
       /*recv_src_idx=*/recv_src_idx.data_ptr<int>(),
       /*recv_channel_offset=*/recv_channel_prefix_matrix.data_ptr<int>(),
       /*send_head=*/send_head.data_ptr<int>(),
@@ -546,6 +584,7 @@ Buffer::intranode_group_cast(
       /*num_tokens=*/num_tokens,
       /*hidden_int4=*/hidden_int4,
       /*num_heads=*/num_heads,
+      /*num_groups=*/num_groups,
       /*buffer_ptrs=*/buffer_ptrs_gpu,
       /*rank=*/rank,
       /*num_ranks=*/num_ranks,
@@ -565,7 +604,7 @@ Buffer::intranode_group_cast(
         t.record_stream(compute_stream);
     }
     // record optional tensors
-    for (auto& to : {lse, recv_lse, num_tokens_per_rank, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
+    for (auto& to : {x_2nd, recv_x_2nd, lse, recv_lse, num_tokens_per_rank, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
@@ -574,19 +613,27 @@ Buffer::intranode_group_cast(
     stream_wait(compute_stream, comm_stream);
   }
 
-  // Switch back compute stream
+  // Switch back current stream to compute stream if needed
   if (allocate_on_comm_stream)
     at::cuda::setCurrentCUDAStream(compute_stream);
 
   // Return values
-  return {recv_x, recv_lse, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event};
+  return {recv_x, recv_lse, recv_x_2nd, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event};
 }
 
-std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> Buffer::intranode_group_reduce(
+std::tuple<
+    /* output data */
+    torch::Tensor,
+    std::optional<torch::Tensor>,
+    /* event */
+    std::optional<EventHandle>>
+Buffer::intranode_group_reduce(
+    /* input / output data */
     const torch::Tensor& x,
     std::optional<torch::Tensor>& reduced_x_buf,
     const std::optional<torch::Tensor>& lse,
     std::optional<torch::Tensor>& reduced_lse_buf,
+    /* other metadata */
     const std::optional<torch::Tensor>& pre_perm_idx,
     const torch::Tensor& src_idx,
     const torch::Tensor& rank_prefix_matrix,
@@ -628,7 +675,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
   GRPCOLL_HOST_ASSERT((hidden_size * comm_elem_size) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
   GRPCOLL_HOST_ASSERT(((hidden_size * comm_elem_size) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
 
-  // Allocate all tensors on comm stream if set
+  // Set current stream to comm stream if needed
   // NOTES: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
@@ -786,7 +833,7 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandl
     stream_wait(compute_stream, comm_stream);
   }
 
-  // Switch back compute stream
+  // Switch back current stream to compute stream if needed
   if (allocate_on_comm_stream)
     at::cuda::setCurrentCUDAStream(compute_stream);
 
@@ -918,7 +965,7 @@ Buffer::internode_group_cast(
     scale_hidden_stride = static_cast<int>(x_scales->stride(1));
   }
 
-  // Allocate all tensors on comm stream if set
+  // Set current stream to comm stream if needed
   // NOTES: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
@@ -1065,7 +1112,7 @@ Buffer::internode_group_cast(
     send_nvl_head = torch::empty({num_rdma_recv_tokens, NUM_MAX_NVL_PEERS}, dtype(torch::kInt32).device(torch::kCUDA));
   }
 
-  // Assign pointers
+  // Assign ptrs
   int64_t* recv_topk_idx_ptr = nullptr;
   float* recv_topk_weights_ptr = nullptr;
   float* recv_x_scales_ptr = nullptr;
@@ -1156,7 +1203,7 @@ Buffer::internode_group_cast(
     stream_wait(compute_stream, comm_stream);
   }
 
-  // Switch back compute stream
+  // Switch back current stream to compute stream if needed
   if (allocate_on_comm_stream)
     at::cuda::setCurrentCUDAStream(compute_stream);
 
@@ -1233,7 +1280,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   GRPCOLL_HOST_ASSERT(combined_rdma_head.dim() == 2 and combined_rdma_head.size(0) == num_combined_tokens and combined_rdma_head.size(1) == num_rdma_ranks);
   GRPCOLL_HOST_ASSERT(combined_nvl_head.dim() == 2 and combined_nvl_head.size(1) == NUM_MAX_NVL_PEERS);
 
-  // Allocate all tensors on comm stream if set
+  // Set current stream to comm stream if needed
   // NOTES: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
@@ -1292,7 +1339,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       false,
       low_latency_mode);
 
-  // Assign bias pointers
+  // Assign bias ptrs
   auto bias_opts = std::vector<std::optional<torch::Tensor>>({bias_0, bias_1});
   void* bias_ptrs[2] = {nullptr, nullptr};
   for (int i = 0; i < 2; ++i)
@@ -1384,7 +1431,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     stream_wait(compute_stream, comm_stream);
   }
 
-  // Switch back compute stream
+  // Switch back current stream to compute stream if needed
   if (allocate_on_comm_stream)
     at::cuda::setCurrentCUDAStream(compute_stream);
 

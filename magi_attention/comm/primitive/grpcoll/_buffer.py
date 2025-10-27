@@ -34,6 +34,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+# mypy: disable-error-code="union-attr"
 import math
 import os
 from typing import Callable
@@ -42,6 +43,7 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.common.enum import GroupReduceOp
+from magi_attention.utils import wrap_to_list
 
 from ._config import GrpCollConfig
 from ._event import EventHandle, EventOverlap
@@ -380,8 +382,8 @@ class GrpCollBuffer:
 
     def group_cast(
         self,
-        x: torch.Tensor,
-        recv_x: torch.Tensor | None = None,
+        x: torch.Tensor | list[torch.Tensor],
+        recv_x: torch.Tensor | list[torch.Tensor] | None = None,
         handle: GrpCollHandle | None = None,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
@@ -394,7 +396,9 @@ class GrpCollBuffer:
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, GrpCollIntraHandle, EventOverlap]:
+    ) -> tuple[
+        list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
+    ]:
         """
         Group cast tokens to different ranks, both intranode and internode settings are supported.
         Intranode kernels require all the ranks should be visible via NVLink.
@@ -402,8 +406,9 @@ class GrpCollBuffer:
             index should be visible via RDMA.
 
         Arguments:
-            x: `torch.Tensor` or tuple of `torch.Tensor`
-            recv_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
+            x: groups of tokens in a list of tensors to be sent simultaneously.
+            recv_x: received tokens buffer to return, if given,
+                or `None` to allocate a new buffer to return for each group of `x`.
             handle: an optional communication handle, if set, the CPU will reuse the layout information to save some time.
             num_tokens_per_rank: `[num_ranks]` with `torch.int`, the number of tokens to be sent to each rank.
             num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
@@ -428,20 +433,33 @@ class GrpCollBuffer:
                 when `cast_lse` is `True`.
 
         Returns:
-            recv_x: received tokens, the same type and tuple as the input `x`, but the number of tokens equals to the
-                received token count.
+            recv_x: received tokens for each group,
+                with the same type and number of groups as the input group `x`,
+                while the number of tokens equals to the received token count.
             handle: the returned communication handle.
             event: the event after executing the kernel (valid only if `async_op` is set).
         """
         is_out_buf_given = recv_x is not None
 
-        hidden_shape = x.shape[1:]
+        x = wrap_to_list(x)
+        num_groups = len(x)
+        if is_out_buf_given:
+            assert recv_x is not None  # mypy
+            recv_x = wrap_to_list(recv_x)
+            assert len(recv_x) == len(x), (
+                "The number of groups of input and output buffer should be the same, "
+                f"but got {len(x)=}, {len(recv_x)=}."
+            )
+
+        hidden_shape = x[0].shape[1:]
         hidden_size = math.prod(hidden_shape)
         if is_out_buf_given:
-            assert recv_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
-                "The hidden shape (except dim0) of input and output buffer should be the same, "
-                f"but got {x.shape=}, {recv_x.shape=}."  # type: ignore[union-attr]
-            )
+            assert recv_x is not None  # mypy
+            for i in range(num_groups):
+                assert recv_x[i].shape[1:] == hidden_shape, (
+                    "The hidden shape (except dim0) of input and output buffer should be the same, "
+                    f"but got {x[i].shape=}, {recv_x[i].shape=}."
+                )
 
         # Default config
         config = (
@@ -451,9 +469,12 @@ class GrpCollBuffer:
         )
 
         # View input/output to 2D shape
-        x = x.view(-1, hidden_size)
+        for i in range(num_groups):
+            x[i] = x[i].view(-1, hidden_size)
         if is_out_buf_given:
-            recv_x = recv_x.view(-1, hidden_size)  # type: ignore[union-attr]
+            assert recv_x is not None  # mypy
+            for i in range(num_groups):
+                recv_x[i] = recv_x[i].view(-1, hidden_size)
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
@@ -550,9 +571,9 @@ class GrpCollBuffer:
         hidden_shape = x.shape[1:]
         hidden_size = math.prod(hidden_shape)
         if is_out_buf_given:
-            assert reduced_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
+            assert reduced_x.shape[1:] == hidden_shape, (
                 "The hidden shape (except dim0) of input and output buffer should be the same, "
-                f"but got {x.shape=}, {reduced_x.shape=}."  # type: ignore[union-attr]
+                f"but got {x.shape=}, {reduced_x.shape=}."
             )
 
         # Default config
@@ -565,7 +586,7 @@ class GrpCollBuffer:
         # View input/output to 2D shape
         x = x.view(-1, hidden_size)
         if is_out_buf_given:
-            reduced_x = reduced_x.view(-1, hidden_size)  # type: ignore[union-attr]
+            reduced_x = reduced_x.view(-1, hidden_size)
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
@@ -606,8 +627,8 @@ class GrpCollBuffer:
 
     def _intranode_group_cast(
         self,
-        x: torch.Tensor,
-        recv_x: torch.Tensor | None,
+        x: list[torch.Tensor],
+        recv_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
@@ -620,9 +641,12 @@ class GrpCollBuffer:
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, GrpCollIntraHandle, EventOverlap]:
+    ) -> tuple[
+        list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
+    ]:
         """Intranode group cast implementation"""
 
+        # Unpack handle if given
         is_handle_given = handle is not None
         if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollIntraHandle)
@@ -637,16 +661,30 @@ class GrpCollBuffer:
             rank_prefix_matrix = None
             channel_prefix_matrix = None
 
+        # Prepare lse and recv_lse
         if cast_lse:
             assert lse is not None, "lse should not be None when `cast_lse` is set"
         else:  # no need to cast lse, even passed in
             lse = None
             recv_lse = None
 
+        # Unpack (x,recv_x) groups
+        num_groups = len(x)
+        assert 1 <= num_groups <= 3, "num_groups only supports {1,2,3}"
+        x_1st = x[0]
+        recv_x_1st = recv_x[0] if recv_x is not None else None
+        if num_groups > 1:
+            x_2nd = x[1]
+            recv_x_2nd = recv_x[1] if recv_x is not None else None
+        else:
+            x_2nd = None
+            recv_x_2nd = None
+
         # Launch the intranode group cast kernel
         (
-            recv_x,
+            recv_x_1st,
             recv_lse,
+            recv_x_2nd,
             # handle
             rank_prefix_matrix,
             channel_prefix_matrix,
@@ -656,10 +694,12 @@ class GrpCollBuffer:
             # event
             event,
         ) = self.runtime.intranode_group_cast(
-            x,
-            recv_x,
+            x_1st,
+            recv_x_1st,
             lse,
             recv_lse,
+            x_2nd,
+            recv_x_2nd,
             num_tokens_per_rank,
             is_token_in_rank,
             num_recv_tokens,
@@ -683,8 +723,16 @@ class GrpCollBuffer:
                 send_head=send_head,
             )
 
+        # Pack recv_x groups
+        recv_x = [
+            recv_x_1st,
+        ]
+        if num_groups > 1:
+            recv_x.append(recv_x_2nd)
+
         # View output to hidden shape
-        recv_x = recv_x.view(-1, *hidden_shape)
+        for i in range(num_groups):
+            recv_x[i] = recv_x[i].view(-1, *hidden_shape)
 
         return (
             recv_x,
@@ -751,8 +799,8 @@ class GrpCollBuffer:
 
     def _internode_group_cast(
         self,
-        x: torch.Tensor,
-        recv_x: torch.Tensor | None,
+        x: list[torch.Tensor],
+        recv_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
@@ -767,7 +815,9 @@ class GrpCollBuffer:
         cast_lse: bool = False,
         lse: torch.Tensor | None = None,
         recv_lse: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, GrpCollIntraHandle, EventOverlap]:
+    ) -> tuple[
+        list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
+    ]:
         """Internode group cast implementation"""
 
         # TODO: support lse for internode group cast
@@ -775,12 +825,7 @@ class GrpCollBuffer:
         # TODO: support post-perm for internode group cast
         assert post_perm_idx is None
 
-        if cast_lse:
-            assert lse is not None, "lse should not be None when `cast_lse` is set"  # type: ignore[unreachable]
-        else:  # no need to cast lse, even passed in
-            lse = None
-            # recv_lse = None
-
+        # Unpack handle if given
         is_handle_given = handle is not None
         if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollInterHandle)
@@ -807,9 +852,22 @@ class GrpCollBuffer:
             gbl_channel_prefix_matrix = None
             recv_gbl_rank_prefix_sum = None
 
+        # Prepare lse and recv_lse
+        if cast_lse:
+            assert lse is not None, "lse should not be None when `cast_lse` is set"  # type: ignore[unreachable]
+        else:  # no need to cast lse, even passed in
+            lse = None
+            # recv_lse = None
+
+        # Unpack (x,recv_x) groups
+        num_groups = len(x)
+        assert num_groups == 1, "num_groups only supports {1,}"
+        x_1st = x[0]
+        recv_x_1st = recv_x[0] if recv_x is not None else None
+
         # Launch the internode group cast kernel
         (
-            recv_x,
+            recv_x_1st,
             # handle
             rdma_channel_prefix_matrix,
             gbl_channel_prefix_matrix,
@@ -823,8 +881,8 @@ class GrpCollBuffer:
             # event
             event,
         ) = self.runtime.internode_group_cast(
-            x,
-            recv_x,
+            x_1st,
+            recv_x_1st,
             None,  # x_scales
             None,  # topk_idx
             None,  # topk_weights
@@ -859,8 +917,14 @@ class GrpCollBuffer:
                 send_nvl_head=send_nvl_head,
             )
 
+        # Pack recv_x groups
+        recv_x = [
+            recv_x_1st,
+        ]
+
         # View output to hidden shape
-        recv_x = recv_x.view(-1, *hidden_shape)
+        for i in range(num_groups):
+            recv_x[i] = recv_x[i].view(-1, *hidden_shape)
 
         return (
             recv_x,

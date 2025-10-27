@@ -592,6 +592,7 @@ def test_func(
         handle,
         event,
     ) = buffer.group_cast(**group_cast_args)
+    recv_x = recv_x[0]
 
     # wait
     event.current_stream_wait() if async_mode else ()
@@ -747,6 +748,9 @@ def test_func(
         _,  # handle
         event,
     ) = buffer.group_cast(**cached_group_cast_args)
+    recv_cached_x = recv_cached_x[0]
+
+    # wait
     event.current_stream_wait() if async_mode else ()
 
     # check recv_cache_x
@@ -1112,6 +1116,10 @@ def test_main(
 
     # --------------      tune group_cast       -------------- #
 
+    # sync before tuning
+    torch.cuda.synchronize()
+    dist.barrier()
+
     if local_rank == 0:
         print(
             "\n# ------    Tune Intranode Group Cast   ------ #\n",
@@ -1187,11 +1195,14 @@ def test_main(
         _,  # recv_lse
         handle,
         _,  # event
-    ) = buffer.group_cast(
-        **group_cast_args
-    )  # type: ignore[assignment]
+    ) = buffer.group_cast(**group_cast_args)
+    recv_x = recv_x[0]
 
     # --------------      tune group_reduce       -------------- #
+
+    # sync before tuning
+    torch.cuda.synchronize()
+    dist.barrier()
 
     if local_rank == 0:
         print(

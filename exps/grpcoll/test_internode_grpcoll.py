@@ -487,6 +487,7 @@ def test_main(
                     handle,
                     event,
                 ) = buffer.group_cast(**group_cast_args)
+                recv_x = recv_x[0]
 
                 # wait
                 event.current_stream_wait() if async_mode else ()
@@ -583,12 +584,10 @@ def test_main(
                     _,  # handle
                     event,
                 ) = buffer.group_cast(**group_cast_args)
+                recv_cached_x = recv_cached_x[0]
+
+                # wait
                 event.current_stream_wait() if async_mode else ()
-                recv_cached_x = (
-                    per_token_cast_back(*recv_cached_x)
-                    if isinstance(recv_cached_x, tuple)
-                    else recv_cached_x
-                )
                 if current_x is not x_pure_rand:
                     check_data(recv_cached_x, recv_gbl_rank_prefix_sum)
 
@@ -800,9 +799,12 @@ def test_main(
         _,  # recv_lse
         handle,
         _,  # event
-    ) = buffer.group_cast(
-        **group_cast_args
-    )  # type: ignore[assignment]
+    ) = buffer.group_cast(**group_cast_args)
+    recv_x = recv_x[0]
+
+    # sync before tuning
+    torch.cuda.synchronize()
+    dist.barrier()
 
     # Tune group_reduce performance
     best_time, best_results = 1e10, None

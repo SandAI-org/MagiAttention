@@ -271,3 +271,16 @@ using namespace magi_attn_comm::grpcoll;
       GRPCOLL_HOST_ASSERT(false and "Unsupported hidden size"); \
   }                                                             \
   while (false)
+
+#define SWITCH_DATA_GROUPS(case_macro, ...)                    \
+  switch (num_groups) {                                        \
+    case 1:                                                    \
+      case_macro(1, ##__VA_ARGS__);                            \
+    case 2:                                                    \
+      case_macro(2, ##__VA_ARGS__);                            \
+    case 3:                                                    \
+      case_macro(3, ##__VA_ARGS__);                            \
+    default:                                                   \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported num_groups"); \
+  }                                                            \
+  while (false)

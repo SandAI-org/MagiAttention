@@ -1249,8 +1249,6 @@ class DistAttnRuntime:
         Maybe concatenate k, v tensors
         into a fused or tupled kv along the seqlen dim
         """
-        # TODO: whether can we pack kv togather along certain dim
-        # to enhance the performance of ffa kernel
         return torch.cat([k, v], dim=0) if self.concat_kv else (k, v)
 
     def _maybe_chunk_kv(
@@ -1273,8 +1271,6 @@ class DistAttnRuntime:
         Maybe concatenate q, o, do tensors
         into a fused or tupled qo_do along the seqlen dim
         """
-        # TODO: whether can we pack q, o, do togather along certain dim
-        # to enhance the performance of ffa kernel
         return torch.cat([q, o, do], dim=0) if self.concat_qo_do else (q, o, do)
 
     def _maybe_chunk_qo_do(

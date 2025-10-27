@@ -139,6 +139,7 @@ class GrpCollConfig:
         dtype: torch.dtype,
         transfer_lse: bool = False,
         num_heads: int | None = None,
+        num_groups: int = 1,
     ) -> int:
         if transfer_lse:
             assert (
@@ -160,7 +161,7 @@ class GrpCollConfig:
             # channel start/end offset + queue head/tail
             + num_channels * num_ranks * torch.int32.itemsize * 4
             # token data buffer
-            + num_channels * num_ranks * nvl_buffer_size * hidden_size * dtype.itemsize
+            + num_channels * num_ranks * nvl_buffer_size * hidden_size * dtype.itemsize * num_groups
             # src idx
             + num_channels * num_ranks * nvl_buffer_size * torch.int32.itemsize
             # lse data buffer

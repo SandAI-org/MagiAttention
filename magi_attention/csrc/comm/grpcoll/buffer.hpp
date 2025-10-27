@@ -164,7 +164,10 @@ struct Buffer {
       bool allocate_on_comm_stream);
 
   std::tuple<
+      /* 1st group of output data */
       torch::Tensor,
+      std::optional<torch::Tensor>,
+      /* 2nd group of output data */
       std::optional<torch::Tensor>,
       /* handle */
       torch::Tensor,
@@ -175,10 +178,15 @@ struct Buffer {
       /* event */
       std::optional<EventHandle>>
   intranode_group_cast(
+      /* 1st group of input / output data*/
       const torch::Tensor& x,
       std::optional<torch::Tensor>& recv_x_buf,
       const std::optional<torch::Tensor>& lse,
       std::optional<torch::Tensor>& recv_lse_buf,
+      /* 2nd group of input / output data*/
+      const std::optional<torch::Tensor>& x_2nd,
+      std::optional<torch::Tensor>& recv_x_buf_2nd,
+      /* other metadata */
       const std::optional<torch::Tensor>& num_tokens_per_rank,
       const torch::Tensor& is_token_in_rank,
       int cached_num_recv_tokens,
@@ -190,11 +198,19 @@ struct Buffer {
       bool async_op,
       bool allocate_on_comm_stream);
 
-  std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> intranode_group_reduce(
+  std::tuple<
+      /* output data */
+      torch::Tensor,
+      std::optional<torch::Tensor>,
+      /* event */
+      std::optional<EventHandle>>
+  intranode_group_reduce(
+      /* input / output data */
       const torch::Tensor& x,
       std::optional<torch::Tensor>& reduced_x_buf,
       const std::optional<torch::Tensor>& lse,
       std::optional<torch::Tensor>& reduced_lse_buf,
+      /* other metadata */
       const std::optional<torch::Tensor>& pre_perm_idx,
       const torch::Tensor& src_idx,
       const torch::Tensor& rank_prefix_matrix,
