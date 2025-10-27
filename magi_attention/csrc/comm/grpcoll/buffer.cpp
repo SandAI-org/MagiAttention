@@ -317,6 +317,8 @@ std::tuple<
     std::optional<torch::Tensor>,
     /* 2nd group of output data */
     std::optional<torch::Tensor>,
+    /* 3rd group of output data */
+    std::optional<torch::Tensor>,
     /* handle */
     torch::Tensor,
     torch::Tensor,
@@ -334,6 +336,9 @@ Buffer::intranode_group_cast(
     /* 2nd group of input / output data*/
     const std::optional<torch::Tensor>& x_2nd,
     std::optional<torch::Tensor>& recv_x_buf_2nd,
+    /* 3rd group of input / output data*/
+    const std::optional<torch::Tensor>& x_3rd,
+    std::optional<torch::Tensor>& recv_x_buf_3rd,
     /* other metadata */
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const torch::Tensor& is_token_in_rank,
@@ -351,6 +356,8 @@ Buffer::intranode_group_cast(
   // Get the number of data groups
   int num_groups = 1;
   if (x_2nd.has_value())
+    ++num_groups;
+  if (x_3rd.has_value())
     ++num_groups;
   GRPCOLL_HOST_ASSERT(num_groups <= 3);
 
@@ -379,6 +386,10 @@ Buffer::intranode_group_cast(
   if (num_groups > 1) {
     GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous());
     GRPCOLL_HOST_ASSERT((x_2nd->size(1) * x_2nd->element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
+  }
+  if (num_groups > 2) {
+    GRPCOLL_HOST_ASSERT(x_3rd->dim() == 2 and x_3rd->is_contiguous());
+    GRPCOLL_HOST_ASSERT((x_3rd->size(1) * x_3rd->element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
   }
   GRPCOLL_HOST_ASSERT(is_token_in_rank.dim() == 2 and is_token_in_rank.is_contiguous());
   GRPCOLL_HOST_ASSERT(is_token_in_rank.size(0) == x.size(0) and is_token_in_rank.size(1) == num_ranks);
@@ -512,9 +523,24 @@ Buffer::intranode_group_cast(
     } else {
       recv_x_2nd = torch::empty({num_recv_tokens, hidden_size}, x.options());
     }
-
     x_ptr_2nd = x_2nd->data_ptr();
     recv_x_ptr_2nd = recv_x_2nd->data_ptr();
+  }
+
+  // Allocate 3rd recv_x buffer and assign the ptr if needed
+  auto recv_x_3rd = std::optional<torch::Tensor>();
+  void *x_ptr_3rd = nullptr, *recv_x_ptr_3rd = nullptr;
+  if (num_groups > 1) {
+    if (recv_x_buf_3rd.has_value()) {
+      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->dim() == 2 && recv_x_buf_3rd->is_contiguous());
+      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->scalar_type() == x_3rd->scalar_type());
+      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->size(0) == num_recv_tokens && recv_x_buf_3rd->size(1) == hidden_size);
+      recv_x_3rd.emplace(recv_x_buf_3rd.value());
+    } else {
+      recv_x_3rd = torch::empty({num_recv_tokens, hidden_size}, x.options());
+    }
+    x_ptr_3rd = x_3rd->data_ptr();
+    recv_x_ptr_3rd = recv_x_3rd->data_ptr();
   }
 
   // Allocate metadata tensors
@@ -553,7 +579,7 @@ Buffer::intranode_group_cast(
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden_size * recv_x.element_size() * num_groups + // data buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * sizeof(int) + // src idx buffer
           num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * num_heads * sizeof(float) + // lse buffer
-          sizeof(int4) // max padding bytes to align for vectorized data buffer
+          sizeof(int4) * num_groups // max padding bytes to align for vectorized data buffer
       <= num_nvl_bytes); // TODO: turn this assertion into the minimum bytes hint API for the user to determine the buffer size
 
   // Launch group_cast kernel
@@ -575,6 +601,8 @@ Buffer::intranode_group_cast(
       /*lse=*/lse_ptr,
       /*recv_x_2nd=*/recv_x_ptr_2nd,
       /*x_2nd=*/x_ptr_2nd,
+      /*recv_x_3rd=*/recv_x_ptr_3rd,
+      /*x_3rd=*/x_ptr_3rd,
       /*recv_src_idx=*/recv_src_idx.data_ptr<int>(),
       /*recv_channel_offset=*/recv_channel_prefix_matrix.data_ptr<int>(),
       /*send_head=*/send_head.data_ptr<int>(),
@@ -604,7 +632,8 @@ Buffer::intranode_group_cast(
         t.record_stream(compute_stream);
     }
     // record optional tensors
-    for (auto& to : {x_2nd, recv_x_2nd, lse, recv_lse, num_tokens_per_rank, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
+    for (auto& to :
+         {x_2nd, recv_x_2nd, x_3rd, recv_x_3rd, lse, recv_lse, num_tokens_per_rank, cached_channel_prefix_matrix, cached_rank_prefix_matrix, post_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
@@ -618,7 +647,7 @@ Buffer::intranode_group_cast(
     at::cuda::setCurrentCUDAStream(compute_stream);
 
   // Return values
-  return {recv_x, recv_lse, recv_x_2nd, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event};
+  return {recv_x, recv_lse, recv_x_2nd, recv_x_3rd, rank_prefix_matrix, channel_prefix_matrix, recv_channel_prefix_matrix, recv_src_idx, send_head, event};
 }
 
 std::tuple<

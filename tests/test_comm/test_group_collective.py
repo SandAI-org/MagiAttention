@@ -367,10 +367,10 @@ class TestGroupCollective(DistTestBase):
                 ],
             },
             {
-                "name": "group_cast_with_2nd_group_with_lse",
+                "name": "group_cast_with_multiple_groups_with_lse",
                 "world_size": 4,
                 "cast_lse": True,
-                "num_groups": 2,
+                "num_groups": 3,
                 "send_buffer_per_rank": [
                     [0, 1, 2, 3],
                     [4, 5, 6, 7],
@@ -382,6 +382,12 @@ class TestGroupCollective(DistTestBase):
                     [4.1, 5.3, 6.5, 7.7],
                     [8.2, 9.4, 10.6, 11.8],
                     [12.1, 13.3, 14.5, 15.7],
+                ],
+                "send_buffer_3rd_per_rank": [
+                    [0.1, 1.3, 2.5, 3.7],
+                    [4.2, 5.4, 6.6, 7.8],
+                    [8.1, 9.3, 10.5, 11.7],
+                    [12.2, 13.4, 14.6, 15.8],
                 ],
                 "send_lse_buffer_per_rank": [
                     [0.1, 1.2, 2.3, 3.4],
@@ -400,6 +406,12 @@ class TestGroupCollective(DistTestBase):
                     [0.2, 1.4, 10.6, 11.8, 2.6, 12.1, 13.3],
                     [2.6, 6.5, 7.7, 14.5, 15.7],
                     [8.2, 9.4, 4.1, 5.3],
+                ],
+                "expected_recv_buffer_3rd_per_rank": [
+                    [5.4, 9.3, 13.4, 0.1, 1.3],
+                    [0.1, 1.3, 10.5, 11.7, 2.5, 12.2, 13.4],
+                    [2.5, 6.6, 7.8, 14.6, 15.8],
+                    [8.1, 9.3, 4.2, 5.4],
                 ],
                 "expected_recv_lse_buffer_per_rank": [
                     [5.6, 9.1, 13.5, 0.1, 1.2],
@@ -575,6 +587,27 @@ class TestGroupCollective(DistTestBase):
                 .reshape(-1, self.num_heads, self.head_dim)
             )
             recv_buffer.append(recv_buffer[0].clone())
+
+            if num_groups > 2:
+                send_buffer.append(
+                    torch.tensor(
+                        test_case["send_buffer_3rd_per_rank"][self.rank],
+                        dtype=dtype,
+                        device=self.device,
+                    )
+                    .repeat_interleave(repeats=self.hidden_size, dim=0)
+                    .reshape(-1, self.num_heads, self.head_dim)
+                )
+                expected_recv_buffer.append(
+                    torch.tensor(
+                        test_case["expected_recv_buffer_3rd_per_rank"][self.rank],
+                        dtype=dtype,
+                        device=self.device,
+                    )
+                    .repeat_interleave(repeats=self.hidden_size, dim=0)
+                    .reshape(-1, self.num_heads, self.head_dim)
+                )
+                recv_buffer.append(recv_buffer[0].clone())
 
         if cast_lse:
             # prepare lse buffer with shape [seqlen, num_heads]

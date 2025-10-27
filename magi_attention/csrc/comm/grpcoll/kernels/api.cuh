@@ -113,12 +113,18 @@ void cached_notify_group_cast(
     cudaStream_t stream);
 
 void group_cast(
+    /* 1st group of input / output data*/
     void* recv_x,
     float* recv_lse,
     const void* x,
     const float* lse,
+    /* 2nd group of input / output data*/
     void* recv_x_2nd,
     const void* x_2nd,
+    /* 3rd group of input / output data*/
+    void* recv_x_3rd,
+    const void* x_3rd,
+    /* other metadata */
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
@@ -149,10 +155,12 @@ void cached_notify_group_reduce(
     cudaStream_t stream);
 
 void group_reduce(
+    /* input / output data */
     void* reduced_x,
     float* reduced_lse,
     const void* x,
     const float* lse,
+    /* other metadata */
     const int64_t* pre_perm_idx,
     const int* src_idx,
     const int* rank_prefix_matrix,

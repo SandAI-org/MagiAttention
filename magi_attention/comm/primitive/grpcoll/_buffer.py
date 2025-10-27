@@ -679,12 +679,19 @@ class GrpCollBuffer:
         else:
             x_2nd = None
             recv_x_2nd = None
+        if num_groups > 2:
+            x_3rd = x[2]
+            recv_x_3rd = recv_x[2] if recv_x is not None else None
+        else:
+            x_3rd = None
+            recv_x_3rd = None
 
         # Launch the intranode group cast kernel
         (
             recv_x_1st,
             recv_lse,
             recv_x_2nd,
+            recv_x_3rd,
             # handle
             rank_prefix_matrix,
             channel_prefix_matrix,
@@ -700,6 +707,8 @@ class GrpCollBuffer:
             recv_lse,
             x_2nd,
             recv_x_2nd,
+            x_3rd,
+            recv_x_3rd,
             num_tokens_per_rank,
             is_token_in_rank,
             num_recv_tokens,
@@ -729,6 +738,8 @@ class GrpCollBuffer:
         ]
         if num_groups > 1:
             recv_x.append(recv_x_2nd)
+        if num_groups > 2:
+            recv_x.append(recv_x_3rd)
 
         # View output to hidden shape
         for i in range(num_groups):

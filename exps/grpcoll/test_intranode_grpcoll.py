@@ -471,6 +471,12 @@ def prepare_test_func_kwargs(
     else:
         x_2nd = None
         recv_x_gc_2nd = None
+    if num_data_groups > 2:
+        x_3rd = x.clone() + 2
+        recv_x_gc_3rd = recv_x_gc.clone() + 2
+    else:
+        x_3rd = None
+        recv_x_gc_3rd = None
 
     return dict(
         x=x,
@@ -481,6 +487,8 @@ def prepare_test_func_kwargs(
         recv_lse_gc_buf=recv_lse_gc_buf,
         x_2nd=x_2nd,
         recv_x_gc_2nd=recv_x_gc_2nd,
+        x_3rd=x_3rd,
+        recv_x_gc_3rd=recv_x_gc_3rd,
         reduced_x_gr=reduced_x_gr,
         reduced_x_gr_buf=reduced_x_gr_buf,
         reduced_lse_gr=reduced_lse_gr,
@@ -525,6 +533,8 @@ def test_func(
     recv_lse_gc_buf: torch.Tensor | None = kwargs["recv_lse_gc_buf"]
     x_2nd: torch.Tensor | None = kwargs["x_2nd"]
     recv_x_gc_2nd: torch.Tensor | None = kwargs["recv_x_gc_2nd"]
+    x_3rd: torch.Tensor | None = kwargs["x_3rd"]
+    recv_x_gc_3rd: torch.Tensor | None = kwargs["recv_x_gc_3rd"]
     reduced_x_gr: torch.Tensor = kwargs["reduced_x_gr"]
     reduced_lse_gr: torch.Tensor | None = kwargs["reduced_lse_gr"]
     reduced_x_gr_buf: torch.Tensor | None = kwargs["reduced_x_gr_buf"]
@@ -553,6 +563,12 @@ def test_func(
         num_data_groups += 1
         x_list.append(x_2nd)
         recv_x_gc_list.append(recv_x_gc_2nd)
+        if pass_out_buffer:
+            recv_x_gc_buf_list.append(recv_x_gc_buf.clone())
+    if x_3rd is not None and recv_x_gc_3rd is not None:
+        num_data_groups += 1
+        x_list.append(x_3rd)
+        recv_x_gc_list.append(recv_x_gc_3rd)
         if pass_out_buffer:
             recv_x_gc_buf_list.append(recv_x_gc_buf.clone())
 
@@ -1036,7 +1052,7 @@ def test_main(
     random_permute_output = True  # set to False to make the output / input of group-cast / group-reduce in a2a rank order
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
-    num_data_groups = 2  # set this > 1 to allow transfer multiple data groups together within the same kernel
+    num_data_groups = 3  # set this > 1 to allow transfer multiple data groups together within the same kernel
     assert 1 <= num_data_groups <= 3
 
     cast_lse = True

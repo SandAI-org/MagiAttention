@@ -225,6 +225,9 @@ void group_cast_kernel(
     /* 2nd group of input / output data*/
     int4* recv_x_2nd,
     const int4* x_2nd,
+    /* 3rd group of input / output data*/
+    int4* recv_x_3rd,
+    const int4* x_3rd,
     /* other metadata */
     int* recv_src_idx,
     int* recv_channel_offset,
@@ -284,10 +287,16 @@ void group_cast_kernel(
 
   // Get channel data buffers for other groups
   //  `x_buffers_2nd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
+  //  `x_buffers_3rd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
   constexpr bool is_2nd_group_exists = kNumDataGroups > 1;
+  constexpr bool is_3rd_group_exists = kNumDataGroups > 2;
   Buffer<int4, sizeof(int4)> channel_x_buffers_2nd;
+  Buffer<int4, sizeof(int4)> channel_x_buffers_3rd;
   if constexpr (is_2nd_group_exists)
     channel_x_buffers_2nd =
+        Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
+  if constexpr (is_3rd_group_exists)
+    channel_x_buffers_3rd =
         Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
 
   // Get copy info
@@ -409,6 +418,12 @@ void group_cast_kernel(
           if constexpr (is_2nd_group_exists) {
             token_ptr_in_queue_array[1] = channel_x_buffers_2nd.buffer() + dst_slot_idx * hidden_int4;
             token_ptr_in_x_array[1] = x_2nd + token_idx * hidden_int4;
+          }
+
+          // for the 3rd group if exists
+          if constexpr (is_3rd_group_exists) {
+            token_ptr_in_queue_array[2] = channel_x_buffers_3rd.buffer() + dst_slot_idx * hidden_int4;
+            token_ptr_in_x_array[2] = x_3rd + token_idx * hidden_int4;
           }
 
 #pragma unroll
@@ -565,6 +580,12 @@ void group_cast_kernel(
           token_ptr_in_queue_int4_array[1] = channel_x_buffers_2nd.buffer() + token_idx_in_queue * hidden_int4;
         }
 
+        // for the 3rd group if exists
+        if constexpr (is_3rd_group_exists) {
+          token_ptr_in_recv_x_int4_array[2] = recv_x_3rd + token_idx_in_recv_x * hidden_int4;
+          token_ptr_in_queue_int4_array[2] = channel_x_buffers_3rd.buffer() + token_idx_in_queue * hidden_int4;
+        }
+
         // Copy this token from recv queue to recv buffer
 #ifndef DISABLE_SM90_FEATURES
 #pragma unroll
@@ -685,6 +706,9 @@ void launch_group_cast(
     /* 2nd group of input / output data*/
     void* recv_x_2nd,
     const void* x_2nd,
+    /* 3rd group of input / output data*/
+    void* recv_x_3rd,
+    const void* x_3rd,
     /* other metadata */
     int* recv_src_idx,
     int* recv_channel_offset,
@@ -716,6 +740,8 @@ void launch_group_cast(
   GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 3, "Invalid kNumDataGroups");
   if constexpr (kNumDataGroups > 1)
     GRPCOLL_HOST_ASSERT(recv_x_2nd != nullptr && x_2nd != nullptr);
+  if constexpr (kNumDataGroups > 2)
+    GRPCOLL_HOST_ASSERT(recv_x_3rd != nullptr && x_3rd != nullptr);
 
 #define GROUP_CAST_LAUNCH_CASE(cast_lse)                                                                                                          \
   {                                                                                                                                               \
@@ -730,6 +756,8 @@ void launch_group_cast(
         lse,                                                                                                                                      \
         reinterpret_cast<int4*>(recv_x_2nd),                                                                                                      \
         reinterpret_cast<const int4*>(x_2nd),                                                                                                     \
+        reinterpret_cast<int4*>(recv_x_3rd),                                                                                                      \
+        reinterpret_cast<const int4*>(x_3rd),                                                                                                     \
         recv_src_idx,                                                                                                                             \
         recv_channel_offset,                                                                                                                      \
         send_head,                                                                                                                                \
@@ -772,6 +800,9 @@ void group_cast(
     /* 2nd group of input / output data*/
     void* recv_x_2nd,
     const void* x_2nd,
+    /* 3rd group of input / output data*/
+    void* recv_x_3rd,
+    const void* x_3rd,
     /* other metadata */
     int* recv_src_idx,
     int* recv_channel_offset,
@@ -799,6 +830,8 @@ void group_cast(
         lse,                                                          \
         recv_x_2nd,                                                   \
         x_2nd,                                                        \
+        recv_x_3rd,                                                   \
+        x_3rd,                                                        \
         recv_src_idx,                                                 \
         recv_channel_offset,                                          \
         send_head,                                                    \

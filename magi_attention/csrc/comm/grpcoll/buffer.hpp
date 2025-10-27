@@ -169,6 +169,8 @@ struct Buffer {
       std::optional<torch::Tensor>,
       /* 2nd group of output data */
       std::optional<torch::Tensor>,
+      /* 3rd group of output data */
+      std::optional<torch::Tensor>,
       /* handle */
       torch::Tensor,
       torch::Tensor,
@@ -186,6 +188,9 @@ struct Buffer {
       /* 2nd group of input / output data*/
       const std::optional<torch::Tensor>& x_2nd,
       std::optional<torch::Tensor>& recv_x_buf_2nd,
+      /* 3rd group of input / output data*/
+      const std::optional<torch::Tensor>& x_3rd,
+      std::optional<torch::Tensor>& recv_x_buf_3rd,
       /* other metadata */
       const std::optional<torch::Tensor>& num_tokens_per_rank,
       const torch::Tensor& is_token_in_rank,
