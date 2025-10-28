@@ -155,11 +155,17 @@ void cached_notify_group_reduce(
     cudaStream_t stream);
 
 void group_reduce(
-    /* input / output data */
+    /* 1st group of input / output data*/
     void* reduced_x,
     float* reduced_lse,
     const void* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    void* reduced_x_2nd,
+    const void* x_2nd,
+    /* 3rd group of input / output data*/
+    void* reduced_x_3rd,
+    const void* x_3rd,
     /* other metadata */
     const int64_t* pre_perm_idx,
     const int* src_idx,
@@ -170,6 +176,7 @@ void group_reduce(
     int num_recv_tokens,
     int hidden_size,
     int num_heads,
+    int num_groups,
     void** buffer_ptrs,
     int rank,
     int num_ranks,

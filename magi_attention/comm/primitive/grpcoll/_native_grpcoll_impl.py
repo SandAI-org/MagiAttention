@@ -265,10 +265,17 @@ def native_group_reduce_impl(
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
     assert config is not None and buffer is not None
 
+    # pack input and output
+    input: list[torch.Tensor] = wrap_to_list(input)
+    output: list[torch.Tensor] | None = (
+        wrap_to_list(output) if output is not None else output
+    )
+    num_groups = len(input)
+
     # get meta dict and handle
-    input_seqlen: int = input.size(0)
+    input_seqlen: int = input[0].size(0)
     output_seqlen: int | None = (
-        output.size(0) if output is not None else kwargs.pop("output_seqlen", None)
+        output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
     meta_dict: dict[str, Any] = kwargs.pop("native_group_reduce_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
@@ -277,8 +284,8 @@ def native_group_reduce_impl(
         # FIXME: for now, we don't support individual group-reduce
         # since the necessary handle is not known until the symmetric group-cast returns
         handle = get_group_reduce_handle_from_sym_group_cast(
-            input=input,
-            output=output,
+            input=input[0],
+            output=output[0] if output is not None else None,
             input_split_sizes=input_split_sizes,
             output_split_sizes=output_split_sizes,
             dst_index=dst_index,
@@ -323,7 +330,12 @@ def native_group_reduce_impl(
         reduced_lse=output_lse,
     )
 
+    # unpack reduced_x
+    if num_groups == 1:
+        reduced_x = reduced_x[0]
+
     # HACK: prepare handle for symmetric group-cast or cached group-reduce
+    # REVIEW: should we empty the handle dict since the tensors in handle is inplace modified ?
     handle_dict["group_cast"] = handle
     handle_dict["group_reduce"] = handle
 

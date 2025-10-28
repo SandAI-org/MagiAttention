@@ -436,6 +436,9 @@ class GrpCollBuffer:
             recv_x: received tokens for each group,
                 with the same type and number of groups as the input group `x`,
                 while the number of tokens equals to the received token count.
+            recv_lse: the logsumexp of each token in `reduced_x` for each attention head,
+                with shape `[num_recv_tokens, num_heads]`,
+                valid if `cast_lse` is `True`, otherwise `None`.
             handle: the returned communication handle.
             event: the event after executing the kernel (valid only if `async_op` is set).
         """
@@ -517,9 +520,9 @@ class GrpCollBuffer:
 
     def group_reduce(
         self,
-        x: torch.Tensor,
+        x: torch.Tensor | list[torch.Tensor],
         handle: GrpCollHandle,
-        reduced_x: torch.Tensor | None = None,
+        reduced_x: torch.Tensor | list[torch.Tensor] | None = None,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
         pre_perm_idx: torch.Tensor | None = None,
@@ -530,7 +533,7 @@ class GrpCollBuffer:
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
+    ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """
         Group reduce tokens (addition **without** weights) from different ranks, both intranode and internode
             settings are supported.
@@ -539,9 +542,10 @@ class GrpCollBuffer:
             index should be visible via RDMA.
 
         Arguments:
-            x: `[num_tokens, hidden_size]`, the tokens to send for reducing to its original ranks.
+            x: groups of tokens in a list of tensors to be reduced simultaneously.
             handle: a must-set communication handle, you can obtain this from the dispatch function.
-            reduced_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
+            reduced_x: received reduced tokens buffer to return, if given,
+                or `None` to allocate a new buffer to return for each group of `x`.
             reduce_op (GroupReduceOp): the reduce operation to use. Defaults to "sum"
                 - "sum": sum reduction
                 - "avg": average reduction
@@ -561,20 +565,35 @@ class GrpCollBuffer:
                 when `reduce_op` is "lse".
 
         Returns:
-            reduced_x: the reduced token from its dispatched ranks.
-            reduced_lse: the reduced logsumexp of each token in `reduced_x` for each attention head
-                if `reduce_op` is "lse", otherwise `None`.
+            reduced_x: reduced tokens for each group,
+                with the same type and number of groups as the input group `x`,
+                while the number of tokens equals to the received token count.
+            reduced_lse: the reduced logsumexp of each token in `reduced_x` for each attention head,
+                with shape `[num_recv_tokens, num_heads]`,
+                valid if `reduce_op` is "lse", otherwise `None`.
             event: the event after executing the kernel (valid only if `async_op` is set).
         """
         is_out_buf_given = reduced_x is not None
 
-        hidden_shape = x.shape[1:]
+        x = wrap_to_list(x)
+        num_groups = len(x)
+        if is_out_buf_given:
+            assert reduced_x is not None  # mypy
+            reduced_x = wrap_to_list(reduced_x)
+            assert len(reduced_x) == len(x), (
+                "The number of groups of input and output buffer should be the same, "
+                f"but got {len(x)=}, {len(reduced_x)=}."
+            )
+
+        hidden_shape = x[0].shape[1:]
         hidden_size = math.prod(hidden_shape)
         if is_out_buf_given:
-            assert reduced_x.shape[1:] == hidden_shape, (
-                "The hidden shape (except dim0) of input and output buffer should be the same, "
-                f"but got {x.shape=}, {reduced_x.shape=}."
-            )
+            assert reduced_x is not None  # mypy
+            for i in range(num_groups):
+                assert reduced_x[i].shape[1:] == hidden_shape, (
+                    "The hidden shape (except dim0) of input and output buffer should be the same, "
+                    f"but got {x[i].shape=}, {reduced_x[i].shape=}."
+                )
 
         # Default config
         config = (
@@ -584,9 +603,12 @@ class GrpCollBuffer:
         )
 
         # View input/output to 2D shape
-        x = x.view(-1, hidden_size)
+        for i in range(num_groups):
+            x[i] = x[i].view(-1, hidden_size)
         if is_out_buf_given:
-            reduced_x = reduced_x.view(-1, hidden_size)
+            assert reduced_x is not None  # mypy
+            for i in range(num_groups):
+                reduced_x[i] = reduced_x[i].view(-1, hidden_size)
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
@@ -754,8 +776,8 @@ class GrpCollBuffer:
 
     def _intranode_group_reduce(
         self,
-        x: torch.Tensor,
-        reduced_x: torch.Tensor | None,
+        x: list[torch.Tensor],
+        reduced_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
@@ -768,27 +790,53 @@ class GrpCollBuffer:
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
+    ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """Intranode group reduce implementation"""
 
         assert isinstance(handle, GrpCollIntraHandle)
 
+        # Prepare lse and reduced_lse
         if reduce_op == "lse":
             assert lse is not None, "lse should not be None when `reduce_op == lse`"
         else:  # no need to reduce lse, even passed in
             lse = None
             reduced_lse = None
 
+        # Unpack (x,reduced_x) groups
+        num_groups = len(x)
+        assert 1 <= num_groups <= 3, "num_groups only supports {1,2,3}"
+        x_1st = x[0]
+        reduced_x_1st = reduced_x[0] if reduced_x is not None else None
+        if num_groups > 1:
+            x_2nd = x[1]
+            reduced_x_2nd = reduced_x[1] if reduced_x is not None else None
+        else:
+            x_2nd = None
+            reduced_x_2nd = None
+        if num_groups > 2:
+            x_3rd = x[2]
+            reduced_x_3rd = reduced_x[2] if reduced_x is not None else None
+        else:
+            x_3rd = None
+            reduced_x_3rd = None
+
         # Launch the intranode group reduce kernel
         (
-            reduced_x,
+            reduced_x_1st,
             reduced_lse,
+            reduced_x_2nd,
+            reduced_x_3rd,
+            # event
             event,
         ) = self.runtime.intranode_group_reduce(
-            x,
-            reduced_x,
+            x_1st,
+            reduced_x_1st,
             lse,
             reduced_lse,
+            x_2nd,
+            reduced_x_2nd,
+            x_3rd,
+            reduced_x_3rd,
             pre_perm_idx,
             handle.recv_src_idx,  # src_idx
             handle.rank_prefix_matrix,  # rank_prefix_matrix
@@ -803,8 +851,18 @@ class GrpCollBuffer:
             comm_dtype,
         )
 
+        # Pack reduced_x groups
+        reduced_x = [
+            reduced_x_1st,
+        ]
+        if num_groups > 1:
+            reduced_x.append(reduced_x_2nd)
+        if num_groups > 2:
+            reduced_x.append(reduced_x_3rd)
+
         # View output to hidden shape
-        reduced_x = reduced_x.view(-1, *hidden_shape)
+        for i in range(num_groups):
+            reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
 
         return (reduced_x, reduced_lse, EventOverlap(event))
 
@@ -946,8 +1004,8 @@ class GrpCollBuffer:
 
     def _internode_group_reduce(
         self,
-        x: torch.Tensor,
-        reduced_x: torch.Tensor | None,
+        x: list[torch.Tensor],
+        reduced_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle,
         hidden_shape: torch.Size,
@@ -960,7 +1018,7 @@ class GrpCollBuffer:
         comm_dtype: torch.dtype | None = None,
         lse: torch.Tensor | None = None,
         reduced_lse: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
+    ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """Internode group reduce implementation"""
 
         # TODO: support pre_perm_idx for internode group reduce
@@ -974,19 +1032,26 @@ class GrpCollBuffer:
 
         assert isinstance(handle, GrpCollInterHandle)
 
+        # Prepare lse and reduced_lse
         if reduce_op == "lse":
             assert lse is not None, "lse should not be None when `reduce_op == lse`"
         else:  # no need to reduce lse, even passed in
             lse = None
             # reduced_lse = None
 
+        # Unpack (x,reduced_x) groups
+        num_groups = len(x)
+        assert num_groups == 1, "num_groups only supports {1,}"
+        x_1st = x[0]
+        reduced_x_1st = reduced_x[0] if reduced_x is not None else None
+
         # Launch the internode group reduce kernel
         (
-            reduced_x,
+            reduced_x_1st,
             event,
         ) = self.runtime.internode_group_reduce(
-            x,
-            reduced_x,
+            x_1st,
+            reduced_x_1st,
             None,  # topk_weights
             None,  # bias_0
             None,  # bias_1
@@ -1005,8 +1070,14 @@ class GrpCollBuffer:
             acc_reduce,
         )
 
+        # Pack reduced_x groups
+        reduced_x = [
+            reduced_x_1st,
+        ]
+
         # View output to hidden shape
-        reduced_x = reduced_x.view(-1, *hidden_shape)
+        for i in range(num_groups):
+            reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
 
         return (reduced_x, None, EventOverlap(event))  # reduced_lse
 

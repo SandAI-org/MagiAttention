@@ -551,6 +551,13 @@ class CommMeta:
 
             kv_group_collective_kwargs = vars(self.kv_group_collective_args_list[stage])
 
+            # FIXME
+            self.num_remote_kv_tokens_per_stage[stage] *= 2
+            kv_group_collective_kwargs["input_split_size_list"] *= 2
+            kv_group_collective_kwargs["output_split_size_list"] *= 2
+            kv_group_collective_kwargs["dst_indices_list"] *= 2
+            kv_group_collective_kwargs["src_index_list"] *= 2
+
             self.kv_group_collective_args_list[stage] = NativeGroupCollectiveArg(
                 **kv_group_collective_kwargs,
             )
