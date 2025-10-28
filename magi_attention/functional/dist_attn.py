@@ -829,20 +829,11 @@ class DistAttnRuntime:
             device = local_kv[0].device
 
         # get the group-cast args for kv
-        if self.concat_kv:  # reuse dkv's comm meta with packed args
-            group_cast_args = self.comm_meta.dkv_group_collective_args_list[
-                overlap_stage
-            ].to_group_cast_args()
-            remote_kv_seqlen = self.comm_meta.num_remote_dkv_tokens_per_stage[
-                overlap_stage
-            ]
-        else:  # use kv's comm meta with packless args
-            group_cast_args = self.comm_meta.kv_group_collective_args_list[
-                overlap_stage
-            ].to_group_cast_args()
-            remote_kv_seqlen = self.comm_meta.num_remote_kv_tokens_per_stage[
-                overlap_stage
-            ]
+        group_cast_args = self.comm_meta.kv_group_collective_args_list[
+            overlap_stage
+        ].to_group_cast_args()
+        remote_kv_seqlen = self.comm_meta.num_remote_kv_tokens_per_stage[overlap_stage]
+        if not self.concat_kv:
             remote_kv_seqlen *= 2  # still x2 to allocate once
 
         # init remote kv buffer
@@ -1182,7 +1173,7 @@ class DistAttnRuntime:
         assert self.concat_dkv, "Only supports concat_dkv"
 
         # get the group-reduce args for dkv
-        group_reduce_args = self.comm_meta.dkv_group_collective_args_list[
+        group_reduce_args = self.comm_meta.kv_group_collective_args_list[
             overlap_stage
         ].to_group_reduce_args()
 
