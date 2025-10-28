@@ -70,13 +70,14 @@ class DistAttnRuntime:
             magi_attention.is_cuda_device_max_connections_one()
         )
         self.hp_dtype = torch.float32
+        self.use_native_grpcoll = magi_attention.comm.is_native_grpcoll_enable()
 
         # ----------    flags for fwd   --------- #
 
         self.fwd_sm_margin = magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
 
         # NOTE: we now always concat kv together for comm
-        # TODO: use concat_kv=False when enabling native grpcoll
+        # TODO: support concat_kv=False when enabling native grpcoll
         self.concat_kv = True
 
         # NOTE: when enabling FFA fwd high precision reduce,
@@ -108,7 +109,7 @@ class DistAttnRuntime:
         self.bwd_sm_margin = magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
 
         # NOTE: we now always concat dkv together for comm
-        # since the dkv buffer is initialized by our own logic
+        # TODO: support concat_dkv=False when enabling native grpcoll
         self.concat_dkv = True
 
         # NOTE: we concat q,o,do in dist-attn bwd when qo comm is enabled
@@ -1074,50 +1075,38 @@ class DistAttnRuntime:
                 overlap_stage
             ].to_group_reduce_args()
 
-            # init remote out/lse buffer and comm dtype
-            if magi_attention.comm.is_native_grpcoll_enable():
-                if partial_remote_out is None:
-                    # skipped for this rank, but still reduced from other ranks
-                    partial_remote_out = torch.empty_like(
-                        ref_remote_out,
-                        dtype=self._maybe_hp_dtype(
-                            ref_remote_out.dtype
-                        ),  # out always in high-precision
-                        device=ref_remote_out.device,
-                    )
-                    partial_remote_lse = torch.empty(
-                        (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
-                        dtype=self._maybe_hp_dtype(
-                            ref_remote_out.dtype
-                        ),  # lse always in high-precision
-                        device=ref_remote_out.device,
-                    )
-                comm_dtype = self._maybe_hp_dtype(
-                    ref_remote_out.dtype, self.fwd_hp_reduce
+            # init remote out/lse buffer
+            if partial_remote_out is None:
+                # skipped for this rank, but still reduced from other ranks
+                partial_remote_out = torch.empty_like(
+                    ref_remote_out,
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_out.dtype,
+                        # out always in high-precision if using native grpcoll
+                        need_hp_dtype=(self.use_native_grpcoll or self.fwd_hp_reduce),
+                    ),
+                    device=ref_remote_out.device,
                 )
-            else:
-                if partial_remote_out is None:
-                    # skipped for this rank, but still reduced from other ranks
-                    partial_remote_out = torch.empty_like(
-                        ref_remote_out,
-                        dtype=self._maybe_hp_dtype(
-                            ref_remote_out.dtype, self.fwd_hp_reduce
-                        ),
-                        device=ref_remote_out.device,
-                    )
-                    partial_remote_lse = torch.empty(
-                        (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
-                        dtype=self._maybe_hp_dtype(
-                            ref_remote_out.dtype
-                        ),  # lse always in high-precision
-                        device=ref_remote_out.device,
-                    )
-                elif not self.fwd_hp_reduce:
-                    # downcast to the same dtype as out
-                    partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
+                partial_remote_lse = torch.empty(
+                    (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_out.dtype,
+                        need_hp_dtype=True,  # lse always in high-precision
+                    ),
+                    device=ref_remote_out.device,
+                )
+            elif not self.use_native_grpcoll and not self.fwd_hp_reduce:
+                # downcast to the same dtype as out
+                # if using non-native grpcoll and not reduce in high-precision
+                partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
 
-                # non-native grpcoll only supports the same comm dtype as input/output
-                comm_dtype = None
+            # init comm dtype
+            # non-native grpcoll only supports the same comm dtype as input/output
+            comm_dtype = (
+                self._maybe_hp_dtype(ref_remote_out.dtype, self.fwd_hp_reduce)
+                if self.use_native_grpcoll
+                else None
+            )
 
             # launch group-reduce kernel
             partial_out_lse_reduce_work = group_reduce(
@@ -1132,7 +1121,7 @@ class DistAttnRuntime:
             )
         else:
             if not self.fwd_out_lse_use_acc and partial_remote_out is not None:
-                # the partial remote out and lse have NOT been reduced to
+                # NOTE: the partial remote out and lse have NOT been reduced to
                 # partial local out and lse by neither ffa fwd kernel nor group-reduce
                 # thus we need to manually reduce here
                 correct_attn_fwd_result(
@@ -1172,53 +1161,44 @@ class DistAttnRuntime:
         """
         assert self.concat_dkv, "Only supports concat_dkv"
 
+        if self.concat_kv:  # ref_remote_dkv is a fused tensor
+            dtype = ref_remote_dkv.dtype
+            device = ref_remote_dkv.device
+            shape = ref_remote_dkv.shape
+        else:  # ref_remote_dkv are tupled tensors
+            dtype = ref_remote_dkv[0].dtype
+            device = ref_remote_dkv[0].device
+            shape = (ref_remote_dkv[0].shape[0] * 2, *ref_remote_dkv[0].shape[1:])
+
         # get the group-reduce args for dkv
         group_reduce_args = self.comm_meta.kv_group_collective_args_list[
             overlap_stage
         ].to_group_reduce_args()
 
         # init remote dkv buffer and comm dtype
-        if magi_attention.comm.is_native_grpcoll_enable():
-            if self.concat_kv:  # ref_remote_dkv is a fused tensor
-                if partial_remote_dkv is None:
-                    # skipped for this rank, but still reduced from other ranks
-                    partial_remote_dkv = torch.empty_like(
-                        ref_remote_dkv,
-                        dtype=self._maybe_hp_dtype(
-                            ref_remote_dkv.dtype
-                        ),  # dkv always in high-precision
-                    )
-                comm_dtype = self._maybe_hp_dtype(
-                    ref_remote_dkv.dtype, self.bwd_hp_reduce
-                )
-            else:  # ref_remote_dkv are tupled tensors
-                ref_remote_dk, _ = self._maybe_chunk(ref_remote_dkv, num_chunks=2)
-                partial_remote_dkv = torch.empty(
-                    (ref_remote_dk.shape[0] * 2, *ref_remote_dk.shape[1:]),
-                    dtype=self._maybe_hp_dtype(
-                        ref_remote_dk.dtype
-                    ),  # dkv always in high-precision
-                    device=ref_remote_dk.device,
-                )
-                comm_dtype = self._maybe_hp_dtype(
-                    ref_remote_dk.dtype, self.bwd_hp_reduce
-                )
-        else:
-            assert self.concat_kv, "Only supports concat_kv with non-native grpcoll"
-            if partial_remote_dkv is None:
-                # skipped for this rank, but still reduced from other ranks
-                partial_remote_dkv = torch.empty_like(
-                    ref_remote_dkv,
-                    dtype=self._maybe_hp_dtype(
-                        ref_remote_dkv.dtype, self.bwd_hp_reduce
-                    ),
-                )
-            elif not self.bwd_hp_reduce:
-                # downcast to the same dtype as kv
-                partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)
+        if partial_remote_dkv is None:
+            # skipped for this rank, but still reduced from other ranks
+            partial_remote_dkv = torch.empty(
+                shape,
+                dtype=self._maybe_hp_dtype(
+                    dtype,
+                    # dkv always in high-precision if using native grpcoll
+                    need_hp_dtype=(self.use_native_grpcoll or self.bwd_hp_reduce),
+                ),
+                device=device,
+            )
+        elif not self.use_native_grpcoll and not self.bwd_hp_reduce:
+            # downcast to the same dtype as dkv
+            # if using non-native grpcoll and not reduce in high-precision
+            partial_remote_dkv = partial_remote_dkv.to(dtype)
 
-            # non-native grpcoll only supports the same comm dtype as input/output
-            comm_dtype = None
+        # init comm dtype
+        # non-native grpcoll only supports the same comm dtype as input/output
+        comm_dtype = (
+            self._maybe_hp_dtype(dtype, self.bwd_hp_reduce)
+            if self.use_native_grpcoll
+            else None
+        )
 
         # launch group-reduce kernel
         partial_dkv_reduce_work = group_reduce(
@@ -1260,34 +1240,29 @@ class DistAttnRuntime:
                 overlap_stage
             ].to_group_reduce_args()
 
-            # init remote dq buffer and comm dtype
-            if magi_attention.comm.is_native_grpcoll_enable():
-                if partial_remote_dq is None:
-                    # skipped for this rank, but still reduced from other ranks
-                    partial_remote_dq = torch.empty_like(
-                        ref_remote_dq,
-                        dtype=self._maybe_hp_dtype(
-                            ref_remote_dq.dtype
-                        ),  # dq always in high-precision
-                    )
-                comm_dtype = self._maybe_hp_dtype(
-                    ref_remote_dq.dtype, self.bwd_hp_reduce
+            # init remote dq buffer
+            if partial_remote_dq is None:
+                # skipped for this rank, but still reduced from other ranks
+                partial_remote_dq = torch.empty_like(
+                    ref_remote_dq,
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_dq.dtype,
+                        # dq always in high-precision if using native grpcoll
+                        need_hp_dtype=(self.use_native_grpcoll or self.bwd_hp_reduce),
+                    ),
                 )
-            else:
-                if partial_remote_dq is None:
-                    # skipped for this rank, but still reduced from other ranks
-                    partial_remote_dq = torch.empty_like(
-                        ref_remote_dq,
-                        dtype=self._maybe_hp_dtype(
-                            ref_remote_dq.dtype, self.bwd_hp_reduce
-                        ),
-                    )
-                elif not self.bwd_hp_reduce:
-                    # downcast to the same dtype as q
-                    partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
+            elif not self.use_native_grpcoll and not self.bwd_hp_reduce:
+                # downcast to the same dtype as dq
+                # if using non-native grpcoll and not reduce in high-precision
+                partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
 
-                # non-native grpcoll only supports the same comm dtype as input/output
-                comm_dtype = None
+            # init comm dtype
+            # non-native grpcoll only supports the same comm dtype as input/output
+            comm_dtype = (
+                self._maybe_hp_dtype(ref_remote_dq.dtype, self.bwd_hp_reduce)
+                if self.use_native_grpcoll
+                else None
+            )
 
             # launch group-reduce kernel
             partial_dq_reduce_work = group_reduce(
@@ -1300,7 +1275,7 @@ class DistAttnRuntime:
             )
         else:
             if not self.bwd_dq_use_acc and partial_remote_dq is not None:
-                # the partial remote dq has NOT been reduced to partial local dq
+                # NOTE: the partial remote dq has NOT been reduced to partial local dq
                 # by neither ffa bwd kernel nor group-reduce
                 # thus we need to manually reduce here
                 partial_local_dq.add_(partial_remote_dq)
