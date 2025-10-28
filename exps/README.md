@@ -26,11 +26,40 @@ bash run_benchmark.sh
 
 ### Block Sparse Attention Performance and Flexibility
 
+This benchmark supports performance profiling for uniform and variable block sparse attention.
+
+#### Quick Start
+
 ```bash
 cd exps/attn
-
 bash run_block_sparse_benchmark.sh
 ```
+
+#### Configuring Block Sizes
+
+Edit `run_block_sparse_benchmark.py` to configure different Q/K block size combinations, used for uniform block sparse mask.
+
+**1. Small K Block**
+```python
+q_block_sizes = [64, 64, 64, 64, 64]
+k_block_sizes = [64, 32, 16, 8, 1]
+```
+Use case: Token-level sparse attention in DSA, like 64x1 block size.
+
+**2. Small Q Block**
+```python
+q_block_sizes = [64, 32, 16, 8]
+k_block_sizes = [64, 64, 64, 64]
+```
+Use case: NSA (Native Sparse Attention) in GQA scenarios, like 16x128 block size, where fewer queries attend to large K/V blocks.
+
+**3. Large Q and K Blocks**
+```python
+q_block_sizes = [64, 128]
+k_block_sizes = [64, 128]
+```
+Use case: Traditional block sparse patterns like 64x64 or 128x128 block sizes.
+
 
 ## Distributed Attention Module Benchmark
 

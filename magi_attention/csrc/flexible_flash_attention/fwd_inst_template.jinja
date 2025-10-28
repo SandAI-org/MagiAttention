@@ -79,16 +79,16 @@ std::vector<at::Tensor> mha_fwd(
 
   // kBlockM/kBlockN are compile-time constants already determined
 
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
-
   // Parameter preparation
   auto [params, out, softmax_lse] = prepare_mha_fwd(
       q, k, v, out_, softmax_lse_, q_ranges, k_ranges,
       attn_type_map_, merge_q_ranges_, qk_map_,
       unique_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
-      out_type_, deterministic, sm_margin);
+      out_type_, deterministic, sm_margin, kBlockM);
   if (profile_mode)
     MagiEvents::stop("fwd_prepare");
+
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Kernel launch (single variant)
   if (profile_mode) 
