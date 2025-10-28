@@ -55,19 +55,28 @@ class GroupCollectiveArg:
         pass
 
     def to_group_cast_args(self) -> dict:
-        return dict(
-            input_split_sizes=self.input_split_size_list,
-            output_split_sizes=self.output_split_size_list,
-            dst_indices=self.dst_indices_list,
-            src_index=self.src_index_list,
-        )
+        return self.to_packed_group_cast_args()
 
     def to_group_reduce_args(self) -> dict:
+        return self.to_packed_group_reduce_args()
+
+    def to_packed_group_cast_args(self, packed_times: int = 1) -> dict:
+        # pack args along split dim by `packed_times` times
         return dict(
-            input_split_sizes=self.output_split_size_list,
-            output_split_sizes=self.input_split_size_list,
-            dst_index=self.src_index_list,
-            src_indices=self.dst_indices_list,
+            input_split_sizes=self.input_split_size_list * packed_times,
+            output_split_sizes=self.output_split_size_list * packed_times,
+            dst_indices=self.dst_indices_list * packed_times,
+            src_index=self.src_index_list * packed_times,
+        )
+
+    def to_packed_group_reduce_args(self, packed_times: int = 1) -> dict:
+        # symmetric to group-cast
+        # pack args along split dim by `packed_times` times
+        return dict(
+            input_split_sizes=self.output_split_size_list * packed_times,
+            output_split_sizes=self.input_split_size_list * packed_times,
+            dst_index=self.src_index_list * packed_times,
+            src_indices=self.dst_indices_list * packed_times,
         )
 
     def __repr__(self) -> str:
@@ -101,43 +110,28 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
     def __post_init__(self):
         super().__post_init__()
 
-        self.device = torch.cuda.current_device()
-
         assert (
             not magi_attention.comm.is_native_grpcoll_enable()
         ), "This arg dataclass is not supported for native grpcoll."
 
+        self.device = torch.cuda.current_device()
+
         # NOTE: only sum-reduce has non-deterministic kernel by now
         self.deterministic |= self.reduce_op != "sum"
 
-        # ----   group cast args dict for packed tensors  ---- #
+        # ----   packed group cast args dict  ---- #
 
-        self._group_cast_args_dict_packed = {
-            # pack tensors along split dim by `self.packed_times` times
-            k: v * self.packed_times  # type: ignore[operator]
-            for k, v in {
-                "input_split_sizes": self.input_split_size_list,
-                "output_split_sizes": self.output_split_size_list,
-                "dst_indices": self.dst_indices_list,
-                "src_index": self.src_index_list,
-            }.items()
-        }
+        self._group_cast_args_dict_packed = self.to_packed_group_cast_args(
+            packed_times=self.packed_times
+        )
 
-        # ----   group reduce args dict for packed tensors  ---- #
+        # ----   packed group reduce args dict  ---- #
 
         if self.init_group_reduce:
-            # symmetric to group-cast
-            self._group_reduce_args_dict_packed = dict(
-                input_split_sizes=self._group_cast_args_dict_packed[
-                    "output_split_sizes"
-                ],
-                output_split_sizes=self._group_cast_args_dict_packed[
-                    "input_split_sizes"
-                ],
-                dst_index=self._group_cast_args_dict_packed["src_index"],
-                src_indices=self._group_cast_args_dict_packed["dst_indices"],
-                reduce_op=self.reduce_op,
+            self._group_reduce_args_dict_packed = self.to_packed_group_reduce_args(
+                packed_times=self.packed_times
             )
+            self._group_reduce_args_dict_packed["reduce_op"] = self.reduce_op
 
         # ----   additional kwargs  ---- #
 
@@ -313,8 +307,6 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
     def __post_init__(self):
         super().__post_init__()
 
-        self.device = torch.cuda.current_device()
-
         assert (
             magi_attention.comm.is_native_grpcoll_enable()
         ), "This arg dataclass is only supported for native grpcoll."
@@ -322,14 +314,13 @@ class NativeGroupCollectiveArg(GroupCollectiveArg):
             not magi_attention.comm.is_hierarchical_comm_enable()
         ), "This arg dataclass is not supported for hierarchical comm for now."
 
-        # NOTE: native grpcoll is always deterministic
-        self.deterministic = True
+        self.device = torch.cuda.current_device()
 
-        # ----   group cast args dict for packed tensors  ---- #
+        # ----   original group cast args dict  ---- #
 
         self._group_cast_args_dict = super().to_group_cast_args()
 
-        # ----   group reduce args dict for packed tensors  ---- #
+        # ----   original group reduce args dict  ---- #
 
         self._group_reduce_args_dict = super().to_group_reduce_args()
 
@@ -468,9 +459,19 @@ class CommMeta:
         and serve as the meta arguments for dist-attn communication.
 
         - num_remote_qo_do_tokens_per_stage: list[int]
-        - qo_do_group_collective_args_list: list[GroupCollectiveArg]
+        - qo_do_group_collective_args_list: list[A2AVBasedGroupCollectiveArg]
         - num_remote_out_lse_tokens_per_stage: list[int]
-        - out_lse_group_collective_args_list: list[GroupCollectiveArg]
+        - out_lse_group_collective_args_list: list[A2AVBasedGroupCollectiveArg]
+
+        And the original args will also be inplace modified
+
+        - num_remote_kv_tokens_per_stage will time by 2
+        - kv_group_collective_args_list will become `list[A2AVBasedGroupCollectiveArg]`
+        with packed_times=2 and reduce_op="sum"
+
+        - num_remote_qo_tokens_per_stage will stay the same
+        - qo_group_collective_args_list will become `list[A2AVBasedGroupCollectiveArg]`
+        with packed_times=1 and reduce_op="sum"
         """
 
         # -----     init a2a-v based group collective args     ----- #
@@ -533,7 +534,36 @@ class CommMeta:
                 )
 
     def _init_native_grpcoll_args(self):
-        raise NotImplementedError("TODO")
+        """If using native group collective,
+        the original args will be inplace modified
+
+        - num_remote_kv_tokens_per_stage will stay the same
+        - kv_group_collective_args_list will become `list[NativeGroupCollectiveArg]`
+
+        - num_remote_qo_tokens_per_stage will stay the same
+        - qo_group_collective_args_list will become `list[NativeGroupCollectiveArg]`
+        """
+
+        # -----     init native group collective args     ----- #
+
+        for stage in range(self.overlap_degree):
+            # --- for fetch tupled kv, and reduce tupled dkv  --- #
+
+            kv_group_collective_kwargs = vars(self.kv_group_collective_args_list[stage])
+
+            self.kv_group_collective_args_list[stage] = NativeGroupCollectiveArg(
+                **kv_group_collective_kwargs,
+            )
+
+            if magi_attention.comm.is_qo_comm_enable():
+                # --- for fetch q, reduce dq, fetch tupled q,o,do,lse and reduce out with lse  --- #
+
+                qo_group_collective_kwargs = vars(
+                    self.qo_group_collective_args_list[stage]
+                )
+                self.qo_group_collective_args_list[stage] = NativeGroupCollectiveArg(
+                    **qo_group_collective_kwargs,
+                )
 
     def __repr__(self) -> str:
         indent = ""
