@@ -1305,17 +1305,15 @@ void group_reduce_kernel(
         // `x_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4_comm), dtype=int, alignment=sizeof(int4)
         channel_x_buffers[curr_rank] = Buffer<int4, sizeof(int4)>(ptr, num_channel_tokens_total * hidden_int4_comm, channel_rank_token_offset * hidden_int4_comm);
 
-        // Get `channel_lse_buffers` for curr rank
-        // if `kIsLSEReduce`
-        if constexpr (kIsLSEReduce) {
-          // Jump across the `src_idx_buffers`, loaded by warp0
-          //  `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
-          ptr = reinterpret_cast<void*>(static_cast<int8_t*>(ptr) + num_channel_tokens_total * sizeof(int));
+        // Jump across the `src_idx_buffers`, loaded by warp0
+        //  `src_idx_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens), dtype=int
+        ptr = reinterpret_cast<void*>(static_cast<int8_t*>(ptr) + num_channel_tokens_total * sizeof(int));
 
+        // Get `channel_lse_buffers` for curr rank if `kIsLSEReduce`
+        if constexpr (kIsLSEReduce)
           // Get `channel_lse_buffers` for curr rank
           // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
           channel_lse_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
-        }
 
         // Get `channel_x_buffers_2nd` for curr rank if `kIs2ndGroupExists`
         // `x_buffers_2nd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4_comm), dtype=int, alignment=sizeof(int4)

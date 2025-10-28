@@ -914,6 +914,7 @@ def test_func(
         reduced_lse,
         event,
     ) = buffer.group_reduce(**group_reduce_args)
+    reduced_x = reduced_x[0]
 
     # wait
     event.current_stream_wait() if async_mode else ()

@@ -1090,6 +1090,74 @@ class TestGroupCollective(DistTestBase):
                     [[1], [0, 1], [2]],
                 ],
             },
+            # TODO: test multiple groups with lse reduce
+            {
+                "name": "group_sum_reduce_with_double_groups",
+                "world_size": 4,
+                "reduce_op": "sum",
+                "acc_reduce": True,
+                "num_groups": 2,
+                "send_buffer_per_rank": [
+                    [0, 1, 2, 3, 4],
+                    [5, 6, 7, 8, 9, 10, 11],
+                    [12, 13, 14, 15, 16],
+                    [17, 18, 19, 20, 21],
+                ],
+                "send_buffer_2nd_per_rank": [
+                    [0, 1, 2, 3, 4],
+                    [5, 6, 7, 8, 9, 10, 11],
+                    [12, 13, 14, 15, 16],
+                    [17, 18, 19, 20, 21],
+                ],
+                "recv_buffer_before_reduce_per_rank": [
+                    [1, 1, 1, 1],
+                    [2, 2, 2, 2],
+                    [3, 3, 3, 3],
+                    [4, 4, 4, 4],
+                ],
+                "recv_buffer_before_reduce_2nd_per_rank": [
+                    [0, 0, 0, 0],
+                    [-1, -1, -1, -1],
+                    [-2, -2, -2, -2],
+                    [-3, -3, -3, -3],
+                ],
+                "expected_recv_buffer_per_rank": [
+                    [9, 11, 22, 20],
+                    [19, 20, 15, 16],
+                    [23, 25, 10, 11],
+                    [14, 17, 19, 20],
+                ],
+                "expected_recv_buffer_2nd_per_rank": [
+                    [8, 10, 21, 19],
+                    [16, 17, 12, 13],
+                    [18, 20, 5, 6],
+                    [7, 10, 12, 13],
+                ],
+                "input_split_size_list_per_rank": [
+                    [1, 1, 1, 2],
+                    [2, 2, 1, 1, 1],
+                    [1, 2, 2],
+                    [1, 1, 1, 1, 1],
+                ],
+                "output_split_size_list_per_rank": [
+                    [2, 1, 1],
+                    [1, 1, 2],
+                    [1, 1, 2],
+                    [1, 1, 2],
+                ],
+                "dst_index_list_per_rank": [
+                    [1, 2, 3, 0],
+                    [0, 2, 0, 3, 3],
+                    [0, 1, 3],
+                    [1, 1, 0, 2, 2],
+                ],
+                "src_indices_list_per_rank": [
+                    [[0, 1], [1, 2], [3]],
+                    [[3], [0, 3], [2]],
+                    [[3], [0, 3], [1]],
+                    [[1], [0, 1], [2]],
+                ],
+            },
         ],
     )
     @parameterize(
@@ -1128,6 +1196,8 @@ class TestGroupCollective(DistTestBase):
             f"{deterministic=} x {async_op=} x "
             f"{reduce_op=} x {acc_reduce=} x {max_input_seqlen=}"
         )
+        num_groups = test_case.get("num_groups", 1)
+        assert num_groups <= 3
 
         # skip for unmatched world size
         if self.world_size != test_case["world_size"]:
@@ -1160,6 +1230,12 @@ class TestGroupCollective(DistTestBase):
         # skip when dtype != comm_dtype
         if comm_dtype is not None and dtype != comm_dtype:
             # TODO: support specific comm dtype for other implementations
+            if not use_native_grpcoll:
+                return
+
+        # skip when num_groups > 1
+        if num_groups > 1:
+            # TODO: support num_groups > 1 for other implementations
             if not use_native_grpcoll:
                 return
 
@@ -1202,14 +1278,6 @@ class TestGroupCollective(DistTestBase):
             .repeat_interleave(repeats=self.hidden_size, dim=0)
             .reshape(-1, self.num_heads, self.head_dim)
         )
-        if max_input_seqlen is not None:
-            send_buffer = pad_at_dim(
-                send_buffer,
-                pad_size=max_input_seqlen - actual_input_seqlen,
-                dim=0,
-                value=-1,
-            )
-            assert send_buffer.shape[0] == max_input_seqlen
         recv_buffer_before_reduce = (
             torch.tensor(
                 test_case["recv_buffer_before_reduce_per_rank"][self.rank],
@@ -1228,6 +1296,78 @@ class TestGroupCollective(DistTestBase):
             .repeat_interleave(repeats=self.hidden_size, dim=0)
             .reshape(-1, self.num_heads, self.head_dim)
         )
+
+        if max_input_seqlen is not None:
+            send_buffer = pad_at_dim(
+                send_buffer,
+                pad_size=max_input_seqlen - actual_input_seqlen,
+                dim=0,
+                value=-1,
+            )
+            assert send_buffer.shape[0] == max_input_seqlen
+
+        if num_groups > 1:
+            send_buffer = [send_buffer]
+            recv_buffer_before_reduce = [recv_buffer_before_reduce]
+            expected_recv_buffer = [expected_recv_buffer]
+
+            send_buffer.append(
+                torch.tensor(
+                    test_case["send_buffer_2nd_per_rank"][self.rank],
+                    dtype=dtype,
+                    device=self.device,
+                )
+                .repeat_interleave(repeats=self.hidden_size, dim=0)
+                .reshape(-1, self.num_heads, self.head_dim)
+            )
+            recv_buffer_before_reduce.append(
+                torch.tensor(
+                    test_case["recv_buffer_before_reduce_2nd_per_rank"][self.rank],
+                    dtype=dtype,
+                    device=self.device,
+                )
+                .repeat_interleave(repeats=self.hidden_size, dim=0)
+                .reshape(-1, self.num_heads, self.head_dim)
+            )
+            expected_recv_buffer.append(
+                torch.tensor(
+                    test_case["expected_recv_buffer_2nd_per_rank"][self.rank],
+                    dtype=dtype,
+                    device=self.device,
+                )
+                .repeat_interleave(repeats=self.hidden_size, dim=0)
+                .reshape(-1, self.num_heads, self.head_dim)
+            )
+
+            if num_groups > 2:
+                send_buffer.append(
+                    torch.tensor(
+                        test_case["send_buffer_3rd_per_rank"][self.rank],
+                        dtype=dtype,
+                        device=self.device,
+                    )
+                    .repeat_interleave(repeats=self.hidden_size, dim=0)
+                    .reshape(-1, self.num_heads, self.head_dim)
+                )
+                recv_buffer_before_reduce.append(
+                    torch.tensor(
+                        test_case["recv_buffer_before_reduce_3rd_per_rank"][self.rank],
+                        dtype=dtype,
+                        device=self.device,
+                    )
+                    .repeat_interleave(repeats=self.hidden_size, dim=0)
+                    .reshape(-1, self.num_heads, self.head_dim)
+                )
+                expected_recv_buffer.append(
+                    torch.tensor(
+                        test_case["expected_recv_buffer_3rd_per_rank"][self.rank],
+                        dtype=dtype,
+                        device=self.device,
+                    )
+                    .repeat_interleave(repeats=self.hidden_size, dim=0)
+                    .reshape(-1, self.num_heads, self.head_dim)
+                )
+
         if is_lse_reduce:
             # prepare lse buffer with shape [seqlen, num_heads]
             send_lse_buffer = (
@@ -1319,13 +1459,18 @@ class TestGroupCollective(DistTestBase):
             recv_buffer_after_reduce = (
                 post_process_outputs[0] if is_lse_reduce else post_process_outputs
             )
-            assert_close(
-                recv_buffer_after_reduce,
-                expected_recv_buffer,
-                atol=1e-8 if dtype != torch.float16 else 1e-4,
-                rtol=1e-4 if dtype != torch.float16 else 5e-3,
-                test_case="group-reduce recv buffer",
-            )
+            recv_buffer_after_reduce = wrap_to_list(recv_buffer_after_reduce)
+            expected_recv_buffer = wrap_to_list(expected_recv_buffer)
+            for ith_recv_buffer_after_reduce, ith_expected_recv_buffer in zip(
+                recv_buffer_after_reduce, expected_recv_buffer
+            ):
+                assert_close(
+                    ith_recv_buffer_after_reduce,
+                    ith_expected_recv_buffer,
+                    atol=1e-8 if dtype != torch.float16 else 1e-4,
+                    rtol=1e-4 if dtype != torch.float16 else 5e-3,
+                    test_case="group-reduce recv buffer",
+                )
         except Exception as e:
             err_msg_list.append(
                 f"For group-reduce: {test_case_name=}, recv buffer is failed due to error: \n{e}\n"
