@@ -1104,10 +1104,10 @@ class TestGroupCollective(DistTestBase):
                     [17, 18, 19, 20, 21],
                 ],
                 "send_buffer_2nd_per_rank": [
-                    [0, 1, 2, 3, 4],
-                    [5, 6, 7, 8, 9, 10, 11],
-                    [12, 13, 14, 15, 16],
-                    [17, 18, 19, 20, 21],
+                    [-1, 0, 1, 2, 3],
+                    [4, 5, 6, 7, 8, 9, 10],
+                    [11, 12, 13, 14, 15],
+                    [16, 17, 18, 19, 20],
                 ],
                 "recv_buffer_before_reduce_per_rank": [
                     [1, 1, 1, 1],
@@ -1128,10 +1128,10 @@ class TestGroupCollective(DistTestBase):
                     [14, 17, 19, 20],
                 ],
                 "expected_recv_buffer_2nd_per_rank": [
-                    [8, 10, 21, 19],
-                    [16, 17, 12, 13],
-                    [18, 20, 5, 6],
-                    [7, 10, 12, 13],
+                    [6, 8, 19, 18],
+                    [15, 15, 11, 12],
+                    [17, 18, 4, 5],
+                    [6, 8, 11, 12],
                 ],
                 "input_split_size_list_per_rank": [
                     [1, 1, 1, 2],

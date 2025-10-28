@@ -163,9 +163,6 @@ void group_reduce(
     /* 2nd group of input / output data*/
     void* reduced_x_2nd,
     const void* x_2nd,
-    /* 3rd group of input / output data*/
-    void* reduced_x_3rd,
-    const void* x_3rd,
     /* other metadata */
     const int64_t* pre_perm_idx,
     const int* src_idx,

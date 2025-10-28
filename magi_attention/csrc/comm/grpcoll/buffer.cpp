@@ -655,8 +655,6 @@ std::tuple<
     std::optional<torch::Tensor>,
     /* 2nd group of output data */
     std::optional<torch::Tensor>,
-    /* 3rd group of output data */
-    std::optional<torch::Tensor>,
     /* event */
     std::optional<EventHandle>>
 Buffer::intranode_group_reduce(
@@ -668,9 +666,6 @@ Buffer::intranode_group_reduce(
     /* 2nd group of input / output data*/
     const std::optional<torch::Tensor>& x_2nd,
     std::optional<torch::Tensor>& reduced_x_buf_2nd,
-    /* 3rd group of input / output data*/
-    const std::optional<torch::Tensor>& x_3rd,
-    std::optional<torch::Tensor>& reduced_x_buf_3rd,
     /* other metadata */
     const std::optional<torch::Tensor>& pre_perm_idx,
     const torch::Tensor& src_idx,
@@ -697,11 +692,7 @@ Buffer::intranode_group_reduce(
   int num_groups = 1;
   if (x_2nd.has_value())
     ++num_groups;
-  if (x_3rd.has_value()) {
-    GRPCOLL_HOST_ASSERT(num_groups == 2);
-    ++num_groups;
-  }
-  GRPCOLL_HOST_ASSERT(num_groups <= 3);
+  GRPCOLL_HOST_ASSERT(num_groups <= 2);
 
   // Check tensors
   GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
@@ -725,10 +716,6 @@ Buffer::intranode_group_reduce(
   if (num_groups > 1) {
     GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x_dtype);
     GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size);
-  }
-  if (num_groups > 2) {
-    GRPCOLL_HOST_ASSERT(x_3rd->dim() == 2 and x_3rd->is_contiguous() and x_3rd->scalar_type() == x_dtype);
-    GRPCOLL_HOST_ASSERT(x_3rd->size(0) == num_tokens and x_3rd->size(1) == hidden_size);
   }
 
   // Set current stream to comm stream if needed
@@ -840,23 +827,6 @@ Buffer::intranode_group_reduce(
     reduced_x_ptr_2nd = reduced_x_2nd->data_ptr();
   }
 
-  // Allocate 3rd reduced_x buffer and assign the ptr if needed
-  auto reduced_x_3rd = std::optional<torch::Tensor>();
-  void *x_ptr_3rd = nullptr, *reduced_x_ptr_3rd = nullptr;
-  if (num_groups > 2) {
-    if (reduced_x_buf_3rd.has_value()) {
-      GRPCOLL_HOST_ASSERT(reduced_x_buf_3rd->dim() == 2 and reduced_x_buf_3rd->is_contiguous() and reduced_x_buf_3rd->scalar_type() == x_dtype);
-      GRPCOLL_HOST_ASSERT(reduced_x_buf_3rd->size(0) == num_reduced_tokens and reduced_x_buf_3rd->size(1) == hidden_size);
-      reduced_x_3rd.emplace(reduced_x_buf_3rd.value());
-    } else {
-      GRPCOLL_HOST_ASSERT(!acc_reduce);
-      reduced_x_3rd = torch::empty({num_reduced_tokens, hidden_size}, x_3rd->options());
-    }
-
-    x_ptr_3rd = x_3rd->data_ptr();
-    reduced_x_ptr_3rd = reduced_x_3rd->data_ptr();
-  }
-
   // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT(
       num_channels * num_ranks * sizeof(int) * 2 + // queue head and tail
@@ -885,8 +855,6 @@ Buffer::intranode_group_reduce(
       /*lse=*/lse_ptr,
       /*reduced_x_2nd=*/reduced_x_ptr_2nd,
       /*x_2nd=*/x_ptr_2nd,
-      /*reduced_x_3rd=*/reduced_x_ptr_3rd,
-      /*x_3rd=*/x_ptr_3rd,
       /*pre_perm_idx=*/pre_perm_idx_ptr,
       /*src_idx=*/src_idx.data_ptr<int>(),
       /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
@@ -920,7 +888,7 @@ Buffer::intranode_group_reduce(
         t.record_stream(compute_stream);
     }
     // record optional tensors
-    for (auto& to : {x_2nd, reduced_x_2nd, x_3rd, reduced_x_3rd, lse, reduced_lse, pre_perm_idx}) {
+    for (auto& to : {x_2nd, reduced_x_2nd, lse, reduced_lse, pre_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
@@ -933,7 +901,7 @@ Buffer::intranode_group_reduce(
   if (allocate_on_comm_stream)
     at::cuda::setCurrentCUDAStream(compute_stream);
 
-  return {reduced_x, reduced_lse, reduced_x_2nd, reduced_x_3rd, event};
+  return {reduced_x, reduced_lse, reduced_x_2nd, event};
 }
 
 std::tuple<

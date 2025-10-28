@@ -804,7 +804,7 @@ class GrpCollBuffer:
 
         # Unpack (x,reduced_x) groups
         num_groups = len(x)
-        assert 1 <= num_groups <= 3, "num_groups only supports {1,2,3}"
+        assert 1 <= num_groups <= 2, "num_groups only supports {1,2}"
         x_1st = x[0]
         reduced_x_1st = reduced_x[0] if reduced_x is not None else None
         if num_groups > 1:
@@ -813,19 +813,12 @@ class GrpCollBuffer:
         else:
             x_2nd = None
             reduced_x_2nd = None
-        if num_groups > 2:
-            x_3rd = x[2]
-            reduced_x_3rd = reduced_x[2] if reduced_x is not None else None
-        else:
-            x_3rd = None
-            reduced_x_3rd = None
 
         # Launch the intranode group reduce kernel
         (
             reduced_x_1st,
             reduced_lse,
             reduced_x_2nd,
-            reduced_x_3rd,
             # event
             event,
         ) = self.runtime.intranode_group_reduce(
@@ -835,8 +828,6 @@ class GrpCollBuffer:
             reduced_lse,
             x_2nd,
             reduced_x_2nd,
-            x_3rd,
-            reduced_x_3rd,
             pre_perm_idx,
             handle.recv_src_idx,  # src_idx
             handle.rank_prefix_matrix,  # rank_prefix_matrix
@@ -857,8 +848,6 @@ class GrpCollBuffer:
         ]
         if num_groups > 1:
             reduced_x.append(reduced_x_2nd)
-        if num_groups > 2:
-            reduced_x.append(reduced_x_3rd)
 
         # View output to hidden shape
         for i in range(num_groups):

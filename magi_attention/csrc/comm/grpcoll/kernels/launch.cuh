@@ -272,7 +272,7 @@ using namespace magi_attn_comm::grpcoll;
   }                                                             \
   while (false)
 
-#define SWITCH_DATA_GROUPS(case_macro, ...)                    \
+#define SWITCH_DATA_GROUPS_3(case_macro, ...)                  \
   switch (num_groups) {                                        \
     case 1:                                                    \
       case_macro(1, ##__VA_ARGS__);                            \
@@ -280,6 +280,17 @@ using namespace magi_attn_comm::grpcoll;
       case_macro(2, ##__VA_ARGS__);                            \
     case 3:                                                    \
       case_macro(3, ##__VA_ARGS__);                            \
+    default:                                                   \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported num_groups"); \
+  }                                                            \
+  while (false)
+
+#define SWITCH_DATA_GROUPS_2(case_macro, ...)                  \
+  switch (num_groups) {                                        \
+    case 1:                                                    \
+      case_macro(1, ##__VA_ARGS__);                            \
+    case 2:                                                    \
+      case_macro(2, ##__VA_ARGS__);                            \
     default:                                                   \
       GRPCOLL_HOST_ASSERT(false and "Unsupported num_groups"); \
   }                                                            \

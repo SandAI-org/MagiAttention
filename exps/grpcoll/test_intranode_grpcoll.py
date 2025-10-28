@@ -465,6 +465,7 @@ def prepare_test_func_kwargs(
     time.sleep(1)
 
     # prepare other data groups
+    # TODO: test group_reduce with `num_data_groups > 1`
     if num_data_groups > 1:
         x_2nd = x.clone() + 1
         recv_x_gc_2nd = recv_x_gc.clone() + 1

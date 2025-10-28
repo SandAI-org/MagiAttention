@@ -851,10 +851,10 @@ void group_cast(
   }                                                                   \
   break
 
-#define GROUP_CAST_DATA_GROUPS_LAUNCH_CASE(...)                     \
-  {                                                                 \
-    SWITCH_DATA_GROUPS(LAUNCH_INTRANODE_GROUP_CAST, ##__VA_ARGS__); \
-  }                                                                 \
+#define GROUP_CAST_DATA_GROUPS_LAUNCH_CASE(...)                       \
+  {                                                                   \
+    SWITCH_DATA_GROUPS_3(LAUNCH_INTRANODE_GROUP_CAST, ##__VA_ARGS__); \
+  }                                                                   \
   break
 
   SWITCH_RANKS_WITH_WARPS(GROUP_CAST_DATA_GROUPS_LAUNCH_CASE);
@@ -963,9 +963,6 @@ void group_reduce_kernel(
     /* 2nd group of input / output data*/
     dtype_t* reduced_x_2nd,
     const dtype_t* x_2nd,
-    /* 3rd group of input / output data*/
-    dtype_t* reduced_x_3rd,
-    const dtype_t* x_3rd,
     /* other metadata */
     const int64_t* pre_perm_idx,
     const int* src_idx,
@@ -1580,9 +1577,6 @@ void launch_group_reduce(
     /* 2nd group of input / output data*/
     void* reduced_x_2nd,
     const void* x_2nd,
-    /* 3rd group of input / output data*/
-    void* reduced_x_3rd,
-    const void* x_3rd,
     /* other metadata */
     const int64_t* pre_perm_idx,
     const int* src_idx,
@@ -1620,7 +1614,7 @@ void launch_group_reduce(
   else
     GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
 
-  GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 3, "Invalid kNumDataGroups");
+  GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 2, "Invalid kNumDataGroups");
 
 #define GROUP_REDUCE_LAUNCH_CASE(reduce_op)        \
   {                                                \
@@ -1647,8 +1641,6 @@ void launch_group_reduce(
         lse,                                       \
         reinterpret_cast<dtype_t*>(reduced_x_2nd), \
         reinterpret_cast<const dtype_t*>(x_2nd),   \
-        reinterpret_cast<dtype_t*>(reduced_x_3rd), \
-        reinterpret_cast<const dtype_t*>(x_3rd),   \
         pre_perm_idx,                              \
         src_idx,                                   \
         rank_prefix_matrix,                        \
@@ -1683,9 +1675,6 @@ void group_reduce(
     /* 2nd group of input / output data*/
     void* reduced_x_2nd,
     const void* x_2nd,
-    /* 3rd group of input / output data*/
-    void* reduced_x_3rd,
-    const void* x_3rd,
     /* other metadata */
     const int64_t* pre_perm_idx,
     const int* src_idx,
@@ -1717,8 +1706,6 @@ void group_reduce(
         lse,                                                                                                         \
         reduced_x_2nd,                                                                                               \
         x_2nd,                                                                                                       \
-        reduced_x_3rd,                                                                                               \
-        x_3rd,                                                                                                       \
         pre_perm_idx,                                                                                                \
         src_idx,                                                                                                     \
         rank_prefix_matrix,                                                                                          \
@@ -1744,9 +1731,9 @@ void group_reduce(
   }                                                                                        \
   break
 
-#define GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE(...)                      \
-  {                                                                    \
-    SWITCH_DATA_GROUPS(GROUP_REDUCE_DTYPE_LAUNCH_CASE, ##__VA_ARGS__); \
+#define GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE(...)                        \
+  {                                                                      \
+    SWITCH_DATA_GROUPS_2(GROUP_REDUCE_DTYPE_LAUNCH_CASE, ##__VA_ARGS__); \
   }
 
 #define GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE(num_ranks, num_warps)        \
