@@ -707,6 +707,11 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             if hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(dtype) != 0:
                 return
 
+            # TODO: for now, native grpcoll only supports fp32 lse comm
+            # thus it cannot pass this test requiring fp64 lse
+            if magi_attention.comm.is_qo_comm_enable():
+                return
+
         # -----    construct test case name   ---- #
 
         assert (
