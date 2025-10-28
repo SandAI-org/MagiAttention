@@ -131,7 +131,7 @@ class A2AVBasedGroupCollectiveArg(GroupCollectiveArg):
             self._group_reduce_args_dict_packed = self.to_packed_group_reduce_args(
                 packed_times=self.packed_times
             )
-            self._group_reduce_args_dict_packed["reduce_op"] = self.reduce_op
+            self._group_reduce_args_dict_packed.update(reduce_op=self.reduce_op)
 
         # ----   additional kwargs  ---- #
 

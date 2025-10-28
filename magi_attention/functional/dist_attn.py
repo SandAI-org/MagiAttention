@@ -64,81 +64,57 @@ class DistAttnRuntime:
         self.calc_meta = calc_meta
         self.cp_group_gc = cp_group_gc
         self.cp_group_gr = cp_group_gr
-        self.deterministic = magi_attention.is_deterministic_mode_enable()
         self.overlap_degree = comm_meta.overlap_degree
-        self.prefetch_stage_by_stage = (
-            magi_attention.is_cuda_device_max_connections_one()
-        )
-        self.hp_dtype = torch.float32
-        self.use_native_grpcoll = magi_attention.comm.is_native_grpcoll_enable()
 
-        # ----------    flags for fwd   --------- #
-
-        self.fwd_sm_margin = magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
+        # ----------    other control flags for fwd   --------- #
 
         # NOTE: we now always concat kv together for comm
-        # TODO: support concat_kv=False when enabling native grpcoll
         self.concat_kv = True
+        # TODO: support concat_kv=False when enabling native grpcoll
+        # self.concat_kv = not self.use_native_grpcoll
 
-        # NOTE: when enabling FFA fwd high precision reduce,
-        # we won't downcast partial out to q dtype before group-reduce comm,
-        # to trade-off double comm overhead for increased precision and less dtype-cast overhead
-        # and this works for out only when `is_qo_comm_enable` is ``True``
-        self.fwd_hp_reduce = magi_attention.comm.is_fwd_high_precision_reduce_enable()
-
-        # NOTE: when neither using sdpa backend nor qo comm,
+        # NOTE: when disabling qo comm
+        # if not using sdpa backend,
         # we will use accumulative buffer for partial out and lse
         # to avoid the storage of partial results
         # and an additional explicit `correct_attn_fwd_result`
-        self.fwd_out_lse_use_acc = (
-            not magi_attention.comm.is_qo_comm_enable()
-            and not magi_attention.is_sdpa_backend_enable()
-        )
+        self.fwd_out_lse_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend
 
         # NOTE: when enabling qo comm
-        # and neither using native grpcoll nor enabling FFA fwd high precision reduce
+        # and neither using native grpcoll nor enabling fwd high precision reduce
         # we're supposed to initialize the partial local out in low precision
         self.fwd_local_out_lp_init = (
-            magi_attention.comm.is_qo_comm_enable()
-            and not magi_attention.comm.is_native_grpcoll_enable()
+            self.enable_qo_comm
+            and not self.use_native_grpcoll
             and not self.fwd_hp_reduce
         )
 
-        # ----------    flags for bwd   --------- #
-
-        self.bwd_sm_margin = magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
+        # ----------    other control flags for bwd   --------- #
 
         # NOTE: we now always concat dkv together for comm
-        # TODO: support concat_dkv=False when enabling native grpcoll
         self.concat_dkv = True
+        # TODO: support concat_dkv=False when enabling native grpcoll
+        # self.concat_dkv = not self.use_native_grpcoll
 
-        # NOTE: we concat q,o,do in dist-attn bwd when qo comm is enabled
-        self.concat_qo_do = magi_attention.comm.is_qo_comm_enable()
+        # NOTE: when enabling qo comm
+        # we always concat q,o,do together for comm unless using native grpcoll
+        self.concat_qo_do = self.enable_qo_comm and not self.use_native_grpcoll
 
-        # NOTE: when enabling FFA bwd high precision reduce,
-        # we won't downcast downcast partial dq,dk,dv to q,k,v dtype before group-reduce comm,
-        # to trade-off double comm overhead for increased precision and less dtype-cast overhead
-        # and this works for dq only when `is_qo_comm_enable` is ``True``
-        self.bwd_hp_reduce = magi_attention.comm.is_bwd_high_precision_reduce_enable()
-
-        # NOTE: when neither using sdpa backend nor qo comm
+        # NOTE: when disabling qo comm
+        # if not using sdpa backend,
         # we will use accumulative buffer for partial dq
         # to avoid an additional explicit `add_`
-        self.bwd_dq_use_acc = (
-            not magi_attention.comm.is_qo_comm_enable()
-            and not magi_attention.is_sdpa_backend_enable()
-        )
+        self.bwd_dq_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend
 
-        # NOTE: when neither using native grpcoll nor enabling FFA bwd high precision reduce
+        # NOTE: when neither using native grpcoll nor enabling bwd high precision reduce
         # we're supposed to initialize the partial local dk,dv in low precision
-        # and the same applies to dq if enabling qo comm
+        # and the same applies to dq when enabling qo comm
         self.bwd_local_dkv_lp_init = (
-            not magi_attention.comm.is_native_grpcoll_enable()
-            and not self.bwd_hp_reduce
+            not self.use_native_grpcoll and not self.bwd_hp_reduce
         )
         self.bwd_local_dq_lp_init = (
-            magi_attention.comm.is_qo_comm_enable()
-            and not magi_attention.comm.is_native_grpcoll_enable()
+            self.enable_qo_comm
+            and not self.use_native_grpcoll
             and not self.bwd_hp_reduce
         )
 
@@ -209,7 +185,9 @@ class DistAttnRuntime:
                 partial_lse = torch.full(
                     (q.size(0), q.size(1)),
                     fill_value=float("-inf"),
-                    dtype=self._maybe_hp_dtype(q.dtype),  # lse always in high-precision
+                    dtype=self._maybe_hp_dtype(
+                        q.dtype, need_hp_dtype=True
+                    ),  # lse always in high-precision
                     device=q.device,
                 )
             return partial_out, partial_lse
@@ -225,7 +203,7 @@ class DistAttnRuntime:
             f"{attn_arg.q_ranges=} | "
             f"{attn_arg.k_ranges=}"
         ):
-            if magi_attention.is_sdpa_backend_enable():
+            if self.use_sdpa_backend:
                 partial_out, partial_lse = sdpa_fwd(
                     q=q,
                     k=k,
@@ -497,7 +475,7 @@ class DistAttnRuntime:
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
-        if magi_attention.is_sdpa_backend_enable():
+        if self.use_sdpa_backend:
             partial_dq, partial_dk, partial_dv = sdpa_bwd(
                 do=do,
                 q=q,
@@ -765,6 +743,46 @@ class DistAttnRuntime:
 
     # ----------    common API   --------- #
 
+    @property
+    def deterministic(self) -> bool:
+        return magi_attention.is_deterministic_mode_enable()
+
+    @property
+    def prefetch_stage_by_stage(self) -> bool:
+        return magi_attention.is_cuda_device_max_connections_one()
+
+    @property
+    def use_sdpa_backend(self) -> bool:
+        return magi_attention.is_sdpa_backend_enable()
+
+    @property
+    def use_native_grpcoll(self) -> bool:
+        return magi_attention.comm.is_native_grpcoll_enable()
+
+    @property
+    def enable_qo_comm(self) -> bool:
+        return magi_attention.comm.is_qo_comm_enable()
+
+    @property
+    def hp_dtype(self) -> torch.dtype:
+        return torch.float32
+
+    @property
+    def fwd_sm_margin(self) -> int:
+        return magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
+
+    @property
+    def bwd_sm_margin(self) -> int:
+        return magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
+
+    @property
+    def fwd_hp_reduce(self) -> bool:
+        return magi_attention.comm.is_fwd_high_precision_reduce_enable()
+
+    @property
+    def bwd_hp_reduce(self) -> bool:
+        return magi_attention.comm.is_bwd_high_precision_reduce_enable()
+
     def is_host_stage(self, overlap_stage: int | None) -> bool:
         """
         Check if the given overlap stage is the host stage
@@ -885,7 +903,7 @@ class DistAttnRuntime:
                 for i = 0, 1, ..., overlap_degree - 1
         """
 
-        if not magi_attention.comm.is_qo_comm_enable():
+        if not self.enable_qo_comm:
             remote_q_buffer = local_q
             remote_q_work = WorkWithPostProcessFn(post_process_fn=lambda x: x)
             return remote_q_work, remote_q_buffer
@@ -952,20 +970,67 @@ class DistAttnRuntime:
                     for i = 0, 1, ..., overlap_degree - 1
         """
 
-        if not magi_attention.comm.is_qo_comm_enable():
+        if not self.enable_qo_comm:
             remote_qo_do_lse_buffer = (local_qo_do, local_lse)
             remote_qo_do_lse_work = WorkWithPostProcessFn(
                 post_process_fn=lambda x: x  # take q,o,do,lse and return q,o,do,lse
             )
             return remote_qo_do_lse_work, remote_qo_do_lse_buffer
 
-        assert self.concat_qo_do, "Only supports concat_qo_do"
-        _, num_heads, head_dim = local_qo_do.shape
+        if self.concat_qo_do:  # local_qo_do is a fused tensor
+            _, num_heads, head_dim = local_qo_do.shape
+            dtype = local_qo_do.dtype
+            device = local_qo_do.device
+        else:  # local_qo_do are tupled tensors
+            _, num_heads, head_dim = local_qo_do[0].shape
+            dtype = local_qo_do[0].dtype
+            device = local_qo_do[0].device
 
-        if magi_attention.comm.is_native_grpcoll_enable():
-            raise NotImplementedError(
-                "TODO: support native grpcoll for fetching q,o,do,lse"
+        if self.use_native_grpcoll:
+            assert (
+                not self.concat_qo_do
+            ), "Only support native grpcoll without concating q,o,do"
+
+            # get the group-cast args
+            group_cast_args = self.comm_meta.qo_group_collective_args_list[
+                overlap_stage
+            ].to_group_cast_args()
+            remote_lse_seqlen = self.comm_meta.num_remote_qo_tokens_per_stage[
+                overlap_stage
+            ]
+            remote_qo_do_seqlen = remote_lse_seqlen * 3
+
+            # init remote lse buffer
+            remote_lse_buffer = torch.empty(
+                (remote_lse_seqlen, num_heads),
+                dtype=self._maybe_hp_dtype(
+                    dtype, need_hp_dtype=True
+                ),  # lse always in high-precision
+                device=device,
             )
+
+            # init remote qo_do buffers
+            remote_qo_do_buffer = torch.empty(
+                (remote_qo_do_seqlen, num_heads, head_dim),
+                dtype=dtype,
+                device=device,
+            )
+            remote_qo_do_buffer = self._maybe_chunk(remote_qo_do_buffer, num_chunks=3)
+
+            # launch group cast kernel
+            remote_qo_do_lse_work = group_cast(
+                input=local_qo_do,
+                output=remote_qo_do_buffer,
+                **group_cast_args,
+                group=self.cp_group_gc,
+                async_op=True,
+                cast_lse=True,
+                input_lse=local_lse,
+                output_lse=remote_lse_buffer,
+            )
+
+            # pack the buffers for qo_do and lse together
+            remote_qo_do_lse_buffer = (remote_qo_do_buffer, remote_lse_buffer)
         else:
             # HACK: since lse usually has different shape and dtype from q,o,do
             # and we concat the q,o,do along the seqlen dim for non-native grpcoll,
@@ -983,15 +1048,16 @@ class DistAttnRuntime:
                 overlap_stage
             ]
 
-            # init remote lse buffer with the shape: [sq, nhq]
+            # init remote lse buffer
             remote_lse_buffer = torch.empty(
-                remote_lse_seqlen,
-                num_heads,
-                dtype=local_lse.dtype,
-                device=local_lse.device,
+                (remote_lse_seqlen, num_heads),
+                dtype=self._maybe_hp_dtype(
+                    dtype, need_hp_dtype=True
+                ),  # lse always in high-precision
+                device=device,
             )
 
-            # launch group cast kernel
+            # launch group cast kernel for lse
             remote_lse_work = group_cast(
                 input=local_lse,
                 output=remote_lse_buffer,
@@ -1012,14 +1078,12 @@ class DistAttnRuntime:
 
             # init remote q,o,do output buffer
             remote_qo_do_buffer = torch.empty(
-                remote_qo_do_seqlen,
-                num_heads,
-                head_dim,
-                dtype=local_qo_do.dtype,
-                device=local_qo_do.device,
+                (remote_qo_do_seqlen, num_heads, head_dim),
+                dtype=dtype,
+                device=device,
             )
 
-            # launch group cast kernel
+            # launch group cast kernel for qo_do
             assert isinstance(local_qo_do, torch.Tensor)  # mypy
             remote_qo_do_work = group_cast(
                 input=local_qo_do,
@@ -1029,7 +1093,7 @@ class DistAttnRuntime:
                 async_op=True,
             )
 
-            # concat the work and buffer for qo_do and lse together
+            # pack the works for qo_do and lse together
             remote_qo_do_lse_work = WorkWithPostProcessFn(
                 work=GeneralWork([remote_qo_do_work.work, remote_lse_work.work]),
                 post_process_fn=lambda x: (  # take qo_do, lse and return qo_do, lse
@@ -1037,6 +1101,8 @@ class DistAttnRuntime:
                     remote_lse_work.post_process_fn(x[1]),
                 ),
             )
+
+            # pack the buffers for qo_do and lse together
             remote_qo_do_lse_buffer = (remote_qo_do_buffer, remote_lse_buffer)
 
         return remote_qo_do_lse_work, remote_qo_do_lse_buffer
@@ -1069,9 +1135,18 @@ class DistAttnRuntime:
         Returns:
             partial_out_lse_reduce_work (WorkWithPostProcessFn): partial out and lse group-reduce work
         """
-        if magi_attention.comm.is_qo_comm_enable():
+        if self.enable_qo_comm:
             # get the group-reduce args for out and lse
-            group_reduce_args = self.comm_meta.out_lse_group_collective_args_list[
+            if self.use_native_grpcoll:  # just the same as original qo args
+                group_collective_args_list = (
+                    self.comm_meta.qo_group_collective_args_list
+                )
+            else:  # the specific args for out and lse
+                group_collective_args_list = (
+                    self.comm_meta.out_lse_group_collective_args_list  # type: ignore[assignment]
+                )
+
+            group_reduce_args = group_collective_args_list[
                 overlap_stage
             ].to_group_reduce_args()
 
@@ -1088,7 +1163,7 @@ class DistAttnRuntime:
                     device=ref_remote_out.device,
                 )
                 partial_remote_lse = torch.empty(
-                    (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
+                    (ref_remote_out.size(0), ref_remote_out.size(1)),
                     dtype=self._maybe_hp_dtype(
                         ref_remote_out.dtype,
                         need_hp_dtype=True,  # lse always in high-precision
@@ -1100,13 +1175,16 @@ class DistAttnRuntime:
                 # if using non-native grpcoll and not reduce in high-precision
                 partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
 
-            # init comm dtype
-            # non-native grpcoll only supports the same comm dtype as input/output
-            comm_dtype = (
-                self._maybe_hp_dtype(ref_remote_out.dtype, self.fwd_hp_reduce)
-                if self.use_native_grpcoll
-                else None
-            )
+            # init some additional kwargs for native grpcoll
+            partial_out_lse_reduce_kwargs: dict[str, Any] = {}
+            if self.use_native_grpcoll:
+                partial_out_lse_reduce_kwargs.update(
+                    acc_reduce=True,
+                    reduce_op="lse",
+                    comm_dtype=self._maybe_hp_dtype(
+                        ref_remote_out.dtype, self.fwd_hp_reduce
+                    ),
+                )
 
             # launch group-reduce kernel
             partial_out_lse_reduce_work = group_reduce(
@@ -1117,7 +1195,7 @@ class DistAttnRuntime:
                 **group_reduce_args,
                 group=self.cp_group_gr,
                 async_op=True,
-                comm_dtype=comm_dtype,
+                **partial_out_lse_reduce_kwargs,
             )
         else:
             if not self.fwd_out_lse_use_acc and partial_remote_out is not None:
@@ -1192,13 +1270,14 @@ class DistAttnRuntime:
             # if using non-native grpcoll and not reduce in high-precision
             partial_remote_dkv = partial_remote_dkv.to(dtype)
 
-        # init comm dtype
-        # non-native grpcoll only supports the same comm dtype as input/output
-        comm_dtype = (
-            self._maybe_hp_dtype(dtype, self.bwd_hp_reduce)
-            if self.use_native_grpcoll
-            else None
-        )
+        # init some additional kwargs for native grpcoll
+        partial_dkv_reduce_kwargs: dict[str, Any] = {}
+        if self.use_native_grpcoll:
+            partial_dkv_reduce_kwargs.update(
+                acc_reduce=True,
+                reduce_op="sum",
+                comm_dtype=self._maybe_hp_dtype(dtype, self.bwd_hp_reduce),
+            )
 
         # launch group-reduce kernel
         partial_dkv_reduce_work = group_reduce(
@@ -1207,7 +1286,7 @@ class DistAttnRuntime:
             **group_reduce_args,
             group=self.cp_group_gr,
             async_op=True,
-            comm_dtype=comm_dtype,
+            **partial_dkv_reduce_kwargs,
         )
 
         return partial_dkv_reduce_work
@@ -1234,7 +1313,7 @@ class DistAttnRuntime:
         Returns:
             partial_dq_reduce_work (WorkWithPostProcessFn): partial dq group-reduce work
         """
-        if magi_attention.comm.is_qo_comm_enable():
+        if self.enable_qo_comm:
             # get the group-reduce args for dq
             group_reduce_args = self.comm_meta.qo_group_collective_args_list[
                 overlap_stage
@@ -1256,13 +1335,16 @@ class DistAttnRuntime:
                 # if using non-native grpcoll and not reduce in high-precision
                 partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
 
-            # init comm dtype
-            # non-native grpcoll only supports the same comm dtype as input/output
-            comm_dtype = (
-                self._maybe_hp_dtype(ref_remote_dq.dtype, self.bwd_hp_reduce)
-                if self.use_native_grpcoll
-                else None
-            )
+            # init some additional kwargs for native grpcoll
+            partial_dq_reduce_kwargs: dict[str, Any] = {}
+            if self.use_native_grpcoll:
+                partial_dq_reduce_kwargs.update(
+                    acc_reduce=True,
+                    reduce_op="sum",
+                    comm_dtype=self._maybe_hp_dtype(
+                        ref_remote_dq.dtype, self.bwd_hp_reduce
+                    ),
+                )
 
             # launch group-reduce kernel
             partial_dq_reduce_work = group_reduce(
@@ -1271,7 +1353,7 @@ class DistAttnRuntime:
                 **group_reduce_args,
                 group=self.cp_group_gr,
                 async_op=True,
-                comm_dtype=comm_dtype,
+                **partial_dq_reduce_kwargs,
             )
         else:
             if not self.bwd_dq_use_acc and partial_remote_dq is not None:
