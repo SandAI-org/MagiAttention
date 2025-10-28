@@ -68,10 +68,8 @@ class DistAttnRuntime:
 
         # ----------    other control flags for fwd   --------- #
 
-        # NOTE: we now always concat kv together for comm
-        self.concat_kv = True
-        # TODO: support concat_kv=False when enabling native grpcoll
-        # self.concat_kv = not self.use_native_grpcoll
+        # NOTE: we now always concat kv together for comm unless using native grpcoll
+        self.concat_kv = not self.use_native_grpcoll
 
         # NOTE: when disabling qo comm
         # if not using sdpa backend,
@@ -91,10 +89,8 @@ class DistAttnRuntime:
 
         # ----------    other control flags for bwd   --------- #
 
-        # NOTE: we now always concat dkv together for comm
-        self.concat_dkv = True
-        # TODO: support concat_dkv=False when enabling native grpcoll
-        # self.concat_dkv = not self.use_native_grpcoll
+        # NOTE: we now always concat dkv together for comm unless using native grpcoll
+        self.concat_dkv = not self.use_native_grpcoll
 
         # NOTE: when enabling qo comm
         # we always concat q,o,do together for comm unless using native grpcoll
@@ -439,7 +435,6 @@ class DistAttnRuntime:
             partial_dq: [num_tokens_q, num_heads_q, head_dim]
             partial_dkv: [num_tokens_kv*2, num_heads_kv, head_dim]
         """
-        assert self.concat_dkv, "Only supports concat_dkv"
 
         is_host_stage = self.is_host_stage(overlap_stage)
 
@@ -453,28 +448,43 @@ class DistAttnRuntime:
         # skipped case
         if attn_arg.can_skip(is_bwd=True):
             partial_dq, partial_dkv = None, None
+
             if is_host_stage:
                 q, _, _ = self._maybe_chunk(qo_do, num_chunks=3)
+                k, _ = self._maybe_chunk(kv, num_chunks=2)
+                if self.concat_kv:  # kv is a fused tensor
+                    dkv_shape = kv.shape
+                else:  # kv are tupled tensors
+                    dkv_shape = (k.shape[0] * 2, *k.shape[1:])
+
                 # NOTE: if local_dq and local_dkv calculation are skipped,
                 # we need to zero-initialize them since they might be reduced later
                 partial_dq = torch.zeros_like(
                     q,
                     dtype=self._maybe_hp_dtype(q.dtype, not self.bwd_local_dq_lp_init),
                 )
-                partial_dkv = torch.zeros_like(
-                    kv,
-                    dtype=self._maybe_hp_dtype(
-                        kv.dtype, not self.bwd_local_dkv_lp_init
-                    ),
+                partial_dkv = torch.zeros(
+                    dkv_shape,
+                    dtype=self._maybe_hp_dtype(k.dtype, not self.bwd_local_dkv_lp_init),
+                    device=k.device,
                 )
+                if not self.concat_dkv:  # make partial_dkv tupled tensors
+                    partial_dkv = self._maybe_chunk(partial_dkv, num_chunks=2)
+
             return partial_dq, partial_dkv
 
-        # attention backward pass
+        # prepare tensors and other meta
         q, o, do = self._maybe_chunk(qo_do, num_chunks=3)
         k, v = self._maybe_chunk(kv, num_chunks=2)
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
+        if self.concat_kv:  # kv is a fused tensor
+            dkv_shape = kv.shape
+        else:  # kv are tupled tensors
+            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
+
+        # attention backward pass
         if self.use_sdpa_backend:
             partial_dq, partial_dk, partial_dv = sdpa_bwd(
                 do=do,
@@ -487,21 +497,18 @@ class DistAttnRuntime:
                 softmax_scale=_softmax_scale,
                 softcap=softcap,
             )
-            partial_dkv = self._maybe_concat(
-                partial_dk, partial_dv, need_concat=self.concat_dkv
-            )
+            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=True)
         else:
+            # init partial_dkv buffer
             # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
             # and we need to zero-initialize partial_dkv since it needs to be reduced
-            if self.concat_kv:  # kv is a fused tensor
-                partial_dkv = torch.zeros_like(kv, dtype=self.hp_dtype)
-            else:  # kv are tupled tensors
-                partial_dkv = torch.zeros(
-                    (k.shape[0] * 2, *k.shape[1:]),
-                    dtype=self.hp_dtype,
-                    device=k.device,
-                )
+            partial_dkv = torch.zeros(
+                dkv_shape,
+                dtype=self.hp_dtype,
+                device=k.device,
+            )
             partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
+
             partial_dq, partial_dk, partial_dv = _flex_flash_attn_backward(
                 dout=do,
                 q=q,
@@ -532,9 +539,11 @@ class DistAttnRuntime:
         if is_host_stage:
             if self.bwd_local_dq_lp_init:
                 partial_dq = partial_dq.to(q.dtype)
-
             if self.bwd_local_dkv_lp_init:
                 partial_dkv = partial_dkv.to(kv.dtype)
+
+        if not self.concat_dkv:  # make partial_dkv tupled tensors
+            partial_dkv = (partial_dk, partial_dv)
 
         return partial_dq, partial_dkv
 
@@ -715,15 +724,19 @@ class DistAttnRuntime:
                 partial_local_dkv
             )
 
-        # cast final local dkv to kv dtype
-        local_dkv = partial_local_dkv.to(
-            ref_local_dkv.dtype
-            if self.concat_kv  # ref_local_dkv is a fused tensor
-            else ref_local_dkv[0].dtype  # ref_local_dkv are tupled tensors
-        )
+        # cast final local dkv to kv dtype and chunk to dk and dv
+        if self.concat_kv:  # ref_local_dkv is a fused tensor
+            kv_dtype = ref_local_dkv.dtype
+        else:  # ref_local_dkv are tupled tensors
+            kv_dtype = ref_local_dkv[0].dtype
 
-        # chunk final local dkv into dk and dv
-        local_dk, local_dv = self._maybe_chunk(local_dkv, num_chunks=2)
+        if self.concat_dkv:
+            local_dkv = partial_local_dkv.to(kv_dtype)
+            local_dk, local_dv = self._maybe_chunk(local_dkv, num_chunks=2)
+        else:
+            local_dk, local_dv = self._maybe_chunk(partial_local_dkv, num_chunks=2)
+            local_dk = local_dk.to(kv_dtype)
+            local_dv = local_dv.to(kv_dtype)
 
         # reset the temporary work list
         self._reset_work_list()
@@ -838,6 +851,8 @@ class DistAttnRuntime:
             remote_kv_buffer: [num_tokens_kv_remote_i*2, num_heads_kv, head_dim],
                 for i = 0, 1, ..., overlap_degree - 1
         """
+
+        # prepare the meta info
         if self.concat_kv:
             _, num_heads, head_dim = local_kv.shape
             dtype = local_kv.dtype
@@ -977,6 +992,7 @@ class DistAttnRuntime:
             )
             return remote_qo_do_lse_work, remote_qo_do_lse_buffer
 
+        # prepare the meta info
         if self.concat_qo_do:  # local_qo_do is a fused tensor
             _, num_heads, head_dim = local_qo_do.shape
             dtype = local_qo_do.dtype
@@ -1237,27 +1253,30 @@ class DistAttnRuntime:
         Returns:
             partial_dkv_reduce_work (WorkWithPostProcessFn): partial dkv group-reduce work
         """
-        assert self.concat_dkv, "Only supports concat_dkv"
 
+        # prepare the meta info
         if self.concat_kv:  # ref_remote_dkv is a fused tensor
             dtype = ref_remote_dkv.dtype
             device = ref_remote_dkv.device
-            shape = ref_remote_dkv.shape
+            remote_dkv_shape = ref_remote_dkv.shape
         else:  # ref_remote_dkv are tupled tensors
             dtype = ref_remote_dkv[0].dtype
             device = ref_remote_dkv[0].device
-            shape = (ref_remote_dkv[0].shape[0] * 2, *ref_remote_dkv[0].shape[1:])
+            remote_dkv_shape = (
+                ref_remote_dkv[0].shape[0] * 2,
+                *ref_remote_dkv[0].shape[1:],
+            )
 
         # get the group-reduce args for dkv
         group_reduce_args = self.comm_meta.kv_group_collective_args_list[
             overlap_stage
         ].to_group_reduce_args()
 
-        # init remote dkv buffer and comm dtype
+        # init remote dkv buffer(s)
         if partial_remote_dkv is None:
             # skipped for this rank, but still reduced from other ranks
             partial_remote_dkv = torch.empty(
-                shape,
+                remote_dkv_shape,
                 dtype=self._maybe_hp_dtype(
                     dtype,
                     # dkv always in high-precision if using native grpcoll
@@ -1265,7 +1284,10 @@ class DistAttnRuntime:
                 ),
                 device=device,
             )
+            if not self.concat_dkv:
+                partial_remote_dkv = self._maybe_chunk(partial_remote_dkv, num_chunks=2)
         elif not self.use_native_grpcoll and not self.bwd_hp_reduce:
+            assert self.concat_dkv
             # downcast to the same dtype as dkv
             # if using non-native grpcoll and not reduce in high-precision
             partial_remote_dkv = partial_remote_dkv.to(dtype)
