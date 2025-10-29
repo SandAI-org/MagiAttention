@@ -69,7 +69,8 @@ struct CollectiveMainloopFwdSm90 {
 
   static constexpr bool SwapAB = SwapAB_;
   // when SwapAB == true, set the warp group overlap tileMMA size for kBlockM
-  static constexpr int TileSize_kBlockM = kBlockM == 8 ? kBlockM : kBlockM / 2;
+  static constexpr int TileSize_kBlockM = kBlockM;
+  // static constexpr int TileSize_kBlockM = kBlockM == 8 ? kBlockM : kBlockM / 2;
 
   // TileShapeMNK for mma qv: kBlockM, kBlockN, kHeadDim
   // (kBlockM, kHeadDim) @ (kHeadDim, kBlockN) -> (kBlockM, kBlockN)

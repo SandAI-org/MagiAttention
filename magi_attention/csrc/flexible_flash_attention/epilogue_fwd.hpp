@@ -65,7 +65,8 @@ struct CollectiveEpilogueFwd {
   static constexpr int kHeadDim = get<1>(TileShape_MNK_PV{});
 
   // when SwapAB == true, set the warp group overlap tileMMA size for kBlockM
-  static constexpr int TileSize_kBlockM = kBlockM == 8 ? kBlockM : kBlockM / 2;
+  static constexpr int TileSize_kBlockM = kBlockM;
+  // static constexpr int TileSize_kBlockM = kBlockM == 8 ? kBlockM : kBlockM / 2;
   using TileShape_MNK_PV_SwapAB_OP_SELECT = Shape<Int<kHeadDim>, Int<TileSize_kBlockM>, decltype(get<2>(TileShape_MNK_PV{}))>;
 
   using TileShape_MNK_PV_Active = std::conditional_t<SwapAB, TileShape_MNK_PV_SwapAB_OP_SELECT, TileShape_MNK_PV>;
@@ -473,34 +474,25 @@ struct CollectiveEpilogueFwd {
 
     if (!skip_correction) {
       // TODO: need reduce compute for pO, and add predicate k for pO
-      Tensor cO = [&]() {
-        if constexpr (!SwapAB) {
-          return cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})); // (BLK_M,BLK_K) -> (blk_m,blk_k)
-        } else {
-          return cute::make_identity_tensor(select<1, 0>(TileShape_MNK_PV{})); // (BLK_K,BLK_M) -> (blk_k,blk_m)
-        }
-      }();
-      Tensor pO = [&]() {
-        if constexpr (!SwapAB) {
-          return make_tensor<bool>(make_shape(size<0>(cO), size<1>(cO)), make_stride(_1{}, _0{}));
-        } else {
-          // When SwapAB, we swap the stride to create a transposed view of pO
-          return make_tensor<bool>(make_shape(size<0>(cO), size<1>(cO)), make_stride(_0{}, _1{}));
-        }
-      }();
+      Tensor cO = cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})); // (BLK_M,BLK_K) -> (blk_m,blk_k)
+      Tensor pO = make_tensor<bool>(make_shape(size<0>(cO), size<1>(cO)), make_stride(_1{}, _0{}));
       int bound = get<0>(params.shape_O) - (offset_o + m_block * kBlockM);
-      if constexpr (!SwapAB) {
 #pragma unroll
-        for (int n = 0; n < size<0>(pO); ++n) {
-          pO(n, _0{}) = get<0>(cO(n, _0{})) < bound;
-        }
-      } else {
-#pragma unroll
-        for (int n = 0; n < size<1>(pO); ++n) {
-          pO(_0{}, n) = get<1>(cO(_0{}, n)) < bound;
-        }
+      for (int n = 0; n < size<0>(pO); ++n) {
+        pO(n, _0{}) = get<0>(cO(n, _0{})) < bound;
       }
-      Tensor tOpO = thr_copy_O.partition_D(pO);
+      Tensor tOpO = [&]() {
+        if constexpr (!SwapAB) {
+          return thr_copy_O.partition_D(pO);
+        } else {
+          auto pO_transposed = make_tensor(
+              pO.data(),
+              cute::make_layout(
+                  cute::make_shape(get<1>(pO.layout().shape()), get<0>(pO.layout().shape())),
+                  cute::make_stride(get<1>(pO.layout().stride()), get<0>(pO.layout().stride()))));
+          return thr_copy_O.partition_D(pO_transposed);
+        }
+      }();
 
       // Define tOrPrevO, tOrPrevO_copy_view, tOgPrevO
       Tensor tOrPrevO = make_fragment_like(tOrO);

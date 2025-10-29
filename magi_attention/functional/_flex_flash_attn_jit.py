@@ -139,8 +139,8 @@ def sanity_check(
                 192,
             ), "ref_block_size: (kblock_m, kblock_n), kblock_m must be 64, 128 or 192 when swapab == False"
             assert (
-                kblock_n % 8 == 0 and kblock_n <= 256
-            ), "ref_block_size: (kblock_m, kblock_n), kblock_n <= 256 and kblock_n % 8 == 0 must be True"
+                kblock_n % 16 == 0 and kblock_n <= 256
+            ), "ref_block_size: (kblock_m, kblock_n), kblock_n <= 256 and kblock_n % 16 == 0 must be True"
 
 
 def get_ffa_jit_spec(

@@ -73,13 +73,14 @@ __device__ __forceinline__ void warp_group_reduce_column_(Tensor<Engine0, Layout
   int const curr_WG = flash::canonical_warp_group_idx_nosync() - 1;
   int lane = threadIdx.x % 32;
   int warp_id = (threadIdx.x >> 5) & 0x3;
+  // only use 4 threads per warp, to avoid tensor(runtime_index) access and use local memory
+  if (lane < 4) {
 #pragma unroll
-  for (int i = lane; i < kNRows * 4; i += 32) {
-    int tensor_index = i >> 2;
-    int low3 = i & 0x7;
-    // shmem index is the column id of mma result, each position only need one thread copy
-    int shmem_index = (i & (~0x7)) | (((low3 << 1) | (low3 >> 2)) & 0x7);
-    shared_result[curr_WG][warp_id][shmem_index] = tensor(tensor_index);
+    for (int i = 0; i < kNRows; i++) {
+      // shmem index is the column id of mma result
+      const int shmem_index = ((i >> 1) << 3) + (i & 1) + (lane << 1);
+      shared_result[curr_WG][warp_id][shmem_index] = tensor(i);
+    }
   }
   // Ensure that the shmem writes of the current thread
   // are visible to other threads within the same warp group
