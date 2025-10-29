@@ -337,8 +337,9 @@ For more information, you can refer to `example/transformers/README.md`.
 - [ ] **[WIP]** Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*)
 - [ ] **[WIP]** Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
 - [ ] **[WIP]** Support `Dynamic DistAttnSolver` with query/output communication pattern, one for either hybrid attention model or dynamic mask scenarios like sparse attention, the other for reducing communication overhead for many cases when only communicating key/value is not the best choice.
-- [ ] Support other attention patterns including cross-attention, sink tokens (*w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453)*) and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
-- [ ] Support Blackwell as well as other GPU architectures.
+- [ ] **[WIP]** Support learnable attention sink (*w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453)*).
+- [ ] Support other attention patterns including cross-attention, and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
+- [ ] Support Ampere, Blackwell as well as other GPU architectures.
 - [ ] Provide a more comprehensive documentation with tutorials, and a more detailed technical blog.
 - [ ] Provide more example codes and recipes for various training scenarios.
 - [ ] Upgrade `MagiAttention` to a distributed native `Flex-Flash-Attention` kernel (*as a major version update*).
