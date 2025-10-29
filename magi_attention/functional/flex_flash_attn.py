@@ -717,6 +717,7 @@ def flex_flash_attn_func(
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor | None = None,
+    sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
     deterministic: bool = False,
@@ -734,9 +735,11 @@ def flex_flash_attn_func(
         q (torch.Tensor): Query tensor.
         k (torch.Tensor): Key tensor.
         v (torch.Tensor): Value tensor.
-        q_ranges (torch.Tensor): query ranges tensor to represent the attn mask.
-        k_ranges (torch.Tensor): key ranges tensor to represent the attn mask.
-        attn_type_map (torch.Tensor): Attention type map tenspr with dtype=torch.int32.
+
+        q_ranges (torch.Tensor): Query ranges tensor to represent the attn mask.
+        k_ranges (torch.Tensor): Key ranges tensor to represent the attn mask.
+        attn_type_map (torch.Tensor, optional): Attention type map tensor with dtype=torch.int32,
+            Defaults to ``None`` to apply full attention for all ranges.
             The values specify the attention type for each token:
 
                 - 0: full attention
@@ -746,41 +749,57 @@ def flex_flash_attn_func(
 
             More information about the attention type map can be found in the ``Note`` below.
 
+        sink (torch.Tensor, optional): Learnable sink token tensor.
+            Defaults to ``None`` to not apply attention sink.
+
         softmax_scale (float, optional): Softmax scale.
             Defaults to ``None`` to use: ``1/sqrt(head_dim)``.
         softcap (float, optional): Softcap. Defaults to ``0.0``.
+
         deterministic (bool, optional): Whether to use deterministic attention. Defaults to ``False``.
-        sm_margin (int, optional): the amount of SMs(streaming multiprocessors) reserved for communication.
-        disable_fwd_atomic_reduction (bool):
-            Whether to disable forward atomic reduction:
 
-                If you can ensure q_ranges has no overlap, you can set this to True for better performance.
-                Overlap in q_ranges is defined as: if any two q_ranges have non-empty intersection, then there is overlap.
-                For example, q_ranges = ``[[0, 15], [10, 20], [20, 30]]`` has overlap because
-                ``[0, 15]`` and ``[10, 20]`` intersect. While q_ranges = ``[[0, 15], [15, 20], [20, 30]]`` has no overlap.
+        sm_margin (int, optional): The amount of SMs reserved out,
+            useful when considering overlapping with other kernels such as communication kernels.
+            Defaults to ``0`` to use all available SMs.
 
-        auto_range_merge (bool, optional): Whether to automatically merge k_ranges for the same q_range.
-            Defaults to ``False``.
+        disable_fwd_atomic_reduction (bool, optional):
+            Whether to disable forward atomic reduction. Defaults to ``False``.
 
-            **Note:** This flag is usually used in sparse attention cases but still under development.
-        profile_mode (bool): profile ffa or not.
+                If you can ensure ``q_ranges`` is non-overlapped,
+                you can set this to ``True`` for better performance.
+                The "overlap" term among ``q_ranges`` is defined as:
+                if any two ``q_range`` in ``q_ranges`` have non-empty intersection, then it is overlapped.
+                For example, ``q_ranges`` = ``[[0, 15], [10, 20], [20, 30]]`` is overlapped
+                since ``q_range1`` = ``[0, 15]`` and ``q_range2`` = ``[10, 20]`` intersect,
+                while `` q_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` then is non-overlapped.
+
+        auto_range_merge (bool, optional):
+            Whether to automatically merge k_ranges for the same q_range. Defaults to ``False``.
+            **Note:** This flag is useful for sparse attention scenarios but still under development.
+
+        profile_mode (bool, optional):
+            Whether to enable profiling mode for FFA. Defaults to ``False``.
+            **Note:** This flag for now is only internally used to profile FFA.
+            Please do not toggle it on in production.
+
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
             - out (torch.Tensor): Attention output tensor
             - lse (torch.Tensor): Log-sum-exp values with dtype=torch.float32.
 
     Shape:
-        - q: (num_tokens_q, num_heads, head_dim)
-        - k: (num_tokens_kv, num_heads, head_dim)
-        - v: (num_tokens_kv, num_heads, head_dim)
+        - q: (num_tokens_q, num_heads_q, head_dim)
+        - k: (num_tokens_kv, num_heads_kv, head_dim)
+        - v: (num_tokens_kv, num_heads_kv, head_dim)
+        - sink: (num_tokens_sink, num_heads_q)
         - q_ranges: (num_ranges, 2)
         - k_ranges: (num_ranges, 2)
-        - attn_type_map: (num_ranges, )
-        - out: (num_tokens_q, num_heads, head_dim)
-        - lse: (num_heads, num_tokens_q)
+        - attn_type_map: (num_ranges,)
+        - out: (num_tokens_q, num_heads_q, head_dim)
+        - lse: (num_tokens_q, num_heads_q)
 
     Note:
-        The `attn_type_map` explains the semantics of different attention mask types.
+        The ``attn_type_map`` explains the semantics of different attention mask types.
         In addition to the descriptions below, see our blog for a visual explanation:
         https://sandai-org.github.io/MagiAttention/blog/#flex-flash-attn
 
@@ -879,6 +898,9 @@ def flex_flash_attn_func(
         "auto_range_merge and deterministic can't be True at the same time, "
         "due to some unresolved bug to be fixed as soon as possible."
     )
+
+    assert sink is None, "Attention Sink is not supported yet."
+
     return FlexFlashAttnFunc.apply(
         q,
         k,
