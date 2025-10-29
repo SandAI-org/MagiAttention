@@ -719,6 +719,7 @@ def flex_flash_attn_func(
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor | None = None,
+    sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
     deterministic: bool = False,
@@ -749,6 +750,9 @@ def flex_flash_attn_func(
                 - 3: bidirectional causal attention
 
             More information about the attention type map can be found in the ``Note`` below.
+
+        sink (torch.Tensor, optional): Learnable sink token tensor.
+            Defaults to ``None`` to not apply attention sink.
 
         softmax_scale (float, optional): Softmax scale.
             Defaults to ``None`` to use: ``1/sqrt(head_dim)``.
@@ -789,6 +793,7 @@ def flex_flash_attn_func(
         - q: (num_tokens_q, num_heads_q, head_dim)
         - k: (num_tokens_kv, num_heads_kv, head_dim)
         - v: (num_tokens_kv, num_heads_kv, head_dim)
+        - sink: (num_tokens_sink, num_heads_q)
         - q_ranges: (num_ranges, 2)
         - k_ranges: (num_ranges, 2)
         - attn_type_map: (num_ranges,)
@@ -895,6 +900,9 @@ def flex_flash_attn_func(
         "auto_range_merge and deterministic can't be True at the same time, "
         "due to some unresolved bug to be fixed as soon as possible."
     )
+
+    assert sink is None, "Attention Sink is not supported yet."
+
     return FlexFlashAttnFunc.apply(
         q,
         k,
