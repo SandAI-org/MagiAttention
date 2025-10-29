@@ -428,7 +428,7 @@ thus please do NOT enable it unless you know exactly what you are doing.</p>
 <p>This feature is experimental and under early development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
 </div>
-<p><strong>MAGI_ATTENTION_FFA_FORWARD_HIGH_PRECISION_REDUCE</strong></p>
+<p><strong>MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable high-precision (fp32) reduce for partial out during dist-attn forward
 to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
@@ -439,7 +439,7 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 <li><p>This feature works for out only when enabling qo comm.</p></li>
 </ol>
 </div>
-<p><strong>MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE</strong></p>
+<p><strong>MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable high-precision (fp32) reduce for partial dq,dk,dv during dist-attn backward
 to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <div class="admonition note">
