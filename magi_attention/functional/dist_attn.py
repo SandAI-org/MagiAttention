@@ -213,6 +213,7 @@ class DistAttnRuntime:
                     q=q,
                     k=k,
                     v=v,
+                    sink=None,
                     out=out_acc,  # directly reduce to out_acc
                     lse=lse_acc,  # directly reduce to lse_acc
                     **attn_arg.to_ffa_args(is_bwd=False),
@@ -510,11 +511,12 @@ class DistAttnRuntime:
             )
             partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
 
-            partial_dq, partial_dk, partial_dv = _flex_flash_attn_backward(
+            partial_dq, partial_dk, partial_dv, _ = _flex_flash_attn_backward(
                 dout=do,
                 q=q,
                 k=k,
                 v=v,
+                sink=None,
                 out=o,
                 lse=lse,
                 dq=dq_acc,  # directly reduce to dq_acc

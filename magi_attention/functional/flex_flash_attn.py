@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import contextmanager
+
 import torch
 from packaging import version
 
@@ -167,6 +169,17 @@ def merge_ranges(
     )
 
 
+@contextmanager
+def maybe_profile_ffa_ctx(event_name: str, profile_mode: bool = False):
+    if profile_mode:
+        ffa_utils.start_event(event_name)
+
+    yield
+
+    if profile_mode:
+        ffa_utils.stop_event(event_name)
+
+
 # -------------------       ffa forward   ------------------- #
 
 
@@ -180,6 +193,7 @@ def _flex_flash_attn_forward_compilable(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out_: torch.Tensor,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
@@ -199,7 +213,6 @@ def _flex_flash_attn_forward_compilable(
     profile_mode: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
-
     mod = get_ffa_jit_mod(
         direction="fwd",
         head_dim=q.shape[-1],
@@ -241,6 +254,7 @@ def _flex_flash_attn_forward_compilable_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out_: torch.Tensor,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
@@ -267,6 +281,7 @@ def _flex_flash_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out: torch.Tensor | None,
     lse: torch.Tensor | None,
     q_ranges: torch.Tensor,
@@ -287,8 +302,8 @@ def _flex_flash_attn_forward(
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
 
-    q, k, v, q_ranges, k_ranges = [
-        maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
+    q, k, v, sink, q_ranges, k_ranges = [
+        maybe_contiguous(x) for x in (q, k, v, sink, q_ranges, k_ranges)
     ]
 
     out = (
@@ -323,6 +338,7 @@ def _flex_flash_attn_forward(
         q=q,
         k=k,
         v=v,
+        sink=sink,
         out_=out,
         lse=lse,
         q_ranges=q_ranges,
@@ -350,7 +366,7 @@ def _flex_flash_attn_forward(
 
 @_torch_custom_op_wrapper(
     "flex_flash_attn::_flex_flash_attn_backward_compilable",
-    mutates_args=("dq", "dk", "dv"),
+    mutates_args=("dq", "dk", "dv", "dsink"),
     device_types="cuda",
 )
 def _flex_flash_attn_backward_compilable(
@@ -358,10 +374,12 @@ def _flex_flash_attn_backward_compilable(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out_: torch.Tensor,
     dq: torch.Tensor,
     dk: torch.Tensor,
     dv: torch.Tensor,
+    dsink: torch.Tensor | None,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -430,10 +448,12 @@ def _flex_flash_attn_backward_compilable_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out_: torch.Tensor,
     dq: torch.Tensor,
     dk: torch.Tensor,
     dv: torch.Tensor,
+    dsink: torch.Tensor | None,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -460,10 +480,12 @@ def _flex_flash_attn_backward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out: torch.Tensor,
     dq: torch.Tensor | None,
     dk: torch.Tensor | None,
     dv: torch.Tensor | None,
+    dsink: torch.Tensor | None,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -480,29 +502,36 @@ def _flex_flash_attn_backward(
     deterministic: bool,
     sm_margin: int,
     profile_mode: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("bwd_prepare")
 
-    dout, q, k, v, out, q_ranges, k_ranges = [
-        maybe_contiguous(x) for x in (dout, q, k, v, out, q_ranges, k_ranges)
+    dout, q, k, v, sink, out, q_ranges, k_ranges = [
+        maybe_contiguous(x) for x in (dout, q, k, v, sink, out, q_ranges, k_ranges)
     ]
 
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
     dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
+    dsink = (
+        (torch.zeros_like(sink, dtype=torch.float32) if dsink is None else dsink)
+        if sink is not None
+        else None
+    )
 
     # NOTE: we can not directly compile `_flex_flash_attn_backward`
-    # since torch.compile does not allow returning the mutated args (dq, dk, dv)
+    # since torch.compile does not allow returning the mutated args (dq, dk, dv, dsink)
     _flex_flash_attn_backward_compilable(
         dout=dout,
         q=q,
         k=k,
         v=v,
+        sink=sink,
         out_=out,
         dq=dq,
         dk=dk,
         dv=dv,
+        dsink=dsink,
         lse=lse,
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -521,7 +550,7 @@ def _flex_flash_attn_backward(
         profile_mode=profile_mode,
     )
 
-    return dq, dk, dv
+    return dq, dk, dv, dsink
 
 
 # -------------------       ffa autograd   ------------------- #
@@ -534,6 +563,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        sink: torch.Tensor | None,
         q_ranges: torch.Tensor,
         k_ranges: torch.Tensor,
         attn_type_map: torch.Tensor | None,
@@ -578,6 +608,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q,
             k,
             v,
+            sink,
             None,  # out
             None,  # lse
             fwd_q_ranges,
@@ -605,7 +636,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if profile_mode:
             ffa_utils.stop_event("fwd_cast")
 
-        ctx.save_for_backward(q, k, v, out, lse, q_ranges, k_ranges, attn_type_map)
+        ctx.save_for_backward(
+            q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map
+        )
 
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
@@ -618,16 +651,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout: torch.Tensor, *args):  # pragma: no cover
-        (
-            q,
-            k,
-            v,
-            out,
-            lse,
-            q_ranges,
-            k_ranges,
-            attn_type_map,
-        ) = ctx.saved_tensors
+        q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map = ctx.saved_tensors
 
         if ctx.auto_range_merge:
             if ctx.profile_mode:
@@ -644,7 +668,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
             if ctx.profile_mode:
                 ffa_utils.stop_event("bwd_range_merge")
-
         else:
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
                 q_ranges,
@@ -653,15 +676,17 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             )
             merge_k_ranges, bwd_kq_map, bwd_unique_count = None, None, None
 
-        dq, dk, dv = _flex_flash_attn_backward(
+        dq, dk, dv, dsink = _flex_flash_attn_backward(
             dout,
             q,
             k,
             v,
+            sink,
             out,
             None,  # dq
             None,  # dk
             None,  # dv
+            None,  # dsink
             lse,
             bwd_q_ranges,
             bwd_k_ranges,
@@ -687,6 +712,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         dq = dq.to(q.dtype)
         dk = dk.to(k.dtype)
         dv = dv.to(v.dtype)
+        if sink is not None:
+            assert dsink is not None  # mypy
+            dsink = dsink.to(sink.dtype)
 
         if ctx.profile_mode:
             ffa_utils.stop_event("bwd_cast")
@@ -695,6 +723,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dq,  # q
             dk,  # k
             dv,  # v
+            dsink,  # sink
             None,  # q_ranges
             None,  # k_ranges
             None,  # attn_type_map
@@ -907,6 +936,7 @@ def flex_flash_attn_func(
         q,
         k,
         v,
+        sink,
         q_ranges,
         k_ranges,
         attn_type_map,
