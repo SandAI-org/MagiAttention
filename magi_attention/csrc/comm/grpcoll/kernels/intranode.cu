@@ -940,7 +940,7 @@ void cached_notify_group_reduce(
 #undef CACHED_NOTIFY_GROUP_REDUCE
 }
 
-// FIXME: the register is spilled for both load/store in some template cases
+// FIXME: the register usage is spilled for both load/store in some template cases
 template <
     typename dtype_t,
     typename comm_dtype_t,
