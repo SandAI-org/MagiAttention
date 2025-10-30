@@ -297,8 +297,11 @@ def build_magi_attn_comm_module(
     ]
     nvcc_flags = [
         "-O3",
+        "-Xptxas",
+        "-v",
         "-Xcompiler",
-        "-O3",
+        "-std=c++17",
+        "-lineinfo",
         "-gencode",
         "arch=compute_90,code=sm_90",  # Explicitly specify sm_90
     ]
@@ -347,6 +350,9 @@ def build_magi_attn_comm_module(
 
     # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
     if os.environ["TORCH_CUDA_ARCH_LIST"].strip() != "9.0":
+        # FIXME: `DISABLE_AGGRESSIVE_PTX_INSTRS` macro is accidentally defined
+        # due to the auto-set `TORCH_CUDA_ARCH_LIST` by ngc image
+        # which is '7.5 8.0 8.6 9.0 10.0 12.0+PTX'
         assert int(os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", 1)) == 1
         os.environ["DISABLE_AGGRESSIVE_PTX_INSTRS"] = "1"
 
