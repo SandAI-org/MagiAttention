@@ -16,6 +16,7 @@ static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
+// for now, we do not need to use kProfileMode;
 static constexpr bool kProfileMode = {{ profile_mode }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim

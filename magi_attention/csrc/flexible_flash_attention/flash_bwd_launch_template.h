@@ -235,7 +235,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
     cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
   }
   CHECK_CUDA_KERNEL_LAUNCH();
-  if (profile_mode) {
+  if (ProfileMode) {
     MagiEvents::stop("bwd_run");
   }
 }
@@ -284,6 +284,6 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
         /*V_in_regs=*/V_in_regs,
         /*RangeMerge=*/RangeMerge,
         /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
-        /*ProfileMode=*/>(params, stream);
+        /*ProfileMode=*/ProfileMode>(params, stream);
   });
 }

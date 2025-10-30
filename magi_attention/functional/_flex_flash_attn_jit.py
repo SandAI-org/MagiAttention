@@ -200,9 +200,9 @@ def get_ffa_jit_spec(
         has_softcap=str(has_softcap).lower(),
         disable_atomic=str(disable_atomic).lower(),
         deterministic=str(deterministic).lower(),
+        profile_mode=str(profile_mode).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
-        profile_mode=profile_mode,
     )
 
     inst_cu = gen_directory / f"{direction}_inst.cu"

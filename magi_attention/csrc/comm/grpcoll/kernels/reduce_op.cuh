@@ -17,6 +17,7 @@
 #pragma once
 
 #include <map>
+#include <stdexcept>
 #include "exception.cuh"
 
 namespace magi_attn_comm::grpcoll {

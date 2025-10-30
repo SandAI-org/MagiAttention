@@ -402,8 +402,8 @@ def prebuild_ffa_kernels() -> None:
     # determine the combinations of prebuild options
     directions = ["fwd", "bwd"]
     head_dims = [64, 128]
-    compute_dtypes = [torch.bfloat16, torch.float16]
-    out_dtypes = [torch.float32, torch.bfloat16, torch.float16]
+    compute_dtypes = [torch.float16, torch.bfloat16]
+    out_dtypes = [torch.float32, torch.float16, torch.bfloat16]
     softcaps = [False, True]
     disable_atomic_opts = [False, True]
     deterministics = [False, True]
@@ -422,7 +422,7 @@ def prebuild_ffa_kernels() -> None:
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
-        direction, h, cdtype, odtype, sc, da, det = args
+        direction, h, cdtype, odtype, sc, da, det, pro = args
         spec, uri = get_ffa_jit_spec(
             arch=(9, 0),
             direction=direction,
@@ -432,6 +432,7 @@ def prebuild_ffa_kernels() -> None:
             softcap=sc,
             disable_atomic_reduction=da,
             deterministic=det,
+            profile_mode=pro,
             ref_block_size=None,
         )
         spec.build()

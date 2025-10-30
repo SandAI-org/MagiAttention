@@ -91,7 +91,7 @@ std::vector<at::Tensor> mha_bwd(
   }
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, profile_mode>(params, stream);
+  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kProfileMode>(params, stream);
 
   return {dq, dk, dv};
 }
