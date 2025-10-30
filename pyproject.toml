@@ -71,6 +71,7 @@ exclude = [
     "csrc/flexible_flash_attention/**/*.cpp",
     "csrc/flexible_flash_attention/**/*.jinja",
     "csrc/flexible_flash_attention/**/*.py",
+    "csrc/utils/*.h",
     "csrc/utils/*.cpp",
     "csrc/utils/*.cu",
     "csrc/comm/**/*.hpp",
