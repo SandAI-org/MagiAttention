@@ -1665,6 +1665,7 @@ __device__ int combine_token(
   return topk_ranks[0];
 }
 
+// FIXME: the register is highly spilled for both load/store
 template <
     bool kLowLatencyMode,
     int kNumRDMARanks,
