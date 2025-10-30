@@ -14,6 +14,7 @@
 
 from typing import Any, Optional, Tuple
 
+import pytest
 import torch
 from einops import rearrange
 from torch.nn.functional import scaled_dot_product_attention as sdpa_func
@@ -29,6 +30,7 @@ from magi_attention.functional.utils import correct_attn_fwd_result
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import assert_close, calc_inf_norm
+from magi_attention.testing.utils import switch_ffa_verbose_jit_build_decorator
 from magi_attention.utils.sparse_utils import (
     choose_ref_block,
     flatten_block_mask,
@@ -667,6 +669,8 @@ class TestBlockSparseAttn(DistTestBase):
         else:
             raise ValueError(f"Unknown test_type: {test_type}")
 
+    @switch_ffa_verbose_jit_build_decorator
+    @pytest.mark.slow
     @with_run_in_mp
     @parameterize(
         "model_config",

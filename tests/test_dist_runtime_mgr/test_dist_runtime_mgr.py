@@ -40,7 +40,7 @@ from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import EPSILON, torch_attn_ref
-from magi_attention.testing.utils import enable_sdpa_backend_decorator
+from magi_attention.testing.utils import switch_sdpa_backend_decorator
 from magi_attention.utils import get_attn_mask_from_ffa_args
 
 
@@ -511,7 +511,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             test_case="cross-attn forward out",
         )
 
-    @enable_sdpa_backend_decorator
+    @switch_sdpa_backend_decorator
     @skip_if_lt_x_gpu(4)
     @with_comms
     @parameterize(

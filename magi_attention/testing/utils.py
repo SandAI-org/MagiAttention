@@ -64,10 +64,18 @@ switch_deterministic_mode_decorator = switch_envvar_decorator(
     envvar_name="MAGI_ATTENTION_DETERMINISTIC_MODE"
 )
 
-enable_sdpa_backend_context = partial(
+switch_sdpa_backend_context = partial(
     switch_envvar_context, envvar_name="MAGI_ATTENTION_SDPA_BACKEND"
 )
 
-enable_sdpa_backend_decorator = switch_envvar_decorator(
+switch_sdpa_backend_decorator = switch_envvar_decorator(
     envvar_name="MAGI_ATTENTION_SDPA_BACKEND"
+)
+
+switch_ffa_verbose_jit_build_context = partial(
+    switch_envvar_context, envvar_name="MAGI_ATTENTION_BUILD_VERBOSE"
+)
+
+switch_ffa_verbose_jit_build_decorator = switch_envvar_decorator(
+    envvar_name="MAGI_ATTENTION_BUILD_VERBOSE"
 )

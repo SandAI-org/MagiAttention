@@ -52,7 +52,7 @@ from magi_attention.testing.precision import (
     H100_TFLOPS_16,
     torch_attn_ref,
 )
-from magi_attention.testing.utils import enable_sdpa_backend_decorator
+from magi_attention.testing.utils import switch_sdpa_backend_decorator
 from magi_attention.utils import (
     get_a2a_corr_factor,
     get_attn_mask_from_ffa_args,
@@ -130,7 +130,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     def world_size(self) -> int:
         return 1
 
-    @enable_sdpa_backend_decorator
+    @switch_sdpa_backend_decorator
     @with_comms
     @parameterize(
         "attn_config",
