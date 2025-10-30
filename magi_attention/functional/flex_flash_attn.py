@@ -199,9 +199,6 @@ def _flex_flash_attn_forward_compilable(
     profile_mode: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
-    q, k, v, q_ranges, k_ranges = [
-        maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
-    ]
 
     mod = get_ffa_jit_mod(
         direction="fwd",
@@ -289,6 +286,7 @@ def _flex_flash_attn_forward(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
+
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
@@ -382,6 +380,7 @@ def _flex_flash_attn_backward_compilable(
     profile_mode: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
+
     mod = get_ffa_jit_mod(
         direction="bwd",
         head_dim=q.shape[-1],
@@ -393,10 +392,6 @@ def _flex_flash_attn_backward_compilable(
         deterministic=deterministic,
         profile_mode=profile_mode,
     )
-
-    dout, q, k, v, out_, q_ranges, k_ranges = [
-        maybe_contiguous(x) for x in (dout, q, k, v, out_, q_ranges, k_ranges)
-    ]
 
     (
         dq,
@@ -488,6 +483,11 @@ def _flex_flash_attn_backward(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("bwd_prepare")
+
+    dout, q, k, v, out, q_ranges, k_ranges = [
+        maybe_contiguous(x) for x in (dout, q, k, v, out, q_ranges, k_ranges)
+    ]
+
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
     dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
@@ -598,8 +598,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if profile_mode:
             ffa_utils.start_event("fwd_cast")
+
         # Cast output to the same dtype as q
         out = out.to(q.dtype)
+
         if profile_mode:
             ffa_utils.stop_event("fwd_cast")
 
@@ -681,6 +683,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         if ctx.profile_mode:
             ffa_utils.start_event("bwd_cast")
 
+        # Cast gradients to the same dtype as inputs
         dq = dq.to(q.dtype)
         dk = dk.to(k.dtype)
         dv = dv.to(v.dtype)
