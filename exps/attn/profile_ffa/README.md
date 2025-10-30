@@ -35,25 +35,51 @@ You can change the block_sparse-related settings in `run_block_sparse_tests` wit
 
 - `ffa_benchmark.py`: run ffa for dense/block sparse mask.
     ```shell
+    # NOTE: enabling profile mode will enforce ffa to build in JIT mode
+    # thus here we toggle this on by default to show the verbose building process
+    # instead of waiting w/o any output
+    export MAGI_ATTENTION_BUILD_VERBOSE=1
+
+    OUT_DIR="outs"
     TEST_TYPE="dense" # choose from {"dense", "block_sparse"}
-    PYTHONPATH=../../../ python ffa_benchmark.py --test_type ${TEST_TYPE} --o output.csv
+    OUTPUT_NAME="output"
+
+    PYTHONPATH=../../../ python ffa_benchmark.py --test_type ${TEST_TYPE} --o ${OUT_DIR}/${OUTPUT_NAME}.csv
     ```
 
 - `compare_ffa_results.py`: compare two output csv with same mask type.
     ```shell
-    python compare_ffa_results.py base_output.csv target_output.csv compare_result.csv
+    # NOTE: enabling profile mode will enforce ffa to build in JIT mode
+    # thus here we toggle this on by default to show the verbose building process
+    # instead of waiting w/o any output
+    export MAGI_ATTENTION_BUILD_VERBOSE=1
+
+    OUT_DIR="outs"
+    BASE_OUTPUT_NAME="base_output"
+    TARGET_OUTPUT_NAME="target_output"
+    COMPARE_RESULT_NAME="compare_result"
+
+    python compare_ffa_results.py ${OUT_DIR}/${BASE_OUTPUT_NAME}.csv ${OUT_DIR}/${TARGET_OUTPUT_NAME}.csv ${OUT_DIR}/${COMPARE_RESULT_NAME}.csv
     ```
 
 #### Shell Scripts
 
 - `run_branch_profile.sh`: profile dense and block_sparse mask for current branch. Generate `profile_dense_branch_name.csv` and `profile_block_sparse_branch_name.csv` in `output_dir`.
     ```shell
-    bash run_branch_profile.sh current_branch_name output_dir
+
+    CURRENT_BRANCH_NAME="main"
+    OUTPUT_DIR="outs"
+
+    bash run_branch_profile.sh ${CURRENT_BRANCH_NAME} ${OUTPUT_DIR}
     ```
 
 - `profile_ffa.sh`: profile dense and block_sparse mask for base and target branch, generate `base_target_dense/block_sparse.csv` in `optimize_ffa/benchmark_results_time` dir.
     ```shell
-    bash profile_ffa.sh base_branch_name target_branch_name
+
+    BASE_BRANCH_NAME="main"
+    TARGET_BRANCH_NAME="optimize_ffa"
+
+    bash profile_ffa.sh ${BASE_BRANCH_NAME} ${TARGET_BRANCH_NAME}
     ```
 
 ### Example

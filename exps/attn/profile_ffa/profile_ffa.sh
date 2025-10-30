@@ -22,6 +22,11 @@
 #   $2: The name of the target branch (e.g., 'develop' or a feature branch).
 # Usage: ./run_comparison.sh <base_branch> <target_branch>
 
+# NOTE: enabling profile mode will enforce ffa to build in JIT mode
+# thus here we toggle this on by default to show the verbose building process
+# instead of waiting w/o any output
+export MAGI_ATTENTION_BUILD_VERBOSE=1
+
 # 1. Check arguments and create the output directory
 if [ "$#" -ne 2 ]; then
     echo "Error: This script requires exactly two arguments."

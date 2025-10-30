@@ -14,6 +14,7 @@
 
 import argparse
 import csv
+import os
 import random
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -301,7 +302,6 @@ def run_benchmark_framework(
     print(f"\nStarting {test_name.upper()} benchmark...")
 
     warmup_iters, run_iters = common_params["warmup_iters"], common_params["run_iters"]
-    # device = common_params["device"]
 
     with open(output_csv_path, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=csv_header)
@@ -575,6 +575,9 @@ if __name__ == "__main__":
         print(
             "⚠️ WARNING: CUDA is not available. Running on CPU, results will not be meaningful."
         )
+
+    output_directory = os.path.dirname(args.output_csv_path)
+    os.makedirs(output_directory, exist_ok=True)
 
     # Define common parameters for all tests
     common_params = {

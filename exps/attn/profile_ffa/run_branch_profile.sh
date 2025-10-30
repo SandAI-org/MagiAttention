@@ -21,6 +21,11 @@
 #   $2: The required <output_dir> where the files will be saved.
 # Usage: ./run_benchmark.sh your_branch_name path/to/output_dir
 
+# NOTE: enabling profile mode will enforce ffa to build in JIT mode
+# thus here we toggle this on by default to show the verbose building process
+# instead of waiting w/o any output
+export MAGI_ATTENTION_BUILD_VERBOSE=1
+
 # 1. Check if exactly two arguments are provided
 if [ "$#" -ne 2 ]; then
     echo "Error: This script requires exactly two arguments."
