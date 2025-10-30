@@ -19,7 +19,7 @@ import torch
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
-from magi_attention import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
+from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]
 
 # isort: on
 
@@ -53,9 +53,7 @@ class TestMergeRange(TestCase):
             merge_outer_ranges,
             range_map,
             unique_count,
-        ) = flexible_flash_attention_utils_cuda.unique_consecutive_pairs(
-            sorted_outer_ranges
-        )
+        ) = ffa_utils.unique_consecutive_pairs(sorted_outer_ranges)
 
         range_map = range_map[1 : unique_count.item() + 1]
 

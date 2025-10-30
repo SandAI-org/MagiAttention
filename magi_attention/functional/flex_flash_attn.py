@@ -23,7 +23,7 @@ from ._flex_flash_attn_jit import get_ffa_jit_mod
 # We need to import the CUDA kernels after importing torch
 is_ffa_utils_installed = False
 try:
-    from magi_attention import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
+    from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]
 
     is_ffa_utils_installed = True
 except ImportError:
@@ -155,9 +155,7 @@ def merge_ranges(
         merge_outer_ranges,
         range_map,
         unique_count,
-    ) = flexible_flash_attention_utils_cuda.unique_consecutive_pairs(
-        sorted_outer_ranges
-    )
+    ) = ffa_utils.unique_consecutive_pairs(sorted_outer_ranges)
 
     return (
         merge_outer_ranges,
@@ -290,7 +288,7 @@ def _flex_flash_attn_forward(
     profile_mode: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if profile_mode:
-        flexible_flash_attention_utils_cuda.start_event("fwd_prepare")
+        ffa_utils.start_event("fwd_prepare")
     q, k, v, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
     ]
@@ -489,7 +487,7 @@ def _flex_flash_attn_backward(
     profile_mode: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if profile_mode:
-        flexible_flash_attention_utils_cuda.start_event("bwd_prepare")
+        ffa_utils.start_event("bwd_prepare")
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
     dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
@@ -553,7 +551,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if auto_range_merge:
             if profile_mode:
-                flexible_flash_attention_utils_cuda.start_event("fwd_range_merge")
+                ffa_utils.start_event("fwd_range_merge")
 
             (
                 merge_q_ranges,
@@ -565,7 +563,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
 
             if profile_mode:
-                flexible_flash_attention_utils_cuda.stop_event("fwd_range_merge")
+                ffa_utils.stop_event("fwd_range_merge")
 
         else:
             fwd_q_ranges = q_ranges
@@ -598,11 +596,11 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         )
 
         if profile_mode:
-            flexible_flash_attention_utils_cuda.start_event("fwd_cast")
+            ffa_utils.start_event("fwd_cast")
         # Cast output to the same dtype as q
         out = out.to(q.dtype)
         if profile_mode:
-            flexible_flash_attention_utils_cuda.stop_event("fwd_cast")
+            ffa_utils.stop_event("fwd_cast")
 
         ctx.save_for_backward(q, k, v, out, lse, q_ranges, k_ranges, attn_type_map)
 
@@ -630,7 +628,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
 
         if ctx.auto_range_merge:
             if ctx.profile_mode:
-                flexible_flash_attention_utils_cuda.start_event("bwd_range_merge")
+                ffa_utils.start_event("bwd_range_merge")
 
             (
                 merge_k_ranges,
@@ -642,7 +640,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
 
             if ctx.profile_mode:
-                flexible_flash_attention_utils_cuda.stop_event("bwd_range_merge")
+                ffa_utils.stop_event("bwd_range_merge")
 
         else:
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
@@ -680,14 +678,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         )
 
         if ctx.profile_mode:
-            flexible_flash_attention_utils_cuda.start_event("bwd_cast")
+            ffa_utils.start_event("bwd_cast")
 
         dq = dq.to(q.dtype)
         dk = dk.to(k.dtype)
         dv = dv.to(v.dtype)
 
         if ctx.profile_mode:
-            flexible_flash_attention_utils_cuda.stop_event("bwd_cast")
+            ffa_utils.stop_event("bwd_cast")
 
         return (
             dq,  # q
