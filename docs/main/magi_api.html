@@ -441,9 +441,10 @@ Directly call magi_attn_kernel to get attention output and lse. This is faster w
 <li><p><strong>q</strong> (<em>torch.Tensor</em>) – Query tensor.</p></li>
 <li><p><strong>k</strong> (<em>torch.Tensor</em>) – Key tensor.</p></li>
 <li><p><strong>v</strong> (<em>torch.Tensor</em>) – Value tensor.</p></li>
-<li><p><strong>q_ranges</strong> (<em>torch.Tensor</em>) – query ranges tensor to represent the attn mask.</p></li>
-<li><p><strong>k_ranges</strong> (<em>torch.Tensor</em>) – key ranges tensor to represent the attn mask.</p></li>
-<li><p><strong>attn_type_map</strong> (<em>torch.Tensor</em>) – <p>Attention type map tenspr with dtype=torch.int32.
+<li><p><strong>q_ranges</strong> (<em>torch.Tensor</em>) – Query ranges tensor to represent the attn mask.</p></li>
+<li><p><strong>k_ranges</strong> (<em>torch.Tensor</em>) – Key ranges tensor to represent the attn mask.</p></li>
+<li><p><strong>attn_type_map</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – <p>Attention type map tensor with dtype=torch.int32,
+Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to apply full attention for all ranges.
 The values specify the attention type for each token:</p>
 <blockquote>
 <div><ul>
@@ -459,20 +460,25 @@ The values specify the attention type for each token:</p>
 Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to use: <code class="docutils literal notranslate"><span class="pre">1/sqrt(head_dim)</span></code>.</p></li>
 <li><p><strong>softcap</strong> (<em>float</em><em>, </em><em>optional</em>) – Softcap. Defaults to <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p></li>
 <li><p><strong>deterministic</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to use deterministic attention. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
-<li><p><strong>sm_margin</strong> (<em>int</em><em>, </em><em>optional</em>) – the amount of SMs(streaming multiprocessors) reserved for communication.</p></li>
-<li><p><strong>disable_fwd_atomic_reduction</strong> (<em>bool</em>) – <p>Whether to disable forward atomic reduction:</p>
+<li><p><strong>sm_margin</strong> (<em>int</em><em>, </em><em>optional</em>) – The amount of SMs reserved out,
+useful when considering overlapping with other kernels such as communication kernels.
+Defaults to <code class="docutils literal notranslate"><span class="pre">0</span></code> to use all available SMs.</p></li>
+<li><p><strong>disable_fwd_atomic_reduction</strong> (<em>bool</em><em>, </em><em>optional</em>) – <p>Whether to disable forward atomic reduction. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p>
 <blockquote>
-<div><p>If you can ensure q_ranges has no overlap, you can set this to True for better performance.
-Overlap in q_ranges is defined as: if any two q_ranges have non-empty intersection, then there is overlap.
-For example, q_ranges = <code class="docutils literal notranslate"><span class="pre">[[0,</span> <span class="pre">15],</span> <span class="pre">[10,</span> <span class="pre">20],</span> <span class="pre">[20,</span> <span class="pre">30]]</span></code> has overlap because
-<code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">15]</span></code> and <code class="docutils literal notranslate"><span class="pre">[10,</span> <span class="pre">20]</span></code> intersect. While q_ranges = <code class="docutils literal notranslate"><span class="pre">[[0,</span> <span class="pre">15],</span> <span class="pre">[15,</span> <span class="pre">20],</span> <span class="pre">[20,</span> <span class="pre">30]]</span></code> has no overlap.</p>
+<div><p>If you can ensure <code class="docutils literal notranslate"><span class="pre">q_ranges</span></code> is non-overlapped,
+you can set this to <code class="docutils literal notranslate"><span class="pre">True</span></code> for better performance.
+The “overlap” term among <code class="docutils literal notranslate"><span class="pre">q_ranges</span></code> is defined as:
+if any two <code class="docutils literal notranslate"><span class="pre">q_range</span></code> in <code class="docutils literal notranslate"><span class="pre">q_ranges</span></code> have non-empty intersection, then it is overlapped.
+For example, <code class="docutils literal notranslate"><span class="pre">q_ranges</span></code> = <code class="docutils literal notranslate"><span class="pre">[[0,</span> <span class="pre">15],</span> <span class="pre">[10,</span> <span class="pre">20],</span> <span class="pre">[20,</span> <span class="pre">30]]</span></code> is overlapped
+since <code class="docutils literal notranslate"><span class="pre">q_range1</span></code> = <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">15]</span></code> and <code class="docutils literal notranslate"><span class="pre">q_range2</span></code> = <code class="docutils literal notranslate"><span class="pre">[10,</span> <span class="pre">20]</span></code> intersect,
+while `` q_ranges`` = <code class="docutils literal notranslate"><span class="pre">[[0,</span> <span class="pre">15],</span> <span class="pre">[15,</span> <span class="pre">20],</span> <span class="pre">[20,</span> <span class="pre">30]]</span></code> then is non-overlapped.</p>
 </div></blockquote>
 </p></li>
-<li><p><strong>auto_range_merge</strong> (<em>bool</em><em>, </em><em>optional</em>) – <p>Whether to automatically merge k_ranges for the same q_range.
-Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p>
-<p><strong>Note:</strong> This flag is usually used in sparse attention cases but still under development.</p>
-</p></li>
-<li><p><strong>profile_mode</strong> (<em>bool</em>) – profile ffa or not.</p></li>
+<li><p><strong>auto_range_merge</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to automatically merge k_ranges for the same q_range. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
+<strong>Note:</strong> This flag is useful for sparse attention scenarios but still under development.</p></li>
+<li><p><strong>profile_mode</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to enable profiling mode for FFA. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
+<strong>Note:</strong> This flag for now is only internally used to profile FFA.
+Please do not toggle it on in production.</p></li>
 <li><p><strong>ref_block_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>] </em><em>| </em><em>None</em>)</p></li>
 </ul>
 </dd>
@@ -489,20 +495,20 @@ Defaults to <code class="docutils literal notranslate"><span class="pre">False</
 </dl>
 <dl class="simple">
 <dt>Shape:</dt><dd><ul class="simple">
-<li><p>q: (num_tokens_q, num_heads, head_dim)</p></li>
-<li><p>k: (num_tokens_kv, num_heads, head_dim)</p></li>
-<li><p>v: (num_tokens_kv, num_heads, head_dim)</p></li>
+<li><p>q: (num_tokens_q, num_heads_q, head_dim)</p></li>
+<li><p>k: (num_tokens_kv, num_heads_kv, head_dim)</p></li>
+<li><p>v: (num_tokens_kv, num_heads_kv, head_dim)</p></li>
 <li><p>q_ranges: (num_ranges, 2)</p></li>
 <li><p>k_ranges: (num_ranges, 2)</p></li>
-<li><p>attn_type_map: (num_ranges, )</p></li>
-<li><p>out: (num_tokens_q, num_heads, head_dim)</p></li>
-<li><p>lse: (num_heads, num_tokens_q)</p></li>
+<li><p>attn_type_map: (num_ranges,)</p></li>
+<li><p>out: (num_tokens_q, num_heads_q, head_dim)</p></li>
+<li><p>lse: (num_tokens_q, num_heads_q)</p></li>
 </ul>
 </dd>
 </dl>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>The <cite>attn_type_map</cite> explains the semantics of different attention mask types.
+<p>The <code class="docutils literal notranslate"><span class="pre">attn_type_map</span></code> explains the semantics of different attention mask types.
 In addition to the descriptions below, see our blog for a visual explanation:
 <a class="reference external" href="https://sandai-org.github.io/MagiAttention/blog/#flex-flash-attn">https://sandai-org.github.io/MagiAttention/blog/#flex-flash-attn</a></p>
 <ol class="arabic">
