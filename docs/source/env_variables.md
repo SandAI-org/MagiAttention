@@ -126,7 +126,7 @@ Toggle this env variable to `1` to enable pre-build ffa kernels for some common 
 
 **MAGI_ATTENTION_PREBUILD_FFA_JOBS**
 
-Set the value of this env variable to control the number of jobs used to pre-build ffa kernels. The default value is `256`.
+Set the value of this env variable to control the number of jobs used to pre-build ffa kernels. The default value is `160`.
 
 
 **MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD**
