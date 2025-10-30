@@ -238,7 +238,6 @@ def _flex_flash_attn_forward_compilable(
         out_type,
         deterministic,
         sm_margin,
-        profile_mode,
     )
 
 
@@ -429,7 +428,6 @@ def _flex_flash_attn_backward_compilable(
         dv_type,
         deterministic,
         sm_margin,
-        profile_mode,
     )
 
 

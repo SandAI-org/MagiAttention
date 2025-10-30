@@ -75,9 +75,9 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*Clear_dK=*/false,
       /*Clear_dV=*/false>;
 
-  if (ProfileMode) {
+  if constexpr (ProfileMode)
     MagiEvents::start("bwd_preprocess");
-  }
+
   typename PreprocessKernel::Arguments preprocess_args{
       static_cast<Element const*>(params.o_ptr),
       {params.total_q, params.d, params.h_qo}, // shape_O
@@ -102,13 +102,12 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   cutlass::kernel_launch<PreprocessKernel>(
       grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, false /*launch_with_pdl*/);
   CHECK_CUDA_KERNEL_LAUNCH();
-  if (ProfileMode) {
-    MagiEvents::stop("bwd_preprocess");
-  }
 
-  if (ProfileMode) {
+  if constexpr (ProfileMode)
+    MagiEvents::stop("bwd_preprocess");
+
+  if constexpr (ProfileMode)
     MagiEvents::start("bwd_run");
-  }
 
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
   using ClusterShape = cute::Shape<_1, Int<1>, _1>; // Currently doesn't not support cluster
@@ -235,9 +234,9 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
     cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
   }
   CHECK_CUDA_KERNEL_LAUNCH();
-  if (ProfileMode) {
+
+  if constexpr (ProfileMode)
     MagiEvents::stop("bwd_run");
-  }
 }
 
 template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic, bool ProfileMode>

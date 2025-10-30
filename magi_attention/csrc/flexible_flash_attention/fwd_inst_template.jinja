@@ -16,7 +16,6 @@ static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
-// for now, we do not need to use kProfileMode;
 static constexpr bool kProfileMode = {{ profile_mode }};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
@@ -76,8 +75,7 @@ std::vector<at::Tensor> mha_fwd(
     bool const disable_fwd_atomic_reduction,
     std::optional<at::ScalarType> out_type_,
     bool const deterministic,
-    int const sm_margin,
-    bool const profile_mode) {
+    int const sm_margin) {
   _check_runtime_contract(q, out_type_, softcap, disable_fwd_atomic_reduction);
 
   // kBlockM/kBlockN are compile-time constants already determined
@@ -88,24 +86,24 @@ std::vector<at::Tensor> mha_fwd(
       attn_type_map_, merge_q_ranges_, qk_map_,
       unique_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
       out_type_, deterministic, sm_margin, kBlockM);
-  if (profile_mode)
+  if constexpr (kProfileMode)
     MagiEvents::stop("fwd_prepare");
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Kernel launch (single variant)
-  if (profile_mode) 
+  if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kDeterministic>(params, stream);
-  if (profile_mode) 
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kDeterministic, kProfileMode>(params, stream);
+  if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");
 
   // Post-processing: fast zero fill for uncovered regions (to match library interface)
-  if (profile_mode)
+  if constexpr (kProfileMode)
     MagiEvents::start("fwd_fill");
   run_fast_zero_fill(params, stream);
-  if (profile_mode)
+  if constexpr (kProfileMode)
     MagiEvents::stop("fwd_fill");
 
   return {out, softmax_lse};
