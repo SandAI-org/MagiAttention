@@ -248,15 +248,19 @@ def get_ffa_jit_spec(
 
         common_objects = common_spec.build_and_get_objects()
 
-        assert is_ffa_utils_installed, (
-            "The `flexible_flash_attention_utils_cuda` "
-            "extension module is not installed. "
-            "This is a required dependency for JIT compilation."
-        )
-        # add utils.so(Dynamic linking)
-        utils_so_path = Path(ffa_utils.__file__)
+        if profile_mode:
+            assert is_ffa_utils_installed, (
+                "The `flexible_flash_attention_utils_cuda` "
+                "extension module is not installed. "
+                "This is a required dependency for JIT compilation when enabling profile mode."
+            )
 
-        return common_objects + [str(utils_so_path)]
+            # add utils.so (dynamic linking)
+            utils_so_path = Path(ffa_utils.__file__)
+
+            common_objects += [str(utils_so_path)]
+
+        return common_objects
 
     spec = gen_jit_spec(
         name=uri,
