@@ -214,6 +214,7 @@ def _flex_flash_attn_forward_compilable(
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_fwd_atomic_reduction,
         deterministic=deterministic,
+        profile_mode=profile_mode,
         ref_block_size=(kblock_m, kblock_n)
         if kblock_m is not None and kblock_n is not None
         else None,
@@ -393,6 +394,7 @@ def _flex_flash_attn_backward_compilable(
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         deterministic=deterministic,
+        profile_mode=profile_mode,
     )
 
     dout, q, k, v, out_, q_ranges, k_ranges = [

@@ -15,8 +15,8 @@ using TDkv     = {{ out_t }};
 static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableDkvAtomic = {{ disable_atomic }};
-
 static constexpr bool kDeterministic = {{ deterministic }};
+static constexpr bool kProfileMode = {{ profile_mode }};
 
 // Runtime contract checks to ensure consistency with compile-time constraints
 static inline void _check_runtime_contract_bwd(
@@ -91,7 +91,7 @@ std::vector<at::Tensor> mha_bwd(
   }
   
   // Kernel launch (single variant)
-  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic>(params, stream, profile_mode);
+  run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, profile_mode>(params, stream);
 
   return {dq, dk, dv};
 }

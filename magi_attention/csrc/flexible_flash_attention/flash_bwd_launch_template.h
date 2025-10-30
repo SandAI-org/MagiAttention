@@ -59,8 +59,9 @@ template <
     int AtomLayoutMdQ = 1,
     bool V_in_regs = false,
     bool RangeMerge = false,
-    bool DisableBwdDkvAtomicReduction = false>
-void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream, bool profile_mode) {
+    bool DisableBwdDkvAtomicReduction = false,
+    bool ProfileMode = false>
+void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
 
@@ -74,7 +75,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream, bool profile_m
       /*Clear_dK=*/false,
       /*Clear_dV=*/false>;
 
-  if (profile_mode) {
+  if (ProfileMode) {
     MagiEvents::start("bwd_preprocess");
   }
   typename PreprocessKernel::Arguments preprocess_args{
@@ -101,11 +102,11 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream, bool profile_m
   cutlass::kernel_launch<PreprocessKernel>(
       grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, false /*launch_with_pdl*/);
   CHECK_CUDA_KERNEL_LAUNCH();
-  if (profile_mode) {
+  if (ProfileMode) {
     MagiEvents::stop("bwd_preprocess");
   }
 
-  if (profile_mode) {
+  if (ProfileMode) {
     MagiEvents::start("bwd_run");
   }
 
@@ -239,8 +240,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream, bool profile_m
   }
 }
 
-template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic>
-void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream, bool profile_mode) {
+template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic, bool ProfileMode>
+void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
   static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
@@ -282,6 +283,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream, bool profile_mo
         /*AtomLayoutMdQ=*/AtomLayoutMdQ,
         /*V_in_regs=*/V_in_regs,
         /*RangeMerge=*/RangeMerge,
-        /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction>(params, stream, profile_mode);
+        /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
+        /*ProfileMode=*/>(params, stream);
   });
 }

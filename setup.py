@@ -407,6 +407,7 @@ def prebuild_ffa_kernels() -> None:
     softcaps = [False, True]
     disable_atomic_opts = [False, True]
     deterministics = [False, True]
+    profile_mode = [False]
 
     combos = itertools.product(
         directions,
@@ -416,6 +417,7 @@ def prebuild_ffa_kernels() -> None:
         softcaps,
         disable_atomic_opts,
         deterministics,
+        profile_mode,
     )
 
     # prebuild the kernels in parallel for the determined options
