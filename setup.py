@@ -478,7 +478,7 @@ if not SKIP_CUDA_BUILD:
     if magi_attn_ext_module is not None:
         ext_modules.append(magi_attn_ext_module)
 
-    # build utils ext module
+    # build ffa utils ext module
     ffa_utils_ext_module = build_ffa_utils_ext_module(
         repo_dir=repo_dir,
         csrc_dir=csrc_dir,

@@ -1,23 +1,27 @@
 ## How to profile ffa
 
-### Test settings
-For now, we test for dense and block sparse scenerias.
+### Settings
 
-model_configs:
-- nhq: 64
-- nhk: 8
-- headdim: 128
-- dtype: torch.bfloat16
+For now, we test only for dense and block sparse scenerias.
+
+#### Model Config
+
+- nhq: [64]
+- nhk: [8]
+- headdim: [128]
+- dtype: [torch.bfloat16]
 
 You can change the model-related settings in `common_params` within `ffa_benchmark.py`.
 
-Dense:
+#### Dense Config
+
 - seqlens_to_test = [8192]
 - mask_types_to_test = ["full", "causal", "varlen_full", "varlen_causal"]
 
 You can change the dense-related settings in `run_dense_tests` within `ffa_benchmark.py`.
 
-Block sparse:
+#### Block sparse Config
+
 - seqlens_to_test = [49152]
 - sparsity_ratios_to_test = [0.1, 0.2, 0.5]
 - block_sizes_to_test = [64, 128]
@@ -25,10 +29,14 @@ Block sparse:
 You can change the block_sparse-related settings in `run_block_sparse_tests` within `ffa_benchmark.py`.
 
 
-### Basic file usage
+### Basic Usage
+
+#### Python Scripts
+
 - `ffa_benchmark.py`: run ffa for dense/block sparse mask.
     ```shell
-    PYTHONPATH=../../../ python ffa_benchmark.py --test_type dense/block_sparse --o output.csv
+    TEST_TYPE="dense" # choose from {"dense", "block_sparse"}
+    PYTHONPATH=../../../ python ffa_benchmark.py --test_type ${TEST_TYPE} --o output.csv
     ```
 
 - `compare_ffa_results.py`: compare two output csv with same mask type.
@@ -36,26 +44,34 @@ You can change the block_sparse-related settings in `run_block_sparse_tests` wit
     python compare_ffa_results.py base_output.csv target_output.csv compare_result.csv
     ```
 
-### Shells
-- run_branch_profile.sh: profile dense and block_sparse mask for current branch. Generate profile_dense_branch_name.csv and profile_block_sparse_branch_name.csv in output_dir.
-```shell
-bash run_branch_profile.sh current_branch_name output_dir
-```
+#### Shell Scripts
 
-- profile_ffa.sh: profile dense and block_sparse mask for base and target branch, generate base_target_dense/block_sparse.csv in optimize_ffa/benchmark_results_time dir.
-```shell
-bash profile_ffa.sh base_branch_name target_branch_name
-```
+- `run_branch_profile.sh`: profile dense and block_sparse mask for current branch. Generate `profile_dense_branch_name.csv` and `profile_block_sparse_branch_name.csv` in `output_dir`.
+    ```shell
+    bash run_branch_profile.sh current_branch_name output_dir
+    ```
+
+- `profile_ffa.sh`: profile dense and block_sparse mask for base and target branch, generate `base_target_dense/block_sparse.csv` in `optimize_ffa/benchmark_results_time` dir.
+    ```shell
+    bash profile_ffa.sh base_branch_name target_branch_name
+    ```
 
 ### Example
-**Banch**
-- base branch: main
-- target branch: optimize_ffa
 
-**run shell**
-- bash profile_ffa.sh main profile_ffa >& output.txt
+#### Steps
 
-**Results**
+**Pick Branches**
+
+- base branch: `main`
+- target branch: `optimize_ffa`
+
+**Run Script**
+
+```shell
+bash profile_ffa.sh main profile_ffa >& output.txt
+```
+
+**View Output**
 
 In dir `optimize_ffa/benchmark_results_time`
 - `profile_dense_main.csv`:   dense mask result for main branch.
@@ -67,13 +83,18 @@ In dir `optimize_ffa/benchmark_results_time`
 - `output.txt`: Containing Intermediate outputs. At the end of output.txt, warnings will be issued for any cases with a TFLOPs variation greater than 1.5%.
 
 
+#### Results
 
-Testing Config: {'seqlen': 8192, 'mask_type': 'full'}
-**FORWARD PERFORMANCE**
-- Total Runtime (ms): 3.5861
-- Achieved TFLOP/s: 613.2028
+> [!NOTE]
+> Testing Config: {'seqlen': 8192, 'mask_type': 'full'}
+
+**Forward Performance**
+
+- Total Runtime (ms): `3.5861`
+- Achieved TFLOP/s: `613.2028`
 
 **Internal Timing Breakdown**
+
 | Operation   | Time (ms) | Description             |
 |-------------|-----------|-------------------------|
 | range_merge | -1.0000   | RangeMerge              |
@@ -83,11 +104,13 @@ Testing Config: {'seqlen': 8192, 'mask_type': 'full'}
 | to          | 0.0032    | cast output to qdtype   |
 
 
-**BACKWARD PERFORMANCE**
-- Total Runtime (ms)   | 10.0102
-- Achieved TFLOP/s     | 549.1948
+**Backward Performance**
+
+- Total Runtime (ms): `10.0102`
+- Achieved TFLOP/s: `549.1948`
 
 **Internal Timing Breakdown**
+
 | Operation  | Time (ms) | Description             |
 |------------|-----------|-------------------------|
 | range_merge| -1.0000   | RangeMerge              |
