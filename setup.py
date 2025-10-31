@@ -78,10 +78,6 @@ SKIP_MAGI_ATTN_COMM_BUILD = (
 # Defaults to enable verbose building magi_attention
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
 
-# Defaults to only build for sm90
-# TODO: support other architectures
-os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
-
 
 title_left_str = "\n\n# -------------------     "
 title_right_str = "     ------------------- #\n\n"
