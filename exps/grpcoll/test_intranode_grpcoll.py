@@ -1424,8 +1424,7 @@ if __name__ == "__main__":
         # hidden_size = 32 * 128 => bandwidth = 220~240 GB/s
         # hidden_size = 48 * 128 => bandwidth = 280~300 GB/s
         # hidden_size = 56 * 128 => bandwidth = 260~280 GB/s
-        # hidden_size = 60 * 128 => bandwidth = 230~250 GB/s
-        # hidden_size = 62 * 128 => bandwidth = 200~210 GB/s
+        # hidden_size = 64 * 128 => bandwidth = 270~280 GB/s
         "--hidden",
         type=int,
         default=56 * 128,
