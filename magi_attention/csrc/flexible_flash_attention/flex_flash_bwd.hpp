@@ -103,7 +103,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
     std::optional<at::ScalarType> dk_type_,
     std::optional<at::ScalarType> dv_type_,
     bool const deterministic,
-    int const sm_margin) {
+    int const sm_margin,
+    int const kBlockM,
+    int const kBlockN) {
 #ifdef FLASHATTENTION_DISABLE_BACKWARD
   TORCH_CHECK(false, "This flash attention build does not support backward.");
 #endif
@@ -202,8 +204,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   TORCH_CHECK(head_size % 8 == 0 && head_size <= max_headdim);
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0);
   int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
-  int const kBlockM = std::get<0>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
-  int const kBlockN = std::get<1>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
+  // int const kBlockM = std::get<0>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
+  // int const kBlockN = std::get<1>(tile_size_bwd_sm90(head_size, element_size, softcap > 0.0));
   // Get rounded max_seqlen
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
 

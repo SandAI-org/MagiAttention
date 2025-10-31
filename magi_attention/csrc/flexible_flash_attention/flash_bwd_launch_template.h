@@ -239,11 +239,21 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
     MagiEvents::stop("bwd_run");
 }
 
-template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic, bool ProfileMode>
+template <
+    int Arch,
+    typename T,
+    typename TDkv,
+    int kBlockM,
+    int kBlockN,
+    int kHeadDim,
+    bool Has_softcap,
+    bool DisableBwdDkvAtomicReduction,
+    bool Deterministic,
+    bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
-  static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
+  // static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
+  // static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
 
   // TODO: Add a specific tuning function for different kHeadDim
   static constexpr int Stages = 2;

@@ -369,6 +369,8 @@ def _flex_flash_attn_backward_compilable(
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
+    kblock_m: int | None,
+    kblock_n: int | None,
     softmax_scale: float,
     softcap: float,
     disable_bwd_dkv_atomic_reduction: bool,
@@ -391,6 +393,9 @@ def _flex_flash_attn_backward_compilable(
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         deterministic=deterministic,
         profile_mode=profile_mode,
+        ref_block_size=(kblock_m, kblock_n)
+        if kblock_m is not None and kblock_n is not None
+        else None,
     )
 
     (
@@ -441,6 +446,8 @@ def _flex_flash_attn_backward_compilable_fake(
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
+    kblock_m: int | None,
+    kblock_n: int | None,
     softmax_scale: float,
     softcap: float,
     disable_bwd_dkv_atomic_reduction: bool,
@@ -471,6 +478,7 @@ def _flex_flash_attn_backward(
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
+    ref_block_size: tuple[int, int] | None,
     softmax_scale: float,
     softcap: float,
     disable_bwd_dkv_atomic_reduction: bool,
@@ -492,6 +500,11 @@ def _flex_flash_attn_backward(
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
     dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
 
+    if ref_block_size is not None:
+        kblock_m, kblock_n = ref_block_size
+    else:
+        kblock_m = None
+        kblock_n = None
     # NOTE: we can not directly compile `_flex_flash_attn_backward`
     # since torch.compile does not allow returning the mutated args (dq, dk, dv)
     _flex_flash_attn_backward_compilable(
@@ -510,6 +523,8 @@ def _flex_flash_attn_backward(
         merge_k_ranges=merge_k_ranges,
         bwd_kq_map=bwd_kq_map,
         bwd_unique_count=bwd_unique_count,
+        kblock_m=kblock_m,
+        kblock_n=kblock_n,
         softmax_scale=softmax_scale,
         softcap=softcap,
         disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
@@ -543,7 +558,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         sm_margin: int = 0,
         disable_fwd_atomic_reduction: bool = False,
         auto_range_merge: bool = False,
-        ref_block_size: tuple[int, int] | None = None,
+        ref_block_size_fwd: tuple[int, int] | None = None,
+        ref_block_size_bwd: tuple[int, int] | None = None,
         profile_mode: bool = False,
     ):
         softmax_scale = (
@@ -586,7 +602,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges,
             fwd_qk_map,
             fwd_unique_count,
-            ref_block_size,
+            ref_block_size_fwd,
             softmax_scale,
             softcap,
             disable_fwd_atomic_reduction,
@@ -613,6 +629,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.sm_margin = sm_margin
         ctx.auto_range_merge = auto_range_merge
         ctx.profile_mode = profile_mode
+        ctx.ref_block_size_bwd = ref_block_size_bwd
 
         return out, lse
 
@@ -669,6 +686,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_k_ranges,
             bwd_kq_map,
             bwd_unique_count,
+            ref_block_size=ctx.ref_block_size_bwd,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
             disable_bwd_dkv_atomic_reduction=False,
@@ -700,11 +718,12 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # attn_type_map
             None,  # softmax_scale
             None,  # softcap
-            None,  # deterministic
+            None,  # deterministicw
             None,  # sm_margin
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
             None,  # ref_block_size
+            None,  # ref_block_size_bwd
             None,  # profile_mode
         )
 
@@ -726,6 +745,7 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: bool = False,
     auto_range_merge: bool = False,
     ref_block_size: tuple[int, int] | None = None,
+    ref_block_size_bwd: tuple[int, int] | None = None,
     profile_mode: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -909,5 +929,6 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         auto_range_merge,
         ref_block_size,
+        ref_block_size_bwd,
         profile_mode,
     )

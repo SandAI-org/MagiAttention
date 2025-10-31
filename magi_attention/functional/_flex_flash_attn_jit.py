@@ -61,6 +61,17 @@ def tile_size_fwd_sm90(head_dim: int, softcap: bool) -> tuple[int, int]:
         return (128, 64)
 
 
+def tile_size_bwd_sm90(head_dim: int, softcap: bool) -> tuple[int, int]:
+    if head_dim <= 64:
+        return (128, 128)
+    elif head_dim <= 128:
+        return (64, 128)
+    elif head_dim <= 192:
+        return (64, 64)
+    else:
+        return (64, 64)
+
+
 def round_up_headdim(head_dim: int) -> int:
     if head_dim <= 64:
         return 64
@@ -158,7 +169,7 @@ def get_ffa_jit_spec(
         if direction == "fwd":
             kblock_m, kblock_n = tile_size_fwd_sm90(head_dim, softcap)
         else:
-            kblock_m, kblock_n = None, None
+            kblock_m, kblock_n = tile_size_bwd_sm90(head_dim, softcap)
 
     uri = get_ffa_uri(
         arch_sm_num,
