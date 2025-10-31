@@ -47,9 +47,18 @@ FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 # Skip building CUDA extension modules
 SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
 
-# NOTE: this flag now only used for magi_attn_comm to disable sm90 features
+# NOTE: this flag now only works for `magi_attn_comm` to disable sm90 features
 # to be compatible with other architectures such as sm80
+# thus we won't put it into docs until all other extensions such as FFA supports architectures other than sm90
 DISABLE_SM90_FEATURES = os.getenv("MAGI_ATTENTION_DISABLE_SM90_FEATURES", "0") == "1"
+
+# NOTE: this flag now only works for `magi_attn_comm` to disable aggressive PTX instructions
+# such as LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
+# however, it is set default to `1` as `.L1::no_allocate` might not be safe to to load volatile data
+# according to this issue: https://github.com/deepseek-ai/DeepEP/issues/136
+# REVIEW: however, we well test it and find no correctness issue but a notable performance gain
+# so in the future we might need to dig deeper into this
+DISABLE_AGGRESSIVE_PTX_INSTRS = os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1") == "1"
 
 # We no longer build the flexible_flash_attention_cuda module
 # instead, we only pre-build some common options with ref_block_size=None if PREBUILD_FFA is True
@@ -66,7 +75,12 @@ SKIP_MAGI_ATTN_COMM_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD", "0") == "1"
 )
 
+# Defaults to enable verbose building magi_attention
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
+
+# Defaults to only build for sm90
+# TODO: support other architectures
+os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
 
 
 title_left_str = "\n\n# -------------------     "
@@ -332,34 +346,25 @@ def build_magi_attn_comm_module(
         )
 
     if DISABLE_SM90_FEATURES:
-        # Prefer A100
-        os.environ["TORCH_CUDA_ARCH_LIST"] = os.getenv("TORCH_CUDA_ARCH_LIST", "8.0")
-
-        # Disable some SM90 features: FP8, launch methods, and TMA
+        # Disable some SM90 features: FP8, launch methods, TMA
+        # as well as aggressive ptx instructions
         cxx_flags.append("-DDISABLE_SM90_FEATURES")
         nvcc_flags.append("-DDISABLE_SM90_FEATURES")
+        cxx_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
+        nvcc_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
 
         # Disable internode and low-latency kernels
         assert disable_nvshmem
     else:
-        # Prefer H800 series
-        os.environ["TORCH_CUDA_ARCH_LIST"] = os.getenv("TORCH_CUDA_ARCH_LIST", "9.0")
-
         # CUDA 12 flags
         nvcc_flags.extend(["-rdc=true", "--ptxas-options=--register-usage-level=10"])
 
-    # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
-    if os.environ["TORCH_CUDA_ARCH_LIST"].strip() != "9.0":
-        # FIXME: `DISABLE_AGGRESSIVE_PTX_INSTRS` macro is accidentally defined
-        # due to the auto-set `TORCH_CUDA_ARCH_LIST` by ngc image
-        # which is '7.5 8.0 8.6 9.0 10.0 12.0+PTX'
-        assert int(os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", 1)) == 1
-        os.environ["DISABLE_AGGRESSIVE_PTX_INSTRS"] = "1"
-
-    # Disable aggressive PTX instructions
-    if int(os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1")):
-        cxx_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
-        nvcc_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
+        # Disable aggressive PTX instructions
+        # such as LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
+        # and `.L1::no_allocate` might not be safe to to load volatile data
+        if DISABLE_AGGRESSIVE_PTX_INSTRS:
+            cxx_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
+            nvcc_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
 
     # Put them together
     extra_compile_args = {

@@ -356,6 +356,12 @@ DEVICE_INLINE int64_t ld_volatile_global(const uint64_t* ptr) {
 // Non-Cached Load/Store Funcs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+/** NOTE:
+ * According to this issue: https://github.com/deepseek-ai/DeepEP/issues/136
+ * `.L1::no_allocate` might not be safe to to load volatile data
+ * however, we well test it and find no correctness issue but a notable performance gain
+ * so in the future we might need to dig deeper into this but disable it by now
+ */
 #ifndef DISABLE_AGGRESSIVE_PTX_INSTRS
 #define LD_NC_FUNC "ld.global.nc.L1::no_allocate.L2::256B"
 #else
