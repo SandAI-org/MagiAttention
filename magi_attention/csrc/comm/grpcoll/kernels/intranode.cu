@@ -732,7 +732,7 @@ void launch_group_cast(
     int num_recv_buffer_tokens) {
   constexpr int kNumThreads = kNumWarps * WARP_SIZE; // num threads per block
   constexpr int kWarpCopyUnrollStages = 5; // warp-copy unroll stages
-  constexpr int kNumTMAStages = 2; // num TMA stages
+  constexpr int kNumTMAStages = 4; // num TMA stages
   constexpr int kNumTMABytesPerWarp = 8192; // num bytes of TMA transfer per warp
 
 #ifndef DISABLE_SM90_FEATURES

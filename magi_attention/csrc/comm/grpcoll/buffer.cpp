@@ -398,6 +398,8 @@ Buffer::intranode_group_cast(
   }
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
+  // NOTES: actually, hidden size in int4 should be aligned with the number of TMA stages in the kernel
+  // which we will verify later in the kernel launch function
   auto hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
   if (num_groups > 1) {
     GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x.scalar_type());
