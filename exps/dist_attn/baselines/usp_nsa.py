@@ -272,6 +272,7 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             q.dtype,  # out_type
             deterministic,
             0,  # sm_margin
+            False,  # profile_mode
         ]
 
         # run ffa forward
@@ -358,6 +359,7 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             torch.float32,  # dv_type
             ctx.deterministic,
             0,  # sm_margin
+            False,  # profile_mode
         ]
 
         flatten_dq, flatten_dk, flatten_dv, _ = _flex_flash_attn_backward(
@@ -370,6 +372,7 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             None,  # dq
             None,  # dk
             None,  # dv
+            None,  # dsink
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
@@ -448,6 +451,7 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             q.dtype,  # out_type
             deterministic,
             0,  # sm_margin
+            False,  # profile_mode
         ]
 
         # run ffa forward
@@ -497,6 +501,7 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             torch.float32,  # dv_type
             ctx.deterministic,
             0,  # sm_margin
+            False,  # profile_mode
         ]
 
         dq, dk, dv, _ = _flex_flash_attn_backward(
@@ -509,6 +514,7 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             None,  # dq
             None,  # dk
             None,  # dv
+            None,  # dsink
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
@@ -642,6 +648,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             q_cmp.dtype,  # out_type
             deterministic,
             0,  # sm_margin
+            False,  # profile_mode
         ]
 
         # run ffa forward
@@ -701,6 +708,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             torch.float32,  # dv_type
             ctx.deterministic,
             0,  # sm_margin
+            False,  # profile_mode
         ]
 
         dq, dk, dv, _ = _flex_flash_attn_backward(
@@ -713,6 +721,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             None,  # dq
             None,  # dk
             None,  # dv
+            None,  # dsink
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,

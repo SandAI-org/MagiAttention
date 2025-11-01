@@ -177,6 +177,7 @@ class TestBlockSparseAttn(DistTestBase):
             out_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            profile_mode=False,
         )
         o_ref, lse_ref = correct_attn_fwd_result(
             out_list=[o, o_acc], lse_list=[lse, lse_acc]
@@ -201,6 +202,7 @@ class TestBlockSparseAttn(DistTestBase):
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            profile_mode=False,
         )
 
         assert_close(
@@ -231,9 +233,10 @@ class TestBlockSparseAttn(DistTestBase):
             v,
             None,  # sink
             o_ref.to(q.dtype),
-            None,
-            None,
-            None,
+            None,  # dq
+            None,  # dk
+            None,  # dv
+            None,  # dsink
             lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
@@ -249,6 +252,7 @@ class TestBlockSparseAttn(DistTestBase):
             dv_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            profile_mode=False,
         )
         dq_ref += dq_acc
         dk_ref += dk_acc
@@ -263,6 +267,7 @@ class TestBlockSparseAttn(DistTestBase):
             dq_acc,
             dk_acc,
             dv_acc,
+            None,  # dsink
             lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
@@ -278,6 +283,7 @@ class TestBlockSparseAttn(DistTestBase):
             dv_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            profile_mode=False,
         )
 
         assert_close(

@@ -361,6 +361,7 @@ class TestFlexFlashAttn(DistTestBase):
             None,  # dq
             None,  # dk
             None,  # dv
+            None,  # dsink
             lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
@@ -393,6 +394,7 @@ class TestFlexFlashAttn(DistTestBase):
             dq_acc,  # dq
             dk_acc,  # dk
             dv_acc,  # dv
+            None,  # dsink
             lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,

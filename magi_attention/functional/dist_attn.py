@@ -522,6 +522,7 @@ class DistAttnRuntime:
                 dq=dq_acc,  # directly reduce to dq_acc
                 dk=partial_dk,
                 dv=partial_dv,
+                dsink=None,  # TODO: support dist sink
                 # NOTE: always use high precision for the partial dq, dkv
                 # to reduce the error caused by the atomic reduction inside the kernel
                 dq_type=self.hp_dtype,
