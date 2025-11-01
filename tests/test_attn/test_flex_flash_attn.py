@@ -15,7 +15,6 @@
 import random
 from typing import Any
 
-import pytest
 import torch
 from torch.testing._internal.common_utils import run_tests
 
@@ -1319,7 +1318,6 @@ class TestFlexFlashAttn(DistTestBase):
             test_case=test_case,
         )
 
-    @pytest.mark.skip(reason="DE-BUG")
     def test_compiled_flex_flash_attn(self):
         s, h, d = 2048, 6, 128
         hk = 3

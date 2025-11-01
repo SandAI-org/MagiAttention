@@ -213,7 +213,7 @@ class DistAttnRuntime:
                     q=q,
                     k=k,
                     v=v,
-                    sink=None,
+                    sink=None,  # TODO: support dist sink
                     out=out_acc,  # directly reduce to out_acc
                     lse=lse_acc,  # directly reduce to lse_acc
                     **attn_arg.to_ffa_args(is_bwd=False),
@@ -516,7 +516,7 @@ class DistAttnRuntime:
                 q=q,
                 k=k,
                 v=v,
-                sink=None,
+                sink=None,  # TODO: support dist sink
                 out=o,
                 lse=lse,
                 dq=dq_acc,  # directly reduce to dq_acc
