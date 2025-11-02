@@ -54,6 +54,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
+    std::optional<const at::Tensor>& sparse_load_loop_count_,
     float const softmax_scale,
     float const softcap,
     bool const disable_fwd_atomic_reduction,
@@ -110,9 +111,11 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   at::Tensor merge_q_ranges;
   at::Tensor qk_map;
   at::Tensor unique_count;
+  at::Tensor sparse_load_loop_count;
   bool const has_merge_q_ranges = merge_q_ranges_.has_value();
   bool const has_qk_map = qk_map_.has_value();
   bool const has_unique_count = unique_count_.has_value();
+  bool const has_sparse_load_loop_count = sparse_load_loop_count_.has_value();
   if (has_merge_q_ranges) {
     merge_q_ranges = merge_q_ranges_.value();
     // Check merge_q_ranges (dtype, device, layout)
@@ -136,6 +139,13 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     CHECK_DEVICE(unique_count);
     CHECK_SHAPE(unique_count);
     CHECK_CONTIGUOUS(unique_count);
+  }
+  if (has_sparse_load_loop_count) {
+    sparse_load_loop_count = sparse_load_loop_count_.value();
+    // Check sparse_load_loop_count (dtype, device, layout)
+    TORCH_CHECK(sparse_load_loop_count.dtype() == torch::kInt32);
+    CHECK_DEVICE(sparse_load_loop_count);
+    CHECK_CONTIGUOUS(sparse_load_loop_count);
   }
   TORCH_CHECK((has_merge_q_ranges == has_qk_map && has_qk_map == has_unique_count), "merge_q_ranges/qk_map/unique_count must be provided together");
 
@@ -243,6 +253,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       /*merge_q_ranges*/ has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
       /*qk_map*/ has_qk_map ? qk_map.data_ptr() : nullptr,
       /*unique_count*/ has_unique_count ? unique_count.data_ptr() : nullptr,
+      /*sparse_load_loop_count*/ has_sparse_load_loop_count ? sparse_load_loop_count.data_ptr() : nullptr,
       /*softmax_lse*/ softmax_lse.data_ptr(),
       /*softmax_scale*/ softmax_scale,
       /*tile_count_semaphore*/ tile_count_semaphore.data_ptr(),

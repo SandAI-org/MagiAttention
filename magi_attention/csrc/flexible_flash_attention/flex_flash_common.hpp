@@ -63,6 +63,7 @@ void set_params_fprop(
     void* merge_q_ranges_d,
     void* qk_map_d,
     void* unique_count_d,
+    void* sparse_load_loop_count_d,
     void* softmax_lse_d,
     float softmax_scale,
     void* tile_count_semaphore_d,

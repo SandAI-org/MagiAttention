@@ -50,7 +50,8 @@ template <
     bool DisableFwdAtomicReduction,
     bool Deterministic,
     bool MergeRange,
-    bool ProfileMode = false>
+    bool ProfileMode = false,
+    bool SparseLoad = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
@@ -164,7 +165,8 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool Deterministic,
-    bool kProfileMode>
+    bool kProfileMode,
+    bool kSparseLoad>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // TODO: support cluster launch
@@ -172,7 +174,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   CLUSTER_SWITCH(cutlass::ceil_div(params.total_q, kBlockM) % 2 == 0, Use_cluster, [&] {
     static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
     BOOL_SWITCH(params.merge_q_ranges != nullptr, MergeRange, [&] {
-      run_flash_fwd<Arch, kBlockM, kBlockN, kHeadDim, ClusterM, T, T_out, Has_softcap, DisableFwdAtomicReduction, Deterministic, MergeRange, kProfileMode>(
+      run_flash_fwd<Arch, kBlockM, kBlockN, kHeadDim, ClusterM, T, T_out, Has_softcap, DisableFwdAtomicReduction, Deterministic, MergeRange, kProfileMode, kSparseLoad>(
           params, stream);
     });
   });
