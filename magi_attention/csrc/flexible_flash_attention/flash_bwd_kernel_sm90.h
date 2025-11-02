@@ -213,6 +213,7 @@ class FlashAttnBwdSm90 {
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
+      using BlockMetaT = typename CollectiveMainloop::BlockMeta;
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
       int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
@@ -234,6 +235,7 @@ class FlashAttnBwdSm90 {
           auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
           bool tile_valid = false;
+          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
           if constexpr (RangeMerge) {
             int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
@@ -244,12 +246,13 @@ class FlashAttnBwdSm90 {
               int bidb = bidb_start + idx;
               block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
               bool tile_valid_tmp =
-                  mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
+                  mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, block_meta, tile_valid);
 
               tile_valid = tile_valid || tile_valid_tmp;
             }
           } else {
-            tile_valid = mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
+            tile_valid =
+                mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, block_meta, tile_valid);
           }
 
           if (tile_valid) {
