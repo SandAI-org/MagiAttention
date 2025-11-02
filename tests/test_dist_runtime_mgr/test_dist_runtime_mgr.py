@@ -888,11 +888,11 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             device=self.device,
         )
 
-        # -----   ref1. torch ref with high precision (fp32)   ---- #
+        # -----   ref. torch ref with high precision (fp64)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_high_precision = torch_attn_ref(
+        total_out_ref_high_precision, _ = torch_attn_ref(
             q=total_q,
             k=total_k,
             v=total_v,

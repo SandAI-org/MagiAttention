@@ -449,6 +449,7 @@ class TestFlexFlashAttn(DistTestBase):
         total_k: torch.Tensor,
         total_v: torch.Tensor,
         total_out: torch.Tensor,
+        total_lse: torch.Tensor,
         grad_total_q: torch.Tensor,
         grad_total_k: torch.Tensor,
         grad_total_v: torch.Tensor,
@@ -460,6 +461,9 @@ class TestFlexFlashAttn(DistTestBase):
         # -----   customize tolerance threshold  ---- #
         o_atol = EPSILON
         o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
+
+        lse_atol = EPSILON
+        lse_rtol = 0.001
 
         dq_atol = EPSILON
         dq_rtol = {torch.bfloat16: 0.3, torch.float16: 0.2}.get(dtype, 0.2)
@@ -487,17 +491,18 @@ class TestFlexFlashAttn(DistTestBase):
             device=self.device,
         )
 
-        # -----   ref1. torch ref with high precision (fp32)   ---- #
+        # -----   ref1. torch ref with high precision (fp64)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_high_precision = torch_attn_ref(
+        total_out_ref_high_precision, total_lse_ref_high_precision = torch_attn_ref(
             q=total_q,
             k=total_k,
             v=total_v,
             mask=mask,
             layout="thd",
             high_precision=True,
+            return_lse=True,
         )
         total_out_ref_high_precision.backward(grad_total_out)
         (
@@ -514,13 +519,14 @@ class TestFlexFlashAttn(DistTestBase):
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_low_precision = torch_attn_ref(
+        total_out_ref_low_precision, total_lse_ref_low_precision = torch_attn_ref(
             q=total_q,
             k=total_k,
             v=total_v,
             mask=mask,
             layout="thd",
             high_precision=False,
+            return_lse=True,
         )
 
         total_out_ref_low_precision.backward(grad_total_out)
@@ -566,6 +572,42 @@ class TestFlexFlashAttn(DistTestBase):
                 rtol=o_rtol,
                 mismatch_threshold=o_thres,
                 test_case=f"{test_case} => o",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
+
+        # -----   assert close for fwd lse   ---- #
+
+        # fa style with Linf norm
+        lse_norm = calc_inf_norm(total_lse, total_lse_ref_high_precision)
+        lse_ref_norm = calc_inf_norm(
+            total_lse_ref_low_precision, total_lse_ref_high_precision
+        )
+        try:
+            self.assertLessEqual(
+                lse_norm,
+                norm_rtol_ratio * lse_ref_norm,
+                msg=f"For {test_case=}: {lse_norm=} should be no greater than {norm_rtol_ratio}x of {lse_ref_norm=}",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
+
+        # torch style with atol + rtol + mismatch threshold
+        o_thres = extract_mismatch_threshold(
+            actual=total_lse_ref_low_precision,
+            expected=total_lse_ref_high_precision,
+            atol=lse_atol,
+            rtol=lse_rtol,
+            mismatch_thres_ratio=mismatch_thres_ratio,
+        )
+        try:
+            magi_attention.testing.assert_close(
+                total_lse,
+                total_lse_ref_high_precision,
+                atol=lse_atol,
+                rtol=lse_rtol,
+                mismatch_threshold=o_thres,
+                test_case=f"{test_case} => lse",
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -801,6 +843,7 @@ class TestFlexFlashAttn(DistTestBase):
             total_k=k,
             total_v=v,
             total_out=o,
+            total_lse=lse,
             grad_total_q=q.grad,
             grad_total_k=k.grad,
             grad_total_v=v.grad,
@@ -995,20 +1038,20 @@ class TestFlexFlashAttn(DistTestBase):
                 ),
                 "k_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 256],  # [0, 256]
+                        [0, 256],
                         [512, 768],
                         [1011, 1123],
-                        [0, 512],  # [256, 512]
+                        [0, 512],
                         [777, 888],
-                        [0, 1024],  # [512, 1024]
-                        [1024, 1280],  # [1024, 1280]
-                        [0, 128],  # [1280, 1536],
+                        [0, 1024],
+                        [1024, 1280],
+                        [0, 128],
                         [555, 556],
                         [777, 982],
                         [1024, 1536],
                         [1689, 1898],
-                        [1024, 1792],  # [1536, 1792],
-                        [1024, 2048],  # [1792, 2048]
+                        [1024, 1792],
+                        [1024, 2048],
                     ],
                 ),
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -1060,19 +1103,19 @@ class TestFlexFlashAttn(DistTestBase):
                 ),
                 "k_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 256],  # [0, 256]
+                        [0, 256],
                         [512, 768],
                         [1011, 1123],
-                        [0, 512],  # [256, 512]
+                        [0, 512],
                         [777, 888],
-                        [1024, 1280],  # [1024, 1280]
-                        [0, 128],  # [1280, 1536],
+                        [1024, 1280],
+                        [0, 128],
                         [555, 556],
                         [777, 982],
                         [1024, 1536],
                         [1689, 1898],
-                        [1024, 1792],  # [1536, 1792],
-                        [1024, 2048],  # [1792, 2048]
+                        [1024, 1792],
+                        [1024, 2048],
                     ],
                 ),
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -1110,19 +1153,19 @@ class TestFlexFlashAttn(DistTestBase):
                 ),
                 "k_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 256],  # [0, 256]
+                        [0, 256],
                         [512, 768],
                         [1011, 1123],
-                        [0, 256],  # [256, 512]
+                        [0, 256],
                         [777, 888],
-                        [1024, 1536],  # [1024, 1280]
-                        [0, 128],  # [1280, 1536],
+                        [1024, 1536],
+                        [0, 128],
                         [555, 556],
                         [777, 982],
                         [1024, 1536],
                         [1689, 1898],
-                        [1024, 1792],  # [1536, 1792],
-                        [1024, 2048],  # [1792, 2048]
+                        [1024, 1792],
+                        [1024, 2048],
                     ],
                 ),
                 "attn_type_map": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -1300,7 +1343,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[{generate_config['name']}]"
             f"[num_pairs={num_pairs}]"
             f"[dtype={dtype}]"
-            f"[attn_type_map={attn_type_map}]"
+            f"[attn_type_map=[{attn_type}] x {q_ranges.size}]"
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[test_accumulation_inplace={test_accumulation_inplace}"
@@ -1363,6 +1406,7 @@ class TestFlexFlashAttn(DistTestBase):
             total_k=k,
             total_v=v,
             total_out=o,
+            total_lse=lse,
             grad_total_q=dq,
             grad_total_k=dk,
             grad_total_v=dv,

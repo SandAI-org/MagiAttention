@@ -837,9 +837,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         local_k = dist_attn_runtime_mgr.dispatch_kv(total_k)
         local_v = dist_attn_runtime_mgr.dispatch_kv(total_v)
 
-        # -----   run dist attn forward on local qkv for local o   ---- #
+        # -----   run dist attn forward on local qkv for local out/lse   ---- #
 
-        local_out, _ = dist_attn_runtime_mgr.calc_attn(
+        local_out, local_lse = dist_attn_runtime_mgr.calc_attn(
             q=local_q,
             k=local_k,
             v=local_v,
@@ -847,9 +847,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             softcap=softcap,
         )
 
-        # -----   undispatch local o to global o   ---- #
+        # -----   undispatch local out/lse to global out/lse   ---- #
 
         total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
+        total_lse = dist_attn_runtime_mgr.undispatch_qo(local_lse)
 
         # -----   run backward   ---- #
 
@@ -880,6 +881,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             total_k=total_k,
             total_v=total_v,
             total_out=total_out,
+            total_lse=total_lse,
             grad_total_q=grad_total_q,
             grad_total_k=grad_total_k,
             grad_total_v=grad_total_v,
@@ -901,6 +903,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         total_k: torch.Tensor,
         total_v: torch.Tensor,
         total_out: torch.Tensor,
+        total_lse: torch.Tensor,
         grad_total_q: torch.Tensor | None,
         grad_total_k: torch.Tensor | None,
         grad_total_v: torch.Tensor | None,
@@ -912,6 +915,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         o_atol = EPSILON
         o_rtol = EPSILON
+
+        lse_atol = EPSILON
+        lse_rtol = EPSILON
 
         dq_atol = EPSILON
         dq_rtol = EPSILON
@@ -933,11 +939,11 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             device=self.device,
         )
 
-        # -----   ref1. torch ref with high precision (fp32)   ---- #
+        # -----   ref. torch ref with high precision (fp64)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_high_precision = torch_attn_ref(
+        total_out_ref_high_precision, total_lse_ref_high_precision = torch_attn_ref(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -946,6 +952,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             softcap=softcap,
             layout="thd",
             high_precision=True,
+            return_lse=True,
         )
 
         if run_bwd:
@@ -973,6 +980,19 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 atol=o_atol,
                 rtol=o_rtol,
                 test_case=f"{test_case} => o",
+            )
+        except Exception as e:
+            err_msg_list.append(str(e))
+
+        # -----   assert close for fwd lse   ---- #
+
+        try:
+            magi_attention.testing.assert_close(
+                total_lse,
+                total_lse_ref_high_precision,
+                atol=lse_atol,
+                rtol=lse_rtol,
+                test_case=f"{test_case} => lse",
             )
         except Exception as e:
             err_msg_list.append(str(e))

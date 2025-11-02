@@ -16,9 +16,12 @@ import re
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange
+from einops import rearrange, repeat
 from packaging import version
 from torch.nn.attention import SDPBackend, sdpa_kernel
+
+from magi_attention.functional.utils import safe_subtract
+from magi_attention.utils import max_fp_dtype, to_higher_fp_dtype
 
 if version.parse(torch.__version__) > version.parse("2.4"):
     # NOTE: in testing, we should explicitly allow bf16/fp16 reduction for sdpa
@@ -125,7 +128,50 @@ def calc_inf_norm(
     a: torch.Tensor,
     b: torch.Tensor,
 ) -> float:
-    return (a.float() - b.float()).norm(p=float("inf")).item()
+    dtype = max_fp_dtype(a.dtype, b.dtype, torch.float32)
+    return safe_subtract(a.to(dtype), b.to(dtype)).norm(p=float("inf")).item()
+
+
+@torch.no_grad
+def calc_attn_lse(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    mask: torch.Tensor,
+    softmax_scale: float | None = None,
+):
+    # prepare softmax scale
+    softmax_scale = q.size(-1) ** (-0.5) if softmax_scale is None else softmax_scale
+    assert softmax_scale is not None  # mypy
+
+    # repeat k,v heads
+    nhq, nhk = q.size(-2), k.size(-2)
+    assert nhq % nhk == 0
+    rep_nhk = nhq // nhk
+    q = rearrange(q, "s hq d -> hq s d")  # Q
+    k = repeat(k, "s hk d -> (hk rep) d s", rep=rep_nhk)  # K.T
+
+    # prepare bias
+    # where bias.shape = [1, sq, sk]
+    bias = torch.zeros_like(mask, dtype=q.dtype, device=q.device)
+    bias.masked_fill_(mask.logical_not(), float("-inf")).unsqueeze_(0)
+
+    # calculate lse
+    lse = (
+        # apply `S = Q x K.T * scale + bias`
+        # where S.shape = [nhq, sq, sk]
+        to_higher_fp_dtype(
+            q @ k * softmax_scale + bias,
+            lowest_precision=torch.float32,
+        )
+        # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
+        # where LSE.shape = [nhq, sq]
+        .logsumexp(dim=-1)
+        # transpose and make contiguous
+        # where LSE.shape = [sq, nhq]
+        .t().contiguous()
+    )
+
+    return lse
 
 
 def torch_attn_ref(
@@ -137,42 +183,43 @@ def torch_attn_ref(
     softcap: float = 0.0,
     layout: str = "thd",
     high_precision: bool = False,
-) -> torch.Tensor:
+    return_lse: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    assert layout in ("thd",), f"Unsupported layout: {layout}"
     assert softcap == 0.0, "non-zero softcap is not supported by now"
 
-    if layout == "thd":
-        q = rearrange(q, "t h d -> 1 h t d")
-        k = rearrange(k, "t h d -> 1 h t d")
-        v = rearrange(v, "t h d -> 1 h t d")
+    org_dtype = q.dtype
+    if high_precision:  # use fp64 as ground-truth
+        q = q.to(torch.float64)
+        k = k.to(torch.float64)
+        v = v.to(torch.float64)
+
+    if return_lse:
+        lse = calc_attn_lse(
+            q,
+            k,
+            mask,
+            softmax_scale,
+        )
+        lse_dtype = max_fp_dtype(org_dtype, torch.float32)
+        lse = lse.to(lse_dtype)
     else:
-        raise ValueError(f"Unsupported layout: {layout}")
+        lse = None
+
+    q = rearrange(q, "t h d -> 1 h t d")
+    k = rearrange(k, "t h d -> 1 h t d")
+    v = rearrange(v, "t h d -> 1 h t d")
 
     with sdpa_kernel(backends=[SDPBackend.MATH]):
-        if high_precision:
-            out = F.scaled_dot_product_attention(
-                q.to(torch.float64),  # NOTE: use fp64 as ground-truth
-                k.to(torch.float64),
-                v.to(torch.float64),
-                attn_mask=mask,
-                enable_gqa=True,
-                scale=softmax_scale,
-            )
-        else:
-            out = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=mask,
-                enable_gqa=True,
-                scale=softmax_scale,
-            )
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=mask,
+            enable_gqa=True,
+            scale=softmax_scale,
+        )
 
-    if layout == "thd":
-        out = rearrange(out, "1 h t d -> t h d")
-    else:
-        raise ValueError(f"Unsupported layout: {layout}")
+    out = rearrange(out, "1 h t d -> t h d").to(org_dtype)
 
-    if high_precision:
-        return out.to(q.dtype)
-    else:
-        return out
+    return out, lse

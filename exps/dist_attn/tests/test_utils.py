@@ -249,7 +249,7 @@ def ref_torch_sdpa_func(q, k, v, grad_total_out, mask, high_precision=False):
     total_k.requires_grad_(True)
     total_v.requires_grad_(True)
 
-    total_out_ref_high_precision = torch_attn_ref(
+    total_out_ref_high_precision, _ = torch_attn_ref(
         q=total_q,
         k=total_k,
         v=total_v,

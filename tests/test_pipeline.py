@@ -690,7 +690,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             local_k = dist_attn_runtime_mgr.dispatch_kv(total_k)
             local_v = dist_attn_runtime_mgr.dispatch_kv(total_v)
 
-            # -----   run dist attn forward on local qkv for local o   ---- #
+            # -----   run dist attn forward on local qkv for local out   ---- #
 
             if self.profile_mode:
                 # barrier before fwd to wait for the processes with slow solver
@@ -705,7 +705,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 softcap=softcap,
             )
 
-            # -----   undispatch local o to global o   ---- #
+            # -----   undispatch local out to global out   ---- #
 
             total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
 
@@ -809,11 +809,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             device=self.device,
         )
 
-        # -----   ref1. torch ref with high precision (fp32)   ---- #
+        # -----   ref1. torch ref with high precision (fp64)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_high_precision = torch_attn_ref(
+        total_out_ref_high_precision, _ = torch_attn_ref(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -840,7 +840,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_low_precision = torch_attn_ref(
+        total_out_ref_low_precision, _ = torch_attn_ref(
             q=total_q,
             k=total_k,
             v=total_v,
