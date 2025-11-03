@@ -237,14 +237,17 @@ class FlashAttnBwdSm90 {
           bool tile_valid = false;
           BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
+          tile_valid =
+              mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, block_meta, tile_valid);
+          /*
           if constexpr (RangeMerge) {
-            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
-            int bidb_start = params.scheduler.range_map[bidb_idx];
+            // int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
+            //                                                                 : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
+            // int bidb_start = params.scheduler.range_map[bidb_idx];
 
             for (int idx = 0; idx < loop_count; ++idx) {
               int bidb = bidb_start + idx;
-              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
+              // block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
               // BlockMetaT block_meta_ = BlockMetaT{params.mainloop, block_coord, shared_storage};
               bool tile_valid_tmp =
                   mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, block_meta, tile_valid);
@@ -252,10 +255,19 @@ class FlashAttnBwdSm90 {
               tile_valid = tile_valid || tile_valid_tmp;
               block_meta.prefetch();
             }
+
+            while (!block_meta.is_finish() && block_meta.is_valid()) {
+              bool tile_valid_tmp =
+                  mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, block_meta, tile_valid);
+
+              tile_valid = tile_valid || tile_valid_tmp;
+              block_meta.prefetch();
+            }
+
           } else {
             tile_valid =
                 mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, block_meta, tile_valid);
-          }
+          } */
 
           if (tile_valid) {
             // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
