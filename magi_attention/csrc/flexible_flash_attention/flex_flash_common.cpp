@@ -22,6 +22,7 @@ void set_params_fprop(
     const size_t total_q,
     const size_t total_k,
     const size_t total_q_rounded,
+    const size_t total_sink,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -29,6 +30,7 @@ void set_params_fprop(
     const at::Tensor q,
     const at::Tensor k,
     const at::Tensor v,
+    const at::Tensor sink,
     at::Tensor kernel_out,
     void* q_ranges_d,
     void* k_ranges_d,
@@ -42,7 +44,7 @@ void set_params_fprop(
     void* qk_map_d,
     void* unique_count_d,
     void* softmax_lse_d,
-    float softmax_scale,
+    float const softmax_scale,
     void* tile_count_semaphore_d,
     float const softcap,
     int const sm_margin,
@@ -62,6 +64,7 @@ void set_params_fprop(
   params.q_ptr = q.data_ptr();
   params.k_ptr = k.data_ptr();
   params.v_ptr = v.data_ptr();
+  params.sink_ptr = sink.data_ptr();
   // Set the strides of Q, K, V
   // All stride are in elements, not bytes.
   params.q_row_stride = q.stride(-3);
@@ -121,6 +124,7 @@ void set_params_dgrad(
     const size_t total_q,
     const size_t total_k,
     const size_t total_q_rounded,
+    const size_t total_sink,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -128,11 +132,13 @@ void set_params_dgrad(
     const at::Tensor q,
     const at::Tensor k,
     const at::Tensor v,
+    const at::Tensor sink,
     const at::Tensor out,
     const at::Tensor dout,
     at::Tensor dq,
     at::Tensor dk,
     at::Tensor dv,
+    at::Tensor dsink,
     void* q_ranges_d,
     void* k_ranges_d,
     void* attn_type_map_d,
@@ -159,6 +165,7 @@ void set_params_dgrad(
       total_q,
       total_k,
       total_q_rounded,
+      total_sink,
       h_qo,
       h_kv,
       d,
@@ -166,6 +173,7 @@ void set_params_dgrad(
       q,
       k,
       v,
+      sink,
       out,
       /*q_ranges_d*/ q_ranges_d,
       /*k_ranges_d*/ k_ranges_d,
@@ -202,6 +210,7 @@ void set_params_dgrad(
   params.dq_ptr = dq.data_ptr();
   params.dk_ptr = dk.data_ptr();
   params.dv_ptr = dv.data_ptr();
+  params.dsink_ptr = dsink.data_ptr();
   params.dq_row_stride = dq.stride(-3);
   params.dk_row_stride = dk.stride(-3);
   params.dv_row_stride = dv.stride(-3);

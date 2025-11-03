@@ -85,10 +85,12 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    const std::optional<at::Tensor>& sink_,
     const at::Tensor& out,
     std::optional<const at::Tensor>& dq_,
     std::optional<const at::Tensor>& dk_,
     std::optional<const at::Tensor>& dv_,
+    std::optional<const at::Tensor>& dsink_,
     const at::Tensor& softmax_lse,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
@@ -120,6 +122,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
   int const head_size = q.size(2);
+  int const total_sink = sink_.has_value() ? sink_->size(0) : 0;
+  auto opts = q.options();
 
   // Check q, k, v, out, dout (dtype, device, layout)
   auto q_type = q.scalar_type();
@@ -151,6 +155,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   CHECK_CONTIGUOUS(q_ranges);
   CHECK_CONTIGUOUS(k_ranges);
 
+  // Init attn_type_map
   at::Tensor attn_type_map;
   bool const has_attn_type_map = attn_type_map_.has_value();
   if (has_attn_type_map) {
@@ -159,6 +164,20 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
     CHECK_DEVICE(attn_type_map);
     CHECK_SHAPE(attn_type_map, batch_size);
     CHECK_CONTIGUOUS(attn_type_map);
+  }
+
+  // Init optional sink
+  at::Tensor sink;
+  if (sink_.has_value()) {
+    sink = sink_.value();
+    TORCH_CHECK(sink.scalar_type() == at::kFloat, "sink must has dtype float");
+    CHECK_DEVICE(sink);
+    TORCH_CHECK(sink.dim() == 2, "sink must be 2D");
+    CHECK_SHAPE(sink, total_sink, num_heads_qo);
+    CHECK_CONTIGUOUS(sink);
+  } else {
+    // Create a dummy empty sink tensor with zero size
+    sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
   }
 
   // Check merge_k_ranges, bwd_kq_map (dtype, device, layout) if given
@@ -234,10 +253,10 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   // Check dk_type is same as dv_type
   TORCH_CHECK(dk_type == dv_type, "dk and dv must have the same dtype");
 
-  auto opts = q.options();
+  // Init gradient tensors to return
   // dq, dk, dv are output tensors, if they are not given, we will create them.
   // If they are given, we will check dtype, device and layout.
-  at::Tensor dq, dk, dv;
+  at::Tensor dq, dk, dv, dsink;
   if (dq_.has_value()) {
     dq = dq_.value();
     TORCH_CHECK(dq.scalar_type() == dq_type, "dq must have the same dtype as dq_type (if given)");
@@ -264,6 +283,20 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
     TORCH_CHECK(dv.stride(-1) == 1, "dv must have contiguous last dimension");
   } else {
     dv = torch::zeros_like(v, opts.dtype(dv_type));
+  }
+  if (sink_.has_value()) {
+    if (dsink_.has_value()) {
+      dsink = dsink_.value();
+      TORCH_CHECK(dsink.dtype() == sink_->dtype(), "dsink must have the same dtype as sink (if given)");
+      CHECK_DEVICE(dsink);
+      CHECK_SHAPE(dsink, total_q, num_heads_qo);
+      CHECK_CONTIGUOUS(dsink);
+    } else {
+      dsink = torch::zeros_like(sink_.value());
+    }
+  } else {
+    // Create a dummy empty dsink tensor with zero size
+    dsink = torch::empty_like(sink);
   }
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
@@ -299,6 +332,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
       total_q,
       total_k,
       total_q_rounded,
+      total_sink,
       num_heads_qo,
       num_heads_kv,
       head_size,
@@ -306,11 +340,13 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
       q,
       k,
       v,
+      sink,
       out,
       dout, // input tensors
       dq,
       dk,
-      dv, // output tensors
+      dv,
+      dsink, // output tensors
       /*q_ranges*/ q_ranges.data_ptr(),
       /*k_ranges*/ k_ranges.data_ptr(),
       /*attn_type_map*/ has_attn_type_map ? attn_type_map.data_ptr() : nullptr,

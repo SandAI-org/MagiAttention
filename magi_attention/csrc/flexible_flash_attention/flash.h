@@ -33,6 +33,7 @@ struct Qkv_params {
   void* __restrict__ q_ptr;
   void* __restrict__ k_ptr;
   void* __restrict__ v_ptr;
+  void* __restrict__ sink_ptr;
 
   // The stride between rows of the Q, K and V matrices.
   index_t q_batch_stride;
@@ -68,7 +69,7 @@ struct Flash_fwd_params : public Qkv_params {
 
   // Dimensions params
   int b, d, d_rounded;
-  int total_q, total_k, total_q_rounded;
+  int total_q, total_k, total_q_rounded, total_sink;
 
   // The scaling factors for the kernel.
   float scale_softmax;
@@ -122,6 +123,7 @@ struct Flash_bwd_params : public Flash_fwd_params {
   void* __restrict__ dq_ptr;
   void* __restrict__ dk_ptr;
   void* __restrict__ dv_ptr;
+  void* __restrict__ dsink_ptr;
 
   // To accumulate dQ
   void* __restrict__ dq_accum_ptr;

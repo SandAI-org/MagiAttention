@@ -107,6 +107,25 @@ def sink_bwd(
     return dsink
 
 
+def correct_attn_lse_with_sink(
+    lse: torch.Tensor,
+    sink: torch.Tensor,
+    inplace: bool = False,
+) -> torch.Tensor:
+    """
+    Corrects the log-sum-exp tensor with sink tokens
+
+    Args:
+        lse (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
+        sink (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
+        inplace (bool, optional): whether to correct ``lse`` inplace. Defaults to ``False``.
+
+    Returns:
+        torch.Tensor: corrected log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
+    """
+    raise NotImplementedError("TODO: implement lse correction with sink tokens")
+
+
 def correct_attn_lse(
     lse1: torch.Tensor,
     lse2: torch.Tensor,
@@ -118,7 +137,7 @@ def correct_attn_lse(
     Args:
         lse1 (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
         lse2 (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
-        inplace (bool, optional): whether to reduce to lse1 inplace. Defaults to False.
+        inplace (bool, optional): whether to correct ``lse1`` inplace. Defaults to ``False``.
 
     Returns:
         torch.Tensor: corrected log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
@@ -145,6 +164,27 @@ def correct_attn_lse(
 correct_attn_lse_compiled = torch.compile(correct_attn_lse)
 
 
+def correct_attn_out_with_sink(
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    sink: torch.Tensor,
+    inplace: bool = False,
+) -> torch.Tensor:
+    """
+    Corrects the output tensor with sink tokens
+
+    Args:
+        out (torch.Tensor): output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
+        lse (torch.Tensor): lse tensor, with shape: [seqlen_q, num_heads_q]
+        sink (torch.Tensor): local lse for out2, with shape: [seqlen_sink, num_heads_q]
+        inplace (bool, optional): whether to correct ``out`` inplace. Defaults to ``False``.
+
+    Returns:
+        torch.Tensor: corrected output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
+    """
+    raise NotImplementedError("TODO: implement out correction with sink tokens")
+
+
 def correct_attn_out(
     out1: torch.Tensor,
     lse1: torch.Tensor,
@@ -158,11 +198,11 @@ def correct_attn_out(
 
     Args:
         out1 (torch.Tensor): local output tensor1, with shape: [seqlen_q, num_heads_q, head_dim]
-        lse1 (torch.Tensor): local lse for out1, with shape: [seqlen_q, num_heads]
+        lse1 (torch.Tensor): local lse for out1, with shape: [seqlen_q, num_heads_q]
         out2 (torch.Tensor): local output tensor2, with shape: [seqlen_q, num_heads_q, head_dim]
-        lse2 (torch.Tensor): local lse for out2, with shape: [seqlen_q, num_heads]
-        lse (torch.Tensor): global lse, with shape: [seqlen_q, num_heads]
-        inplace (bool, optional): whether to reduce to out1 inplace. Defaults to False.
+        lse2 (torch.Tensor): local lse for out2, with shape: [seqlen_q, num_heads_q]
+        lse (torch.Tensor): global lse, with shape: [seqlen_q, num_heads_q]
+        inplace (bool, optional): whether to correct ``out1`` inplace. Defaults to ``False``.
 
     Returns:
         torch.Tensor: corrected global output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
@@ -202,7 +242,9 @@ def correct_attn_fwd_result(
     Args:
         out_list (list[torch.Tensor]): the list of partial out tensors
         lse_list (list[torch.Tensor]): the list of partial lse tensors
-        inplace (bool, optional): whether to reduce to the first out and lse in the list inplace. Defaults to False.
+        inplace (bool, optional):
+            whether to reduce the corrected results to the first ``out`` and ``lse``
+            in the list inplace. Defaults to ``False``.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: the corrected out and lse

@@ -46,6 +46,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
     const at::Tensor& q_ranges,
@@ -72,7 +73,10 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
   int const head_size = q.size(2);
+  int const total_sink = sink_.has_value() ? sink_->size(0) : 0;
+  auto opts = q.options();
 
+  // Check q, k, v (dtype, device, layout)
   auto q_type = q.scalar_type();
   TORCH_CHECK(q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16, "Flexible Flash Attention only supports fp16 and bf16 data type");
   TORCH_CHECK(k.scalar_type() == q_type, "query and key must have the same dtype");
@@ -94,6 +98,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   CHECK_CONTIGUOUS(q_ranges);
   CHECK_CONTIGUOUS(k_ranges);
 
+  // Init attn_type_map
   at::Tensor attn_type_map;
   bool const has_attn_type_map = attn_type_map_.has_value();
   if (has_attn_type_map) {
@@ -144,7 +149,6 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0, "Number of heads in key/value must divide number of heads in query");
 
-  auto opts = q.options();
   // Define a helper function to round up to multiple of m
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
   int const head_size_rounded = round_up_headdim(head_size);
@@ -152,6 +156,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
+  // Init softmax_lse tensors to return
   at::Tensor softmax_lse;
   // If softmax_lse is provided, check its dtype, device, and layout.
   // Otherwise, create a new tensor with the appropriate dtype and shape.
@@ -168,6 +173,20 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
   }
 
+  // Init optional sink
+  at::Tensor sink;
+  if (sink_.has_value()) {
+    sink = sink_.value();
+    TORCH_CHECK(sink.scalar_type() == at::kFloat, "sink must has dtype float");
+    CHECK_DEVICE(sink);
+    TORCH_CHECK(sink.dim() == 2, "sink must be 2D");
+    CHECK_SHAPE(sink, total_sink, num_heads_qo);
+    CHECK_CONTIGUOUS(sink);
+  } else {
+    // Create a dummy empty sink tensor with zero size
+    sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+  }
+
   // Determine the output type
   at::ScalarType out_type;
   if (out_type_.has_value())
@@ -178,9 +197,9 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     out_type = !disable_fwd_atomic_reduction ? at::kFloat : q_type; // Use float32 to ensure numerical stability when enable atomic reduction
   TORCH_CHECK(out_type == at::kFloat || out_type == at::kBFloat16 || out_type == at::kHalf);
 
-  // If the output tensor 'out' is provided, check its dtype, device, and
-  // layout. Otherwise, create a new output tensor with the appropriate dtype
-  // and shape.
+  // Init output tensors to return
+  // If the output tensor 'out' is provided, check its dtype, device, and layout.
+  // Otherwise, create a new output tensor with the appropriate dtype and shape.
   at::Tensor out;
   if (out_.has_value()) {
     out = out_.value();
@@ -197,8 +216,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   // Get q block size, used to initialize range_locks
   // FIXME: hack way to get the block size
   // int const kBlockM = std::get<0>(tile_size_fwd_sm90(head_size, element_size, softcap > 0.0));
-  // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads_qo
-  // columns
+  // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads_qo columns
   at::Tensor range_locks = torch::empty({(total_q + kBlockM - 1) / kBlockM + 1, num_heads_qo}, opts.dtype(torch::kInt32));
   // Create tile_count_semaphore tensor, used to count the number of tiles
   at::Tensor tile_count_semaphore = torch::zeros({1}, opts.dtype(torch::kInt32));
@@ -224,6 +242,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       total_q,
       total_k,
       total_q_rounded,
+      total_sink,
       num_heads_qo,
       num_heads_kv,
       head_size,
@@ -231,6 +250,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       q,
       k,
       v,
+      sink,
       out,
       /*q_ranges*/ q_ranges.data_ptr(),
       /*k_ranges*/ k_ranges.data_ptr(),
