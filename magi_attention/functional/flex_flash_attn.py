@@ -20,6 +20,7 @@ from packaging import version
 from magi_attention.utils import nvtx
 
 from ._flex_flash_attn_jit import get_ffa_jit_mod
+from .utils import correct_attn_out_lse_with_sink_compiled, sink_bwd_compiled
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
@@ -249,6 +250,15 @@ def _flex_flash_attn_forward_compilable(
         sm_margin,
     )
 
+    # TODO: move the post-process for sink tokens inside the kernel
+    if sink is not None:
+        out_, lse = correct_attn_out_lse_with_sink_compiled(
+            out=out_,
+            lse=lse,
+            sink=sink,
+            inplace=True,
+        )
+
 
 @_torch_register_fake_wrapper("flex_flash_attn::_flex_flash_attn_forward_compilable")
 def _flex_flash_attn_forward_compilable_fake(
@@ -412,10 +422,24 @@ def _flex_flash_attn_backward_compilable(
         profile_mode=profile_mode,
     )
 
+    # TODO: move the pre-process for sink tokens inside the kernel
+    if sink is not None:
+        dsink = sink_bwd_compiled(
+            sink=sink,
+            lse=lse,
+            o=out_,
+            do=dout,
+            dsink=dsink,
+        )
+
     (
         dq,
         dk,
         dv,
+        # NOTE: when sink is not given
+        # a new zero-sized empty dsink will be returned for convenience
+        # no matter whether dsink buffer is given
+        dsink,
     ) = mod.bwd(
         dout,
         q,

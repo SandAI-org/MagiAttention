@@ -104,12 +104,22 @@ std::vector<at::Tensor> mha_fwd(
 
   // Post-processing: fast zero fill for uncovered regions (to match library interface)
   if constexpr (kProfileMode)
-    MagiEvents::start("fwd_fill");
+    MagiEvents::start("fwd_zero_fill");
   
   run_fast_zero_fill(params, stream);
   
   if constexpr (kProfileMode)
-    MagiEvents::stop("fwd_fill");
+    MagiEvents::stop("fwd_zero_fill");
+
+  // Optional post-processing for attention sink
+  if constexpr (kProfileMode)
+    MagiEvents::start("fwd_sink_correct");
+
+  // TODO: implement the post-processing kernel for attention sink
+  // run_sink_correct(params, stream);
+
+  if constexpr (kProfileMode)
+    MagiEvents::stop("fwd_sink_correct");
 
   return {out, softmax_lse};
 }

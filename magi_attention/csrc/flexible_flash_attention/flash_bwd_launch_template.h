@@ -75,9 +75,11 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       /*Clear_dK=*/false,
       /*Clear_dV=*/false>;
 
+  // Launch the pre-processing kernel of the ffa backward pass
   if constexpr (ProfileMode)
     MagiEvents::start("bwd_preprocess");
 
+  // TODO: calculate the dsink in the preprocess kernel
   typename PreprocessKernel::Arguments preprocess_args{
       static_cast<Element const*>(params.o_ptr),
       {params.total_q, params.d, params.h_qo}, // shape_O
@@ -106,6 +108,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   if constexpr (ProfileMode)
     MagiEvents::stop("bwd_preprocess");
 
+  // Run the main kernel of the ffa backward pass
   if constexpr (ProfileMode)
     MagiEvents::start("bwd_run");
 

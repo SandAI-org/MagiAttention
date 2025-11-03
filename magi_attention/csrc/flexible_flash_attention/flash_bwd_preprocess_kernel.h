@@ -242,8 +242,8 @@ class FlashAttnBwdPreprocess {
     Tensor mLSElog2 = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_dPsum, params.stride_LSE_log2)(0, _, bidh); // total_q
     Tensor gLSElog2 = local_tile(cute::domain_offset(make_coord(0), mLSElog2), Shape<Int<kBlockM>>{}, make_coord(m_block));
 
-    // We should not write back -inf because the subsequent calculation of scores would involve -inf - (-inf), which
-    // results in NaN.
+    // We should not write back -inf because the subsequent calculation of scores would involve -inf - (-inf),
+    // which results in NaN.
     if (thread_idx < params.total_q_rounded - m_block * kBlockM && thread_idx < kBlockM) {
       gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
     }

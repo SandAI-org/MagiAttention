@@ -80,7 +80,7 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
+std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
     const at::Tensor& k,
@@ -254,7 +254,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   TORCH_CHECK(dk_type == dv_type, "dk and dv must have the same dtype");
 
   // Init gradient tensors to return
-  // dq, dk, dv are output tensors, if they are not given, we will create them.
+  // dq, dk, dv, dsink are output tensors, if they are not given, we will create them.
   // If they are given, we will check dtype, device and layout.
   at::Tensor dq, dk, dv, dsink;
   if (dq_.has_value()) {
@@ -301,8 +301,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
-  // add a new dimension(4) for TMA alignment(16bytes)
-  // actually, we only use index 0 of dimension 4.
+  // add a new dimension (4) for TMA alignment (16 bytes)
+  // actually, we only use index 0 of the new dimension (4).
   int const total_q_rounded = round_multiple(total_q + kBlockM - 1, kBlockM);
 
   at::Tensor softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
@@ -368,5 +368,5 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
       /*sm_margin*/ sm_margin,
       /*disable_bwd_dkv_atomic_reduction*/ disable_bwd_dkv_atomic_reduction);
 
-  return {params, dq, dk, dv};
+  return {params, dq, dk, dv, dsink};
 }

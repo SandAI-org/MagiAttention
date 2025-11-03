@@ -73,6 +73,7 @@ def sink_bwd(
     lse: torch.Tensor,
     o: torch.Tensor,
     do: torch.Tensor,
+    dsink: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # prepare sink, lse
     sink_dtype = sink.dtype
@@ -95,7 +96,7 @@ def sink_bwd(
     # where p_sink.shape = [nhq, sq, s_sink]
     #       delta.shape = [[nhq, sq, 1]
     #       dsink.shape = [s_sink, nhq]
-    dsink = (
+    dsink_ = (
         # shape: [nhq, s_sink, sq] x [nhq, sq, 1] -> [nhq, s_sink, 1]
         (p_sink.transpose(-1, -2) @ -delta)
         # shape: [nhq, s_sink, 1] -> [nhq, s_sink]
@@ -104,7 +105,17 @@ def sink_bwd(
         .t()
     ).to(sink_dtype)
 
+    if dsink is None:
+        dsink = dsink_
+    else:
+        assert dsink.shape == dsink_.shape
+        assert dsink.dtype == dsink_.dtype
+        dsink.copy_(dsink_)
+
     return dsink
+
+
+sink_bwd_compiled = torch.compile(sink_bwd)
 
 
 def calc_lse_rescale_weight(
@@ -359,3 +370,6 @@ def correct_attn_out_lse_with_sink(
     lse = lse.copy_(lse_new) if inplace else lse_new
 
     return out, lse
+
+
+correct_attn_out_lse_with_sink_compiled = torch.compile(correct_attn_out_lse_with_sink)
