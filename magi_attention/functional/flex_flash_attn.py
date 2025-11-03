@@ -505,9 +505,13 @@ def _flex_flash_attn_backward(
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("bwd_prepare")
 
-    dout, q, k, v, sink, out, q_ranges, k_ranges = [
-        maybe_contiguous(x) for x in (dout, q, k, v, sink, out, q_ranges, k_ranges)
-    ]
+    # NOTE: torch.compiler allows neither
+    # making nor checking contiguity in backward
+    # so we just skip here, but check inside the kernel
+    if not torch.compiler.is_compiling():
+        dout, q, k, v, sink, out, q_ranges, k_ranges = [
+            maybe_contiguous(x) for x in (dout, q, k, v, sink, out, q_ranges, k_ranges)
+        ]
 
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
@@ -580,21 +584,15 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         )
 
         if auto_range_merge:
-            if profile_mode:
-                ffa_utils.start_event("fwd_range_merge")
-
-            (
-                merge_q_ranges,
-                fwd_q_ranges,
-                fwd_k_ranges,
-                fwd_attn_type_map,
-                fwd_qk_map,
-                fwd_unique_count,
-            ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
-
-            if profile_mode:
-                ffa_utils.stop_event("fwd_range_merge")
-
+            with maybe_profile_ffa_ctx("fwd_range_merge", profile_mode):
+                (
+                    merge_q_ranges,
+                    fwd_q_ranges,
+                    fwd_k_ranges,
+                    fwd_attn_type_map,
+                    fwd_qk_map,
+                    fwd_unique_count,
+                ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -626,14 +624,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             profile_mode,
         )
 
-        if profile_mode:
-            ffa_utils.start_event("fwd_cast")
-
         # Cast output to the same dtype as q
-        out = out.to(q.dtype)
-
-        if profile_mode:
-            ffa_utils.stop_event("fwd_cast")
+        with maybe_profile_ffa_ctx("fwd_cast", profile_mode):
+            out = out.to(q.dtype)
 
         ctx.save_for_backward(
             q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map
@@ -653,20 +646,15 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map = ctx.saved_tensors
 
         if ctx.auto_range_merge:
-            if ctx.profile_mode:
-                ffa_utils.start_event("bwd_range_merge")
-
-            (
-                merge_k_ranges,
-                bwd_k_ranges,
-                bwd_q_ranges,
-                bwd_attn_type_map,
-                bwd_kq_map,
-                bwd_unique_count,
-            ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
-
-            if ctx.profile_mode:
-                ffa_utils.stop_event("bwd_range_merge")
+            with maybe_profile_ffa_ctx("bwd_range_merge", ctx.profile_mode):
+                (
+                    merge_k_ranges,
+                    bwd_k_ranges,
+                    bwd_q_ranges,
+                    bwd_attn_type_map,
+                    bwd_kq_map,
+                    bwd_unique_count,
+                ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
         else:
             bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
                 q_ranges,
@@ -704,19 +692,14 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             profile_mode=ctx.profile_mode,
         )
 
-        if ctx.profile_mode:
-            ffa_utils.start_event("bwd_cast")
-
         # Cast gradients to the same dtype as inputs
-        dq = dq.to(q.dtype)
-        dk = dk.to(k.dtype)
-        dv = dv.to(v.dtype)
-        if sink is not None:
-            assert dsink is not None  # mypy
-            dsink = dsink.to(sink.dtype)
-
-        if ctx.profile_mode:
-            ffa_utils.stop_event("bwd_cast")
+        with maybe_profile_ffa_ctx("bwd_cast", ctx.profile_mode):
+            dq = dq.to(q.dtype)
+            dk = dk.to(k.dtype)
+            dv = dv.to(v.dtype)
+            if sink is not None:
+                assert dsink is not None  # mypy
+                dsink = dsink.to(sink.dtype)
 
         return (
             dq,  # q
