@@ -107,23 +107,54 @@ def sink_bwd(
     return dsink
 
 
-def correct_attn_lse_with_sink(
-    lse: torch.Tensor,
-    sink: torch.Tensor,
-    inplace: bool = False,
+def calc_lse_rescale_weight(
+    lse_to_rescale: torch.Tensor,
+    rescaled_lse: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Corrects the log-sum-exp tensor with sink tokens
+    """Calculate the rescale weight to correct attention output
+    given the lse to rescale (i.e. the old original lse)
+    and the rescaled lse (i.e. the new lse)
 
     Args:
-        lse (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
-        sink (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
-        inplace (bool, optional): whether to correct ``lse`` inplace. Defaults to ``False``.
+        lse_to_rescale (torch.Tensor): the old log-sum-exp tensor to rescale
+            with shape: [seqlen_q, num_heads_q]
+        rescaled_lse (torch.Tensor): the new rescaled log-sum-exp tensor
+            with shape: [seqlen_q, num_heads_q]
 
     Returns:
-        torch.Tensor: corrected log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
+        torch.Tensor: the rescale weight with shape: [seqlen_q, num_heads_q, 1]
     """
-    raise NotImplementedError("TODO: implement lse correction with sink tokens")
+    # calculate the rescale weight with shape: [sq, nhq, 1]
+    # formula: w = exp(lse_old - lse_new)
+    return safe_subtract(lse_to_rescale, rescaled_lse).exp().unsqueeze(-1)
+
+
+def calc_lse_sink(
+    sink: torch.Tensor,
+    ref_lse: torch.Tensor,
+) -> torch.Tensor:
+    """Calculate the log-sum-exp of the sink tokens
+    and broadcast it to the shape of the reference lse
+
+    Args:
+        sink (torch.Tensor): the sink tokens with shape: [seqlen_sink, num_heads_q]
+        ref_lse (torch.Tensor): the reference lse tensor with shape: [seqlen_q, num_heads_q]
+            to provide the meta info like shape
+
+    Returns:
+        torch.Tensor: the log-sum-exp of the sink tokens
+    """
+    # calculate lse_sink and broadcast it to ref lse's shape
+    lse_sink = (
+        # shape: [s_sink, nhq] -> [nhq,]
+        torch.logsumexp(sink, dim=0)
+        # shape: [nhq,] -> [1, nhq]
+        .unsqueeze(0)
+        # shape: [1, nhq] -> [sq, nhq]
+        .expand_as(ref_lse)
+    )
+
+    return lse_sink
 
 
 def correct_attn_lse(
@@ -164,27 +195,6 @@ def correct_attn_lse(
 correct_attn_lse_compiled = torch.compile(correct_attn_lse)
 
 
-def correct_attn_out_with_sink(
-    out: torch.Tensor,
-    lse: torch.Tensor,
-    sink: torch.Tensor,
-    inplace: bool = False,
-) -> torch.Tensor:
-    """
-    Corrects the output tensor with sink tokens
-
-    Args:
-        out (torch.Tensor): output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
-        lse (torch.Tensor): lse tensor, with shape: [seqlen_q, num_heads_q]
-        sink (torch.Tensor): local lse for out2, with shape: [seqlen_sink, num_heads_q]
-        inplace (bool, optional): whether to correct ``out`` inplace. Defaults to ``False``.
-
-    Returns:
-        torch.Tensor: corrected output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
-    """
-    raise NotImplementedError("TODO: implement out correction with sink tokens")
-
-
 def correct_attn_out(
     out1: torch.Tensor,
     lse1: torch.Tensor,
@@ -209,17 +219,11 @@ def correct_attn_out(
     """
     assert out1.dtype == out2.dtype and lse1.dtype == lse2.dtype == lse.dtype
 
-    w1, w2 = [
-        # formula: wi = exp(lsei - lse)
-        to_higher_fp_dtype(
-            # shape: [s, h] -> [s, h, 1]
-            safe_subtract(lsei, lse).exp().unsqueeze(-1),
-            torch.float32,
-        )
-        for lsei in [lse1, lse2]
-    ]
+    # calculate the rescale weight for out1 and out2 resp.
+    w1, w2 = [calc_lse_rescale_weight(lsei, lse) for lsei in (lse1, lse2)]
 
-    # formula: out = w1 * out1 + w2 * out2
+    # correct out
+    # with formula: out = w1 * out1 + w2 * out2
     if inplace:
         out1 *= w1
         out = out1.add_(w2 * out2)
@@ -273,3 +277,85 @@ def correct_attn_fwd_result(
         )
 
     return corrected_out, corrected_lse
+
+
+def correct_attn_lse_with_sink(
+    lse: torch.Tensor,
+    sink: torch.Tensor,
+    inplace: bool = False,
+) -> torch.Tensor:
+    """
+    Corrects the log-sum-exp tensor with sink tokens
+
+    Args:
+        lse (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
+        sink (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_sink, num_heads_q]
+        inplace (bool, optional): whether to correct ``lse`` inplace. Defaults to ``False``.
+
+    Returns:
+        torch.Tensor: corrected log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
+    """
+    lse_sink = calc_lse_sink(sink, lse)
+
+    return correct_attn_lse(lse, lse_sink, inplace=inplace)
+
+
+def correct_attn_out_with_sink(
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    sink: torch.Tensor,
+    inplace: bool = False,
+) -> torch.Tensor:
+    """
+    Corrects the output tensor with sink tokens
+
+    Args:
+        out (torch.Tensor): output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
+        lse (torch.Tensor): lse tensor, with shape: [seqlen_q, num_heads_q]
+        sink (torch.Tensor): local lse for out2, with shape: [seqlen_sink, num_heads_q]
+        inplace (bool, optional): whether to correct ``out`` inplace. Defaults to ``False``.
+
+    Returns:
+        torch.Tensor: corrected output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
+    """
+    lse_sink = calc_lse_sink(sink, lse)
+
+    # calculate the rescale weight with shape: [sq, nhq, 1]
+    # formula derivation:
+    # w = exp(lse_old - lse_new)
+    #   = exp(lse - log(exp(lse) + exp(lse_sink)))
+    #   = exp(lse) / (exp(lse) + exp(lse_sink))
+    #   = 1 / (1 + exp(lse_sink - lse))
+    w = torch.reciprocal(1 + safe_subtract(lse_sink, lse).exp()).unsqueeze(-1)
+
+    return out.mul_(w) if inplace else (out * w).to(out.dtype)
+
+
+def correct_attn_out_lse_with_sink(
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    sink: torch.Tensor,
+    inplace: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Corrects the output tensor and log-sum-exp tensor with sink tokens
+
+    Args:
+        out (torch.Tensor): output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
+        lse (torch.Tensor): lse tensor, with shape: [seqlen_q, num_heads_q]
+        sink (torch.Tensor): local lse for out2, with shape: [seqlen_sink, num_heads_q]
+        inplace (bool, optional): whether to correct ``out`` inplace. Defaults to ``False``.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: corrected output and lse
+            - out: corrected output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
+            - lse: corrected lse tensor, with shape: [seqlen_q, num_heads_q]
+    """
+    lse_sink = calc_lse_sink(sink, lse)
+    lse_new = correct_attn_lse(lse, lse_sink, inplace=False)
+    w = calc_lse_rescale_weight(lse, lse_new)
+
+    out = out.mul_(w) if inplace else (out * w).to(out.dtype)
+    lse = lse.copy_(lse_new) if inplace else lse_new
+
+    return out, lse
