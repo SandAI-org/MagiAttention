@@ -20,7 +20,7 @@ from einops import reduce
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils._utils import get_attn_mask_from_ffa_args
 
-from .utils import safe_subtract
+from .utils import safe_subtract, softmax_bwd
 
 __all__ = [
     "sdpa_fwd",
@@ -252,14 +252,16 @@ def sdpa_bwd_calc(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    delta: torch.Tensor,
+    delta: torch.Tensor | None,
     attn_weight: torch.Tensor,
     softmax_scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dv = attn_weight.transpose(-2, -1) @ do
     grad_weight = do @ v.transpose(-2, -1)
-    # grad_weight = softmax_bwd(grad_weight, attn_weight) * softmax_scale
-    grad_weight = attn_weight * (grad_weight - delta) * softmax_scale
+    if delta is None:
+        grad_weight = softmax_bwd(grad_weight, attn_weight) * softmax_scale
+    else:  # an easier way to compute grad_weight if delta is given
+        grad_weight = attn_weight * (grad_weight - delta) * softmax_scale
     dq = grad_weight @ k
     dk = grad_weight.transpose(-2, -1) @ q
 
@@ -270,8 +272,16 @@ def sdpa_bwd_preprocess(
     do: torch.Tensor,
     o: torch.Tensor,
 ) -> torch.Tensor:
+    """Calculate delta from o and do
+    to avoid massive dot product of p and dp
+    where for each row i:
+    delta_i := p_i.T x dp_i
+        = p_i.T x (v x do_i)
+        = (p_i.T x v) x do_i
+        = o_i.T x do_i
+    """
     # shape: [b, nh, sq, 1]
-    delta = (do * o).sum(-1, keepdim=True)
+    delta = (o * do).sum(-1, keepdim=True)
     return delta
 
 

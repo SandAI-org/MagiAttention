@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import re
-from typing import overload
 
 import torch
 import torch.nn.functional as F
@@ -133,40 +132,43 @@ def calc_inf_norm(
     return safe_subtract(a.to(dtype), b.to(dtype)).norm(p=float("inf")).item()
 
 
-@overload
-def _attn_pre_process(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: None,
-    mask: torch.Tensor,
-    softmax_scale: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, None, torch.Tensor, float]:
-    ...
-
-
-@overload
-def _attn_pre_process(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    mask: torch.Tensor,
-    softmax_scale: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
-    ...
-
-
 def _attn_pre_process(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor | None,
+    sink: torch.Tensor | None,
     mask: torch.Tensor,
     softmax_scale: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, float]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor,
+    float,
+]:
     # prepare softmax scale
     softmax_scale = q.size(-1) ** (-0.5) if softmax_scale is None else softmax_scale
     assert softmax_scale is not None  # mypy
 
-    # repeat k,v heads
+    # prepare bias
+    # where bias.shape = [1, sq, sk]
+    bias = torch.zeros_like(mask, dtype=q.dtype, device=q.device)
+    bias.masked_fill_(mask.logical_not(), float("-inf")).unsqueeze_(0)
+
+    # prepare sink
+    # where sink.shape = [nhq, sq, s_sink]
+    if sink is not None:
+        sink = to_higher_fp_dtype(
+            repeat(sink, "s hq -> hq sq s", sq=q.size(0)),
+            lowest_precision=torch.float32,
+        )
+
+    # prepare q,k,v
+    # where:
+    #   q.shape = [nhq, sq, d]
+    #   k.shape = [nhq, d, sk]
+    #   v.shape = [nhq, sk, d]
     nhq, nhk = q.size(-2), k.size(-2)
     assert nhq % nhk == 0
     rep_nhk = nhq // nhk
@@ -175,12 +177,7 @@ def _attn_pre_process(
     if v is not None:
         v = repeat(v, "s hk d -> (hk rep) s d", rep=rep_nhk)  # V
 
-    # prepare bias
-    # where bias.shape = [1, sq, sk]
-    bias = torch.zeros_like(mask, dtype=q.dtype, device=q.device)
-    bias.masked_fill_(mask.logical_not(), float("-inf")).unsqueeze_(0)
-
-    return q, k, v, bias, softmax_scale
+    return q, k, v, sink, bias, softmax_scale
 
 
 @torch.no_grad
@@ -190,10 +187,11 @@ def calc_attn_lse(
     mask: torch.Tensor,
     softmax_scale: float | None = None,
 ):
-    (q, k, _, bias, softmax_scale) = _attn_pre_process(
+    (q, k, _, _, bias, softmax_scale) = _attn_pre_process(
         q=q,
         k=k,
         v=None,
+        sink=None,
         mask=mask,
         softmax_scale=softmax_scale,
     )
@@ -263,10 +261,11 @@ def _ref_attn_torch_impl(
     softmax_scale: float | None = None,
     return_lse: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    (q, k, v, bias, softmax_scale) = _attn_pre_process(
+    (q, k, v, sink, bias, softmax_scale) = _attn_pre_process(
         q=q,
         k=k,
         v=v,
+        sink=sink,
         mask=mask,
         softmax_scale=softmax_scale,
     )
@@ -277,6 +276,10 @@ def _ref_attn_torch_impl(
         q @ k * softmax_scale + bias,
         lowest_precision=torch.float32,
     )
+    if sink is not None:
+        # apply `S = S.concat(sink, dim=-1)`
+        # where S.shape = [nhq, sq, sk + s_sink]
+        s = torch.concat([s, sink], dim=-1)
 
     if return_lse:
         # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
@@ -289,8 +292,12 @@ def _ref_attn_torch_impl(
         lse = None
 
     # apply row-wise softmax `P = softmax(S, dim=-1)`
-    # where P.shape = [nhq, sq, sk]
-    p = safe_softmax(s, dim=-1).to(v.dtype)
+    # where P.shape = [nhq, sq, sk + s_sink]
+    p = safe_softmax(s, dim=-1).to(q.dtype)
+    if sink is not None:
+        # apply `P = P.drop(sink, dim=-1)`
+        # where P.shape = [nhq, sq, sk]
+        p = p[..., : -sink.size(dim=-1)]
 
     # apply `O = P x V`
     # where O.shape = [nhq, sq, d]
@@ -298,7 +305,7 @@ def _ref_attn_torch_impl(
 
     # rearrange and make contiguous
     # where O.shape = [sq, nhq, d]
-    out = rearrange(out, "nhq sq d -> sq nhq d").contiguous()
+    out = rearrange(out, "nhq sq d -> sq nhq d")
 
     return out, lse
 

@@ -501,7 +501,6 @@ class TestFlexFlashAttn(DistTestBase):
             v=total_v,
             mask=mask,
             layout="thd",
-            backend="torch",
             high_precision=True,
             return_lse=True,
         )
@@ -526,7 +525,6 @@ class TestFlexFlashAttn(DistTestBase):
             v=total_v,
             mask=mask,
             layout="thd",
-            backend="torch",
             high_precision=False,
             return_lse=True,
         )

@@ -14,6 +14,7 @@
 
 import torch
 import torch.nn.functional as F
+from einops import rearrange, reduce, repeat
 
 from magi_attention.utils import to_higher_fp_dtype
 
@@ -65,6 +66,45 @@ def softmax_bwd(dout: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
     dinp = torch.einsum("...ij, ...ijk -> ...ik", dout, diag_out - outer_out)
 
     return dinp
+
+
+def sink_bwd(
+    sink: torch.Tensor,
+    lse: torch.Tensor,
+    o: torch.Tensor,
+    do: torch.Tensor,
+) -> torch.Tensor:
+    # prepare sink, lse
+    sink_dtype = sink.dtype
+    sink = repeat(sink, "s hq -> hq sq s", sq=lse.size(0)).to(lse.dtype)
+    lse = rearrange(lse, "sq hq -> hq sq 1")
+
+    # calculate delta = (o * do).sum(dim=-1)
+    # where o.shape = [sq, nhq, d]
+    #       do.shape = [sq, nhq, d]
+    #       delta.shape = [nhq, sq, 1]
+    delta = reduce(o.to(lse.dtype) * do.to(lse.dtype), "sq hq d -> hq sq 1", "sum")
+
+    # calculat p_sink = exp(sink - lse)
+    # where sink.shape = [nhq, sq, s_sink]
+    #       lse.shape = [nhq, sq, 1]
+    #       p_sink.shape = [nhq, sq, s_sink]
+    p_sink = torch.exp(sink - lse)
+
+    # calculate dsink = p_sink.T x -delta
+    # where p_sink.shape = [nhq, sq, s_sink]
+    #       delta.shape = [[nhq, sq, 1]
+    #       dsink.shape = [s_sink, nhq]
+    dsink = (
+        # shape: [nhq, s_sink, sq] x [nhq, sq, 1] -> [nhq, s_sink, 1]
+        (p_sink.transpose(-1, -2) @ -delta)
+        # shape: [nhq, s_sink, 1] -> [nhq, s_sink]
+        .squeeze(-1)
+        # shape: [nhq, s_sink] -> [s_sink, nhq]
+        .t()
+    ).to(sink_dtype)
+
+    return dsink
 
 
 def correct_attn_lse(
