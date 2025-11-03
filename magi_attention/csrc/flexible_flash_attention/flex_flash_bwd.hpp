@@ -289,7 +289,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
       dsink = dsink_.value();
       TORCH_CHECK(dsink.dtype() == sink_->dtype(), "dsink must have the same dtype as sink (if given)");
       CHECK_DEVICE(dsink);
-      CHECK_SHAPE(dsink, total_q, num_heads_qo);
+      CHECK_SHAPE(dsink, total_sink, num_heads_qo);
       CHECK_CONTIGUOUS(dsink);
     } else {
       dsink = torch::zeros_like(sink_.value());

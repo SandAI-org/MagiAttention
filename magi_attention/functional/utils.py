@@ -76,7 +76,7 @@ def sink_bwd(
 ) -> torch.Tensor:
     # prepare sink, lse
     sink_dtype = sink.dtype
-    sink = repeat(sink, "s hq -> hq sq s", sq=lse.size(0)).to(lse.dtype)
+    sink = repeat(sink, "s_sink hq -> hq sq s_sink", sq=lse.size(0)).to(lse.dtype)
     lse = rearrange(lse, "sq hq -> hq sq 1")
 
     # calculate delta = (o * do).sum(dim=-1)
@@ -326,7 +326,7 @@ def correct_attn_out_with_sink(
     #   = exp(lse - log(exp(lse) + exp(lse_sink)))
     #   = exp(lse) / (exp(lse) + exp(lse_sink))
     #   = 1 / (1 + exp(lse_sink - lse))
-    w = torch.reciprocal(1 + safe_subtract(lse_sink, lse).exp()).unsqueeze(-1)
+    w = torch.reciprocal(1 + calc_lse_rescale_weight(lse_sink, lse))
 
     return out.mul_(w) if inplace else (out * w).to(out.dtype)
 

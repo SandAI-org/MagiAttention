@@ -916,8 +916,6 @@ def flex_flash_attn_func(
         "due to some unresolved bug to be fixed as soon as possible."
     )
 
-    assert sink is None, "Attention Sink is not supported yet."
-
     return FlexFlashAttnFunc.apply(
         q,
         k,
