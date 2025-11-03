@@ -50,7 +50,7 @@ from magi_attention.testing.precision import (
     H100_NVLINK_A2A_BWU,
     H100_NVLINK_BANDWIDTH,
     H100_TFLOPS_16,
-    torch_attn_ref,
+    ref_attn_func,
 )
 from magi_attention.testing.utils import switch_sdpa_backend_decorator
 from magi_attention.utils import (
@@ -943,7 +943,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_high_precision, total_lse_ref_high_precision = torch_attn_ref(
+        total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,

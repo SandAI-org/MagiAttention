@@ -34,7 +34,7 @@ from magi_attention.testing.precision import (
     assert_close,
     calc_inf_norm,
     extract_mismatch_threshold,
-    torch_attn_ref,
+    ref_attn_func,
 )
 from magi_attention.utils import get_attn_mask_from_ffa_args, is_list_value_any
 
@@ -495,12 +495,13 @@ class TestFlexFlashAttn(DistTestBase):
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_high_precision, total_lse_ref_high_precision = torch_attn_ref(
+        total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
             mask=mask,
             layout="thd",
+            backend="torch",
             high_precision=True,
             return_lse=True,
         )
@@ -519,12 +520,13 @@ class TestFlexFlashAttn(DistTestBase):
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_low_precision, total_lse_ref_low_precision = torch_attn_ref(
+        total_out_ref_low_precision, total_lse_ref_low_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
             mask=mask,
             layout="thd",
+            backend="torch",
             high_precision=False,
             return_lse=True,
         )
@@ -1267,7 +1269,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "min_len_k": 16,
                 "max_len_k": 256,
             },
-            # FIXME: ut failed for the following 2 test case, maybe due to very small qk ranges.
+            # FIXME: ut failed for the following 2 test cases, maybe due to very small qk ranges.
             # {
             #    "name": "strange_test_1",
             #    "total_seqlen_q": 513,

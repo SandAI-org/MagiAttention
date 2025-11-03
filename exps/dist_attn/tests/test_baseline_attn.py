@@ -44,7 +44,7 @@ from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
-from magi_attention.testing.precision import calc_inf_norm, extract_mismatch_info
+from magi_attention.testing.precision import _extract_mismatch_info, calc_inf_norm
 
 
 class AttnImpl(Enum):
@@ -270,7 +270,7 @@ class TestBaselineAttn(DistTestBase):
             torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
         except AssertionError as e:
             error_msg = str(e)
-            _, _, mismatch_threshold_ref = extract_mismatch_info(error_msg)
+            _, _, mismatch_threshold_ref = _extract_mismatch_info(error_msg)
 
         return min(max(mismatch_threshold_ref * mismatch_thres_ratio, 0.0), 1.0)
 

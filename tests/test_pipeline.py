@@ -54,7 +54,7 @@ from magi_attention.testing.precision import (
     H100_TFLOPS_16,
     calc_inf_norm,
     extract_mismatch_threshold,
-    torch_attn_ref,
+    ref_attn_func,
 )
 from magi_attention.utils import (
     get_a2a_corr_factor,
@@ -813,7 +813,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_high_precision, _ = torch_attn_ref(
+        total_out_ref_high_precision, _ = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -840,7 +840,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_low_precision, _ = torch_attn_ref(
+        total_out_ref_low_precision, _ = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,

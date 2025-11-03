@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import re
+from typing import overload
 
 import torch
 import torch.nn.functional as F
@@ -20,7 +21,7 @@ from einops import rearrange, repeat
 from packaging import version
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from magi_attention.functional.utils import safe_subtract
+from magi_attention.functional.utils import safe_softmax, safe_subtract
 from magi_attention.utils import max_fp_dtype, to_higher_fp_dtype
 
 if version.parse(torch.__version__) > version.parse("2.4"):
@@ -47,7 +48,7 @@ H800_NVLINK_BANDWIDTH = 200e9  # 200 GB/s, single-end
 H800_NVLINK_A2A_BWU = 0.6
 
 
-def extract_mismatch_info(error_msg: str) -> tuple[int, int, float]:
+def _extract_mismatch_info(error_msg: str) -> tuple[int, int, float]:
     match = re.search(r"Mismatched elements: (\d+) / (\d+)", error_msg)
 
     if match:
@@ -72,7 +73,7 @@ def extract_mismatch_threshold(
         torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
     except AssertionError as e:
         error_msg = str(e)
-        _, _, mismatch_threshold = extract_mismatch_info(error_msg)
+        _, _, mismatch_threshold = _extract_mismatch_info(error_msg)
 
     # scale it by `mismatch_thres_ratio`, and clamp it in [0, 1]
     return min(max(mismatch_threshold * mismatch_thres_ratio, 0.0), 1.0)
@@ -100,7 +101,7 @@ def assert_close(
             print(no_mismatch_info)
     except AssertionError as e:
         error_msg = str(e)
-        mismatched_elements, total_elements, mismatch_ratio = extract_mismatch_info(
+        mismatched_elements, total_elements, mismatch_ratio = _extract_mismatch_info(
             error_msg
         )
 
@@ -132,13 +133,35 @@ def calc_inf_norm(
     return safe_subtract(a.to(dtype), b.to(dtype)).norm(p=float("inf")).item()
 
 
-@torch.no_grad
-def calc_attn_lse(
+@overload
+def _attn_pre_process(
     q: torch.Tensor,
     k: torch.Tensor,
+    v: None,
     mask: torch.Tensor,
     softmax_scale: float | None = None,
-):
+) -> tuple[torch.Tensor, torch.Tensor, None, torch.Tensor, float]:
+    ...
+
+
+@overload
+def _attn_pre_process(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor,
+    softmax_scale: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    ...
+
+
+def _attn_pre_process(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor | None,
+    mask: torch.Tensor,
+    softmax_scale: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor, float]:
     # prepare softmax scale
     softmax_scale = q.size(-1) ** (-0.5) if softmax_scale is None else softmax_scale
     assert softmax_scale is not None  # mypy
@@ -149,11 +172,31 @@ def calc_attn_lse(
     rep_nhk = nhq // nhk
     q = rearrange(q, "s hq d -> hq s d")  # Q
     k = repeat(k, "s hk d -> (hk rep) d s", rep=rep_nhk)  # K.T
+    if v is not None:
+        v = repeat(v, "s hk d -> (hk rep) s d", rep=rep_nhk)  # V
 
     # prepare bias
     # where bias.shape = [1, sq, sk]
     bias = torch.zeros_like(mask, dtype=q.dtype, device=q.device)
     bias.masked_fill_(mask.logical_not(), float("-inf")).unsqueeze_(0)
+
+    return q, k, v, bias, softmax_scale
+
+
+@torch.no_grad
+def calc_attn_lse(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    mask: torch.Tensor,
+    softmax_scale: float | None = None,
+):
+    (q, k, _, bias, softmax_scale) = _attn_pre_process(
+        q=q,
+        k=k,
+        v=None,
+        mask=mask,
+        softmax_scale=softmax_scale,
+    )
 
     # calculate lse
     lse = (
@@ -174,26 +217,14 @@ def calc_attn_lse(
     return lse
 
 
-def torch_attn_ref(
+def _ref_attn_sdpa_impl(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     mask: torch.Tensor,
     softmax_scale: float | None = None,
-    softcap: float = 0.0,
-    layout: str = "thd",
-    high_precision: bool = False,
     return_lse: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    assert layout in ("thd",), f"Unsupported layout: {layout}"
-    assert softcap == 0.0, "non-zero softcap is not supported by now"
-
-    org_dtype = q.dtype
-    if high_precision:  # use fp64 as ground-truth
-        q = q.to(torch.float64)
-        k = k.to(torch.float64)
-        v = v.to(torch.float64)
-
     if return_lse:
         lse = calc_attn_lse(
             q,
@@ -201,8 +232,6 @@ def torch_attn_ref(
             mask,
             softmax_scale,
         )
-        lse_dtype = max_fp_dtype(org_dtype, torch.float32)
-        lse = lse.to(lse_dtype)
     else:
         lse = None
 
@@ -220,6 +249,111 @@ def torch_attn_ref(
             scale=softmax_scale,
         )
 
-    out = rearrange(out, "1 h t d -> t h d").to(org_dtype)
+    out = rearrange(out, "1 h t d -> t h d")
+
+    return out, lse
+
+
+def _ref_attn_torch_impl(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor,
+    softmax_scale: float | None = None,
+    return_lse: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    (q, k, v, bias, softmax_scale) = _attn_pre_process(
+        q=q,
+        k=k,
+        v=v,
+        mask=mask,
+        softmax_scale=softmax_scale,
+    )
+
+    # apply `S = Q x K.T * scale + bias`
+    # where S.shape = [nhq, sq, sk]
+    s = to_higher_fp_dtype(
+        q @ k * softmax_scale + bias,
+        lowest_precision=torch.float32,
+    )
+
+    if return_lse:
+        # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
+        # where LSE.shape = [nhq, sq]
+        # and then transpose and make contiguous
+        # where LSE.shape = [sq, nhq]
+        with torch.no_grad():
+            lse = s.logsumexp(dim=-1).t().contiguous()
+    else:
+        lse = None
+
+    # apply row-wise softmax `P = softmax(S, dim=-1)`
+    # where P.shape = [nhq, sq, sk]
+    p = safe_softmax(s, dim=-1).to(v.dtype)
+
+    # apply `O = P x V`
+    # where O.shape = [nhq, sq, d]
+    out = p @ v
+
+    # rearrange and make contiguous
+    # where O.shape = [sq, nhq, d]
+    out = rearrange(out, "nhq sq d -> sq nhq d").contiguous()
+
+    return out, lse
+
+
+def ref_attn_func(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor,
+    sink: torch.Tensor | None = None,
+    softmax_scale: float | None = None,
+    softcap: float = 0.0,
+    layout: str = "thd",
+    backend: str = "sdpa",
+    high_precision: bool = False,
+    return_lse: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    assert layout in ("thd",), f"Unsupported layout: {layout}"
+    assert softcap == 0.0, "non-zero softcap is not supported by now"
+
+    # maybe cast input to high precision
+    org_dtype = q.dtype
+    lse_dtype = max_fp_dtype(org_dtype, torch.float32)
+    if high_precision:  # use fp64 as ground-truth
+        q = q.to(torch.float64)
+        k = k.to(torch.float64)
+        v = v.to(torch.float64)
+
+    # apply reference attention with specified backend
+    match backend:
+        case "sdpa":
+            assert sink is None, "sink is not supported for sdpa backend by now"
+            out, lse = _ref_attn_sdpa_impl(
+                q=q,
+                k=k,
+                v=v,
+                mask=mask,
+                softmax_scale=softmax_scale,
+                return_lse=return_lse,
+            )
+        case "torch":
+            out, lse = _ref_attn_torch_impl(
+                q=q,
+                k=k,
+                v=v,
+                mask=mask,
+                softmax_scale=softmax_scale,
+                return_lse=return_lse,
+            )
+        case _:
+            raise NotImplementedError(f"Unsupported backend: {backend}")
+
+    # maybe cast output back to original dtype
+    out = out.to(org_dtype)
+    if return_lse:
+        assert lse is not None  # mypy
+        lse = lse.to(lse_dtype)
 
     return out, lse

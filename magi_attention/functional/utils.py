@@ -23,7 +23,7 @@ def safe_subtract(
     b: torch.Tensor,
 ) -> torch.Tensor:
     """Safely subtracts two tensors,
-    where the subtraction results of two -inf will be set to -inf.
+    where the subtraction results of two `-inf` will be set to `-inf`, instead of `nan`.
     """
 
     eq = (a == b) & (a == float("-inf"))
@@ -33,12 +33,35 @@ def safe_subtract(
     return sub
 
 
+def safe_softmax(
+    a: torch.Tensor,
+    dim: int = -1,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Safely applies row-wise softmax to the input tensor,
+    where all-`-inf` / all-nan rows will be set to all-zero rows during forward/backward resp.
+    """
+    all_neg_inf_mask = (a == float("-inf")).all(dim=dim, keepdim=True)
+
+    def safe_softmax_bwd_hook(g):
+        all_nan_mask = (g != g).all(dim=dim, keepdim=True)
+        g.masked_fill_(all_nan_mask, 0.0)
+        return g
+
+    a.register_hook(safe_softmax_bwd_hook)
+
+    sm = F.softmax(a, dim=dim, dtype=dtype)
+
+    sm = sm.masked_fill(all_neg_inf_mask, 0.0)
+
+    return sm
+
+
 def softmax_bwd(dout: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
     """Standard backward func for `out = softmax(inp)`"""
 
     diag_out = torch.diag_embed(out)
     outer_out = torch.einsum("...ij, ...ik -> ...ijk", out, out)
-
     dinp = torch.einsum("...ij, ...ijk -> ...ik", dout, diag_out - outer_out)
 
     return dinp
