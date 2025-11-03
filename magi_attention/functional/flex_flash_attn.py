@@ -70,6 +70,11 @@ def maybe_contiguous(x: torch.Tensor) -> torch.Tensor:
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
+def check_contiguous(*args: torch.Tensor | None) -> None:
+    for arg in args:
+        assert arg is None or arg.is_contiguous()
+
+
 def merge_ranges(
     outer_ranges: torch.Tensor, inner_ranges: torch.Tensor, attn_type_map: torch.Tensor
 ) -> tuple[
@@ -213,6 +218,8 @@ def _flex_flash_attn_forward_compilable(
     profile_mode: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
+    check_contiguous(q, k, v, sink, q_ranges, k_ranges)
+
     mod = get_ffa_jit_mod(
         direction="fwd",
         head_dim=q.shape[-1],
@@ -302,6 +309,7 @@ def _flex_flash_attn_forward(
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
 
+    # make all input tensors contiguous before initializing output buffers
     q, k, v, sink, q_ranges, k_ranges = [
         maybe_contiguous(x) for x in (q, k, v, sink, q_ranges, k_ranges)
     ]
@@ -398,6 +406,8 @@ def _flex_flash_attn_backward_compilable(
     profile_mode: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
+    check_contiguous(dout, q, k, v, sink, out_, q_ranges, k_ranges)
+
     mod = get_ffa_jit_mod(
         direction="bwd",
         head_dim=q.shape[-1],
@@ -505,9 +515,9 @@ def _flex_flash_attn_backward(
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("bwd_prepare")
 
-    # NOTE: torch.compiler allows neither
-    # making nor checking contiguity in backward
-    # so we just skip here, but check inside the kernel
+    # make all input tensors contiguous before initializing output buffers
+    # NOTE: in backward, torch.compiler allows neither making nor checking contiguity
+    # so we just skip here, but check later
     if not torch.compiler.is_compiling():
         dout, q, k, v, sink, out, q_ranges, k_ranges = [
             maybe_contiguous(x) for x in (dout, q, k, v, sink, out, q_ranges, k_ranges)
