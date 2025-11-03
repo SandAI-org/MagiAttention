@@ -1021,7 +1021,7 @@ struct CollectiveMainloopBwdSm90 {
     }
   }
 
-  template <typename SharedStorage, typename FrgTensordKV>
+  template <typename SharedStorage, typename FrgTensordKV, typename BlockMetaT>
   CUTLASS_DEVICE bool mma(
       Params const& params,
       MainloopPipeline pipeline_q,
@@ -1034,22 +1034,40 @@ struct CollectiveMainloopBwdSm90 {
       int& work_idx,
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       SharedStorage& shared_storage,
+      BlockMetaT& block_meta,
       bool const has_valid_tile) {
     static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
-    int n_block = get<0>(block_coord);
+    /*int n_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
-    int bidb = get<2>(block_coord);
+    int bidb = get<2>(block_coord); */
+    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
+    int bidh = block_meta.bidh;
+    int n_block = block_meta.n_block;
+    flash::AttnType attn_type = block_meta.attn_type;
+    int m_block_min = block_meta.m_block_min;
+    int m_block_max = block_meta.m_block_max;
+    /*
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
+    auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type); */
 
     // if (bidh == 0 && thread_idx == 0) {
     //     printf("[BWD MMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n", bidb, kBlockM, kBlockN, n_block,
     //     m_block_min, m_block_max, attn_type);
     // }
     // It's possible to have m_block_max <= m_block_min. Exit early
-    if (m_block_max <= m_block_min) {
+    // if (m_block_max <= m_block_min) {
+    //   return false;
+    // }
+
+    while (!block_meta.is_finish() && !block_meta.is_valid()) {
+      // Find the first valid block_meta
+      block_meta.prefetch();
+    }
+
+    if (block_meta.is_finish()) {
+      // No valid block found
       return false;
     }
 
@@ -1500,6 +1518,10 @@ struct CollectiveMainloopBwdSm90 {
 
     auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
 
+    // while (!block_meta.is_finish() && block_meta.is_valid()) {
+    m_block = block_meta.m_block_min;
+    m_block_max = block_meta.m_block_max;
+
     CUTLASS_PRAGMA_NO_UNROLL
     for (; m_block < m_block_max - 1; ++m_block) {
       bwd_step(m_block, mask_fn, cute::false_type{});
@@ -1507,14 +1529,18 @@ struct CollectiveMainloopBwdSm90 {
     // only the last block need to mask_lse;
     bwd_step(m_block, mask_fn, cute::true_type{});
 
+    if constexpr (Q_dO_same_stages) {
+      smem_pipe_read_do = smem_pipe_read;
+    }
+    // block_meta.prefetch();
+    //}
+
     if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
       // TODO: Handle inv causal part, can be optimized
     }
 
     // if (blockIdx.x == 0 && threadIdx.x == 128) { print_tensor(tdVrdV); }
-    if constexpr (Q_dO_same_stages) {
-      smem_pipe_read_do = smem_pipe_read;
-    }
+
     return true;
   }
 };
