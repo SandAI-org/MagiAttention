@@ -103,6 +103,10 @@ struct Flash_fwd_params : public Qkv_params {
   int arch;
   int num_sm;
   int* __restrict__ tile_count_semaphore;
+
+  bool has_sink() const {
+    return total_sink == 0;
+  }
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

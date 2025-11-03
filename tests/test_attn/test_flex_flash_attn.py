@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: disable-error-code="union-attr"
 import random
 from typing import Any
 
@@ -177,16 +178,16 @@ class TestFlexFlashAttn(DistTestBase):
         k: torch.Tensor,
         v: torch.Tensor,
         do: torch.Tensor,
-        q_ranges_tensor,
-        k_ranges_tensor,
-        attn_type_map_tensor,
-        auto_range_merge,
-        test_case,
+        q_ranges_tensor: torch.Tensor,
+        k_ranges_tensor: torch.Tensor,
+        attn_type_map_tensor: torch.Tensor,
+        auto_range_merge: bool,
+        test_case: str,
         o_ref: torch.Tensor,
         dq_ref: torch.Tensor,
         dk_ref: torch.Tensor,
         dv_ref: torch.Tensor,
-    ):
+    ) -> list[str]:
         # Check deterministic behavior
         # If deterministic is True, we will compare the output and gradients with a second run
         # If any of them is not equal, we will collect the error messages
@@ -448,17 +449,20 @@ class TestFlexFlashAttn(DistTestBase):
         total_q: torch.Tensor,
         total_k: torch.Tensor,
         total_v: torch.Tensor,
+        total_sink: torch.Tensor | None,
         total_out: torch.Tensor,
         total_lse: torch.Tensor,
         grad_total_q: torch.Tensor,
         grad_total_k: torch.Tensor,
         grad_total_v: torch.Tensor,
+        grad_total_sink: torch.Tensor | None,
         grad_total_out: torch.Tensor,
         dtype: torch.dtype,
         test_case: str = "",
         err_msg_list: list[str] = [],
     ) -> None:
         # -----   customize tolerance threshold  ---- #
+
         o_atol = EPSILON
         o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
 
@@ -474,6 +478,9 @@ class TestFlexFlashAttn(DistTestBase):
         dv_atol = EPSILON
         dv_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
 
+        dsink_atol = EPSILON
+        dsink_rtol = 0.001
+
         method_name = self._testMethodName
 
         # NOTE: an experimental value from magi_attention testing
@@ -482,6 +489,7 @@ class TestFlexFlashAttn(DistTestBase):
         norm_rtol_ratio: float = 2.0
 
         # -----   build attn mask   ---- #
+
         mask = get_attn_mask_from_ffa_args(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
@@ -494,14 +502,19 @@ class TestFlexFlashAttn(DistTestBase):
         # -----   ref1. torch ref with high precision (fp64)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
+        has_sink = total_sink is not None
+        if has_sink:
+            total_sink.grad = None
 
         total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
+            sink=total_sink,
             mask=mask,
             layout="thd",
             high_precision=True,
+            backend="torch" if has_sink else "sdpa",
             return_lse=True,
         )
         total_out_ref_high_precision.backward(grad_total_out)
@@ -509,22 +522,28 @@ class TestFlexFlashAttn(DistTestBase):
             grad_total_q_ref_high_precision,
             grad_total_k_ref_high_precision,
             grad_total_v_ref_high_precision,
+            grad_total_sink_ref_high_precision,
         ) = (
             total_q.grad,
             total_k.grad,
             total_v.grad,
+            total_sink.grad if has_sink else None,
         )
 
         # -----   ref2. torch ref with low precision (fp16/bf16)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
+        if has_sink:
+            total_sink.grad = None
 
         total_out_ref_low_precision, total_lse_ref_low_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
+            sink=total_sink,
             mask=mask,
             layout="thd",
+            backend="torch" if has_sink else "sdpa",
             high_precision=False,
             return_lse=True,
         )
@@ -534,10 +553,12 @@ class TestFlexFlashAttn(DistTestBase):
             grad_total_q_ref_low_precision,
             grad_total_k_ref_low_precision,
             grad_total_v_ref_low_precision,
+            grad_total_sink_ref_low_precision,
         ) = (
             total_q.grad,
             total_k.grad,
             total_v.grad,
+            total_sink.grad if has_sink else None,
         )
 
         # -----   assert close for fwd out   ---- #
@@ -723,6 +744,45 @@ class TestFlexFlashAttn(DistTestBase):
         except Exception as e:
             err_msg_list.append(str(e))
 
+        # -----   assert close for bwd dsink   ---- #
+
+        if has_sink:
+            # fa style with Linf norm
+            dsink_norm = calc_inf_norm(
+                grad_total_sink, grad_total_sink_ref_high_precision
+            )
+            dsink_ref_norm = calc_inf_norm(
+                grad_total_sink_ref_low_precision, grad_total_sink_ref_high_precision
+            )
+            try:
+                self.assertLessEqual(
+                    dsink_norm,
+                    norm_rtol_ratio * dsink_ref_norm,
+                    msg=f"For {test_case=}: {dsink_norm=} should be no greater than {norm_rtol_ratio}x of {dsink_ref_norm=}",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
+
+            # torch style with atol + rtol + mismatch threshold
+            dsink_thres = extract_mismatch_threshold(
+                actual=grad_total_sink_ref_low_precision,
+                expected=grad_total_sink_ref_high_precision,
+                atol=dsink_atol,
+                rtol=dsink_rtol,
+                mismatch_thres_ratio=mismatch_thres_ratio,
+            )
+            try:
+                magi_attention.testing.assert_close(
+                    grad_total_sink,
+                    grad_total_sink_ref_high_precision,
+                    atol=dsink_atol,
+                    rtol=dsink_rtol,
+                    mismatch_threshold=dsink_thres,
+                    test_case=f"{test_case} => dsink",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
+
         # -----   raise error if any error occurs   ---- #
 
         if err_msg_list:
@@ -730,18 +790,19 @@ class TestFlexFlashAttn(DistTestBase):
 
     def run_test_case(
         self,
-        seqlen_q,
-        seqlen_kv,
-        model_config,
-        dtype,
-        q_ranges,
-        k_ranges,
-        attn_type_map,
-        auto_range_merge,
-        deterministic,
-        test_accumulation_inplace,
-        test_case,
-    ):
+        seqlen_q: int,
+        seqlen_kv: int,
+        seqlen_sink: int,
+        model_config: dict[str, Any],
+        dtype: torch.dtype,
+        q_ranges: AttnRanges,
+        k_ranges: AttnRanges,
+        attn_type_map: list[int],
+        auto_range_merge: bool,
+        deterministic: bool,
+        test_accumulation_inplace: bool,
+        test_case: str,
+    ) -> None:
         if auto_range_merge and deterministic:
             return
 
@@ -754,6 +815,7 @@ class TestFlexFlashAttn(DistTestBase):
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
+        has_sink = seqlen_sink > 0
 
         # construct data
         q = torch.randn(
@@ -775,6 +837,15 @@ class TestFlexFlashAttn(DistTestBase):
             requires_grad=True,
         )
         do = torch.randn_like(q)
+        if has_sink:
+            sink = torch.randn(
+                (seqlen_sink, num_heads_q),
+                dtype=torch.float32,
+                device=self.device,
+                requires_grad=True,
+            )
+        else:
+            sink = None
 
         # construct meta args
         q_ranges_tensor = q_ranges.to_tensor(device=self.device)
@@ -801,21 +872,24 @@ class TestFlexFlashAttn(DistTestBase):
 
         # run ffa forward
         o, lse = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            q_ranges_tensor,
-            k_ranges_tensor,
-            attn_type_map_tensor,
+            q=q,
+            k=k,
+            v=v,
+            q_ranges=q_ranges_tensor,
+            k_ranges=k_ranges_tensor,
+            attn_type_map=attn_type_map_tensor,
+            sink=sink,
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
         )
+
+        # run ffa backward
         o.backward(do)
 
         err_msg_list = []
 
+        # if deterministic is True, check deterministic behavior and return error messages
         if deterministic:
-            # If deterministic is True, check deterministic behavior and return
             err_msg_list = self.check_deterministic(
                 q=q,
                 k=k,
@@ -842,11 +916,13 @@ class TestFlexFlashAttn(DistTestBase):
             total_q=q,
             total_k=k,
             total_v=v,
+            total_sink=sink,
             total_out=o,
             total_lse=lse,
             grad_total_q=q.grad,
             grad_total_k=k.grad,
             grad_total_v=v.grad,
+            grad_total_sink=sink.grad if has_sink else None,
             grad_total_out=do,
             dtype=dtype,
             test_case=test_case,
@@ -1189,7 +1265,8 @@ class TestFlexFlashAttn(DistTestBase):
         test_accumulation_inplace: bool,
     ):
         # extract config
-        seqlen = attn_mask_config["seqlen"]
+        seqlen: int = attn_mask_config["seqlen"]
+        seqlen_sink: int = attn_mask_config.get("seqlen_sink", 0)
         q_ranges: AttnRanges = attn_mask_config["q_ranges"]
         k_ranges: AttnRanges = attn_mask_config["k_ranges"]
         attn_type_map: list[int] = attn_mask_config["attn_type_map"]
@@ -1209,12 +1286,14 @@ class TestFlexFlashAttn(DistTestBase):
             f"[random_attn_type_map={random_attn_type_map}]"
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
-            f"[test_accumulation_inplace={test_accumulation_inplace}]"
+            f"[acc_inplace={test_accumulation_inplace}]"
+            f"[has_sink={seqlen_sink > 0}]"
         )
 
         self.run_test_case(
             seqlen_q=seqlen,
             seqlen_kv=seqlen,
+            seqlen_sink=seqlen_sink,
             model_config=model_config,
             dtype=dtype,
             q_ranges=q_ranges,
@@ -1288,7 +1367,9 @@ class TestFlexFlashAttn(DistTestBase):
             # },
         ],
     )
-    @parameterize("num_pairs", [10, 100, 1000])  # the max qk range pairs to generate
+    @parameterize(
+        "num_pairs", [10, 100, 1000]
+    )  # the max num of qk range pairs to generate
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize(
         "attn_type", [0, 1, 2, 3, 4]
@@ -1309,12 +1390,13 @@ class TestFlexFlashAttn(DistTestBase):
     ):
         """in this test, we generate q,k range randomly and as complicate as possible"""
         # extract config
-        total_seqlen_q = generate_config["total_seqlen_q"]
-        total_seqlen_k = generate_config["total_seqlen_k"]
-        min_len_q = generate_config["min_len_q"]
-        min_len_k = generate_config["min_len_k"]
-        max_len_q = generate_config["max_len_q"]
-        max_len_k = generate_config["min_len_k"]
+        total_seqlen_q: int = generate_config["total_seqlen_q"]
+        total_seqlen_k: int = generate_config["total_seqlen_k"]
+        min_len_q: int = generate_config["min_len_q"]
+        min_len_k: int = generate_config["min_len_k"]
+        max_len_q: int = generate_config["max_len_q"]
+        max_len_k: int = generate_config["min_len_k"]
+        seqlen_sink: int = generate_config.get("seqlen_sink", 0)
 
         q_list, k_list = self.generate_non_overlapping_qk_pairs(
             total_seqlen_q=total_seqlen_q,
@@ -1346,12 +1428,14 @@ class TestFlexFlashAttn(DistTestBase):
             f"[attn_type_map=[{attn_type}] x {q_ranges.size}]"
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
-            f"[test_accumulation_inplace={test_accumulation_inplace}"
+            f"[acc_inplace={test_accumulation_inplace}]"
+            f"[has_sink={seqlen_sink > 0}]"
         )
 
         self.run_test_case(
             seqlen_q=total_seqlen_q,
             seqlen_kv=total_seqlen_k,
+            seqlen_sink=seqlen_sink,
             model_config=model_config,
             dtype=dtype,
             q_ranges=q_ranges,
@@ -1364,15 +1448,16 @@ class TestFlexFlashAttn(DistTestBase):
         )
 
     def test_compiled_flex_flash_attn(self):
-        s, h, d = 2048, 6, 128
-        hk = 3
+        s, sink = 2048, 4
+        hq, hk, d = 6, 3, 128
 
-        q = torch.randn(s, h, d, dtype=torch.bfloat16, device="cuda")
+        q = torch.randn(s, hq, d, dtype=torch.bfloat16, device="cuda")
         k = torch.randn(s, hk, d, dtype=torch.bfloat16, device="cuda")
         v = torch.randn_like(k)
         do = torch.randn_like(q)
+        sink = torch.randn(sink, hq, dtype=torch.float32, device="cuda")
 
-        [x.requires_grad_(True) for x in (q, k, v)]
+        [x.requires_grad_(True) for x in (q, k, v, sink)]
 
         q_ranges = AttnRanges.from_ranges([[0, s // 2], [s // 2, s]])
         k_ranges = AttnRanges.from_ranges([[0, s // 2], [s // 2, s]])
@@ -1386,12 +1471,13 @@ class TestFlexFlashAttn(DistTestBase):
             q_ranges=q_ranges.to_tensor("cuda"),
             k_ranges=k_ranges.to_tensor("cuda"),
             attn_type_map=torch.tensor(attn_type_map, dtype=torch.int32, device="cuda"),
+            sink=sink,
             # FIXME: compiling does not support auto_range_merge
             # due to custom unique_consecutive_pairs kernel with dynamic output shape
             auto_range_merge=False,
         )
         o.backward(do)
-        dq, dk, dv = q.grad, k.grad, v.grad
+        dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
 
         self.assert_close_to_torch_ref(
             q_ranges=q_ranges,
@@ -1402,11 +1488,13 @@ class TestFlexFlashAttn(DistTestBase):
             total_q=q,
             total_k=k,
             total_v=v,
+            total_sink=sink,
             total_out=o,
             total_lse=lse,
             grad_total_q=dq,
             grad_total_k=dk,
             grad_total_v=dv,
+            grad_total_sink=dsink,
             grad_total_out=do,
             dtype=torch.bfloat16,
             test_case="test_compiled_flex_flash_attn",

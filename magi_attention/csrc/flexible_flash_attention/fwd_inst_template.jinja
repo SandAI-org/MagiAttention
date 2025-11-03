@@ -112,14 +112,16 @@ std::vector<at::Tensor> mha_fwd(
     MagiEvents::stop("fwd_zero_fill");
 
   // Optional post-processing for attention sink
-  if constexpr (kProfileMode)
-    MagiEvents::start("fwd_sink_correct");
+  if (params.has_sink()) {
+    if constexpr (kProfileMode)
+      MagiEvents::start("fwd_sink_correct");
 
-  // TODO: implement the post-processing kernel for attention sink
-  // run_sink_correct(params, stream);
+    // TODO: implement the post-processing kernel for attention sink
+    // run_sink_correct(params, stream);
 
-  if constexpr (kProfileMode)
-    MagiEvents::stop("fwd_sink_correct");
+    if constexpr (kProfileMode)
+      MagiEvents::stop("fwd_sink_correct");
+  }
 
   return {out, softmax_lse};
 }
