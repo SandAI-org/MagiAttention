@@ -339,6 +339,21 @@ class FlashAttnBwdSm90 {
         bool tile_valid = false;
 
         BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
+
+        tile_valid = mainloop.mma(
+            params.mainloop,
+            pipeline_q,
+            pipeline_do,
+            smem_pipe_read,
+            smem_pipe_read_do,
+            tdKrdK,
+            tdVrdV,
+            threadIdx.x - NumCopyThreads,
+            work_idx,
+            block_coord,
+            shared_storage,
+            block_meta,
+            tile_valid);
         /*
         while (!block_meta.is_finish() && block_meta.is_valid()) {
           bool tile_valid_tmp = mainloop.mma(
@@ -360,7 +375,7 @@ class FlashAttnBwdSm90 {
         } */
 
         // int bidb = 0;
-
+        /*
         if constexpr (RangeMerge) {
           int bidb_idx = get<2>(block_coord);
           int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
@@ -386,7 +401,7 @@ class FlashAttnBwdSm90 {
             tile_valid = tile_valid || tile_valid_tmp;
             block_meta.prefetch();
           }
-          /*
+
           for (int idx = 0; idx < loop_count; ++idx) {
             // bidb = bidb_start + idx;
             // block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
@@ -409,7 +424,7 @@ class FlashAttnBwdSm90 {
 
             tile_valid = tile_valid || tile_valid_tmp;
             block_meta.prefetch();
-          } */
+          }
           if constexpr (Deterministic) {
             cute::get<2>(block_coord_) = get<2>(block_coord);
           }
@@ -428,7 +443,7 @@ class FlashAttnBwdSm90 {
               shared_storage,
               block_meta,
               tile_valid);
-        }
+        } */
         // auto [n_block, bidh, bidb_idx] = block_coord;
         /*if (bidh == 0) {
           printf("n_block: %d thread_idx: %d bidb: %d block_meta.bidb: %d\n", n_block, threadIdx.x, bidb, block_meta.bidb - 1);

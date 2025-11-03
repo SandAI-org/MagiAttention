@@ -1256,7 +1256,7 @@ struct CollectiveMainloopBwdSm90 {
         Tensor t0ScS = thread0_mma.partition_C(cS);
         Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SdP_swapAB>(t0ScS.layout()));
         int const thread_row_offset = get<Row>(tScS_rowcol(_0{}, _0{}));
-        int const seqlenq_row_limit = seqlen_q - m_block * kBlockM - thread_row_offset;
+        int const seqlenq_row_limit = block_meta.seqlen_info.seqlen_q - m_block * kBlockM - thread_row_offset;
 
 #pragma unroll
         for (int mi = 0; mi < size<0>(scores); ++mi) {
@@ -1516,24 +1516,31 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
-    auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
+    // auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
 
-    // while (!block_meta.is_finish() && block_meta.is_valid()) {
-    m_block = block_meta.m_block_min;
-    m_block_max = block_meta.m_block_max;
+    while (!block_meta.is_finish() && block_meta.is_valid()) {
+      m_block = block_meta.m_block_min;
+      m_block_max = block_meta.m_block_max;
+      // seqlen_q = block_meta.seqlen_info.seqlen_q;
+      // seqlen_k = block_meta.seqlen_info.seqlen_k;
+      attn_type = block_meta.attn_type;
 
-    CUTLASS_PRAGMA_NO_UNROLL
-    for (; m_block < m_block_max - 1; ++m_block) {
-      bwd_step(m_block, mask_fn, cute::false_type{});
+      auto mask_fn = [&](auto& tSrS, int m_block) {
+        mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, block_meta.seqlen_info.seqlen_q, block_meta.seqlen_info.seqlen_k);
+      };
+
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (; m_block < m_block_max - 1; ++m_block) {
+        bwd_step(m_block, mask_fn, cute::false_type{});
+      }
+      // only the last block need to mask_lse;
+      bwd_step(m_block, mask_fn, cute::true_type{});
+
+      if constexpr (Q_dO_same_stages) {
+        smem_pipe_read_do = smem_pipe_read;
+      }
+      block_meta.prefetch();
     }
-    // only the last block need to mask_lse;
-    bwd_step(m_block, mask_fn, cute::true_type{});
-
-    if constexpr (Q_dO_same_stages) {
-      smem_pipe_read_do = smem_pipe_read;
-    }
-    // block_meta.prefetch();
-    //}
 
     if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
       // TODO: Handle inv causal part, can be optimized
