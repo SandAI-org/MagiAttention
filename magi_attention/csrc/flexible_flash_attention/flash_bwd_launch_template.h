@@ -174,7 +174,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.dq_determin_conflict_state,
       params.dq_determin_range_locks,
       params.attn_type_map,
-      params.qk_map};
+      params.bwd_kq_map};
   // The case work with GQA is ugly but idk how to fix it.
   typename CollectiveEpilogue::Arguments epilogue_args{
       static_cast<typename CollectiveEpilogue::Element*>(params.dk_ptr),

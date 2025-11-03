@@ -460,7 +460,7 @@ struct CollectiveMainloopBwdSm90 {
 
     template <typename SharedStorage>
     CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
-        : n_block(get<1>(block_coord)), bidh(get<1>(block_coord)), q_ranges(params.q_ranges), k_ranges(params.k_ranges), attn_type_map(params.attn_type_map) {
+        : n_block(get<0>(block_coord)), bidh(get<1>(block_coord)), q_ranges(params.q_ranges), k_ranges(params.k_ranges), attn_type_map(params.attn_type_map) {
       bidb = [&]() {
         if constexpr (RangeMerge) {
           return params.cu_batches[get<2>(block_coord)];
@@ -536,12 +536,54 @@ struct CollectiveMainloopBwdSm90 {
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
 
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
+    // auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
     // It's possible to have m_block_max <= m_block_min. Loading Q, K can cause illegal memory access.
+    auto m_block_min = block_meta.m_block_min;
+    auto m_block_max = block_meta.m_block_max;
+    /*
+    if (bidb == 0 && bidh == 0 && threadIdx.x == 0) {
+      printf(
+            "initial block_meta: n_block: %d, n_block_: %d, bidb: %d, m_block_min: %d, m_block_max: %d, seqlen_q: %d, seqlen_k: %d, offset_q: %d, offset_k: %d,
+    attn_type: %d\norigin info:  bidb_: %d, m_block_min_: %d, m_block_max_: %d, seqlen_q_: %d, seqlen_k_: %d, offset_q_: %d, offset_k_: %d, attn_type_: %d\n", n_block,
+             block_meta.n_block,
+             block_meta.bidb,
+             block_meta.m_block_min,
+             block_meta.m_block_max,
+             block_meta.seqlen_info.seqlen_q,
+             block_meta.seqlen_info.seqlen_k,
+             block_meta.seqlen_info.offset_q,
+             block_meta.seqlen_info.offset_k,
+             block_meta.attn_type,
+             bidb,
+             m_block_min,
+             m_block_max,
+             seqlen_info.seqlen_q,
+             seqlen_info.seqlen_k,
+             seqlen_info.offset_q,
+             seqlen_info.offset_k,
+             attn_type
+       );
+    } */
+
+    // auto attn_type_ = block_meta.attn_type;
+    /*while (!block_meta.is_finish() && !block_meta.is_valid()) {
+      // Find the first valid block_meta
+      block_meta.prefetch();
+    }
+
+    if (block_meta.is_finish()) {
+      // No valid block found
+      return false;
+    } */
 
     if (m_block_max <= m_block_min) {
       return false;
     }
+
+    // if (bidh == 0 && threadIdx.x == 0) {
+    //   printf("n_block: %d bidb: %d m_block_min_: %d m_block_max_: %d attn_type_: %d, m_block_min: %d m_block_max: %d attn_type: %d\n", n_block, bidb, m_block_min_,
+    //   m_block_max_, static_cast<int>(attn_type_), m_block_min, m_block_max, static_cast<int>(attn_type));
+    // }
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -613,12 +655,12 @@ struct CollectiveMainloopBwdSm90 {
     //    cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
     auto load_Q = [&](int m_block, auto& smem_pipe_write) {
       // auto block_tma_Q = params.tma_load_Q.get_slice(cluster_local_block_id.y);
-      Tensor gQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
+      Tensor gQ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
       Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
       Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
       Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ));
       Tensor gLSE = local_tile(
-          cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mLSE),
+          cute::domain_offset(make_coord(_0{}, block_meta.seqlen_info.offset_q), mLSE),
           make_shape(get<0>(shape(mLSE)), select<0>(TileShape_MNK{})), // (4, kblockm)
           make_coord(_0{}, _)); // (4, M, _)
 
@@ -654,10 +696,10 @@ struct CollectiveMainloopBwdSm90 {
     auto load_dO = [&](int m_block, auto& smem_pipe_write, auto& smem_pipe_write_do) {
       Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
       Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO));
-      Tensor gdO = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdO), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
+      Tensor gdO = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mdO), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
       Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
       Tensor gdPsum = local_tile(
-          cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum),
+          cute::domain_offset(make_coord(_0{}, block_meta.seqlen_info.offset_q), mdPsum),
           make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})), // (4, kblockm)
           make_coord(_0{}, _));
 
@@ -676,11 +718,11 @@ struct CollectiveMainloopBwdSm90 {
     };
 
     if (lane_predicate) {
-      load_Q(m_block, smem_pipe_write);
+      load_KV();
     }
 
     if (lane_predicate) {
-      load_KV();
+      load_Q(m_block, smem_pipe_write);
 
 #pragma unroll(kHeadDim < 256 ? 2 : 1)
       for (; m_block < m_block_max - 1; ++m_block) {

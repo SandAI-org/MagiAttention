@@ -245,10 +245,12 @@ class FlashAttnBwdSm90 {
             for (int idx = 0; idx < loop_count; ++idx) {
               int bidb = bidb_start + idx;
               block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
+              // BlockMetaT block_meta_ = BlockMetaT{params.mainloop, block_coord, shared_storage};
               bool tile_valid_tmp =
                   mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, block_meta, tile_valid);
 
               tile_valid = tile_valid || tile_valid_tmp;
+              block_meta.prefetch();
             }
           } else {
             tile_valid =
