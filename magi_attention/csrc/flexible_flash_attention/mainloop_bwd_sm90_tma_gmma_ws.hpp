@@ -727,9 +727,6 @@ struct CollectiveMainloopBwdSm90 {
     while (!block_meta.is_finish() && block_meta.is_valid()) {
       int m_block = block_meta.m_block_min;
       int m_block_max = block_meta.m_block_max;
-      // if (bidh == 0 && threadIdx.x == 0)
-      //   printf("bidb: %d n_block: %d m_block_min: %d m_block_max: %d \n", block_meta.bidb, block_meta.n_block, block_meta.m_block_min, block_meta.m_block_max);
-
       /*if (bidh == 0 && threadIdx.x == 0) {
           printf(
                 "block_meta: n_block: %d, bidb: %d, m_block_min: %d, m_block_max: %d, seqlen_q: %d, seqlen_k: %d, offset_q: %d, offset_k: %d, attn_type: %d\n",
@@ -1041,43 +1038,6 @@ struct CollectiveMainloopBwdSm90 {
       }
       block_meta.prefetch();
     }
-
-    /*
-    #pragma unroll 2
-        for (; m_block < m_block_max; ++m_block) {
-    #pragma unroll
-          for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-            cutlass::arch::NamedBarrier::sync(
-                cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-                static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warpgroup_idx ); // sdQ full, to be written to gmem
-          }
-
-          if (lane_predicate) {
-            if constexpr (Deterministic) {
-              m_block_sync(m_block);
-            }
-            cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
-            tma_store_arrive();
-            tma_store_wait<0>();
-            if constexpr (Deterministic) {
-              m_block_arrive(m_block);
-            }
-          }
-          // Note, the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
-          for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-            cutlass::arch::NamedBarrier::arrive(
-                cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-                static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warpgroup_idx ); // sdQ empty, ready to be written to
-          }
-        }
-        if constexpr (Deterministic) {
-          if (lane_predicate) {
-            for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
-              m_block_sync(m_block);
-              m_block_arrive(m_block);
-            }
-          }
-        } */
   }
 
   CUTLASS_DEVICE void mma_init() {
