@@ -14,7 +14,7 @@
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange, reduce, repeat
+from einops import rearrange, repeat
 
 from magi_attention.utils import to_higher_fp_dtype
 
@@ -84,7 +84,14 @@ def sink_bwd(
     # where o.shape = [sq, nhq, d]
     #       do.shape = [sq, nhq, d]
     #       delta.shape = [nhq, sq, 1]
-    delta = reduce(o.to(lse.dtype) * do.to(lse.dtype), "sq hq d -> hq sq 1", "sum")
+    delta = (
+        # shape: [sq, nhq, d] · [sq, nhq, d] -> [sq, nhq, d]
+        (o * do)
+        # shape: [sq, nhq, d] -> [sq, nhq, 1]
+        .sum(-1, keepdim=True, dtype=lse.dtype)
+        # shape: [sq, nhq, 1] -> [nhq, sq, 1]
+        .transpose(0, 1)
+    )
 
     # calculat p_sink = exp(sink - lse)
     # where sink.shape = [nhq, sq, s_sink]

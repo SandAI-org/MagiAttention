@@ -161,7 +161,7 @@ def _attn_pre_process(
     if sink is not None:
         sink = to_higher_fp_dtype(
             repeat(sink, "s hq -> hq sq s", sq=q.size(0)),
-            lowest_precision=torch.float32,
+            lowest_precision=max_fp_dtype(q.dtype, torch.float32),
         )
 
     # prepare q,k,v

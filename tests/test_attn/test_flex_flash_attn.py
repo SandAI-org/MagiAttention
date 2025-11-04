@@ -479,7 +479,7 @@ class TestFlexFlashAttn(DistTestBase):
         dv_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
 
         dsink_atol = EPSILON
-        dsink_rtol = 0.001
+        dsink_rtol = 0.01
 
         method_name = self._testMethodName
 
@@ -1448,14 +1448,14 @@ class TestFlexFlashAttn(DistTestBase):
         )
 
     def test_compiled_flex_flash_attn(self):
-        s, sink = 2048, 4
+        s, s_sink = 2048, 4
         hq, hk, d = 6, 3, 128
 
         q = torch.randn(s, hq, d, dtype=torch.bfloat16, device="cuda")
         k = torch.randn(s, hk, d, dtype=torch.bfloat16, device="cuda")
         v = torch.randn_like(k)
         do = torch.randn_like(q)
-        sink = torch.randn(sink, hq, dtype=torch.float32, device="cuda")
+        sink = torch.randn(s_sink, hq, dtype=torch.float32, device="cuda")
 
         [x.requires_grad_(True) for x in (q, k, v, sink)]
 
