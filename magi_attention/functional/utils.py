@@ -84,6 +84,7 @@ def sink_bwd(
     # where o.shape = [sq, nhq, d]
     #       do.shape = [sq, nhq, d]
     #       delta.shape = [nhq, sq, 1]
+    # delta = reduce(o.to(lse.dtype) * do.to(lse.dtype), "sq hq d -> hq sq 1", "sum")
     delta = (
         # shape: [sq, nhq, d] · [sq, nhq, d] -> [sq, nhq, d]
         (o * do)

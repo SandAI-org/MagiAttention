@@ -33,6 +33,12 @@ if version.parse(torch.__version__) > version.parse("2.4"):
 # usage: to avoid division by zero in numerical calculation and assert-close testing
 EPSILON = 1e-8
 
+# NOTE: an experimental value from fa/ffa/magi_attention testing
+MISMATCH_THRES_RATIO: float = 2.0
+MAX_MISMATCH_THRES: float = 0.75
+NORM_RTOL_RATIO: float = 2.0
+
+# IB spec: https://nvdam.widen.net/s/dps8txlsrf/infiniband-ndr-400g-architecture-datasheet-1620877-r4
 IB_BANDWIDTH = 50e9  # 500 GB/s, single-end
 
 # H100 spec: https://www.nvidia.com/en-us/data-center/h100/
@@ -47,7 +53,7 @@ H800_NVLINK_BANDWIDTH = 200e9  # 200 GB/s, single-end
 H800_NVLINK_A2A_BWU = 0.6
 
 
-def _extract_mismatch_info(error_msg: str) -> tuple[int, int, float]:
+def extract_mismatch_info(error_msg: str) -> tuple[int, int, float]:
     match = re.search(r"Mismatched elements: (\d+) / (\d+)", error_msg)
 
     if match:
@@ -66,16 +72,22 @@ def extract_mismatch_threshold(
     atol: float,
     rtol: float,
     mismatch_thres_ratio: float = 1.0,
+    min_mismatch_thres: float = 0.0,
+    max_mismatch_thres: float = 1.0,
 ) -> float:
     mismatch_threshold = 0.0
     try:
         torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
     except AssertionError as e:
         error_msg = str(e)
-        _, _, mismatch_threshold = _extract_mismatch_info(error_msg)
+        _, _, mismatch_threshold = extract_mismatch_info(error_msg)
 
-    # scale it by `mismatch_thres_ratio`, and clamp it in [0, 1]
-    return min(max(mismatch_threshold * mismatch_thres_ratio, 0.0), 1.0)
+    # scale it by `mismatch_thres_ratio`,
+    # and clamp it in [min_mismatch_thres, max_mismatch_thres]
+    return min(
+        max(mismatch_threshold * mismatch_thres_ratio, min_mismatch_thres),
+        max_mismatch_thres,
+    )
 
 
 @torch.no_grad
@@ -100,7 +112,7 @@ def assert_close(
             print(no_mismatch_info)
     except AssertionError as e:
         error_msg = str(e)
-        mismatched_elements, total_elements, mismatch_ratio = _extract_mismatch_info(
+        mismatched_elements, total_elements, mismatch_ratio = extract_mismatch_info(
             error_msg
         )
 

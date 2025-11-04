@@ -32,6 +32,9 @@ from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import (
     EPSILON,
+    MAX_MISMATCH_THRES,
+    MISMATCH_THRES_RATIO,
+    NORM_RTOL_RATIO,
     assert_close,
     calc_inf_norm,
     extract_mismatch_threshold,
@@ -460,33 +463,77 @@ class TestFlexFlashAttn(DistTestBase):
         dtype: torch.dtype,
         test_case: str = "",
         err_msg_list: list[str] = [],
+        err_ratio_dict: dict[str, float] = {},
     ) -> None:
         # -----   customize tolerance threshold  ---- #
 
         o_atol = EPSILON
         o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
+        o_norm_rtol_ratio = err_ratio_dict.get("o_norm_rtol_ratio", NORM_RTOL_RATIO)
+        o_mismatch_thres_ratio = err_ratio_dict.get(
+            "o_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        o_min_mismatch_thres = err_ratio_dict.get("o_min_mismatch_thres", 0.0)
+        o_max_mismatch_thres = err_ratio_dict.get(
+            "o_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         lse_atol = EPSILON
         lse_rtol = 0.001
+        lse_norm_rtol_ratio = err_ratio_dict.get("lse_norm_rtol_ratio", NORM_RTOL_RATIO)
+        lse_mismatch_thres_ratio = err_ratio_dict.get(
+            "lse_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        lse_min_mismatch_thres = err_ratio_dict.get("lse_min_mismatch_thres", 0.0)
+        lse_max_mismatch_thres = err_ratio_dict.get(
+            "lse_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dq_atol = EPSILON
         dq_rtol = {torch.bfloat16: 0.3, torch.float16: 0.2}.get(dtype, 0.2)
+        dq_norm_rtol_ratio = err_ratio_dict.get("dq_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dq_mismatch_thres_ratio = err_ratio_dict.get(
+            "dq_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dq_min_mismatch_thres = err_ratio_dict.get("dq_min_mismatch_thres", 0.0)
+        dq_max_mismatch_thres = err_ratio_dict.get(
+            "dq_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dk_atol = EPSILON
         dk_rtol = {torch.bfloat16: 0.15, torch.float16: 0.08}.get(dtype, 0.08)
+        dk_norm_rtol_ratio = err_ratio_dict.get("dk_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dk_mismatch_thres_ratio = err_ratio_dict.get(
+            "dk_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dk_min_mismatch_thres = err_ratio_dict.get("dk_min_mismatch_thres", 0.0)
+        dk_max_mismatch_thres = err_ratio_dict.get(
+            "dk_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dv_atol = EPSILON
         dv_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
+        dv_norm_rtol_ratio = err_ratio_dict.get("dv_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dv_mismatch_thres_ratio = err_ratio_dict.get(
+            "dv_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dv_min_mismatch_thres = err_ratio_dict.get("dv_min_mismatch_thres", 0.0)
+        dv_max_mismatch_thres = err_ratio_dict.get(
+            "dv_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dsink_atol = EPSILON
         dsink_rtol = 0.01
-
-        method_name = self._testMethodName
-
-        # NOTE: an experimental value from magi_attention testing
-        mismatch_thres_ratio: float = 2.0
-        # NOTE: an experimental value from fa testing
-        norm_rtol_ratio: float = 2.0
+        dsink_norm_rtol_ratio = err_ratio_dict.get(
+            "dsink_norm_rtol_ratio", NORM_RTOL_RATIO
+        )
+        dsink_mismatch_thres_ratio = err_ratio_dict.get(
+            "dsink_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dsink_min_mismatch_thres = err_ratio_dict.get("dsink_min_mismatch_thres", 0.0)
+        dsink_max_mismatch_thres = err_ratio_dict.get(
+            "dsink_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         # -----   build attn mask   ---- #
 
@@ -571,8 +618,8 @@ class TestFlexFlashAttn(DistTestBase):
         try:
             self.assertLessEqual(
                 out_norm,
-                norm_rtol_ratio * out_ref_norm,
-                msg=f"For {test_case=}: {out_norm=} should be no greater than {norm_rtol_ratio}x of {out_ref_norm=}",
+                o_norm_rtol_ratio * out_ref_norm,
+                msg=f"For {test_case=}: {out_norm=} should be no greater than {o_norm_rtol_ratio}x of {out_ref_norm=}",
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -583,7 +630,9 @@ class TestFlexFlashAttn(DistTestBase):
             expected=total_out_ref_high_precision,
             atol=o_atol,
             rtol=o_rtol,
-            mismatch_thres_ratio=mismatch_thres_ratio,
+            mismatch_thres_ratio=o_mismatch_thres_ratio,
+            min_mismatch_thres=o_min_mismatch_thres,
+            max_mismatch_thres=o_max_mismatch_thres,
         )
         try:
             magi_attention.testing.assert_close(
@@ -607,19 +656,21 @@ class TestFlexFlashAttn(DistTestBase):
         try:
             self.assertLessEqual(
                 lse_norm,
-                norm_rtol_ratio * lse_ref_norm,
-                msg=f"For {test_case=}: {lse_norm=} should be no greater than {norm_rtol_ratio}x of {lse_ref_norm=}",
+                lse_norm_rtol_ratio * lse_ref_norm,
+                msg=f"For {test_case=}: {lse_norm=} should be no greater than {lse_norm_rtol_ratio}x of {lse_ref_norm=}",
             )
         except Exception as e:
             err_msg_list.append(str(e))
 
         # torch style with atol + rtol + mismatch threshold
-        o_thres = extract_mismatch_threshold(
+        lse_thres = extract_mismatch_threshold(
             actual=total_lse_ref_low_precision,
             expected=total_lse_ref_high_precision,
             atol=lse_atol,
             rtol=lse_rtol,
-            mismatch_thres_ratio=mismatch_thres_ratio,
+            mismatch_thres_ratio=lse_mismatch_thres_ratio,
+            min_mismatch_thres=lse_min_mismatch_thres,
+            max_mismatch_thres=lse_max_mismatch_thres,
         )
         try:
             magi_attention.testing.assert_close(
@@ -627,7 +678,7 @@ class TestFlexFlashAttn(DistTestBase):
                 total_lse_ref_high_precision,
                 atol=lse_atol,
                 rtol=lse_rtol,
-                mismatch_threshold=o_thres,
+                mismatch_threshold=lse_thres,
                 test_case=f"{test_case} => lse",
             )
         except Exception as e:
@@ -643,8 +694,8 @@ class TestFlexFlashAttn(DistTestBase):
         try:
             self.assertLessEqual(
                 dq_norm,
-                norm_rtol_ratio * dq_ref_norm,
-                msg=f"For {test_case=}: {dq_norm=} should be no greater than {norm_rtol_ratio}x of {dq_ref_norm=}",
+                dq_norm_rtol_ratio * dq_ref_norm,
+                msg=f"For {test_case=}: {dq_norm=} should be no greater than {dq_norm_rtol_ratio}x of {dq_ref_norm=}",
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -655,10 +706,10 @@ class TestFlexFlashAttn(DistTestBase):
             expected=grad_total_q_ref_high_precision,
             atol=dq_atol,
             rtol=dq_rtol,
-            mismatch_thres_ratio=mismatch_thres_ratio,
+            mismatch_thres_ratio=dq_mismatch_thres_ratio,
+            min_mismatch_thres=dq_min_mismatch_thres,
+            max_mismatch_thres=dq_max_mismatch_thres,
         )
-        if method_name == "test_flex_attn_random":
-            dq_thres = 1.0
         try:
             magi_attention.testing.assert_close(
                 grad_total_q,
@@ -681,8 +732,8 @@ class TestFlexFlashAttn(DistTestBase):
         try:
             self.assertLessEqual(
                 dk_norm,
-                norm_rtol_ratio * dk_ref_norm,
-                msg=f"For {test_case=}: {dk_norm=} should be no greater than {norm_rtol_ratio}x of {dk_ref_norm=}",
+                dk_norm_rtol_ratio * dk_ref_norm,
+                msg=f"For {test_case=}: {dk_norm=} should be no greater than {dk_norm_rtol_ratio}x of {dk_ref_norm=}",
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -693,7 +744,9 @@ class TestFlexFlashAttn(DistTestBase):
             expected=grad_total_k_ref_high_precision,
             atol=dk_atol,
             rtol=dk_rtol,
-            mismatch_thres_ratio=mismatch_thres_ratio,
+            mismatch_thres_ratio=dk_mismatch_thres_ratio,
+            min_mismatch_thres=dk_min_mismatch_thres,
+            max_mismatch_thres=dk_max_mismatch_thres,
         )
         try:
             magi_attention.testing.assert_close(
@@ -718,8 +771,8 @@ class TestFlexFlashAttn(DistTestBase):
         try:
             self.assertLessEqual(
                 dv_norm,
-                norm_rtol_ratio * dv_ref_norm,
-                msg=f"For {test_case=}: {dv_norm=} should be no greater than {norm_rtol_ratio}x of {dv_ref_norm=}",
+                dv_norm_rtol_ratio * dv_ref_norm,
+                msg=f"For {test_case=}: {dv_norm=} should be no greater than {dv_norm_rtol_ratio}x of {dv_ref_norm=}",
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -730,7 +783,9 @@ class TestFlexFlashAttn(DistTestBase):
             expected=grad_total_v_ref_high_precision,
             atol=dv_atol,
             rtol=dv_rtol,
-            mismatch_thres_ratio=mismatch_thres_ratio,
+            mismatch_thres_ratio=dv_mismatch_thres_ratio,
+            min_mismatch_thres=dv_min_mismatch_thres,
+            max_mismatch_thres=dv_max_mismatch_thres,
         )
         try:
             magi_attention.testing.assert_close(
@@ -757,8 +812,11 @@ class TestFlexFlashAttn(DistTestBase):
             try:
                 self.assertLessEqual(
                     dsink_norm,
-                    norm_rtol_ratio * dsink_ref_norm,
-                    msg=f"For {test_case=}: {dsink_norm=} should be no greater than {norm_rtol_ratio}x of {dsink_ref_norm=}",
+                    dsink_norm_rtol_ratio * dsink_ref_norm,
+                    msg=(
+                        f"For {test_case=}: {dsink_norm=} should be no greater than "
+                        f"{dsink_norm_rtol_ratio}x of {dsink_ref_norm=}"
+                    ),
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -769,7 +827,9 @@ class TestFlexFlashAttn(DistTestBase):
                 expected=grad_total_sink_ref_high_precision,
                 atol=dsink_atol,
                 rtol=dsink_rtol,
-                mismatch_thres_ratio=mismatch_thres_ratio,
+                mismatch_thres_ratio=dsink_mismatch_thres_ratio,
+                min_mismatch_thres=dsink_min_mismatch_thres,
+                max_mismatch_thres=dsink_max_mismatch_thres,
             )
             try:
                 magi_attention.testing.assert_close(
@@ -802,6 +862,7 @@ class TestFlexFlashAttn(DistTestBase):
         deterministic: bool,
         test_accumulation_inplace: bool,
         test_case: str,
+        err_ratio_dict: dict[str, float] = {},
     ) -> None:
         if auto_range_merge and deterministic:
             return
@@ -927,6 +988,7 @@ class TestFlexFlashAttn(DistTestBase):
             dtype=dtype,
             test_case=test_case,
             err_msg_list=err_msg_list,
+            err_ratio_dict=err_ratio_dict,
         )
 
     MODEL_CONFIGS = [
@@ -1254,7 +1316,7 @@ class TestFlexFlashAttn(DistTestBase):
     @parameterize("auto_range_merge", [False, True])
     @parameterize("deterministic", [False, True])
     @parameterize("test_accumulation_inplace", [False, True])
-    def test_flex_flash_attn(
+    def test_ffa_simple(
         self,
         attn_mask_config: dict[str, Any],
         model_config: dict[str, Any],
@@ -1377,7 +1439,7 @@ class TestFlexFlashAttn(DistTestBase):
     @parameterize("auto_range_merge", [False, True])
     @parameterize("deterministic", [False, True])
     @parameterize("test_accumulation_inplace", [False, True])
-    def test_flex_attn_random(
+    def test_ffa_random(
         self,
         model_config: dict[str, Any],
         generate_config: dict[str, Any],
@@ -1445,9 +1507,13 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             test_case=test_case,
+            err_ratio_dict={
+                "dq_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
+                "dq_min_mismatch_thres": 0.02,
+            },
         )
 
-    def test_compiled_flex_flash_attn(self):
+    def test_ffa_compiled(self):
         s, s_sink = 2048, 4
         hq, hk, d = 6, 3, 128
 
