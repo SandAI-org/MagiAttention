@@ -872,6 +872,16 @@ struct CollectiveMainloopBwdSm90 {
       return;
     }
 
+    while (!block_meta.is_finish() && !block_meta.is_valid()) {
+      // Find the first valid block_meta
+      block_meta.prefetch();
+    }
+
+    if (block_meta.is_finish()) {
+      // No valid block found
+      return;
+    }
+
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
@@ -975,50 +985,99 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
-    int m_block = m_block_min;
-    if constexpr (Deterministic) {
-      if (lane_predicate) {
-        for (int m_block = 0; m_block < m_block_min; ++m_block) {
-          m_block_sync(m_block);
-          m_block_arrive(m_block);
+    while (!block_meta.is_finish() && block_meta.is_valid()) {
+      int m_block = block_meta.m_block_min;
+      m_block_max = block_meta.m_block_max;
+      Tensor gdQaccum = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)
+
+      auto block_tma_dQ = params.tma_add_dQ.get_slice(_0{});
+      Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
+      Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
+
+      if constexpr (Deterministic) {
+        if (lane_predicate) {
+          for (int m_block = 0; m_block < block_meta.m_block_min; ++m_block) {
+            m_block_sync(m_block);
+            m_block_arrive(m_block);
+          }
         }
-      }
-    }
-#pragma unroll 2
-    for (; m_block < m_block_max; ++m_block) {
-#pragma unroll
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        cutlass::arch::NamedBarrier::sync(
-            cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-            static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warpgroup_idx /*id*/); // sdQ full, to be written to gmem
       }
 
-      if (lane_predicate) {
-        if constexpr (Deterministic) {
-          m_block_sync(m_block);
+#pragma unroll 2
+      for (; m_block < m_block_max; ++m_block) {
+#pragma unroll
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          cutlass::arch::NamedBarrier::sync(
+              cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
+              static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warpgroup_idx /*id*/); // sdQ full, to be written to gmem
         }
-        cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
-        tma_store_arrive();
-        tma_store_wait<0>();
-        if constexpr (Deterministic) {
-          m_block_arrive(m_block);
+
+        if (lane_predicate) {
+          if constexpr (Deterministic) {
+            m_block_sync(m_block);
+          }
+          cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
+          tma_store_arrive();
+          tma_store_wait<0>();
+          if constexpr (Deterministic) {
+            m_block_arrive(m_block);
+          }
+        }
+        // Note, the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
+        for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+          cutlass::arch::NamedBarrier::arrive(
+              cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
+              static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warpgroup_idx /*id*/); // sdQ empty, ready to be written to
         }
       }
-      // Note, the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
-      for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
-        cutlass::arch::NamedBarrier::arrive(
-            cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
-            static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warpgroup_idx /*id*/); // sdQ empty, ready to be written to
+
+      if constexpr (Deterministic) {
+        if (lane_predicate) {
+          for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
+            m_block_sync(m_block);
+            m_block_arrive(m_block);
+          }
+        }
       }
+      block_meta.prefetch();
     }
-    if constexpr (Deterministic) {
-      if (lane_predicate) {
-        for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
-          m_block_sync(m_block);
-          m_block_arrive(m_block);
+
+    /*
+    #pragma unroll 2
+        for (; m_block < m_block_max; ++m_block) {
+    #pragma unroll
+          for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+            cutlass::arch::NamedBarrier::sync(
+                cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
+                static_cast<uint32_t>(BwdNamedBarriers::dQFullWG1) + warpgroup_idx ); // sdQ full, to be written to gmem
+          }
+
+          if (lane_predicate) {
+            if constexpr (Deterministic) {
+              m_block_sync(m_block);
+            }
+            cute::copy(params.tma_add_dQ, tdQsdQ, tdQgdQ(_, _, _, m_block));
+            tma_store_arrive();
+            tma_store_wait<0>();
+            if constexpr (Deterministic) {
+              m_block_arrive(m_block);
+            }
+          }
+          // Note, the for_each() function is required here to ensure `warpgroup_idx` is of type Int<x>.
+          for (int warpgroup_idx = 0; warpgroup_idx < NumMmaWarpGroups; ++warpgroup_idx) {
+            cutlass::arch::NamedBarrier::arrive(
+                cutlass::NumThreadsPerWarpGroup + cutlass::NumThreadsPerWarp,
+                static_cast<uint32_t>(BwdNamedBarriers::dQEmptyWG1) + warpgroup_idx ); // sdQ empty, ready to be written to
+          }
         }
-      }
-    }
+        if constexpr (Deterministic) {
+          if (lane_predicate) {
+            for (int m_block = m_block_max; m_block < m_block_num; ++m_block) {
+              m_block_sync(m_block);
+              m_block_arrive(m_block);
+            }
+          }
+        } */
   }
 
   CUTLASS_DEVICE void mma_init() {

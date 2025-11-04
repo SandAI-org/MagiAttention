@@ -287,6 +287,14 @@ class FlashAttnBwdSm90 {
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
           auto [n_block, bidh, bidb_idx] = block_coord;
           BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
+
+          if constexpr (!Deterministic) {
+            mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta);
+          } else {
+            mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta, bidb_last);
+            bidb_last = block_meta.bidb;
+          }
+          /*
           if constexpr (RangeMerge) {
             int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
                                                                              : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
@@ -315,6 +323,7 @@ class FlashAttnBwdSm90 {
               }
               block_meta.prefetch();
             } */
+          /*
           } else {
             if constexpr (!Deterministic) {
               mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta);
@@ -323,7 +332,7 @@ class FlashAttnBwdSm90 {
               // bidb_last = bidb_idx;
               bidb_last = block_meta.bidb;
             }
-          }
+          } */
         }
       }
     } else { // Consumer
