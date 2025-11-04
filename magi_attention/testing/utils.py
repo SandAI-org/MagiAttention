@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
 import os
+from contextlib import contextmanager
 from functools import partial, wraps
 
 from magi_attention.utils import wrap_to_list
 
 
-@contextlib.contextmanager
+@contextmanager
 def switch_envvar_context(envvar_name: str | list[str], enable: bool = True):
     envvar_name_list = wrap_to_list(envvar_name)
     old_value_list = []

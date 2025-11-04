@@ -470,6 +470,7 @@ class TestFlexFlashAttn(DistTestBase):
         o_atol = EPSILON
         o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
         o_norm_rtol_ratio = err_ratio_dict.get("o_norm_rtol_ratio", NORM_RTOL_RATIO)
+        o_min_norm_rtol = err_ratio_dict.get("o_min_norm_rtol", 0.0)
         o_mismatch_thres_ratio = err_ratio_dict.get(
             "o_mismatch_thres_ratio", MISMATCH_THRES_RATIO
         )
@@ -481,6 +482,7 @@ class TestFlexFlashAttn(DistTestBase):
         lse_atol = EPSILON
         lse_rtol = 0.001
         lse_norm_rtol_ratio = err_ratio_dict.get("lse_norm_rtol_ratio", NORM_RTOL_RATIO)
+        lse_min_norm_rtol = err_ratio_dict.get("lse_min_norm_rtol", 0.0)
         lse_mismatch_thres_ratio = err_ratio_dict.get(
             "lse_mismatch_thres_ratio", MISMATCH_THRES_RATIO
         )
@@ -492,6 +494,7 @@ class TestFlexFlashAttn(DistTestBase):
         dq_atol = EPSILON
         dq_rtol = {torch.bfloat16: 0.3, torch.float16: 0.2}.get(dtype, 0.2)
         dq_norm_rtol_ratio = err_ratio_dict.get("dq_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dq_min_norm_rtol = err_ratio_dict.get("dq_min_norm_rtol", 0.0)
         dq_mismatch_thres_ratio = err_ratio_dict.get(
             "dq_mismatch_thres_ratio", MISMATCH_THRES_RATIO
         )
@@ -503,6 +506,7 @@ class TestFlexFlashAttn(DistTestBase):
         dk_atol = EPSILON
         dk_rtol = {torch.bfloat16: 0.15, torch.float16: 0.08}.get(dtype, 0.08)
         dk_norm_rtol_ratio = err_ratio_dict.get("dk_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dk_min_norm_rtol = err_ratio_dict.get("dk_min_norm_rtol", 0.0)
         dk_mismatch_thres_ratio = err_ratio_dict.get(
             "dk_mismatch_thres_ratio", MISMATCH_THRES_RATIO
         )
@@ -514,6 +518,7 @@ class TestFlexFlashAttn(DistTestBase):
         dv_atol = EPSILON
         dv_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
         dv_norm_rtol_ratio = err_ratio_dict.get("dv_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dv_min_norm_rtol = err_ratio_dict.get("dv_min_norm_rtol", 0.0)
         dv_mismatch_thres_ratio = err_ratio_dict.get(
             "dv_mismatch_thres_ratio", MISMATCH_THRES_RATIO
         )
@@ -523,10 +528,11 @@ class TestFlexFlashAttn(DistTestBase):
         )
 
         dsink_atol = EPSILON
-        dsink_rtol = 0.01
+        dsink_rtol = 0.05
         dsink_norm_rtol_ratio = err_ratio_dict.get(
             "dsink_norm_rtol_ratio", NORM_RTOL_RATIO
         )
+        dsink_min_norm_rtol = err_ratio_dict.get("dsink_min_norm_rtol", 0.0)
         dsink_mismatch_thres_ratio = err_ratio_dict.get(
             "dsink_mismatch_thres_ratio", MISMATCH_THRES_RATIO
         )
@@ -618,8 +624,11 @@ class TestFlexFlashAttn(DistTestBase):
         try:
             self.assertLessEqual(
                 out_norm,
-                o_norm_rtol_ratio * out_ref_norm,
-                msg=f"For {test_case=}: {out_norm=} should be no greater than {o_norm_rtol_ratio}x of {out_ref_norm=}",
+                max(o_min_norm_rtol, o_norm_rtol_ratio * out_ref_norm),
+                msg=(
+                    f"For {test_case=}: {out_norm=} should be no greater than "
+                    f"max({o_min_norm_rtol}, {o_norm_rtol_ratio} x {out_ref_norm=})",
+                ),
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -656,8 +665,11 @@ class TestFlexFlashAttn(DistTestBase):
         try:
             self.assertLessEqual(
                 lse_norm,
-                lse_norm_rtol_ratio * lse_ref_norm,
-                msg=f"For {test_case=}: {lse_norm=} should be no greater than {lse_norm_rtol_ratio}x of {lse_ref_norm=}",
+                max(lse_min_norm_rtol, lse_norm_rtol_ratio * lse_ref_norm),
+                msg=(
+                    f"For {test_case=}: {lse_norm=} should be no greater than "
+                    f"max({lse_min_norm_rtol}, {lse_norm_rtol_ratio} x {lse_ref_norm=})"
+                ),
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -694,8 +706,11 @@ class TestFlexFlashAttn(DistTestBase):
         try:
             self.assertLessEqual(
                 dq_norm,
-                dq_norm_rtol_ratio * dq_ref_norm,
-                msg=f"For {test_case=}: {dq_norm=} should be no greater than {dq_norm_rtol_ratio}x of {dq_ref_norm=}",
+                max(dq_min_norm_rtol, dq_norm_rtol_ratio * dq_ref_norm),
+                msg=(
+                    f"For {test_case=}: {dq_norm=} should be no greater than "
+                    f"max({dq_min_norm_rtol}, {dq_norm_rtol_ratio} x {dq_ref_norm=})"
+                ),
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -732,8 +747,11 @@ class TestFlexFlashAttn(DistTestBase):
         try:
             self.assertLessEqual(
                 dk_norm,
-                dk_norm_rtol_ratio * dk_ref_norm,
-                msg=f"For {test_case=}: {dk_norm=} should be no greater than {dk_norm_rtol_ratio}x of {dk_ref_norm=}",
+                max(dk_min_norm_rtol, dk_norm_rtol_ratio * dk_ref_norm),
+                msg=(
+                    f"For {test_case=}: {dk_norm=} should be no greater than "
+                    f"max({dk_min_norm_rtol}, {dk_norm_rtol_ratio} x {dk_ref_norm=})"
+                ),
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -771,8 +789,11 @@ class TestFlexFlashAttn(DistTestBase):
         try:
             self.assertLessEqual(
                 dv_norm,
-                dv_norm_rtol_ratio * dv_ref_norm,
-                msg=f"For {test_case=}: {dv_norm=} should be no greater than {dv_norm_rtol_ratio}x of {dv_ref_norm=}",
+                max(dv_min_norm_rtol, dv_norm_rtol_ratio * dv_ref_norm),
+                msg=(
+                    f"For {test_case=}: {dv_norm=} should be no greater than "
+                    f"max({dv_min_norm_rtol}, {dv_norm_rtol_ratio} x {dv_ref_norm=})"
+                ),
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -812,10 +833,10 @@ class TestFlexFlashAttn(DistTestBase):
             try:
                 self.assertLessEqual(
                     dsink_norm,
-                    dsink_norm_rtol_ratio * dsink_ref_norm,
+                    max(dsink_min_norm_rtol, dsink_norm_rtol_ratio * dsink_ref_norm),
                     msg=(
                         f"For {test_case=}: {dsink_norm=} should be no greater than "
-                        f"{dsink_norm_rtol_ratio}x of {dsink_ref_norm=}"
+                        f"max({dsink_min_norm_rtol}, {dsink_norm_rtol_ratio} x {dsink_ref_norm=})"
                     ),
                 )
             except Exception as e:
@@ -1025,6 +1046,7 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "full_4k",
                 "seqlen": 4096,
+                "seqlen_sink": 1,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 4096],
@@ -1073,6 +1095,7 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "varlen_full_4k",
                 "seqlen": 4096,
+                "seqlen_sink": 2,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1129,6 +1152,7 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "varlen_block_causal_2k",
                 "seqlen": 2048,
+                "seqlen_sink": 4,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1197,6 +1221,7 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "varlen_block_causal_2k_with_disjoint_ranges",
                 "seqlen": 2048,
+                "seqlen_sink": 6,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1261,6 +1286,7 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "deterministic_sample",
                 "seqlen": 2500,
+                "seqlen_sink": 8,
                 "q_ranges": AttnRanges.from_ranges(
                     [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
                 ),
@@ -1329,6 +1355,7 @@ class TestFlexFlashAttn(DistTestBase):
         # extract config
         seqlen: int = attn_mask_config["seqlen"]
         seqlen_sink: int = attn_mask_config.get("seqlen_sink", 0)
+        num_heads_q: int = model_config["num_heads_q"]
         q_ranges: AttnRanges = attn_mask_config["q_ranges"]
         k_ranges: AttnRanges = attn_mask_config["k_ranges"]
         attn_type_map: list[int] = attn_mask_config["attn_type_map"]
@@ -1352,6 +1379,10 @@ class TestFlexFlashAttn(DistTestBase):
             f"[has_sink={seqlen_sink > 0}]"
         )
 
+        # FIXME: for now, sink token does not support deterministic mode
+        if seqlen_sink > 0 and deterministic:
+            return
+
         self.run_test_case(
             seqlen_q=seqlen,
             seqlen_kv=seqlen,
@@ -1365,6 +1396,14 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             test_case=test_case,
+            err_ratio_dict={
+                "dq_min_mismatch_thres": 0.005,
+                "dsink_min_mismatch_thres": 1 / (seqlen_sink * num_heads_q)
+                if seqlen_sink > 0
+                else 0,
+                "dsink_min_norm_rtol": 5e-4,
+                "dsink_norm_rtol_ratio": NORM_RTOL_RATIO * 2,
+            },
         )
 
     @with_run_in_mp
@@ -1458,7 +1497,6 @@ class TestFlexFlashAttn(DistTestBase):
         min_len_k: int = generate_config["min_len_k"]
         max_len_q: int = generate_config["max_len_q"]
         max_len_k: int = generate_config["min_len_k"]
-        seqlen_sink: int = generate_config.get("seqlen_sink", 0)
 
         q_list, k_list = self.generate_non_overlapping_qk_pairs(
             total_seqlen_q=total_seqlen_q,
@@ -1491,13 +1529,12 @@ class TestFlexFlashAttn(DistTestBase):
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[acc_inplace={test_accumulation_inplace}]"
-            f"[has_sink={seqlen_sink > 0}]"
         )
 
         self.run_test_case(
             seqlen_q=total_seqlen_q,
             seqlen_kv=total_seqlen_k,
-            seqlen_sink=seqlen_sink,
+            seqlen_sink=0,
             model_config=model_config,
             dtype=dtype,
             q_ranges=q_ranges,

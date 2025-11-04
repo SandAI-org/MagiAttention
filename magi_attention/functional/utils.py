@@ -14,7 +14,7 @@
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange, reduce, repeat
 
 from magi_attention.utils import to_higher_fp_dtype
 
@@ -84,15 +84,7 @@ def sink_bwd(
     # where o.shape = [sq, nhq, d]
     #       do.shape = [sq, nhq, d]
     #       delta.shape = [nhq, sq, 1]
-    # delta = reduce(o.to(lse.dtype) * do.to(lse.dtype), "sq hq d -> hq sq 1", "sum")
-    delta = (
-        # shape: [sq, nhq, d] · [sq, nhq, d] -> [sq, nhq, d]
-        (o * do)
-        # shape: [sq, nhq, d] -> [sq, nhq, 1]
-        .sum(-1, keepdim=True, dtype=lse.dtype)
-        # shape: [sq, nhq, 1] -> [nhq, sq, 1]
-        .transpose(0, 1)
-    )
+    delta = reduce((o * do).to(lse.dtype), "sq hq d -> hq sq 1", "sum")
 
     # calculat p_sink = exp(sink - lse)
     # where sink.shape = [nhq, sq, s_sink]
@@ -104,26 +96,18 @@ def sink_bwd(
     # where p_sink.shape = [nhq, sq, s_sink]
     #       delta.shape = [[nhq, sq, 1]
     #       dsink.shape = [s_sink, nhq]
-    dsink_ = (
-        # shape: [nhq, s_sink, sq] x [nhq, sq, 1] -> [nhq, s_sink, 1]
-        (p_sink.transpose(-1, -2) @ -delta)
-        # shape: [nhq, s_sink, 1] -> [nhq, s_sink]
-        .squeeze(-1)
-        # shape: [nhq, s_sink] -> [s_sink, nhq]
-        .t()
-    ).to(sink_dtype)
+    dsink_ = reduce(p_sink * -delta, "nhq sq s_sink -> s_sink nhq", "sum")
 
     if dsink is None:
-        dsink = dsink_
+        dsink = dsink_.to(sink_dtype)
     else:
-        assert dsink.shape == dsink_.shape
-        assert dsink.dtype == dsink_.dtype
+        assert dsink.dtype == sink_dtype
         dsink.copy_(dsink_)
 
     return dsink
 
 
-sink_bwd_compiled = torch.compile(sink_bwd)
+sink_bwd_compiled = torch.compile(dynamic=True)(sink_bwd)
 
 
 def calc_lse_rescale_weight(
@@ -211,7 +195,7 @@ def correct_attn_lse(
     return lse
 
 
-correct_attn_lse_compiled = torch.compile(correct_attn_lse)
+correct_attn_lse_compiled = torch.compile(dynamic=True)(correct_attn_lse)
 
 
 def correct_attn_out(
@@ -253,7 +237,7 @@ def correct_attn_out(
     return out
 
 
-correct_attn_out_compiled = torch.compile(correct_attn_out)
+correct_attn_out_compiled = torch.compile(dynamic=True)(correct_attn_out)
 
 
 def correct_attn_fwd_result(
@@ -380,4 +364,6 @@ def correct_attn_out_lse_with_sink(
     return out, lse
 
 
-correct_attn_out_lse_with_sink_compiled = torch.compile(correct_attn_out_lse_with_sink)
+correct_attn_out_lse_with_sink_compiled = torch.compile(dynamic=True)(
+    correct_attn_out_lse_with_sink
+)
