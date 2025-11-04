@@ -52,6 +52,7 @@ class DistAttnRuntime:
     remote_qo_do_lse_work_with_buffer_per_stage: list[WorkWithBuffer]
     partial_dq_reduce_work_per_stage: list[WorkWithPostProcessFn]
     partial_dkv_reduce_work_per_stage: list[WorkWithPostProcessFn]
+    partial_dsink_reduce_work: WorkWithPostProcessFn
 
     def __init__(
         self,
@@ -130,28 +131,33 @@ class DistAttnRuntime:
         overlap_stage: int | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
+        sink: torch.Tensor | None = None,  # TODO: apply attention sink
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Apply forward partial attention with given q,kv for the given overlap stage
 
         Args:
-            q (torch.Tensor): current q
+            q (torch.Tensor): current q tensor
             kv (FusedOrTupleTensor): current kv fused or tupled tensor
             out_acc (torch.Tensor, optional): accumulative buffer for out
             lse_acc (torch.Tensor, optional): accumulative buffer for lse
             overlap_stage (int, optional): given overlap stage. Defaults to None.
 
             softmax_scale (float, optional): softmax scale.
-                Defaults to None to use default value: 1/sqrt(head_dim)
-            softcap (float, optional): softcap. Defaults to 0.
+                Defaults to ``None`` to use default value: ``1/sqrt(head_dim)``
+            softcap (float, optional): softcap. Defaults to ``0``.
+
+            sink (torch.Tensor, optional): sink tensor.
+                Defaults to ``None`` to not apply attention sink.
 
         Returns:
-            out (torch.Tensor | None): partial out, or None if skipped
-            lse (torch.Tensor | None): partial log-sum-exp, or None if skipped
+            out (torch.Tensor | None): partial out, or ``None`` if skipped
+            lse (torch.Tensor | None): partial log-sum-exp, or ``None`` if skipped
 
         Shape:
             q: [num_tokens_q, num_heads_q, head_dim]
             kv: [num_tokens_kv*2, num_heads_kv, head_dim]
+            sink: [num_tokens_sink, num_heads_q]
             out: [num_tokens_q, num_heads_q, head_dim]
             lse: [num_tokens_q, num_heads_q]
             out_acc: [num_tokens_q, num_heads_q, head_dim]
@@ -324,9 +330,9 @@ class DistAttnRuntime:
 
         Args:
             partial_remote_out (torch.Tensor, optional):
-                partial remote out in float32 dtype, or None if skipped
+                partial remote out in float32 dtype, or ``None`` if skipped
             partial_remote_lse (torch.Tensor, optional):
-                partial remote lse in float32 dtype, or None if skipped
+                partial remote lse in float32 dtype, or ``None`` if skipped
             partial_local_out (torch.Tensor): partial local out to be reduced
             partial_local_lse (torch.Tensor): partial local lse to be reduced
             ref_remote_out (torch.Tensor):
@@ -393,11 +399,12 @@ class DistAttnRuntime:
         local_kv: FusedOrTupleTensor,
         local_out: torch.Tensor,
         local_lse: torch.Tensor,
+        global_sink: torch.Tensor | None,
     ) -> None:
         if self.concat_kv:  # local_kv is a fused tensor
-            ctx.save_for_backward(local_q, local_kv, local_out, local_lse)
+            ctx.save_for_backward(local_q, local_kv, local_out, local_lse, global_sink)
         else:  # local_kv are tupled tensors
-            ctx.save_for_backward(local_q, *local_kv, local_out, local_lse)
+            ctx.save_for_backward(local_q, *local_kv, local_out, local_lse, global_sink)
 
     # ----------    API for bwd   --------- #
 
@@ -411,7 +418,8 @@ class DistAttnRuntime:
         overlap_stage: int | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
-    ) -> tuple[torch.Tensor | None, FusedOrTupleTensor | None]:
+        sink: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, FusedOrTupleTensor | None, torch.Tensor | None]:
         """
         Apply backward partial attention with given qo_do,kv,lse for the given overlap stage
 
@@ -423,22 +431,31 @@ class DistAttnRuntime:
             overlap_stage (int, optional): given overlap stage. Defaults to None.
 
             softmax_scale (float, optional): softmax scale.
-                Defaults to None to use default value: 1/sqrt(head_dim)
-            softcap (float, optional): softcap. Defaults to 0.
+                Defaults to ``None`` to use default value: ``1/sqrt(head_dim)``
+            softcap (float, optional): softcap. Defaults to ``0``.
+
+            sink (torch.Tensor, optional): sink tensor.
+                Defaults to ``None`` to not apply backward of sink to compute partial dsink.
 
         Returns:
-            partial_dq (torch.Tensor | None): partial dq, or None if skipped
-            partial_dkv (FusedOrTupleTensor | None): partial dkv, or None if skipped
+            partial_dq (torch.Tensor | None): partial dq, or ``None`` if skipped
+            partial_dkv (FusedOrTupleTensor | None): partial dkv, or ``None`` if skipped
+            partial_dsink (torch.Tensor | None): partial dsink, or ``None`` if skipped
 
         Shape:
             qo_do: [num_tokens_q*3, num_heads_q, head_dim]
             kv: [num_tokens_kv*2, num_heads_kv, head_dim]
+            sink: [num_tokens_sink, num_heads_q]
             lse: [num_tokens_q, num_heads_q]
             partial_dq: [num_tokens_q, num_heads_q, head_dim]
             partial_dkv: [num_tokens_kv*2, num_heads_kv, head_dim]
+            partial_dsink: [num_tokens_sink, num_heads_q]
         """
 
         is_host_stage = self.is_host_stage(overlap_stage)
+
+        # TODO: compute partial dsink
+        partial_dsink = None if sink is None else None
 
         # fetch attn arg
         if is_host_stage:
@@ -473,7 +490,7 @@ class DistAttnRuntime:
                 if not self.concat_dkv:  # make partial_dkv tupled tensors
                     partial_dkv = self._maybe_chunk(partial_dkv, num_chunks=2)
 
-            return partial_dq, partial_dkv
+            return partial_dq, partial_dkv, partial_dsink
 
         # prepare tensors and other meta
         q, o, do = self._maybe_chunk(qo_do, num_chunks=3)
@@ -550,7 +567,7 @@ class DistAttnRuntime:
         if not self.concat_dkv:  # make partial_dkv tupled tensors
             partial_dkv = (partial_dk, partial_dv)
 
-        return partial_dq, partial_dkv
+        return partial_dq, partial_dkv, partial_dsink
 
     @nvtx.instrument_nvtx
     def get_curr_qo_do_kv_lse_and_fetch_next(
@@ -653,13 +670,13 @@ class DistAttnRuntime:
 
         Args:
             partial_remote_dq (torch.Tensor, optional):
-                partial remote dq in float32 dtype, or None if skipped
+                partial remote dq in float32 dtype, or ``None`` if skipped
             partial_local_dq (torch.Tensor): partial local dq to be reduced
             ref_remote_qo_do (FusedOrTupleTensor):
                 reference remote qo_do fused or tupled tensor,
                 to provide meta info like dtype and shape
             partial_remote_dkv (FusedOrTupleTensor, optional):
-                partial remote dkv in float32 dtype, or None if skipped
+                partial remote dkv in float32 dtype, or ``None`` if skipped
             partial_local_dkv (FusedOrTupleTensor): partial local dkv to be reduced
             ref_remote_kv (FusedOrTupleTensor):
                 reference remote kv fused or tupled tensor, to provide meta info like dtype and shape
@@ -688,22 +705,42 @@ class DistAttnRuntime:
         )
 
     @nvtx.instrument_nvtx
-    def prepare_reduced_local_dq_dk_dv(
+    def reduce_partial_dsink(
+        self,
+        partial_global_dsink: torch.Tensor | None,
+    ) -> None:
+        """
+        Reduce partial global dsink to replicated global dsink
+        and assign the returned work to self.partial_dsink_reduce_work
+
+        Args:
+            partial_global_dsink (torch.Tensor, optional):
+                partial global dsink to be reduced if given
+        """
+        self.partial_dsink_reduce_work = self._reduce_partial_dsink(
+            partial_global_dsink=partial_global_dsink,
+        )
+
+    @nvtx.instrument_nvtx
+    def prepare_reduced_local_dqkv_global_dsink(
         self,
         partial_local_dq: torch.Tensor,
         partial_local_dkv: FusedOrTupleTensor,
+        partial_global_dsink: torch.Tensor | None,
         ref_local_dq: torch.Tensor,
         ref_local_dkv: FusedOrTupleTensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
-        Prepare the final reduced local dq,dk,dv
-        before returning from backward
+        Prepare the final reduced local dq,dk,dv before returning from backward
         with clearing the temporary work list
 
         Args:
             partial_local_dq (torch.Tensor): partial local dq to be reduced
             partial_local_dkv (FusedOrTupleTensor):
                 partial local dkv fused or tupled tensor to be reduced
+            partial_global_dsink (torch.Tensor, optional):
+                partial global dsink to be reduced if given
+
             ref_local_dq (torch.Tensor):
                 reference local dq, to provide meta info like dtype and shape
             ref_local_dkv (FusedOrTupleTensor):
@@ -713,6 +750,8 @@ class DistAttnRuntime:
             local_dq (torch.Tensor): reduced local dq tensor
             local_dk (torch.Tensor): reduced local dk tensor
             local_dv (torch.Tensor): reduced local dv tensor
+            global_dsink (torch.Tensor, optional):
+                reduced global dsink tensor (replicated among cp ranks) if required
         """
         # wait for all partial dq reduced
         for partial_dq_reduce_work in self.partial_dq_reduce_work_per_stage:
@@ -743,21 +782,39 @@ class DistAttnRuntime:
             local_dk = local_dk.to(kv_dtype)
             local_dv = local_dv.to(kv_dtype)
 
+        # wait for partial global dsink reduced
+        global_dsink = self.partial_dsink_reduce_work.wait_post_process(
+            partial_global_dsink
+        )
+
         # reset the temporary work list
         self._reset_work_list()
 
-        return local_dq, local_dk, local_dv
+        return local_dq, local_dk, local_dv, global_dsink
 
     def load_tensors_from_fwd(
         self, ctx
-    ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        FusedOrTupleTensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ]:
         if self.concat_kv:  # local kv is a fused tensor
-            local_q, local_kv, local_out, local_lse = ctx.saved_tensors
+            local_q, local_kv, local_out, local_lse, global_sink = ctx.saved_tensors
         else:  # local kv are tupled tensors
-            local_q, local_k, local_v, local_out, local_lse = ctx.saved_tensors
+            (
+                local_q,
+                local_k,
+                local_v,
+                local_out,
+                local_lse,
+                global_sink,
+            ) = ctx.saved_tensors
             local_kv = (local_k, local_v)
 
-        return local_q, local_kv, local_out, local_lse
+        return local_q, local_kv, local_out, local_lse, global_sink
 
     # ----------    common API   --------- #
 
@@ -1144,9 +1201,9 @@ class DistAttnRuntime:
 
         Args:
             partial_remote_out (torch.Tensor, optional):
-                partial remote out in float32 dtype, or None if skipped
+                partial remote out in float32 dtype, or ``None`` if skipped
             partial_remote_lse (torch.Tensor, optional):
-                partial remote lse in float32 dtype, or None if skipped
+                partial remote lse in float32 dtype, or ``None`` if skipped
             partial_local_out (torch.Tensor): partial local out to be reduced
             partial_local_lse (torch.Tensor): partial local lse to be reduced
             ref_remote_out (torch.Tensor):
@@ -1248,7 +1305,7 @@ class DistAttnRuntime:
 
         Args:
             partial_remote_dkv (FusedOrTupleTensor, optional):
-                partial remote dkv fused or tupled tensor, or None if skipped
+                partial remote dkv fused or tupled tensor, or ``None`` if skipped
             partial_local_dkv (FusedOrTupleTensor):
                 partial local dkv fused or tupled tensor to be reduced
             ref_remote_dkv (FusedOrTupleTensor):
@@ -1331,7 +1388,7 @@ class DistAttnRuntime:
 
         Args:
             partial_remote_dq (torch.Tensor, optional):
-                partial remote dq in float32 dtype, or None if skipped
+                partial remote dq in float32 dtype, or ``None`` if skipped
             partial_local_dq (torch.Tensor): partial local dq to be reduced
             ref_remote_dq (torch.Tensor):
                 reference remote dq, to provide meta info like dtype and shape
@@ -1395,6 +1452,39 @@ class DistAttnRuntime:
 
         return partial_dq_reduce_work
 
+    @nvtx.instrument_nvtx
+    def _reduce_partial_dsink(
+        self,
+        partial_global_dsink: torch.Tensor | None,
+    ) -> WorkWithPostProcessFn:
+        """
+        Reduce partial global dsink to replicated global dsink
+
+        Args:
+            partial_global_dsink (torch.Tensor, optional):
+                partial global dsink to be reduced if given
+
+        Returns:
+            partial_dsink_reduce_work (WorkWithPostProcessFn):
+                partial global dsink all-reduce work if required
+        """
+        if partial_global_dsink is not None:
+            work = dist.all_reduce(
+                partial_global_dsink,
+                group=self.cp_group_gc,
+                async_op=True,
+            )
+            partial_dsink_reduce_work = WorkWithPostProcessFn(
+                work=GeneralWork(work),
+                post_process_fn=lambda x: x,  # take partial dsink and return in-place reduced dsink
+            )
+        else:
+            partial_dsink_reduce_work = WorkWithPostProcessFn(
+                work=None, post_process_fn=lambda *args, **kwargs: None  # return None
+            )
+
+        return partial_dsink_reduce_work
+
     def _maybe_concat(
         self,
         *x: torch.Tensor,
@@ -1450,6 +1540,7 @@ class DistAttnRuntime:
         self.partial_dkv_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
             None
         ] * self.overlap_degree  # bwd
+        self.partial_dsink_reduce_work: WorkWithPostProcessFn = None  # bwd
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, DistAttnRuntime):
@@ -1471,6 +1562,7 @@ class DistAttnFunc(torch.autograd.Function):
         local_q: torch.Tensor,
         local_k: torch.Tensor,
         local_v: torch.Tensor,
+        global_sink: torch.Tensor | None,
         dist_attn_runtime: DistAttnRuntime,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
@@ -1482,6 +1574,9 @@ class DistAttnFunc(torch.autograd.Function):
             local_q (torch.Tensor): local q tensor
             local_k (torch.Tensor): local k tensor
             local_v (torch.Tensor): local v tensor
+            global_sink (torch.Tensor | None): optional global sink tensor
+                to apply attention sink if given
+
             dist_attn_runtime(DistAttnRuntime): dist attn runtime
 
             softmax_scale (float, optional): softmax scale.
@@ -1489,14 +1584,13 @@ class DistAttnFunc(torch.autograd.Function):
             softcap (float, optional): softcap. Defaults to 0.
 
         Returns:
-            local_out (torch.Tensor): local out tensor
-
-            local_lse (torch.Tensor): local lse tensor
+            tuple[torch.Tensor, torch.Tensor]: local out tensor and local lse tensor
 
         Shape:
             local_q: [num_tokens_q_local, num_heads_q, head_dim]
             local_k: [num_tokens_kv_local, num_heads_kv, head_dim]
             local_v: [num_tokens_kv_local, num_heads_kv, head_dim]
+            global_sink: [num_tokens_sink_global, num_heads_q]
             local_out: [num_tokens_q_local, num_heads_q, head_dim]
             local_lse: [num_tokens_q_local, num_heads_q]
         """
@@ -1515,6 +1609,7 @@ class DistAttnFunc(torch.autograd.Function):
             overlap_stage=None,
             softmax_scale=softmax_scale,
             softcap=softcap,
+            sink=global_sink,
         )
         assert partial_local_out is not None and partial_local_lse is not None
 
@@ -1547,6 +1642,7 @@ class DistAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
                 softmax_scale=softmax_scale,
                 softcap=softcap,
+                sink=global_sink,
             )
 
             # reduce ith partial out with partial lse
@@ -1574,6 +1670,7 @@ class DistAttnFunc(torch.autograd.Function):
             local_kv=local_kv,
             local_out=local_out,
             local_lse=local_lse,
+            global_sink=global_sink,
         )
         ctx.dist_attn_runtime = dist_attn_runtime
         ctx.softmax_scale = softmax_scale
@@ -1589,6 +1686,7 @@ class DistAttnFunc(torch.autograd.Function):
             local_kv,
             local_out,
             local_lse,
+            global_sink,
         ) = dist_attn_runtime.load_tensors_from_fwd(ctx)
         softmax_scale: float | None = ctx.softmax_scale
         softcap: float = ctx.softcap
@@ -1610,6 +1708,7 @@ class DistAttnFunc(torch.autograd.Function):
         (
             partial_local_dq,
             partial_local_dkv,
+            partial_global_dsink,
         ) = dist_attn_runtime.apply_bwd_partial_attn(
             qo_do=local_qo_do,
             kv=local_kv,
@@ -1617,8 +1716,14 @@ class DistAttnFunc(torch.autograd.Function):
             overlap_stage=None,
             softmax_scale=softmax_scale,
             softcap=softcap,
+            sink=global_sink,
         )
         assert partial_local_dq is not None and partial_local_dkv is not None
+
+        # reduce partial global dsink if required
+        dist_attn_runtime.reduce_partial_dsink(
+            partial_global_dsink=partial_global_dsink,
+        )
 
         # loop into remote stages
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
@@ -1640,6 +1745,7 @@ class DistAttnFunc(torch.autograd.Function):
             (
                 partial_remote_dq,
                 partial_remote_dkv,
+                _,  # partial_global_dsink
             ) = dist_attn_runtime.apply_bwd_partial_attn(
                 qo_do=curr_remote_qo_do,
                 kv=curr_remote_kv,
@@ -1648,6 +1754,7 @@ class DistAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
                 softmax_scale=softmax_scale,
                 softcap=softcap,
+                sink=global_sink,
             )
 
             # reduce ith partial dq,dkv
@@ -1662,11 +1769,17 @@ class DistAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
             )
 
-        # prepare reduced local dq,dk,dv
+        # prepare reduced local dq,dk,dv and maybe global dsink
         # before returning from backward
-        local_dq, local_dk, local_dv = dist_attn_runtime.prepare_reduced_local_dq_dk_dv(
+        (
+            local_dq,
+            local_dk,
+            local_dv,
+            global_dsink,
+        ) = dist_attn_runtime.prepare_reduced_local_dqkv_global_dsink(
             partial_local_dq=partial_local_dq,
             partial_local_dkv=partial_local_dkv,
+            partial_global_dsink=partial_global_dsink,
             ref_local_dq=local_q,
             ref_local_dkv=local_kv,
         )
@@ -1675,6 +1788,7 @@ class DistAttnFunc(torch.autograd.Function):
             local_dq,
             local_dk,
             local_dv,
+            global_dsink,
             None,  # dist_attn_runtime
             None,  # softmax_scale
             None,  # softcap
@@ -1686,28 +1800,36 @@ def dist_attn_func(
     k: torch.Tensor,
     v: torch.Tensor,
     dist_attn_runtime: DistAttnRuntime,
+    sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Distributed attention autograd function
 
     Args:
-        q (torch.Tensor): local q
-        k (torch.Tensor): local k
-        v (torch.Tensor): local v
+        q (torch.Tensor): local q tensor
+        k (torch.Tensor): local k tensor
+        v (torch.Tensor): local v tensor
+
         dist_attn_runtime (DistAttnRuntime): distributed attention runtime
 
+        sink (torch.Tensor, optional): global sink tensor (replicated among cp ranks).
+            Defaults to ``None`` to not apply attention sink.
+
+        NOTE: for now, we only support sink tensor with dtype=torch.float32
+
         softmax_scale (float, optional): softmax scale.
-            Defaults to None to use default value: 1/sqrt(head_dim)
-        softcap (float, optional): softcap. Defaults to 0.
+            Defaults to ``None`` to use default value: ``1/sqrt(head_dim)``
+        softcap (float, optional): softcap. Defaults to ``0.0``.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: local out and local lse
+        tuple[torch.Tensor, torch.Tensor]: local out tensor and local lse tensor
 
     Shapes:
         q: [num_tokens_q_local, num_heads_q, head_dim]
         k: [num_tokens_kv_local, num_heads_kv, head_dim]
         v: [num_tokens_kv_local, num_heads_kv, head_dim]
+        sink: [num_tokens_sink_global, num_heads_q]
         out: [num_tokens_q_local, num_heads_q, head_dim]
         lse: [num_tokens_q_local, num_heads_q]
     """
@@ -1715,6 +1837,7 @@ def dist_attn_func(
         q,
         k,
         v,
+        sink,
         dist_attn_runtime,
         softmax_scale,
         softcap,

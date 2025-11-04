@@ -709,6 +709,7 @@ def calc_attn(
     k: torch.Tensor,
     v: torch.Tensor,
     key: DistAttnRuntimeKey,
+    sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -723,6 +724,9 @@ def calc_attn(
             as one argument for many other magi_attention APIs,
             about which the users may have no bother to care.
 
+        sink (torch.Tensor, optional): global sink tensor (replicated among cp ranks).
+            Defaults to ``None`` to not apply attention sink.
+
         softmax_scale (float, optional): softmax scale.
             Defaults to ``None`` to use: ``1/sqrt(head_dim)``.
         softcap (float, optional): softcap. Defaults to ``0.0``.
@@ -736,6 +740,7 @@ def calc_attn(
         - q: [num_tokens_q_local, num_heads_q, head_dim]
         - k: [num_tokens_kv_local, num_heads_kv, head_dim]
         - v: [num_tokens_kv_local, num_heads_kv, head_dim]
+        - sink: [num_tokens_sink_global, num_heads_q]
         - out: [num_tokens_q_local, num_heads_q, head_dim]
         - lse: [num_tokens_q_local, num_heads_q]
 
@@ -750,6 +755,7 @@ def calc_attn(
         q=q,
         k=k,
         v=v,
+        sink=sink,
         softmax_scale=softmax_scale,
         softcap=softcap,
     )
