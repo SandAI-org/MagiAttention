@@ -861,8 +861,13 @@ struct CollectiveMainloopBwdSm90 {
     }
   }
 
-  template <typename SharedStorage>
-  CUTLASS_DEVICE void store_dq(Params const& params, SharedStorage& shared_storage, cute::tuple<int32_t, int32_t, int32_t> block_coord, int bidb_last = 0) {
+  template <typename SharedStorage, typename BlockMetaT>
+  CUTLASS_DEVICE void store_dq(
+      Params const& params,
+      SharedStorage& shared_storage,
+      cute::tuple<int32_t, int32_t, int32_t> block_coord,
+      BlockMetaT& block_meta,
+      int bidb_last = 0) {
     if constexpr (!dQacc_use_TMA) {
       return;
     }
@@ -870,12 +875,21 @@ struct CollectiveMainloopBwdSm90 {
     static constexpr int kBlockM = get<0>(TileShape_MNK{});
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
+    int n_block = block_meta.n_block;
+    int bidh = block_meta.bidh;
+    int bidb = block_meta.bidb;
+    SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
+    flash::AttnType attn_type = block_meta.attn_type;
+    int m_block_min = block_meta.m_block_min;
+    int m_block_max = block_meta.m_block_max;
+    /*
     int n_block = get<0>(block_coord);
     int bidh = get<1>(block_coord);
     int bidb = get<2>(block_coord);
     SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
     flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
     auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
+    */
 
     if constexpr (Deterministic) {
       // update conflict state of batches

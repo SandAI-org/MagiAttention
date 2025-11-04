@@ -286,28 +286,42 @@ class FlashAttnBwdSm90 {
           // get block_coord without deterministic message
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
           auto [n_block, bidh, bidb_idx] = block_coord;
-
+          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
           if constexpr (RangeMerge) {
             int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
                                                                              : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
             int bidb_start = params.scheduler.range_map[bidb_idx];
 
+            while (!block_meta.is_finish() && block_meta.is_valid()) {
+              if constexpr (!Deterministic) {
+                mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta);
+              } else {
+                mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta, bidb_last);
+                bidb_last = block_meta.bidb;
+              }
+              block_meta.prefetch();
+            }
+            /*
             for (int idx = 0; idx < loop_count; ++idx) {
               int bidb = bidb_start + idx;
               block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
+              // BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
+
               if constexpr (!Deterministic) {
-                mainloop.store_dq(params.mainloop, shared_storage, block_coord);
+                mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta);
               } else {
-                mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
+                mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta, bidb_last);
                 bidb_last = bidb;
               }
-            }
+              block_meta.prefetch();
+            } */
           } else {
             if constexpr (!Deterministic) {
-              mainloop.store_dq(params.mainloop, shared_storage, block_coord);
+              mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta);
             } else {
-              mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
-              bidb_last = bidb_idx;
+              mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta, bidb_last);
+              // bidb_last = bidb_idx;
+              bidb_last = block_meta.bidb;
             }
           }
         }
@@ -450,6 +464,9 @@ class FlashAttnBwdSm90 {
         } */
 
         block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), block_meta.bidb - 1);
+        if constexpr (Deterministic) {
+          cute::get<2>(block_coord_) = get<2>(block_coord);
+        }
         if (tile_valid) {
 #pragma unroll
           for (int i = 0; i < size(tdKrdK); ++i) {
