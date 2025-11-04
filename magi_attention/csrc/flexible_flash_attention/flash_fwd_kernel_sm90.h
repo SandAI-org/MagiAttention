@@ -55,6 +55,7 @@ class FlashAttnFwdSm90 {
   static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
   static constexpr int NumMmaThreadsQK = CollectiveMainloop::NumMmaThreadsQK;
   static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
+  static constexpr bool SparseLoad = CollectiveMainloop::SparseLoad;
 
   // Mainloop derived types
   // using BlockMeta = typename CollectiveMainloop::BlockMeta;
@@ -260,62 +261,105 @@ class FlashAttnFwdSm90 {
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
-      using BlockMetaT = typename CollectiveMainloop::BlockMeta<true>;
+      if constexpr (!SparseLoad) {
+        // normal load using TMA
+        using BlockMetaT = typename CollectiveMainloop::BlockMeta<true>;
 
-      // Deallocate the registers for the producer WG, this makes the consumer
-      // WG have more registers
-      cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+        // Deallocate the registers for the producer WG, this makes the consumer
+        // WG have more registers
+        cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
-      // Initialize the producer pipeline state
-      PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
-      PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
+        // Initialize the producer pipeline state
+        PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
+        PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
 
-      // Initialize the work index
-      int work_idx = 0;
+        // Initialize the work index
+        int work_idx = 0;
 
-      // Get some block-level information
-      int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
-      // Currently, SingleProducerWarp is always true
-      static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
+        // Get some block-level information
+        int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+        // Currently, SingleProducerWarp is always true
+        static constexpr bool SingleProducerWarp = NumProducerThreads == cutlass::NumThreadsPerWarp;
 
-      // Only the first warp in the warp group needs to issue the TMA load
-      // instruction
-      if constexpr (SingleProducerWarp) {
-        if (warp_idx_in_warpgroup != 0) {
-          return;
+        // Only the first warp in the warp group needs to issue the TMA load
+        // instruction
+        if constexpr (SingleProducerWarp) {
+          if (warp_idx_in_warpgroup != 0) {
+            return;
+          }
         }
-      }
 
-      // wtfff?
-      if (!SingleProducerWarp && warp_idx_in_warpgroup != 0) {
-        scheduler.init_consumer();
-      }
-
-      // cutlass::arch::wait_on_dependent_grids();
-
-      // Load Q, K, V
-      for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
-                                                                                  : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
-           work_tile_info.is_valid(params.scheduler);
-           work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0
-               ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
-               : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
-        BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
-        // get block_coord without deterministic message
-        auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
-        auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
-
-        BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
-
-        bool has_tile_valid = mainloop.load(
-            params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_coord, block_meta, work_idx);
-
-        scheduler_prefetch();
-        if (has_tile_valid) {
-          ++work_idx;
+        // wtfff?
+        if (!SingleProducerWarp && warp_idx_in_warpgroup != 0) {
+          scheduler.init_consumer();
         }
+
+        // cutlass::arch::wait_on_dependent_grids();
+
+        // Load Q, K, V
+        for (auto work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0 ? scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler)
+                                                                                    : scheduler.template get_initial_work</*IsProducerWarp=*/false>(params.scheduler);
+             work_tile_info.is_valid(params.scheduler);
+             work_tile_info = SingleProducerWarp || warp_idx_in_warpgroup == 0
+                 ? scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)
+                 : scheduler.template get_next_work</*IsProducerWarp=*/false>(params.scheduler, work_tile_info)) {
+          BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
+          // get block_coord without deterministic message
+          auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
+          auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
+
+          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
+
+          bool has_tile_valid = mainloop.load(
+              params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_coord, block_meta, work_idx);
+
+          scheduler_prefetch();
+          if (has_tile_valid) {
+            ++work_idx;
+          }
+        }
+        mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
+      } else {
+        // TODO: Sparse Load using cp.async
+        // using BlockMetaT = typename CollectiveMainloop::SparseBlockMeta<true>;
+
+        // // Deallocate the registers for the producer WG, this makes the consumer
+        // // WG have more registers
+        // cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
+
+        // // Initialize the producer pipeline state
+        // PipelineState smem_pipe_write_k = cutlass::make_producer_start_state<MainloopPipelineK>();
+        // PipelineState smem_pipe_write_v = cutlass::make_producer_start_state<MainloopPipelineV>();
+
+        // // Initialize the work index
+        // int work_idx = 0;
+
+        // // Get some block-level information
+        // int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
+        // int thread_idx = threadIdx.x % NumProducerThreads;
+
+        // // Load Q, K, V
+        // for (auto work_tile_info = scheduler.template get_initial_work</*IsProducerWarp=*/true>(params.scheduler);
+        //     work_tile_info.is_valid(params.scheduler);
+        //     work_tile_info = scheduler.template get_next_work</*IsProducerWarp=*/true>(params.scheduler, work_tile_info)) {
+        //   BlockCoordType block_coord_raw = work_tile_info.get_block_coord(params.scheduler);
+        //   // get block_coord without deterministic message
+        //   auto block_coord = cute::make_tuple(get<0>(block_coord_raw), get<1>(block_coord_raw), get<2>(block_coord_raw));
+        //   auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
+
+        //   BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
+
+        //   bool has_tile_valid = mainloop.load_sparse(
+        //       params.mainloop, pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, scheduler_prefetch, block_coord, block_meta, work_idx,
+        //       thread_idx);
+
+        //   scheduler_prefetch();
+        //   if (has_tile_valid) {
+        //     ++work_idx;
+        //   }
+        // }
+        // mainloop.load_tail_sparse(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
       }
-      mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
     } else { // Consumer
       using BlockMetaT = typename CollectiveMainloop::BlockMeta<false>;
 
