@@ -17,6 +17,7 @@ from typing import overload
 import torch
 import torch.distributed as dist
 
+import magi_attention
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.common.enum import GroupReduceOp
 from magi_attention.utils import is_list_type_all, nvtx
@@ -140,37 +141,81 @@ def a2av_group_cast_impl(
 
     # ---------    lauch a2a comm kernel     --------- #
 
-    if cast_lse:
-        # NOTE: we can not fuse lse comm with out comm based on nccl APIs
-        # due to different shape and dtype
-        a2a_input, a2a_input_lse = a2a_input
-        a2a_output, a2a_output_lse = a2a_output
-        work_out = all2all_v(
-            input=a2a_input,
-            output=a2a_output,
-            input_split_size_list=a2a_input_split_size_list,
-            output_split_size_list=a2a_output_split_size_list,
-            group=group,
-            async_op=async_op,
-        )
-        work_lse = all2all_v(
-            input=a2a_input_lse,
-            output=a2a_output_lse,
-            input_split_size_list=a2a_input_split_size_list,
-            output_split_size_list=a2a_output_split_size_list,
-            group=group,
-            async_op=async_op,
-        )
-        work = [work_out, work_lse]
+    comm_stream = torch.cuda.current_stream()
+    if magi_attention.is_comm_stream_enable():
+        comm_stream = magi_attention.get_unified_comm_stream()
+
+        with torch.cuda.stream(comm_stream):
+            if cast_lse:
+                # NOTE: we can not fuse lse comm with out comm based on nccl APIs
+                # due to different shape and dtype
+                a2a_input, a2a_input_lse = a2a_input
+                a2a_output, a2a_output_lse = a2a_output
+                work_out = all2all_v(
+                    input=a2a_input,
+                    output=a2a_output,
+                    input_split_size_list=a2a_input_split_size_list,
+                    output_split_size_list=a2a_output_split_size_list,
+                    group=group,
+                    async_op=False,
+                )
+                work_lse = all2all_v(
+                    input=a2a_input_lse,
+                    output=a2a_output_lse,
+                    input_split_size_list=a2a_input_split_size_list,
+                    output_split_size_list=a2a_output_split_size_list,
+                    group=group,
+                    async_op=False,
+                )
+                result = post_process_fn(output=a2a_output, output_lse=a2a_output_lse)
+                work = torch.cuda.Event()
+                work.record(comm_stream)
+                post_process_fn = lambda *args, **kwargs: result
+            else:
+                work = all2all_v(
+                    input=a2a_input,
+                    output=a2a_output,
+                    input_split_size_list=a2a_input_split_size_list,
+                    output_split_size_list=a2a_output_split_size_list,
+                    group=group,
+                    async_op=False,
+                )
+                result = post_process_fn(output=a2a_output)
+                work = torch.cuda.Event()
+                work.record(comm_stream)
+                post_process_fn = lambda *args, **kwargs: result
     else:
-        work = all2all_v(
-            input=a2a_input,
-            output=a2a_output,
-            input_split_size_list=a2a_input_split_size_list,
-            output_split_size_list=a2a_output_split_size_list,
-            group=group,
-            async_op=async_op,
-        )
+        if cast_lse:
+            # NOTE: we can not fuse lse comm with out comm based on nccl APIs
+            # due to different shape and dtype
+            a2a_input, a2a_input_lse = a2a_input
+            a2a_output, a2a_output_lse = a2a_output
+            work_out = all2all_v(
+                input=a2a_input,
+                output=a2a_output,
+                input_split_size_list=a2a_input_split_size_list,
+                output_split_size_list=a2a_output_split_size_list,
+                group=group,
+                async_op=async_op,
+            )
+            work_lse = all2all_v(
+                input=a2a_input_lse,
+                output=a2a_output_lse,
+                input_split_size_list=a2a_input_split_size_list,
+                output_split_size_list=a2a_output_split_size_list,
+                group=group,
+                async_op=async_op,
+            )
+            work = [work_out, work_lse]
+        else:
+            work = all2all_v(
+                input=a2a_input,
+                output=a2a_output,
+                input_split_size_list=a2a_input_split_size_list,
+                output_split_size_list=a2a_output_split_size_list,
+                group=group,
+                async_op=async_op,
+            )
 
     return WorkWithPostProcessFn(
         work=GeneralWork(work=work),

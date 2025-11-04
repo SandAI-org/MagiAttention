@@ -453,6 +453,24 @@ def _calc_group_cast_a2a_input_args(
             device=input.device,
         )
 
+    unified_stream: torch.cuda.Stream = magi_attention.get_unified_comm_stream()
+    if magi_attention.is_comm_stream_enable():
+        unified_stream.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(unified_stream):
+            a2a_input = range_gather(
+                input=input,
+                **perm_before_a2a_kwargs,
+            )
+            if cast_lse:
+                a2a_input_lse = range_gather(
+                    input=input_lse,
+                    **perm_before_a2a_kwargs,
+                )
+                a2a_input = (a2a_input, a2a_input_lse)
+
+        return a2a_input, a2a_input_split_size
+
     # -----     group_cast_a2a_input tensor args     ----- #
 
     a2a_input = range_gather(
@@ -563,6 +581,10 @@ def _calc_group_cast_a2a_output_args(
 
     # -----     group_cast_a2a_output tensor args     ----- #
 
+    unified_stream: torch.cuda.Stream = magi_attention.get_unified_comm_stream()
+    if magi_attention.is_comm_stream_enable():
+        unified_stream.wait_stream(torch.cuda.current_stream())
+
     a2a_output = output
     if cast_lse:
         assert output_lse is not None
@@ -627,6 +649,13 @@ def calc_group_cast_a2a_args(
 
     # ---------    prepare post-process fn    --------- #
 
+    def make_stream_fn(fn, stream):
+        def wrapped_fn(*args, **kwargs):
+            with torch.cuda.stream(stream):
+                return fn(*args, **kwargs)
+
+        return wrapped_fn
+
     if cast_lse:
         post_process_fn = partial(
             unpermute_output_with_lse,
@@ -637,6 +666,10 @@ def calc_group_cast_a2a_args(
             unpermute_output,
             unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
         )
+
+    # if magi_attention.is_comm_stream_enable():
+    # post_process_fn = make_stream_fn(post_process_fn, magi_attention.get_unified_comm_stream())
+    # post_process_fn = make_stream_fn(post_process_fn, magi_attention.get_unified_comm_stream())
 
     return (
         a2a_output,

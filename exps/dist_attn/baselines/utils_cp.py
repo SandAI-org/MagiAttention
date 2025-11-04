@@ -24,7 +24,10 @@ import transformer_engine_torch as tex
 from einops import rearrange
 
 # fa3
-from flash_attn_interface import _flash_attn_backward, _flash_attn_forward
+try:
+    from flash_attn_interface import _flash_attn_backward, _flash_attn_forward
+except:
+    pass
 
 # from flashattn_hopper.flash_attn_interface import (
 #     _flash_attn_backward,

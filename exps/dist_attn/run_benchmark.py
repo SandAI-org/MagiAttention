@@ -64,19 +64,19 @@ class AttnImpl(Enum):
 
 # attention params
 SEED = 42
-TOTAL_SEQLEN = 512 * 1024
+TOTAL_SEQLEN = 64 * 1024
 Q_HEADS = 48
 KV_HEADS = 16
 EMBED_DIM = 1024
 HIDDEN_SIZE = 128
 DTYPE = torch.bfloat16
-WORLD_SIZE = 64
+WORLD_SIZE = 8
 ATTN_IMPL = AttnImpl.MAGI_ATTENTION
 ATTN_BACKEND = AttnBackend.FA3
 
 # mask params
 MASK_NUMS = 1
-MASK_TYPE = FlashMaskType.FULL_DOCUMENT
+MASK_TYPE = FlashMaskType.FULL
 ITERATION = 10
 
 # Optional baseline params (except magi)

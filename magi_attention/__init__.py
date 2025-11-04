@@ -16,6 +16,8 @@ import importlib.util
 import os
 import warnings
 
+import torch
+
 from . import comm, config, functional
 from .dist_attn_runtime_mgr import (
     init_dist_attn_runtime_key,
@@ -97,3 +99,13 @@ def dist_attn_runtime_dict_size() -> int:
     Default value is ``100``
     """
     return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "100"))
+
+
+def is_comm_stream_enable() -> bool:
+    return os.environ.get("MAGI_ATTENTION_COMM_STREAM", "0") == "1"
+
+
+def get_unified_comm_stream() -> torch.cuda.Stream:
+    if not hasattr(get_unified_comm_stream, "_stream"):
+        get_unified_comm_stream._stream = torch.cuda.Stream(priority=-1)
+    return get_unified_comm_stream._stream
