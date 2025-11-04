@@ -142,7 +142,7 @@ def calc_lse_sink(
     Args:
         sink (torch.Tensor): the sink tokens with shape: [seqlen_sink, num_heads_q]
         ref_lse (torch.Tensor): the reference lse tensor with shape: [seqlen_q, num_heads_q]
-            to provide the meta info like shape
+            to provide the meta info like shape and dtype
 
     Returns:
         torch.Tensor: the log-sum-exp of the sink tokens
@@ -150,7 +150,7 @@ def calc_lse_sink(
     # calculate lse_sink and broadcast it to ref lse's shape
     lse_sink = (
         # shape: [s_sink, nhq] -> [nhq,]
-        torch.logsumexp(sink, dim=0)
+        torch.logsumexp(sink, dim=0).to(ref_lse.dtype)
         # shape: [nhq,] -> [1, nhq]
         .unsqueeze(0)
         # shape: [1, nhq] -> [sq, nhq]
@@ -158,6 +158,9 @@ def calc_lse_sink(
     )
 
     return lse_sink
+
+
+calc_lse_sink_compiled = torch.compile(dynamic=True)(calc_lse_sink)
 
 
 def correct_attn_lse(

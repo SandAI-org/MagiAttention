@@ -26,7 +26,7 @@ from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
-from .utils import correct_attn_fwd_result
+from .utils import calc_lse_sink_compiled, correct_attn_fwd_result, sink_bwd_compiled
 
 FusedOrTupleTensor: TypeAlias = torch.Tensor | tuple[torch.Tensor, ...]
 WorkWithBuffer: TypeAlias = (
@@ -131,7 +131,7 @@ class DistAttnRuntime:
         overlap_stage: int | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
-        sink: torch.Tensor | None = None,  # TODO: apply attention sink
+        sink: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Apply forward partial attention with given q,kv for the given overlap stage
@@ -174,25 +174,12 @@ class DistAttnRuntime:
 
         # skipped case
         if attn_arg.can_skip(is_bwd=False):
-            partial_out, partial_lse = None, None
             if is_host_stage:
-                # NOTE: we can NOT use empty_like here,
-                # since when all attn computations are skipped for certain q range
-                # we have nowhere to zero-fill it
-                partial_out = torch.zeros_like(
-                    q,
-                    dtype=self._maybe_hp_dtype(q.dtype, not self.fwd_local_out_lp_init),
-                    device=q.device,
+                return self._init_out_lse_skipped_host_stage(
+                    q=q,
+                    sink=sink,
                 )
-                partial_lse = torch.full(
-                    (q.size(0), q.size(1)),
-                    fill_value=float("-inf"),
-                    dtype=self._maybe_hp_dtype(
-                        q.dtype, need_hp_dtype=True
-                    ),  # lse always in high-precision
-                    device=q.device,
-                )
-            return partial_out, partial_lse
+            return None, None
 
         # attention forward pass
         k, v = self._maybe_chunk(kv, num_chunks=2)
@@ -210,6 +197,9 @@ class DistAttnRuntime:
                     q=q,
                     k=k,
                     v=v,
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
                     attn_arg=attn_arg,
                     softmax_scale=_softmax_scale,
                     softcap=softcap,
@@ -219,7 +209,9 @@ class DistAttnRuntime:
                     q=q,
                     k=k,
                     v=v,
-                    sink=None,  # TODO: support dist sink
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
                     out=out_acc,  # directly reduce to out_acc
                     lse=lse_acc,  # directly reduce to lse_acc
                     **attn_arg.to_ffa_args(is_bwd=False),
@@ -454,9 +446,6 @@ class DistAttnRuntime:
 
         is_host_stage = self.is_host_stage(overlap_stage)
 
-        # TODO: compute partial dsink
-        partial_dsink = None if sink is None else None
-
         # fetch attn arg
         if is_host_stage:
             attn_arg = self.calc_meta.local_attn_arg
@@ -466,31 +455,14 @@ class DistAttnRuntime:
 
         # skipped case
         if attn_arg.can_skip(is_bwd=True):
-            partial_dq, partial_dkv = None, None
-
             if is_host_stage:
-                q, _, _ = self._maybe_chunk(qo_do, num_chunks=3)
-                k, _ = self._maybe_chunk(kv, num_chunks=2)
-                if self.concat_kv:  # kv is a fused tensor
-                    dkv_shape = kv.shape
-                else:  # kv are tupled tensors
-                    dkv_shape = (k.shape[0] * 2, *k.shape[1:])
-
-                # NOTE: if local_dq and local_dkv calculation are skipped,
-                # we need to zero-initialize them since they might be reduced later
-                partial_dq = torch.zeros_like(
-                    q,
-                    dtype=self._maybe_hp_dtype(q.dtype, not self.bwd_local_dq_lp_init),
+                return self._init_dq_dkv_dsink_skipped_host_stage(
+                    qo_do=qo_do,
+                    kv=kv,
+                    lse=lse,
+                    sink=sink,
                 )
-                partial_dkv = torch.zeros(
-                    dkv_shape,
-                    dtype=self._maybe_hp_dtype(k.dtype, not self.bwd_local_dkv_lp_init),
-                    device=k.device,
-                )
-                if not self.concat_dkv:  # make partial_dkv tupled tensors
-                    partial_dkv = self._maybe_chunk(partial_dkv, num_chunks=2)
-
-            return partial_dq, partial_dkv, partial_dsink
+            return None, None, None
 
         # prepare tensors and other meta
         q, o, do = self._maybe_chunk(qo_do, num_chunks=3)
@@ -505,11 +477,14 @@ class DistAttnRuntime:
 
         # attention backward pass
         if self.use_sdpa_backend:
-            partial_dq, partial_dk, partial_dv = sdpa_bwd(
+            partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
                 do=do,
                 q=q,
                 k=k,
                 v=v,
+                # NOTE: dsink should be computed only once
+                # thus we only compute it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
                 o=o,
                 lse=lse,
                 attn_arg=attn_arg,
@@ -528,18 +503,25 @@ class DistAttnRuntime:
             )
             partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
 
-            partial_dq, partial_dk, partial_dv, _ = _flex_flash_attn_backward(
+            (
+                partial_dq,
+                partial_dk,
+                partial_dv,
+                partial_dsink,
+            ) = _flex_flash_attn_backward(
                 dout=do,
                 q=q,
                 k=k,
                 v=v,
-                sink=None,  # TODO: support dist sink
+                # NOTE: dsink should be computed only once
+                # thus we only compute it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
                 out=o,
                 lse=lse,
                 dq=dq_acc,  # directly reduce to dq_acc
                 dk=partial_dk,
                 dv=partial_dv,
-                dsink=None,  # TODO: support dist sink
+                dsink=None,  # let kernel initialize dsink if required
                 # NOTE: always use high precision for the partial dq, dkv
                 # to reduce the error caused by the atomic reduction inside the kernel
                 dq_type=self.hp_dtype,
@@ -1485,6 +1467,82 @@ class DistAttnRuntime:
 
         return partial_dsink_reduce_work
 
+    def _init_out_lse_skipped_host_stage(
+        self,
+        q: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # NOTE: we can NOT use empty initialization here,
+        # since we have nowhere to zero-fill it
+        # when all attn computations are skipped for certain q range
+        out = torch.zeros_like(
+            q,
+            dtype=self._maybe_hp_dtype(q.dtype, not self.fwd_local_out_lp_init),
+            device=q.device,
+        )
+
+        lse = torch.full(
+            (q.size(0), q.size(1)),  # [sq, nhq]
+            fill_value=float("-inf"),
+            dtype=self._maybe_hp_dtype(
+                q.dtype, need_hp_dtype=True
+            ),  # lse always in high-precision
+            device=q.device,
+        )
+
+        # in skipped host stage,
+        # we directly use lse_sink to initialize lse
+        if sink is not None:
+            lse = calc_lse_sink_compiled(
+                sink=sink,
+                ref_lse=lse,
+            )
+
+        return out, lse
+
+    def _init_dq_dkv_dsink_skipped_host_stage(
+        self,
+        qo_do: FusedOrTupleTensor,
+        kv: FusedOrTupleTensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
+        q, o, do = self._maybe_chunk(qo_do, num_chunks=3)
+        k, _ = self._maybe_chunk(kv, num_chunks=2)
+        if self.concat_kv:  # kv is a fused tensor
+            dkv_shape = kv.shape
+        else:  # kv are tupled tensors
+            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
+
+        # NOTE: if local_dq and local_dkv calculation are skipped,
+        # we need to zero-initialize them since they might be reduced later
+        dq = torch.zeros_like(
+            q,
+            dtype=self._maybe_hp_dtype(q.dtype, not self.bwd_local_dq_lp_init),
+        )
+
+        dkv = torch.zeros(
+            dkv_shape,
+            dtype=self._maybe_hp_dtype(k.dtype, not self.bwd_local_dkv_lp_init),
+            device=k.device,
+        )
+        if not self.concat_dkv:  # make partial_dkv tupled tensors
+            dkv = self._maybe_chunk(dkv, num_chunks=2)
+
+        # in skipped host stage,
+        # we directly calculate dsink here
+        if sink is not None:
+            dsink = sink_bwd_compiled(
+                sink=sink,
+                lse=lse,
+                o=o,
+                do=do,
+            )
+        else:
+            dsink = None
+
+        return dq, dkv, dsink
+
     def _maybe_concat(
         self,
         *x: torch.Tensor,
@@ -1719,6 +1777,7 @@ class DistAttnFunc(torch.autograd.Function):
             sink=global_sink,
         )
         assert partial_local_dq is not None and partial_local_dkv is not None
+        assert global_sink is None or partial_global_dsink is not None
 
         # reduce partial global dsink if required
         dist_attn_runtime.reduce_partial_dsink(

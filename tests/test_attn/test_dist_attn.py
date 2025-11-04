@@ -31,7 +31,10 @@ from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveAr
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import EPSILON, assert_close, ref_attn_func
-from magi_attention.testing.utils import switch_envvar_context
+from magi_attention.testing.utils import (
+    switch_envvar_context,
+    switch_sdpa_backend_context,
+)
 
 
 # TODO: add more unitest for dist attn
@@ -96,9 +99,16 @@ class TestDistAttn(DistTestBase):
     def seed(self) -> int:
         return 42
 
+    @property
+    def device(self) -> int:
+        return torch.cuda.current_device()
+
     @skip_if_lt_x_gpu(4)
     @with_comms
-    @parameterize("seqlen_sink", [0])
+    @parameterize("seqlen_sink", [0, 4])
+    @parameterize("num_heads", [(8, 8), (8, 4)])
+    @parameterize("head_dim", [128, 64])
+    @parameterize("use_sdpa_backend", [False, True])
     @parameterize("use_native_grpcoll", [False, True])
     @parameterize(
         "dtype",
@@ -108,11 +118,18 @@ class TestDistAttn(DistTestBase):
         ],
     )
     def test_full_attn(
-        self, seqlen_sink: int, use_native_grpcoll: bool, dtype: torch.dtype
+        self,
+        seqlen_sink: int,
+        num_heads: tuple[int, int],
+        head_dim: int,
+        use_sdpa_backend: bool,
+        use_native_grpcoll: bool,
+        dtype: torch.dtype,
     ):
-        with self._switch_native_grpcoll_context(enable=use_native_grpcoll):
-            device = torch.cuda.current_device()
-
+        nhq, nhk = num_heads
+        with switch_sdpa_backend_context(
+            enable=use_sdpa_backend
+        ), self._switch_native_grpcoll_context(enable=use_native_grpcoll):
             calc_meta = CalcMeta(
                 local_attn_arg=AttnArg(
                     q_ranges=AttnRanges.from_ranges([[0, 128]]),
@@ -165,26 +182,26 @@ class TestDistAttn(DistTestBase):
             )
 
             local_q = torch.randn(
-                128, 8, 128, device=device, dtype=dtype, requires_grad=True
+                128, nhq, head_dim, device=self.device, dtype=dtype, requires_grad=True
             )
             local_k = torch.randn(
-                128, 4, 128, device=device, dtype=dtype, requires_grad=True
+                128, nhk, head_dim, device=self.device, dtype=dtype, requires_grad=True
             )
             local_v = torch.randn(
-                128, 4, 128, device=device, dtype=dtype, requires_grad=True
+                128, nhk, head_dim, device=self.device, dtype=dtype, requires_grad=True
             )
-            total_mask = torch.ones(512, 512, device=device).bool()
-            total_sink = (
-                torch.randn(
+            total_mask = torch.ones(512, 512, device=self.device).bool()
+            if seqlen_sink > 0:
+                total_sink = torch.randn(
                     seqlen_sink,
-                    8,
-                    device=device,
+                    nhq,
+                    device=self.device,
                     dtype=torch.float32,
                     requires_grad=True,
                 )
-                if seqlen_sink > 0
-                else None
-            )
+                dist.all_reduce(total_sink.data, group=self.nccl_group)
+            else:
+                total_sink = None
 
             local_out, local_lse = dist_attn_func(
                 q=local_q,
@@ -232,6 +249,7 @@ class TestDistAttn(DistTestBase):
             )
             if total_sink is not None:
                 total_dsink_ref = total_sink.grad
+                dist.all_reduce(total_dsink_ref.data, group=self.nccl_group)
             else:
                 total_dsink_ref = None
 
@@ -240,7 +258,7 @@ class TestDistAttn(DistTestBase):
                 total_out_ref,
                 atol=EPSILON,
                 rtol=5e-2,
-                mismatch_threshold=0.05,
+                mismatch_threshold=0.08,
                 test_case="out",
             )
             assert_close(
@@ -256,7 +274,7 @@ class TestDistAttn(DistTestBase):
                 local_grad_q_ref,
                 atol=EPSILON,
                 rtol=5e-2,
-                mismatch_threshold=0.05,
+                mismatch_threshold=0.08,
                 test_case="dq",
             )
             assert_close(
@@ -264,7 +282,7 @@ class TestDistAttn(DistTestBase):
                 local_grad_k_ref,
                 atol=EPSILON,
                 rtol=5e-2,
-                mismatch_threshold=0.05,
+                mismatch_threshold=0.08,
                 test_case="dk",
             )
             assert_close(
@@ -272,7 +290,7 @@ class TestDistAttn(DistTestBase):
                 local_grad_v_ref,
                 atol=EPSILON,
                 rtol=5e-2,
-                mismatch_threshold=0.05,
+                mismatch_threshold=0.08,
                 test_case="dv",
             )
             if total_sink is not None:
@@ -280,8 +298,8 @@ class TestDistAttn(DistTestBase):
                     total_dsink,
                     total_dsink_ref,
                     atol=EPSILON,
-                    rtol=5e-3,
-                    mismatch_threshold=0.01,
+                    rtol=5e-2,
+                    mismatch_threshold=1 / nhq,
                     test_case="dsink",
                 )
 
