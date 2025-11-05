@@ -82,18 +82,18 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   // TODO: calculate the dsink in the preprocess kernel
   typename PreprocessKernel::Arguments preprocess_args{
       static_cast<Element const*>(params.o_ptr),
-      {params.total_q, params.d, params.h_qo}, // shape_O
-      {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O
+      {params.total_q, params.d, params.h_qo}, // shape_O: [sq, hd, nhq]
+      {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O: [nhq*hd, 1, hd]
       static_cast<Element const*>(params.do_ptr),
-      {params.do_row_stride, _1{}, params.do_head_stride}, // stride_dO
+      {params.do_row_stride, _1{}, params.do_head_stride}, // stride_dO: [nhq*hd, 1, hd]
       static_cast<float*>(params.dsoftmax_sum),
-      {_4{}, params.total_q_rounded, params.h_qo}, // shape_dPsum
-      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_dPsum
-      {params.total_q, params.h_qo}, // shape_LSE
+      {_4{}, params.total_q_rounded, params.h_qo}, // shape_dPsum: [4, sq_rounded, nhq]
+      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_dPsum: [1, 4, sq_rounded*4]
       static_cast<float*>(params.softmax_lse_ptr),
-      {params.h_qo, _1{}}, // stride_LSE
+      {params.total_q, params.h_qo}, // shape_LSE: [sq, nhq]
+      {params.h_qo, _1{}}, // stride_LSE: [nhq, 1]
       static_cast<float*>(params.softmax_lse_log2_ptr),
-      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2
+      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2: [1, 4, sq_rounded*4]
       params.q_ranges,
       params.k_ranges,
       params.total_q,

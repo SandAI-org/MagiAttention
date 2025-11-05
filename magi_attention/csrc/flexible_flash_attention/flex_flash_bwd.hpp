@@ -301,7 +301,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
-  // add a new dimension (4) for TMA alignment (16 bytes)
+  // Create the rounded total_q to allocate dPsum and LSE_log2
+  // to avoid OOB when loading them at the query tensor's seqlen boundary
+  // NOTE: we add a new dimension (4) for TMA alignment (16 bytes)
   // actually, we only use index 0 of the new dimension (4).
   int const total_q_rounded = round_multiple(total_q + kBlockM - 1, kBlockM);
 
