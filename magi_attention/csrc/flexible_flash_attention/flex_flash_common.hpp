@@ -43,7 +43,6 @@ void set_params_fprop(
     const size_t b,
     const size_t total_q,
     const size_t total_k,
-    const size_t total_q_rounded,
     const size_t total_sink,
     const size_t h_qo,
     const size_t h_kv,

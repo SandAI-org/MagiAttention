@@ -152,7 +152,6 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   // Define a helper function to round up to multiple of m
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
   int const head_size_rounded = round_up_headdim(head_size);
-  int const total_q_rounded = round_multiple(total_q + 128 - 1, 128);
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
@@ -241,7 +240,6 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       batch_size,
       total_q,
       total_k,
-      total_q_rounded,
       total_sink,
       num_heads_qo,
       num_heads_kv,

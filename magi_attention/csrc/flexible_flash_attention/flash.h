@@ -69,7 +69,7 @@ struct Flash_fwd_params : public Qkv_params {
 
   // Dimensions params
   int b, d, d_rounded;
-  int total_q, total_k, total_q_rounded, total_sink;
+  int total_q, total_k, total_sink;
 
   // The scaling factors for the kernel.
   float scale_softmax;
@@ -113,6 +113,9 @@ struct Flash_fwd_params : public Qkv_params {
 
 struct Flash_bwd_params : public Flash_fwd_params {
   using index_t = int64_t;
+
+  // Dimensions params
+  int total_q_rounded;
 
   // RangeMerge params
   int2* __restrict__ merge_k_ranges;

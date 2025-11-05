@@ -96,8 +96,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2: [1, 4, sq_rounded*4]
       params.q_ranges,
       params.k_ranges,
-      params.total_q,
-      params.total_q_rounded};
+      params.total_q};
   typename PreprocessKernel::Params preprocess_params = PreprocessKernel::to_underlying_arguments(preprocess_args);
   int num_m_block = cute::ceil_div(params.total_q_rounded, kBlockM);
   dim3 grid_m(1, num_m_block, params.h_qo);

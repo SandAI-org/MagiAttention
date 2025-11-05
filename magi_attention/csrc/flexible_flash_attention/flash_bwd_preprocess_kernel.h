@@ -104,7 +104,6 @@ class FlashAttnBwdPreprocess {
     int2 const* q_ranges;
     int2 const* k_ranges;
     int const total_q;
-    int const total_q_rounded;
   };
 
   // Kernel entry point API
@@ -131,7 +130,6 @@ class FlashAttnBwdPreprocess {
     int2 const* q_ranges = nullptr;
     int2 const* k_ranges = nullptr;
     int const total_q;
-    int const total_q_rounded;
   };
 
   // Convert to underlying arguments. In this case, a simple copy for the aliased type.
@@ -153,7 +151,6 @@ class FlashAttnBwdPreprocess {
         args.q_ranges,
         args.k_ranges,
         args.total_q,
-        args.total_q_rounded,
     };
   }
 

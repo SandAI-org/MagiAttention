@@ -21,7 +21,6 @@ void set_params_fprop(
     const size_t b,
     const size_t total_q,
     const size_t total_k,
-    const size_t total_q_rounded,
     const size_t total_sink,
     const size_t h_qo,
     const size_t h_kv,
@@ -51,6 +50,15 @@ void set_params_fprop(
     bool const disable_fwd_atomic_reduction) {
   // Reset the parameters
   params = {};
+
+  // Set dimensions
+  params.b = b;
+  params.h_qo = h_qo;
+  params.h_kv = h_kv;
+  params.total_q = total_q;
+  params.total_k = total_k;
+  params.d = d;
+  params.d_rounded = d_rounded;
 
   // Set the compute and output types for the kernel.
   // Compute type is the type of the input tensors.
@@ -85,9 +93,12 @@ void set_params_fprop(
   params.q_ranges = static_cast<int2*>(q_ranges_d);
   params.k_ranges = static_cast<int2*>(k_ranges_d);
   params.attn_type_map = static_cast<int*>(attn_type_map_d);
+
+  // Set auto range merge
   params.merge_q_ranges = static_cast<int2*>(merge_q_ranges_d);
   params.qk_map = static_cast<int*>(qk_map_d);
   params.unique_count = static_cast<int*>(unique_count_d);
+  params.merge_batch_size = merge_batch_size;
 
   // Set kernel utility pointers
   params.range_locks = static_cast<int*>(range_locks_d);
@@ -98,18 +109,8 @@ void set_params_fprop(
   params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
   params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
 
-  // Softmax sum
+  // Set softmax
   params.softmax_lse_ptr = softmax_lse_d;
-  params.b = b;
-  params.merge_batch_size = merge_batch_size;
-  params.h_qo = h_qo;
-  params.h_kv = h_kv;
-  params.total_q = total_q;
-  params.total_k = total_k;
-  params.total_q_rounded = total_q_rounded;
-  params.d = d;
-  params.d_rounded = d_rounded;
-  // Set the different scale values.
   params.scale_softmax = softmax_scale;
   params.softcap = softcap;
 
@@ -164,7 +165,6 @@ void set_params_dgrad(
       b,
       total_q,
       total_k,
-      total_q_rounded,
       total_sink,
       h_qo,
       h_kv,
@@ -192,6 +192,9 @@ void set_params_dgrad(
       /*softcap*/ softcap,
       /*sm_margin*/ sm_margin,
       /*disable_fwd_atomic_reduction*/ false);
+
+  // Set backward-specific dimensions
+  params.total_q_rounded = total_q_rounded;
 
   // Set backward-specific pointers and flags
   params.merge_k_ranges = static_cast<int2*>(merge_k_ranges_d);
