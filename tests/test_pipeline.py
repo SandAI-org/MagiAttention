@@ -51,6 +51,9 @@ from magi_attention.testing.precision import (
     H100_NVLINK_A2A_BWU,
     H100_NVLINK_BANDWIDTH,
     H100_TFLOPS_16,
+    MAX_MISMATCH_THRES,
+    MISMATCH_THRES_RATIO,
+    NORM_RTOL_RATIO,
     assert_close,
     calc_inf_norm,
     extract_mismatch_threshold,
@@ -809,31 +812,83 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         dtype: torch.dtype,
         run_bwd: bool,
         test_case: str = "",
+        err_ratio_dict: dict[str, float] = {},
     ) -> None:
-        # -----   customize tolerance threshold  ---- #
+        # -----   customize tolerance / threshold  ---- #
 
         o_atol = EPSILON
         o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
+        o_norm_rtol_ratio = err_ratio_dict.get("o_norm_rtol_ratio", NORM_RTOL_RATIO)
+        o_min_norm_rtol = err_ratio_dict.get("o_min_norm_rtol", 0.0)
+        o_mismatch_thres_ratio = err_ratio_dict.get(
+            "o_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        o_min_mismatch_thres = err_ratio_dict.get("o_min_mismatch_thres", 0.0)
+        o_max_mismatch_thres = err_ratio_dict.get(
+            "o_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         lse_atol = EPSILON
-        lse_rtol = {torch.bfloat16: 0.01, torch.float16: 0.005}.get(dtype, 0.005)
+        lse_rtol = 0.001
+        lse_norm_rtol_ratio = err_ratio_dict.get("lse_norm_rtol_ratio", NORM_RTOL_RATIO)
+        lse_min_norm_rtol = err_ratio_dict.get("lse_min_norm_rtol", 0.0)
+        lse_mismatch_thres_ratio = err_ratio_dict.get(
+            "lse_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        lse_min_mismatch_thres = err_ratio_dict.get("lse_min_mismatch_thres", 0.0)
+        lse_max_mismatch_thres = err_ratio_dict.get(
+            "lse_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dq_atol = EPSILON
         dq_rtol = {torch.bfloat16: 0.3, torch.float16: 0.2}.get(dtype, 0.2)
+        dq_norm_rtol_ratio = err_ratio_dict.get("dq_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dq_min_norm_rtol = err_ratio_dict.get("dq_min_norm_rtol", 0.0)
+        dq_mismatch_thres_ratio = err_ratio_dict.get(
+            "dq_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dq_min_mismatch_thres = err_ratio_dict.get("dq_min_mismatch_thres", 0.0)
+        dq_max_mismatch_thres = err_ratio_dict.get(
+            "dq_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dk_atol = EPSILON
         dk_rtol = {torch.bfloat16: 0.15, torch.float16: 0.08}.get(dtype, 0.08)
+        dk_norm_rtol_ratio = err_ratio_dict.get("dk_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dk_min_norm_rtol = err_ratio_dict.get("dk_min_norm_rtol", 0.0)
+        dk_mismatch_thres_ratio = err_ratio_dict.get(
+            "dk_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dk_min_mismatch_thres = err_ratio_dict.get("dk_min_mismatch_thres", 0.0)
+        dk_max_mismatch_thres = err_ratio_dict.get(
+            "dk_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dv_atol = EPSILON
         dv_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
+        dv_norm_rtol_ratio = err_ratio_dict.get("dv_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dv_min_norm_rtol = err_ratio_dict.get("dv_min_norm_rtol", 0.0)
+        dv_mismatch_thres_ratio = err_ratio_dict.get(
+            "dv_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dv_min_mismatch_thres = err_ratio_dict.get("dv_min_mismatch_thres", 0.0)
+        dv_max_mismatch_thres = err_ratio_dict.get(
+            "dv_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dsink_atol = EPSILON
-        dsink_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
-
-        # NOTE: an experimental value from magi_attention testing
-        mismatch_thres_ratio: float = 2.0
-        # NOTE: an experimental value from fa testing
-        norm_rtol_ratio: float = 2.0
+        dsink_rtol = 0.05
+        dsink_norm_rtol_ratio = err_ratio_dict.get(
+            "dsink_norm_rtol_ratio", NORM_RTOL_RATIO
+        )
+        dsink_min_norm_rtol = err_ratio_dict.get("dsink_min_norm_rtol", 0.0)
+        dsink_mismatch_thres_ratio = err_ratio_dict.get(
+            "dsink_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dsink_min_mismatch_thres = err_ratio_dict.get("dsink_min_mismatch_thres", 0.0)
+        dsink_max_mismatch_thres = err_ratio_dict.get(
+            "dsink_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         # -----   build attn mask   ---- #
 
@@ -928,8 +983,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         try:
             self.assertLessEqual(
                 out_norm,
-                norm_rtol_ratio * out_ref_norm,
-                msg=f"For {test_case=}: {out_norm=} should be no greater than {norm_rtol_ratio}x of {out_ref_norm=}",
+                max(o_min_norm_rtol, o_norm_rtol_ratio * out_ref_norm),
+                msg=(
+                    f"For {test_case=}: {out_norm=} should be no greater than "
+                    f"max({o_min_norm_rtol}, {o_norm_rtol_ratio} x {out_ref_norm=})",
+                ),
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -940,7 +998,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             expected=total_out_ref_high_precision,
             atol=o_atol,
             rtol=o_rtol,
-            mismatch_thres_ratio=mismatch_thres_ratio,
+            mismatch_thres_ratio=o_mismatch_thres_ratio,
+            min_mismatch_thres=o_min_mismatch_thres,
+            max_mismatch_thres=o_max_mismatch_thres,
         )
         try:
             assert_close(
@@ -965,8 +1025,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             try:
                 self.assertLessEqual(
                     lse_norm,
-                    norm_rtol_ratio * lse_ref_norm,
-                    msg=f"For {test_case=}: {lse_norm=} should be no greater than {norm_rtol_ratio}x of {lse_ref_norm=}",
+                    max(lse_min_norm_rtol, lse_norm_rtol_ratio * lse_ref_norm),
+                    msg=(
+                        f"For {test_case=}: {lse_norm=} should be no greater than "
+                        f"max({lse_min_norm_rtol}, {lse_norm_rtol_ratio} x {lse_ref_norm=})"
+                    ),
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -977,7 +1040,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 expected=total_lse_ref_high_precision,
                 atol=lse_atol,
                 rtol=lse_rtol,
-                mismatch_thres_ratio=mismatch_thres_ratio,
+                mismatch_thres_ratio=lse_mismatch_thres_ratio,
+                min_mismatch_thres=lse_min_mismatch_thres,
+                max_mismatch_thres=lse_max_mismatch_thres,
             )
             try:
                 assert_close(
@@ -1004,8 +1069,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             try:
                 self.assertLessEqual(
                     dq_norm,
-                    norm_rtol_ratio * dq_ref_norm,
-                    msg=f"For {test_case=}: {dq_norm=} should be no greater than {norm_rtol_ratio}x of {dq_ref_norm=}",
+                    max(dq_min_norm_rtol, dq_norm_rtol_ratio * dq_ref_norm),
+                    msg=(
+                        f"For {test_case=}: {dq_norm=} should be no greater than "
+                        f"max({dq_min_norm_rtol}, {dq_norm_rtol_ratio} x {dq_ref_norm=})"
+                    ),
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -1016,7 +1084,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 expected=grad_total_q_ref_high_precision,
                 atol=dq_atol,
                 rtol=dq_rtol,
-                mismatch_thres_ratio=mismatch_thres_ratio,
+                mismatch_thres_ratio=dq_mismatch_thres_ratio,
+                min_mismatch_thres=dq_min_mismatch_thres,
+                max_mismatch_thres=dq_max_mismatch_thres,
             )
             try:
                 assert_close(
@@ -1040,8 +1110,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             try:
                 self.assertLessEqual(
                     dk_norm,
-                    norm_rtol_ratio * dk_ref_norm,
-                    msg=f"For {test_case=}: {dk_norm=} should be no greater than {norm_rtol_ratio}x of {dk_ref_norm=}",
+                    max(dk_min_norm_rtol, dk_norm_rtol_ratio * dk_ref_norm),
+                    msg=(
+                        f"For {test_case=}: {dk_norm=} should be no greater than "
+                        f"max({dk_min_norm_rtol}, {dk_norm_rtol_ratio} x {dk_ref_norm=})"
+                    ),
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -1052,7 +1125,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 expected=grad_total_k_ref_high_precision,
                 atol=dk_atol,
                 rtol=dk_rtol,
-                mismatch_thres_ratio=mismatch_thres_ratio,
+                mismatch_thres_ratio=dk_mismatch_thres_ratio,
+                min_mismatch_thres=dk_min_mismatch_thres,
+                max_mismatch_thres=dk_max_mismatch_thres,
             )
             try:
                 assert_close(
@@ -1076,8 +1151,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             try:
                 self.assertLessEqual(
                     dv_norm,
-                    norm_rtol_ratio * dv_ref_norm,
-                    msg=f"For {test_case=}: {dv_norm=} should be no greater than {norm_rtol_ratio}x of {dv_ref_norm=}",
+                    max(dv_min_norm_rtol, dv_norm_rtol_ratio * dv_ref_norm),
+                    msg=(
+                        f"For {test_case=}: {dv_norm=} should be no greater than "
+                        f"max({dv_min_norm_rtol}, {dv_norm_rtol_ratio} x {dv_ref_norm=})"
+                    ),
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -1088,7 +1166,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 expected=grad_total_v_ref_high_precision,
                 atol=dv_atol,
                 rtol=dv_rtol,
-                mismatch_thres_ratio=mismatch_thres_ratio,
+                mismatch_thres_ratio=dv_mismatch_thres_ratio,
+                min_mismatch_thres=dv_min_mismatch_thres,
+                max_mismatch_thres=dv_max_mismatch_thres,
             )
             try:
                 assert_close(
@@ -1116,10 +1196,12 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 try:
                     self.assertLessEqual(
                         dsink_norm,
-                        norm_rtol_ratio * dsink_ref_norm,
+                        max(
+                            dsink_min_norm_rtol, dsink_norm_rtol_ratio * dsink_ref_norm
+                        ),
                         msg=(
                             f"For {test_case=}: {dsink_norm=} should be no greater than "
-                            f"{norm_rtol_ratio}x of {dsink_ref_norm=}"
+                            f"max({dsink_min_norm_rtol}, {dsink_norm_rtol_ratio} x {dsink_ref_norm=})"
                         ),
                     )
                 except Exception as e:
@@ -1131,7 +1213,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     expected=grad_total_sink_ref_high_precision,
                     atol=dsink_atol,
                     rtol=dsink_rtol,
-                    mismatch_thres_ratio=mismatch_thres_ratio,
+                    mismatch_thres_ratio=dsink_mismatch_thres_ratio,
+                    min_mismatch_thres=dsink_min_mismatch_thres,
+                    max_mismatch_thres=dsink_max_mismatch_thres,
                 )
                 try:
                     assert_close(

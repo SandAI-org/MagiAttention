@@ -465,7 +465,7 @@ class TestFlexFlashAttn(DistTestBase):
         err_msg_list: list[str] = [],
         err_ratio_dict: dict[str, float] = {},
     ) -> None:
-        # -----   customize tolerance threshold  ---- #
+        # -----   customize tolerance / threshold  ---- #
 
         o_atol = EPSILON
         o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
