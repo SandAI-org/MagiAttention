@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 
 import torch
 from einops import reduce
@@ -20,7 +19,7 @@ from einops import reduce
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import get_attn_mask_from_ffa_args, to_higher_fp_dtype
 
-from .utils import correct_attn_out_lse_with_sink, safe_subtract, sink_bwd, softmax_bwd
+from .utils import correct_attn_out_lse_with_sink, safe_softmax, sink_bwd, softmax_bwd
 
 __all__ = [
     "sdpa_fwd",
@@ -63,9 +62,7 @@ def sdpa_fwd_preprocess(
     softmax_scale: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float, int]:
     sq, sk = q.size(-2), k.size(-2)
-    softmax_scale = (
-        1 / math.sqrt(q.size(-1)) if softmax_scale is None else softmax_scale
-    )
+    softmax_scale = q.size(-1) ** (-0.5) if softmax_scale is None else softmax_scale
     attn_bias = torch.zeros(sq, sk, dtype=q.dtype, device=q.device)
     nhq, nhk = q.size(-3), k.size(-3)
     rep_times = nhq // nhk
@@ -107,12 +104,9 @@ def sdpa_fwd_calc(
     # and `-inf` will result in `-inf` correctly as well
     lse = torch.logsumexp(attn_weight, dim=-1, keepdim=True)
 
-    # BUG: pytorch softmax cannot assure the sum to 1 when dtype is float64
-    # attn_weight = torch.softmax(attn_weight, dim=-1)
-
-    # NOTE: two -inf subtraction will result in nan, but we need -inf
-    # attn_weight = torch.exp(attn_weight - lse)
-    attn_weight = torch.exp(safe_subtract(attn_weight, lse)).to(v.dtype)
+    # NOTE: pytorch softmax has many limitations and bugs
+    # thus we use our own safe_softmax with lse involved
+    attn_weight = safe_softmax(attn_weight, lse).to(v.dtype)
 
     out = attn_weight @ v
 
@@ -206,6 +200,7 @@ def sdpa_fwd(
             out=out,
             lse=lse,
             sink=sink,
+            inplace=True,
         )
 
     return out, lse
@@ -257,9 +252,9 @@ def sdpa_bwd_recalc_fwd(
     )
     attn_weight += attn_bias
 
-    # NOTE: two -inf subtraction will result in nan, but we need -inf
-    # attn_weight = torch.exp(attn_weight - lse.unsqueeze(-1))
-    attn_weight = torch.exp(safe_subtract(attn_weight, lse.unsqueeze(-1))).to(q.dtype)
+    # NOTE: pytorch softmax has many limitations and bugs
+    # thus we use our own safe_softmax with lse involved
+    attn_weight = safe_softmax(attn_weight, lse.unsqueeze(-1)).to(q.dtype)
 
     return attn_weight
 

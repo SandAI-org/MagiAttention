@@ -165,7 +165,9 @@ def _attn_pre_process(
 
     # prepare bias
     # where bias.shape = [1, sq, sk]
-    bias = torch.zeros_like(mask, dtype=q.dtype, device=q.device)
+    bias = torch.zeros_like(
+        mask, dtype=max_fp_dtype(q.dtype, torch.float32), device=q.device
+    )
     bias.masked_fill_(mask.logical_not(), float("-inf")).unsqueeze_(0)
 
     # prepare sink
@@ -285,27 +287,24 @@ def _ref_attn_torch_impl(
     # apply `S = Q x K.T * scale + bias`
     # where S.shape = [nhq, sq, sk]
     s = to_higher_fp_dtype(
-        q @ k * softmax_scale + bias,
+        q @ k * softmax_scale,
         lowest_precision=torch.float32,
     )
+    s += bias
     if sink is not None:
         # apply `S = S.concat(sink, dim=-1)`
         # where S.shape = [nhq, sq, sk + s_sink]
         s = torch.concat([s, sink], dim=-1)
 
-    if return_lse:
-        # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
-        # where LSE.shape = [nhq, sq]
-        # and then transpose and make contiguous
-        # where LSE.shape = [sq, nhq]
-        with torch.no_grad():
-            lse = s.logsumexp(dim=-1).t().contiguous()
-    else:
-        lse = None
+    # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
+    # where LSE.shape = [nhq, sq, 1]
+    lse = s.logsumexp(dim=-1, keepdim=True)
 
     # apply row-wise softmax `P = softmax(S, dim=-1)`
     # where P.shape = [nhq, sq, sk + s_sink]
-    p = safe_softmax(s, dim=-1).to(q.dtype)
+    # NOTE: pytorch softmax has many limitations and bugs
+    # thus we use our own safe_softmax with lse involved
+    p = safe_softmax(s, lse).to(q.dtype)
     if sink is not None:
         # apply `P = P.drop(sink, dim=-1)`
         # where P.shape = [nhq, sq, sk]
@@ -318,6 +317,13 @@ def _ref_attn_torch_impl(
     # rearrange and make contiguous
     # where O.shape = [sq, nhq, d]
     out = rearrange(out, "nhq sq d -> sq nhq d")
+
+    # prepare lse if required to return
+    # where LSE.shape = [sq, nhq]
+    if return_lse:
+        lse = rearrange(lse, "nhq sq 1 -> sq nhq")
+    else:
+        lse = None
 
     return out, lse
 

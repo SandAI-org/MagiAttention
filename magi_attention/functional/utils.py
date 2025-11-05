@@ -24,34 +24,56 @@ def safe_subtract(
     b: torch.Tensor,
 ) -> torch.Tensor:
     """Safely subtracts two tensors,
-    where the subtraction results of two `-inf` will be set to `-inf`, instead of `nan`.
+    where the subtraction results of two `-inf` will be set to `-inf`, instead of `nan`,
+    as well as the corr. gradients will be set to zeros
     """
+    two_neg_inf_mask = (a == b) & (a == float("-inf"))
 
-    eq = (a == b) & (a == float("-inf"))
-    sub = a - b
-    sub = torch.where(eq, torch.fill(sub, float("-inf")), sub)
+    def safe_subtract_bwd_hook(g):
+        g.masked_fill_(two_neg_inf_mask, 0.0)
+        return g
 
-    return sub
+    if a.requires_grad:
+        a.register_hook(safe_subtract_bwd_hook)
+
+    return (a - b).masked_fill(two_neg_inf_mask, float("-inf"))
 
 
 def safe_softmax(
-    a: torch.Tensor,
+    x: torch.Tensor,
+    lse: torch.Tensor | None = None,
     dim: int = -1,
-    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Safely applies row-wise softmax to the input tensor,
-    where all-`-inf` / all-nan rows will be set to all-zero rows during forward/backward resp.
+    where all-``-inf`` rows will be set to all-zero rows
+    as well as the corr. gradients will be set to zeros
+
+    NOTE: ``torch.nn.functional.softmax`` has many limitations,
+    and besides the safety operations mentioned above, it also has bugs
+    when dtype is ``float64``, where the sum cannot be assured to ``1``
+
+    Therefore, we recommend to use this function with ``lse`` given,
+    where we will use the safer formula of softmax:
+        ``softmax(x) = exp(x - lse)``
+
+    NOTE: if ``lse`` is given, it requires to have the same ``ndim`` as ``x``
+    and trivial size ``1`` at ``dim`` to be broadcastable to ``x``
     """
-    all_neg_inf_mask = (a == float("-inf")).all(dim=dim, keepdim=True)
+
+    if lse is not None:
+        assert x.ndim == lse.ndim and lse.size(dim) == 1
+        return torch.exp(safe_subtract(x, lse))
+
+    all_neg_inf_mask = (x == float("-inf")).all(dim=dim, keepdim=True)
 
     def safe_softmax_bwd_hook(g):
-        all_nan_mask = (g != g).all(dim=dim, keepdim=True)
-        g.masked_fill_(all_nan_mask, 0.0)
+        g.masked_fill_(all_neg_inf_mask, 0.0)
         return g
 
-    a.register_hook(safe_softmax_bwd_hook)
+    if x.requires_grad:
+        x.register_hook(safe_softmax_bwd_hook)
 
-    sm = F.softmax(a, dim=dim, dtype=dtype)
+    sm = F.softmax(x, dim=dim)
 
     sm = sm.masked_fill(all_neg_inf_mask, 0.0)
 
@@ -134,27 +156,29 @@ def calc_lse_rescale_weight(
 
 def calc_lse_sink(
     sink: torch.Tensor,
-    ref_lse: torch.Tensor,
+    seqlen_lse: int,
 ) -> torch.Tensor:
     """Calculate the log-sum-exp of the sink tokens
-    and broadcast it to the shape of the reference lse
+    and repeat it to the given seqlen_lse
 
     Args:
         sink (torch.Tensor): the sink tokens with shape: [seqlen_sink, num_heads_q]
-        ref_lse (torch.Tensor): the reference lse tensor with shape: [seqlen_q, num_heads_q]
-            to provide the meta info like shape and dtype
+        seqlen_lse (int): the seqlen of the lse_sink
 
     Returns:
-        torch.Tensor: the log-sum-exp of the sink tokens
+        torch.Tensor: the log-sum-exp of the sink tokens with shape: [seqlen_lse, num_heads_q]
     """
-    # calculate lse_sink and broadcast it to ref lse's shape
+    # calculate lse_sink and repeat to seqlen_lse
     lse_sink = (
         # shape: [s_sink, nhq] -> [nhq,]
-        torch.logsumexp(sink, dim=0).to(ref_lse.dtype)
+        torch.logsumexp(sink, dim=0)
         # shape: [nhq,] -> [1, nhq]
         .unsqueeze(0)
         # shape: [1, nhq] -> [sq, nhq]
-        .expand_as(ref_lse)
+        # NOTE: we had better not use `expand` here
+        # to avoid view conflict when involving in-place operations
+        # .expand_as(seqlen_lse, -1)
+        .repeat(seqlen_lse, 1)
     )
 
     return lse_sink
@@ -182,8 +206,8 @@ def correct_attn_lse(
 
     assert lse1.dtype == lse2.dtype
 
-    min_lse = to_higher_fp_dtype(torch.min(lse1, lse2), torch.float32)
-    max_lse = to_higher_fp_dtype(torch.max(lse1, lse2), torch.float32)
+    min_lse = to_higher_fp_dtype(torch.minimum(lse1, lse2), torch.float32)
+    max_lse = to_higher_fp_dtype(torch.maximum(lse1, lse2), torch.float32)
 
     # formula derivation:
     # lse = log(exp(lse1) + exp(lse2))
@@ -193,9 +217,7 @@ def correct_attn_lse(
     #     = max_lse + softplus(min_lse - max_lse)
     lse = max_lse + F.softplus(safe_subtract(min_lse, max_lse))
 
-    lse = lse1.copy_(lse) if inplace else lse.to(lse1.dtype)
-
-    return lse
+    return lse1.copy_(lse) if inplace else lse.to(lse1.dtype)
 
 
 correct_attn_lse_compiled = torch.compile(dynamic=True)(correct_attn_lse)
@@ -301,7 +323,7 @@ def correct_attn_lse_with_sink(
     Returns:
         torch.Tensor: corrected log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
     """
-    lse_sink = calc_lse_sink(sink, lse)
+    lse_sink = calc_lse_sink(sink, lse.size(0))
 
     return correct_attn_lse(lse, lse_sink, inplace=inplace)
 
@@ -324,7 +346,7 @@ def correct_attn_out_with_sink(
     Returns:
         torch.Tensor: corrected output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
     """
-    lse_sink = calc_lse_sink(sink, lse)
+    lse_sink = calc_lse_sink(sink, lse.size(0))
 
     # calculate the rescale weight with shape: [sq, nhq, 1]
     # formula derivation:
@@ -357,7 +379,7 @@ def correct_attn_out_lse_with_sink(
             - out: corrected output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
             - lse: corrected lse tensor, with shape: [seqlen_q, num_heads_q]
     """
-    lse_sink = calc_lse_sink(sink, lse)
+    lse_sink = calc_lse_sink(sink, lse.size(0))
     lse_new = correct_attn_lse(lse, lse_sink, inplace=False)
     w = calc_lse_rescale_weight(lse, lse_new)
 

@@ -23,7 +23,6 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
-import magi_attention.testing
 from magi_attention import init_dist_attn_runtime_mgr
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
@@ -52,6 +51,7 @@ from magi_attention.testing.precision import (
     H100_NVLINK_A2A_BWU,
     H100_NVLINK_BANDWIDTH,
     H100_TFLOPS_16,
+    assert_close,
     calc_inf_norm,
     extract_mismatch_threshold,
     ref_attn_func,
@@ -892,7 +892,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             mismatch_thres_ratio=mismatch_thres_ratio,
         )
         try:
-            magi_attention.testing.assert_close(
+            assert_close(
                 total_out,
                 total_out_ref_high_precision,
                 atol=o_atol,
@@ -929,7 +929,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 mismatch_thres_ratio=mismatch_thres_ratio,
             )
             try:
-                magi_attention.testing.assert_close(
+                assert_close(
                     grad_total_q,
                     grad_total_q_ref_high_precision,
                     atol=dq_atol,
@@ -965,7 +965,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 mismatch_thres_ratio=mismatch_thres_ratio,
             )
             try:
-                magi_attention.testing.assert_close(
+                assert_close(
                     grad_total_k,
                     grad_total_k_ref_high_precision,
                     atol=dk_atol,
@@ -1001,7 +1001,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 mismatch_thres_ratio=mismatch_thres_ratio,
             )
             try:
-                magi_attention.testing.assert_close(
+                assert_close(
                     grad_total_v,
                     grad_total_v_ref_high_precision,
                     atol=dv_atol,

@@ -22,7 +22,6 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
-import magi_attention.testing
 from magi_attention import init_dist_attn_runtime_mgr
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
@@ -50,6 +49,7 @@ from magi_attention.testing.precision import (
     H100_NVLINK_A2A_BWU,
     H100_NVLINK_BANDWIDTH,
     H100_TFLOPS_16,
+    assert_close,
     ref_attn_func,
 )
 from magi_attention.testing.utils import switch_sdpa_backend_decorator
@@ -144,6 +144,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0],
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
+                "total_seqlen_sink": 1,
                 "chunk_size": 32,
             },
             # varlen full attn with total seqlen 1050
@@ -209,6 +210,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 8,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
+                "total_seqlen_sink": 2,
                 "chunk_size": 128,
             },
             # varlen block causal with total seqlen 960
@@ -271,6 +273,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 840,
                 "total_seqlen_k": 840,
+                "total_seqlen_sink": 3,
                 "chunk_size": 4,
             },
             # varlen block causal with total seqlen 1k
@@ -339,6 +342,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 8,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
+                "total_seqlen_sink": 4,
                 "chunk_size": 128,
             },
             # block sliding-window full with total seqlen 1k
@@ -405,6 +409,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 8,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
+                "total_seqlen_sink": 5,
                 "chunk_size": 128,
             },
             # block sliding-window causal with total seqlen 1k
@@ -464,6 +469,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 4,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
+                "total_seqlen_sink": 6,
                 "chunk_size": 128,
             },
             # varlen block causal with total seqlen 1k + overlapped q ranges
@@ -536,6 +542,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 11,
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
+                "total_seqlen_sink": 7,
                 "chunk_size": 128,
             },
             # varlen block causal with total seqlen 840 + overlapped q ranges
@@ -597,6 +604,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 6,
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
+                "total_seqlen_sink": 8,
                 "chunk_size": 5,
             },
         ],
@@ -723,6 +731,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}] x "
+            f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}"
         )
         test_case_seed = str2seed(test_case)
 
@@ -741,6 +750,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
+        total_seqlen_sink: int = attn_config.get("total_seqlen_sink", 0)
         chunk_size: int = attn_config["chunk_size"]
         num_heads_q, num_heads_kv = num_heads
         softmax_scale = (  # choose softmax_scale by rule
@@ -827,9 +837,22 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             dtype=dtype,
             requires_grad=run_bwd,
         )
+        total_sink = (
+            torch.randn(
+                total_seqlen_sink,
+                num_heads_q,
+                device=self.device,
+                dtype=dtype,
+                requires_grad=run_bwd,
+            )
+            if total_seqlen_sink > 0
+            else None
+        )
         dist.all_reduce(total_q.data, group=self.nccl_group)
         dist.all_reduce(total_k.data, group=self.nccl_group)
         dist.all_reduce(total_v.data, group=self.nccl_group)
+        if total_sink is not None:
+            dist.all_reduce(total_sink.data, group=self.nccl_group)
 
         # -----   dispatch global qkv to local qkv   ---- #
 
@@ -843,6 +866,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             q=local_q,
             k=local_k,
             v=local_v,
+            sink=total_sink,
             softmax_scale=softmax_scale,
             softcap=softcap,
         )
@@ -863,9 +887,11 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 total_k.grad,
                 total_v.grad,
             )
+            grad_total_sink = total_sink.grad if total_sink is not None else None
         else:
             grad_total_out = None
             grad_total_q, grad_total_k, grad_total_v = None, None, None
+            grad_total_sink = None
 
         # -----   assert close to torch ref   ---- #
 
@@ -880,11 +906,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             total_q=total_q,
             total_k=total_k,
             total_v=total_v,
+            total_sink=total_sink,
             total_out=total_out,
             total_lse=total_lse,
             grad_total_q=grad_total_q,
             grad_total_k=grad_total_k,
             grad_total_v=grad_total_v,
+            grad_total_sink=grad_total_sink,
             grad_total_out=grad_total_out,
             run_bwd=run_bwd,
             test_case=test_case,
@@ -902,11 +930,13 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         total_q: torch.Tensor,
         total_k: torch.Tensor,
         total_v: torch.Tensor,
+        total_sink: torch.Tensor | None,
         total_out: torch.Tensor,
         total_lse: torch.Tensor,
         grad_total_q: torch.Tensor | None,
         grad_total_k: torch.Tensor | None,
         grad_total_v: torch.Tensor | None,
+        grad_total_sink: torch.Tensor | None,
         grad_total_out: torch.Tensor | None,
         run_bwd: bool,
         test_case: str = "",
@@ -928,6 +958,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         dv_atol = EPSILON
         dv_rtol = EPSILON
 
+        dsink_atol = EPSILON
+        dsink_rtol = EPSILON
+
         # -----   build attn mask   ---- #
 
         mask = get_attn_mask_from_ffa_args(
@@ -942,15 +975,19 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----   ref. torch ref with high precision (fp64)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
+        if total_sink is not None:
+            total_sink.grad = None
 
         total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
+            sink=total_sink,
             mask=mask,
             softmax_scale=softmax_scale,
             softcap=softcap,
             layout="thd",
+            backend="torch",
             high_precision=True,
             return_lse=True,
         )
@@ -966,6 +1003,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 total_k.grad,
                 total_v.grad,
             )
+            if total_sink is not None:
+                grad_total_sink_ref_high_precision = total_sink.grad
+            else:
+                grad_total_sink_ref_high_precision = None
 
         # -----   init error message list   ---- #
 
@@ -974,7 +1015,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----   assert close for fwd out   ---- #
 
         try:
-            magi_attention.testing.assert_close(
+            assert_close(
                 total_out,
                 total_out_ref_high_precision,
                 atol=o_atol,
@@ -987,7 +1028,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----   assert close for fwd lse   ---- #
 
         try:
-            magi_attention.testing.assert_close(
+            assert_close(
                 total_lse,
                 total_lse_ref_high_precision,
                 atol=lse_atol,
@@ -1001,7 +1042,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             # -----   assert close for bwd dq   ---- #
 
             try:
-                magi_attention.testing.assert_close(
+                assert_close(
                     grad_total_q,
                     grad_total_q_ref_high_precision,
                     atol=dq_atol,
@@ -1014,7 +1055,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             # -----   assert close for bwd dk   ---- #
 
             try:
-                magi_attention.testing.assert_close(
+                assert_close(
                     grad_total_k,
                     grad_total_k_ref_high_precision,
                     atol=dk_atol,
@@ -1027,7 +1068,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             # -----   assert close for bwd dv   ---- #
 
             try:
-                magi_attention.testing.assert_close(
+                assert_close(
                     grad_total_v,
                     grad_total_v_ref_high_precision,
                     atol=dv_atol,
@@ -1036,6 +1077,20 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
+
+            # -----   assert close for bwd dsink   ---- #
+
+            if total_sink is not None:
+                try:
+                    assert_close(
+                        grad_total_sink,
+                        grad_total_sink_ref_high_precision,
+                        atol=dsink_atol,
+                        rtol=dsink_rtol,
+                        test_case=f"{test_case} => dsink",
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
 
         # -----   raise error if any error occurs   ---- #
 

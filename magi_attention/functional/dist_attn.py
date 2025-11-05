@@ -1481,21 +1481,21 @@ class DistAttnRuntime:
             device=q.device,
         )
 
-        lse = torch.full(
-            (q.size(0), q.size(1)),  # [sq, nhq]
-            fill_value=float("-inf"),
-            dtype=self._maybe_hp_dtype(
-                q.dtype, need_hp_dtype=True
-            ),  # lse always in high-precision
-            device=q.device,
-        )
-
-        # in skipped host stage,
-        # we directly use lse_sink to initialize lse
         if sink is not None:
+            # in skipped host stage if sink is given,
+            # we directly use lse_sink to initialize lse
             lse = calc_lse_sink_compiled(
                 sink=sink,
-                ref_lse=lse,
+                seqlen_lse=q.size(0),
+            )
+        else:
+            lse = torch.full(
+                (q.size(0), q.size(1)),  # [sq, nhq]
+                fill_value=float("-inf"),
+                dtype=self._maybe_hp_dtype(
+                    q.dtype, need_hp_dtype=True
+                ),  # lse always in high-precision
+                device=q.device,
             )
 
         return out, lse
