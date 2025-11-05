@@ -987,7 +987,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             softmax_scale=softmax_scale,
             softcap=softcap,
             layout="thd",
-            backend="torch",
+            backend="torch" if total_sink is not None else "sdpa",
             high_precision=True,
             return_lse=True,
         )
@@ -1003,10 +1003,9 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 total_k.grad,
                 total_v.grad,
             )
-            if total_sink is not None:
-                grad_total_sink_ref_high_precision = total_sink.grad
-            else:
-                grad_total_sink_ref_high_precision = None
+            grad_total_sink_ref_high_precision = (
+                total_sink.grad if total_sink is not None else None
+            )
 
         # -----   init error message list   ---- #
 

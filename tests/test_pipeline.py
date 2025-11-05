@@ -497,6 +497,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         dtype: torch.dtype,
         random_type_mapping: bool,
         run_bwd: bool = True,
+        # FIXME: for now, either lse calculation or applying attn sink
+        # requires torch impl of ref_attn_func
+        # which causes OOM for this test, thus skipped for now
+        test_lse: bool = False,
+        test_sink: bool = False,
     ):
         # -----    switch mode   ---- #
 
@@ -574,6 +579,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
+        total_seqlen_sink: int = (
+            attn_config.get("total_seqlen_sink", 0) if test_sink else 0
+        )
         chunk_size: int = attn_config["chunk_size"]
         num_heads_q, num_heads_kv = num_heads
         softmax_scale = (  # choose softmax_scale by rule
@@ -680,9 +688,22 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dtype=dtype,
                 requires_grad=run_bwd,
             )
+            total_sink = (
+                torch.randn(
+                    total_seqlen_sink,
+                    num_heads_q,
+                    device=self.device,
+                    dtype=dtype,
+                    requires_grad=run_bwd,
+                )
+                if total_seqlen_sink > 0
+                else None
+            )
             dist.all_reduce(total_q.data, group=self.nccl_group)
             dist.all_reduce(total_k.data, group=self.nccl_group)
             dist.all_reduce(total_v.data, group=self.nccl_group)
+            if total_sink is not None:
+                dist.all_reduce(total_sink.data, group=self.nccl_group)
 
             # -----   dispatch global qkv to local qkv   ---- #
 
@@ -697,10 +718,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dist.barrier()
                 torch.cuda.synchronize()
 
-            local_out, _ = dist_attn_runtime_mgr.calc_attn(
+            local_out, local_lse = dist_attn_runtime_mgr.calc_attn(
                 q=local_q,
                 k=local_k,
                 v=local_v,
+                sink=total_sink,
                 softmax_scale=softmax_scale,
                 softcap=softcap,
             )
@@ -708,6 +730,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # -----   undispatch local out to global out   ---- #
 
             total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
+            total_lse = (
+                dist_attn_runtime_mgr.undispatch_qo(local_lse) if test_lse else None
+            )
 
             # -----   run backward   ---- #
 
@@ -726,11 +751,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     total_k.grad,
                     total_v.grad,
                 )
+                grad_total_sink = total_sink.grad if total_sink is not None else None
             else:
-                grad_total_q = None
-                grad_total_k = None
-                grad_total_v = None
                 grad_total_out = None
+                grad_total_q, grad_total_k, grad_total_v = None, None, None
+                grad_total_sink = None
 
             # -----   assert close if not using profile mode   ---- #
 
@@ -748,10 +773,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     total_q=total_q,
                     total_k=total_k,
                     total_v=total_v,
+                    total_sink=total_sink,
                     total_out=total_out,
+                    total_lse=total_lse,
                     grad_total_q=grad_total_q,
                     grad_total_k=grad_total_k,
                     grad_total_v=grad_total_v,
+                    grad_total_sink=grad_total_sink,
                     grad_total_out=grad_total_out,
                     dtype=dtype,
                     run_bwd=run_bwd,
@@ -770,10 +798,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_q: torch.Tensor,
         total_k: torch.Tensor,
         total_v: torch.Tensor,
+        total_sink: torch.Tensor | None,
         total_out: torch.Tensor,
+        total_lse: torch.Tensor | None,
         grad_total_q: torch.Tensor | None,
         grad_total_k: torch.Tensor | None,
         grad_total_v: torch.Tensor | None,
+        grad_total_sink: torch.Tensor | None,
         grad_total_out: torch.Tensor | None,
         dtype: torch.dtype,
         run_bwd: bool,
@@ -784,6 +815,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         o_atol = EPSILON
         o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
 
+        lse_atol = EPSILON
+        lse_rtol = {torch.bfloat16: 0.01, torch.float16: 0.005}.get(dtype, 0.005)
+
         dq_atol = EPSILON
         dq_rtol = {torch.bfloat16: 0.3, torch.float16: 0.2}.get(dtype, 0.2)
 
@@ -792,6 +826,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         dv_atol = EPSILON
         dv_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
+
+        dsink_atol = EPSILON
+        dsink_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
 
         # NOTE: an experimental value from magi_attention testing
         mismatch_thres_ratio: float = 2.0
@@ -812,8 +849,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         # -----   ref1. torch ref with high precision (fp64)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
+        if total_sink is not None:
+            total_sink.grad = None
 
-        total_out_ref_high_precision, _ = ref_attn_func(
+        total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -821,7 +860,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             softmax_scale=softmax_scale,
             softcap=softcap,
             layout="thd",
+            backend="torch" if total_sink is not None else "sdpa",
             high_precision=True,
+            return_lse=total_lse is not None,
         )
 
         if run_bwd:
@@ -835,12 +876,17 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 total_k.grad,
                 total_v.grad,
             )
+            grad_total_sink_ref_high_precision = (
+                total_sink.grad if total_sink is not None else None
+            )
 
         # -----   ref2. torch ref with low precision (fp16/bf16)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
+        if total_sink is not None:
+            total_sink.grad = None
 
-        total_out_ref_low_precision, _ = ref_attn_func(
+        total_out_ref_low_precision, total_lse_ref_low_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -848,7 +894,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             softmax_scale=softmax_scale,
             softcap=softcap,
             layout="thd",
+            backend="torch" if total_sink is not None else "sdpa",
             high_precision=False,
+            return_lse=total_lse is not None,
         )
 
         if run_bwd:
@@ -861,6 +909,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 total_q.grad,
                 total_k.grad,
                 total_v.grad,
+            )
+            grad_total_sink_ref_low_precision = (
+                total_sink.grad if total_sink is not None else None
             )
 
         # -----   init error message list   ---- #
@@ -902,6 +953,45 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             )
         except Exception as e:
             err_msg_list.append(str(e))
+
+        # -----   assert close for fwd lse   ---- #
+
+        if total_lse is not None:
+            # fa style with Linf norm
+            lse_norm = calc_inf_norm(total_lse, total_lse_ref_high_precision)
+            lse_ref_norm = calc_inf_norm(
+                total_lse_ref_low_precision, total_lse_ref_high_precision
+            )
+            try:
+                self.assertLessEqual(
+                    lse_norm,
+                    norm_rtol_ratio * lse_ref_norm,
+                    msg=f"For {test_case=}: {lse_norm=} should be no greater than {norm_rtol_ratio}x of {lse_ref_norm=}",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
+
+            # torch style with atol + rtol + mismatch threshold
+            lse_thres = extract_mismatch_threshold(
+                actual=total_lse_ref_low_precision,
+                expected=total_lse_ref_high_precision,
+                atol=lse_atol,
+                rtol=lse_rtol,
+                mismatch_thres_ratio=mismatch_thres_ratio,
+            )
+            try:
+                assert_close(
+                    total_lse,
+                    total_lse_ref_high_precision,
+                    atol=lse_atol,
+                    rtol=lse_rtol,
+                    mismatch_threshold=lse_thres,
+                    test_case=f"{test_case} => lse",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
+
+        # -----   assert close for bwd   ---- #
 
         if run_bwd:
             # -----   assert close for bwd dq   ---- #
@@ -1011,6 +1101,49 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
+
+            # -----   assert close for bwd dsink   ---- #
+
+            if total_sink is not None:
+                # fa style with Linf norm
+                dsink_norm = calc_inf_norm(
+                    grad_total_sink, grad_total_sink_ref_high_precision
+                )
+                dsink_ref_norm = calc_inf_norm(
+                    grad_total_sink_ref_low_precision,
+                    grad_total_sink_ref_high_precision,
+                )
+                try:
+                    self.assertLessEqual(
+                        dsink_norm,
+                        norm_rtol_ratio * dsink_ref_norm,
+                        msg=(
+                            f"For {test_case=}: {dsink_norm=} should be no greater than "
+                            f"{norm_rtol_ratio}x of {dsink_ref_norm=}"
+                        ),
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
+
+                # torch style with atol + rtol + mismatch threshold
+                dsink_thres = extract_mismatch_threshold(
+                    actual=grad_total_sink_ref_low_precision,
+                    expected=grad_total_sink_ref_high_precision,
+                    atol=dsink_atol,
+                    rtol=dsink_rtol,
+                    mismatch_thres_ratio=mismatch_thres_ratio,
+                )
+                try:
+                    assert_close(
+                        grad_total_sink,
+                        grad_total_sink_ref_high_precision,
+                        atol=dsink_atol,
+                        rtol=dsink_rtol,
+                        mismatch_threshold=dsink_thres,
+                        test_case=f"{test_case} => dsink",
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
 
         # -----   raise error if any error occurs   ---- #
 
