@@ -176,7 +176,7 @@ class FastZeroFillKernel {
     // Should we add __syncthreads() here?
     // __syncthreads();
 
-    // Print debug info
+    /* DEBUG */
     // if (thread_idx == 0 && block == 0 && bidh == 0) {
     //     printf("kGmemElemsPerStore: %d. kBytePerRow: %d. kBlockKGmem: %d. kGmemThreadsPerRow: %d.\n",
     //     kGmemElemsPerStore, kBytePerRow, kBlockKGmem, kGmemThreadsPerRow);

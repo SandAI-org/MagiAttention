@@ -50,6 +50,7 @@ void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
   if (smem_size >= 48 * 1024) { // over the limitation (48KB) of static shared memory
     CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   }
+
   cutlass::kernel_launch<ZeroFillKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, /*launch_with_pdl=*/false);
   CHECK_CUDA_KERNEL_LAUNCH();
 }

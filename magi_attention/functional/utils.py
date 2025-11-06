@@ -170,10 +170,8 @@ def calc_lse_sink(
     """
     # calculate lse_sink and repeat to seqlen_lse
     lse_sink = (
-        # shape: [s_sink, nhq] -> [nhq,]
-        torch.logsumexp(sink, dim=0)
-        # shape: [nhq,] -> [1, nhq]
-        .unsqueeze(0)
+        # shape: [s_sink, nhq] -> [1, nhq]
+        torch.logsumexp(sink, dim=0, keepdim=True)
         # shape: [1, nhq] -> [sq, nhq]
         # NOTE: we had better not use `expand` here
         # to avoid view conflict when involving in-place operations
@@ -380,11 +378,11 @@ def correct_attn_out_lse_with_sink(
             - lse: corrected lse tensor, with shape: [seqlen_q, num_heads_q]
     """
     lse_sink = calc_lse_sink(sink, lse.size(0))
-    lse_new = correct_attn_lse(lse, lse_sink, inplace=False)
-    w = calc_lse_rescale_weight(lse, lse_new)
+    corr_lse = correct_attn_lse(lse, lse_sink, inplace=False)
+    w = calc_lse_rescale_weight(lse, corr_lse)
 
     out = out.mul_(w) if inplace else (out * w).to(out.dtype)
-    lse = lse.copy_(lse_new) if inplace else lse_new
+    lse = lse.copy_(corr_lse) if inplace else corr_lse
 
     return out, lse
 

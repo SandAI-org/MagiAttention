@@ -57,6 +57,7 @@ void set_params_fprop(
   params.h_kv = h_kv;
   params.total_q = total_q;
   params.total_k = total_k;
+  params.total_sink = total_sink;
   params.d = d;
   params.d_rounded = d_rounded;
 

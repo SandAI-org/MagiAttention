@@ -781,7 +781,6 @@ class TestFlexFlashAttn(DistTestBase):
         # -----   assert close for bwd dv   ---- #
 
         # fa style with Linf norm
-
         dv_norm = calc_inf_norm(grad_total_v, grad_total_v_ref_high_precision)
         dv_ref_norm = calc_inf_norm(
             grad_total_v_ref_low_precision, grad_total_v_ref_high_precision
@@ -1600,7 +1599,7 @@ class TestFlexFlashAttn(DistTestBase):
             grad_total_sink=dsink,
             grad_total_out=do,
             dtype=torch.bfloat16,
-            test_case="test_compiled_flex_flash_attn",
+            test_case="test_ffa_compiled",
         )
 
 
