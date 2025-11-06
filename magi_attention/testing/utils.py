@@ -15,6 +15,7 @@
 import os
 from contextlib import contextmanager
 from functools import partial, wraps
+from typing import Callable
 
 from magi_attention.utils import wrap_to_list
 
@@ -79,3 +80,34 @@ switch_ffa_verbose_jit_build_context = partial(
 switch_ffa_verbose_jit_build_decorator = switch_envvar_decorator(
     envvar_name="MAGI_ATTENTION_BUILD_VERBOSE"
 )
+
+
+def switch_envvars(
+    envvar_name_list: list[str], enable_list: list[bool]
+) -> Callable[[], None]:
+    """Switch the given list of environment variables
+    to the corr. given value indicated by the list of `enable`,
+    and return a call back function to switch them back.
+
+    NOTE: this is helpful when switching multiple environment variables at once,
+    as chaining several ``switch_envvar_context`` calls in a single ``with`` statement
+    can become unwieldy and lead to excessive indentation.
+
+    Args:
+        enable_list (bool, optional): ``enable_list[i]`` indicates whether to
+            enable the ith environment variable in the ``envvar_name_list``.
+
+    Returns:
+        Callable[[], None]: the call back function to switch the environment variables back
+    """
+    ctx_mgr_lis = []
+    for envvar_name, enable in zip(envvar_name_list, enable_list):
+        ctx_mgr = switch_envvar_context(envvar_name=envvar_name, enable=enable)
+        ctx_mgr.__enter__()
+        ctx_mgr_lis.append(ctx_mgr)
+
+    def switch_envvars_back():
+        for ctx_mgr in reversed(ctx_mgr_lis):
+            ctx_mgr.__exit__(None, None, None)
+
+    return switch_envvars_back

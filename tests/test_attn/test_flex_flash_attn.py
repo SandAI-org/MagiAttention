@@ -1534,7 +1534,7 @@ class TestFlexFlashAttn(DistTestBase):
         self.run_test_case(
             seqlen_q=total_seqlen_q,
             seqlen_kv=total_seqlen_k,
-            seqlen_sink=0,
+            seqlen_sink=0,  # pass testing attn sink for now
             model_config=model_config,
             dtype=dtype,
             q_ranges=q_ranges,
