@@ -38,48 +38,8 @@
 
 using namespace cute;
 
-template <
-    int Arch,
-    int kHeadDim,
-    int kBlockM,
-    int kBlockN,
-    bool Has_softcap,
-    bool Has_sink,
-    typename Element,
-    typename ElementDkv,
-    bool Deterministic,
-    int Stages = 2,
-    int Stages_dO = 2,
-    int Stages_dS = 2,
-    bool SdP_swapAB = true,
-    bool dKV_swapAB = false,
-    bool dQ_swapAB = false,
-    int NumMmaWarpGroups = 2,
-    int AtomLayoutMSdP = 1,
-    int AtomLayoutNdKV = 2,
-    int AtomLayoutMdQ = 1,
-    bool V_in_regs = false,
-    bool RangeMerge = false,
-    bool DisableBwdDkvAtomicReduction = false,
-    bool ProfileMode = false>
-void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
-  using ElementAccum = float;
-  using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
-
-  using TileShape_MK = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
-
-  using PreprocessKernel = flash::FlashAttnBwdPreprocess<
-      /*TileShape_MK_=*/TileShape_MK,
-      /*Element=*/Element,
-      /*ElementAccum=*/ElementAccum,
-      /*ArchTag_=*/ArchTag,
-      /*Clear_dQ=*/false,
-      /*Clear_dK=*/false,
-      /*Clear_dV=*/false,
-      /*Has_sink=*/Has_sink,
-      /*Deterministic=*/Deterministic>;
-
-  // Launch the pre-processing kernel of the ffa backward pass
+template <typename PreprocessKernel, int kBlockM, typename Element, bool ProfileMode = false>
+void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
   if constexpr (ProfileMode)
     MagiEvents::start("bwd_preprocess");
 
@@ -111,15 +71,64 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       // meta
       params.total_q,
       params.total_sink};
+
   typename PreprocessKernel::Params preprocess_params = PreprocessKernel::to_underlying_arguments(preprocess_args);
+
   int num_m_block = cute::ceil_div(params.total_q_rounded, kBlockM);
   dim3 grid_m(1, num_m_block, params.h_qo);
+
   cutlass::kernel_launch<PreprocessKernel>(
       grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, /*launch_with_pdl=*/false);
+
   CHECK_CUDA_KERNEL_LAUNCH();
 
   if constexpr (ProfileMode)
     MagiEvents::stop("bwd_preprocess");
+}
+
+template <
+    int Arch,
+    int kHeadDim,
+    int kBlockM,
+    int kBlockN,
+    bool Has_softcap,
+    typename Element,
+    typename ElementDkv,
+    bool Deterministic,
+    int Stages = 2,
+    int Stages_dO = 2,
+    int Stages_dS = 2,
+    bool SdP_swapAB = true,
+    bool dKV_swapAB = false,
+    bool dQ_swapAB = false,
+    int NumMmaWarpGroups = 2,
+    int AtomLayoutMSdP = 1,
+    int AtomLayoutNdKV = 2,
+    int AtomLayoutMdQ = 1,
+    bool V_in_regs = false,
+    bool RangeMerge = false,
+    bool DisableBwdDkvAtomicReduction = false,
+    bool ProfileMode = false>
+void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
+  using ElementAccum = float;
+  using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
+
+  using TileShape_MK = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
+
+  // Launch the pre-processing kernel of the ffa backward pass
+  BOOL_SWITCH(params.has_sink(), Has_sink, [&] {
+    using PreprocessKernel = flash::FlashAttnBwdPreprocess<
+        /*TileShape_MK_=*/TileShape_MK,
+        /*Element=*/Element,
+        /*ElementAccum=*/ElementAccum,
+        /*ArchTag_=*/ArchTag,
+        /*Clear_dQ=*/false,
+        /*Clear_dK=*/false,
+        /*Clear_dV=*/false,
+        /*Has_sink=*/Has_sink,
+        /*Deterministic=*/Deterministic>;
+    run_flash_bwd_pre_process<PreprocessKernel, kBlockM, Element, ProfileMode>(params, stream);
+  });
 
   // Run the main kernel of the ffa backward pass
   if constexpr (ProfileMode)
@@ -279,32 +288,29 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static constexpr int AtomLayoutMdQ = kHeadDim <= 64 ? 2 : 1;
   static constexpr bool V_in_regs = false;
 
-  BOOL_SWITCH(params.has_sink(), Has_sink, [&] {
-    BOOL_SWITCH(params.merge_k_ranges != nullptr, RangeMerge, [&] {
-      run_flash_bwd<
-          /*Arch=*/Arch,
-          /*kHeadDim=*/kHeadDim,
-          /*kBlockM=*/kBlockM,
-          /*kBlockN=*/kBlockN,
-          /*Has_softcap=*/Has_softcap,
-          /*Has_sink=*/Has_sink,
-          /*Element=*/T,
-          /*ElementDkv=*/TDkv,
-          /*Deterministic=*/Deterministic,
-          /*Stages=*/Stages,
-          /*Stages_dO=*/Stages_dO,
-          /*Stages_dS=*/Stages_dS,
-          /*SdP_swapAB=*/SdP_swapAB,
-          /*dKV_swapAB=*/dKV_swapAB,
-          /*dQ_swapAB=*/dQ_swapAB,
-          /*NumMmaWarpGroups=*/NumMmaWarpGroups,
-          /*AtomLayoutMSdP=*/AtomLayoutMSdP,
-          /*AtomLayoutNdKV=*/AtomLayoutNdKV,
-          /*AtomLayoutMdQ=*/AtomLayoutMdQ,
-          /*V_in_regs=*/V_in_regs,
-          /*RangeMerge=*/RangeMerge,
-          /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
-          /*ProfileMode=*/ProfileMode>(params, stream);
-    });
+  BOOL_SWITCH(params.merge_k_ranges != nullptr, RangeMerge, [&] {
+    run_flash_bwd<
+        /*Arch=*/Arch,
+        /*kHeadDim=*/kHeadDim,
+        /*kBlockM=*/kBlockM,
+        /*kBlockN=*/kBlockN,
+        /*Has_softcap=*/Has_softcap,
+        /*Element=*/T,
+        /*ElementDkv=*/TDkv,
+        /*Deterministic=*/Deterministic,
+        /*Stages=*/Stages,
+        /*Stages_dO=*/Stages_dO,
+        /*Stages_dS=*/Stages_dS,
+        /*SdP_swapAB=*/SdP_swapAB,
+        /*dKV_swapAB=*/dKV_swapAB,
+        /*dQ_swapAB=*/dQ_swapAB,
+        /*NumMmaWarpGroups=*/NumMmaWarpGroups,
+        /*AtomLayoutMSdP=*/AtomLayoutMSdP,
+        /*AtomLayoutNdKV=*/AtomLayoutNdKV,
+        /*AtomLayoutMdQ=*/AtomLayoutMdQ,
+        /*V_in_regs=*/V_in_regs,
+        /*RangeMerge=*/RangeMerge,
+        /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
+        /*ProfileMode=*/ProfileMode>(params, stream);
   });
 }
