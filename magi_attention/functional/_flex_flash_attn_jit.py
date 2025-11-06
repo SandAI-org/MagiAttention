@@ -72,6 +72,30 @@ def tile_size_bwd_sm90(head_dim: int, softcap: bool) -> tuple[int, int]:
         return (64, 64)
 
 
+def get_fwd_tile_shape(
+    head_dim: int, softcap: bool, ref_block_size: tuple[int, int] | None = None
+) -> tuple[int, int]:
+    if ref_block_size is not None:
+        # TODO: we need a more reasonable method to get bwd tileshape from ref_block_size
+        kblock_m, kblock_n = ref_block_size
+    else:
+        kblock_m, kblock_n = tile_size_fwd_sm90(head_dim, softcap)
+
+    return kblock_m, kblock_n
+
+
+def get_bwd_tile_shape(
+    head_dim: int, softcap: bool, ref_block_size: tuple[int, int] | None = None
+) -> tuple[int, int]:
+    if ref_block_size is not None:
+        # TODO: we need a more reasonable method to get bwd tileshape from ref_block_size
+        kblock_m, kblock_n = ref_block_size
+    else:
+        kblock_m, kblock_n = tile_size_bwd_sm90(head_dim, softcap)
+
+    return kblock_m, kblock_n
+
+
 def round_up_headdim(head_dim: int) -> int:
     if head_dim <= 64:
         return 64
@@ -163,13 +187,10 @@ def get_ffa_jit_spec(
     # Convert arch to SM number
     arch_sm_num = f"{arch[0]}{arch[1]}"
 
-    if ref_block_size is not None:
-        kblock_m, kblock_n = ref_block_size
+    if direction == "fwd":
+        kblock_m, kblock_n = get_fwd_tile_shape(head_dim, softcap, ref_block_size)
     else:
-        if direction == "fwd":
-            kblock_m, kblock_n = tile_size_fwd_sm90(head_dim, softcap)
-        else:
-            kblock_m, kblock_n = tile_size_bwd_sm90(head_dim, softcap)
+        kblock_m, kblock_n = get_bwd_tile_shape(head_dim, softcap, ref_block_size)
 
     uri = get_ffa_uri(
         arch_sm_num,

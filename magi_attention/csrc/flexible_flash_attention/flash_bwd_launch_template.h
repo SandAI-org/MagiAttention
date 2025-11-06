@@ -254,8 +254,6 @@ template <
     bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  // static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
-  // static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
 
   // TODO: Add a specific tuning function for different kHeadDim
   static constexpr int Stages = 2;

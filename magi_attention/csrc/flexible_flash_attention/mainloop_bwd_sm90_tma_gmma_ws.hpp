@@ -530,16 +530,6 @@ struct CollectiveMainloopBwdSm90 {
       cute::tuple<int32_t, int32_t, int32_t> block_coord,
       BlockMetaT& block_meta,
       bool const has_valid_tile) {
-    /*int n_block = get<0>(block_coord);
-    int bidh = get<1>(block_coord);
-    int bidb = get<2>(block_coord); */
-    // SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-
-    // flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    // auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
-    // It's possible to have m_block_max <= m_block_min. Loading Q, K can cause illegal memory access.
-    // auto m_block_min = block_meta.m_block_min;
-    // auto m_block_max = block_meta.m_block_max;
     /*
     if (bidb == 0 && bidh == 0 && threadIdx.x == 0) {
       printf(
@@ -579,14 +569,6 @@ struct CollectiveMainloopBwdSm90 {
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
     int bidh = block_meta.bidh;
     int n_block = block_meta.n_block;
-    // if (m_block_max <= m_block_min) {
-    //   return false;
-    // }
-
-    // if (bidh == 0 && threadIdx.x == 0) {
-    //   printf("n_block: %d bidb: %d m_block_min_: %d m_block_max_: %d attn_type_: %d, m_block_min: %d m_block_max: %d attn_type: %d\n", n_block, bidb, m_block_min_,
-    //   m_block_max_, static_cast<int>(attn_type_), m_block_min, m_block_max, static_cast<int>(attn_type));
-    // }
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
     Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{});
@@ -608,33 +590,17 @@ struct CollectiveMainloopBwdSm90 {
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE_log2), params.shape_LSE, params.stride_LSE_log2)(_, _, bidh); // (4, total_seqlen)
     Tensor mdPsum = make_tensor(make_gmem_ptr(params.ptr_dPsum), params.shape_LSE, params.stride_dPsum)(_, _, bidh); // (4, total_seqlen)
 
-    // Tensor gQ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
-    // Tensor gdO = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdO), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
     Tensor gK = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mK), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
     Tensor gV = local_tile(domain_offset(make_coord(seqlen_info.offset_k, _0{}), mV), select<1, 2>(TileShape_MNK{}), make_coord(n_block, _0{})); // (N, K)
-
-    /*Tensor gLSE = local_tile(
-        cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mLSE),
-        make_shape(get<0>(shape(mLSE)), select<0>(TileShape_MNK{})), // (4, kblockm)
-        make_coord(_0{}, _)); // (4, M, _) */
-    /*Tensor gdPsum = local_tile(
-        cute::domain_offset(make_coord(_0{}, seqlen_info.offset_q), mdPsum),
-        make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})), // (4, kblockm)
-        make_coord(_0{}, _)); // (4, M, _) */
 
     Tensor sK_x = make_tensor(sK.data(), make_layout(sK.layout(), Layout<_1>{}));
     Tensor gK_x = make_tensor(gK.data(), make_layout(gK.layout(), Layout<_1>{}));
     Tensor sV_x = make_tensor(sV.data(), make_layout(sV.layout(), Layout<_1>{}));
     Tensor gV_x = make_tensor(gV.data(), make_layout(gV.layout(), Layout<_1>{}));
-    // auto [tQgQ, tQsQ] = tma_partition(params.tma_load_Q, block_rank_in_cluster, Layout<ClusterShape>{},
-    //                                   group_modes<0, 2>(sQ), group_modes<0, 2>(gQ));  // (TMA, k), (TMA, PIPE)
-    // auto [tdOgdO, tdOsdO] = tma_partition(params.tma_load_dO, block_rank_in_cluster, Layout<ClusterShape>{},
-    //                                   group_modes<0, 2>(sdO), group_modes<0, 2>(gdO));  // (TMA, k), (TMA, PIPE)
     auto block_tma_Q = params.tma_load_Q.get_slice(cluster_local_block_id.y);
     auto block_tma_dO = params.tma_load_dO.get_slice(cluster_local_block_id.y);
-    // Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
+
     Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ));
-    // Tensor tdOgdO = group_modes<0, 3>(block_tma_dO.partition_S(gdO));
     Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO));
     auto [tKgK, tKsK] = tma_partition(params.tma_load_K, _0{}, Layout<_1>{}, group_modes<0, 2>(sK_x), group_modes<0, 2>(gK_x)); // (TMA), (TMA)
     auto [tVgV, tVsV] = tma_partition(params.tma_load_V, _0{}, Layout<_1>{}, group_modes<0, 2>(sV_x), group_modes<0, 2>(gV_x)); // (TMA), (TMA)
@@ -648,8 +614,6 @@ struct CollectiveMainloopBwdSm90 {
       }
     }
 
-    // int m_block = m_block_min;
-
     int lane_predicate = cute::elect_one_sync();
     // int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
 
@@ -657,31 +621,16 @@ struct CollectiveMainloopBwdSm90 {
     // if (warp_idx_in_warpgroup == 0)
     //    cutlass::arch::NamedBarrier::sync(NumMmaThreads + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(BwdNamedBarriers::KVEmpty) /*id*/);
     auto load_Q = [&](int m_block, auto& smem_pipe_write, auto& tQgQ, auto& gLSE, auto& block_meta) {
-      // auto block_tma_Q = params.tma_load_Q.get_slice(cluster_local_block_id.y);
-      // Tensor gQ = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K, _)
-      // Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
-      // Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ));
-      // Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ));
-      /*Tensor gLSE = local_tile(
-          cute::domain_offset(make_coord(_0{}, block_meta.seqlen_info.offset_q), mLSE),
-          make_shape(get<0>(shape(mLSE)), select<0>(TileShape_MNK{})), // (4, kblockm)
-          make_coord(_0{}, _)); // (4, M, _) */
-
       // do tma copy
-      // int lane_predicate = cute::elect_one_sync();
-      // if (lane_predicate) {
       pipeline_q.producer_acquire(smem_pipe_write);
       copy(
           params.tma_load_Q.with(*pipeline_q.producer_get_barrier(smem_pipe_write), mcast_mask_qdo, TMA::CacheHintSm90::EVICT_LAST),
           tQgQ(_, m_block),
           tQsQ(_, smem_pipe_write.index()));
       copy(bulk_copy.with(*pipeline_q.producer_get_barrier(smem_pipe_write)), gLSE(_, _, m_block), sLSE(_, _, smem_pipe_write.index()));
-      // }
     };
 
     auto load_KV = [&]() {
-      // int lane_predicate = cute::elect_one_sync();
-      // if (lane_predicate) {
       if (!has_valid_tile) {
         shared_storage.pipelines.barrier_KV.arrive_and_expect_tx(TmaTransactionBytesK + TmaTransactionBytesV);
         copy(
@@ -693,18 +642,9 @@ struct CollectiveMainloopBwdSm90 {
             tVgV,
             tVsV);
       }
-      // }
     };
 
     auto load_dO = [&](int m_block, auto& smem_pipe_write, auto& smem_pipe_write_do, auto& tdOgdO, auto& gdPsum, auto& block_meta) {
-      // Tensor gdO = local_tile(domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mdO), select<0, 2>(TileShape_MNK{}), make_coord(_, _0{})); // (M, K,
-      // _) Tensor sdO = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_do.data()), SmemLayoutdO{}); Tensor tdOgdO = group_modes<0,
-      // 3>(block_tma_dO.partition_S(gdO)); Tensor tdOsdO = group_modes<0, 3>(block_tma_dO.partition_D(sdO));
-      /*Tensor gdPsum = local_tile(
-          cute::domain_offset(make_coord(_0{}, block_meta.seqlen_info.offset_q), mdPsum),
-          make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})), // (4, kblockm)
-          make_coord(_0{}, _)); */
-
       PipelineState_dO smem_pipe_write_do_cur = cute::conditional_return<Q_dO_same_stages>(smem_pipe_write, smem_pipe_write_do);
       pipeline_do.producer_acquire(smem_pipe_write_do_cur);
       copy(
@@ -719,6 +659,7 @@ struct CollectiveMainloopBwdSm90 {
       ++smem_pipe_write;
     };
 
+    // TODO: add prologue and epilogue here!
     if (lane_predicate) {
       load_KV();
     }
@@ -742,21 +683,6 @@ struct CollectiveMainloopBwdSm90 {
           make_shape(get<0>(shape(mdPsum)), select<0>(TileShape_MNK{})), // (4, kblockm)
           make_coord(_0{}, _));
 
-      /*if (bidh == 0 && threadIdx.x == 0) {
-          printf(
-                "block_meta: n_block: %d, bidb: %d, m_block_min: %d, m_block_max: %d, seqlen_q: %d, seqlen_k: %d, offset_q: %d, offset_k: %d, attn_type: %d\n",
-                block_meta.n_block,
-                block_meta.bidb,
-                block_meta.m_block_min,
-                block_meta.m_block_max,
-                block_meta.seqlen_info.seqlen_q,
-                block_meta.seqlen_info.seqlen_k,
-                block_meta.seqlen_info.offset_q,
-                block_meta.seqlen_info.offset_k,
-                block_meta.attn_type
-          );
-      }*/
-
       if (lane_predicate) {
         load_Q(m_block, smem_pipe_write, tQgQ, gLSE, block_meta);
 
@@ -776,10 +702,6 @@ struct CollectiveMainloopBwdSm90 {
       }
       block_meta.prefetch();
     }
-
-    // if (lane_predicate) {
-    //  load_dO(m_block, smem_pipe_write, smem_pipe_write_do, block_meta);
-    // }
 
     return true;
   }
@@ -904,14 +826,6 @@ struct CollectiveMainloopBwdSm90 {
     flash::AttnType attn_type = block_meta.attn_type;
     int m_block_min = block_meta.m_block_min;
     int m_block_max = block_meta.m_block_max;
-    /*
-    int n_block = get<0>(block_coord);
-    int bidh = get<1>(block_coord);
-    int bidb = get<2>(block_coord);
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type);
-    */
 
     if constexpr (Deterministic) {
       // update conflict state of batches
@@ -997,6 +911,7 @@ struct CollectiveMainloopBwdSm90 {
     Tensor tdQgdQ = block_tma_dQ.partition_D(gdQaccum); // (TMA, TMA_M, TMA_K)
     Tensor tdQsdQ = block_tma_dQ.partition_S(sdQ); // (TMA, TMA_M, TMA_K)
 
+    // TODO: add deterministic for range_merge.
     while (!block_meta.is_finish() && block_meta.is_valid()) {
       int m_block = block_meta.m_block_min;
       m_block_max = block_meta.m_block_max;
@@ -1086,28 +1001,12 @@ struct CollectiveMainloopBwdSm90 {
       bool const has_valid_tile) {
     static_assert(is_rmem<FrgTensordKV>::value, "dK and dV tensor must be rmem resident.");
 
-    /*int n_block = get<0>(block_coord);
-    int bidh = get<1>(block_coord);
-    int bidb = get<2>(block_coord); */
     SeqlenInfo_t seqlen_info = block_meta.seqlen_info;
     int bidh = block_meta.bidh;
     int n_block = block_meta.n_block;
     flash::AttnType attn_type = block_meta.attn_type;
     int m_block_min = block_meta.m_block_min;
     int m_block_max = block_meta.m_block_max;
-    /*
-    SeqlenInfo_t seqlen_info{bidb, params.q_ranges, params.k_ranges};
-    flash::AttnType attn_type = static_cast<flash::AttnType>(params.attn_type_map ? params.attn_type_map[bidb] : 0);
-    auto [m_block_min, m_block_max] = BlockMN_t::get_m_block_min_max(seqlen_info, n_block, bidb, attn_type); */
-
-    // if (bidh == 0 && thread_idx == 0) {
-    //     printf("[BWD MMA] bidb: %d,  kBlockM: %d, kBlockN: %d, n_block: %d, m_block_min: %d, m_block_max: %d, attn_type: %d\n", bidb, kBlockM, kBlockN, n_block,
-    //     m_block_min, m_block_max, attn_type);
-    // }
-    // It's possible to have m_block_max <= m_block_min. Exit early
-    // if (m_block_max <= m_block_min) {
-    //   return false;
-    // }
 
     while (!block_meta.is_finish() && !block_meta.is_valid()) {
       // Find the first valid block_meta
@@ -1561,16 +1460,9 @@ struct CollectiveMainloopBwdSm90 {
       // TODO: Handle causal part, can be optimized
     }
 
-    static constexpr int kBlockM = get<0>(TileShape_MNK{});
-    static constexpr int kBlockN = get<1>(TileShape_MNK{});
-
-    // auto mask_fn = [&](auto& tSrS, int m_block) { mask.template apply<true /*Seqlenk_mask*/>(tSrS, m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k); };
-
     while (!block_meta.is_finish() && block_meta.is_valid()) {
       m_block = block_meta.m_block_min;
       m_block_max = block_meta.m_block_max;
-      // seqlen_q = block_meta.seqlen_info.seqlen_q;
-      // seqlen_k = block_meta.seqlen_info.seqlen_k;
       attn_type = block_meta.attn_type;
 
       auto mask_fn = [&](auto& tSrS, int m_block) {
@@ -1590,6 +1482,7 @@ struct CollectiveMainloopBwdSm90 {
       block_meta.prefetch();
     }
 
+    // TODO: mask_fn optimize for bwd meet some performance problem.
     if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
       // TODO: Handle inv causal part, can be optimized
     }

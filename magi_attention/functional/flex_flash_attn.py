@@ -317,6 +317,7 @@ def _flex_flash_attn_forward(
     else:
         kblock_m = None
         kblock_n = None
+
     # NOTE: we can not directly compile `_flex_flash_attn_forward`
     # since torch.compile does not allow returning the mutated args (out, lse)
     _flex_flash_attn_forward_compilable(
@@ -505,6 +506,7 @@ def _flex_flash_attn_backward(
     else:
         kblock_m = None
         kblock_n = None
+
     # NOTE: we can not directly compile `_flex_flash_attn_backward`
     # since torch.compile does not allow returning the mutated args (dq, dk, dv)
     _flex_flash_attn_backward_compilable(
@@ -558,8 +560,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         sm_margin: int = 0,
         disable_fwd_atomic_reduction: bool = False,
         auto_range_merge: bool = False,
-        ref_block_size_fwd: tuple[int, int] | None = None,
-        ref_block_size_bwd: tuple[int, int] | None = None,
+        ref_block_size: tuple[int, int] | None = None,
         profile_mode: bool = False,
     ):
         softmax_scale = (
@@ -602,7 +603,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges,
             fwd_qk_map,
             fwd_unique_count,
-            ref_block_size_fwd,
+            ref_block_size,
             softmax_scale,
             softcap,
             disable_fwd_atomic_reduction,
@@ -628,8 +629,8 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
         ctx.auto_range_merge = auto_range_merge
+        ctx.ref_block_size = ref_block_size
         ctx.profile_mode = profile_mode
-        ctx.ref_block_size_bwd = ref_block_size_bwd
 
         return out, lse
 
@@ -686,7 +687,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_k_ranges,
             bwd_kq_map,
             bwd_unique_count,
-            ref_block_size=ctx.ref_block_size_bwd,
+            ref_block_size=ctx.ref_block_size,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
             disable_bwd_dkv_atomic_reduction=False,
@@ -723,7 +724,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
             None,  # ref_block_size
-            None,  # ref_block_size_bwd
             None,  # profile_mode
         )
 
@@ -745,7 +745,6 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: bool = False,
     auto_range_merge: bool = False,
     ref_block_size: tuple[int, int] | None = None,
-    ref_block_size_bwd: tuple[int, int] | None = None,
     profile_mode: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -794,6 +793,11 @@ def flex_flash_attn_func(
         auto_range_merge (bool, optional):
             Whether to automatically merge k_ranges for the same q_range. Defaults to ``False``.
             **Note:** This flag is useful for sparse attention scenarios but still under development.
+
+        ref_block_size (tuple[int, int], optional):
+            A reference block size used to help select the tile shape.
+            For example, for block sparse scenarios with block sizes of 64x64 or 128x128,
+            this can be set to (64, 64) or (128, 128).
 
         profile_mode (bool, optional):
             Whether to enable profiling mode for FFA. Defaults to ``False``.
@@ -929,6 +933,5 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         auto_range_merge,
         ref_block_size,
-        ref_block_size_bwd,
         profile_mode,
     )
