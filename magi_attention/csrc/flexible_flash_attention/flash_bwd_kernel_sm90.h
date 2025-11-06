@@ -263,7 +263,8 @@ class FlashAttnBwdSm90 {
             mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta);
           } else {
             mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta, bidb_last);
-            bidb_last = block_meta.bidb;
+            // we need to minus one because we call prefetch in the inner loop;
+            bidb_last = block_meta.bidb - 1;
           }
         }
       }
