@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <stdexcept>
+
 #include "cute/tensor.hpp"
 
 #include <cutlass/array.h>
@@ -34,7 +36,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQ, bool Clear_dK, bool Clear_dV>
+template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQ, bool Clear_dK, bool Clear_dV, bool Has_sink, bool Deterministic>
 class FlashAttnBwdPreprocess {
  public:
   // Type Aliases
@@ -49,6 +51,7 @@ class FlashAttnBwdPreprocess {
   static constexpr uint32_t MaxThreadsPerBlock = 256;
   static constexpr uint32_t MinBlocksPerMultiprocessor = 2;
   static constexpr int SharedStorageSize = 0;
+  static constexpr int kMaxSeqlenSink = Has_sink ? 8 : 1; // NOTE: we use dummy 1 if not `Has_sink` to reduce register usage
 
   static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
   static_assert(get<1>(TileShape_MK{}) % kGmemElemsPerLoad == 0, "Headdim must be a multiple of kGmemElemsPerLoad");
@@ -67,6 +70,7 @@ class FlashAttnBwdPreprocess {
 
   static constexpr int kGmemElemsPerLoadAccum = sizeof(cute::uint128_t) / sizeof(ElementAccum);
   static_assert((kBlockM * kHeadDim / kGmemElemsPerLoadAccum) % MaxThreadsPerBlock == 0, "MaxThreadsPerBlock must divide kBlockM * kHeadDim / kGmemElemsPerLoadAccum");
+
   using GmemLayoutAtomAccum = Layout<Shape<Int<MaxThreadsPerBlock>>>;
   using GmemTiledCopyAccum = decltype(make_tiled_copy(
       Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{},
@@ -79,6 +83,8 @@ class FlashAttnBwdPreprocess {
   using StridedPsum = cute::Stride<_1, _4, int64_t>;
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (sq, nhq)
   using StrideLSE = cute::Stride<int64_t, _1>;
+  using ShapeSink = cute::Shape<int32_t, int32_t>; // (s_sink, nhq)
+  using StrideSink = cute::Stride<int64_t, _1>;
 
   // Device side arguments
   struct Arguments {
@@ -100,10 +106,15 @@ class FlashAttnBwdPreprocess {
     // LSE_log2
     float* ptr_LSE_log2;
     StridedPsum const stride_LSE_log2;
+    // sink
+    float* ptr_sink;
+    ShapeSink const shape_sink;
+    StrideSink const stride_sink;
+    // dsink
+    float* ptr_dsink;
     // meta
-    int2 const* q_ranges;
-    int2 const* k_ranges;
     int const total_q;
+    int const total_sink;
   };
 
   // Kernel entry point API
@@ -126,31 +137,52 @@ class FlashAttnBwdPreprocess {
     // LSE_log2
     float* ptr_LSE_log2;
     StridedPsum const stride_LSE_log2;
+    // sink
+    float* ptr_sink = nullptr;
+    ShapeSink const shape_sink;
+    StrideSink const stride_sink;
+    // dsink
+    float* ptr_dsink = nullptr;
     // meta
-    int2 const* q_ranges = nullptr;
-    int2 const* k_ranges = nullptr;
     int const total_q;
+    int const total_sink = 0;
   };
 
   // Convert to underlying arguments. In this case, a simple copy for the aliased type.
   static Params to_underlying_arguments(Arguments const& args) {
+    // Check total_sink
+    if (args.total_sink > kMaxSeqlenSink) {
+      throw std::runtime_error("Invalid seqlen sink: " + std::to_string(args.total_sink) + ", must be <= kMaxSeqlenSink: " + std::to_string(kMaxSeqlenSink));
+    }
+
     return {
+        // O
         args.ptr_O,
         args.shape_O,
         args.stride_O,
+        // dO
         args.ptr_dO,
         args.stride_dO,
+        // dPsum
         args.ptr_dPsum,
         args.shape_dPsum,
         args.stride_dPsum,
+        // LSE
         args.ptr_LSE,
         args.shape_LSE,
         args.stride_LSE,
+        // LSE_log2
         args.ptr_LSE_log2,
         args.stride_LSE_log2,
-        args.q_ranges,
-        args.k_ranges,
+        // sink
+        args.ptr_sink,
+        args.shape_sink,
+        args.stride_sink,
+        // dsink
+        args.ptr_dsink,
+        // meta
         args.total_q,
+        args.total_sink,
     };
   }
 
@@ -166,21 +198,25 @@ class FlashAttnBwdPreprocess {
     int const m_block = blockIdx.y;
     int const bidh = blockIdx.z;
 
+    // Get seqlen info
     int const remain_valid_seqlen_q = params.total_q - m_block * kBlockM;
 
-    // Initialize the input tensors for O, dO, and LSE
+    // Initialize the input tensors for O, dO, LSE, sink
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh); // [sq, hd]
     Tensor gO = local_tile(cute::domain_offset(make_coord(0, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
     Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh); // [sq, hd]
     Tensor gdO = local_tile(cute::domain_offset(make_coord(0, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh); // [sq,]
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(0), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block)); // (M,)
+    Tensor mSink = make_tensor(make_gmem_ptr(params.ptr_sink), params.shape_sink, params.stride_sink)(_, bidh); // [s_sink,]
 
     // Load the LSE
     // NOTE: we mask the OOB lse as `inf`,
     // to make the subsequent calculation of OOB scores (exp(x - lse))
     // become exp(0 - `inf`) = exp(`-inf`) = 0
     float lse = thread_idx < remain_valid_seqlen_q && thread_idx < kBlockM ? gLSE(thread_idx) : INFINITY;
+
+    // Load the sink
 
     // Initialize the tiled copy for O and dO
     GmemTiledCopy gmem_tiled_copy_O;
@@ -225,10 +261,10 @@ class FlashAttnBwdPreprocess {
     // and upcast to float32
     Layout l = make_layout(get<1>(tOrO.layout()), make_layout(get<0>(tOrO.layout()), get<2>(tOrO.layout())));
     Tensor tOrO_l = make_tensor(tOrO.data(), l);
-    Tensor tOrO_l_fp32 = make_tensor_like<float>(tOrO_l);
+    Tensor tOrO_l_fp32 = make_tensor_like<float>(tOrO_l); // (tM, tK)
     flash::convert_type_out(tOrO_l, tOrO_l_fp32);
     Tensor tOrdO_l = make_tensor(tOrdO.data(), l);
-    Tensor tOrdO_l_fp32 = make_tensor_like<float>(tOrdO_l);
+    Tensor tOrdO_l_fp32 = make_tensor_like<float>(tOrdO_l); // (tM, tK)
     flash::convert_type_out(tOrdO_l, tOrdO_l_fp32);
 
     // Compute `dPsum = sum(O * dO, dim=-1)`

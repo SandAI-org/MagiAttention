@@ -172,8 +172,19 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   CLUSTER_SWITCH(cutlass::ceil_div(params.total_q, kBlockM) % 2 == 0, Use_cluster, [&] {
     static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
     BOOL_SWITCH(params.merge_q_ranges != nullptr, MergeRange, [&] {
-      run_flash_fwd<Arch, kBlockM, kBlockN, kHeadDim, ClusterM, T, T_out, Has_softcap, DisableFwdAtomicReduction, Deterministic, MergeRange, kProfileMode>(
-          params, stream);
+      run_flash_fwd<
+          /*Arch=*/Arch,
+          /*kBlockM=*/kBlockM,
+          /*kBlockN=*/kBlockN,
+          /*kHeadDim=*/kHeadDim,
+          /*ClusterM=*/ClusterM,
+          /*Element=*/T,
+          /*ElementOut=*/T_out,
+          /*Has_softcap=*/Has_softcap,
+          /*DisableFwdAtomicReduction=*/DisableFwdAtomicReduction,
+          /*Deterministic=*/Deterministic,
+          /*MergeRange=*/MergeRange,
+          /*ProfileMode=*/kProfileMode>(params, stream);
     });
   });
 }

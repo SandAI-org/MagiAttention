@@ -150,7 +150,6 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0, "Number of heads in key/value must divide number of heads in query");
 
   // Define a helper function to round up to multiple of m
-  auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
   int const head_size_rounded = round_up_headdim(head_size);
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};

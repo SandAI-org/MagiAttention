@@ -37,20 +37,20 @@ void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
 
   auto kernel_params = ZeroFillKernel::to_underlying_arguments(
       {static_cast<T_out*>(params.o_ptr),
-       {params.total_q, params.d, params.h_qo},
-       {params.o_row_stride, _1{}, params.o_head_stride},
+       {params.total_q, params.d, params.h_qo}, // shape_O: [sq, hd, nhq]
+       {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O: [nhq*hd, 1, hd]
        static_cast<float*>(params.softmax_lse_ptr),
-       {params.h_qo, _1{}}});
+       {params.h_qo, _1{}}}); // stride_LSE: [nhq, 1]
 
   dim3 grid_dims = ZeroFillKernel::get_grid_shape(kernel_params);
   dim3 block_dims = ZeroFillKernel::get_block_shape();
 
   auto kernel = cutlass::device_kernel<ZeroFillKernel>;
   int smem_size = ZeroFillKernel::SharedStorageSize;
-  if (smem_size >= 48 * 1024) {
+  if (smem_size >= 48 * 1024) { // over the limitation (48KB) of static shared memory
     CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   }
-  cutlass::kernel_launch<ZeroFillKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
+  cutlass::kernel_launch<ZeroFillKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, /*launch_with_pdl=*/false);
   CHECK_CUDA_KERNEL_LAUNCH();
 }
 
