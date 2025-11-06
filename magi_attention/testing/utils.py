@@ -100,6 +100,11 @@ def switch_envvars(
     Returns:
         Callable[[], None]: the call back function to switch the environment variables back
     """
+    assert len(envvar_name_list) == len(enable_list), (
+        "envvar_name_list and enable_list should have the same length, "
+        f"but got {len(envvar_name_list)=} and {len(enable_list)=}."
+    )
+
     ctx_mgr_lis = []
     for envvar_name, enable in zip(envvar_name_list, enable_list):
         ctx_mgr = switch_envvar_context(envvar_name=envvar_name, enable=enable)
