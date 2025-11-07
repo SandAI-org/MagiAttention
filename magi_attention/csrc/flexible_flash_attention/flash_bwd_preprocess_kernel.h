@@ -30,6 +30,7 @@
 #include <cutlass/numeric_types.h>
 
 #include "seqlen.h"
+#include "softmax.h"
 #include "utils.h"
 
 namespace flash {
@@ -52,11 +53,16 @@ class FlashAttnBwdPreprocess {
   static constexpr uint32_t MinBlocksPerMultiprocessor = 2;
   static constexpr int SharedStorageSize = 0;
   static constexpr int kMaxSeqlenSink = Has_sink ? 8 : 1; // NOTE: we use dummy 1 to reduce memory usage if not `Has_sink`
+  // the first s_sink threads process the sink, thus we need kMaxSeqlenSink <= MaxThreadsPerBlock
+  static_assert(kMaxSeqlenSink <= MaxThreadsPerBlock);
 
   static constexpr int kGmemElemsPerLoad = sizeof(cute::uint128_t) / sizeof(Element);
   static_assert(get<1>(TileShape_MK{}) % kGmemElemsPerLoad == 0, "Headdim must be a multiple of kGmemElemsPerLoad");
   static constexpr int kBlockM = get<0>(TileShape_MK{});
   static constexpr int kHeadDim = get<1>(TileShape_MK{});
+  // one thread processes one row, thus we need kBlockM <= MaxThreadsPerBlock
+  static_assert(kBlockM <= MaxThreadsPerBlock);
+
   // We want kBlockKGmem to be a power of 2 so that when we do the summing,
   // it's just between threads in the same warp
   static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
@@ -188,11 +194,6 @@ class FlashAttnBwdPreprocess {
 
   CUTLASS_DEVICE
   void operator()(Params const& params, [[maybe_unused]] char* smem_buf) {
-    static constexpr int kBlockM = get<0>(TileShape_MK{});
-
-    // one thread processes one row, thus we need kBlockM <= MaxThreadsPerBlock
-    static_assert(kBlockM <= MaxThreadsPerBlock);
-
     // Get block coordinates
     int const m_block = blockIdx.y;
     int const bidh = blockIdx.z;
@@ -204,13 +205,15 @@ class FlashAttnBwdPreprocess {
     int const remain_valid_seqlen_q = params.total_q - m_block * kBlockM;
     bool const is_valid_row = thread_idx < remain_valid_seqlen_q && thread_idx < kBlockM;
 
-    // Initialize the input tensors for O, dO and LSE
+    // Initialize the input tensors for O, dO, LSE, sink and dsink
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh); // [sq, hd]
     Tensor gO = local_tile(cute::domain_offset(make_coord(0, _0{}), mO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
     Tensor mdO = make_tensor(make_gmem_ptr(params.ptr_dO), params.shape_O, params.stride_dO)(_, _, bidh); // [sq, hd]
     Tensor gdO = local_tile(cute::domain_offset(make_coord(0, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh); // [sq,]
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(0), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block)); // (M,)
+    Tensor mSink = make_tensor(make_gmem_ptr(params.ptr_sink), params.shape_sink, params.stride_sink)(_, bidh); // [s_sink,]
+    Tensor mdSink = make_tensor(make_gmem_ptr(params.ptr_dsink), params.shape_sink, params.stride_sink)(_, bidh); // [s_sink,]
 
     // Load the LSE
     // NOTE: we mask the OOB lse as `inf`,
@@ -218,15 +221,12 @@ class FlashAttnBwdPreprocess {
     // become exp(0 - `inf`) = exp(`-inf`) = 0
     float lse = is_valid_row ? gLSE(thread_idx) : INFINITY;
 
-    // Initialize shared memory / register for sink
+    // Initialize static shared memory / register for sink
     __shared__ float shared_sink[kMaxSeqlenSink];
     float p_sink[kMaxSeqlenSink];
 
     // Load the sink
     if constexpr (Has_sink) {
-      // Initialize the input tensor for sink
-      Tensor mSink = make_tensor(make_gmem_ptr(params.ptr_sink), params.shape_sink, params.stride_sink)(_, bidh); // [s_sink,]
-
       // Load the sink to shared memory by first s_sink threads in the block
       if (thread_idx < params.total_sink) {
         shared_sink[thread_idx] = mSink(thread_idx);
@@ -237,7 +237,7 @@ class FlashAttnBwdPreprocess {
       // Compute the `p_sink = exp(sink - lse)`
       // for this row with the corr. lse
       for (int si = 0; si < params.total_sink; ++si) {
-        p_sink[si] = exp(shared_sink[si] - lse);
+        p_sink[si] = safe_softmax(shared_sink[si], lse);
       }
     }
 
@@ -309,13 +309,13 @@ class FlashAttnBwdPreprocess {
     Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block)); // (M,)
 
     // Store the reduced dPsum to output tensor
-    // by the thread holding the head dim 0
+    // by the thread whose hd_idx == 0
     // NOTE: we make OOB dPsum as 0
     if (get<1>(tOcO(_0{}, _0{}, _0{})) == 0) { // hd_idx = 0
 #pragma unroll
       for (int mi = 0; mi < size(dP_sum); ++mi) {
-        int const row = get<0>(tOcO(_0{}, mi, _0{})); // row_idx
-        gdPsum(row) = row < remain_valid_seqlen_q ? dP_sum(mi) : 0;
+        int const row_idx = get<0>(tOcO(_0{}, mi, _0{})); // row_idx
+        gdPsum(row_idx) = row_idx < remain_valid_seqlen_q ? dP_sum(mi) : 0;
       }
     }
 
@@ -335,14 +335,12 @@ class FlashAttnBwdPreprocess {
     // Compute partial `dsink = p_sink * -dPsum` for this row
     // and then reduce-add it back (atomically / sequentially) to the global memory of dsink
     if constexpr (Has_sink) {
-      // Make sure all writes to global memory in this block (esp. gdPsum)
+      // Make sure all gdPsum store to global memory
       // before this point are completed
-      __threadfence_block();
+      // __threadfence_block(); // REVIEW: block-level fence seems enough
+      __threadfence();
 
       if (is_valid_row) {
-        // Initialize the output tensor for dsink
-        Tensor mdSink = make_tensor(make_gmem_ptr(params.ptr_dsink), params.shape_sink, params.stride_sink)(_, bidh); // [s_sink,]
-
         // Load the negative dPsum for this row
         float neg_dPsum = -gdPsum(thread_idx);
 

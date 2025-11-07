@@ -229,6 +229,12 @@ def _flex_flash_attn_forward_compilable(
         else None,
     )
 
+    sink_fwd_debug = False  # DE-BUG
+    sink_ = None  # DE-BUG
+    if sink_fwd_debug and sink is not None:
+        sink_ = sink
+        sink = None
+
     out_, lse = mod.fwd(
         q,
         k,
@@ -250,13 +256,11 @@ def _flex_flash_attn_forward_compilable(
         sm_margin,
     )
 
-    # TODO: move the post-process for sink tokens inside the kernel
-    sink_fwd_debug = True  # DE-BUG
-    if sink_fwd_debug and sink is not None:
+    if sink_fwd_debug and sink_ is not None:
         out_, lse = correct_attn_out_lse_with_sink_compiled(
             out=out_,
             lse=lse,
-            sink=sink,
+            sink=sink_,
             inplace=True,
         )
 
@@ -423,7 +427,7 @@ def _flex_flash_attn_backward_compilable(
         profile_mode=profile_mode,
     )
 
-    sink_bwd_debug = False  # DE-BUG
+    sink_bwd_debug = True  # DE-BUG
     if sink_bwd_debug and sink is not None:
         dsink = sink_bwd_compiled(
             sink=sink,

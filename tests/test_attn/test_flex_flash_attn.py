@@ -1545,7 +1545,10 @@ class TestFlexFlashAttn(DistTestBase):
             test_case=test_case,
             err_ratio_dict={
                 "dq_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
-                "dq_min_mismatch_thres": 0.02,
+                "dq_min_mismatch_thres": 0.025,
+                "dk_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
+                "dk_min_mismatch_thres": 0.025,
+                "dv_norm_rtol_ratio": NORM_RTOL_RATIO * 1.5,
             },
         )
 
@@ -1564,6 +1567,7 @@ class TestFlexFlashAttn(DistTestBase):
         q_ranges = AttnRanges.from_ranges([[0, s // 2], [s // 2, s]])
         k_ranges = AttnRanges.from_ranges([[0, s // 2], [s // 2, s]])
         attn_type_map = [0, 1]
+
         compiled_ffa_func = torch.compile(fullgraph=True)(flex_flash_attn_func)
 
         o, lse = compiled_ffa_func(

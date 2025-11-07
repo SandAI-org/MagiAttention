@@ -27,27 +27,34 @@
 #include "cuda_check.h"
 #include "fast_zero_fill_kernel.h"
 #include "flash.h"
+#include "static_switch.h"
 
 using namespace cute;
 
-template <typename T_out, uint32_t kBlockM, uint32_t kHeadDim>
+template <typename T_out, uint32_t kBlockM, uint32_t kHeadDim, bool Has_sink>
 void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = cutlass::arch::Sm90;
-  using ZeroFillKernel = flash::FastZeroFillKernel<T_out, kBlockM, kHeadDim, ArchTag>;
+  using ZeroFillKernel = flash::FastZeroFillKernel<T_out, kBlockM, kHeadDim, Has_sink, ArchTag>;
 
   auto kernel_params = ZeroFillKernel::to_underlying_arguments(
-      {static_cast<T_out*>(params.o_ptr),
+      {// O
+       static_cast<T_out*>(params.o_ptr),
        {params.total_q, params.d, params.h_qo}, // shape_O: [sq, hd, nhq]
        {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O: [nhq*hd, 1, hd]
+                                                          // LSE
        static_cast<float*>(params.softmax_lse_ptr),
-       {params.h_qo, _1{}}}); // stride_LSE: [nhq, 1]
+       {params.h_qo, _1{}}, // stride_LSE: [nhq, 1]
+                            // sink
+       static_cast<float*>(params.sink_ptr),
+       {params.total_sink, params.h_qo}, // shape_sink: [s_sink, nhq]
+       {params.h_qo, _1{}}}); // stride_sink: [nhq, 1]
 
   dim3 grid_dims = ZeroFillKernel::get_grid_shape(kernel_params);
   dim3 block_dims = ZeroFillKernel::get_block_shape();
 
   auto kernel = cutlass::device_kernel<ZeroFillKernel>;
   int smem_size = ZeroFillKernel::SharedStorageSize;
-  if (smem_size >= 48 * 1024) { // over the limitation (48KB) of static shared memory
+  if (smem_size >= 48 * 1024) { // over the limitation (48KB) of static shared memory of H100
     CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   }
 
@@ -59,5 +66,5 @@ template <typename T_out, uint32_t kHeadDim>
 void run_fast_zero_fill_(Flash_fwd_params& params, cudaStream_t stream) {
   // TODO: tuning block size
   static constexpr uint32_t kBlockM = 256;
-  run_fast_zero_fill<T_out, kBlockM, kHeadDim>(params, stream);
+  BOOL_SWITCH(params.has_sink(), Has_sink, [&] { run_fast_zero_fill<T_out, kBlockM, kHeadDim, Has_sink>(params, stream); });
 }
