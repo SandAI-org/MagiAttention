@@ -164,7 +164,7 @@ class JitSpec:
                 verbose,
             )
 
-    def build_and_load(self):
+    def build_and_load(self, force_jit: bool = False) -> None:
         mod_name = self.name
 
         def _artifact_exists(lib_dir: Path, module_name: str) -> bool:
@@ -173,7 +173,11 @@ class JitSpec:
                     return True
             return False
 
-        if self.aot_path.exists() and _artifact_exists(self.aot_path, mod_name):
+        if (
+            not force_jit
+            and self.aot_path.exists()
+            and _artifact_exists(self.aot_path, mod_name)
+        ):
             lib_dir = self.aot_path
         else:
             self.build()

@@ -336,9 +336,8 @@ class FlashAttnBwdPreprocess {
     // and then reduce-add it back (atomically / sequentially) to the global memory of dsink
     if constexpr (Has_sink) {
       // Make sure all gdPsum store to global memory
-      // before this point are completed
-      // __threadfence_block(); // REVIEW: block-level fence seems enough
-      __threadfence();
+      // before this point are visible to all threads within this block
+      __threadfence_block();
 
       if (is_valid_row) {
         // Load the negative dPsum for this row

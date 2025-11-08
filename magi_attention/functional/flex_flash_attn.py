@@ -212,6 +212,7 @@ def _flex_flash_attn_forward_compilable(
     deterministic: bool,
     sm_margin: int,
     profile_mode: bool,
+    force_jit: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     mod = get_ffa_jit_mod(
@@ -227,6 +228,7 @@ def _flex_flash_attn_forward_compilable(
         ref_block_size=(kblock_m, kblock_n)
         if kblock_m is not None and kblock_n is not None
         else None,
+        force_jit=force_jit,
     )
 
     out_, lse = mod.fwd(
@@ -274,6 +276,7 @@ def _flex_flash_attn_forward_compilable_fake(
     deterministic: bool,
     sm_margin: int,
     profile_mode: bool,
+    force_jit: bool,
 ) -> None:
     pass
 
@@ -300,6 +303,7 @@ def _flex_flash_attn_forward(
     deterministic: bool,
     sm_margin: int,
     profile_mode: bool,
+    force_jit: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
@@ -359,6 +363,7 @@ def _flex_flash_attn_forward(
         deterministic=deterministic,
         sm_margin=sm_margin,
         profile_mode=profile_mode,
+        force_jit=force_jit,
     )
 
     return out, lse
@@ -399,6 +404,7 @@ def _flex_flash_attn_backward_compilable(
     deterministic: bool,
     sm_margin: int,
     profile_mode: bool,
+    force_jit: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
@@ -411,6 +417,7 @@ def _flex_flash_attn_backward_compilable(
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         deterministic=deterministic,
         profile_mode=profile_mode,
+        force_jit=force_jit,
     )
 
     sink_bwd_debug = True  # DE-BUG
@@ -489,6 +496,7 @@ def _flex_flash_attn_backward_compilable_fake(
     deterministic: bool,
     sm_margin: int,
     profile_mode: bool,
+    force_jit: bool,
 ) -> None:
     pass
 
@@ -521,6 +529,7 @@ def _flex_flash_attn_backward(
     deterministic: bool,
     sm_margin: int,
     profile_mode: bool,
+    force_jit: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("bwd_prepare")
@@ -571,6 +580,7 @@ def _flex_flash_attn_backward(
         deterministic=deterministic,
         sm_margin=sm_margin,
         profile_mode=profile_mode,
+        force_jit=force_jit,
     )
 
     return dq, dk, dv, dsink
@@ -598,6 +608,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         auto_range_merge: bool = False,
         ref_block_size: tuple[int, int] | None = None,
         profile_mode: bool = False,
+        force_jit: bool = False,
     ):
         softmax_scale = (
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
@@ -622,26 +633,29 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_unique_count = None
 
         out, lse = _flex_flash_attn_forward(
-            q,
-            k,
-            v,
-            sink,
-            None,  # out
-            None,  # lse
-            fwd_q_ranges,
-            fwd_k_ranges,
-            fwd_attn_type_map,
-            merge_q_ranges,
-            fwd_qk_map,
-            fwd_unique_count,
-            ref_block_size,
-            softmax_scale,
-            softcap,
-            disable_fwd_atomic_reduction,
-            q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
-            deterministic,
-            sm_margin,
-            profile_mode,
+            q=q,
+            k=k,
+            v=v,
+            sink=sink,
+            out=None,
+            lse=None,
+            q_ranges=fwd_q_ranges,
+            k_ranges=fwd_k_ranges,
+            attn_type_map=fwd_attn_type_map,
+            merge_q_ranges=merge_q_ranges,
+            qk_map=fwd_qk_map,
+            fwd_unique_count=fwd_unique_count,
+            ref_block_size=ref_block_size,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
+            disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
+            out_type=q.dtype
+            if disable_fwd_atomic_reduction
+            else torch.float32,  # out_type
+            deterministic=deterministic,
+            sm_margin=sm_margin,
+            profile_mode=profile_mode,
+            force_jit=force_jit,
         )
 
         # Cast output to the same dtype as q
@@ -658,6 +672,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.sm_margin = sm_margin
         ctx.auto_range_merge = auto_range_merge
         ctx.profile_mode = profile_mode
+        ctx.force_jit = force_jit
 
         return out, lse
 
@@ -684,23 +699,23 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_k_ranges, bwd_kq_map, bwd_unique_count = None, None, None
 
         dq, dk, dv, dsink = _flex_flash_attn_backward(
-            dout,
-            q,
-            k,
-            v,
-            sink,
-            out,
-            None,  # dq
-            None,  # dk
-            None,  # dv
-            None,  # dsink
-            lse,
-            bwd_q_ranges,
-            bwd_k_ranges,
-            bwd_attn_type_map,
-            merge_k_ranges,
-            bwd_kq_map,
-            bwd_unique_count,
+            dout=dout,
+            q=q,
+            k=k,
+            v=v,
+            sink=sink,
+            out=out,
+            dq=None,
+            dk=None,
+            dv=None,
+            dsink=None,
+            lse=lse,
+            q_ranges=bwd_q_ranges,
+            k_ranges=bwd_k_ranges,
+            attn_type_map=bwd_attn_type_map,
+            merge_k_ranges=merge_k_ranges,
+            bwd_kq_map=bwd_kq_map,
+            bwd_unique_count=bwd_unique_count,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
             disable_bwd_dkv_atomic_reduction=False,
@@ -710,6 +725,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
             profile_mode=ctx.profile_mode,
+            force_jit=ctx.force_jit,
         )
 
         # Cast gradients to the same dtype as inputs
@@ -737,6 +753,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # auto_range_merge
             None,  # ref_block_size
             None,  # profile_mode
+            None,  # force_jit
         )
 
 
@@ -759,6 +776,7 @@ def flex_flash_attn_func(
     auto_range_merge: bool = False,
     ref_block_size: tuple[int, int] | None = None,
     profile_mode: bool = False,
+    force_jit: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
@@ -813,6 +831,11 @@ def flex_flash_attn_func(
         profile_mode (bool, optional):
             Whether to enable profiling mode for FFA. Defaults to ``False``.
             **Note:** This flag for now is only internally used to profile FFA.
+            Please do not toggle it on in production.
+
+        force_jit (bool, optional):
+            Whether to force build FFA in JIT mode, even the pre-built `libs` exists. Defaults to ``False``.
+            **Note:** This flag for now is only used for development.
             Please do not toggle it on in production.
 
     Returns:
@@ -948,4 +971,5 @@ def flex_flash_attn_func(
         auto_range_merge,
         ref_block_size,
         profile_mode,
+        force_jit,
     )

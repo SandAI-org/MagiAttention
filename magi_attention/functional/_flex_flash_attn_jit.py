@@ -286,6 +286,7 @@ def get_ffa_jit_mod(
     deterministic: bool,
     profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
+    force_jit: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -304,7 +305,7 @@ def get_ffa_jit_mod(
         ref_block_size,
     )
 
-    return spec.build_and_load()
+    return spec.build_and_load(force_jit=force_jit)
 
 
 # Disable caching when MAGI_ATTENTION_NO_CACHE=1 (caching is enabled by default)
