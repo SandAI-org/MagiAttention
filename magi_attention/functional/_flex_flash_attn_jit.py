@@ -87,11 +87,11 @@ def get_fwd_tile_shape(
 def get_bwd_tile_shape(
     head_dim: int, softcap: bool, ref_block_size: tuple[int, int] | None = None
 ) -> tuple[int, int]:
-    if ref_block_size is not None:
-        # TODO: we need a more reasonable method to get bwd tileshape from ref_block_size
-        kblock_m, kblock_n = ref_block_size
-    else:
-        kblock_m, kblock_n = tile_size_bwd_sm90(head_dim, softcap)
+    # TODO: we need a more reasonable method to get bwd tileshape from ref_block_size
+    # if ref_block_size is not None:
+    #    kblock_m, kblock_n = ref_block_size
+    # else:
+    kblock_m, kblock_n = tile_size_bwd_sm90(head_dim, softcap)
 
     return kblock_m, kblock_n
 
