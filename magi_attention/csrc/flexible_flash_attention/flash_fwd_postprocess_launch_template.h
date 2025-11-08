@@ -36,20 +36,23 @@ void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = cutlass::arch::Sm90;
   using PostprocessKernel = flash::FlashAttnFwdPostprocess<T_out, kBlockM, kHeadDim, Has_sink, ArchTag>;
 
-  auto kernel_params = PostprocessKernel::to_underlying_arguments(
-      {// O
-       static_cast<T_out*>(params.o_ptr),
-       {params.total_q, params.d, params.h_qo}, // shape_O: [sq, hd, nhq]
-       {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O: [nhq*hd, 1, hd]
-                                                          // LSE
-       static_cast<float*>(params.softmax_lse_ptr),
-       {params.h_qo, _1{}}, // stride_LSE: [nhq, 1]
-                            // sink
-       static_cast<float*>(params.sink_ptr),
-       {params.total_sink, params.h_qo}, // shape_sink: [s_sink, nhq]
-       {params.h_qo, _1{}}}); // stride_sink: [nhq, 1]
+  typename PostprocessKernel::Arguments postprocess_args{
+      // O
+      static_cast<T_out*>(params.o_ptr),
+      {params.total_q, params.d, params.h_qo}, // shape_O: [sq, hd, nhq]
+      {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O: [nhq*hd, 1, hd]
+      // LSE
+      static_cast<float*>(params.softmax_lse_ptr),
+      {params.h_qo, _1{}}, // stride_LSE: [nhq, 1]
+      // sink
+      static_cast<float*>(params.sink_ptr),
+      {params.total_sink, params.h_qo}, // shape_sink: [s_sink, nhq]
+      {params.h_qo, _1{}} // stride_sink: [nhq, 1]
+  };
 
-  dim3 grid_dims = PostprocessKernel::get_grid_shape(kernel_params);
+  typename PostprocessKernel::Params postprocess_params = PostprocessKernel::to_underlying_arguments(postprocess_args);
+
+  dim3 grid_dims = PostprocessKernel::get_grid_shape(postprocess_params);
   dim3 block_dims = PostprocessKernel::get_block_shape();
 
   auto kernel = cutlass::device_kernel<PostprocessKernel>;
@@ -58,7 +61,7 @@ void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {
     CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   }
 
-  cutlass::kernel_launch<PostprocessKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, /*launch_with_pdl=*/false);
+  cutlass::kernel_launch<PostprocessKernel>(grid_dims, block_dims, smem_size, stream, postprocess_params, /*launch_with_pdl=*/false);
   CHECK_CUDA_KERNEL_LAUNCH();
 }
 

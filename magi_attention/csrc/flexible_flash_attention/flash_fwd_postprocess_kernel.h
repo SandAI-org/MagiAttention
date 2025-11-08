@@ -153,7 +153,7 @@ class FlashAttnFwdPostprocess {
   }
 
   CUTLASS_DEVICE
-  void operator()(Params const& params, char* smem_buf) {
+  void operator()(Params const& params, [[maybe_unused]] char* smem_buf) {
     // Get block coordinates
     int32_t const block = blockIdx.x;
     int32_t const bidh = blockIdx.y;
@@ -291,14 +291,11 @@ class FlashAttnFwdPostprocess {
         /*predicate_M=*/tOpOm);
 
     if constexpr (Has_sink) {
-      // Partition the src thread global tensors for O
-      Tensor tOgO_src = gmem_thr_copy_O.partition_S(gO);
+      // Retile the src/dst tensors to dst/src resp.
+      Tensor tOgO_src = gmem_thr_copy_O.retile_S(tOgO);
+      Tensor tOrO_dst = gmem_thr_copy_O.retile_D(tOrO); // NOTE: we reuse the zero-filled tOrO
 
-      // Make a fragment tensor as the dst of tOgO
-      Tensor tOrO_dst = make_fragment_like(gmem_thr_copy_O.partition_D(rO));
-      cute::clear(tOrO_dst);
-
-      // Load the original tOgO_src to tOrO_dst, where tOpOm_sink and tOpOk are true
+      // Load the original tOgO to tOrOt, where tOpOm_sink and tOpOk are true
       flash::copy2</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clearn_OOB_K=*/false>(
           /*tiled_copy=*/gmem_tiled_copy_O,
           /*S=*/tOgO_src,
@@ -308,7 +305,7 @@ class FlashAttnFwdPostprocess {
           /*predicate_M=*/tOpOm_sink);
 
 #pragma unroll
-      // Rescale the tOrO_dst by tLSErLSE
+      // Rescale the tOrO by rescale_weight stored in tLSErLSE
       for (int m = 0; m < size<1>(tOrO_dst); ++m) {
         float rescale_weight_m = tLSErLSE(m);
         Tensor tOrO_dst_m = tOrO_dst(_, m, _);
@@ -318,16 +315,12 @@ class FlashAttnFwdPostprocess {
         }
       }
 
-      // Retile the src/dst tensors to dst/src resp.
-      Tensor tOgO_dst = gmem_thr_copy_O.retile_D(tOgO_src);
-      Tensor tOrO_src = gmem_thr_copy_O.retile_S(tOrO_dst);
-
-      // Store the rescaled tOrO_dst to tOgO_src, where tOpOm_sink and tOpOk are true
+      // Store the rescaled tOrO to tOgO, where tOpOm_sink and tOpOk are true
       // then the covered part of O is rescaled by sink
       flash::copy2</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clearn_OOB_K=*/false>(
           /*tiled_copy=*/gmem_tiled_copy_O,
-          /*S=*/tOrO_src,
-          /*D=*/tOgO_dst,
+          /*S=*/tOrO,
+          /*D=*/tOgO,
           /*identity_MN=*/tOcO,
           /*predicate_K=*/tOpOk,
           /*predicate_M=*/tOpOm_sink);
