@@ -36,7 +36,7 @@ namespace flash {
 using namespace cute;
 
 template <typename T_out_, uint32_t kBlockM_, uint32_t kHeadDim_, bool Has_sink, class ArchTag_>
-class FastZeroFillKernel {
+class FlashAttnFwdPostprocess {
  public:
   using ArchTag = ArchTag_;
   using T_out = T_out_;

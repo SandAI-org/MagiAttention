@@ -20,7 +20,7 @@ from packaging import version
 from magi_attention.utils import nvtx
 
 from ._flex_flash_attn_jit import get_ffa_jit_mod
-from .utils import correct_attn_out_lse_with_sink_compiled, sink_bwd_compiled
+from .utils import sink_bwd_compiled
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
@@ -229,12 +229,6 @@ def _flex_flash_attn_forward_compilable(
         else None,
     )
 
-    sink_fwd_debug = False  # DE-BUG
-    sink_ = None  # DE-BUG
-    if sink_fwd_debug and sink is not None:
-        sink_ = sink
-        sink = None
-
     out_, lse = mod.fwd(
         q,
         k,
@@ -255,14 +249,6 @@ def _flex_flash_attn_forward_compilable(
         deterministic,
         sm_margin,
     )
-
-    if sink_fwd_debug and sink_ is not None:
-        out_, lse = correct_attn_out_lse_with_sink_compiled(
-            out=out_,
-            lse=lse,
-            sink=sink_,
-            inplace=True,
-        )
 
 
 @_torch_register_fake_wrapper("flex_flash_attn::_flex_flash_attn_forward_compilable")

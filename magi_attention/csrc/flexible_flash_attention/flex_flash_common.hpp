@@ -36,7 +36,7 @@
 int get_max_headdim();
 int round_up_headdim(int head_size);
 
-void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream);
+void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream);
 
 void set_params_fprop(
     Flash_fwd_params& params,

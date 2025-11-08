@@ -25,18 +25,18 @@
 #include <cutlass/kernel_launch.h>
 
 #include "cuda_check.h"
-#include "fast_zero_fill_kernel.h"
 #include "flash.h"
+#include "flash_fwd_postprocess_kernel.h"
 #include "static_switch.h"
 
 using namespace cute;
 
 template <typename T_out, uint32_t kBlockM, uint32_t kHeadDim, bool Has_sink>
-void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
+void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = cutlass::arch::Sm90;
-  using ZeroFillKernel = flash::FastZeroFillKernel<T_out, kBlockM, kHeadDim, Has_sink, ArchTag>;
+  using PostprocessKernel = flash::FlashAttnFwdPostprocess<T_out, kBlockM, kHeadDim, Has_sink, ArchTag>;
 
-  auto kernel_params = ZeroFillKernel::to_underlying_arguments(
+  auto kernel_params = PostprocessKernel::to_underlying_arguments(
       {// O
        static_cast<T_out*>(params.o_ptr),
        {params.total_q, params.d, params.h_qo}, // shape_O: [sq, hd, nhq]
@@ -49,22 +49,22 @@ void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
        {params.total_sink, params.h_qo}, // shape_sink: [s_sink, nhq]
        {params.h_qo, _1{}}}); // stride_sink: [nhq, 1]
 
-  dim3 grid_dims = ZeroFillKernel::get_grid_shape(kernel_params);
-  dim3 block_dims = ZeroFillKernel::get_block_shape();
+  dim3 grid_dims = PostprocessKernel::get_grid_shape(kernel_params);
+  dim3 block_dims = PostprocessKernel::get_block_shape();
 
-  auto kernel = cutlass::device_kernel<ZeroFillKernel>;
-  int smem_size = ZeroFillKernel::SharedStorageSize;
+  auto kernel = cutlass::device_kernel<PostprocessKernel>;
+  int smem_size = PostprocessKernel::SharedStorageSize;
   if (smem_size >= 48 * 1024) { // over the limitation (48KB) of static shared memory of H100
     CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   }
 
-  cutlass::kernel_launch<ZeroFillKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, /*launch_with_pdl=*/false);
+  cutlass::kernel_launch<PostprocessKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, /*launch_with_pdl=*/false);
   CHECK_CUDA_KERNEL_LAUNCH();
 }
 
 template <typename T_out, uint32_t kHeadDim>
-void run_fast_zero_fill_(Flash_fwd_params& params, cudaStream_t stream) {
+void run_flash_fwd_post_process_(Flash_fwd_params& params, cudaStream_t stream) {
   // TODO: tuning block size
   static constexpr uint32_t kBlockM = 256;
-  BOOL_SWITCH(params.has_sink(), Has_sink, [&] { run_fast_zero_fill<T_out, kBlockM, kHeadDim, Has_sink>(params, stream); });
+  BOOL_SWITCH(params.has_sink(), Has_sink, [&] { run_flash_fwd_post_process<T_out, kBlockM, kHeadDim, Has_sink>(params, stream); });
 }

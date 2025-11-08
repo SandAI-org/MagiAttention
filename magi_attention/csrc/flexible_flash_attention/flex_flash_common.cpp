@@ -231,27 +231,27 @@ void set_params_dgrad(
   params.dq_determin_range_locks = static_cast<int*>(dq_determin_range_locks_d);
 }
 
-void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
+void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {
   // Fast zero-fill for output accumulator if needed by kernel configuration
   OUT_DTYPE_SWITCH(params.out_type, TOut, [&] {
 #ifndef FLASHATTENTION_DISABLE_HDIM64
     if (params.d <= 64) {
-      return run_fast_zero_fill_<TOut, 64>(params, stream);
+      return run_flash_fwd_post_process_<TOut, 64>(params, stream);
     }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM128
     if (params.d <= 128) {
-      return run_fast_zero_fill_<TOut, 128>(params, stream);
+      return run_flash_fwd_post_process_<TOut, 128>(params, stream);
     }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM192
     if (params.d <= 192) {
-      return run_fast_zero_fill_<TOut, 192>(params, stream);
+      return run_flash_fwd_post_process_<TOut, 192>(params, stream);
     }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM256
     if (params.d <= 256) {
-      return run_fast_zero_fill_<TOut, 256>(params, stream);
+      return run_flash_fwd_post_process_<TOut, 256>(params, stream);
     }
 #endif
   });
