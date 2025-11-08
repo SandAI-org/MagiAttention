@@ -57,7 +57,7 @@ __global__ void notify_group_cast(
     int num_channels,
     const bool* is_token_in_rank,
     int* channel_prefix_matrix,
-    int* rank_prefix_matrix_copy,
+    int* rank_prefix_matrix,
     int num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
@@ -105,7 +105,7 @@ __global__ void notify_group_cast(
     // Copy `rank_size_prefix` matrix to an individual tensor
     // where the original part left in buffer will be skipped in `group_cast`
     for (int i = thread_id; i < kNumRanks * kNumRanks; i += num_threads)
-      rank_prefix_matrix_copy[i] = local_per_rank_buffer[i];
+      rank_prefix_matrix[i] = local_per_rank_buffer[i];
 
 #pragma unroll
     // Extra memset for later channel metadata
@@ -147,7 +147,7 @@ void notify_group_cast(
     int num_tokens,
     const bool* is_token_in_rank,
     int* channel_prefix_matrix,
-    int* rank_prefix_matrix_copy,
+    int* rank_prefix_matrix,
     int num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
@@ -166,7 +166,7 @@ void notify_group_cast(
       num_channels,                          \
       is_token_in_rank,                      \
       channel_prefix_matrix,                 \
-      rank_prefix_matrix_copy,               \
+      rank_prefix_matrix,                    \
       num_memset_int,                        \
       buffer_ptrs,                           \
       barrier_signal_ptrs,                   \

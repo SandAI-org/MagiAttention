@@ -95,7 +95,7 @@ void notify_group_cast(
     int num_tokens,
     const bool* is_token_in_rank,
     int* channel_prefix_matrix,
-    int* rank_prefix_matrix_copy,
+    int* rank_prefix_matrix,
     int num_memset_int,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
