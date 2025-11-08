@@ -559,6 +559,9 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
         )
 
+        if sparse_load and not auto_range_merge:
+            raise RuntimeError("When using sparse load, range merge must be enabled.")
+
         if auto_range_merge:
             if profile_mode:
                 ffa_utils.start_event("fwd_range_merge")
@@ -579,6 +582,12 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 sparse_load_loop_count = ffa_utils.compute_sparse_load_loop_count(
                     fwd_k_ranges, fwd_qk_map, fwd_unique_count, tile_size
                 )
+                # TODO: arbitrary Q range size
+                if ref_block_size is not None:
+                    ref_block_size = (ref_block_size[0], tile_size)
+                else:
+                    ref_block_size = (64, tile_size)
+                print(sparse_load_loop_count)
             else:
                 sparse_load_loop_count = None
 

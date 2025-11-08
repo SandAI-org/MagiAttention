@@ -126,8 +126,8 @@ struct CollectiveMainloopSparseFwdSm90 {
   // do pv must be larger than qk or not ?
   static constexpr int NumMmaThreadsQK = size(TiledMmaQK{});
   static constexpr int NumMmaThreads = size(TiledMmaPV{});
-  // use one warp to produce Q and KV
-  static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarp;
+  // use one warpgroup to produce KV with cp.async, use one thread to produce Q with TMA
+  static constexpr int NumProducerThreads = cutlass::NumThreadsPerWarpGroup;
   static_assert(NumMmaThreadsQK % cutlass::NumThreadsPerWarpGroup == 0);
   static_assert(NumMmaThreads % cutlass::NumThreadsPerWarpGroup == 0);
   static constexpr int NumMmaWarpGroups = NumMmaThreads / cutlass::NumThreadsPerWarpGroup;
@@ -196,7 +196,7 @@ struct CollectiveMainloopSparseFwdSm90 {
   // and have sQ being position_independent_swizzle_tensor.
   // If !Use_TMA_KV, we use cp.async (instead of TMA) to load K & V, so we want smem_k and smem_v to be aligned.
   static constexpr size_t SmemAlignmentQ = !MmaQK_is_RS ? 128 : cutlass::detail::alignment_for_swizzle(SmemLayoutQ{});
-  static constexpr size_t SmemAlignmentK = 128;
+  static constexpr size_t SmemAlignmentK = Use_TMA_KV ? 128 : cutlass::detail::alignment_for_swizzle(SmemLayoutK{});
   static constexpr size_t SmemAlignmentVtNoTranspose = cutlass::detail::alignment_for_swizzle(SmemLayoutVt{});
   static_assert(SmemAlignmentQ >= 128 and SmemAlignmentK >= 128 && SmemAlignmentVtNoTranspose >= 128, "Require at least 128B alignment");
   static constexpr size_t SmemAlignmentP = cutlass::detail::alignment_for_swizzle(SmemLayoutP{});
@@ -273,7 +273,7 @@ struct CollectiveMainloopSparseFwdSm90 {
   };
 
   template <bool IsProducer>
-  struct BlockMeta {
+  struct SparseBlockMeta {
     int const& m_block;
     int const& bidh;
     int const bidh_kv;
@@ -282,6 +282,9 @@ struct CollectiveMainloopSparseFwdSm90 {
     SeqlenInfo_t seqlen_info;
     flash::AttnType attn_type;
 
+    // int cur_k_range_idx[2]; // for intra-wg overlap
+    // int cur_k_range_inner_idx[kStages];
+    // bool is_kv_valid[kStages];
     int cur_k_range_idx;
     int cur_k_range_inner_idx;
     bool is_kv_valid;
@@ -294,7 +297,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     int const* const sparse_load_loop_count;
 
     template <typename SharedStorage>
-    CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx)
+    CUTLASS_DEVICE SparseBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx)
         : m_block(get<0>(block_coord)),
           bidh(get<1>(block_coord)),
           bidh_kv(params.qhead_per_khead_divmod.divide(bidh)),
@@ -316,6 +319,7 @@ struct CollectiveMainloopSparseFwdSm90 {
           return bidb + 1;
         }
       }();
+      cur_loop = 0;
       loop_count = sparse_load_loop_count ? sparse_load_loop_count[get<2>(block_coord)] : 0;
 
       cur_k_range_idx = 0;
@@ -358,7 +362,7 @@ struct CollectiveMainloopSparseFwdSm90 {
       ++cur_loop;
       // update token index for each thread
       if (!is_finish()) {
-        int num_threads = 128;
+        int num_threads = NumProducerThreads;
         int num_steps = num_threads; // move pointer to the next token, for each thread
         int cnt = 0;
 
@@ -395,6 +399,66 @@ struct CollectiveMainloopSparseFwdSm90 {
     }
   };
 
+  template <bool IsProducer>
+  struct BlockMeta {
+    int const& m_block;
+    int const& bidh;
+    int const bidh_kv;
+    int bidb;
+    int end_batches;
+    SeqlenInfo_t seqlen_info;
+    flash::AttnType attn_type;
+
+    int cur_loop;
+    int loop_count;
+
+    int2 const* const q_ranges;
+    int2 const* const k_ranges;
+    int const* const attn_type_map;
+    int const* const sparse_load_loop_count;
+
+    template <typename SharedStorage>
+    CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
+        : m_block(get<0>(block_coord)),
+          bidh(get<1>(block_coord)),
+          bidh_kv(params.qhead_per_khead_divmod.divide(bidh)),
+          q_ranges(params.q_ranges),
+          k_ranges(params.k_ranges),
+          attn_type_map(params.attn_type_map),
+          sparse_load_loop_count(params.sparse_load_loop_count) {
+      bidb = [&]() {
+        if constexpr (RangeMerge) {
+          return params.cu_batches[get<2>(block_coord)];
+        } else {
+          return get<2>(block_coord);
+        }
+      }();
+      end_batches = [&]() {
+        if constexpr (RangeMerge) {
+          return params.cu_batches[get<2>(block_coord) + 1];
+        } else {
+          return bidb + 1;
+        }
+      }();
+      cur_loop = 0;
+      loop_count = sparse_load_loop_count ? sparse_load_loop_count[get<2>(block_coord)] : 0;
+      if (!is_finish()) {
+        seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
+        attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
+      }
+    }
+
+    CUTLASS_DEVICE
+    void prefetch() {
+      ++cur_loop;
+    }
+
+    CUTLASS_DEVICE
+    bool is_finish() {
+      return cur_loop >= loop_count;
+    }
+  };
+
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);
     TMA_Q tma_load_Q = make_tma_copy_A_sm90(GmemTiledCopyQ{}, mQ, SmemLayoutQ{}, TileShape_MNK{}, ClusterShape{}); // no mcast for Q
@@ -420,7 +484,8 @@ struct CollectiveMainloopSparseFwdSm90 {
         args.q_ranges,
         args.k_ranges,
         args.attn_type_map,
-        args.cu_batches};
+        args.cu_batches,
+        args.sparse_load_loop_count};
   }
 
   /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance
@@ -444,9 +509,7 @@ struct CollectiveMainloopSparseFwdSm90 {
       BlockMetaT& block_meta,
       int& work_idx,
       int const thread_idx) {
-    if (!block_meta.is_finish()) {
-      block_meta.prefetch();
-    } else {
+    if (block_meta.is_finish()) {
       // No more blocks to process
       return false;
     }
@@ -482,27 +545,54 @@ struct CollectiveMainloopSparseFwdSm90 {
       }
     };
 
-    auto load_K = [&](auto& smem_pipe_write) {
+    auto load_K = [&](int token_idx, bool is_valid, auto& smem_pipe_write) {
       pipeline_k.producer_acquire(smem_pipe_write);
+      // TODO: Producer Ops. calculate src/dst offset based on token index, then cp.async load
+      pipeline_k.producer_commit(smem_pipe_write);
       ++smem_pipe_write;
     };
 
-    auto load_V = [&](auto& smem_pipe_write) {
+    auto load_V = [&](int token_idx, bool is_valid, auto& smem_pipe_write) {
       pipeline_v.producer_acquire(smem_pipe_write);
+      pipeline_v.producer_commit(smem_pipe_write);
       ++smem_pipe_write;
     };
 
     // Prologue
+    int n_block_max = block_meta.loop_count;
     if constexpr (IntraWGOverlap) {
-      load_K(smem_pipe_write_k);
+      load_K(0, false, smem_pipe_write_k);
       load_Q();
       shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
     }
 
     do {
       // Prefetch the next block_meta
+      // printf("Producer: Before block_meta.prefetch()...\n");
       block_meta.prefetch();
+      int n_block = block_meta.cur_loop;
+      int prev_n_block = n_block - 1;
+      bool is_valid = block_meta.is_kv_valid;
+      // printf("Producer: While loop load Interleaved K/V...\n");
+      // TODO
+      // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
+      // int token_idx = params.k_ranges[block_meta.cur_k_range_idx[1]].x + block_meta.cur_k_range_inner_idx[1];
+      // int prev_token_idx = params.k_ranges[block_meta.cur_k_range_idx[0]].x + block_meta.cur_k_range_inner_idx[0];
+
+      if (n_block < n_block_max) {
+        // Load interleaved K/V
+        if constexpr (IntraWGOverlap) {
+          load_K(n_block, is_valid, smem_pipe_write_k);
+          load_V(prev_n_block, is_valid, smem_pipe_write_v);
+        }
+      }
+
     } while (!block_meta.is_finish());
+
+    // Epilogue, load the tail V
+    load_V(0, false, smem_pipe_write_v);
+
+    return true;
   }
 
   template <typename SharedStorage>
@@ -557,8 +647,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     int warp_group_idx = flash::canonical_warp_group_idx_nosync();
 
     // Tell producers that smem_q is ready to be loaded
-    cutlass::arch::NamedBarrier::arrive(
-        NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+    cutlass::arch::NamedBarrier::arrive(NumMmaThreadsQK + NumProducerThreads, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
 
     if constexpr (UseSchedulerBarrier) {
       // We have NamedBarrier for up to 3 WGs (why 3 WGs ?)
@@ -671,13 +760,8 @@ struct CollectiveMainloopSparseFwdSm90 {
       cute::copy(smem_tiled_copy_Q, tSsQ_copy_view, tSrQ_copy_view);
     }
 
-    while (!block_meta.is_finish() && !block_meta.is_valid()) {
-      // Find the first valid block_meta
-      block_meta.prefetch();
-    }
-
     if (block_meta.is_finish()) {
-      // No valid block found
+      // No more blocks to process
       return false;
     }
 
@@ -693,13 +777,15 @@ struct CollectiveMainloopSparseFwdSm90 {
     //   );
     // }
 
-    // Get n_block for kv
-    int n_block = block_meta.n_block_max - 1;
-    // Get seqlen for kv
-    int seqlen_k = block_meta.seqlen_info.seqlen_k;
-    // Get the minimum number of blocks to calculate
-    int n_block_min = block_meta.n_block_min;
-    // Get attention type for n_block
+    // // Get n_block for kv
+    // int n_block = block_meta.n_block_max - 1;
+    int n_block_max = block_meta.loop_count;
+    int n_block = 0;
+    // // Get seqlen for kv
+    // int seqlen_k = block_meta.seqlen_info.seqlen_k;
+    // // Get the minimum number of blocks to calculate
+    // int n_block_min = block_meta.n_block_min;
+    // // Get attention type for n_block
     flash::AttnType attn_type = block_meta.attn_type;
     // Get mask for n_block
     flash::Mask<kBlockM, kBlockN, TiledMmaQK> mask;
@@ -724,24 +810,28 @@ struct CollectiveMainloopSparseFwdSm90 {
       }
     };
     // regular_mask_fn: mask for specific attention type block, for all other blocks in a tile job
-    auto regular_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      if constexpr (RangeMerge) {
-        if (!finish_boundary) {
-          boundary_mask_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
-          finish_boundary = true;
-        } else {
-          mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-        }
-      } else {
-        mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-      }
-    };
+    // auto regular_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
+    //   if constexpr (RangeMerge) {
+    //     if (!finish_boundary) {
+    //       boundary_mask_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
+    //       finish_boundary = true;
+    //     } else {
+    //       mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+    //     }
+    //   } else {
+    //     mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+    //   }
+    // };
+
+    // TODO: boundary mask for sparse load
 
     /* ================================================= Prologue ================================================= */
     // Wait for the Q to be loaded
     barrier_Q.wait(work_idx % 2);
+    // printf("Consumer: Q loaded\n");
     // Wait for first block of k to be loaded
     consumer_wait(pipeline_k, smem_pipe_read_k);
+    // printf("Consumer: first K loaded\n");
 
     // launch Q @ K of n_block and wait for it to finish
     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
@@ -759,7 +849,8 @@ struct CollectiveMainloopSparseFwdSm90 {
     // }
 
     // Apply mask
-    boundary_mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
+    // TODO: add mask_fn
+    // boundary_mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
     //     print_tensor(tSrS);
@@ -797,7 +888,7 @@ struct CollectiveMainloopSparseFwdSm90 {
       arrive_on_P_write_barrier();
     }
 
-    --n_block;
+    ++n_block; // iterate from 0 to loop_count - 1
 
 /* ================================================= Mainloop ================================================= */
 #pragma unroll 2
@@ -832,7 +923,7 @@ struct CollectiveMainloopSparseFwdSm90 {
           consumer_wait(pipeline_v, smem_pipe_read_v);
         }
 
-        // Do p @ v of n_block + 1
+        // Do p @ v of n_block - 1
         flash::gemm</*zero_init=*/false, /*wg_wait=*/-1>(
             tiled_mma_pv, cute::conditional_return<MmaPV_is_RS>(tOrP, tOsP), tOrV(_, _, _, smem_pipe_read_v.index()), tOrO);
 
@@ -849,7 +940,8 @@ struct CollectiveMainloopSparseFwdSm90 {
         scoremod_premask_fn(tSrS);
 
         // Apply mask
-        mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
+        // TODO: add mask_fn
+        // mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
 
         // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
         //     printf("============================================ tSrS fwd before online_softmax m_block: %d ==============================\n", m_block);
@@ -896,46 +988,47 @@ struct CollectiveMainloopSparseFwdSm90 {
       // Prefetch the next block_meta
       block_meta.prefetch();
 
-      if (n_block >= n_block_min && seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
+      // if (n_block >= n_block_min && seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
+      if (n_block < n_block_max && attn_type == flash::AttnType::Full) {
         // If seqlen_k is a multiple of kBlockN, we can skip the boundary mask for the first n_block
         fwd_step(n_block, bypass_fn, cute::true_type{} /*check_inf*/);
-        --n_block;
+        ++n_block;
         finish_boundary = true;
       }
 
-      if (n_block >= n_block_min) {
-        if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-          int const m_idx_min = block_meta.m_block * kBlockM;
-          int const n_block_min_causal_local_mask = std::max(n_block_min, (m_idx_min + seqlen_k - block_meta.seqlen_info.seqlen_q) / kBlockN);
-#pragma unroll 1
-          for (; n_block >= n_block_min_causal_local_mask; --n_block) {
-            fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
-          }
-        }
+      //       if (n_block >= n_block_min) {
+      //         if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
+      //           int const m_idx_min = block_meta.m_block * kBlockM;
+      //           int const n_block_min_causal_local_mask = std::max(n_block_min, (m_idx_min + seqlen_k - block_meta.seqlen_info.seqlen_q) / kBlockN);
+      // #pragma unroll 1
+      //           for (; n_block >= n_block_min_causal_local_mask; --n_block) {
+      //             fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
+      //           }
+      //         }
 
-        // Calculate the number of iterations needed before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
-        int const m_idx_max = (block_meta.m_block + 1) * kBlockM;
-        int const n_block_min_before_inv_causal_mask =
-            attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? n_block_min : cute::ceil_div(m_idx_max, kBlockN);
-        // Skip applying mask to the iterations before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
-#pragma unroll 1
-        for (; n_block >= n_block_min_before_inv_causal_mask; --n_block) {
-          fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
-        }
+      //         // Calculate the number of iterations needed before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
+      //         int const m_idx_max = (block_meta.m_block + 1) * kBlockM;
+      //         int const n_block_min_before_inv_causal_mask =
+      //             attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? n_block_min : cute::ceil_div(m_idx_max, kBlockN);
+      //         // Skip applying mask to the iterations before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
+      // #pragma unroll 1
+      //         for (; n_block >= n_block_min_before_inv_causal_mask; --n_block) {
+      //           fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
+      //         }
 
-        // Separate masking iterations on the left for inv-causal and bi-causal attention, because they are both top-left aligned
-        if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-#pragma unroll 1
-          for (; n_block >= n_block_min; --n_block) {
-            fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
-          }
-        }
-      }
+      //         // Separate masking iterations on the left for inv-causal and bi-causal attention, because they are both top-left aligned
+      //         if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
+      // #pragma unroll 1
+      //           for (; n_block >= n_block_min; --n_block) {
+      //             fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
+      //           }
+      //         }
+      //       }
 
       // Step into the next block
-      n_block = block_meta.n_block_max - 1;
-      seqlen_k = block_meta.seqlen_info.seqlen_k;
-      n_block_min = block_meta.n_block_min;
+      // n_block = block_meta.n_block_max - 1;
+      // seqlen_k = block_meta.seqlen_info.seqlen_k;
+      // n_block_min = block_meta.n_block_min;
       attn_type = block_meta.attn_type;
       finish_boundary = []() {
         if constexpr (RangeMerge) {
@@ -944,10 +1037,9 @@ struct CollectiveMainloopSparseFwdSm90 {
           return true;
         }
       }();
-    } while (!block_meta.is_finish() && block_meta.is_valid());
+    } while (!block_meta.is_finish());
 
-    cutlass::arch::NamedBarrier::arrive(
-        NumMmaThreadsQK + (Use_TMA_Q ? cutlass::NumThreadsPerWarp : NumProducerThreads), static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
+    cutlass::arch::NamedBarrier::arrive(NumMmaThreadsQK + NumProducerThreads, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
 
     // Only rescale tOrO if RescaleOBeforeGemm is enabled
     if constexpr (RescaleOBeforeGemm) {
