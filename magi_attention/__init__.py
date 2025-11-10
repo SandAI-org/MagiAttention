@@ -89,6 +89,16 @@ def is_deterministic_mode_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_DETERMINISTIC_MODE", "0") == "1"
 
 
+def is_profile_mode_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to enable profiling mode
+    to profile all magi_attention kernels, by now mainly for ffa kernels
+
+    Default value is ``0``
+    """
+    return os.environ.get("MAGI_ATTENTION_PROFILE_MODE", "0") == "1"
+
+
 def dist_attn_runtime_dict_size() -> int:
     """
     Set the value of this env variable to control

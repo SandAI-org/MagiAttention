@@ -97,6 +97,14 @@ This is only supposed to be used for testing or debugging, since the performance
 Toggle this env variable to `1` to enable deterministic mode to use deterministic algorithms for all magi_attention kernels. The default value is `0`.
 
 
+**MAGI_ATTENTION_PROFILE_MODE**
+
+Toggle this env variable to `1` to enable profiling mode to profile all magi_attention kernels, by now mainly for ffa kernels (*see [here](https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa) for more details*). The default value is `0`.
+
+```{note}
+This is only supposed to be used for development. Please do NOT enable it in production.
+```
+
 ## For Build
 
 ### JIT

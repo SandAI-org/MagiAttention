@@ -22,13 +22,16 @@ import numpy as np
 import nvtx
 import torch
 
+import magi_attention
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.ranges import AttnRanges
+
+# isort: split
 from exps.attn.baselines.utils import (
     calculate_attn_flops,
     generate_seqlens,
     seqlens2curanges,
 )
-from magi_attention.common.enum import AttnMaskType
-from magi_attention.common.ranges import AttnRanges
 
 # -----------------------------------------------------------------------------
 # Dependencies
@@ -335,7 +338,6 @@ def run_benchmark_framework(
                         config["block_size"],
                         config["block_size"],
                     )
-                ffa_args["profile_mode"] = True
 
                 # B. Forward pass
                 fwd_timings: List[List[float]] = [[] for _ in fwd_event_keys]
@@ -575,6 +577,10 @@ if __name__ == "__main__":
         print(
             "⚠️ WARNING: CUDA is not available. Running on CPU, results will not be meaningful."
         )
+
+    assert (
+        magi_attention.is_profile_mode_enable()
+    ), "Please enable profiling mode before running this script."
 
     output_directory = os.path.dirname(args.output_csv_path)
     os.makedirs(output_directory, exist_ok=True)

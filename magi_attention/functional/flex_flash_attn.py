@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from contextlib import contextmanager
 
 import torch
@@ -62,6 +63,9 @@ else:
 
     _torch_custom_op_wrapper = noop_custom_op_wrapper
     _torch_register_fake_wrapper = noop_register_fake_wrapper
+
+
+profile_mode = os.environ.get("MAGI_ATTENTION_PROFILE_MODE", "0") == "1"
 
 
 # -------------------       helpers   ------------------- #
@@ -171,7 +175,7 @@ def merge_ranges(
 
 
 @contextmanager
-def maybe_profile_ffa_ctx(event_name: str, profile_mode: bool = False):
+def maybe_profile_ffa_ctx(event_name: str):
     if profile_mode:
         ffa_utils.start_event(event_name)
 
@@ -211,7 +215,6 @@ def _flex_flash_attn_forward_compilable(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    profile_mode: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     mod = get_ffa_jit_mod(
@@ -273,7 +276,6 @@ def _flex_flash_attn_forward_compilable_fake(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    profile_mode: bool,
 ) -> None:
     pass
 
@@ -299,7 +301,6 @@ def _flex_flash_attn_forward(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    profile_mode: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
@@ -358,7 +359,6 @@ def _flex_flash_attn_forward(
         out_type=out_type,
         deterministic=deterministic,
         sm_margin=sm_margin,
-        profile_mode=profile_mode,
     )
 
     return out, lse
@@ -398,7 +398,6 @@ def _flex_flash_attn_backward_compilable(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    profile_mode: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
@@ -413,7 +412,7 @@ def _flex_flash_attn_backward_compilable(
         profile_mode=profile_mode,
     )
 
-    sink_bwd_debug = False  # DE-BUG
+    sink_bwd_debug = True  # DE-BUG
     if sink_bwd_debug and sink is not None:
         dsink = sink_bwd_compiled(
             sink=sink,
@@ -488,7 +487,6 @@ def _flex_flash_attn_backward_compilable_fake(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    profile_mode: bool,
 ) -> None:
     pass
 
@@ -520,7 +518,6 @@ def _flex_flash_attn_backward(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-    profile_mode: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("bwd_prepare")
@@ -570,7 +567,6 @@ def _flex_flash_attn_backward(
         dv_type=dv_type,
         deterministic=deterministic,
         sm_margin=sm_margin,
-        profile_mode=profile_mode,
     )
 
     return dq, dk, dv, dsink
@@ -597,14 +593,13 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         disable_fwd_atomic_reduction: bool = False,
         auto_range_merge: bool = False,
         ref_block_size: tuple[int, int] | None = None,
-        profile_mode: bool = False,
     ):
         softmax_scale = (
             q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
         )
 
         if auto_range_merge:
-            with maybe_profile_ffa_ctx("fwd_range_merge", profile_mode):
+            with maybe_profile_ffa_ctx("fwd_range_merge"):
                 (
                     merge_q_ranges,
                     fwd_q_ranges,
@@ -643,11 +638,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             else torch.float32,  # out_type
             deterministic=deterministic,
             sm_margin=sm_margin,
-            profile_mode=profile_mode,
         )
 
         # Cast output to the same dtype as q
-        with maybe_profile_ffa_ctx("fwd_cast", profile_mode):
+        with maybe_profile_ffa_ctx("fwd_cast"):
             out = out.to(q.dtype)
 
         ctx.save_for_backward(
@@ -659,7 +653,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
         ctx.auto_range_merge = auto_range_merge
-        ctx.profile_mode = profile_mode
 
         return out, lse
 
@@ -668,7 +661,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map = ctx.saved_tensors
 
         if ctx.auto_range_merge:
-            with maybe_profile_ffa_ctx("bwd_range_merge", ctx.profile_mode):
+            with maybe_profile_ffa_ctx("bwd_range_merge"):
                 (
                     merge_k_ranges,
                     bwd_k_ranges,
@@ -711,11 +704,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dv_type=torch.float32,
             deterministic=ctx.deterministic,
             sm_margin=ctx.sm_margin,
-            profile_mode=ctx.profile_mode,
         )
 
         # Cast gradients to the same dtype as inputs
-        with maybe_profile_ffa_ctx("bwd_cast", ctx.profile_mode):
+        with maybe_profile_ffa_ctx("bwd_cast"):
             dq = dq.to(q.dtype)
             dk = dk.to(k.dtype)
             dv = dv.to(v.dtype)
@@ -738,7 +730,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
             None,  # ref_block_size
-            None,  # profile_mode
         )
 
 
@@ -760,7 +751,6 @@ def flex_flash_attn_func(
     disable_fwd_atomic_reduction: bool = False,
     auto_range_merge: bool = False,
     ref_block_size: tuple[int, int] | None = None,
-    profile_mode: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
@@ -811,11 +801,6 @@ def flex_flash_attn_func(
         auto_range_merge (bool, optional):
             Whether to automatically merge k_ranges for the same q_range. Defaults to ``False``.
             **Note:** This flag is useful for sparse attention scenarios but still under development.
-
-        profile_mode (bool, optional):
-            Whether to enable profiling mode for FFA. Defaults to ``False``.
-            **Note:** This flag for now is only internally used to profile FFA.
-            Please do not toggle it on in production.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
@@ -949,5 +934,4 @@ def flex_flash_attn_func(
         disable_fwd_atomic_reduction,
         auto_range_merge,
         ref_block_size,
-        profile_mode,
     )
