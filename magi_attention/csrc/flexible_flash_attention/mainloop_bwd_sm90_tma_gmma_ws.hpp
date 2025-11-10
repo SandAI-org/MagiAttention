@@ -1108,9 +1108,6 @@ struct CollectiveMainloopBwdSm90 {
       pipeline.consumer_wait(smem_pipe_read, barrier_token);
     };
 
-    int const seqlen_q = seqlen_info.seqlen_q;
-    int const seqlen_k = seqlen_info.seqlen_k;
-
     // For the case where we do atomicAdd directly to gdQaccum instead of using TMA
     Tensor mdQaccum = make_tensor(make_gmem_ptr(reinterpret_cast<ElementAccum*>(params.ptr_dQ)), params.shape_dQ, params.stride_dQ)(_, _, bidh);
     Tensor gdQaccum_ = local_tile(domain_offset(make_coord(seqlen_info.offset_q, _0{}), mdQaccum), TileShape_dQaccum{}, make_coord(_, _0{})); // (M, K, _)

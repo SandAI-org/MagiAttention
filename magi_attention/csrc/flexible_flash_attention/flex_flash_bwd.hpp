@@ -203,7 +203,6 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   int const max_headdim = get_max_headdim();
   TORCH_CHECK(head_size % 8 == 0 && head_size <= max_headdim);
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0);
-  int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
   // Get rounded max_seqlen
   auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
 
