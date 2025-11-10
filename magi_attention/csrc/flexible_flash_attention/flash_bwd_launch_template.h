@@ -130,8 +130,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
         /*Clear_dQ=*/false,
         /*Clear_dK=*/false,
         /*Clear_dV=*/false,
-        /*Has_sink=*/Has_sink,
-        /*Deterministic=*/Deterministic>;
+        /*Has_sink=*/Has_sink>;
     run_flash_bwd_pre_process<PreprocessKernel, kBlockM, Element, ProfileMode>(params, stream);
   });
 

@@ -170,15 +170,15 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   at::Tensor sink;
   if (sink_.has_value()) {
     sink = sink_.value();
-    TORCH_CHECK(sink.scalar_type() == at::kFloat, "sink must has dtype float");
-    CHECK_DEVICE(sink);
-    TORCH_CHECK(sink.dim() == 2, "sink must be 2D");
-    CHECK_SHAPE(sink, total_sink, num_heads_qo);
-    CHECK_CONTIGUOUS(sink);
   } else {
     // Create a dummy empty sink tensor with zero size
     sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
   }
+  TORCH_CHECK(sink.scalar_type() == at::kFloat, "sink must has dtype float");
+  CHECK_DEVICE(sink);
+  TORCH_CHECK(sink.dim() == 2, "sink must be 2D");
+  CHECK_SHAPE(sink, total_sink, num_heads_qo);
+  CHECK_CONTIGUOUS(sink);
 
   // Check merge_k_ranges, bwd_kq_map (dtype, device, layout) if given
   int merge_batch_size = batch_size;
@@ -287,10 +287,6 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   if (sink_.has_value()) {
     if (dsink_.has_value()) {
       dsink = dsink_.value();
-      TORCH_CHECK(dsink.dtype() == sink_->dtype(), "dsink must have the same dtype as sink (if given)");
-      CHECK_DEVICE(dsink);
-      CHECK_SHAPE(dsink, total_sink, num_heads_qo);
-      CHECK_CONTIGUOUS(dsink);
     } else {
       dsink = torch::zeros_like(sink_.value());
     }
@@ -298,6 +294,10 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     // Create a dummy empty dsink tensor with zero size
     dsink = torch::empty_like(sink);
   }
+  TORCH_CHECK(dsink.dtype() == sink.dtype(), "dsink must have the same dtype as sink (if given)");
+  CHECK_DEVICE(dsink);
+  CHECK_SHAPE(dsink, total_sink, num_heads_qo);
+  CHECK_CONTIGUOUS(dsink);
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 

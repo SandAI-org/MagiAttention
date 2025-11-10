@@ -179,6 +179,7 @@ class TestFlexFlashAttn(DistTestBase):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        sink: torch.Tensor | None,
         do: torch.Tensor,
         q_ranges_tensor: torch.Tensor,
         k_ranges_tensor: torch.Tensor,
@@ -186,9 +187,11 @@ class TestFlexFlashAttn(DistTestBase):
         auto_range_merge: bool,
         test_case: str,
         o_ref: torch.Tensor,
+        lse_ref: torch.Tensor,
         dq_ref: torch.Tensor,
         dk_ref: torch.Tensor,
         dv_ref: torch.Tensor,
+        dsink_ref: torch.Tensor | None,
     ) -> list[str]:
         # Check deterministic behavior
         # If deterministic is True, we will compare the output and gradients with a second run
@@ -198,13 +201,14 @@ class TestFlexFlashAttn(DistTestBase):
         k = k.clone().detach().requires_grad_(True)
         v = v.clone().detach().requires_grad_(True)
         do = do.clone()
-        o, _ = flex_flash_attn_func(
-            q,
-            k,
-            v,
-            q_ranges_tensor,
-            k_ranges_tensor,
-            attn_type_map_tensor,
+        o, lse = flex_flash_attn_func(
+            q=q,
+            k=k,
+            v=v,
+            q_ranges=q_ranges_tensor,
+            k_ranges=k_ranges_tensor,
+            attn_type_map=attn_type_map_tensor,
+            sink=sink,
             auto_range_merge=auto_range_merge,
             deterministic=True,
         )
@@ -214,6 +218,10 @@ class TestFlexFlashAttn(DistTestBase):
             assert torch.equal(
                 o, o_ref
             ), f"For {test_case=}: forward output not deterministic"
+
+            assert torch.equal(
+                lse, lse_ref
+            ), f"For {test_case=}: forward lse not deterministic"
 
             assert torch.equal(
                 q.grad, dq_ref
@@ -226,6 +234,11 @@ class TestFlexFlashAttn(DistTestBase):
             assert torch.equal(
                 v.grad, dv_ref
             ), f"For {test_case=}: backward dv not deterministic"
+
+            if sink is not None:
+                assert torch.equal(
+                    sink.grad, dsink_ref
+                ), f"For {test_case=}: backward dsink not deterministic"
         except Exception as e:
             err_msg_list.append(str(e))
 
@@ -970,6 +983,7 @@ class TestFlexFlashAttn(DistTestBase):
                 q=q,
                 k=k,
                 v=v,
+                sink=sink,
                 do=do,
                 q_ranges_tensor=q_ranges_tensor,
                 k_ranges_tensor=k_ranges_tensor,
@@ -977,9 +991,11 @@ class TestFlexFlashAttn(DistTestBase):
                 auto_range_merge=auto_range_merge,
                 test_case=test_case,
                 o_ref=o,
+                lse_ref=lse,
                 dq_ref=q.grad,
                 dk_ref=k.grad,
                 dv_ref=v.grad,
+                dsink_ref=sink.grad if has_sink else None,
             )
 
         # compare with reference
@@ -1372,10 +1388,6 @@ class TestFlexFlashAttn(DistTestBase):
             f"[acc_inplace={test_accumulation_inplace}]"
             f"[has_sink={seqlen_sink > 0}]"
         )
-
-        # FIXME: for now, sink token does not support deterministic mode
-        if seqlen_sink > 0 and deterministic:
-            return
 
         self.run_test_case(
             seqlen_q=seqlen,
