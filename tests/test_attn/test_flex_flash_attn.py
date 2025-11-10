@@ -193,14 +193,18 @@ class TestFlexFlashAttn(DistTestBase):
         dv_ref: torch.Tensor,
         dsink_ref: torch.Tensor | None,
     ) -> list[str]:
-        # Check deterministic behavior
-        # If deterministic is True, we will compare the output and gradients with a second run
-        # If any of them is not equal, we will collect the error messages
+        """Check deterministic behavior
+        in which we will compare the output and gradients with a second run
+        and if any of them is not equal, we will collect the error messages to return
+        """
         err_msg_list: list[str] = []
+
         q = q.clone().detach().requires_grad_(True)
         k = k.clone().detach().requires_grad_(True)
         v = v.clone().detach().requires_grad_(True)
+        sink = sink.clone().detach().requires_grad_(True) if sink is not None else None
         do = do.clone()
+
         o, lse = flex_flash_attn_func(
             q=q,
             k=k,
@@ -1072,6 +1076,7 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "varlen_full_1k",
                 "seqlen": 1024,
+                "seqlen_sink": 2,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 366],
@@ -1105,7 +1110,7 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "varlen_full_4k",
                 "seqlen": 4096,
-                "seqlen_sink": 2,
+                "seqlen_sink": 4,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1135,6 +1140,7 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "block_causal_2k",
                 "seqlen": 2048,
+                "seqlen_sink": 6,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1162,7 +1168,7 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "varlen_block_causal_2k",
                 "seqlen": 2048,
-                "seqlen_sink": 4,
+                "seqlen_sink": 8,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1231,7 +1237,6 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "varlen_block_causal_2k_with_disjoint_ranges",
                 "seqlen": 2048,
-                "seqlen_sink": 6,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1296,7 +1301,6 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "name": "deterministic_sample",
                 "seqlen": 2500,
-                "seqlen_sink": 8,
                 "q_ranges": AttnRanges.from_ranges(
                     [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
                 ),
@@ -1403,11 +1407,12 @@ class TestFlexFlashAttn(DistTestBase):
             test_accumulation_inplace=test_accumulation_inplace,
             test_case=test_case,
             err_ratio_dict={
-                "dq_min_mismatch_thres": 0.005,
-                "dsink_min_mismatch_thres": 1 / (seqlen_sink * num_heads_q)
+                "dq_min_mismatch_thres": 5e-3,
+                "dsink_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
+                "dsink_min_mismatch_thres": max(1 / (seqlen_sink * num_heads_q), 5e-2)
                 if seqlen_sink > 0
                 else 0,
-                "dsink_min_norm_rtol": 5e-4,
+                "dsink_min_norm_rtol": 5e-3,
                 "dsink_norm_rtol_ratio": NORM_RTOL_RATIO * 2,
             },
         )

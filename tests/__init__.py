@@ -11,3 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import os
+
+# enable sanity check in every unitest by default
+os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "1"
+
+# enable verbose building magi_attention by default
+os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"

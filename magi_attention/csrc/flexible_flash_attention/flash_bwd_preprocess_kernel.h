@@ -62,7 +62,9 @@ class FlashAttnBwdPreprocess {
   static constexpr int kHeadDim = get<1>(TileShape_MK{});
   // one thread processes one row, thus we need kBlockM <= MaxThreadsPerBlock
   static_assert(kBlockM <= MaxThreadsPerBlock);
-  static constexpr int kNumPartialSink = Has_sink ? kBlockM : 1; // NOTE: we use dummy 1 to reduce memory usage if not `Has_sink`
+  static constexpr int kNumPartialSink = Has_sink ? MaxThreadsPerBlock : 1; // NOTE: we use dummy 1 to reduce memory usage if not `Has_sink`
+  static constexpr int kWarpSize = 32;
+  static_assert(!Has_sink || kNumPartialSink % kWarpSize == 0); // NOTE: we would demand the block size to be divisible by the warp size if `Has_sink`
 
   // We want kBlockKGmem to be a power of 2 so that when we do the summing,
   // it's just between threads in the same warp
@@ -221,8 +223,7 @@ class FlashAttnBwdPreprocess {
 
     // Get seqlen info
     int const remain_valid_seqlen_q = params.total_q - m_block * kBlockM;
-    bool const is_valid_thread = thread_idx < kBlockM;
-    bool const is_valid_row = is_valid_thread && thread_idx < remain_valid_seqlen_q;
+    bool const is_valid_row = thread_idx < kBlockM && thread_idx < remain_valid_seqlen_q;
 
     // Initialize the input tensors for O, dO, LSE, sink and dsink
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh); // [sq, hd]
@@ -255,13 +256,12 @@ class FlashAttnBwdPreprocess {
       __syncthreads();
 
       // Compute the `p_sink = exp(sink - lse)`
-      // for this row with the corr. lse
-      // and store to shared memory
-      if (is_valid_thread) {
+      // for this row with the corr. lse and store to shared memory
+      // NOTE: the oob part in shared_pd_sink will be zero since lse = inf,
+      // which is necessary to safely reduce partial dsink later
 #pragma unroll
-        for (int si = 0; si < params.total_sink; ++si) {
-          shared_pd_sink[si][thread_idx] = safe_softmax(shared_sink[si], lse);
-        }
+      for (int si = 0; si < params.total_sink; ++si) {
+        shared_pd_sink[si][thread_idx] = safe_softmax(shared_sink[si], lse);
       }
       __syncthreads();
     }
@@ -396,6 +396,13 @@ class FlashAttnBwdPreprocess {
     // }
   }
 
+  CUTLASS_DEVICE float warp_reduce_dsink(unsigned int mask, float acc_dsink) {
+    for (int offset = kWarpSize / 2; offset > 0; offset /= 2) {
+      acc_dsink += __shfl_down_sync(mask, acc_dsink, offset);
+    }
+    return acc_dsink;
+  }
+
   template <typename ReduceBufTensor>
   CUTLASS_DEVICE void block_reduce_dsink(
       Params const& params,
@@ -403,29 +410,62 @@ class FlashAttnBwdPreprocess {
       float shared_dsink[kMaxSeqlenSink][kNumPartialSink],
       int const m_block,
       int const thread_idx) {
-    float block_reduced_dsink[kMaxSeqlenSink];
+    static constexpr unsigned warp_mask = 0xffffffff;
+    static constexpr int kNumWarps = kNumPartialSink / kWarpSize;
+    __shared__ float shared_warp_reduced_dsink[kMaxSeqlenSink][kNumWarps];
 
-    // Method1: reduce all by thread0 (TODO: optimize it with warp-reduce and shared memory)
-    if (thread_idx == 0) {
+    int const warp_idx = thread_idx / kWarpSize;
+    int const land_idx = thread_idx % kWarpSize;
+
 #pragma unroll
-      for (int si = 0; si < params.total_sink; ++si) {
-        block_reduced_dsink[si] = 0;
-#pragma unroll
-        for (int mi = 0; mi < kNumPartialSink; ++mi) {
-          block_reduced_dsink[si] += shared_dsink[si][mi];
-        }
+    for (int si = 0; si < params.total_sink; ++si) {
+      __syncthreads();
+
+      float acc_dsink = shared_dsink[si][thread_idx];
+
+      // accumulate warp-reduced dsink into lane0
+      acc_dsink = warp_reduce_dsink(warp_mask, acc_dsink);
+
+      // lane0 writes the warp-reduced dsink to shared memory
+      if (land_idx == 0) {
+        shared_warp_reduced_dsink[si][warp_idx] = acc_dsink;
+      }
+      __syncthreads();
+
+      // let the first kNumWarps threads read the warp-reduced dsink from shared memory
+      // and apply final warp-reduce to accumulate block-reduced dsink into thread0
+      const unsigned int ballot_warp_mask = __ballot_sync(warp_mask, thread_idx < kNumWarps);
+      if (thread_idx < kNumWarps) {
+        acc_dsink = shared_warp_reduced_dsink[si][thread_idx];
+        acc_dsink = warp_reduce_dsink(ballot_warp_mask, acc_dsink);
       }
 
-      // store block-reduced dsink to reduce buffer
-      for (int si = 0; si < params.total_sink; ++si) {
-        dsink_reduce_buf(m_block, si) = block_reduced_dsink[si];
+      // thread0 stores block-reduced dsink to reduce buffer
+      if (thread_idx == 0) {
+        dsink_reduce_buf(m_block, si) = acc_dsink;
       }
     }
   }
 
   template <typename OutTensor, typename ReduceBufTensor>
-  CUTLASS_DEVICE void global_reduce_dsink(Params const& params, OutTensor& dsink, ReduceBufTensor& dsink_reduce_buf, int const thread_idx) {
+  CUTLASS_DEVICE void global_reduce_dsink(
+      Params const& params,
+      OutTensor& dsink,
+      ReduceBufTensor& dsink_reduce_buf,
+      // float shared_dsink[kMaxSeqlenSink][kNumPartialSink],
+      int const thread_idx) {
     __threadfence(); // complete the acquire pattern after atomic
+
+    // #pragma unroll
+    //       for (int si = 0; si < params.total_sink; ++si) {
+    //         __syncthreads();
+    //         float acc_dsink = 0;
+    // #pragma unroll
+    //         for (int bi = thread_idx; bi < params.num_m_block; bi += kNumPartialSink) {
+    //           acc_dsink += dsink_reduce_buf(bi, si);
+    //         }
+    //         shared_dsink[si][thread_idx] = acc_dsink;
+    //       }
 
     // Method1: reduce all by thread0 (TODO: optimize it with warp-reduce and shared memory)
     float block_reduced_dsink[kMaxSeqlenSink];

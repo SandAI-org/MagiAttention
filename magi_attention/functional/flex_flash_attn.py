@@ -21,7 +21,6 @@ from packaging import version
 from magi_attention.utils import nvtx
 
 from ._flex_flash_attn_jit import get_ffa_jit_mod
-from .utils import sink_bwd_compiled
 
 # isort: off
 # We need to import the CUDA kernels after importing torch
@@ -411,17 +410,6 @@ def _flex_flash_attn_backward_compilable(
         deterministic=deterministic,
         profile_mode=profile_mode,
     )
-
-    sink_bwd_debug = False  # DE-BUG
-    if sink_bwd_debug and sink is not None:
-        dsink = sink_bwd_compiled(
-            sink=sink,
-            lse=lse,
-            o=out_,
-            do=dout,
-            dsink=dsink,
-        )
-        sink = None
 
     (
         dq,

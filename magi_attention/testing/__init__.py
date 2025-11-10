@@ -36,11 +36,6 @@ __all__ = [
 ]
 
 
-# HACK: enable sanity check in every unitest by default
-# TODO: inherit the unitest.TestCaseBase and enable/disable it inside the base class's setUp/tearDown
-os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "1"
-
-
 def parameterize(argument: str, values: list[Any]) -> Callable:
     """
     This function simulates pytest.mark.parameterize with multi-process support.
