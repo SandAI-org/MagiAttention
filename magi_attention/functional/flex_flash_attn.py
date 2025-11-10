@@ -420,7 +420,7 @@ def _flex_flash_attn_backward_compilable(
         force_jit=force_jit,
     )
 
-    sink_bwd_debug = True  # DE-BUG
+    sink_bwd_debug = False  # DE-BUG
     if sink_bwd_debug and sink is not None:
         dsink = sink_bwd_compiled(
             sink=sink,

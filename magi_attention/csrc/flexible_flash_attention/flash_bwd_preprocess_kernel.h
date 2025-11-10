@@ -62,6 +62,7 @@ class FlashAttnBwdPreprocess {
   static constexpr int kHeadDim = get<1>(TileShape_MK{});
   // one thread processes one row, thus we need kBlockM <= MaxThreadsPerBlock
   static_assert(kBlockM <= MaxThreadsPerBlock);
+  static constexpr int kNumPartialSink = Has_sink ? kBlockM : 1; // NOTE: we use dummy 1 to reduce memory usage if not `Has_sink`
 
   // We want kBlockKGmem to be a power of 2 so that when we do the summing,
   // it's just between threads in the same warp
@@ -91,6 +92,8 @@ class FlashAttnBwdPreprocess {
   using StrideLSE = cute::Stride<int64_t, _1>;
   using ShapeSink = cute::Shape<int32_t, int32_t>; // (s_sink, nhq)
   using StrideSink = cute::Stride<int64_t, _1>;
+  using ShapedSinkReduceBuf = cute::Shape<int32_t, int32_t, int32_t>; // (num_m_block, s_sink, nhq)
+  using StridedSinkReduceBuf = cute::Stride<int64_t, int64_t, _1>;
 
   // Device side arguments
   struct Arguments {
@@ -118,7 +121,12 @@ class FlashAttnBwdPreprocess {
     StrideSink const stride_sink;
     // dsink
     float* ptr_dsink;
+    float* ptr_dsink_reduce_buf;
+    unsigned int* ptr_dsink_reduce_cnt; // one counter per head
+    ShapedSinkReduceBuf const shape_dsink_reduce_buf;
+    StridedSinkReduceBuf const stride_dsink_reduce_buf;
     // meta
+    int const num_m_block;
     int const total_q;
     int const total_sink;
   };
@@ -149,7 +157,12 @@ class FlashAttnBwdPreprocess {
     StrideSink const stride_sink;
     // dsink
     float* ptr_dsink = nullptr;
+    float* ptr_dsink_reduce_buf = nullptr;
+    unsigned int* ptr_dsink_reduce_cnt = nullptr;
+    ShapedSinkReduceBuf const shape_dsink_reduce_buf;
+    StridedSinkReduceBuf const stride_dsink_reduce_buf;
     // meta
+    int const num_m_block;
     int const total_q;
     int const total_sink = 0;
   };
@@ -186,7 +199,12 @@ class FlashAttnBwdPreprocess {
         args.stride_sink,
         // dsink
         args.ptr_dsink,
+        args.ptr_dsink_reduce_buf,
+        args.ptr_dsink_reduce_cnt,
+        args.shape_dsink_reduce_buf,
+        args.stride_dsink_reduce_buf,
         // meta
+        args.num_m_block,
         args.total_q,
         args.total_sink,
     };
@@ -214,18 +232,20 @@ class FlashAttnBwdPreprocess {
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(0), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block)); // (M,)
     Tensor mSink = make_tensor(make_gmem_ptr(params.ptr_sink), params.shape_sink, params.stride_sink)(_, bidh); // [s_sink,]
     Tensor mdSink = make_tensor(make_gmem_ptr(params.ptr_dsink), params.shape_sink, params.stride_sink)(_, bidh); // [s_sink,]
+    Tensor mdSinkReduceBuf =
+        make_tensor(make_gmem_ptr(params.ptr_dsink_reduce_buf), params.shape_dsink_reduce_buf, params.stride_dsink_reduce_buf)(_, _, bidh); // [num_m_block, s_sink]
 
     // Load the LSE
     // NOTE: we mask the OOB lse as `inf`,
     // to make the subsequent calculation of OOB scores (exp(x - lse))
-    // become exp(0 - `inf`) = exp(`-inf`) = 0
+    // become exp(x - `inf`) = exp(`-inf`) = 0
     float lse = is_valid_row ? gLSE(thread_idx) : INFINITY;
 
     // Initialize static shared memory / register for sink
     __shared__ float shared_sink[kMaxSeqlenSink];
-    float p_sink[kMaxSeqlenSink];
+    __shared__ float shared_pd_sink[kMaxSeqlenSink][kNumPartialSink];
 
-    // Load the sink
+    // Load the sink and compute p_sink
     if constexpr (Has_sink) {
       // Load the sink to shared memory by first s_sink threads in the block
       if (thread_idx < params.total_sink) {
@@ -233,12 +253,14 @@ class FlashAttnBwdPreprocess {
       }
       __syncthreads();
 
-#pragma unroll
       // Compute the `p_sink = exp(sink - lse)`
       // for this row with the corr. lse
+      // and store to shared memory
+#pragma unroll
       for (int si = 0; si < params.total_sink; ++si) {
-        p_sink[si] = safe_softmax(shared_sink[si], lse);
+        shared_pd_sink[si][thread_idx] = safe_softmax(shared_sink[si], lse);
       }
+      __syncthreads();
     }
 
     // Initialize the tiled copy for O and dO
@@ -309,13 +331,23 @@ class FlashAttnBwdPreprocess {
     Tensor gdPsum = local_tile(cute::domain_offset(make_coord(0), mdPsum), Shape<Int<kBlockM>>{}, make_coord(m_block)); // (M,)
 
     // Store the reduced dPsum to output tensor
-    // by the thread whose hd_idx == 0
-    // NOTE: we make OOB dPsum as 0
+    // and also compute partial dsink if `Has_sink`
+    // by the threads whose hd_idx == 0
     if (get<1>(tOcO(_0{}, _0{}, _0{})) == 0) { // hd_idx = 0
 #pragma unroll
       for (int mi = 0; mi < size(dP_sum); ++mi) {
         int const row_idx = get<0>(tOcO(_0{}, mi, _0{})); // row_idx
-        gdPsum(row_idx) = row_idx < remain_valid_seqlen_q ? dP_sum(mi) : 0;
+        float dPsum_mi = row_idx < remain_valid_seqlen_q ? dP_sum(mi) : 0; // NOTE: we make OOB dPsum as 0
+        gdPsum(row_idx) = dPsum_mi;
+
+        // Compute partial `dsink = p_sink * -dPsum` for this row
+        // and store to the same shared memory as p_sink
+        if constexpr (Has_sink) {
+#pragma unroll
+          for (int si = 0; si < params.total_sink; ++si) {
+            shared_pd_sink[si][row_idx] *= -dPsum_mi;
+          }
+        }
       }
     }
 
@@ -332,25 +364,53 @@ class FlashAttnBwdPreprocess {
       gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
     }
 
-    // Compute partial `dsink = p_sink * -dPsum` for this row
-    // and then reduce-add it back (atomically / sequentially) to the global memory of dsink
+    // Reduce partial dsink along the seqlen_q dim if `Has_sink`
     if constexpr (Has_sink) {
-      // Make sure all gdPsum store to global memory
-      // before this point are visible to all threads within this block
-      __threadfence_block();
+      __syncthreads();
 
-      if (is_valid_row) {
-        // Load the negative dPsum for this row
-        float neg_dPsum = -gdPsum(thread_idx);
-
+      // compute block-reduced dsink and store to reduce buffer
+      // Method1: reduce all by thread0 (TODO: optimize it with warp-reduce and shared memory)
+      float block_reduced_dsink[kMaxSeqlenSink];
+      if (thread_idx == 0) {
 #pragma unroll
-        // Compute partial `dsink = p_sink * -dPsum`
-        // and reduce-add to the global memory of dsink
         for (int si = 0; si < params.total_sink; ++si) {
-          if constexpr (Deterministic) {
-            // TODO: support sequential reduce-add for deterministic mode
-          } else { // atomic reduce-add for non-deterministic mode
-            atomicAdd(&mdSink(si), p_sink[si] * neg_dPsum);
+          block_reduced_dsink[si] = 0;
+#pragma unroll
+          for (int mi = 0; mi < kBlockM; ++mi) {
+            block_reduced_dsink[si] += shared_pd_sink[si][mi];
+          }
+        }
+
+        // store block-reduced dsink to reduce buffer
+        for (int si = 0; si < params.total_sink; ++si) {
+          mdSinkReduceBuf(m_block, si) = block_reduced_dsink[si];
+        }
+      }
+
+      // Mark the block-reduction of dsink by this block as done
+      // and return a flag to indicate whether this is the last m block to finish block-reduction
+      bool is_this_m_block_last_done = mark_this_m_block_done(params, bidh, thread_idx);
+
+      // The last m block will load all the block-reduced dsink results from reduce buffer
+      // then reduce them to store the final reduced dsink
+      if (is_this_m_block_last_done) {
+        __threadfence(); // complete the acquire pattern after atomic
+
+        // Method1: reduce all by thread0 (TODO: optimize it with warp-reduce and shared memory)
+        if (thread_idx == 0) {
+#pragma unroll
+          for (int si = 0; si < params.total_sink; ++si) {
+            block_reduced_dsink[si] = 0;
+#pragma unroll
+            for (int bi = 0; bi < params.num_m_block; ++bi) {
+              block_reduced_dsink[si] += mdSinkReduceBuf(bi, si);
+            }
+          }
+
+          // store block-reduced dsink to reduce buffer
+#pragma unroll
+          for (int si = 0; si < params.total_sink; ++si) {
+            mdSink(si) = block_reduced_dsink[si];
           }
         }
       }
@@ -365,6 +425,26 @@ class FlashAttnBwdPreprocess {
     //     gmem_thr_copy_dQaccum.partition_D(gdQaccum); Tensor zero = make_fragment_like(tdQgdQaccum); clear(zero);
     //     cute::copy(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementAccum>{}, zero, tdQgdQaccum);
     // }
+  }
+
+  CUTLASS_DEVICE
+  bool mark_this_m_block_done(Params const& params, int const bidh, int const thread_idx) const {
+    // Make sure all writes to dsink reduce buffer in this thread is visible to others
+    __threadfence();
+
+    // Make sure all writes to dsink reduce buffer in this block is visible to others
+    __syncthreads();
+
+    __shared__ bool is_this_m_block_last_done_shared;
+
+    if (thread_idx == 0) {
+      unsigned int order = atomicInc(&params.ptr_dsink_reduce_cnt[bidh], params.num_m_block);
+      is_this_m_block_last_done_shared = (order == params.num_m_block - 1);
+    }
+
+    __syncthreads();
+
+    return is_this_m_block_last_done_shared;
   }
 };
 

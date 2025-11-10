@@ -19,7 +19,6 @@ from typing import Any
 import torch
 from torch.testing._internal.common_utils import run_tests
 
-import magi_attention.testing
 from magi_attention.common import AttnRanges
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.functional.flex_flash_attn import (
@@ -303,6 +302,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             profile_mode=False,
+            force_jit=False,
         )
 
         o_ref, lse_ref = correct_attn_fwd_result(
@@ -332,6 +332,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             profile_mode=False,
+            force_jit=False,
         )
 
         assert_close(
@@ -382,6 +383,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             profile_mode=False,
+            force_jit=False,
         )
 
         dq_ref += dq_acc
@@ -415,6 +417,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             profile_mode=False,
+            force_jit=False,
         )
 
         assert_close(
@@ -644,7 +647,7 @@ class TestFlexFlashAttn(DistTestBase):
             max_mismatch_thres=o_max_mismatch_thres,
         )
         try:
-            magi_attention.testing.assert_close(
+            assert_close(
                 total_out,
                 total_out_ref_high_precision,
                 atol=o_atol,
@@ -685,7 +688,7 @@ class TestFlexFlashAttn(DistTestBase):
             max_mismatch_thres=lse_max_mismatch_thres,
         )
         try:
-            magi_attention.testing.assert_close(
+            assert_close(
                 total_lse,
                 total_lse_ref_high_precision,
                 atol=lse_atol,
@@ -726,7 +729,7 @@ class TestFlexFlashAttn(DistTestBase):
             max_mismatch_thres=dq_max_mismatch_thres,
         )
         try:
-            magi_attention.testing.assert_close(
+            assert_close(
                 grad_total_q,
                 grad_total_q_ref_high_precision,
                 atol=dq_atol,
@@ -767,7 +770,7 @@ class TestFlexFlashAttn(DistTestBase):
             max_mismatch_thres=dk_max_mismatch_thres,
         )
         try:
-            magi_attention.testing.assert_close(
+            assert_close(
                 grad_total_k,
                 grad_total_k_ref_high_precision,
                 atol=dk_atol,
@@ -808,7 +811,7 @@ class TestFlexFlashAttn(DistTestBase):
             max_mismatch_thres=dv_max_mismatch_thres,
         )
         try:
-            magi_attention.testing.assert_close(
+            assert_close(
                 grad_total_v,
                 grad_total_v_ref_high_precision,
                 atol=dv_atol,
@@ -852,7 +855,7 @@ class TestFlexFlashAttn(DistTestBase):
                 max_mismatch_thres=dsink_max_mismatch_thres,
             )
             try:
-                magi_attention.testing.assert_close(
+                assert_close(
                     grad_total_sink,
                     grad_total_sink_ref_high_precision,
                     atol=dsink_atol,

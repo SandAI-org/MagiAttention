@@ -115,7 +115,7 @@ struct Flash_bwd_params : public Flash_fwd_params {
   using index_t = int64_t;
 
   // Dimensions params
-  int total_q_rounded;
+  int total_q_rounded, num_m_block;
 
   // RangeMerge params
   int2* __restrict__ merge_k_ranges;
@@ -125,12 +125,16 @@ struct Flash_bwd_params : public Flash_fwd_params {
   // Dtype params
   at::ScalarType dkv_type;
 
-  // The dO and dQKV matrices.
+  // The dO, dQ, dK and dV matrices.
   void* __restrict__ do_ptr;
   void* __restrict__ dq_ptr;
   void* __restrict__ dk_ptr;
   void* __restrict__ dv_ptr;
+
+  // The dsink-related matrices and workspace
   void* __restrict__ dsink_ptr;
+  void* __restrict__ dsink_reduce_buf_ptr;
+  void* __restrict__ dsink_reduce_cnt_ptr;
 
   // To accumulate dQ
   void* __restrict__ dq_accum_ptr;

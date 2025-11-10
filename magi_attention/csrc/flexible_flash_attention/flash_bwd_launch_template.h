@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <stdexcept>
+
 #include <cute/tensor.hpp>
 
 #include <cutlass/cluster_launch.hpp> // For ClusterLauncher
@@ -68,14 +70,17 @@ void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
       {params.h_qo, _1{}}, // stride_sink: [nhq, 1]
       // dsink
       static_cast<float*>(params.dsink_ptr),
+      static_cast<float*>(params.dsink_reduce_buf_ptr),
+      static_cast<unsigned int*>(params.dsink_reduce_cnt_ptr), // shape_dsink_reduce_cnt: [nhq,]
+      {params.num_m_block, params.total_sink, params.h_qo}, // shape_dsink_reduce_buf: [num_m_block, s_sink, nhq]
+      {params.total_sink * params.h_qo, params.h_qo, _1{}}, // stride_dsink_reduce_buf: [nhq, 1]
       // meta
+      params.num_m_block,
       params.total_q,
       params.total_sink};
 
   typename PreprocessKernel::Params preprocess_params = PreprocessKernel::to_underlying_arguments(preprocess_args);
-
-  int num_m_block = cute::ceil_div(params.total_q_rounded, kBlockM);
-  dim3 grid_m(1, num_m_block, params.h_qo);
+  dim3 grid_m(1, params.num_m_block, params.h_qo);
 
   cutlass::kernel_launch<PreprocessKernel>(
       grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, /*launch_with_pdl=*/false);
@@ -270,8 +275,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
 template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic, bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
-  static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
+  static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+  static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
 
   // TODO: Add a specific tuning function for different kHeadDim
   static constexpr int Stages = 2;

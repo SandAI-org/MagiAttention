@@ -126,6 +126,7 @@ void set_params_dgrad(
     const size_t total_q,
     const size_t total_k,
     const size_t total_q_rounded,
+    const size_t num_m_block,
     const size_t total_sink,
     const size_t h_qo,
     const size_t h_kv,
@@ -141,6 +142,8 @@ void set_params_dgrad(
     at::Tensor dk,
     at::Tensor dv,
     at::Tensor dsink,
+    at::Tensor dsink_reduce_buf,
+    at::Tensor dsink_reduce_cnt,
     void* q_ranges_d,
     void* k_ranges_d,
     void* attn_type_map_d,
@@ -196,6 +199,7 @@ void set_params_dgrad(
 
   // Set backward-specific dimensions
   params.total_q_rounded = total_q_rounded;
+  params.num_m_block = num_m_block;
 
   // Set backward-specific pointers and flags
   params.merge_k_ranges = static_cast<int2*>(merge_k_ranges_d);
@@ -215,6 +219,8 @@ void set_params_dgrad(
   params.dk_ptr = dk.data_ptr();
   params.dv_ptr = dv.data_ptr();
   params.dsink_ptr = dsink.data_ptr();
+  params.dsink_reduce_buf_ptr = dsink_reduce_buf.data_ptr();
+  params.dsink_reduce_cnt_ptr = dsink_reduce_cnt.data_ptr();
   params.dq_row_stride = dq.stride(-3);
   params.dk_row_stride = dk.stride(-3);
   params.dv_row_stride = dv.stride(-3);
