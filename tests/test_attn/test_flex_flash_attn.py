@@ -366,6 +366,7 @@ class TestFlexFlashAttn(DistTestBase):
             merge_k_ranges,
             bwd_kq_map,
             bwd_unique_count,
+            ref_block_size=None,
             softmax_scale=softmax_scale,
             softcap=0.0,
             disable_bwd_dkv_atomic_reduction=False,  # TODO: test when it's `True`
@@ -397,6 +398,7 @@ class TestFlexFlashAttn(DistTestBase):
             merge_k_ranges,
             bwd_kq_map,
             bwd_unique_count,
+            ref_block_size=None,
             softmax_scale=softmax_scale,
             softcap=0.0,
             disable_bwd_dkv_atomic_reduction=False,  # TODO: test when it's `True`
