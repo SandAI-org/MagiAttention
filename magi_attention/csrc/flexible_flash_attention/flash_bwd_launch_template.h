@@ -127,6 +127,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       SdP_swapAB,
       dKV_swapAB,
       dQ_swapAB,
+      RangeMerge,
       NumMmaWarpGroups,
       AtomLayoutMSdP,
       AtomLayoutNdKV,
@@ -172,7 +173,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.k_ranges,
       params.dq_determin_conflict_state,
       params.dq_determin_range_locks,
-      params.attn_type_map};
+      params.attn_type_map,
+      params.bwd_kq_map};
   // The case work with GQA is ugly but idk how to fix it.
   typename CollectiveEpilogue::Arguments epilogue_args{
       static_cast<typename CollectiveEpilogue::Element*>(params.dk_ptr),
@@ -239,11 +241,19 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
     MagiEvents::stop("bwd_run");
 }
 
-template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic, bool ProfileMode>
+template <
+    int Arch,
+    typename T,
+    typename TDkv,
+    int kBlockM,
+    int kBlockN,
+    int kHeadDim,
+    bool Has_softcap,
+    bool DisableBwdDkvAtomicReduction,
+    bool Deterministic,
+    bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
-  static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
 
   // TODO: Add a specific tuning function for different kHeadDim
   static constexpr int Stages = 2;

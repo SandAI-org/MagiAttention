@@ -213,6 +213,7 @@ class FlashAttnBwdSm90 {
     TileScheduler scheduler(reinterpret_cast<typename TileScheduler::SharedStorage*>(&shared_storage.pipelines.smem_scheduler));
 
     if (warp_group_idx == 0) { // Producer
+      using BlockMetaT = typename CollectiveMainloop::BlockMeta;
       cutlass::arch::warpgroup_reg_dealloc<LoadRegisterRequirement>();
 
       int warp_idx_in_warpgroup = __shfl_sync(0xffffffff, (threadIdx.x / 32) % 4, 0);
@@ -234,23 +235,10 @@ class FlashAttnBwdSm90 {
           auto scheduler_prefetch = [&scheduler, &params, &work_tile_info]() { scheduler.prefetch_next_work(params.scheduler, work_tile_info); };
 
           bool tile_valid = false;
+          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
-          if constexpr (RangeMerge) {
-            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
-            int bidb_start = params.scheduler.range_map[bidb_idx];
-
-            for (int idx = 0; idx < loop_count; ++idx) {
-              int bidb = bidb_start + idx;
-              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
-              bool tile_valid_tmp =
-                  mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
-
-              tile_valid = tile_valid || tile_valid_tmp;
-            }
-          } else {
-            tile_valid = mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, tile_valid);
-          }
+          tile_valid =
+              mainloop.load(params.mainloop, pipeline_q, pipeline_do, smem_pipe_write, smem_pipe_write_do, shared_storage, block_coord, block_meta, tile_valid);
 
           if (tile_valid) {
             // Wait for the MMA warpgroups to say that smem_k and smem_v are ready
@@ -269,33 +257,19 @@ class FlashAttnBwdSm90 {
           // get block_coord without deterministic message
           auto block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), get<2>(block_coord_));
           auto [n_block, bidh, bidb_idx] = block_coord;
+          BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
-          if constexpr (RangeMerge) {
-            int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                             : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
-            int bidb_start = params.scheduler.range_map[bidb_idx];
-
-            for (int idx = 0; idx < loop_count; ++idx) {
-              int bidb = bidb_start + idx;
-              block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
-              if constexpr (!Deterministic) {
-                mainloop.store_dq(params.mainloop, shared_storage, block_coord);
-              } else {
-                mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
-                bidb_last = bidb;
-              }
-            }
+          if constexpr (!Deterministic) {
+            mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta);
           } else {
-            if constexpr (!Deterministic) {
-              mainloop.store_dq(params.mainloop, shared_storage, block_coord);
-            } else {
-              mainloop.store_dq(params.mainloop, shared_storage, block_coord, bidb_last);
-              bidb_last = bidb_idx;
-            }
+            mainloop.store_dq(params.mainloop, shared_storage, block_coord, block_meta, bidb_last);
+            // we need to minus one because we call prefetch in the inner loop;
+            bidb_last = block_meta.bidb - 1;
           }
         }
       }
     } else { // Consumer
+      using BlockMetaT = typename CollectiveMainloop::BlockMeta;
       cutlass::arch::warpgroup_reg_alloc<MmaRegisterRequirement>();
       // Initialize matmul objects.
       TiledMmadKV tiled_mma_dKV;
@@ -320,52 +294,27 @@ class FlashAttnBwdSm90 {
         clear(tdVrdV);
         bool tile_valid = false;
 
-        if constexpr (RangeMerge) {
-          int bidb_idx = get<2>(block_coord);
-          int loop_count = (bidb_idx < *params.scheduler.unique_count - 1) ? (params.scheduler.range_map[bidb_idx + 1] - params.scheduler.range_map[bidb_idx])
-                                                                           : (params.scheduler.num_batches - params.scheduler.range_map[bidb_idx]);
-          int bidb_start = params.scheduler.range_map[bidb_idx];
+        BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage};
 
-          for (int idx = 0; idx < loop_count; ++idx) {
-            int bidb = bidb_start + idx;
-            block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), bidb);
+        tile_valid = mainloop.mma(
+            params.mainloop,
+            pipeline_q,
+            pipeline_do,
+            smem_pipe_read,
+            smem_pipe_read_do,
+            tdKrdK,
+            tdVrdV,
+            threadIdx.x - NumCopyThreads,
+            work_idx,
+            block_coord,
+            shared_storage,
+            block_meta,
+            tile_valid);
 
-            // dK and dV output accumulator.
-            bool tile_valid_tmp = mainloop.mma(
-                params.mainloop,
-                pipeline_q,
-                pipeline_do,
-                smem_pipe_read,
-                smem_pipe_read_do,
-                tdKrdK,
-                tdVrdV,
-                threadIdx.x - NumCopyThreads,
-                work_idx,
-                block_coord,
-                shared_storage,
-                tile_valid);
-
-            tile_valid = tile_valid || tile_valid_tmp;
-          }
-          if constexpr (Deterministic) {
-            cute::get<2>(block_coord_) = get<2>(block_coord);
-          }
-        } else {
-          tile_valid = mainloop.mma(
-              params.mainloop,
-              pipeline_q,
-              pipeline_do,
-              smem_pipe_read,
-              smem_pipe_read_do,
-              tdKrdK,
-              tdVrdV,
-              threadIdx.x - NumCopyThreads,
-              work_idx,
-              block_coord,
-              shared_storage,
-              tile_valid);
+        block_coord = cute::make_tuple(get<0>(block_coord_), get<1>(block_coord_), block_meta.bidb - 1);
+        if constexpr (Deterministic) {
+          cute::get<2>(block_coord_) = get<2>(block_coord);
         }
-
         if (tile_valid) {
 #pragma unroll
           for (int i = 0; i < size(tdKrdK); ++i) {

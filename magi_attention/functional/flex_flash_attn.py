@@ -317,6 +317,7 @@ def _flex_flash_attn_forward(
     else:
         kblock_m = None
         kblock_n = None
+
     # NOTE: we can not directly compile `_flex_flash_attn_forward`
     # since torch.compile does not allow returning the mutated args (out, lse)
     _flex_flash_attn_forward_compilable(
@@ -369,6 +370,8 @@ def _flex_flash_attn_backward_compilable(
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
+    kblock_m: int | None,
+    kblock_n: int | None,
     softmax_scale: float,
     softcap: float,
     disable_bwd_dkv_atomic_reduction: bool,
@@ -391,6 +394,9 @@ def _flex_flash_attn_backward_compilable(
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         deterministic=deterministic,
         profile_mode=profile_mode,
+        ref_block_size=(kblock_m, kblock_n)
+        if kblock_m is not None and kblock_n is not None
+        else None,
     )
 
     (
@@ -441,6 +447,8 @@ def _flex_flash_attn_backward_compilable_fake(
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
+    kblock_m: int | None,
+    kblock_n: int | None,
     softmax_scale: float,
     softcap: float,
     disable_bwd_dkv_atomic_reduction: bool,
@@ -471,6 +479,7 @@ def _flex_flash_attn_backward(
     merge_k_ranges: torch.Tensor | None,
     bwd_kq_map: torch.Tensor | None,
     bwd_unique_count: torch.Tensor | None,
+    ref_block_size: tuple[int, int] | None,
     softmax_scale: float,
     softcap: float,
     disable_bwd_dkv_atomic_reduction: bool,
@@ -492,6 +501,12 @@ def _flex_flash_attn_backward(
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
     dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
 
+    if ref_block_size is not None:
+        kblock_m, kblock_n = ref_block_size
+    else:
+        kblock_m = None
+        kblock_n = None
+
     # NOTE: we can not directly compile `_flex_flash_attn_backward`
     # since torch.compile does not allow returning the mutated args (dq, dk, dv)
     _flex_flash_attn_backward_compilable(
@@ -510,6 +525,8 @@ def _flex_flash_attn_backward(
         merge_k_ranges=merge_k_ranges,
         bwd_kq_map=bwd_kq_map,
         bwd_unique_count=bwd_unique_count,
+        kblock_m=kblock_m,
+        kblock_n=kblock_n,
         softmax_scale=softmax_scale,
         softcap=softcap,
         disable_bwd_dkv_atomic_reduction=disable_bwd_dkv_atomic_reduction,
@@ -612,6 +629,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
         ctx.auto_range_merge = auto_range_merge
+        ctx.ref_block_size = ref_block_size
         ctx.profile_mode = profile_mode
 
         return out, lse
@@ -669,6 +687,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_k_ranges,
             bwd_kq_map,
             bwd_unique_count,
+            ref_block_size=ctx.ref_block_size,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
             disable_bwd_dkv_atomic_reduction=False,
@@ -700,7 +719,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # attn_type_map
             None,  # softmax_scale
             None,  # softcap
-            None,  # deterministic
+            None,  # deterministicw
             None,  # sm_margin
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
@@ -774,6 +793,11 @@ def flex_flash_attn_func(
         auto_range_merge (bool, optional):
             Whether to automatically merge k_ranges for the same q_range. Defaults to ``False``.
             **Note:** This flag is useful for sparse attention scenarios but still under development.
+
+        ref_block_size (tuple[int, int], optional):
+            A reference block size used to help select the tile shape.
+            For example, for block sparse scenarios with block sizes of 64x64 or 128x128,
+            this can be set to (64, 64) or (128, 128).
 
         profile_mode (bool, optional):
             Whether to enable profiling mode for FFA. Defaults to ``False``.

@@ -18,14 +18,9 @@ static constexpr bool kDisableAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 
-// Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
-{% if kblock_m and kblock_n %}
+// get kblock_m and kblock_n from python side;
 static constexpr int kBlockM = {{ kblock_m }};
 static constexpr int kBlockN = {{ kblock_n }};
-{% else %}
-static constexpr int kBlockM = std::get<0>(tile_size_fwd_sm90(kHeadDim, /*element_size*/2, kHasSoftcap));
-static constexpr int kBlockN = std::get<1>(tile_size_fwd_sm90(kHeadDim, /*element_size*/2, kHasSoftcap));
-{% endif %}
 
 // Runtime contract checks to ensure consistency with compile-time constraints
 static inline void _check_runtime_contract(
