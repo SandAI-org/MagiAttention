@@ -302,7 +302,6 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             profile_mode=False,
-            force_jit=False,
         )
 
         o_ref, lse_ref = correct_attn_fwd_result(
@@ -332,7 +331,6 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             profile_mode=False,
-            force_jit=False,
         )
 
         assert_close(
@@ -383,7 +381,6 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             profile_mode=False,
-            force_jit=False,
         )
 
         dq_ref += dq_acc
@@ -417,7 +414,6 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             profile_mode=False,
-            force_jit=False,
         )
 
         assert_close(

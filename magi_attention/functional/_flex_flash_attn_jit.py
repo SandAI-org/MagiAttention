@@ -42,6 +42,9 @@ _DTYPE_TO_CUTLASS = {
     torch.float32: "float",
 }
 
+# Whether to disable caching (caching is enabled by default)
+no_build_cache = os.getenv("MAGI_ATTENTION_NO_BUILD_CACHE", "0") == "1"
+
 
 def tile_size_fwd_sm90(head_dim: int, softcap: bool) -> tuple[int, int]:
     if head_dim <= 64:
@@ -286,7 +289,6 @@ def get_ffa_jit_mod(
     deterministic: bool,
     profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
-    force_jit: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -305,9 +307,8 @@ def get_ffa_jit_mod(
         ref_block_size,
     )
 
-    return spec.build_and_load(force_jit=force_jit)
+    return spec.build_and_load()
 
 
-# Disable caching when MAGI_ATTENTION_NO_CACHE=1 (caching is enabled by default)
-if os.getenv("MAGI_ATTENTION_NO_CACHE", "0") != "1":
+if no_build_cache:
     get_ffa_jit_mod = lru_cache(maxsize=None)(get_ffa_jit_mod)

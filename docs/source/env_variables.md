@@ -113,9 +113,19 @@ Toggle this env variable to `1` to enable verbose output during the JIT compilat
 
 Toggle this env variable to `1` to enable debug flags for the C++/CUDA compiler. This includes options like `-g` (debugging symbols) and other flags to get more detailed information, such as register usage. The default value is `0`.
 
+
+**MAGI_ATTENTION_NO_BUILD_CACHE**
+
+Toggle this env variable to `1` to disable caching for built ffa kernels. The default value is `0`.
+
+**MAGI_ATTENTION_FORCE_JIT_BUILD**
+
+Toggle this env variable to `1` to force building FFA in JIT mode, even the pre-built AOT `libs` exists. The default value is `0`.
+
 **NVCC_THREADS**
 
 Sets the number of threads for `nvcc`'s `--split-compile` option, which can speed up the JIT compilation of CUDA kernels. The default value is `4`.
+
 
 ### AOT
 
