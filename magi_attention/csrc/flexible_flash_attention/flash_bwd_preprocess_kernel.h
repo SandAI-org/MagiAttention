@@ -372,23 +372,7 @@ class FlashAttnBwdPreprocess {
       __syncthreads();
 
       // compute block-reduced dsink and store to reduce buffer
-      // Method1: reduce all by thread0 (TODO: optimize it with warp-reduce and shared memory)
-      float block_reduced_dsink[kMaxSeqlenSink];
-      if (thread_idx == 0) {
-#pragma unroll
-        for (int si = 0; si < params.total_sink; ++si) {
-          block_reduced_dsink[si] = 0;
-#pragma unroll
-          for (int mi = 0; mi < kBlockM; ++mi) {
-            block_reduced_dsink[si] += shared_pd_sink[si][mi];
-          }
-        }
-
-        // store block-reduced dsink to reduce buffer
-        for (int si = 0; si < params.total_sink; ++si) {
-          mdSinkReduceBuf(m_block, si) = block_reduced_dsink[si];
-        }
-      }
+      block_reduce_dsink(params, mdSinkReduceBuf, shared_pd_sink, m_block, thread_idx);
 
       // Mark the block-reduction of dsink by this block as done
       // and return a flag to indicate whether this is the last m block to finish block-reduction
@@ -397,25 +381,7 @@ class FlashAttnBwdPreprocess {
       // The last m block will load all the block-reduced dsink results from reduce buffer
       // then reduce them to store the final reduced dsink
       if (is_this_m_block_last_done) {
-        __threadfence(); // complete the acquire pattern after atomic
-
-        // Method1: reduce all by thread0 (TODO: optimize it with warp-reduce and shared memory)
-        if (thread_idx == 0) {
-#pragma unroll
-          for (int si = 0; si < params.total_sink; ++si) {
-            block_reduced_dsink[si] = 0;
-#pragma unroll
-            for (int bi = 0; bi < params.num_m_block; ++bi) {
-              block_reduced_dsink[si] += mdSinkReduceBuf(bi, si);
-            }
-          }
-
-          // store block-reduced dsink to reduce buffer
-#pragma unroll
-          for (int si = 0; si < params.total_sink; ++si) {
-            mdSink(si) = block_reduced_dsink[si];
-          }
-        }
+        global_reduce_dsink(params, mdSink, mdSinkReduceBuf, thread_idx);
       }
     }
 
