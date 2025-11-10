@@ -499,13 +499,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
-        run_bwd: bool = True,
-        random_flags_mode: bool = False,
+        random_flags_mode: bool = False,  # TODO: implement random flags mode
         # FIXME: for now, either lse calculation or applying attn sink
         # requires torch impl of ref_attn_func
         # which causes OOM for this test, thus skipped for now
         test_lse: bool = False,
         test_sink: bool = False,
+        run_bwd: bool = True,
     ):
         # -----    switch mode   ---- #
 

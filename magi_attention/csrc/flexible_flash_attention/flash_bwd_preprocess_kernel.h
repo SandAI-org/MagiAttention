@@ -258,7 +258,7 @@ class FlashAttnBwdPreprocess {
 
       // Compute the `p_sink = exp(sink - lse)`
       // for this row with the corr. lse and store to shared memory
-      // NOTE: the oob part in shared_pd_sink will be zero since lse = inf,
+      // NOTE: the OOB part in shared_pd_sink will be zero since lse = inf,
       // which is necessary to safely reduce partial dsink later
 #pragma unroll
       for (int si = 0; si < params.total_sink; ++si) {
@@ -271,12 +271,11 @@ class FlashAttnBwdPreprocess {
     GmemTiledCopy gmem_tiled_copy_O;
     auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
 
-    // Partition the src thread global tensors for O and dO
+    // Partition the src global tensors for O and dO
     Tensor tOgO = gmem_thr_copy_O.partition_S(gO);
     Tensor tOgdO = gmem_thr_copy_O.partition_S(gdO);
 
-    // Construct identity layout of gO
-    // and partition the dst thread global tensor of cO
+    // Construct identity layout of gO for indexing convenience
     Tensor cO = cute::make_identity_tensor(TileShape_MK{}); // (BLK_M,BLK_K) -> (blk_m,blk_k)
     Tensor tOcO = gmem_thr_copy_O.partition_D(cO);
 
@@ -287,7 +286,7 @@ class FlashAttnBwdPreprocess {
       tOpO(k) = get<1>(tOcO(_0{}, _0{}, k)) < get<1>(params.shape_O); // hd_idx < hd
     }
 
-    // Load the thread global tensors to register for O and dO by tiled copy
+    // Load the global tensors to register for O and dO by tiled copy
     // (8, kBlockM / 32, kHeadDim / 64) or (8, kBlockM / 16, kHeadDim / 128)
     Tensor tOrO = make_fragment_like(tOgO);
     Tensor tOrdO = make_fragment_like(tOgdO);
@@ -372,17 +371,22 @@ class FlashAttnBwdPreprocess {
     if constexpr (Has_sink) {
       __syncthreads();
 
-      // Apply block-reduced dsink and store to reduce buffer for this block
-      block_reduce_dsink(params, mdSinkReduceBufThisBlock, shared_pd_sink, thread_idx);
+      if (params.num_m_block == 1) {
+        // Since there is only one m block, just apply block reduction and store to dsink directly
+        block_reduce_dsink(params, mdSink, shared_pd_sink, thread_idx);
+      } else {
+        // Apply block-reduced dsink and store to reduce buffer for this block
+        block_reduce_dsink(params, mdSinkReduceBufThisBlock, shared_pd_sink, thread_idx);
 
-      // Mark the block-reduction of dsink by this block as done
-      // and return a flag to indicate whether this is the last finished m block
-      bool is_this_m_block_last_done = mark_this_m_block_done(params, bidh, thread_idx);
+        // Mark the block-reduction of dsink by this block as done
+        // and return a flag to indicate whether this is the last finished m block
+        bool is_this_m_block_last_done = mark_this_m_block_done(params, bidh, thread_idx);
 
-      // The last m block will load all the block-reduced dsink results from reduce buffer
-      // then reduce them to store the final reduced dsink
-      if (is_this_m_block_last_done) {
-        global_reduce_dsink(params, mdSink, mdSinkReduceBuf, shared_pd_sink, thread_idx);
+        // The last m block will load all the block-reduced dsink results from reduce buffer
+        // then reduce them to store the final reduced dsink
+        if (is_this_m_block_last_done) {
+          global_reduce_dsink(params, mdSink, mdSinkReduceBuf, shared_pd_sink, thread_idx);
+        }
       }
     }
 

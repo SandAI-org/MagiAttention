@@ -686,8 +686,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
+        random_flags_mode: bool = False,  # TODO: implement random flags mode
         run_bwd: bool = True,
-        random_flags_mode: bool = False,
     ):
         # NOTE: test pipeline using sdpa does not need profile mode
         # thus we always enable sanity check mode
