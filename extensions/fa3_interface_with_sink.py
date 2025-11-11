@@ -54,6 +54,7 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             num_heads_k = (qkv.shape[2] - num_heads_q) // 2
             assert num_heads_k * 2 + num_heads_q == qkv.shape[2]
             q, k, v = qkv.split([num_heads_q, num_heads_k, num_heads_k], dim=-2)
+
         out, softmax_lse, *rest = _flash_attn_forward(
             q,
             k,
@@ -85,7 +86,7 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             softcap=softcap,
             sm_margin=sm_margin,
         )
-        # ctx.save_for_backward(q, k, v, out_padded, softmax_lse)
+
         ctx.save_for_backward(q, k, v, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
@@ -111,6 +112,7 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             qkv_shape = q.shape[:-2] + (num_heads_q + num_heads_k * 2, *q.shape[-1:])
             dqkv = torch.empty(qkv_shape, dtype=q.dtype, device=q.device)
             dq, dk, dv = dqkv.split([num_heads_q, num_heads_k, num_heads_k], dim=-2)
+
         _flash_attn_backward(
             dout,
             q,
@@ -134,7 +136,9 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             ctx.deterministic,
             ctx.sm_margin,
         )
+
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
+
         return (
             dqkv,
             None,
@@ -238,6 +242,7 @@ class FA3FuncWithSink(torch.autograd.Function):
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
 
         dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
+
         dsink = FA3FuncWithSink.compute_dsink(
             out=out,
             dout=dout,
@@ -302,7 +307,7 @@ class FA3FuncWithSink(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if sink is not None:
             b = out.shape[0]
-            # rearrange out, lse, sink
+            # rearrange out, lse
             out = rearrange(out, "b s h d -> (b s) h d")
             lse = rearrange(lse, "b h s -> (b s) h")
 
@@ -328,7 +333,7 @@ class FA3FuncWithSink(torch.autograd.Function):
         sink: torch.Tensor | None,
     ) -> torch.Tensor | None:
         if sink is not None:
-            # rearrange out, do, lse, sink
+            # rearrange out, do, lse
             out = rearrange(out, "b s h d -> (b s) h d")
             dout = rearrange(dout, "b s h d -> (b s) h d")
             lse = rearrange(lse, "b h s -> (b s) h")
@@ -353,6 +358,7 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
         q,
         k,
         v,
+        sink,
         cu_seqlens_q,
         cu_seqlens_k,
         seqused_q,
@@ -378,7 +384,7 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (
                 -0.5
             )
-        # out, q, k, v, out_padded, softmax_lse = _flash_attn_varlen_forward(
+
         out, softmax_lse, *rest = _flash_attn_forward(
             q,
             k,
@@ -412,9 +418,24 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
         )
-        # ctx.save_for_backward(q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k)
+
+        out, softmax_lse = FA3VarlenFuncWithSink.correct_out_lse_with_sink(
+            out=out,
+            lse=softmax_lse,
+            sink=sink,
+        )
+
         ctx.save_for_backward(
-            q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k
+            q,
+            k,
+            v,
+            sink,
+            out,
+            softmax_lse,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            seqused_q,
+            seqused_k,
         )
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_k = max_seqlen_k
@@ -433,6 +454,7 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
             q,
             k,
             v,
+            sink,
             out,
             softmax_lse,
             cu_seqlens_q,
@@ -440,8 +462,18 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
             seqused_q,
             seqused_k,
         ) = ctx.saved_tensors
+
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
+
         dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
+
+        dsink = FA3VarlenFuncWithSink.compute_dsink(
+            out=out,
+            dout=dout,
+            lse=softmax_lse,
+            sink=sink,
+        )
+
         _flash_attn_backward(
             dout,
             q,
@@ -465,13 +497,16 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
             ctx.deterministic,
             ctx.sm_margin,
         )
+
         dq = dq[..., : q.shape[-1]]  # We could have padded the head dimension
         dk = dk[..., : k.shape[-1]]
         dv = dv[..., : v.shape[-1]]
+
         return (
             dq,
             dk,
             dv,
+            dsink,
             None,
             None,
             None,
@@ -493,6 +528,52 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
             None,
             None,
         )
+
+    @staticmethod
+    def correct_out_lse_with_sink(
+        out: torch.Tensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if sink is not None:
+            # rearrange lse
+            lse = rearrange(lse, "h s -> s h")
+
+            # correct out, lse with sink
+            out, lse = correct_attn_out_lse_with_sink_compiled(
+                out=out,
+                lse=lse,
+                sink=sink,
+                inplace=True,
+            )
+
+            # rearrange lse back
+            lse = rearrange(lse, "s h -> h s").contiguous()
+
+        return out, lse
+
+    @staticmethod
+    def compute_dsink(
+        out: torch.Tensor,
+        dout: torch.Tensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if sink is not None:
+            # rearrange lse
+            lse = rearrange(lse, "h s -> s h")
+
+            # compute dsink
+            dsink = sink_bwd_compiled(
+                sink=sink,
+                lse=lse,
+                o=out,
+                do=dout,
+            )
+        else:
+            dsink = None
+
+        return dsink
 
 
 def fa3_qkvpacked_func_with_sink(
@@ -657,6 +738,7 @@ def fa3_varlen_func_with_sink(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
+    sink=None,
     seqused_q=None,
     seqused_k=None,
     softmax_scale=None,
@@ -678,6 +760,7 @@ def fa3_varlen_func_with_sink(
         q,
         k,
         v,
+        sink,
         cu_seqlens_q,
         cu_seqlens_k,
         seqused_q,

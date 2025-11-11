@@ -66,6 +66,7 @@ def squash_batch_dim(x: torch.Tensor) -> torch.Tensor:
 def infer_varlen_mask_from_batch(
     batch_size: int,
     seq_len: int,
+    device: str = "cuda",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Converts fixed-length full attention into varlen fulll attention format by generating
     cumulative sequence lengths for queries and keys.
@@ -73,13 +74,16 @@ def infer_varlen_mask_from_batch(
     Args:
         batch_size (int): The number of sequences in the batch.
         seq_len (int): The fixed sequence length for each sequence in the batch.
+        device (str, optional): The device to allocate the tensors on. Defaults to ``"cuda"``.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
             A pair of 1D tensors (cu_seqlens_q, cu_seqlens_k), each of shape ``[batch_size + 1,]``,
             representing the cumulative sequence lengths for the queries and keys respectively.
     """
-    cu_seqlens_q = torch.arange(0, batch_size + 1) * seq_len
+    cu_seqlens_q = (
+        torch.arange(0, batch_size + 1, dtype=torch.int32, device=device) * seq_len
+    )
     cu_seqlens_k = cu_seqlens_q
 
     return cu_seqlens_q, cu_seqlens_k

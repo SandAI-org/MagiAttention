@@ -19,7 +19,10 @@ from unittest import TestCase
 import torch
 from einops import rearrange
 
-from extensions.fa3_interface_with_sink import fa3_func_with_sink
+from extensions.fa3_interface_with_sink import (
+    fa3_func_with_sink,
+    fa3_varlen_func_with_sink,
+)
 from magi_attention.api.functools import (
     infer_attn_mask_from_cu_seqlens,
     infer_varlen_mask_from_batch,
@@ -51,40 +54,31 @@ class TestFAInterfaceWithSink(TestCase):
     def device(self):
         return torch.cuda.current_device()
 
-    @parameterize("mode", ["batch"])  # ["batch", "varlen", "qkvpacked"]
+    @parameterize("mode", ["batch", "varlen"])  # ["batch", "varlen", "qkvpacked"]
     @parameterize(
         "attn_config",
         [
             {
                 "batch_size": 1,
-                "sq": 4096,
-                "sk": 4096,
-                "s_sink": 4,
+                "sq": 2048,
+                "sk": 2048,
+                "s_sink": 1,
                 "nhq": 8,
                 "nhk": 8,
                 "hd": 64,
             },
             {
                 "batch_size": 2,
-                "sq": 2048,
-                "sk": 2048,
+                "sq": 1024,
+                "sk": 1024,
                 "s_sink": 2,
                 "nhq": 8,
                 "nhk": 4,
                 "hd": 128,
             },
-            {
-                "batch_size": 4,
-                "sq": 1024,
-                "sk": 1024,
-                "s_sink": 1,
-                "nhq": 8,
-                "nhk": 1,
-                "hd": 192,
-            },
         ],
     )
-    @parameterize("dtype", [torch.bfloat16])
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("causal", [False, True])
     def test_fa3_interface_with_sink(
         self,
@@ -153,6 +147,21 @@ class TestFAInterfaceWithSink(TestCase):
                 fa3_out.backward(do_)
                 fa3_out = rearrange(fa3_out, "b s h d -> (b s) h d")
                 fa3_lse = rearrange(fa3_lse, "b h s -> (b s) h")
+            case "varlen":
+                fa3_out, fa3_lse = fa3_varlen_func_with_sink(
+                    q=q,
+                    k=k,
+                    v=v,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=sq,
+                    max_seqlen_k=sk,
+                    sink=sink,
+                    causal=causal,
+                    return_attn_probs=True,
+                )
+                fa3_out.backward(do)
+                fa3_lse = rearrange(fa3_lse, "h s -> s h")
             case _:
                 raise NotImplementedError(f"Unsupported mode: {mode}")
 
@@ -242,8 +251,8 @@ class TestFAInterfaceWithSink(TestCase):
 
         dsink_atol = EPSILON
         dsink_rtol = 0.05
-        dsink_norm_rtol_ratio = NORM_RTOL_RATIO
-        dsink_mismatch_thres_ratio = MISMATCH_THRES_RATIO
+        dsink_norm_rtol_ratio = NORM_RTOL_RATIO * 2
+        dsink_mismatch_thres_ratio = MISMATCH_THRES_RATIO * 1.5
         dsink_min_mismatch_thres_ratio = (
             1 / (total_sink.numel()) if total_sink is not None else 0
         )

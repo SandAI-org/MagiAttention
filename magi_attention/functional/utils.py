@@ -52,7 +52,8 @@ def safe_lse(
         g.masked_fill_(all_neg_inf_mask, 0.0)
         return g
 
-    x.register_hook(safe_lse_bwd_hook)
+    if x.requires_grad:
+        x.register_hook(safe_lse_bwd_hook)
 
     lse = torch.logsumexp(x, dim=dim, keepdim=keepdim)
 
@@ -132,7 +133,7 @@ def sink_bwd(
     # where sink.shape = [nhq, sq, s_sink]
     #       lse.shape = [nhq, sq, 1]
     #       p_sink.shape = [nhq, sq, s_sink]
-    p_sink = torch.exp(sink - lse)
+    p_sink = safe_softmax(sink, lse)
 
     # calculate dsink = p_sink.T x -delta
     # where p_sink.shape = [nhq, sq, s_sink]
