@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# mypy: disable-error-code="union-attr"
 import unittest
 from typing import Any
 from unittest import TestCase
@@ -210,6 +209,12 @@ class TestFAInterfaceWithSink(TestCase):
     ) -> None:
         # -----   customize tolerance / threshold  ---- #
 
+        if total_sink is not None:
+            assert isinstance(total_sink, torch.Tensor)
+            has_sink = True
+        else:
+            has_sink = False
+
         o_atol = EPSILON
         o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
         o_norm_rtol_ratio = NORM_RTOL_RATIO
@@ -257,7 +262,7 @@ class TestFAInterfaceWithSink(TestCase):
         # -----   ref1. torch ref with high precision (fp64)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
-        has_sink = total_sink is not None
+
         if has_sink:
             total_sink.grad = None
 
