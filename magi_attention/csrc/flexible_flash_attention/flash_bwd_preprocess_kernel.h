@@ -244,12 +244,14 @@ class FlashAttnBwdPreprocess {
     // become exp(x - `inf`) = exp(`-inf`) = 0
     float lse = is_valid_row ? gLSE(thread_idx) : INFINITY;
 
-    // Initialize static shared memory / register for sink
-    __shared__ float shared_sink[kMaxSeqlenSink];
+    // Initialize static shared memory buffer for p_sink and later partial dsink
     __shared__ float shared_pd_sink[kMaxSeqlenSink][kNumPartialSink];
 
     // Load the sink and compute p_sink
     if constexpr (Has_sink) {
+      // Initialize static shared memory for sink
+      __shared__ float shared_sink[kMaxSeqlenSink];
+
       // Load the sink to shared memory by first s_sink threads in the block
       if (thread_idx < params.total_sink) {
         shared_sink[thread_idx] = mSink(thread_idx);
@@ -306,7 +308,7 @@ class FlashAttnBwdPreprocess {
         /*max_MN=*/remain_valid_seqlen_q);
 
     // Reshape from e.g. (8, kBlockM / 32, kHeadDim / 64) to (kBlockM / 32, (8, kHeadDim / 64))
-    // and upcast to float32
+    // and upcast to float32 for higher reduce precision
     Layout l = make_layout(get<1>(tOrO.layout()), make_layout(get<0>(tOrO.layout()), get<2>(tOrO.layout())));
     Tensor tOrO_l = make_tensor(tOrO.data(), l);
     Tensor tOrO_l_fp32 = make_tensor_like<float>(tOrO_l); // (tM, tK)
@@ -454,7 +456,9 @@ class FlashAttnBwdPreprocess {
       TensordSinkReduceBuf& dsink_reduce_buf,
       float shared_dsink[kMaxSeqlenSink][kNumPartialSink],
       int const thread_idx) {
-    __threadfence(); // complete the acquire pattern after atomic
+    // Make sure the atomic operation is completed
+    // before loading the dsink reduce buffer (acquire order)
+    __threadfence(); // REVIEW: is this fence necessary ?
 
     // Load the block-reduced dsink from reduce buffer
     // and accumulate them to shared memory
@@ -475,14 +479,14 @@ class FlashAttnBwdPreprocess {
 
   CUTLASS_DEVICE
   bool mark_this_m_block_done(Params const& params, int const bidh, int const thread_idx) const {
-    // Make sure all writes to dsink reduce buffer in this thread is visible to others
+    // Make sure all writes to dsink reduce buffer in this block is visible to others (release order)
     __threadfence();
-
-    // Make sure all writes to dsink reduce buffer in this block is visible to others
     __syncthreads();
 
     __shared__ bool is_this_m_block_last_done_shared;
 
+    // Mark the block-reduction of dsink by this block as done
+    // and get the flag to indicate whether this is the last finished m block
     if (thread_idx == 0) {
       unsigned int order = atomicInc(&params.ptr_dsink_reduce_cnt[bidh], params.num_m_block);
       is_this_m_block_last_done_shared = (order == params.num_m_block - 1);
