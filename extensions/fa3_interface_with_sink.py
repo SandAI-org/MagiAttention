@@ -30,6 +30,7 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
     def forward(
         ctx,
         qkv,
+        sink,
         softmax_scale,
         causal,
         q_descale=None,
@@ -87,7 +88,13 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             sm_margin=sm_margin,
         )
 
-        ctx.save_for_backward(q, k, v, out, softmax_lse)
+        out, softmax_lse = FA3QKVPackedFuncWithSink.correct_out_lse_with_sink(
+            out=out,
+            lse=softmax_lse,
+            sink=sink,
+        )
+
+        ctx.save_for_backward(q, k, v, sink, out, softmax_lse)
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
@@ -100,7 +107,7 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse = ctx.saved_tensors
+        q, k, v, sink, out, softmax_lse = ctx.saved_tensors
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
         if ctx.ndim == 5:
             qkv_shape = q.shape[:-2] + (3, *q.shape[-2:])
@@ -112,6 +119,13 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             qkv_shape = q.shape[:-2] + (num_heads_q + num_heads_k * 2, *q.shape[-1:])
             dqkv = torch.empty(qkv_shape, dtype=q.dtype, device=q.device)
             dq, dk, dv = dqkv.split([num_heads_q, num_heads_k, num_heads_k], dim=-2)
+
+        dsink = FA3QKVPackedFuncWithSink.compute_dsink(
+            out=out,
+            dout=dout,
+            lse=softmax_lse,
+            sink=sink,
+        )
 
         _flash_attn_backward(
             dout,
@@ -141,6 +155,7 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
 
         return (
             dqkv,
+            dsink,
             None,
             None,
             None,
@@ -154,6 +169,57 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             None,
             None,
         )
+
+    @staticmethod
+    def correct_out_lse_with_sink(
+        out: torch.Tensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if sink is not None:
+            b = out.shape[0]
+            # rearrange out, lse
+            out = rearrange(out, "b s h d -> (b s) h d")
+            lse = rearrange(lse, "b h s -> (b s) h")
+
+            # correct out, lse with sink
+            out, lse = correct_attn_out_lse_with_sink_compiled(
+                out=out,
+                lse=lse,
+                sink=sink,
+                inplace=True,
+            )
+
+            # rearrange out, lse back
+            out = rearrange(out, "(b s) h d -> b s h d", b=b).contiguous()
+            lse = rearrange(lse, "(b s) h -> b h s", b=b).contiguous()
+
+        return out, lse
+
+    @staticmethod
+    def compute_dsink(
+        out: torch.Tensor,
+        dout: torch.Tensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if sink is not None:
+            # rearrange out, do, lse
+            out = rearrange(out, "b s h d -> (b s) h d")
+            dout = rearrange(dout, "b s h d -> (b s) h d")
+            lse = rearrange(lse, "b h s -> (b s) h")
+
+            # compute dsink
+            dsink = sink_bwd_compiled(
+                sink=sink,
+                lse=lse,
+                o=out,
+                do=dout,
+            )
+        else:
+            dsink = None
+
+        return dsink
 
 
 class FA3FuncWithSink(torch.autograd.Function):
@@ -578,6 +644,7 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
 
 def fa3_qkvpacked_func_with_sink(
     qkv,
+    sink=None,
     softmax_scale=None,
     causal=False,
     q_descale=None,
@@ -627,6 +694,7 @@ def fa3_qkvpacked_func_with_sink(
     """
     return FA3QKVPackedFuncWithSink.apply(
         qkv,
+        sink,
         softmax_scale,
         causal,
         q_descale,

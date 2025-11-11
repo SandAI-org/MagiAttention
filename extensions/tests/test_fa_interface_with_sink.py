@@ -21,6 +21,7 @@ from einops import rearrange
 
 from extensions.fa3_interface_with_sink import (
     fa3_func_with_sink,
+    fa3_qkvpacked_func_with_sink,
     fa3_varlen_func_with_sink,
 )
 from magi_attention.api.functools import (
@@ -54,7 +55,7 @@ class TestFAInterfaceWithSink(TestCase):
     def device(self):
         return torch.cuda.current_device()
 
-    @parameterize("mode", ["batch", "varlen"])  # ["batch", "varlen", "qkvpacked"]
+    @parameterize("mode", ["batch", "varlen", "qkvpacked"])
     @parameterize(
         "attn_config",
         [
@@ -64,7 +65,7 @@ class TestFAInterfaceWithSink(TestCase):
                 "sk": 2048,
                 "s_sink": 1,
                 "nhq": 8,
-                "nhk": 8,
+                "nhk": 4,
                 "hd": 64,
             },
             {
@@ -73,7 +74,7 @@ class TestFAInterfaceWithSink(TestCase):
                 "sk": 1024,
                 "s_sink": 2,
                 "nhq": 8,
-                "nhk": 4,
+                "nhk": 8,
                 "hd": 128,
             },
         ],
@@ -143,7 +144,6 @@ class TestFAInterfaceWithSink(TestCase):
                     causal=causal,
                     return_attn_probs=True,
                 )
-
                 fa3_out.backward(do_)
                 fa3_out = rearrange(fa3_out, "b s h d -> (b s) h d")
                 fa3_lse = rearrange(fa3_lse, "b h s -> (b s) h")
@@ -162,6 +162,21 @@ class TestFAInterfaceWithSink(TestCase):
                 )
                 fa3_out.backward(do)
                 fa3_lse = rearrange(fa3_lse, "h s -> s h")
+            case "qkvpacked":
+                q_, k_, v_, do_ = [
+                    rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
+                ]
+                qkv = torch.cat([q_, k_, v_], dim=-2)  # concat at num_heads dim
+                fa3_out, fa3_lse = fa3_qkvpacked_func_with_sink(
+                    qkv=qkv,
+                    sink=sink,
+                    causal=causal,
+                    num_heads_q=nhq,
+                    return_attn_probs=True,
+                )
+                fa3_out.backward(do_)
+                fa3_out = rearrange(fa3_out, "b s h d -> (b s) h d")
+                fa3_lse = rearrange(fa3_lse, "b h s -> (b s) h")
             case _:
                 raise NotImplementedError(f"Unsupported mode: {mode}")
 
