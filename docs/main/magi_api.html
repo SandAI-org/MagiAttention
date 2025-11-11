@@ -456,6 +456,8 @@ The values specify the attention type for each token:</p>
 </div></blockquote>
 <p>More information about the attention type map can be found in the <code class="docutils literal notranslate"><span class="pre">Note</span></code> below.</p>
 </p></li>
+<li><p><strong>sink</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – Learnable sink token tensor.
+Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to not apply attention sink.</p></li>
 <li><p><strong>softmax_scale</strong> (<em>float</em><em>, </em><em>optional</em>) – Softmax scale.
 Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to use: <code class="docutils literal notranslate"><span class="pre">1/sqrt(head_dim)</span></code>.</p></li>
 <li><p><strong>softcap</strong> (<em>float</em><em>, </em><em>optional</em>) – Softcap. Defaults to <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p></li>
@@ -476,9 +478,6 @@ while `` q_ranges`` = <code class="docutils literal notranslate"><span class="pr
 </p></li>
 <li><p><strong>auto_range_merge</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to automatically merge k_ranges for the same q_range. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
 <strong>Note:</strong> This flag is useful for sparse attention scenarios but still under development.</p></li>
-<li><p><strong>profile_mode</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to enable profiling mode for FFA. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
-<strong>Note:</strong> This flag for now is only internally used to profile FFA.
-Please do not toggle it on in production.</p></li>
 <li><p><strong>ref_block_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>] </em><em>| </em><em>None</em>)</p></li>
 </ul>
 </dd>
@@ -498,6 +497,7 @@ Please do not toggle it on in production.</p></li>
 <li><p>q: (num_tokens_q, num_heads_q, head_dim)</p></li>
 <li><p>k: (num_tokens_kv, num_heads_kv, head_dim)</p></li>
 <li><p>v: (num_tokens_kv, num_heads_kv, head_dim)</p></li>
+<li><p>sink: (num_tokens_sink, num_heads_q)</p></li>
 <li><p>q_ranges: (num_ranges, 2)</p></li>
 <li><p>k_ranges: (num_ranges, 2)</p></li>
 <li><p>attn_type_map: (num_ranges,)</p></li>
@@ -1362,6 +1362,8 @@ about which the users may have no bother to care.</p></li>
 <li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the object that holds some inner meta data
 as one argument for many other magi_attention APIs,
 about which the users may have no bother to care.</p></li>
+<li><p><strong>sink</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – global sink tensor (replicated among cp ranks).
+Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to not apply attention sink.</p></li>
 <li><p><strong>softmax_scale</strong> (<em>float</em><em>, </em><em>optional</em>) – softmax scale.
 Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to use: <code class="docutils literal notranslate"><span class="pre">1/sqrt(head_dim)</span></code>.</p></li>
 <li><p><strong>softcap</strong> (<em>float</em><em>, </em><em>optional</em>) – softcap. Defaults to <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p></li>
@@ -1383,6 +1385,7 @@ Defaults to <code class="docutils literal notranslate"><span class="pre">None</s
 <li><p>q: [num_tokens_q_local, num_heads_q, head_dim]</p></li>
 <li><p>k: [num_tokens_kv_local, num_heads_kv, head_dim]</p></li>
 <li><p>v: [num_tokens_kv_local, num_heads_kv, head_dim]</p></li>
+<li><p>sink: [num_tokens_sink_global, num_heads_q]</p></li>
 <li><p>out: [num_tokens_q_local, num_heads_q, head_dim]</p></li>
 <li><p>lse: [num_tokens_q_local, num_heads_q]</p></li>
 </ul>
@@ -1398,6 +1401,7 @@ Defaults to <code class="docutils literal notranslate"><span class="pre">None</s
 <li><p><strong>k</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>v</strong> (<em>Tensor</em>)</p></li>
 <li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>)</p></li>
+<li><p><strong>sink</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
 <li><p><strong>softmax_scale</strong> (<em>float</em><em> | </em><em>None</em>)</p></li>
 <li><p><strong>softcap</strong> (<em>float</em>)</p></li>
 </ul>

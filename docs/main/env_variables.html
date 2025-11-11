@@ -468,6 +468,12 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 </div>
 <p><strong>MAGI_ATTENTION_DETERMINISTIC_MODE</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable deterministic mode to use deterministic algorithms for all magi_attention kernels. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<p><strong>MAGI_ATTENTION_PROFILE_MODE</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable profiling mode to profile all magi_attention kernels, by now mainly for ffa kernels (<em>see <a class="reference external" href="https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa">here</a> for more details</em>). The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This is only supposed to be used for development. Please do NOT enable it in production.</p>
+</div>
 </section>
 <section id="for-build">
 <h2>For Build<a class="headerlink" href="#for-build" title="Link to this heading">#</a></h2>
@@ -479,6 +485,10 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable verbose output during the JIT compilation process, showing the full ninja build commands being executed. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <p><strong>MAGI_ATTENTION_BUILD_DEBUG</strong></p>
 <p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable debug flags for the C++/CUDA compiler. This includes options like <code class="docutils literal notranslate"><span class="pre">-g</span></code> (debugging symbols) and other flags to get more detailed information, such as register usage. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<p><strong>MAGI_ATTENTION_NO_BUILD_CACHE</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to disable caching for built ffa kernels. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<p><strong>MAGI_ATTENTION_FORCE_JIT_BUILD</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to force building FFA in JIT mode, even the pre-built AOT <code class="docutils literal notranslate"><span class="pre">libs</span></code> exists. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
 <p><strong>NVCC_THREADS</strong></p>
 <p>Sets the number of threads for <code class="docutils literal notranslate"><span class="pre">nvcc</span></code>’s <code class="docutils literal notranslate"><span class="pre">--split-compile</span></code> option, which can speed up the JIT compilation of CUDA kernels. The default value is <code class="docutils literal notranslate"><span class="pre">4</span></code>.</p>
 </section>
