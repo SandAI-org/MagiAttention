@@ -19,11 +19,7 @@ from unittest import TestCase
 import torch
 from einops import rearrange
 
-from extensions.fa3_interface_with_sink import (
-    fa3_func_with_sink,
-    fa3_qkvpacked_func_with_sink,
-    fa3_varlen_func_with_sink,
-)
+# isort: split
 from magi_attention.api.functools import (
     infer_attn_mask_from_cu_seqlens,
     infer_varlen_mask_from_batch,
@@ -41,6 +37,14 @@ from magi_attention.testing.precision import (
 )
 from magi_attention.utils import get_attn_mask_from_ffa_args
 
+# isort: split
+from extensions.fa2_interface_with_sink import fa2_func_with_sink
+from extensions.fa3_interface_with_sink import (
+    fa3_func_with_sink,
+    fa3_qkvpacked_func_with_sink,
+    fa3_varlen_func_with_sink,
+)
+
 
 class TestFAInterfaceWithSink(TestCase):
     def setUp(self):
@@ -54,6 +58,131 @@ class TestFAInterfaceWithSink(TestCase):
     @property
     def device(self):
         return torch.cuda.current_device()
+
+    @parameterize("mode", ["batch"])
+    @parameterize(
+        "attn_config",
+        [
+            {
+                "batch_size": 1,
+                "sq": 2048,
+                "sk": 2048,
+                "s_sink": 1,
+                "nhq": 8,
+                "nhk": 4,
+                "hd": 64,
+            },
+            {
+                "batch_size": 2,
+                "sq": 1024,
+                "sk": 1024,
+                "s_sink": 2,
+                "nhq": 8,
+                "nhk": 8,
+                "hd": 128,
+            },
+        ],
+    )
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize("causal", [False, True])
+    def test_fa2_interface_with_sink(
+        self,
+        mode: str,
+        attn_config: dict[str, Any],
+        dtype: torch.dtype,
+        causal: bool,
+    ):
+        b = attn_config["batch_size"]
+        sq, sk, s_sink = attn_config["sq"], attn_config["sk"], attn_config["s_sink"]
+        nhq, nhk, hd = attn_config["nhq"], attn_config["nhk"], attn_config["hd"]
+        has_sink = s_sink > 0
+
+        # construct data
+        q = torch.randn(
+            (b * sq, nhq, hd),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        k = torch.randn(
+            (b * sk, nhk, hd),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        v = torch.randn(
+            (b * sk, nhk, hd),
+            dtype=dtype,
+            device=self.device,
+            requires_grad=True,
+        )
+        do = torch.randn_like(q)
+        if has_sink:
+            sink = torch.randn(
+                (s_sink, nhq),
+                dtype=torch.float32,
+                device=self.device,
+                requires_grad=True,
+            )
+        else:
+            sink = None
+
+        # construct mask
+        cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(b, sq)
+        q_ranges, k_ranges, attn_type_map, *rest = infer_attn_mask_from_cu_seqlens(
+            cu_seqlens_q, cu_seqlens_k, causal=causal
+        )
+        attn_type_map = [t.to_int_type() for t in attn_type_map]
+
+        # run FA2 with sink
+        match mode:
+            case "batch":
+                q_, k_, v_, do_ = [
+                    rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
+                ]
+                fa2_out = fa2_func_with_sink(
+                    q=q_,
+                    k=k_,
+                    v=v_,
+                    sink=sink,
+                    causal=causal,
+                    # NOTE: FA2 only supports returning lse when dropout_p > 0
+                    return_attn_probs=False,
+                )
+                fa2_out.backward(do_)
+                fa2_out = rearrange(fa2_out, "b s h d -> (b s) h d")
+            case _:
+                raise NotImplementedError(f"Unsupported mode: {mode}")
+
+        fa2_dq, fa2_dk, fa2_dv = q.grad, k.grad, v.grad
+        fa2_dsink = sink.grad if has_sink else None
+        q.grad, k.grad, v.grad = None, None, None
+        if has_sink:
+            sink.grad = None
+
+        self.assert_close_to_torch_ref(
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            total_seqlen_q=b * sq,
+            total_seqlen_k=b * sk,
+            total_q=q,
+            total_k=k,
+            total_v=v,
+            total_sink=sink,
+            total_out=fa2_out,
+            total_lse=None,
+            grad_total_q=fa2_dq,
+            grad_total_k=fa2_dk,
+            grad_total_v=fa2_dv,
+            grad_total_sink=fa2_dsink,
+            grad_total_out=do,
+            dtype=dtype,
+            test_case=(
+                f"fa2_interface_with_sink_[{mode=}]x"
+                f"[{attn_config=}]x[{dtype=}]x[{causal=}]"
+            ),
+        )
 
     @parameterize("mode", ["batch", "varlen", "qkvpacked"])
     @parameterize(
@@ -130,7 +259,7 @@ class TestFAInterfaceWithSink(TestCase):
         )
         attn_type_map = [t.to_int_type() for t in attn_type_map]
 
-        # run fa3 with sink
+        # run FA3 with sink
         match mode:
             case "batch":
                 q_, k_, v_, do_ = [
@@ -222,7 +351,7 @@ class TestFAInterfaceWithSink(TestCase):
         total_v: torch.Tensor,
         total_sink: torch.Tensor | None,
         total_out: torch.Tensor,
-        total_lse: torch.Tensor,
+        total_lse: torch.Tensor | None,
         grad_total_q: torch.Tensor,
         grad_total_k: torch.Tensor,
         grad_total_v: torch.Tensor,
@@ -388,42 +517,43 @@ class TestFAInterfaceWithSink(TestCase):
 
         # -----   assert close for fwd lse   ---- #
 
-        # fa style with Linf norm
-        lse_norm = calc_inf_norm(total_lse, total_lse_ref_high_precision)
-        lse_ref_norm = calc_inf_norm(
-            total_lse_ref_low_precision, total_lse_ref_high_precision
-        )
-        try:
-            self.assertLessEqual(
-                lse_norm,
-                lse_norm_rtol_ratio * lse_ref_norm,
-                msg=(
-                    f"For {test_case=}: {lse_norm=} should be no greater than "
-                    f"{lse_norm_rtol_ratio} x {lse_ref_norm=}"
-                ),
+        if total_lse is not None:
+            # fa style with Linf norm
+            lse_norm = calc_inf_norm(total_lse, total_lse_ref_high_precision)
+            lse_ref_norm = calc_inf_norm(
+                total_lse_ref_low_precision, total_lse_ref_high_precision
             )
-        except Exception as e:
-            err_msg_list.append(str(e))
+            try:
+                self.assertLessEqual(
+                    lse_norm,
+                    lse_norm_rtol_ratio * lse_ref_norm,
+                    msg=(
+                        f"For {test_case=}: {lse_norm=} should be no greater than "
+                        f"{lse_norm_rtol_ratio} x {lse_ref_norm=}"
+                    ),
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
 
-        # torch style with atol + rtol + mismatch threshold
-        lse_thres = extract_mismatch_threshold(
-            actual=total_lse_ref_low_precision,
-            expected=total_lse_ref_high_precision,
-            atol=lse_atol,
-            rtol=lse_rtol,
-            mismatch_thres_ratio=lse_mismatch_thres_ratio,
-        )
-        try:
-            assert_close(
-                total_lse,
-                total_lse_ref_high_precision,
+            # torch style with atol + rtol + mismatch threshold
+            lse_thres = extract_mismatch_threshold(
+                actual=total_lse_ref_low_precision,
+                expected=total_lse_ref_high_precision,
                 atol=lse_atol,
                 rtol=lse_rtol,
-                mismatch_threshold=lse_thres,
-                test_case=f"{test_case} => lse",
+                mismatch_thres_ratio=lse_mismatch_thres_ratio,
             )
-        except Exception as e:
-            err_msg_list.append(str(e))
+            try:
+                assert_close(
+                    total_lse,
+                    total_lse_ref_high_precision,
+                    atol=lse_atol,
+                    rtol=lse_rtol,
+                    mismatch_threshold=lse_thres,
+                    test_case=f"{test_case} => lse",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
 
         # -----   assert close for bwd dq   ---- #
 
