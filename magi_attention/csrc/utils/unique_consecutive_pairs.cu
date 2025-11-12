@@ -113,7 +113,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> unique_consecutive_pairs
 
   void* d_temp_storage_scan = nullptr;
   size_t temp_storage_bytes_scan = 0;
-  cub::Sum scan_op;
+  cuda::std::plus<> scan_op;
   int initial_value = 0;
 
   cub::DeviceScan::ExclusiveScan(d_temp_storage_scan, temp_storage_bytes_scan, d_flags.data_ptr<int>(), d_write_indices.data_ptr<int>(), scan_op, initial_value, n);
