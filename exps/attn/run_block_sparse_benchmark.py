@@ -38,7 +38,7 @@ from magi_attention.utils.sparse_utils import (
 impls = ["ffa"]
 
 # actual seqlen
-seqlens = [32768 * (i + 1) for i in range(0, 4)]
+seqlens = [32768 * (i + 1) for i in range(0, 2)]
 
 # current block sparse attention always has low sparsity
 sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
@@ -46,17 +46,19 @@ sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
 ds = [128]
 wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
-nhqs = [8]
-num_groups = [1]
+nhqs = [32]
+num_groups = [8]
 # small K block
-# q_block_sizes = [64, 64, 64, 64, 64]
-# k_block_sizes = [64, 32, 16, 8, 1]
+q_block_sizes = [64, 64, 64, 64, 64]
+k_block_sizes = [64, 32, 16, 8, 1]
 # small Q block
-q_block_sizes = [64, 32, 16, 8]
-k_block_sizes = [64, 64, 64, 64]
+# q_block_sizes = [64, 32, 16, 8]
+# k_block_sizes = [64, 64, 64, 64]
 # large Q block and K block
 # q_block_sizes = [64, 128]
 # k_block_sizes = [64, 128]
+
+sparse_load = False
 
 assert len(q_block_sizes) == len(k_block_sizes)
 
@@ -231,7 +233,9 @@ def sparse_attn_benchmark(
             attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device="cuda")
 
             # TODO: SwapAB will change this constraint
-            ref_block_size = choose_ref_block((q_block_size, k_block_size))
+            ref_block_size = choose_ref_block(
+                (q_block_size, k_block_size), sparse_load=sparse_load
+            )
 
             def fn():
                 return ffa_func(
@@ -243,6 +247,7 @@ def sparse_attn_benchmark(
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
                     ref_block_size=ref_block_size,
+                    sparse_load=sparse_load,
                 )
 
             if wd == "bwd":

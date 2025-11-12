@@ -587,7 +587,6 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     ref_block_size = (ref_block_size[0], tile_size)
                 else:
                     ref_block_size = (64, tile_size)
-                print(sparse_load_loop_count)
             else:
                 sparse_load_loop_count = None
 

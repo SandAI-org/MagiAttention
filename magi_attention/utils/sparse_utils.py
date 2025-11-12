@@ -574,7 +574,7 @@ def get_sdpa_mask_from_var_block_mask(
 
 
 def choose_ref_block(
-    block_size: tuple[int, int], swap_ab: bool = False
+    block_size: tuple[int, int], swap_ab: bool = False, sparse_load: bool = False
 ) -> tuple[int, int]:
     """
     Choose the proper reference block size for different Q/K block sizes, currently for uniform block mask.
@@ -586,6 +586,8 @@ def choose_ref_block(
     q_block_size, k_block_size = block_size
     if swap_ab:
         raise NotImplementedError("SwapAB Attention is not supported yet.")
+    elif sparse_load:
+        return (64, 128)  # only support (64, 128) block size
     else:
         # Tile_M must be a multiple of 64
         if q_block_size >= 64:

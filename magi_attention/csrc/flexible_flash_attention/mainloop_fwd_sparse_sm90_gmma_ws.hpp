@@ -282,12 +282,11 @@ struct CollectiveMainloopSparseFwdSm90 {
     SeqlenInfo_t seqlen_info;
     flash::AttnType attn_type;
 
-    // int cur_k_range_idx[2]; // for intra-wg overlap
-    // int cur_k_range_inner_idx[kStages];
-    // bool is_kv_valid[kStages];
     int cur_k_range_idx;
     int cur_k_range_inner_idx;
     bool is_kv_valid;
+    int token_idx;
+    int prev_token_idx;
     int cur_loop;
     int loop_count;
 
@@ -324,12 +323,12 @@ struct CollectiveMainloopSparseFwdSm90 {
 
       cur_k_range_idx = 0;
       cur_k_range_inner_idx = 0;
-      is_kv_valid = false;
+      is_kv_valid = true;
+      prev_token_idx = -1;
 
       if (!is_finish()) {
         seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
-        is_kv_valid = true;
 
         // metadata init
         int cnt = 0;
@@ -343,8 +342,8 @@ struct CollectiveMainloopSparseFwdSm90 {
             break;
           } else {
             cur_k_range_idx += 1;
+            cnt += (seqlen_k - cur_k_range_inner_idx);
             cur_k_range_inner_idx = 0;
-            cnt += seqlen_k;
             // k_range out-of-bounds
             if (bidb + cur_k_range_idx >= end_batches) {
               is_kv_valid = false;
@@ -352,6 +351,8 @@ struct CollectiveMainloopSparseFwdSm90 {
             }
           }
         }
+        // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
+        token_idx = k_ranges[bidb + cur_k_range_idx].x + cur_k_range_inner_idx;
       }
 
       // TODO: maybe debug
@@ -360,6 +361,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     CUTLASS_DEVICE
     void prefetch() {
       ++cur_loop;
+      prev_token_idx = token_idx;
       // update token index for each thread
       if (!is_finish()) {
         int num_threads = NumProducerThreads;
@@ -376,8 +378,8 @@ struct CollectiveMainloopSparseFwdSm90 {
             break;
           } else {
             cur_k_range_idx += 1;
+            cnt += (seqlen_k - cur_k_range_inner_idx);
             cur_k_range_inner_idx = 0;
-            cnt += seqlen_k;
             // k_range out-of-bounds
             if (bidb + cur_k_range_idx >= end_batches) {
               is_kv_valid = false;
@@ -385,6 +387,8 @@ struct CollectiveMainloopSparseFwdSm90 {
             }
           }
         }
+        // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
+        token_idx = k_ranges[bidb + cur_k_range_idx].x + cur_k_range_inner_idx;
       }
     }
 
@@ -545,23 +549,65 @@ struct CollectiveMainloopSparseFwdSm90 {
       }
     };
 
+    int64_t cache_policy = createpolicy_evict_last();
+    int num_element_per_load = 16 / sizeof(Element);
+    int total_load_count = kHeadDim / num_element_per_load;
     auto load_K = [&](int token_idx, bool is_valid, auto& smem_pipe_write) {
       pipeline_k.producer_acquire(smem_pipe_write);
-      // TODO: Producer Ops. calculate src/dst offset based on token index, then cp.async load
-      pipeline_k.producer_commit(smem_pipe_write);
+      // Producer Ops. calculate src/dst offset based on token index, then cp.async load
+      // K shape: (seqlen, head_dim, num_heads)
+      Element* ptr_gK_base = params.ptr_K + block_meta.bidh_kv * get<2>(params.stride_K);
+      Element* src_ptr = ptr_gK_base + token_idx * get<0>(params.stride_K);
+      // shared memory pointer
+      Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
+      Tensor sK_stage = sK(_, _, smem_pipe_write.index());
+      Element* dst_ptr = &sK_stage(thread_idx, 0); // each thread's starting position in smem_k
+
+      for (int i = 0; i < total_load_count; ++i) {
+        cp_async_cacheglobal_l2_prefetch_256B(src_ptr, dst_ptr, is_valid, cache_policy);
+        src_ptr += num_element_per_load;
+        dst_ptr = &sK_stage(thread_idx, (i + 1) * num_element_per_load);
+      }
+      // if (block_meta.m_block == 0 && thread_idx == 0 && blockIdx.x == 0) {
+      //   printf("SmemK Layout\n");
+      //   cute::print_tensor(sK);
+      // }
+
+      pipeline_k.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive);
       ++smem_pipe_write;
     };
 
     auto load_V = [&](int token_idx, bool is_valid, auto& smem_pipe_write) {
       pipeline_v.producer_acquire(smem_pipe_write);
-      pipeline_v.producer_commit(smem_pipe_write);
+      Element* ptr_gV_base = params.ptr_V + block_meta.bidh_kv * get<2>(params.stride_V);
+      Element* src_ptr = ptr_gV_base + token_idx * get<0>(params.stride_V);
+      // shared memory pointer
+      Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
+      Tensor sVt_stage = sVt(_, _, smem_pipe_write.index());
+      Element* dst_ptr = &sVt_stage(0, thread_idx); // each thread's starting position in smem_v (transposed)
+      for (int i = 0; i < total_load_count; ++i) {
+        cp_async_cacheglobal_l2_prefetch_256B(src_ptr, dst_ptr, is_valid, cache_policy);
+        src_ptr += num_element_per_load;
+        dst_ptr = &sVt_stage((i + 1) * num_element_per_load, thread_idx);
+      }
+      // if (block_meta.m_block == 0 && thread_idx == 0 && blockIdx.x == 0) {
+      //   printf("SmemV Layout\n");
+      //   cute::print_tensor(sVt);
+      // }
+
+      pipeline_v.producer_commit(smem_pipe_write, cutlass::arch::cpasync_barrier_arrive);
       ++smem_pipe_write;
     };
 
     // Prologue
     int n_block_max = block_meta.loop_count;
     if constexpr (IntraWGOverlap) {
-      load_K(0, false, smem_pipe_write_k);
+      load_K(block_meta.token_idx, block_meta.is_kv_valid, smem_pipe_write_k);
+      // if (block_meta.m_block == 0 && blockIdx.x == 0) {
+      //   printf("=====Prologue Load=======\n");
+      //   printf("Thread %d load (token index, is valid):(%d, %d)  for K\n", thread_idx, block_meta.token_idx, block_meta.is_kv_valid);
+      //   printf("=========================\n");
+      // }
       load_Q();
       shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
     }
@@ -571,26 +617,32 @@ struct CollectiveMainloopSparseFwdSm90 {
       // printf("Producer: Before block_meta.prefetch()...\n");
       block_meta.prefetch();
       int n_block = block_meta.cur_loop;
-      int prev_n_block = n_block - 1;
+      // int prev_n_block = n_block - 1;
       bool is_valid = block_meta.is_kv_valid;
-      // printf("Producer: While loop load Interleaved K/V...\n");
-      // TODO
-      // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
-      // int token_idx = params.k_ranges[block_meta.cur_k_range_idx[1]].x + block_meta.cur_k_range_inner_idx[1];
-      // int prev_token_idx = params.k_ranges[block_meta.cur_k_range_idx[0]].x + block_meta.cur_k_range_inner_idx[0];
 
       if (n_block < n_block_max) {
         // Load interleaved K/V
         if constexpr (IntraWGOverlap) {
-          load_K(n_block, is_valid, smem_pipe_write_k);
-          load_V(prev_n_block, is_valid, smem_pipe_write_v);
+          // if (block_meta.m_block == 0 && blockIdx.x == 0) {
+          //   printf("======Mainloop Load=======\n");
+          //   printf("Thread %d load (token index, is valid):(%d, %d) for K\n", thread_idx, block_meta.token_idx, block_meta.is_kv_valid);
+          //   printf("Thread %d load (token index, is valid):(%d, %d) for V\n", thread_idx, block_meta.prev_token_idx, block_meta.is_kv_valid);
+          //   printf("=========================\n");
+          // }
+          load_K(block_meta.token_idx, is_valid, smem_pipe_write_k);
+          load_V(block_meta.prev_token_idx, is_valid, smem_pipe_write_v);
         }
       }
 
     } while (!block_meta.is_finish());
 
     // Epilogue, load the tail V
-    load_V(0, false, smem_pipe_write_v);
+    // if (block_meta.m_block == 0 && blockIdx.x == 0) {
+    //   printf("=====Epilogue Load=======\n");
+    //   printf("Thread %d load (token index, is valid):(%d, %d) for V\n", thread_idx, block_meta.prev_token_idx, block_meta.is_kv_valid);
+    //   printf("=========================\n");
+    // }
+    load_V(block_meta.prev_token_idx, block_meta.is_kv_valid, smem_pipe_write_v);
 
     return true;
   }
@@ -987,6 +1039,7 @@ struct CollectiveMainloopSparseFwdSm90 {
 
       // Prefetch the next block_meta
       block_meta.prefetch();
+      n_block = block_meta.cur_loop;
 
       // if (n_block >= n_block_min && seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
       if (n_block < n_block_max && attn_type == flash::AttnType::Full) {
