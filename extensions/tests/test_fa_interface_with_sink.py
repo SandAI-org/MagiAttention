@@ -43,6 +43,7 @@ from extensions.fa2_interface_with_sink import (
     fa2_kvpacked_func_with_sink,
     fa2_qkvpacked_func_with_sink,
     fa2_varlen_func_with_sink,
+    fa2_varlen_qkvpacked_func_with_sink,
 )
 from extensions.fa3_interface_with_sink import (
     fa3_func_with_sink,
@@ -64,7 +65,9 @@ class TestFAInterfaceWithSink(TestCase):
     def device(self):
         return torch.cuda.current_device()
 
-    @parameterize("mode", ["batch", "varlen", "qkvpacked", "kvpacked"])
+    @parameterize(
+        "mode", ["batch", "varlen", "qkvpacked", "kvpacked", "varlen_qkvpacked"]
+    )
     @parameterize(
         "attn_config",
         [
@@ -175,14 +178,12 @@ class TestFAInterfaceWithSink(TestCase):
                 q_, k_, v_, do_ = [
                     rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
                 ]
-
                 # NOTE: FA2 does not support GQA/MQA for qkvpacked API
                 rep_times = nhq // nhk
                 k_, v_ = [
                     repeat(x, "b s h d -> b s (h r) d", r=rep_times) for x in (k_, v_)
                 ]
                 qkv = torch.stack([q_, k_, v_], dim=-3)  # stack before num_heads dim
-
                 fa2_out = fa2_qkvpacked_func_with_sink(
                     qkv=qkv,
                     sink=sink,
@@ -207,6 +208,21 @@ class TestFAInterfaceWithSink(TestCase):
                 )
                 fa2_out.backward(do_)
                 fa2_out = rearrange(fa2_out, "b s h d -> (b s) h d")
+            case "varlen_qkvpacked":
+                # NOTE: FA2 does not support GQA/MQA for varlen_qkvpacked API
+                rep_times = nhq // nhk
+                k_, v_ = [repeat(x, "s h d -> s (h r) d", r=rep_times) for x in (k, v)]
+                qkv = torch.stack([q, k_, v_], dim=-3)  # stack before num_heads dim
+                fa2_out = fa2_varlen_qkvpacked_func_with_sink(
+                    qkv=qkv,
+                    cu_seqlens=cu_seqlens_q,
+                    max_seqlen=sq,
+                    sink=sink,
+                    causal=causal,
+                    # NOTE: FA2 only supports returning lse when dropout_p > 0
+                    return_attn_probs=False,
+                )
+                fa2_out.backward(do)
             case _:
                 raise NotImplementedError(f"Unsupported mode: {mode}")
 

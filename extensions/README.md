@@ -9,7 +9,7 @@
 pytest extensions/tests/test_fa_interface_with_sink.py
 ```
 
-### Basic Usage
+### Basic Usage for FlashAttention 3
 
 #### Basic Usage for fa3_func_with_sink
 
@@ -111,4 +111,12 @@ out, lse = fa3_qkvpacked_func_with_sink(
 out.backward(do)
 
 dqkv, dsink = qkv.grad, sink.grad
+```
+
+
+### Basic Usage for FlashAttention 2
+
+#### Basic Usage for fa2_func_with_sink
+
+```python
 ```
