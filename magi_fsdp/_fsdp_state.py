@@ -33,7 +33,9 @@ from torch.distributed.device_mesh import _get_device_handle
 from torch.distributed.utils import _to_kwargs
 from torch.utils._pytree import tree_flatten, tree_map
 
-from ._fsdp_api import MixedPrecisionPolicy
+from magi_fsdp._fsdp_offload import CPUOffloadManager, OffloadGlobalContext
+
+from ._fsdp_api import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy
 from ._fsdp_common import (
     TrainingState,
     _cast_fp_tensor,
@@ -86,6 +88,7 @@ class MagiFSDPState(_State):
         self._is_root: Optional[bool] = None  # root set during lazy init
         self._state_ctx = MagiFSDPStateContext()
         self._comm_ctx = MagiFSDPCommContext()
+        self._offload_global_ctx = OffloadGlobalContext()
         self._training_state: TrainingState = TrainingState.IDLE
         self._states_to_forward_prefetch: list[MagiFSDPState] = []
         self._states_to_backward_prefetch: list[MagiFSDPState] = []
@@ -97,6 +100,7 @@ class MagiFSDPState(_State):
         modules: tuple[nn.Module, ...],
         device: torch.device,
         mp_policy: MixedPrecisionPolicy,
+        offload_policy: OffloadPolicy,
     ) -> None:
         for module in modules:
             _insert_module_state(module, self)
@@ -104,6 +108,9 @@ class MagiFSDPState(_State):
         self._device = device
         self._device_handle = _get_device_handle(device.type)
         self._mp_policy = mp_policy
+        self._offload_policy = offload_policy
+        self._cpu_offload_manager = CPUOffloadManager(offload_policy=offload_policy)
+        self._register_cpu_offload_hooks()
         if len(modules) == 1:
             self._pre_forward_hook_handle = modules[0].register_forward_pre_hook(
                 self._pre_forward, prepend=True, with_kwargs=True
@@ -192,9 +199,12 @@ class MagiFSDPState(_State):
 
     def _init_shared_state(self) -> None:
         self._comm_ctx.lazy_init(self._device)
+        self._offload_global_ctx.lazy_init(self._device)
         for state in self._state_ctx.all_states:
             state._state_ctx = self._state_ctx
             state._comm_ctx = self._comm_ctx
+            state._offload_global_ctx = self._offload_global_ctx
+            state._cpu_offload_manager.offload_global_ctx = self._offload_global_ctx
             if fsdp_param_group := state._fsdp_param_group:
                 fsdp_param_group.comm_ctx = self._comm_ctx
 
@@ -254,6 +264,7 @@ class MagiFSDPState(_State):
             return output
         if self._fsdp_param_group:
             output = self._fsdp_param_group.post_forward(module, input, output)
+        self._cpu_offload_manager.post_forward()
         output = self._register_pre_backward_hook(output)
         self._training_state = TrainingState.IDLE
         if self._state_ctx.iter_forward_root is self:
@@ -277,19 +288,23 @@ class MagiFSDPState(_State):
     def _pre_backward(self, grad: torch.Tensor) -> torch.Tensor:
         self._training_state = TrainingState.PRE_BACKWARD
         self._register_root_post_backward_final_callback()
+        default_prefetch = len(self._states_to_backward_prefetch) == 0
         if self._fsdp_param_group:
-            default_prefetch = len(self._states_to_backward_prefetch) == 0
             self._fsdp_param_group.pre_backward(default_prefetch)
+        self._cpu_offload_manager.pre_backward(default_prefetch)
         for fsdp_state in self._states_to_backward_prefetch:
             if (target_param_group := fsdp_state._fsdp_param_group) is not None:
                 MagiFSDPParamGroup._prefetch_unshard(target_param_group, "backward")
+            CPUOffloadManager._prefetch_h2d(fsdp_state._cpu_offload_manager)
         return grad
 
     def _root_post_backward_final_callback(self) -> None:
         if not compiled_autograd_enabled():
             logger.debug("MagiFSDP::root_post_backward")
         with torch.profiler.record_function("MagiFSDP::root_post_backward_callback"):
+            self._offload_global_ctx.reset_global_ctx()
             for state in self._state_ctx.all_states:
+                state._cpu_offload_manager.reset_cpu_offload_manager()
                 fsdp_param_group = state._fsdp_param_group
                 if (
                     fsdp_param_group
@@ -344,6 +359,16 @@ class MagiFSDPState(_State):
         Variable._execution_engine.queue_callback(
             self._root_post_backward_final_callback
         )
+
+    def _register_cpu_offload_hooks(self, method_name: str = "forward") -> None:
+        if (
+            isinstance(self._offload_policy, CPUOffloadPolicy)
+            and self._offload_policy.offload_activation
+        ):
+            for module in self._modules:
+                self._cpu_offload_manager._register_saved_tensor_hooks(
+                    module, method_name
+                )
 
 
 def _get_module_fsdp_state(module: nn.Module) -> Optional[MagiFSDPState]:

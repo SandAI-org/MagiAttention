@@ -215,7 +215,7 @@ class TestFullyShard2DTraining(FSDPTest):
             dp_mesh,
             use_activation_checkpointing=False,
             reshard_after_forward=True,
-            offload_policy=CPUOffloadPolicy(),
+            offload_policy=CPUOffloadPolicy(offload_param=True),
         )
         for param in model.parameters():
             self.assertEqual(param.device.type, "cpu")

@@ -75,7 +75,7 @@ class TestTrackerFullyShard1DTrainingCore(FSDPTest):
             {
                 "reshard_after_forward": [True, False],
                 "offload_policy": [
-                    CPUOffloadPolicy(pin_memory=False),
+                    CPUOffloadPolicy(pin_memory=False, offload_param=True),
                     OffloadPolicy(),
                 ],
                 "mp_policy": [

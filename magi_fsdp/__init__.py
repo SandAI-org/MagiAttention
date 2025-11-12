@@ -16,7 +16,14 @@
 
 import os
 
-from ._fsdp_api import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy
+from ._fsdp_api import (
+    CkptLoadPolicy,
+    CkptSavePolicy,
+    CPUOffloadPolicy,
+    MixedPrecisionPolicy,
+    OffloadPolicy,
+    OptimPolicy,
+)
 from ._fsdp_mem_tracker import MagiFSDPMemTracker
 from ._fsdp_module import MagiFSDPModule, UnshardHandle
 from ._fully_shard import fully_shard, register_fsdp_forward_method
@@ -30,6 +37,9 @@ __all__ = [
     "register_fsdp_forward_method",
     "UnshardHandle",
     "MagiFSDPMemTracker",
+    "OptimPolicy",
+    "CkptSavePolicy",
+    "CkptLoadPolicy",
 ]
 
 

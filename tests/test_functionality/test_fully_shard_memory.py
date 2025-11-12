@@ -96,7 +96,9 @@ class TestFullyShardMemory(FSDPTest):
         fully_shard_fn = functools.partial(
             fully_shard,
             reshard_after_forward=reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if use_cpu_offload else OffloadPolicy(),
+            offload_policy=CPUOffloadPolicy(offload_param=True)
+            if use_cpu_offload
+            else OffloadPolicy(),
         )
         for module in model.modules():
             if isinstance(module, TransformerBlock):

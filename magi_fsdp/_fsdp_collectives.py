@@ -381,17 +381,17 @@ def foreach_dtype_reduce(
     unsharded_grads: list[torch.Tensor],
     reduce_scatter_group: dist.ProcessGroup,
     reduce_scatter_stream: torch.Stream,
-    orig_dtypes: list[torch.dtype],
     uniform_reduce_dtype: Optional[torch.dtype],
     device: torch.device,
     reduce_scatter_reduce_op: Optional[Union[dist.ReduceOp, dist.ReduceOp.RedOpType]],
-    all_reduce_group: Optional[dist.ProcessGroup],  # not `None` iff HSDP
+    all_reduce_group: Optional[dist.ProcessGroup],  # not `None` if HSDP
     all_reduce_stream: torch.Stream,
     all_reduce_grads: bool,
     partial_reduce_outputs: Optional[
         dict[torch.dtype, Optional[torch.Tensor]]
     ],  # only used for HSDP
     all_reduce_hook: Optional[Callable[[torch.Tensor], None]],
+    main_param_dtype: Optional[torch.dtype] = None,
 ) -> tuple[
     list[torch.Tensor],
     torch.Event,
@@ -404,6 +404,7 @@ def foreach_dtype_reduce(
     ``unsharded_grads`` owns the references to the gradients computed by
     autograd, so clearing the list frees the gradients.
     """
+    orig_dtypes = [param.orig_dtype for param in fsdp_params]
     grad_dtypes = [grad.dtype for grad in unsharded_grads]
     world_size = reduce_scatter_group.size()
     device_handle = _get_device_handle(device.type)
@@ -554,6 +555,9 @@ def foreach_dtype_reduce(
                 fsdp_reduce_data.padded_unsharded_sizes_per_dtype  # type: ignore
             )
             _div_if_needed(reduce_output_per_dtype, postdivide_factor)
+            reduce_output_per_dtype = _to_dtype_if_needed(
+                reduce_output_per_dtype, main_param_dtype
+            )
             # View out and accumulate sharded gradients
             flat_grad_offset = 0  # [0, reduce_scatter_output_numel - 1]
             for idx, padded_unsharded_size_per_dtype in zip(
@@ -568,43 +572,50 @@ def foreach_dtype_reduce(
                     stride=fsdp_param.contiguous_sharded_stride,
                     storage_offset=flat_grad_offset,
                 )
-                new_sharded_grad = _to_dtype_if_needed(
-                    new_sharded_grad, orig_dtypes[idx]
-                )
-                to_accumulate_grad = fsdp_param.sharded_param.grad is not None
-                if fsdp_param.offload_to_cpu:
-                    # Only overlap the D2H copy (copying to pinned memory) if not
-                    # accumulating gradients since the CPU add kernel depends on
-                    # the copy result and we cannot run the add as a callback
-                    non_blocking = fsdp_param.pin_memory and not to_accumulate_grad
-                    # Since the GPU sharded gradient is allocated in the RS stream,
-                    # we can free it here by not keeping a ref without waiting for
-                    # the D2H copy since future RS-stream ops run after the copy
-                    new_sharded_grad = new_sharded_grad.to(
-                        torch.device("cpu"), non_blocking=non_blocking
+                if main_param_dtype is None:
+                    new_sharded_grad = _to_dtype_if_needed(
+                        new_sharded_grad, orig_dtypes[idx]
                     )
-                    if non_blocking:
-                        # Record an event on which to block the CPU thread to
-                        # ensure that the D2H copy finishes before the optimizer
-                        fsdp_param.grad_offload_event = (
-                            reduce_scatter_stream.record_event()
+                    to_accumulate_grad = fsdp_param.sharded_param.grad is not None
+                    if fsdp_param.offload_to_cpu:
+                        # Only overlap the D2H copy (copying to pinned memory) if not
+                        # accumulating gradients since the CPU add kernel depends on
+                        # the copy result and we cannot run the add as a callback
+                        non_blocking = fsdp_param.pin_memory and not to_accumulate_grad
+                        # Since the GPU sharded gradient is allocated in the RS stream,
+                        # we can free it here by not keeping a ref without waiting for
+                        # the D2H copy since future RS-stream ops run after the copy
+                        new_sharded_grad = new_sharded_grad.to(
+                            torch.device("cpu"), non_blocking=non_blocking
                         )
-                if to_accumulate_grad:
-                    assert isinstance(fsdp_param.sharded_param.grad, DTensor)
-                    fsdp_param.sharded_param.grad._local_tensor += new_sharded_grad
+                        if non_blocking:
+                            # Record an event on which to block the CPU thread to
+                            # ensure that the D2H copy finishes before the optimizer
+                            fsdp_param.grad_offload_event = (
+                                reduce_scatter_stream.record_event()
+                            )
+                    param = fsdp_param.sharded_param
                 else:
-                    new_sharded_dtensor_grad = fsdp_param.to_sharded_dtensor(
-                        new_sharded_grad
-                    )
-                    fsdp_param.sharded_param.grad = new_sharded_dtensor_grad
+                    to_accumulate_grad = fsdp_param.sharded_main_param.grad is not None
+                    param = fsdp_param.sharded_main_param
+                if to_accumulate_grad:
+                    assert isinstance(param.grad, DTensor)
+                    param.grad._local_tensor += new_sharded_grad
+                else:
+                    if main_param_dtype is None:
+                        new_sharded_dtensor_grad = fsdp_param.to_sharded_dtensor(
+                            new_sharded_grad
+                        )
+                    else:
+                        new_sharded_dtensor_grad = (
+                            fsdp_param.to_sharded_main_param_dtensor(new_sharded_grad)
+                        )
+                    param.grad = new_sharded_dtensor_grad
                 if not compiled_autograd_enabled():
                     for hook in (
-                        getattr(
-                            fsdp_param.sharded_param, "_post_accumulate_grad_hooks", {}
-                        )
-                        or {}
+                        getattr(param, "_post_accumulate_grad_hooks", {}) or {}
                     ).values():
-                        hook(fsdp_param.sharded_param)
+                        hook(param)
                 padded_sharded_numel = (
                     padded_unsharded_size_per_dtype.numel() // world_size
                 )
@@ -639,6 +650,7 @@ def foreach_reduce(
     all_reduce_grads: bool,
     partial_reduce_output: Optional[torch.Tensor],  # only used for HSDP
     all_reduce_hook: Optional[Callable[[torch.Tensor], None]],
+    main_param_dtype: Optional[torch.dtype] = None,
 ) -> tuple[
     torch.Tensor,
     torch.Event,
@@ -745,7 +757,8 @@ def foreach_reduce(
 
     with device_handle.stream(post_reduce_stream):
         _div_if_needed(reduce_output, postdivide_factor)
-        reduce_output = _to_dtype_if_needed(reduce_output, orig_dtype)
+        cast_dtype = main_param_dtype or orig_dtype
+        reduce_output = _to_dtype_if_needed(reduce_output, cast_dtype)
         # View out and accumulate sharded gradients
         flat_grad_offset = 0  # [0, reduce_scatter_output_numel - 1]
         for padded_unsharded_size, fsdp_param in zip(
@@ -759,36 +772,47 @@ def foreach_reduce(
                 stride=fsdp_param.contiguous_sharded_stride,
                 storage_offset=flat_grad_offset,
             )
-            to_accumulate_grad = fsdp_param.sharded_param.grad is not None
-            if fsdp_param.offload_to_cpu:
-                # Only overlap the D2H copy (copying to pinned memory) if not
-                # accumulating gradients since the CPU add kernel depends on
-                # the copy result and we cannot run the add as a callback
-                non_blocking = fsdp_param.pin_memory and not to_accumulate_grad
-                # Since the GPU sharded gradient is allocated in the RS stream,
-                # we can free it here by not keeping a ref without waiting for
-                # the D2H copy since future RS-stream ops run after the copy
-                new_sharded_grad = new_sharded_grad.to(
-                    torch.device("cpu"), non_blocking=non_blocking
-                )
-                if non_blocking:
-                    # Record an event on which to block the CPU thread to
-                    # ensure that the D2H copy finishes before the optimizer
-                    fsdp_param.grad_offload_event = reduce_scatter_stream.record_event()
-            if to_accumulate_grad:
-                assert isinstance(fsdp_param.sharded_param.grad, DTensor)
-                fsdp_param.sharded_param.grad._local_tensor += new_sharded_grad
+            if main_param_dtype is None:
+                to_accumulate_grad = fsdp_param.sharded_param.grad is not None
+                if fsdp_param.offload_to_cpu:
+                    # Only overlap the D2H copy (copying to pinned memory) if not
+                    # accumulating gradients since the CPU add kernel depends on
+                    # the copy result and we cannot run the add as a callback
+                    non_blocking = fsdp_param.pin_memory and not to_accumulate_grad
+                    # Since the GPU sharded gradient is allocated in the RS stream,
+                    # we can free it here by not keeping a ref without waiting for
+                    # the D2H copy since future RS-stream ops run after the copy
+                    new_sharded_grad = new_sharded_grad.to(
+                        torch.device("cpu"), non_blocking=non_blocking
+                    )
+                    if non_blocking:
+                        # Record an event on which to block the CPU thread to
+                        # ensure that the D2H copy finishes before the optimizer
+                        fsdp_param.grad_offload_event = (
+                            reduce_scatter_stream.record_event()
+                        )
+                param = fsdp_param.sharded_param
             else:
-                new_sharded_dtensor_grad = fsdp_param.to_sharded_dtensor(
-                    new_sharded_grad
-                )
-                fsdp_param.sharded_param.grad = new_sharded_dtensor_grad
+                to_accumulate_grad = fsdp_param.sharded_main_param.grad is not None
+                param = fsdp_param.sharded_main_param
+            if to_accumulate_grad:
+                assert isinstance(param.grad, DTensor)
+                param.grad._local_tensor += new_sharded_grad
+            else:
+                if main_param_dtype is None:
+                    new_sharded_dtensor_grad = fsdp_param.to_sharded_dtensor(
+                        new_sharded_grad
+                    )
+                else:
+                    new_sharded_dtensor_grad = fsdp_param.to_sharded_main_param_dtensor(
+                        new_sharded_grad
+                    )
+                param.grad = new_sharded_dtensor_grad
             if not compiled_autograd_enabled():
                 for hook in (
-                    getattr(fsdp_param.sharded_param, "_post_accumulate_grad_hooks", {})
-                    or {}
+                    getattr(param, "_post_accumulate_grad_hooks", {}) or {}
                 ).values():
-                    hook(fsdp_param.sharded_param)
+                    hook(param)
             padded_sharded_numel = padded_unsharded_size.numel() // world_size
             flat_grad_offset += padded_sharded_numel
         post_reduce_event = post_reduce_stream.record_event()

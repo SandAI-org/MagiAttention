@@ -17,13 +17,20 @@
 from __future__ import annotations
 
 import functools
+import warnings
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Optional, Union, overload
 
 import torch.nn as nn
 from torch.distributed._composable import contract
 from torch.distributed.utils import _get_root_modules
 
-from ._fsdp_api import MixedPrecisionPolicy, OffloadPolicy
+from ._fsdp_api import (
+    CkptLoadPolicy,
+    CkptSavePolicy,
+    MixedPrecisionPolicy,
+    OffloadPolicy,
+    OptimPolicy,
+)
 from ._fsdp_common import MagiFSDPMeshInfo, MagiHSDPMeshInfo
 from ._fsdp_init import (
     _get_device_from_mesh,
@@ -59,6 +66,9 @@ def fully_shard(
     mp_policy: MixedPrecisionPolicy = ...,
     offload_policy: OffloadPolicy = ...,
     ignored_params: Optional[set[nn.Parameter]] = ...,
+    optim_policy: OptimPolicy = ...,
+    save_policy: CkptSavePolicy = ...,
+    load_policy: CkptLoadPolicy = ...,
 ) -> list[MagiFSDPModule]:
     ...
 
@@ -73,6 +83,9 @@ def fully_shard(
     mp_policy: MixedPrecisionPolicy = ...,
     offload_policy: OffloadPolicy = ...,
     ignored_params: Optional[set[nn.Parameter]] = ...,
+    optim_policy: OptimPolicy = ...,
+    save_policy: CkptSavePolicy = ...,
+    load_policy: CkptLoadPolicy = ...,
 ) -> MagiFSDPModule:
     ...
 
@@ -92,6 +105,9 @@ def fully_shard(
     mp_policy: MixedPrecisionPolicy = MixedPrecisionPolicy(),
     offload_policy: OffloadPolicy = OffloadPolicy(),
     ignored_params: Optional[set[nn.Parameter]] = None,
+    optim_policy: OptimPolicy = OptimPolicy(),
+    save_policy: CkptSavePolicy = CkptSavePolicy(),
+    load_policy: CkptLoadPolicy = CkptLoadPolicy(),
 ):
     """
     Apply fully sharded data parallelism (MagiFSDP) to ``module``, where MagiFSDP
@@ -182,6 +198,10 @@ def fully_shard(
         ignored_params: Optional(Set[nn.Parameter]): The set of parameters to be
             ignored by MagiFSDP. They will not be sharded, nor moved to the device
             during init, nor have their gradients reduced in backward.
+        optim_policy (OptimPolicy): This controls how to optimize the model runtime
+            process. See :class:`OptimPolicy` for details.
+        save_policy (Optional[CkptSavePolicy]): The policy to save the checkpoint for MagiFSDP.
+        load_policy (Optional[CkptLoadPolicy]): The policy to load the checkpoint for MagiFSDP.
 
     Returns:
         MagiFSDPModule: The module with MagiFSDP applied (in-place).
@@ -211,7 +231,7 @@ def fully_shard(
         (module,) if isinstance(module, nn.Module) else tuple(_get_root_modules(module))
     )
     state = fully_shard.state(modules[0])  # type: ignore[attr-defined] # see [1]
-    state.init(modules, device, mp_policy)
+    state.init(modules, device, mp_policy, offload_policy)
 
     managed_modules = _get_managed_modules(modules, ignored_params)
     params, buffers = _get_managed_states(managed_modules, ignored_params)
@@ -227,12 +247,23 @@ def fully_shard(
             shard_placement_fn,
             mp_policy,
             offload_policy,
+            optim_policy,
+        )
+    if optim_policy.enable_main_param:
+        warnings.warn(
+            "Remind to call model.named_main_parameters to init optimizer.", UserWarning
         )
 
     # For Dynamo
     for managed_module in managed_modules:
         managed_module._is_fsdp_managed_module = True  # type: ignore[assignment]
         managed_module._fsdp_use_orig_params = True  # type: ignore[assignment]
+
+    # For Checkpoint
+    for managed_module in managed_modules:
+        managed_module._save_policy = save_policy
+        managed_module._load_policy = load_policy
+        managed_module._optim_policy = optim_policy
 
     # Place MagiFSDP leftmost for highest priority in the method resolution order
     for module in modules:
@@ -273,6 +304,7 @@ def register_fsdp_forward_method(module: nn.Module, method_name: str) -> None:
         return
     if not hasattr(module, method_name):
         raise ValueError(f"{type(module)} does not have a method {method_name}")
+    module._get_fsdp_state()._register_cpu_offload_hooks(method_name)  # type: ignore
     orig_method = getattr(module, method_name)
 
     @functools.wraps(orig_method)

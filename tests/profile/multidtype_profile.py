@@ -21,12 +21,10 @@ from magi_attention.utils import nvtx
 from torch.distributed.device_mesh import DeviceMesh
 from torch.testing._internal.distributed._tensor.common_dtensor import ModelArgs
 
+import magi_fsdp
 from magi_fsdp._fsdp_api import MixedPrecisionPolicy
 from magi_fsdp._fully_shard import fully_shard
 from magi_fsdp.testing.common_fsdp import MultiDtypeTransformer
-
-# from torch.distributed.fsdp import fully_shard
-# from torch.distributed.fsdp import MixedPrecisionPolicy
 
 
 def init_distributed(world_size, is_hsdp=False):
@@ -57,8 +55,7 @@ if __name__ == "__main__":
     device_mesh = init_distributed(world_size, is_hsdp=False)
     rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{rank}")
-    ENABLE_MAIN_PARAMS = os.environ.get("MAIN_PARAMS", "0") == "1"
-    print(f"{ENABLE_MAIN_PARAMS=}")
+    assert magi_fsdp.is_multi_dtype_reduce_enable()
 
     seed = 42
     torch.manual_seed(seed)
@@ -100,11 +97,6 @@ if __name__ == "__main__":
         "LayerNorm": torch.float32,
     }
     model = MultiDtypeTransformer(model_args, multi_dtype_config)  # type: ignore
-
-    # mp_policy = MixedPrecisionPolicy(
-    #     param_dtype=torch.bfloat16,
-    #     reduce_dtype=torch.float32,
-    # )
     mp_policy = MixedPrecisionPolicy()
 
     layers0 = [model.layers[0], model.layers[1]]  # fp32,bf16
@@ -129,19 +121,12 @@ if __name__ == "__main__":
         model.layers[15],
     ]  # fp32,fp16,bf16,fp32,fp16,bf32
     fully_shard(layers4, mesh=device_mesh, mp_policy=mp_policy)
-
-    # layers = [layer for layer in model.layers]
-    # fully_shard(layers, mesh=device_mesh, mp_policy=mp_policy)
-
     fully_shard(model, mesh=device_mesh, mp_policy=mp_policy)
 
     lr = 1e-3
 
-    if ENABLE_MAIN_PARAMS:
-        main_params = [
-            p.detach().clone().float().requires_grad_(True) for p in model.parameters()
-        ]
-        optim = torch.optim.Adam(main_params, lr=lr)
+    if os.environ.get("MAGI_FSDP_WITH_MAIN_PARAMS", "0") == "1":
+        optim = torch.optim.Adam(model.main_parameters(), lr=lr)
     else:
         optim = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -151,8 +136,12 @@ if __name__ == "__main__":
     batch_size = 4
     seq_len = 4096
     num_steps = 10
+    num_microbatches = 2
     torch.manual_seed(42 + rank + 1)
-    inp = torch.randint(0, model_args.vocab_size, (batch_size, seq_len), device=device)
+    inps = [
+        torch.randint(0, model_args.vocab_size, (batch_size, seq_len), device=device)
+        for _ in range(num_microbatches)
+    ]
 
     prof_iters, prof_start_iter, prof_end_iter = 10, 4, 7
     for iter in range(num_steps):
@@ -168,23 +157,11 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
 
         optim.zero_grad()
-        out = model(inp)
-        loss = out.sum()
-        loss.backward()
-
-        # cast grad to fp32
-        if ENABLE_MAIN_PARAMS:
-            for model_p, master_p in zip(model.parameters(), main_params):
-                if model_p.grad is not None:
-                    if master_p.grad is None:
-                        master_p.grad = model_p.grad.detach().float().clone()
-                    else:
-                        master_p.grad.copy_(model_p.grad.detach().float())
+        for micro_idx, inp in enumerate(inps):
+            is_last_microbatch = micro_idx == num_microbatches - 1
+            model.set_requires_gradient_sync(is_last_microbatch)
+            model.set_is_last_backward(is_last_microbatch)
+            out = model(inp)
+            loss = out.sum()
+            loss.backward()
         optim.step()
-
-        # copy main params to model params
-        if ENABLE_MAIN_PARAMS:
-            for model_p, master_p in zip(model.parameters(), main_params):
-                model_p.data.copy_(master_p.data.to(dtype=model_p.dtype))
-
-        # print(f"{torch.isnan(out).any()=}")

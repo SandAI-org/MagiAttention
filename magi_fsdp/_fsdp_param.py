@@ -193,6 +193,18 @@ class ParamModuleInfo:
 
 
 @dataclass
+class ParamPackInfo:
+    """
+    Records parameter variants (master and EMA) for an FSDP-sharded parameter.
+    Maintains a dictionary of other related params to ensure the same order
+    as `module.named_parameters()` during collection.
+    """
+
+    sharded_main_param: DTensor
+    sharded_ema_param: nn.Parameter
+
+
+@dataclass
 class ExtensionsData:
     # User-defined metadata passed from pre to post-all-gather
     all_gather_metadata: Optional[Any] = None
@@ -221,11 +233,13 @@ class MagiFSDPParam:
     contiguous_sharded_post_forward_stride: tuple[int, ...]
     _sharded_param_data: torch.Tensor  # 1D
     sharded_param: nn.Parameter  # ND
+    sharded_main_param: nn.Parameter  # ND
     _sharded_post_forward_param_data: Optional[torch.Tensor]  # 1D
     _sharded_post_forward_param: Optional[nn.Parameter]  # ND
     _unsharded_param: nn.Parameter  # ND
     unsharded_accumulated_grad: Optional[torch.Tensor]  # ND
     _sharding_spec: DTensorSpec
+    _sharding_main_param_spec: DTensorSpec
     # DTensor attributes (only defined for DTensor `param`):
     _tp_spec: DTensorSpec
     all_gather_outputs: list[torch.Tensor]  # 1D
@@ -252,7 +266,10 @@ class MagiFSDPParam:
         self.post_forward_mesh_info = post_forward_mesh_info
         self.device = device
         self.mp_policy = mp_policy
-        self.offload_to_cpu: bool = isinstance(offload_policy, CPUOffloadPolicy)
+        self.offload_to_cpu: bool = (
+            isinstance(offload_policy, CPUOffloadPolicy)
+            and offload_policy.offload_param
+        )
         self.pin_memory = (
             self.offload_to_cpu and cast(CPUOffloadPolicy, offload_policy).pin_memory
         )
@@ -420,6 +437,30 @@ class MagiFSDPParam:
         # the `fully_shard` call returns to allow provided parameters to alias
         self._setattr_on_modules(self.sharded_param)
         self.sharded_state = ShardedState.SHARDED
+
+    def _init_sharded_main_param(self, main_param_dtype: Optional[torch.dtype] = None):
+        # FP16/BF16 Sharded Param -> Sharded Main Param
+        with torch.no_grad():
+            if not self.sharded_param.requires_grad:
+                self.sharded_main_param = None
+            else:
+                self.main_param_dtype = main_param_dtype
+                if self.sharded_param.dtype != self.main_param_dtype:
+                    self.sharded_main_param = (
+                        self.sharded_param.detach().clone().to(self.main_param_dtype)
+                    )
+                    self.sharded_main_param.requires_grad_(True)
+                else:
+                    self.sharded_main_param = self.sharded_param
+                self._sharding_main_param_spec = DTensorSpec(
+                    self._spmd_mesh,
+                    self._spmd_placements,
+                    tensor_meta=TensorMeta(
+                        self._sharding_spec.shape,
+                        self._sharding_spec.stride,
+                        self.main_param_dtype,
+                    ),
+                )
 
     def _init_sharded_post_forward_param_metadata(self, param: torch.Tensor) -> None:
         mesh_info = self.post_forward_mesh_info
@@ -635,10 +676,18 @@ class MagiFSDPParam:
             _raise_assert_with_print(
                 f"Expects size {self.sharded_size} but got {tensor.shape}"
             )
-        return _from_local_no_grad(
-            tensor,
-            self._sharding_spec,
-        )
+        return _from_local_no_grad(tensor, self._sharding_spec)
+
+    def to_sharded_main_param_dtensor(self, tensor: torch.Tensor) -> DTensor:
+        """
+        Converts a local tensor representing either the sharded main parameter
+        or sharded main parameter gradient to DTensor.
+        """
+        if tensor.shape != self.sharded_size:
+            _raise_assert_with_print(
+                f"Expects size {self.sharded_size} but got {tensor.shape}"
+            )
+        return _from_local_no_grad(tensor, self._sharding_main_param_spec)
 
     def to_sharded_post_forward_dtensor(self, tensor: torch.Tensor) -> DTensor:
         if tensor.shape != self.sharded_post_forward_size:
@@ -701,6 +750,36 @@ class MagiFSDPParam:
                 self.all_gather_outputs, self._unsharded_inner_tensors
             ):
                 free_storage(tensor)
+
+    def copy_from_main_param(self) -> None:
+        if (
+            self.sharded_main_param is not None
+            and self.sharded_main_param is not self.sharded_param
+        ):
+            with torch.no_grad():
+                cast_dtype = self.sharded_param.dtype
+                self.sharded_param._local_tensor.copy_(
+                    self.sharded_main_param._local_tensor.to(cast_dtype)
+                )
+
+    def grad_copy_to_main_param(self) -> None:
+        if (
+            self.sharded_main_param is not None
+            and self.sharded_main_param is not self.sharded_param
+        ):
+            if self.sharded_param.grad is not None:
+                with torch.no_grad():
+                    if self.sharded_main_param.grad is None:
+                        self.sharded_main_param.grad = torch.zeros_like(
+                            self.sharded_main_param
+                        )
+                    cast_dtype = self.sharded_main_param.dtype
+                    self.sharded_main_param.grad._local_tensor.copy_(
+                        self.sharded_param.grad._local_tensor.to(cast_dtype)
+                    )
+                    self.sharded_param.grad._local_tensor.zero_()
+            else:
+                self.sharded_main_param.grad = None
 
     @property
     def all_gather_inputs(self) -> list[torch.Tensor]:  # 1D

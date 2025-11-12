@@ -382,8 +382,8 @@ class TestFullyShard1DTrainingCore(FSDPTest):
             {
                 "reshard_after_forward": [True],  # save CI time
                 "offload_policy": [
-                    CPUOffloadPolicy(pin_memory=True),
-                    CPUOffloadPolicy(pin_memory=False),
+                    CPUOffloadPolicy(pin_memory=True, offload_param=True),
+                    CPUOffloadPolicy(pin_memory=False, offload_param=True),
                 ],
                 "device_type": ["cuda"],
                 "delay_flags": [
@@ -1042,7 +1042,7 @@ class TestFullyShardGradientAccumulation(FSDPTest):
                         "reshard_after_forward": False,
                         "mode": "root_only",  # "root_only": disable reduce-scatter for root's linear only
                         "reshard_after_backward": False,
-                        "offload_policy": CPUOffloadPolicy(),
+                        "offload_policy": CPUOffloadPolicy(offload_param=True),
                         "reduce_scatter_only": True,  # `True`: reduce-scatter only (no all-reduce) each microbatch
                     },
                     {

@@ -22,7 +22,6 @@ export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 export MASTER_PORT=${MASTER_PORT:-16988}
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
-# export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \
@@ -32,13 +31,9 @@ DISTRIBUTED_ARGS="
     --master_port $MASTER_PORT
 "
 
-export MAGI_FSDP_MULTI_DTYPE_REDUCE=1
-export MAGI_FSDP_WITH_MAIN_PARAMS=1
-
-echo $MAGI_FSDP_WITH_MAIN_PARAMS
 echo $DISTRIBUTED_ARGS
 
-TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS multidtype_profile.py"
+TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS cpu_offload.py"
 
 # generate a timestamp for the nsys output file
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -46,7 +41,7 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 NSYS_CMD="
 nsys profile \
     --force-overwrite true \
-    -o exp_mainparams_${TIMESTAMP}.nsys-rep \
+    -o exp_offload_${TIMESTAMP}.nsys-rep \
     --capture-range=cudaProfilerApi \
     $TORCHRUN_CMD
 "

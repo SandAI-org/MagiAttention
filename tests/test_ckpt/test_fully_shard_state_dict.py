@@ -125,8 +125,8 @@ class TestFullyShardStateDictMultiProcess(FSDPTest):
         self.run_subtests(
             {
                 "offload_policy": [
-                    CPUOffloadPolicy(pin_memory=True),
-                    CPUOffloadPolicy(pin_memory=False),
+                    CPUOffloadPolicy(pin_memory=True, offload_param=True),
+                    CPUOffloadPolicy(pin_memory=False, offload_param=True),
                 ],
                 "cpu_state_dict": [True, False],
             },

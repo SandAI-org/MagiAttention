@@ -54,12 +54,18 @@ class MixedPrecisionPolicy:
             precision policies. (Default: ``None``)
         cast_forward_inputs (bool): This specifies whether MagiFSDP should cast the
             forward's floating-point input tensors to ``param_dtype`` or not.
+        main_param_dtype (Optional[torch.dtype]): The data type used for main
+            parameters if enabled. This can be used to maintain main parameters
+            in higher precision (e.g., ``torch.float32``) while training in
+            mixed precision. If ``None`` and main parameters are enabled, the main
+            parameter dtype will be set to ``torch.float32``. (Default: ``None``)
     """
 
     param_dtype: Optional[torch.dtype] = None
     reduce_dtype: Optional[torch.dtype] = None
     output_dtype: Optional[torch.dtype] = None
     cast_forward_inputs: bool = True
+    main_param_dtype: Optional[torch.dtype] = None
 
 
 @dataclass
@@ -73,18 +79,81 @@ class OffloadPolicy:
 @dataclass
 class CPUOffloadPolicy(OffloadPolicy):
     """
-    This offload policy offloads parameters, gradients, and optimizer states to
-    CPU. Sharded parameters are copied host-to-device before all-gather. The
-    all-gathered parameters are freed according to ``reshard_after_forward``.
+    This offload policy offloads activation, parameters, gradients, and optimizer
+    states to CPU. Sharded parameters are copied host-to-device before all-gather.
+    The all-gathered parameters are freed according to ``reshard_after_forward``.
     Sharded gradients are copied device-to-host in backward, and the optimizer
-    step runs on CPU with CPU optimizer states.
+    step runs on CPU with CPU optimizer states. Activations are copied device-to-host
+    after forward, and are copied host-to-device in after backward.
 
     Attributes:
-        pin_memory (bool): Whether to pin sharded parameter and gradient
+        pin_memory (bool): Whether to pin activation, sharded parameter and gradient
             memory. Pinning memory allows both more efficient H2D/D2H copies
             and for the copies to overlap with compute. However, the pinned
             memory cannot be used by other processes. Set this to ``False`` if
             you have insufficient CPU memory. (Default: ``True``)
+        offload_param (bool): Whether to offload param, grad and optimizer states to CPU.
+            (Default: ``False``)
+        offload_activation (bool): Whether to offload activation to CPU.
+            (Default: ``True``)
+        foreach_offload (bool): Offload all activations of a module at once, or transfer
+            each activation individually. (Default: ``True``)
     """
 
     pin_memory: bool = True
+
+    # whether to offload param, grad and optimizer
+    offload_param: bool = False
+
+    # whether to offload activation
+    offload_activation: bool = True
+    foreach_offload: bool = False
+
+
+@dataclass
+class OptimPolicy:
+    """
+    This configures MagiFSDP's optimization behavior. It controls whether
+    additional optimization-related parameters such as main parameters
+    or EMA (Exponential Moving Average) parameters are enabled.
+
+    These parameters can be used to improve numerical stability, optimization
+    consistency, or generalization performance without changing the original
+    model definition. When disabled, MagiFSDP falls back to the default behavior
+    of using the model's original parameters.
+
+    Attributes:
+        enable_main_param (bool): Whether to enable main parameters.
+            Main parameters are typically maintained in high precision and
+            used for optimizer updates to improve stability. (Default: ``False``)
+        enable_ema_param (bool): Whether to enable EMA (Exponential Moving Average)
+            parameters. EMA parameters are maintained as a smoothed version of model
+            weights and can be used for evaluation or checkpoint averaging. (Default: ``False``)
+    """
+
+    # whether to use main param for optimization
+    enable_main_param: bool = False
+    # whether to use EMA param for optimization
+    enable_ema_param: bool = False
+
+
+@dataclass
+class CkptSavePolicy:
+    """
+    Whether to save main parameters or EMA parameters, will be included when saving a checkpoint.
+    When disabled, only the module's default parameters are saved.
+    """
+
+    to_save_main_params: bool = False
+    to_save_ema_params: bool = False
+
+
+@dataclass
+class CkptLoadPolicy:
+    """
+    Whether to load main parameters or EMA parameters, will be included when loading a checkpoint.
+    When disabled, only the module's default parameters are loaded.
+    """
+
+    to_load_main_params: bool = False
+    to_load_ema_params: bool = False
