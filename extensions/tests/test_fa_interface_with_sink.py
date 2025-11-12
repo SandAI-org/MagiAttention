@@ -43,6 +43,7 @@ from extensions.fa2_interface_with_sink import (
     fa2_kvpacked_func_with_sink,
     fa2_qkvpacked_func_with_sink,
     fa2_varlen_func_with_sink,
+    fa2_varlen_kvpacked_func_with_sink,
     fa2_varlen_qkvpacked_func_with_sink,
 )
 from extensions.fa3_interface_with_sink import (
@@ -66,7 +67,15 @@ class TestFAInterfaceWithSink(TestCase):
         return torch.cuda.current_device()
 
     @parameterize(
-        "mode", ["batch", "varlen", "qkvpacked", "kvpacked", "varlen_qkvpacked"]
+        "mode",
+        [
+            "batch",
+            "varlen",
+            "qkvpacked",
+            "kvpacked",
+            "varlen_qkvpacked",
+            "varlen_kvpacked",
+        ],
     )
     @parameterize(
         "attn_config",
@@ -223,15 +232,32 @@ class TestFAInterfaceWithSink(TestCase):
                     return_attn_probs=False,
                 )
                 fa2_out.backward(do)
+            case "varlen_kvpacked":
+                kv = torch.stack([k, v], dim=-3)  # stack before num_heads dim
+                fa2_out = fa2_varlen_kvpacked_func_with_sink(
+                    q=q,
+                    kv=kv,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=sq,
+                    max_seqlen_k=sk,
+                    sink=sink,
+                    causal=causal,
+                    # NOTE: FA2 only supports returning lse when dropout_p > 0
+                    return_attn_probs=False,
+                )
+                fa2_out.backward(do)
             case _:
                 raise NotImplementedError(f"Unsupported mode: {mode}")
 
+        # fetch gradients
         fa2_dq, fa2_dk, fa2_dv = q.grad, k.grad, v.grad
         fa2_dsink = sink.grad if has_sink else None
         q.grad, k.grad, v.grad = None, None, None
         if has_sink:
             sink.grad = None
 
+        # check
         self.assert_close_to_torch_ref(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
@@ -381,12 +407,14 @@ class TestFAInterfaceWithSink(TestCase):
             case _:
                 raise NotImplementedError(f"Unsupported mode: {mode}")
 
+        # fetch gradients
         fa3_dq, fa3_dk, fa3_dv = q.grad, k.grad, v.grad
         fa3_dsink = sink.grad if has_sink else None
         q.grad, k.grad, v.grad = None, None, None
         if has_sink:
             sink.grad = None
 
+        # check
         self.assert_close_to_torch_ref(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
