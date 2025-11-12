@@ -149,7 +149,7 @@ def dsink_all_reduce_op() -> str:
     similar to ``bias`` in ``nn.Linear`` layer.
 
     So under some popular training frameworks, such as Megatron-LM, FSDP,the sum-reduction across cp ranks
-    of the partial gradients of sink might be automatically applied within the whole dp x cp mesh.
+    of the partial gradients of sink might be automatically applied within the whole ``dp x cp`` mesh.
 
     To avoid repeated reduction, we provide this environment variable
     to specify the all-reduce op for sink gradients within ``dist_attn_func``.

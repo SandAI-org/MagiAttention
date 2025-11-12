@@ -37,16 +37,13 @@ Set the value of this env variable to control the all-reduce op for sink gradien
 
 
 ```{note}
-For now we only accept global replicated sink tensor as input to feed into `dist_attn_func`,
-and the gradients of sink in each cp rank are partial and requires to be sum-reduced across cp ranks.
+For now we only accept global replicated sink tensor as input to feed into `dist_attn_func`, and the gradients of sink in each cp rank are partial and requires to be sum-reduced across cp ranks.
 
-However, since sink tensor is learnable, it will be considered as a regular parameter in the model
-similar to `bias` in `nn.Linear` layer. So under some popular training frameworks, such as Megatron-LM, FSDP,
-the sum-reduction across cp ranks of the partial gradients of sink might be automatically applied within the whole dp x cp mesh.
+However, since sink tensor is learnable, it will be considered as a regular parameter in the model similar to `bias` in `nn.Linear` layer.
 
-To avoid repeated reduction, we provide this environment variable to specify the all-reduce op for sink gradients within `dist_attn_func`,
+So under some popular training frameworks, such as Megatron-LM, FSDP, the sum-reduction across cp ranks of the partial gradients of sink might be automatically applied within the whole `dp x cp` mesh.
 
-whose default value is `none` to NOT apply any reduction to sink gradients by `dist_attn_func` and let the framework handle it.
+To avoid repeated reduction, we provide this environment variable to specify the all-reduce op for sink gradients within `dist_attn_func`, whose default value is `none` to NOT apply any reduction to sink gradients by `dist_attn_func` and let the framework handle it.
 
 However, under the scenarios w/o any framework mechanism to reduce parameters across cp ranks, you have to specify this environment variable to `sum`.
 
