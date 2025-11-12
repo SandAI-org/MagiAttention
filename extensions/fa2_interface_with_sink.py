@@ -241,6 +241,7 @@ class FA2KVPackedFuncWithSink(torch.autograd.Function):
         ctx,
         q,
         kv,
+        sink,
         dropout_p,
         softmax_scale,
         causal,
@@ -260,6 +261,7 @@ class FA2KVPackedFuncWithSink(torch.autograd.Function):
             q = torch.nn.functional.pad(q, [0, 8 - head_size_og % 8])
             k = torch.nn.functional.pad(k, [0, 8 - head_size_og % 8])
             v = torch.nn.functional.pad(v, [0, 8 - head_size_og % 8])
+
         out_padded, softmax_lse, S_dmask, rng_state = _wrapped_flash_attn_forward(
             q,
             k,
@@ -273,8 +275,15 @@ class FA2KVPackedFuncWithSink(torch.autograd.Function):
             alibi_slopes=alibi_slopes,
             return_softmax=return_softmax and dropout_p > 0,
         )
+
+        out_padded, softmax_lse = FA2FuncWithSink.correct_out_lse_with_sink(
+            out=out_padded,
+            lse=softmax_lse,
+            sink=sink,
+        )
+
         if is_grad:
-            ctx.save_for_backward(q, k, v, out_padded, softmax_lse, rng_state)
+            ctx.save_for_backward(q, k, v, sink, out_padded, softmax_lse, rng_state)
             ctx.dropout_p = dropout_p
             ctx.softmax_scale = softmax_scale
             ctx.causal = causal
@@ -282,12 +291,14 @@ class FA2KVPackedFuncWithSink(torch.autograd.Function):
             ctx.softcap = softcap
             ctx.alibi_slopes = alibi_slopes
             ctx.deterministic = deterministic
+
         out = out_padded[..., :head_size_og]
+
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
     def backward(ctx, dout, *args):
-        q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors
+        q, k, v, sink, out, softmax_lse, rng_state = ctx.saved_tensors
         dq = torch.empty_like(q)
         kv_shape = k.shape[:-2] + (2, *k.shape[-2:])
         dkv = torch.empty(kv_shape, dtype=k.dtype, device=k.device)
@@ -295,6 +306,14 @@ class FA2KVPackedFuncWithSink(torch.autograd.Function):
         dout_padded = dout
         if head_size_og % 8 != 0:
             dout_padded = torch.nn.functional.pad(dout, [0, 8 - head_size_og % 8])
+
+        dsink = FA2FuncWithSink.compute_dsink(
+            out=out,
+            dout=dout_padded,
+            lse=softmax_lse,
+            sink=sink,
+        )
+
         _wrapped_flash_attn_backward(
             dout_padded,
             q,
@@ -315,9 +334,11 @@ class FA2KVPackedFuncWithSink(torch.autograd.Function):
             ctx.deterministic,
             rng_state=rng_state,
         )
+
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
-        return dq, dkv, None, None, None, None, None, None, None, None, None
+
+        return dq, dkv, dsink, None, None, None, None, None, None, None, None, None
 
 
 class FA2VarlenKVPackedFuncWithSink(torch.autograd.Function):
@@ -883,9 +904,10 @@ def fa2_qkvpacked_func_with_sink(
     )
 
 
-def flash_attn_kvpacked_func(
+def fa2_kvpacked_func_with_sink(
     q,
     kv,
+    sink=None,
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -923,6 +945,7 @@ def flash_attn_kvpacked_func(
     Arguments:
         q: (batch_size, seqlen, nheads, headdim)
         kv: (batch_size, seqlen, 2, nheads_k, headdim)
+        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -949,6 +972,7 @@ def flash_attn_kvpacked_func(
     return FA2KVPackedFuncWithSink.apply(
         q,
         kv,
+        sink,
         dropout_p,
         softmax_scale,
         causal,
