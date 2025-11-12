@@ -17,7 +17,7 @@ from typing import Any
 from unittest import TestCase
 
 import torch
-from einops import rearrange
+from einops import rearrange, repeat
 
 # isort: split
 from magi_attention.api.functools import (
@@ -40,6 +40,7 @@ from magi_attention.utils import get_attn_mask_from_ffa_args
 # isort: split
 from extensions.fa2_interface_with_sink import (
     fa2_func_with_sink,
+    fa2_qkvpacked_func_with_sink,
     fa2_varlen_func_with_sink,
 )
 from extensions.fa3_interface_with_sink import (
@@ -62,7 +63,7 @@ class TestFAInterfaceWithSink(TestCase):
     def device(self):
         return torch.cuda.current_device()
 
-    @parameterize("mode", ["batch", "varlen"])
+    @parameterize("mode", ["batch", "varlen", "qkvpacked"])
     @parameterize(
         "attn_config",
         [
@@ -169,6 +170,27 @@ class TestFAInterfaceWithSink(TestCase):
                     return_attn_probs=False,
                 )
                 fa2_out.backward(do)
+            case "qkvpacked":
+                q_, k_, v_, do_ = [
+                    rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
+                ]
+
+                # NOTE: FA2 does not support GQA/MQA for qkvpacked API
+                rep_times = nhq // nhk
+                k_, v_ = [
+                    repeat(x, "b s h d -> b s (h r) d", r=rep_times) for x in (k_, v_)
+                ]
+                qkv = torch.stack([q_, k_, v_], dim=2)  # stack before num_heads dim
+
+                fa2_out = fa2_qkvpacked_func_with_sink(
+                    qkv=qkv,
+                    sink=sink,
+                    causal=causal,
+                    # NOTE: FA2 only supports returning lse when dropout_p > 0
+                    return_attn_probs=False,
+                )
+                fa2_out.backward(do_)
+                fa2_out = rearrange(fa2_out, "b s h d -> (b s) h d")
             case _:
                 raise NotImplementedError(f"Unsupported mode: {mode}")
 
