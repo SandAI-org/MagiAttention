@@ -14,8 +14,11 @@
 
 import os
 
-# enable sanity check in every unitest by default
+# Enable sanity check in every unitest by default
 os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "1"
 
-# enable verbose building magi_attention by default
+# Enable verbose building magi_attention in every unitest by default
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
+
+# Enable sum-reduction of dsink in every unitest by default
+os.environ["MAGI_ATTENTION_DSINK_ALL_REDUCE_OP"] = "sum"

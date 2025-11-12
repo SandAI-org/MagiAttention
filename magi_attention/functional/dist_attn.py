@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
+
 # mypy: disable-error-code="union-attr,list-item"
 from typing import Any, TypeAlias
 
 import torch
 import torch.distributed as dist
+from torch.distributed import ReduceOp
 
 import magi_attention
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
@@ -838,6 +841,14 @@ class DistAttnRuntime:
     def bwd_hp_reduce(self) -> bool:
         return magi_attention.comm.is_bwd_high_precision_reduce_enable()
 
+    @property
+    def dsink_reduce_op(self) -> ReduceOp | None:
+        return {
+            "none": None,
+            "sum": ReduceOp.SUM,
+            "avg": ReduceOp.AVG,
+        }[magi_attention.comm.dsink_all_reduce_op()]
+
     def is_host_stage(self, overlap_stage: int | None) -> bool:
         """
         Check if the given overlap stage is the host stage
@@ -1449,15 +1460,30 @@ class DistAttnRuntime:
                 partial global dsink all-reduce work if required
         """
         if partial_global_dsink is not None:
-            work = dist.all_reduce(
-                partial_global_dsink,
-                group=self.cp_group_gc,
-                async_op=True,
-            )
-            partial_dsink_reduce_work = WorkWithPostProcessFn(
-                work=GeneralWork(work),
-                post_process_fn=lambda x: x,  # take partial dsink and return in-place reduced dsink
-            )
+            if (op := self.dsink_reduce_op) is not None:  # required to reduce
+                work = dist.all_reduce(
+                    partial_global_dsink,
+                    op=op,
+                    group=self.cp_group_gc,
+                    async_op=True,
+                )
+                partial_dsink_reduce_work = WorkWithPostProcessFn(
+                    work=GeneralWork(work),
+                    post_process_fn=lambda x: x,  # take partial dsink and return in-place reduced dsink
+                )
+            else:  # let the caller handle the reduction
+                warnings.warn(
+                    "The dsink reduction is skipped by default "
+                    "since usually the training framework will handle it automatically. "
+                    "However, under the scenarios w/o any framework mechanism to reduce parameters across cp ranks, "
+                    "you can set the env var `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP` to `sum` "
+                    "to let `magi_attention` apply reduction. Otherwise, you might need to reduce the dsink manually."
+                    ""
+                )
+                partial_dsink_reduce_work = WorkWithPostProcessFn(
+                    work=None,
+                    post_process_fn=lambda x: x,  # take partial dsink and return partial dsink
+                )
         else:
             partial_dsink_reduce_work = WorkWithPostProcessFn(
                 work=None, post_process_fn=lambda *args, **kwargs: None  # return None
