@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 # Copyright (c) 2023, Tri Dao.
 
 import torch
@@ -594,6 +593,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
         q,
         k,
         v,
+        sink,
         cu_seqlens_q,
         cu_seqlens_k,
         max_seqlen_q,
@@ -617,6 +617,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
             q = torch.nn.functional.pad(q, [0, 8 - head_size_og % 8])
             k = torch.nn.functional.pad(k, [0, 8 - head_size_og % 8])
             v = torch.nn.functional.pad(v, [0, 8 - head_size_og % 8])
+
         (
             out_padded,
             softmax_lse,
@@ -640,9 +641,24 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
             return_softmax=return_softmax and dropout_p > 0,
             block_table=block_table,
         )
+
+        out_padded, softmax_lse = FA2VarlenFuncWithSink.correct_out_lse_with_sink(
+            out=out_padded,
+            lse=softmax_lse,
+            sink=sink,
+        )
+
         if is_grad:
             ctx.save_for_backward(
-                q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, rng_state
+                q,
+                k,
+                v,
+                sink,
+                out_padded,
+                softmax_lse,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                rng_state,
             )
             ctx.dropout_p = dropout_p
             ctx.max_seqlen_q = max_seqlen_q
@@ -655,6 +671,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
             ctx.deterministic = deterministic
 
         out = out_padded[..., :head_size_og]
+
         return out if not return_softmax else (out, softmax_lse, S_dmask)
 
     @staticmethod
@@ -663,6 +680,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
             q,
             k,
             v,
+            sink,
             out,
             softmax_lse,
             cu_seqlens_q,
@@ -670,10 +688,19 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
             rng_state,
         ) = ctx.saved_tensors
         dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
+
         head_size_og = dout.size(2)
         dout_padded = dout
         if head_size_og % 8 != 0:
             dout_padded = torch.nn.functional.pad(dout, [0, 8 - head_size_og % 8])
+
+        dsink = FA2VarlenFuncWithSink.compute_dsink(
+            out=out,
+            dout=dout,
+            lse=softmax_lse,
+            sink=sink,
+        )
+
         _wrapped_flash_attn_varlen_backward(
             dout_padded,
             q,
@@ -698,13 +725,16 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
             ctx.deterministic,
             rng_state=rng_state,
         )
+
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dk = dk[..., : dout.shape[-1]]
         dv = dv[..., : dout.shape[-1]]
+
         return (
             dq,
             dk,
             dv,
+            dsink,
             None,
             None,
             None,
@@ -720,6 +750,52 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
             None,
             None,
         )
+
+    @staticmethod
+    def correct_out_lse_with_sink(
+        out: torch.Tensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if sink is not None:
+            # rearrange lse
+            lse = rearrange(lse, "h s -> s h")
+
+            # correct out, lse with sink
+            out, lse = correct_attn_out_lse_with_sink_compiled(
+                out=out,
+                lse=lse,
+                sink=sink,
+                inplace=True,
+            )
+
+            # rearrange lse back
+            lse = rearrange(lse, "s h -> h s").contiguous()
+
+        return out, lse
+
+    @staticmethod
+    def compute_dsink(
+        out: torch.Tensor,
+        dout: torch.Tensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if sink is not None:
+            # rearrange lse
+            lse = rearrange(lse, "h s -> s h")
+
+            # compute dsink
+            dsink = sink_bwd_compiled(
+                sink=sink,
+                lse=lse,
+                o=out,
+                do=dout,
+            )
+        else:
+            dsink = None
+
+        return dsink
 
 
 def flash_attn_qkvpacked_func(
@@ -899,6 +975,7 @@ def fa2_func_with_sink(
         q: (batch_size, seqlen, nheads, headdim)
         k: (batch_size, seqlen, nheads_k, headdim)
         v: (batch_size, seqlen, nheads_k, headdim)
+        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1096,7 +1173,7 @@ def flash_attn_varlen_kvpacked_func(
     )
 
 
-def flash_attn_varlen_func(
+def fa2_varlen_func_with_sink(
     q,
     k,
     v,
@@ -1104,6 +1181,7 @@ def flash_attn_varlen_func(
     cu_seqlens_k,
     max_seqlen_q,
     max_seqlen_k,
+    sink=None,
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -1146,6 +1224,7 @@ def flash_attn_varlen_func(
            of the sequences in the batch, used to index into kv.
         max_seqlen_q: int. Maximum query sequence length in the batch.
         max_seqlen_k: int. Maximum key sequence length in the batch.
+        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1173,6 +1252,7 @@ def flash_attn_varlen_func(
         q,
         k,
         v,
+        sink,
         cu_seqlens_q,
         cu_seqlens_k,
         max_seqlen_q,

@@ -38,7 +38,10 @@ from magi_attention.testing.precision import (
 from magi_attention.utils import get_attn_mask_from_ffa_args
 
 # isort: split
-from extensions.fa2_interface_with_sink import fa2_func_with_sink
+from extensions.fa2_interface_with_sink import (
+    fa2_func_with_sink,
+    fa2_varlen_func_with_sink,
+)
 from extensions.fa3_interface_with_sink import (
     fa3_func_with_sink,
     fa3_qkvpacked_func_with_sink,
@@ -59,7 +62,7 @@ class TestFAInterfaceWithSink(TestCase):
     def device(self):
         return torch.cuda.current_device()
 
-    @parameterize("mode", ["batch"])
+    @parameterize("mode", ["batch", "varlen"])
     @parameterize(
         "attn_config",
         [
@@ -151,6 +154,21 @@ class TestFAInterfaceWithSink(TestCase):
                 )
                 fa2_out.backward(do_)
                 fa2_out = rearrange(fa2_out, "b s h d -> (b s) h d")
+            case "varlen":
+                fa2_out = fa2_varlen_func_with_sink(
+                    q=q,
+                    k=k,
+                    v=v,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=sq,
+                    max_seqlen_k=sk,
+                    sink=sink,
+                    causal=causal,
+                    # NOTE: FA2 only supports returning lse when dropout_p > 0
+                    return_attn_probs=False,
+                )
+                fa2_out.backward(do)
             case _:
                 raise NotImplementedError(f"Unsupported mode: {mode}")
 

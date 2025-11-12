@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 # Copyright (c) 2023, Tri Dao.
 
 import torch
@@ -88,7 +87,7 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             sm_margin=sm_margin,
         )
 
-        out, softmax_lse = FA3QKVPackedFuncWithSink.correct_out_lse_with_sink(
+        out, softmax_lse = FA3FuncWithSink.correct_out_lse_with_sink(
             out=out,
             lse=softmax_lse,
             sink=sink,
@@ -120,7 +119,7 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             dqkv = torch.empty(qkv_shape, dtype=q.dtype, device=q.device)
             dq, dk, dv = dqkv.split([num_heads_q, num_heads_k, num_heads_k], dim=-2)
 
-        dsink = FA3QKVPackedFuncWithSink.compute_dsink(
+        dsink = FA3FuncWithSink.compute_dsink(
             out=out,
             dout=dout,
             lse=softmax_lse,
@@ -169,57 +168,6 @@ class FA3QKVPackedFuncWithSink(torch.autograd.Function):
             None,
             None,
         )
-
-    @staticmethod
-    def correct_out_lse_with_sink(
-        out: torch.Tensor,
-        lse: torch.Tensor,
-        sink: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if sink is not None:
-            b = out.shape[0]
-            # rearrange out, lse
-            out = rearrange(out, "b s h d -> (b s) h d")
-            lse = rearrange(lse, "b h s -> (b s) h")
-
-            # correct out, lse with sink
-            out, lse = correct_attn_out_lse_with_sink_compiled(
-                out=out,
-                lse=lse,
-                sink=sink,
-                inplace=True,
-            )
-
-            # rearrange out, lse back
-            out = rearrange(out, "(b s) h d -> b s h d", b=b).contiguous()
-            lse = rearrange(lse, "(b s) h -> b h s", b=b).contiguous()
-
-        return out, lse
-
-    @staticmethod
-    def compute_dsink(
-        out: torch.Tensor,
-        dout: torch.Tensor,
-        lse: torch.Tensor,
-        sink: torch.Tensor | None,
-    ) -> torch.Tensor | None:
-        if sink is not None:
-            # rearrange out, do, lse
-            out = rearrange(out, "b s h d -> (b s) h d")
-            dout = rearrange(dout, "b s h d -> (b s) h d")
-            lse = rearrange(lse, "b h s -> (b s) h")
-
-            # compute dsink
-            dsink = sink_bwd_compiled(
-                sink=sink,
-                lse=lse,
-                o=out,
-                do=dout,
-            )
-        else:
-            dsink = None
-
-        return dsink
 
 
 class FA3FuncWithSink(torch.autograd.Function):
