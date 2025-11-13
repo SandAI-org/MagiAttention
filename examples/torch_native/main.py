@@ -31,14 +31,7 @@ from magi_attention.api.functools import (
     infer_varlen_mask_from_batch,
     squash_batch_dim,
 )
-from magi_attention.common.enum import AttnOverlapMode
-from magi_attention.config import (
-    DispatchConfig,
-    DistAttnConfig,
-    MinHeapDispatchAlg,
-    OverlapConfig,
-    UniformOverlapAlg,
-)
+from magi_attention.config import DistAttnConfig
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeKey
 
 SEED = 42
@@ -247,20 +240,7 @@ def prepare_data(device_mesh, train_iter):
 def prepare_magi_attention(input, cu_seqlens_q, cu_seqlens_k, pad_size, cp_group):
     # ---   magi_attn_flex_dispatch   --- #
     # an example of distattnconfig
-    dist_attn_config = DistAttnConfig(
-        dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
-        overlap_config=OverlapConfig(
-            enable=True,
-            mode=AttnOverlapMode.STATIC,
-            degree=4,
-            min_chunk_size=13,
-            max_num_chunks=52,
-            alg=UniformOverlapAlg(
-                random_costs=True,
-                random_seed=42,
-            ),
-        ),
-    )
+    dist_attn_config = DistAttnConfig()
 
     # you can also use fa_varlen-like varlen dispatch interface directly
     x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
