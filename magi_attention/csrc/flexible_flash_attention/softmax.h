@@ -78,7 +78,7 @@ __device__ __forceinline__ void warp_group_reduce_column_(Tensor<Engine0, Layout
 #pragma unroll
     for (int i = 0; i < kNRows; i++) {
       // shmem index is the column id of mma result
-      const int shmem_index = ((i >> 1) << 3) + (i & 1) + (lane << 1);
+      const int shmem_index = kNRows < 4 ? ((i >> 1) << 3) + (i & 0x1) + (lane << 1) : ((i >> 2) << 4) + (i & 0x3) + (lane << 2);
       shared_result[curr_WG][warp_id][shmem_index] = tensor(i);
     }
   }
@@ -90,13 +90,23 @@ __device__ __forceinline__ void warp_group_reduce_column_(Tensor<Engine0, Layout
 #pragma unroll
   for (int ni = 0; ni < size<0>(tensor); ni++) {
     // global index is the column id of register in mma result
-    int global_index = ((ni & (~0x1)) << 2) | ((threadIdx.x & 0x3) << 1) | (ni & 0x1);
-    tensor(ni) =
-        op(op(shared_result[curr_WG][0][global_index], shared_result[curr_WG][1][global_index]),
-           op(shared_result[curr_WG][2][global_index], shared_result[curr_WG][3][global_index]));
+    int global_index = kNRows < 4 ? ((ni >> 1) << 3) | (ni & 0x1) | ((threadIdx.x & 0x3) << 1) : ((ni >> 2) << 4) | (ni & 0x3) | ((threadIdx.x & 0x3) << 2);
+    // ver0
+    // tensor(ni) =
+    //     op(op(shared_result[curr_WG][0][global_index], shared_result[curr_WG][1][global_index]),
+    //        op(shared_result[curr_WG][2][global_index], shared_result[curr_WG][3][global_index]));
+    // ver1
+    tensor(ni) = op(tensor(ni), shared_result[curr_WG][warp_id ^ 1][global_index]);
+    tensor(ni) = op(tensor(ni), shared_result[curr_WG][warp_id ^ 2][global_index]);
+    tensor(ni) = op(tensor(ni), shared_result[curr_WG][warp_id ^ 3][global_index]);
+    // ver2
+    // if (lane < 4) {
+    //   tensor(ni) = op(tensor(ni), shared_result[curr_WG][warp_id ^ 1][global_index]);
+    //   tensor(ni) = op(tensor(ni), shared_result[curr_WG][warp_id ^ 2][global_index]);
+    //   tensor(ni) = op(tensor(ni), shared_result[curr_WG][warp_id ^ 3][global_index]);
+    // }
+    // tensor(ni) = __shfl_sync(0xffffffff, tensor(ni), (lane & 0x3));
   }
-  // Sync on the current mma warp group's named barrier, prevent overwrite
-  cutlass::arch::NamedBarrier::sync(cutlass::NumThreadsPerWarpGroup, static_cast<uint32_t>(FwdNamedBarriers::WarpGroupSwapAB1) + curr_WG /*id*/);
 }
 
 template <typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>

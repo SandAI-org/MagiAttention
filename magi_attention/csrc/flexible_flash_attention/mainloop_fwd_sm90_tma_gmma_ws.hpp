@@ -225,7 +225,7 @@ struct CollectiveMainloopFwdSm90 {
   // use SM90_U32x1_STSM_N when TileSize_kBlockM == 8
   // because P matrix's TiledCopy needs enough vals for selected CopyAtom
   // TiledNumVal{} % AtomNumVal{} == 0
-  using SmemCopyAtomP = std::conditional_t<TileSize_kBlockM == 8, Copy_Atom<cute::DefaultCopy, Element>, Copy_Atom<cute::SM90_U32x4_STSM_N, Element>>;
+  using SmemCopyAtomP = std::conditional_t<TileSize_kBlockM == 8, Copy_Atom<cute::SM90_U32x2_STSM_N, Element>, Copy_Atom<cute::SM90_U32x4_STSM_N, Element>>;
 
   // Get TMA copy op for Q and KV
   using GmemTiledCopyQ = cute::SM90_TMA_LOAD;
@@ -981,10 +981,17 @@ struct CollectiveMainloopFwdSm90 {
 
     // Convert layout and type from tSrS to tOrP which will be used in MmaPV
     Tensor tOrP = [&]() {
-      Tensor tOrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmaPV_Active>(tSrS.layout()));
-      Tensor tOrP = make_tensor_like<Element>(tOrP_acc);
-      convert_type_out(tOrP_acc, tOrP);
-      return tOrP;
+      if constexpr (TileSize_kBlockM == 8) {
+        Tensor tOrP_acc = make_tensor(tSrS.data(), tSrS.layout());
+        Tensor tOrP = make_tensor_like<Element>(tOrP_acc);
+        flash::convert_type_out(tOrP_acc, tOrP);
+        return tOrP;
+      } else {
+        Tensor tOrP_acc = make_tensor(tSrS.data(), flash::convert_layout_acc_Aregs<TiledMmaPV_Active>(tSrS.layout()));
+        Tensor tOrP = make_tensor_like<Element>(tOrP_acc);
+        flash::convert_type_out(tOrP_acc, tOrP);
+        return tOrP;
+      }
     }();
 
     // Write tOrP to smem
