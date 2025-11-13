@@ -38,17 +38,15 @@ from transformers.utils.versions import require_version
 from typing_extensions import override
 
 from magi_attention.api import (
+    DistAttnConfig,
+    compute_pad_size,
     get_most_recent_key,
     get_position_ids,
+    infer_varlen_mask_from_batch,
     magi_attn_varlen_dispatch,
+    squash_batch_dim,
     undispatch,
 )
-from magi_attention.api.functools import (
-    compute_pad_size,
-    infer_varlen_mask_from_batch,
-    squash_batch_dim,
-)
-from magi_attention.config import DistAttnConfig
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.51.0")

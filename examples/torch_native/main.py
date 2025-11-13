@@ -25,13 +25,14 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Partial, Shard, distribute_tensor
 from torch.optim.lr_scheduler import LinearLR
 
-from magi_attention.api import magi_attn_varlen_dispatch, undispatch
-from magi_attention.api.functools import (
+from magi_attention.api import (
+    DistAttnConfig,
     compute_pad_size,
     infer_varlen_mask_from_batch,
+    magi_attn_varlen_dispatch,
     squash_batch_dim,
+    undispatch,
 )
-from magi_attention.config import DistAttnConfig
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeKey
 
 SEED = 42
