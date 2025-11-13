@@ -400,6 +400,41 @@
   <section id="environment-variables">
 <h1>Environment Variables<a class="headerlink" href="#environment-variables" title="Link to this heading">#</a></h1>
 <p>In <strong>MagiAttention</strong>, many features need to be configured through environment variables. Below are some environment variables that can be set, along with their descriptions.</p>
+<section id="for-correctness">
+<h2>For Correctness<a class="headerlink" href="#for-correctness" title="Link to this heading">#</a></h2>
+<p><strong>MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable high-precision (fp32) reduce for partial out during dist-attn forward
+to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ol class="arabic simple">
+<li><p>Inside the ffa forward kernel, we always use high-precision (fp32) accumulation for partial out.</p></li>
+<li><p>We always use high-precision (fp32) lse everywhere.</p></li>
+<li><p>This feature works for out only when enabling qo comm.</p></li>
+</ol>
+</div>
+<p><strong>MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE</strong></p>
+<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable high-precision (fp32) reduce for partial dq,dk,dv during dist-attn backward
+to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ol class="arabic simple">
+<li><p>Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dq,dk,dv.</p></li>
+<li><p>This feature works for dq only when enabling qo comm.</p></li>
+</ol>
+</div>
+<p><strong>MAGI_ATTENTION_DSINK_ALL_REDUCE_OP</strong></p>
+<p>Set the value of this env variable to control the all-reduce op for sink gradients within <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code> when involving attention sink. The default value is <code class="docutils literal notranslate"><span class="pre">none</span></code>. And options are within {<code class="docutils literal notranslate"><span class="pre">none</span></code>, <code class="docutils literal notranslate"><span class="pre">sum</span></code>, <code class="docutils literal notranslate"><span class="pre">avg</span></code>}.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>For now we only accept global replicated sink tensor as input to feed into <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code>, and the gradients of sink in each cp rank are partial and requires to be sum-reduced across cp ranks.</p>
+<p>However, since sink tensor is learnable, it will be considered as a regular parameter in the model similar to <code class="docutils literal notranslate"><span class="pre">bias</span></code> in <code class="docutils literal notranslate"><span class="pre">nn.Linear</span></code> layer.</p>
+<p>So under some popular training frameworks, such as Megatron-LM, FSDP, the sum-reduction across cp ranks of the partial gradients of sink might be automatically applied within the whole <code class="docutils literal notranslate"><span class="pre">dp</span> <span class="pre">x</span> <span class="pre">cp</span></code> mesh.</p>
+<p>To avoid repeated reduction, we provide this environment variable to specify the all-reduce op for sink gradients within <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code>, whose default value is <code class="docutils literal notranslate"><span class="pre">none</span></code> to NOT apply any reduction to sink gradients by <code class="docutils literal notranslate"><span class="pre">dist_attn_func</span></code> and let the framework handle it.</p>
+<p>However, under the scenarios w/o any framework mechanism to reduce parameters across cp ranks, you have to specify this environment variable to <code class="docutils literal notranslate"><span class="pre">sum</span></code>.</p>
+<p>And sometimes, <code class="docutils literal notranslate"><span class="pre">avg</span></code> might also be an option when you need to scale the sink gradients by <code class="docutils literal notranslate"><span class="pre">1/cp</span></code>.</p>
+</div>
+</section>
 <section id="for-performance">
 <h2>For Performance<a class="headerlink" href="#for-performance" title="Link to this heading">#</a></h2>
 <p><strong>MAGI_ATTENTION_HIERARCHICAL_COMM</strong></p>
@@ -427,27 +462,6 @@ thus please do NOT enable it unless you know exactly what you are doing.</p>
 <p class="admonition-title">Note</p>
 <p>This feature is experimental and under early development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.</p>
-</div>
-<p><strong>MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable high-precision (fp32) reduce for partial out during dist-attn forward
-to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<ol class="arabic simple">
-<li><p>Inside the ffa forward kernel, we always use high-precision (fp32) accumulation for partial out.</p></li>
-<li><p>We always use high-precision (fp32) lse everywhere.</p></li>
-<li><p>This feature works for out only when enabling qo comm.</p></li>
-</ol>
-</div>
-<p><strong>MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE</strong></p>
-<p>Toggle this env variable to <code class="docutils literal notranslate"><span class="pre">1</span></code> to enable high-precision (fp32) reduce for partial dq,dk,dv during dist-attn backward
-to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is <code class="docutils literal notranslate"><span class="pre">0</span></code>.</p>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<ol class="arabic simple">
-<li><p>Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dq,dk,dv.</p></li>
-<li><p>This feature works for dq only when enabling qo comm.</p></li>
-</ol>
 </div>
 <p><strong>MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE</strong></p>
 <p>Set the value of this env variable to control the size of <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict</span></code>. The default value is <code class="docutils literal notranslate"><span class="pre">100</span></code>.</p>
@@ -535,6 +549,7 @@ to trade-off double comm overhead for increased precision and less dtype-cast ov
   </div>
   <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-correctness">For Correctness</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-performance">For Performance</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-debug">For Debug</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#for-build">For Build</a><ul class="visible nav section-nav flex-column">
