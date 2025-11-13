@@ -29,6 +29,7 @@
 
 #include "named_barrier.hpp"
 #include "seqlen.h"
+#include "softmax.h"
 #include "utils.h"
 
 namespace flash {
@@ -581,24 +582,6 @@ struct CollectiveEpilogueFwd {
     // Don't need to do tma_store_wait<0>() here since we already did in @store
   }
 
-  CUTLASS_DEVICE ElementPartial correct_lse(ElementPartial lse_prev, ElementPartial lse_curr) {
-    ElementPartial max_lse = max(lse_prev, lse_curr);
-    ElementPartial min_lse = min(lse_prev, lse_curr);
-    ElementPartial lse = max_lse + softplus(safe_sub(min_lse, max_lse));
-    return lse;
-  }
-
-  CUTLASS_DEVICE ElementPartial softplus(ElementPartial x) {
-    return logf(1.f + expf(x));
-  }
-
-  CUTLASS_DEVICE ElementPartial safe_sub(ElementPartial a, ElementPartial b) {
-    if (a == -INFINITY && b == -INFINITY) {
-      return -INFINITY;
-    }
-    return a - b;
-  }
-
   template <typename Engine0, typename Layout0, typename Engine1, typename Layout1>
   CUTLASS_DEVICE void correct_output(
       Tensor<Engine0, Layout0>& prev_output,
@@ -615,8 +598,8 @@ struct CollectiveEpilogueFwd {
     CUTE_STATIC_ASSERT_V(size<0>(curr_output) == size<0>(final_lse));
 #pragma unroll
     for (int mi = 0; mi < size<0>(curr_output); ++mi) {
-      ElementPartial coeff_prev = expf(safe_sub(prev_lse(mi), final_lse(mi)));
-      ElementPartial coeff_curr = expf(safe_sub(curr_lse(mi), final_lse(mi)));
+      ElementPartial coeff_prev = calc_lse_rescale_weight(prev_lse(mi), final_lse(mi));
+      ElementPartial coeff_curr = calc_lse_rescale_weight(curr_lse(mi), final_lse(mi));
 #pragma unroll
       for (int ni = 0; ni < size<1>(curr_output); ++ni) {
         // Instead of computing exp(x - max), we compute exp2(x * log_2(e) -

@@ -150,14 +150,14 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       params.determin_range_locks,
   };
 
-  typename flash::TileSchedulerArguments scheduler_args{/*num_heads*/ params.h_qo,
-                                                        /*num_batches*/ params.merge_batch_size,
-                                                        /*tile_count_semaphore*/ params.tile_count_semaphore,
-                                                        /*ranges*/ params.q_ranges,
-                                                        /*merge_ranges*/ params.merge_q_ranges,
-                                                        /*range_map*/ params.qk_map,
-                                                        /*determin_conflict_state*/ params.determin_conflict_state,
-                                                        /*unique_count*/ params.unique_count};
+  typename flash::TileSchedulerArguments scheduler_args{/*num_heads=*/params.h_qo,
+                                                        /*num_batches=*/params.merge_batch_size,
+                                                        /*tile_count_semaphore=*/params.tile_count_semaphore,
+                                                        /*ranges=*/params.q_ranges,
+                                                        /*merge_ranges=*/params.merge_q_ranges,
+                                                        /*range_map=*/params.qk_map,
+                                                        /*determin_conflict_state=*/params.determin_conflict_state,
+                                                        /*unique_count=*/params.unique_count};
 
   int device;
   CHECK_CUDA(cudaGetDevice(&device));
@@ -209,8 +209,20 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   CLUSTER_SWITCH(cutlass::ceil_div(params.total_q, kBlockM) % 2 == 0, Use_cluster, [&] {
     static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
     BOOL_SWITCH(params.merge_q_ranges != nullptr, MergeRange, [&] {
-      run_flash_fwd<Arch, kBlockM, kBlockN, kHeadDim, ClusterM, T, T_out, Has_softcap, DisableFwdAtomicReduction, Deterministic, MergeRange, kProfileMode, kSparseLoad>(
-          params, stream);
+      run_flash_fwd<
+          /*Arch=*/Arch,
+          /*kBlockM=*/kBlockM,
+          /*kBlockN=*/kBlockN,
+          /*kHeadDim=*/kHeadDim,
+          /*ClusterM=*/ClusterM,
+          /*Element=*/T,
+          /*ElementOut=*/T_out,
+          /*Has_softcap=*/Has_softcap,
+          /*DisableFwdAtomicReduction=*/DisableFwdAtomicReduction,
+          /*Deterministic=*/Deterministic,
+          /*MergeRange=*/MergeRange,
+          /*ProfileMode=*/kProfileMode,
+          /*SparseLoad=*/kSparseLoad>(params, stream);
     });
   });
 }

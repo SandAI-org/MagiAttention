@@ -44,6 +44,8 @@ from .utils import write_if_different
 os.makedirs(jit_env.MAGI_ATTENTION_WORKSPACE_DIR, exist_ok=True)
 os.makedirs(jit_env.MAGI_ATTENTION_CSRC_DIR, exist_ok=True)
 
+force_jit = os.environ.get("MAGI_ATTENTION_FORCE_JIT_BUILD", "0") == "1"
+
 
 class MagiAttentionJITLogger(logging.Logger):
     def __init__(self, name):
@@ -164,7 +166,7 @@ class JitSpec:
                 verbose,
             )
 
-    def build_and_load(self):
+    def build_and_load(self) -> None:
         mod_name = self.name
 
         def _artifact_exists(lib_dir: Path, module_name: str) -> bool:
@@ -173,7 +175,11 @@ class JitSpec:
                     return True
             return False
 
-        if self.aot_path.exists() and _artifact_exists(self.aot_path, mod_name):
+        if (
+            not force_jit
+            and self.aot_path.exists()
+            and _artifact_exists(self.aot_path, mod_name)
+        ):
             lib_dir = self.aot_path
         else:
             self.build()

@@ -279,6 +279,7 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             flatten_q,
             flatten_k_ag,
             flatten_v_ag,
+            None,  # sink
             None,  # out
             None,  # lse
             q_ranges_tensor,
@@ -359,15 +360,17 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             0,  # sm_margin
         ]
 
-        flatten_dq, flatten_dk, flatten_dv = _flex_flash_attn_backward(
+        flatten_dq, flatten_dk, flatten_dv, _ = _flex_flash_attn_backward(
             flatten_dout,
             flatten_q,
             flatten_k_ag,
             flatten_v_ag,
+            None,  # sink
             out,
             None,  # dq
             None,  # dk
             None,  # dv
+            None,  # dsink
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
@@ -453,6 +456,7 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             q,
             k_ag,
             v_ag,
+            None,  # sink
             None,  # out
             None,  # lse
             runtime_meta.q_ranges_tensor,
@@ -496,15 +500,17 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             0,  # sm_margin
         ]
 
-        dq, dk, dv = _flex_flash_attn_backward(
+        dq, dk, dv, _ = _flex_flash_attn_backward(
             dout,
             q,
             k_ag,
             v_ag,
+            None,  # sink
             out,
             None,  # dq
             None,  # dk
             None,  # dv
+            None,  # dsink
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,
@@ -645,6 +651,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             q_cmp,
             k_ag_cmp,
             v_ag_cmp,
+            None,  # sink
             None,  # out
             None,  # lse
             runtime_meta.q_ranges_tensor,
@@ -698,15 +705,17 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             0,  # sm_margin
         ]
 
-        dq, dk, dv = _flex_flash_attn_backward(
+        dq, dk, dv, _ = _flex_flash_attn_backward(
             dout,
             q_cmp,
             k_ag_cmp,
             v_ag_cmp,
+            None,  # sink
             out,
             None,  # dq
             None,  # dk
             None,  # dv
+            None,  # dsink
             softmax_lse,
             ctx.q_ranges_tensor,
             ctx.k_ranges_tensor,

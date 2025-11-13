@@ -24,21 +24,16 @@ from magi_attention.utils import str2seed
 from . import dist_common, utils
 from .dist_common import RUN_IN_MP
 from .gt_dispatcher import GroundTruthDispatcher
-from .precision import assert_close, torch_attn_ref
+from .precision import assert_close, ref_attn_func
 
 __all__ = [
     "dist_common",
     "utils",
     "GroundTruthDispatcher",
     "assert_close",
-    "torch_attn_ref",
+    "ref_attn_func",
     "parameterize",
 ]
-
-
-# HACK: enable sanity check in every unitest by default
-# TODO: inherit the unitest.TestCaseBase and enable/disable it inside the base class's setUp/tearDown
-os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "1"
 
 
 def parameterize(argument: str, values: list[Any]) -> Callable:

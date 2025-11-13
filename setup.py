@@ -507,9 +507,7 @@ else:
     print(f"{title_left_str}Skipping CUDA build{title_right_str}")
 
 
-# init cmdclass
-
-
+# customize build extension
 class MagiAttnBuildExtension(BuildExtension):
     """
     A BuildExtension that switches its behavior based on the command.
@@ -545,6 +543,7 @@ class MagiAttnBuildExtension(BuildExtension):
             )
 
 
+# init cmdclass
 cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
 

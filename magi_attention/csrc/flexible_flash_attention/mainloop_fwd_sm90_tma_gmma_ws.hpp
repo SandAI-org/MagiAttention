@@ -770,6 +770,7 @@ struct CollectiveMainloopFwdSm90 {
       return false;
     }
 
+    /** DEBUG **/
     // if (block_meta.bidb == 0 && block_meta.bidh == 0 && thread_idx == 0 && block_meta.m_block == 0) {
     //   printf(
     //       "initial block_meta: m_block: %d, n_block_min: %d, n_block_max: %d, seqlen_q: %d, seqlen_k: %d, attn_type: %d\n",
@@ -792,7 +793,7 @@ struct CollectiveMainloopFwdSm90 {
     flash::AttnType attn_type = block_meta.attn_type;
     // Get mask for n_block
     flash::Mask<kBlockM, kBlockN, TiledMmaQK> mask;
-    //
+    // Whether the boundary masking is finished
     bool finish_boundary = true;
 
     // According to the specific attn_type, define three types of mask_fn, used in different situations
@@ -841,6 +842,8 @@ struct CollectiveMainloopFwdSm90 {
 
     // Apply score-modification-function(currently only support softcap) before mask
     scoremod_premask_fn(tSrS);
+
+    /** DEBUG **/
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ tSrS m_block: %d ==============================\n", m_block);
     //     print_tensor(tSrS);
@@ -849,6 +852,8 @@ struct CollectiveMainloopFwdSm90 {
 
     // Apply mask
     boundary_mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
+
+    /** DEBUG **/
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
     //     print_tensor(tSrS);
@@ -857,6 +862,8 @@ struct CollectiveMainloopFwdSm90 {
 
     // Get row-max and row-sum of tSrS
     cute::copy(softmax.template max_get_scale</*Is_first=*/true, /*Check_inf=*/true>(tSrS), scores_scale);
+
+    /** DEBUG **/
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ scores_scale m_block: %d ==============================\n", m_block);
     //     print_tensor(scores_scale);
@@ -865,6 +872,8 @@ struct CollectiveMainloopFwdSm90 {
 
     // Apply exponential to tSrS
     softmax.template online_softmax</*Is_first=*/true, /*Check_inf=*/true>(tSrS);
+
+    /** DEBUG **/
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ tSrS after online_softmax m_block: %d ==============================\n", m_block);
     //     print_tensor(tSrS);

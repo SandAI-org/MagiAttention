@@ -21,7 +21,7 @@ void set_params_fprop(
     const size_t b,
     const size_t total_q,
     const size_t total_k,
-    const size_t total_q_rounded,
+    const size_t total_sink,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -29,6 +29,7 @@ void set_params_fprop(
     const at::Tensor q,
     const at::Tensor k,
     const at::Tensor v,
+    const at::Tensor sink,
     at::Tensor kernel_out,
     void* q_ranges_d,
     void* k_ranges_d,
@@ -43,13 +44,23 @@ void set_params_fprop(
     void* unique_count_d,
     void* sparse_load_loop_count_d,
     void* softmax_lse_d,
-    float softmax_scale,
+    float const softmax_scale,
     void* tile_count_semaphore_d,
     float const softcap,
     int const sm_margin,
     bool const disable_fwd_atomic_reduction) {
   // Reset the parameters
   params = {};
+
+  // Set dimensions
+  params.b = b;
+  params.h_qo = h_qo;
+  params.h_kv = h_kv;
+  params.total_q = total_q;
+  params.total_k = total_k;
+  params.total_sink = total_sink;
+  params.d = d;
+  params.d_rounded = d_rounded;
 
   // Set the compute and output types for the kernel.
   // Compute type is the type of the input tensors.
@@ -63,6 +74,7 @@ void set_params_fprop(
   params.q_ptr = q.data_ptr();
   params.k_ptr = k.data_ptr();
   params.v_ptr = v.data_ptr();
+  params.sink_ptr = sink.data_ptr();
   // Set the strides of Q, K, V
   // All stride are in elements, not bytes.
   params.q_row_stride = q.stride(-3);
@@ -83,9 +95,12 @@ void set_params_fprop(
   params.q_ranges = static_cast<int2*>(q_ranges_d);
   params.k_ranges = static_cast<int2*>(k_ranges_d);
   params.attn_type_map = static_cast<int*>(attn_type_map_d);
+
+  // Set auto range merge
   params.merge_q_ranges = static_cast<int2*>(merge_q_ranges_d);
   params.qk_map = static_cast<int*>(qk_map_d);
   params.unique_count = static_cast<int*>(unique_count_d);
+  params.merge_batch_size = merge_batch_size;
   params.sparse_load_loop_count = static_cast<int*>(sparse_load_loop_count_d);
 
   // Set kernel utility pointers
@@ -97,18 +112,8 @@ void set_params_fprop(
   params.determin_range_locks = static_cast<int*>(determin_range_locks_d);
   params.determin_conflict_state = static_cast<int*>(determin_conflict_state_d);
 
-  // Softmax sum
+  // Set softmax
   params.softmax_lse_ptr = softmax_lse_d;
-  params.b = b;
-  params.merge_batch_size = merge_batch_size;
-  params.h_qo = h_qo;
-  params.h_kv = h_kv;
-  params.total_q = total_q;
-  params.total_k = total_k;
-  params.total_q_rounded = total_q_rounded;
-  params.d = d;
-  params.d_rounded = d_rounded;
-  // Set the different scale values.
   params.scale_softmax = softmax_scale;
   params.softcap = softcap;
 
@@ -123,6 +128,8 @@ void set_params_dgrad(
     const size_t total_q,
     const size_t total_k,
     const size_t total_q_rounded,
+    const size_t num_m_block,
+    const size_t total_sink,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -130,11 +137,15 @@ void set_params_dgrad(
     const at::Tensor q,
     const at::Tensor k,
     const at::Tensor v,
+    const at::Tensor sink,
     const at::Tensor out,
     const at::Tensor dout,
     at::Tensor dq,
     at::Tensor dk,
     at::Tensor dv,
+    at::Tensor dsink,
+    at::Tensor dsink_reduce_buf,
+    at::Tensor dsink_reduce_cnt,
     void* q_ranges_d,
     void* k_ranges_d,
     void* attn_type_map_d,
@@ -160,7 +171,7 @@ void set_params_dgrad(
       b,
       total_q,
       total_k,
-      total_q_rounded,
+      total_sink,
       h_qo,
       h_kv,
       d,
@@ -168,6 +179,7 @@ void set_params_dgrad(
       q,
       k,
       v,
+      sink,
       out,
       /*q_ranges_d*/ q_ranges_d,
       /*k_ranges_d*/ k_ranges_d,
@@ -188,6 +200,10 @@ void set_params_dgrad(
       /*sm_margin*/ sm_margin,
       /*disable_fwd_atomic_reduction*/ false);
 
+  // Set backward-specific dimensions
+  params.total_q_rounded = total_q_rounded;
+  params.num_m_block = num_m_block;
+
   // Set backward-specific pointers and flags
   params.merge_k_ranges = static_cast<int2*>(merge_k_ranges_d);
   params.bwd_kq_map = static_cast<int*>(bwd_kq_map_d);
@@ -205,6 +221,9 @@ void set_params_dgrad(
   params.dq_ptr = dq.data_ptr();
   params.dk_ptr = dk.data_ptr();
   params.dv_ptr = dv.data_ptr();
+  params.dsink_ptr = dsink.data_ptr();
+  params.dsink_reduce_buf_ptr = dsink_reduce_buf.data_ptr();
+  params.dsink_reduce_cnt_ptr = dsink_reduce_cnt.data_ptr();
   params.dq_row_stride = dq.stride(-3);
   params.dk_row_stride = dk.stride(-3);
   params.dv_row_stride = dv.stride(-3);
@@ -221,27 +240,27 @@ void set_params_dgrad(
   params.dq_determin_range_locks = static_cast<int*>(dq_determin_range_locks_d);
 }
 
-void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream) {
+void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {
   // Fast zero-fill for output accumulator if needed by kernel configuration
   OUT_DTYPE_SWITCH(params.out_type, TOut, [&] {
 #ifndef FLASHATTENTION_DISABLE_HDIM64
     if (params.d <= 64) {
-      return run_fast_zero_fill_<TOut, 64>(params, stream);
+      return run_flash_fwd_post_process_<TOut, 64>(params, stream);
     }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM128
     if (params.d <= 128) {
-      return run_fast_zero_fill_<TOut, 128>(params, stream);
+      return run_flash_fwd_post_process_<TOut, 128>(params, stream);
     }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM192
     if (params.d <= 192) {
-      return run_fast_zero_fill_<TOut, 192>(params, stream);
+      return run_flash_fwd_post_process_<TOut, 192>(params, stream);
     }
 #endif
 #ifndef FLASHATTENTION_DISABLE_HDIM256
     if (params.d <= 256) {
-      return run_fast_zero_fill_<TOut, 256>(params, stream);
+      return run_flash_fwd_post_process_<TOut, 256>(params, stream);
     }
 #endif
   });

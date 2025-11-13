@@ -39,7 +39,7 @@ from magi_attention.functional.flex_flash_attn import flex_flash_attn_func
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
-from magi_attention.testing.precision import EPSILON, torch_attn_ref
+from magi_attention.testing.precision import EPSILON, ref_attn_func
 from magi_attention.testing.utils import switch_sdpa_backend_decorator
 from magi_attention.utils import get_attn_mask_from_ffa_args
 
@@ -888,11 +888,11 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             device=self.device,
         )
 
-        # -----   ref1. torch ref with high precision (fp32)   ---- #
+        # -----   ref. torch ref with high precision (fp64)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
 
-        total_out_ref_high_precision = torch_attn_ref(
+        total_out_ref_high_precision, _ = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,

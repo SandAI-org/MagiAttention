@@ -33,9 +33,11 @@ namespace flash {
 using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+// Softmax Helpers
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <bool zero_init = true, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
-__device__ __forceinline__ void thread_reduce_(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& summary, Operator& op) {
+CUTLASS_DEVICE void thread_reduce_(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& summary, Operator& op) {
   static_assert(Layout0::rank == 2, "Only support 2D Tensor");
   static_assert(Layout1::rank == 1, "Only support 1D Tensor");
   CUTE_STATIC_ASSERT_V(size<0>(summary) == size<0>(tensor));
@@ -49,7 +51,7 @@ __device__ __forceinline__ void thread_reduce_(Tensor<Engine0, Layout0> const& t
 }
 
 template <typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
-__device__ __forceinline__ void quad_allreduce_(Tensor<Engine0, Layout0>& dst, Tensor<Engine1, Layout1>& src, Operator& op) {
+CUTLASS_DEVICE void quad_allreduce_(Tensor<Engine0, Layout0>& dst, Tensor<Engine1, Layout1>& src, Operator& op) {
   CUTE_STATIC_ASSERT_V(size(dst) == size(src));
 #pragma unroll
   for (int i = 0; i < size(dst); i++) {
@@ -58,19 +60,19 @@ __device__ __forceinline__ void quad_allreduce_(Tensor<Engine0, Layout0>& dst, T
 }
 
 template <bool zero_init = true, typename Engine0, typename Layout0, typename Engine1, typename Layout1, typename Operator>
-__device__ __forceinline__ void reduce_(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& summary, Operator& op) {
+CUTLASS_DEVICE void reduce_(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& summary, Operator& op) {
   thread_reduce_<zero_init>(tensor, summary, op);
   quad_allreduce_(summary, summary, op);
 }
 
 template <bool zero_init = true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
-__device__ __forceinline__ void reduce_max(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& max) {
+CUTLASS_DEVICE void reduce_max(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& max) {
   MaxOp<float> max_op;
   reduce_<zero_init>(tensor, max, max_op);
 }
 
 template <bool zero_init = true, bool warp_reduce = true, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
-__device__ __forceinline__ void reduce_sum(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& sum) {
+CUTLASS_DEVICE void reduce_sum(Tensor<Engine0, Layout0> const& tensor, Tensor<Engine1, Layout1>& sum) {
   SumOp<float> sum_op;
   thread_reduce_<zero_init>(tensor, sum, sum_op);
   if constexpr (warp_reduce) {
@@ -80,7 +82,7 @@ __device__ __forceinline__ void reduce_sum(Tensor<Engine0, Layout0> const& tenso
 
 // Apply the exp to all the elements.
 template <bool Scale_max = true, bool Check_inf = true, int Max_offset = 0, typename Engine0, typename Layout0, typename Engine1, typename Layout1>
-__forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0>& tensor, Tensor<Engine1, Layout1> const& max, const float scale) {
+CUTLASS_DEVICE void scale_apply_exp2(Tensor<Engine0, Layout0>& tensor, Tensor<Engine1, Layout1> const& max, const float scale) {
   // For FP8, we can subtract max by 8.0 so that the value after exp2 is in the range of [0, 256].
   // This lets us use more of the FP8 range (instead of just [0, 1]) to reduce underflow.
   static constexpr float max_offset = float(Max_offset); // We can only template on int, not float
@@ -103,6 +105,64 @@ __forceinline__ __device__ void scale_apply_exp2(Tensor<Engine0, Layout0>& tenso
   }
 }
 
+template <typename Element>
+CUTLASS_DEVICE Element calc_lse(Element* x, size_t n) {
+  static_assert(std::is_same_v<Element, float>, "Only support float");
+
+  if (n == 0) {
+    return -INFINITY;
+  }
+
+  Element lse = 0;
+#pragma unroll
+  for (int i = 0; i < n; ++i) {
+    lse += expf(x[i]);
+  }
+  lse = logf(lse);
+
+  return lse;
+}
+
+template <typename Element>
+CUTLASS_DEVICE Element safe_sub(Element a, Element b) {
+  if (a == -INFINITY && b == -INFINITY) {
+    // (-Inf) - (-Inf) will result in NaN
+    // but we expect it to be -Inf
+    return -INFINITY;
+  }
+  return a - b;
+}
+
+template <typename Element>
+CUTLASS_DEVICE Element softplus(Element x) {
+  static_assert(std::is_same_v<Element, float>, "Only support float");
+  return logf(1.f + expf(x));
+}
+
+template <typename Element>
+CUTLASS_DEVICE Element correct_lse(Element lse1, Element lse2) {
+  Element max_lse = max(lse1, lse2);
+  Element min_lse = min(lse1, lse2);
+  Element lse = max_lse + softplus(safe_sub(min_lse, max_lse));
+  return lse;
+}
+
+template <typename Element>
+CUTLASS_DEVICE Element calc_lse_rescale_weight(Element lse_to_rescale, Element rescaled_lse) {
+  static_assert(std::is_same_v<Element, float>, "Only support float");
+  Element rescale_weight = expf(safe_sub(lse_to_rescale, rescaled_lse));
+  return rescale_weight;
+}
+
+template <typename Element>
+CUTLASS_DEVICE Element safe_softmax(Element x, Element lse) {
+  static_assert(std::is_same_v<Element, float>, "Only support float");
+  Element softmax_x = expf(safe_sub(x, lse));
+  return softmax_x;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Softmax
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int kNRows, int Max_offset = 0>

@@ -37,7 +37,7 @@ from magi_attention.comm.primitive.grpcoll.utils import (
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import assert_close
-from magi_attention.testing.utils import switch_envvar_context
+from magi_attention.testing.utils import switch_envvar_context, switch_envvars
 from magi_attention.utils import wrap_to_list
 
 
@@ -47,8 +47,9 @@ class TestGroupCollective(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        self._switch_hier_comm_context = partial(
-            switch_envvar_context, envvar_name="MAGI_ATTENTION_HIERARCHICAL_COMM"
+        self.hier_comm_envvar = "MAGI_ATTENTION_HIERARCHICAL_COMM"
+        self.switch_hier_comm_context = partial(
+            switch_envvar_context, envvar_name=self.hier_comm_envvar
         )
 
         world_size_inter_node, world_size_intra_node = {
@@ -71,8 +72,9 @@ class TestGroupCollective(DistTestBase):
 
         # -----    set up for native grpcoll   ---- #
 
-        self._switch_native_grpcoll_context = partial(
-            switch_envvar_context, envvar_name="MAGI_ATTENTION_NATIVE_GRPCOLL"
+        self.native_grpcoll_envvar = "MAGI_ATTENTION_NATIVE_GRPCOLL"
+        self.switch_native_grpcoll_context = partial(
+            switch_envvar_context, envvar_name=self.native_grpcoll_envvar
         )
 
         grpcoll_mgr.register_buffer(
@@ -728,31 +730,37 @@ class TestGroupCollective(DistTestBase):
         else:
             native_grpcoll_handle_dict = {}
 
+        # switch the env flags
+        switch_back = switch_envvars(
+            envvar_name_list=[self.hier_comm_envvar, self.native_grpcoll_envvar],
+            enable_list=[use_hier_comm, use_native_grpcoll],
+        )
+
         # run group-cast comm kernel
-        with self._switch_hier_comm_context(
-            enable=use_hier_comm
-        ), self._switch_native_grpcoll_context(enable=use_native_grpcoll):
-            work = group_cast(
-                input=send_buffer,
-                output=recv_buffer,
-                input_split_sizes=input_split_size_list,
-                output_split_sizes=output_split_size_list,
-                dst_indices=dst_indices_list,
-                src_index=src_index_list,
-                group=self.process_group,
-                async_op=async_op,
-                cast_lse=cast_lse,
-                input_lse=send_lse_buffer,
-                output_lse=recv_lse_buffer,
-                # kwargs below for hier comm
-                intra_group=self.intra_group,
-                inter_group=self.inter_group,
-                # kwargs below for native grpcoll
-                native_grpcoll_handle_dict=native_grpcoll_handle_dict,
-            )
+        work = group_cast(
+            input=send_buffer,
+            output=recv_buffer,
+            input_split_sizes=input_split_size_list,
+            output_split_sizes=output_split_size_list,
+            dst_indices=dst_indices_list,
+            src_index=src_index_list,
+            group=self.process_group,
+            async_op=async_op,
+            cast_lse=cast_lse,
+            input_lse=send_lse_buffer,
+            output_lse=recv_lse_buffer,
+            # kwargs below for hier comm
+            intra_group=self.intra_group,
+            inter_group=self.inter_group,
+            # kwargs below for native grpcoll
+            native_grpcoll_handle_dict=native_grpcoll_handle_dict,
+        )
 
         # post process
         post_process_outputs = work.wait_post_process(*post_process_inputs)
+
+        # switch the env flags back
+        switch_back()
 
         # check results
         err_msg_list = []
@@ -1424,34 +1432,40 @@ class TestGroupCollective(DistTestBase):
         else:
             native_grpcoll_handle_dict = {}
 
+        # switch the env flags
+        switch_back = switch_envvars(
+            envvar_name_list=[self.hier_comm_envvar, self.native_grpcoll_envvar],
+            enable_list=[use_hier_comm, use_native_grpcoll],
+        )
+
         # run group-reduce comm kernel
-        with self._switch_hier_comm_context(
-            enable=use_hier_comm
-        ), self._switch_native_grpcoll_context(enable=use_native_grpcoll):
-            work = group_reduce(
-                input=send_buffer,
-                output=recv_buffer_before_reduce,
-                input_split_sizes=input_split_size_list,
-                output_split_sizes=output_split_size_list,
-                dst_index=dst_index_list,
-                src_indices=src_indices_list,
-                group=self.process_group,
-                async_op=async_op,
-                reduce_op=reduce_op,
-                acc_reduce=acc_reduce,
-                comm_dtype=comm_dtype,
-                input_lse=send_lse_buffer,
-                output_lse=recv_lse_buffer_before_reduce,
-                deterministic=deterministic,
-                # kwargs below for hier comm
-                intra_group=self.intra_group,
-                inter_group=self.inter_group,
-                # kwargs below for native grpcoll
-                native_grpcoll_handle_dict=native_grpcoll_handle_dict,
-            )
+        work = group_reduce(
+            input=send_buffer,
+            output=recv_buffer_before_reduce,
+            input_split_sizes=input_split_size_list,
+            output_split_sizes=output_split_size_list,
+            dst_index=dst_index_list,
+            src_indices=src_indices_list,
+            group=self.process_group,
+            async_op=async_op,
+            reduce_op=reduce_op,
+            acc_reduce=acc_reduce,
+            comm_dtype=comm_dtype,
+            input_lse=send_lse_buffer,
+            output_lse=recv_lse_buffer_before_reduce,
+            deterministic=deterministic,
+            # kwargs below for hier comm
+            intra_group=self.intra_group,
+            inter_group=self.inter_group,
+            # kwargs below for native grpcoll
+            native_grpcoll_handle_dict=native_grpcoll_handle_dict,
+        )
 
         # post process
         post_process_outputs = work.wait_post_process(*post_process_inputs)
+
+        # switch the env flags back
+        switch_back()
 
         # check results
         err_msg_list = []

@@ -42,6 +42,9 @@ _DTYPE_TO_CUTLASS = {
     torch.float32: "float",
 }
 
+# Whether to disable caching (caching is enabled by default)
+no_build_cache = os.getenv("MAGI_ATTENTION_NO_BUILD_CACHE", "0") == "1"
+
 
 def tile_size_fwd_sm90(head_dim: int, softcap: bool) -> tuple[int, int]:
     if head_dim <= 64:
@@ -218,7 +221,7 @@ def get_ffa_jit_spec(
 
     common_sources = [
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flex_flash_common.cpp",
-        jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "fast_zero_fill.cu",
+        jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flash_fwd_postprocess.cu",
     ]
 
     include_dirs = [
@@ -314,6 +317,5 @@ def get_ffa_jit_mod(
     return spec.build_and_load()
 
 
-# Disable caching when MAGI_ATTENTION_NO_CACHE=1 (caching is enabled by default)
-if os.getenv("MAGI_ATTENTION_NO_CACHE", "0") != "1":
+if no_build_cache:
     get_ffa_jit_mod = lru_cache(maxsize=None)(get_ffa_jit_mod)

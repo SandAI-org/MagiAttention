@@ -35,6 +35,7 @@ You can change the block_sparse-related settings in `run_block_sparse_tests` wit
 
 - `ffa_benchmark.py`: run ffa for dense/block sparse mask.
     ```shell
+    export MAGI_ATTENTION_PROFILE_MODE=1
     # NOTE: enabling profile mode will enforce ffa to build in JIT mode
     # thus here we toggle this on by default to show the verbose building process
     # instead of waiting w/o any output
@@ -49,6 +50,7 @@ You can change the block_sparse-related settings in `run_block_sparse_tests` wit
 
 - `compare_ffa_results.py`: compare two output csv with same mask type.
     ```shell
+    export MAGI_ATTENTION_PROFILE_MODE=1
     # NOTE: enabling profile mode will enforce ffa to build in JIT mode
     # thus here we toggle this on by default to show the verbose building process
     # instead of waiting w/o any output
@@ -126,7 +128,7 @@ In dir `optimize_ffa/benchmark_results_time`
 | range_merge | -1.0000   | RangeMerge              |
 | Prepare     | 0.0153    | prepare_mha_forward     |
 | Run         | 3.4125    | run_mha_forward         |
-| Fill        | 0.0119    | Fast_zero_fill          |
+| Postprocess | 0.0119    | fwd_postprocess         |
 | to          | 0.0032    | cast output to qdtype   |
 
 

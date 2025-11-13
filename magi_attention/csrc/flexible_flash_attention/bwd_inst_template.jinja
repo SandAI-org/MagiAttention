@@ -55,10 +55,12 @@ std::vector<at::Tensor> mha_bwd(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    const std::optional<at::Tensor>& sink_,
     const at::Tensor& out,
     std::optional<const at::Tensor>& dq_,
     std::optional<const at::Tensor>& dk_,
     std::optional<const at::Tensor>& dv_,
+    std::optional<const at::Tensor>& dsink_,
     const at::Tensor& softmax_lse,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
@@ -79,19 +81,19 @@ std::vector<at::Tensor> mha_bwd(
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Parameter preparation (including output tensor allocation)
-  
-  auto [params, dq, dk, dv] = prepare_mha_bwd(
-      dout, q, k, v, out, dq_, dk_, dv_, softmax_lse, q_ranges, k_ranges,
+  auto [params, dq, dk, dv, dsink] = prepare_mha_bwd(
+      dout, q, k, v, sink_, out, dq_, dk_, dv_, dsink_, softmax_lse, q_ranges, k_ranges,
       attn_type_map_, merge_k_ranges_, bwd_kq_map_,
       bwd_unique_count_, softmax_scale, softcap, disable_bwd_dkv_atomic_reduction,
       dq_type_, dk_type_, dv_type_, deterministic, sm_margin);
-  if constexpr (kProfileMode) 
+  
+  if constexpr (kProfileMode)
     MagiEvents::stop("bwd_prepare");
   
   // Kernel launch (single variant)
   run_mha_bwd_<kArch, TCompute, TDkv, kHeadDim, kHasSoftcap, kDisableDkvAtomic, kDeterministic, kProfileMode>(params, stream);
 
-  return {dq, dk, dv};
+  return {dq, dk, dv, dsink};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

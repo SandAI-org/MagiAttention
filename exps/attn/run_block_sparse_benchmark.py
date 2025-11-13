@@ -46,8 +46,8 @@ sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
 ds = [128]
 wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
-nhqs = [32]
-num_groups = [8]
+nhqs = [16]
+num_groups = [4]
 # small K block
 q_block_sizes = [64, 64, 64, 64, 64]
 k_block_sizes = [64, 32, 16, 8, 1]

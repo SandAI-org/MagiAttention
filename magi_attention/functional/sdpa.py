@@ -12,15 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import math
 
 import torch
 from einops import reduce
 
 from magi_attention.meta.collection.calc_meta import AttnArg
-from magi_attention.utils._utils import get_attn_mask_from_ffa_args
+from magi_attention.utils import get_attn_mask_from_ffa_args, to_higher_fp_dtype
 
-from .utils import safe_subtract
+from .utils import correct_attn_out_lse_with_sink, safe_softmax, sink_bwd, softmax_bwd
 
 __all__ = [
     "sdpa_fwd",
@@ -63,9 +62,7 @@ def sdpa_fwd_preprocess(
     softmax_scale: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float, int]:
     sq, sk = q.size(-2), k.size(-2)
-    softmax_scale = (
-        1 / math.sqrt(q.size(-1)) if softmax_scale is None else softmax_scale
-    )
+    softmax_scale = q.size(-1) ** (-0.5) if softmax_scale is None else softmax_scale
     attn_bias = torch.zeros(sq, sk, dtype=q.dtype, device=q.device)
     nhq, nhk = q.size(-3), k.size(-3)
     rep_times = nhq // nhk
@@ -96,7 +93,10 @@ def sdpa_fwd_calc(
     attn_bias: torch.Tensor,
     softmax_scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    attn_weight = q @ k.transpose(-2, -1) * softmax_scale
+    attn_weight = to_higher_fp_dtype(
+        q @ k.transpose(-2, -1) * softmax_scale,
+        lowest_precision=torch.float32,
+    )
     attn_weight += attn_bias
 
     # NOTE: this lse is numerically stabilized according to
@@ -104,12 +104,9 @@ def sdpa_fwd_calc(
     # and `-inf` will result in `-inf` correctly as well
     lse = torch.logsumexp(attn_weight, dim=-1, keepdim=True)
 
-    # BUG: pytorch softmax cannot assure the sum to 1 when dtype is float64
-    # attn_weight = torch.softmax(attn_weight, dim=-1)
-
-    # NOTE: two -inf subtraction will result in nan, but we need -inf
-    # attn_weight = torch.exp(attn_weight - lse)
-    attn_weight = torch.exp(safe_subtract(attn_weight, lse))
+    # NOTE: pytorch softmax has many limitations and bugs
+    # thus we use our own safe_softmax with lse involved
+    attn_weight = safe_softmax(attn_weight, lse).to(v.dtype)
 
     out = attn_weight @ v
 
@@ -138,6 +135,7 @@ def sdpa_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     attn_arg: AttnArg,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
@@ -151,6 +149,8 @@ def sdpa_fwd(
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
         v (torch.Tensor): [num_tokens_kv, num_heads_kv, head_dim]
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
+        sink (torch.Tensor, optional): [num_tokens_sink, num_heads_q]
+            Defaults to ``None`` to not apply attention sink.
 
         attn_arg (AttnArg): attention arguments for ffa
 
@@ -193,6 +193,15 @@ def sdpa_fwd(
 
     if rearrange:
         out, lse = sdpa_fwd_out_lse_rearrange(out, lse)
+
+    if sink is not None:
+        assert rearrange
+        out, lse = correct_attn_out_lse_with_sink(
+            out=out,
+            lse=lse,
+            sink=sink,
+            inplace=True,
+        )
 
     return out, lse
 
@@ -237,12 +246,15 @@ def sdpa_bwd_recalc_fwd(
     attn_bias: torch.Tensor,
     softmax_scale: float,
 ) -> torch.Tensor:
-    attn_weight = q @ k.transpose(-2, -1) * softmax_scale
+    attn_weight = to_higher_fp_dtype(
+        q @ k.transpose(-2, -1) * softmax_scale,
+        lowest_precision=torch.float32,
+    )
     attn_weight += attn_bias
 
-    # NOTE: two -inf subtraction will result in nan, but we need -inf
-    # attn_weight = torch.exp(attn_weight - lse.unsqueeze(-1))
-    attn_weight = torch.exp(safe_subtract(attn_weight, lse.unsqueeze(-1)))
+    # NOTE: pytorch softmax has many limitations and bugs
+    # thus we use our own safe_softmax with lse involved
+    attn_weight = safe_softmax(attn_weight, lse.unsqueeze(-1)).to(q.dtype)
 
     return attn_weight
 
@@ -252,14 +264,16 @@ def sdpa_bwd_calc(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    delta: torch.Tensor,
+    delta: torch.Tensor | None,
     attn_weight: torch.Tensor,
     softmax_scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dv = attn_weight.transpose(-2, -1) @ do
     grad_weight = do @ v.transpose(-2, -1)
-    # grad_weight = softmax_bwd(grad_weight, attn_weight) * softmax_scale
-    grad_weight = attn_weight * (grad_weight - delta) * softmax_scale
+    if delta is None:
+        grad_weight = softmax_bwd(grad_weight, attn_weight) * softmax_scale
+    else:  # an easier way to compute grad_weight if delta is given
+        grad_weight = attn_weight * (grad_weight - delta) * softmax_scale
     dq = grad_weight @ k
     dk = grad_weight.transpose(-2, -1) @ q
 
@@ -270,8 +284,16 @@ def sdpa_bwd_preprocess(
     do: torch.Tensor,
     o: torch.Tensor,
 ) -> torch.Tensor:
+    """Calculate delta from o and do
+    to avoid massive dot product of p and dp
+    where for each row i:
+    delta_i := p_i.T x dp_i
+        = p_i.T x (v x do_i)
+        = (p_i.T x v) x do_i
+        = o_i.T x do_i
+    """
     # shape: [b, nh, sq, 1]
-    delta = (do * o).sum(-1, keepdim=True)
+    delta = (o * do).sum(-1, keepdim=True)
     return delta
 
 
@@ -329,12 +351,13 @@ def sdpa_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     o: torch.Tensor,
     lse: torch.Tensor,
     attn_arg: AttnArg,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """SDPA backward function
 
     Args:
@@ -346,6 +369,8 @@ def sdpa_bwd(
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
         v (torch.Tensor): [num_tokens_kv, num_heads_kv, head_dim]
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
+        sink (torch.Tensor, optional): [num_tokens_sink, num_heads_q]
+            Defaults to ``None`` to not calculate dsink.
         o (torch.Tensor): [num_tokens_q, num_heads_q, head_dim]
             or [batch_size, num_heads_q, num_tokens_q, head_dim]
         lse (torch.Tensor): [num_tokens_q, num_heads_q]
@@ -365,10 +390,24 @@ def sdpa_bwd(
 
         torch.Tensor: dv with shape [num_tokens_kv, num_heads_kv, head_dim]
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
+
+        torch.Tensor or None: dsink with shape [num_tokens_sink, num_heads_q]
+            or None if sink is None
     """
     assert softcap == 0.0, "non-zero softcap is not supported by now"
 
     rearrange = len(q.shape) == 3  # from [t, nh, hd] to [1, nh, t, hd]
+
+    if sink is not None:
+        assert rearrange
+        dsink = sink_bwd(
+            sink=sink,
+            lse=lse,
+            o=o,
+            do=do,
+        )
+    else:
+        dsink = None
 
     if rearrange:
         q, k, v, o, do, lse = sdpa_bwd_qkvodo_lse_rearrange(q, k, v, o, do, lse)
@@ -398,4 +437,4 @@ def sdpa_bwd(
     if rearrange:
         dq, dk, dv = sdpa_bwd_dqdkdv_rearrange(dq, dk, dv)
 
-    return dq, dk, dv
+    return dq, dk, dv, dsink

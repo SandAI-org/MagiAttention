@@ -21,6 +21,7 @@
 #   $2: The required <output_dir> where the files will be saved.
 # Usage: ./run_benchmark.sh your_branch_name path/to/output_dir
 
+export MAGI_ATTENTION_PROFILE_MODE=1
 # NOTE: enabling profile mode will enforce ffa to build in JIT mode
 # thus here we toggle this on by default to show the verbose building process
 # instead of waiting w/o any output

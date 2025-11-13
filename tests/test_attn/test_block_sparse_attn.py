@@ -161,6 +161,7 @@ class TestBlockSparseAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
+            sink=None,
             out=None,
             lse=None,
             q_ranges=fwd_q_ranges,
@@ -184,6 +185,7 @@ class TestBlockSparseAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
+            sink=None,
             out=o_acc,
             lse=lse_acc,
             q_ranges=fwd_q_ranges,
@@ -222,15 +224,17 @@ class TestBlockSparseAttn(DistTestBase):
         dk_acc = torch.randn_like(k, dtype=torch.float32)
         dv_acc = torch.randn_like(v, dtype=torch.float32)
 
-        dq_ref, dk_ref, dv_ref = _flex_flash_attn_backward(
+        dq_ref, dk_ref, dv_ref, _ = _flex_flash_attn_backward(
             do,
             q,
             k,
             v,
+            None,  # sink
             o_ref.to(q.dtype),
-            None,
-            None,
-            None,
+            None,  # dq
+            None,  # dk
+            None,  # dv
+            None,  # dsink
             lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
@@ -250,15 +254,17 @@ class TestBlockSparseAttn(DistTestBase):
         dq_ref += dq_acc
         dk_ref += dk_acc
         dv_ref += dv_acc
-        dq_acc, dk_acc, dv_acc = _flex_flash_attn_backward(
+        dq_acc, dk_acc, dv_acc, _ = _flex_flash_attn_backward(
             do,
             q,
             k,
             v,
+            None,  # sink
             o_ref.to(q.dtype),
             dq_acc,
             dk_acc,
             dv_acc,
+            None,  # dsink
             lse_ref,
             bwd_q_ranges,
             bwd_k_ranges,
@@ -314,6 +320,7 @@ class TestBlockSparseAttn(DistTestBase):
         nhk,
         deterministic,
         test_accumulation_inplace,
+        sparse_load,
         test_case,
         err_msg_list,
         uniform=True,
@@ -374,7 +381,7 @@ class TestBlockSparseAttn(DistTestBase):
         v.grad = None
         """
 
-        ref_block_size = choose_ref_block(block_size)
+        ref_block_size = choose_ref_block(block_size, sparse_load=sparse_load)
         o, _ = flex_flash_attn_func(
             q,
             k,
@@ -384,6 +391,7 @@ class TestBlockSparseAttn(DistTestBase):
             attn_type_map=attn_type_map_tensor,
             auto_range_merge=True,
             ref_block_size=ref_block_size,
+            sparse_load=sparse_load,
         )
 
         o = rearrange(o, "(b h s) 1 d -> b s h d", b=1, s=s, h=h)
@@ -472,6 +480,7 @@ class TestBlockSparseAttn(DistTestBase):
         nhk,
         deterministic,
         test_accumulation_inplace,
+        sparse_load,
         test_case,
         uniform=True,
         block_row_sz=None,
@@ -532,6 +541,7 @@ class TestBlockSparseAttn(DistTestBase):
             nhk,
             deterministic,
             test_accumulation_inplace,
+            sparse_load,
             test_case,
             err_msg_list,
             uniform=uniform,
@@ -739,6 +749,7 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize("attn_type", [0])  # For now, we only test full mask.
     @parameterize("deterministic", [True, False])
     @parameterize("test_accumulation_inplace", [False])
+    @parameterize("sparse_load", [True, False])
     def test_block_sparse_attn(
         self,
         model_config: dict[str, Any],
@@ -750,6 +761,7 @@ class TestBlockSparseAttn(DistTestBase):
         attn_type: int,
         deterministic: bool,
         test_accumulation_inplace: bool,
+        sparse_load: bool,
     ):
         auto_range_merge = True
         # FIXME: auto_range_merge and deterministic can't be True at the same time
@@ -811,6 +823,7 @@ class TestBlockSparseAttn(DistTestBase):
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[test_accumulation_inplace={test_accumulation_inplace}]"
+            f"[sparse_load={sparse_load}]"
         )
         print(f"[RANK {self.rank}]: {test_case=}")
         # ----- Construct q, k, vdata ----- #
@@ -848,6 +861,7 @@ class TestBlockSparseAttn(DistTestBase):
             nhk=num_heads_kv,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
+            sparse_load=sparse_load,
             test_case=test_case,
             uniform=(test_type == "uniform"),
             block_row_sz=block_row_sz,

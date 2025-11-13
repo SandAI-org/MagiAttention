@@ -36,14 +36,14 @@
 int get_max_headdim();
 int round_up_headdim(int head_size);
 
-void run_fast_zero_fill(Flash_fwd_params& params, cudaStream_t stream);
+void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream);
 
 void set_params_fprop(
     Flash_fwd_params& params,
     const size_t b,
     const size_t total_q,
     const size_t total_k,
-    const size_t total_q_rounded,
+    const size_t total_sink,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -51,6 +51,7 @@ void set_params_fprop(
     const at::Tensor q,
     const at::Tensor k,
     const at::Tensor v,
+    const at::Tensor sink,
     at::Tensor kernel_out,
     void* q_ranges_d,
     void* k_ranges_d,
@@ -77,6 +78,8 @@ void set_params_dgrad(
     const size_t total_q,
     const size_t total_k,
     const size_t total_q_rounded,
+    const size_t num_m_block,
+    const size_t total_sink,
     const size_t h_qo,
     const size_t h_kv,
     const size_t d,
@@ -84,11 +87,15 @@ void set_params_dgrad(
     const at::Tensor q,
     const at::Tensor k,
     const at::Tensor v,
+    const at::Tensor sink,
     const at::Tensor out,
     const at::Tensor dout,
     at::Tensor dq,
     at::Tensor dk,
     at::Tensor dv,
+    at::Tensor dsink,
+    at::Tensor dsink_reduce_buf,
+    at::Tensor dsink_reduce_cnt,
     void* q_ranges_d,
     void* k_ranges_d,
     void* attn_type_map_d,
