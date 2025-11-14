@@ -37,9 +37,11 @@ with open("./README.md", "r", encoding="utf-8") as fh:
 # Note: ninja build requires include_dirs to be absolute paths
 project_root = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_NAME = "magi_attention"
-NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
 exe_extension = sysconfig.get_config_var("EXE")
 USER_HOME = os.getenv("MAGI_ATTENTION_HOME")
+
+# For CUDA13.0: the cccl header path needs to be explicitly included
+CUDA13_CCCL_PATH = "/usr/local/cuda-13.0/include/cccl/"
 
 # For CI: allow forcing C++11 ABI to match NVCR images that use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
@@ -191,6 +193,7 @@ def build_ffa_utils_ext_module(
     include_dirs = [
         common_dir,
         utils_dir_abs,
+        CUDA13_CCCL_PATH,
     ]
 
     extra_compile_args = {
@@ -295,7 +298,7 @@ def build_magi_attn_comm_module(
     ]
 
     # init include dirs
-    include_dirs = [common_dir, grpcoll_dir_abs]
+    include_dirs = [CUDA13_CCCL_PATH, common_dir, grpcoll_dir_abs]
 
     # init extra compile args
     cxx_flags = [

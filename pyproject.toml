@@ -85,3 +85,5 @@ exclude = [
     # include ext modules besides flexible_flash_attention
     "*.so",
 ]
+
+[tool.setuptools_scm]

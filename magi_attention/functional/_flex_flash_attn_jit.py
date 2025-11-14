@@ -224,11 +224,15 @@ def get_ffa_jit_spec(
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flash_fwd_postprocess.cu",
     ]
 
+    # For CUDA13.0: the cccl header path needs to be explicitly included
+    CUDA13_CCCL_PATH = "/usr/local/cuda-13.0/include/cccl/"
+
     include_dirs = [
         jit_env.MAGI_ATTENTION_INCLUDE_DIR.resolve(),
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR.resolve(),
         jit_env.CUTLASS_INCLUDE_DIRS[0].resolve(),
         jit_env.CUTLASS_INCLUDE_DIRS[1].resolve(),
+        CUDA13_CCCL_PATH,
     ]
 
     # Disable other head dimensions to reduce compile time

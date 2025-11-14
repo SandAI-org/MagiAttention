@@ -68,18 +68,26 @@ Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
 
 ### Step1: Activate an NGC pytorch docker container
 
-* release note: [here](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-25-05.html#rel-25-05)
-* docker image version: nvcr.io/nvidia/pytorch:25.05-py3
+* NGC pytorch docker release note: [here](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/)
 * docker run command:
 
     ```bash
-    docker run --name {container_name} -v {host_mnt_root}:{container_mnt_root} -it -d --privileged --gpus all --network host --ipc host --ulimit memlock=-1 --ulimit stack=67108864 nvcr.io/nvidia/pytorch:25.05-py3 /bin/bash
+    # choose one compatible version
+    MAJOR_VERSION=25
+    MINOR_VERSION=10 # choose from {05, 06, 08, 09, 10}
+
+    # specify your own names and paths
+    CONTAINER_NAME=...
+    HOST_MNT_ROOT=...
+    CONTAINER_MNT_ROOT=...
+
+    docker run --name ${CONTAINER_NAME} -v ${HOST_MNT_ROOT}:${CONTAINER_MNT_ROOT} -it -d --privileged --gpus all --network host --ipc host --ulimit memlock=-1 --ulimit stack=67108864 nvcr.io/nvidia/pytorch:${MAJOR_VERSION}.${MINOR_VERSION}-py3 /bin/bash
     ```
 
 * docker exec command:
 
     ```bash
-    docker exec -it {container_name} /bin/bash
+    docker exec -it ${CONTAINER_NAME} /bin/bash
     ```
 
 ### Step2: Install required packages

@@ -29,14 +29,35 @@ def safe_subtract(
     """
     two_neg_inf_mask = (a == b) & (a == float("-inf"))
 
-    def safe_subtract_bwd_hook(g):
-        g.masked_fill_(two_neg_inf_mask, 0.0)
+    return (a - b).masked_fill(two_neg_inf_mask, float("-inf"))
+
+
+def safe_lse(
+    x: torch.Tensor,
+    dim: int = -1,
+    keepdim: bool = False,
+) -> torch.Tensor:
+    """Safely applies row-wise log-sum-exp to the input tensor,
+    where all-``-inf`` rows's grad will be set to ``0``, instead of ``nan``
+
+    NOTE: ``torch.logsumexp`` is numerically stabilized according to
+    https://pytorch.org/docs/stable/generated/torch.logsumexp.html#torch-logsumexp
+
+    and although all-``-inf`` rows will result in ``-inf`` correctly,
+    yet the corr. gradients will result in ``nan``, similar to ``torch.nn.functional.softmax``'s backward behavior
+    """
+    all_neg_inf_mask = (x == float("-inf")).all(dim=dim, keepdim=keepdim)
+
+    def safe_lse_bwd_hook(g):
+        g.masked_fill_(all_neg_inf_mask, 0.0)
         return g
 
-    if a.requires_grad:
-        a.register_hook(safe_subtract_bwd_hook)
+    if x.requires_grad:
+        x.register_hook(safe_lse_bwd_hook)
 
-    return (a - b).masked_fill(two_neg_inf_mask, float("-inf"))
+    lse = torch.logsumexp(x, dim=dim, keepdim=keepdim)
+
+    return lse.masked_fill(all_neg_inf_mask, float("-inf"))
 
 
 def safe_softmax(
@@ -112,7 +133,7 @@ def sink_bwd(
     # where sink.shape = [nhq, sq, s_sink]
     #       lse.shape = [nhq, sq, 1]
     #       p_sink.shape = [nhq, sq, s_sink]
-    p_sink = torch.exp(sink - lse)
+    p_sink = safe_softmax(sink, lse)
 
     # calculate dsink = p_sink.T x -delta
     # where p_sink.shape = [nhq, sq, s_sink]

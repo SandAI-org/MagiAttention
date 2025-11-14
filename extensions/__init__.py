@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
+from .fa3_interface_with_sink import (
+    fa3_func_with_sink,
+    fa3_qkvpacked_func_with_sink,
+    fa3_varlen_func_with_sink,
+)
 
-# Enable sanity check in every unitest by default
-os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "1"
-
-# Enable verbose building magi_attention in every unitest by default
-os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
-
-# Enable sum-reduction of dsink in every unitest by default
-os.environ["MAGI_ATTENTION_DSINK_ALL_REDUCE_OP"] = "sum"
+__all__ = [
+    "fa3_func_with_sink",
+    "fa3_varlen_func_with_sink",
+    "fa3_qkvpacked_func_with_sink",
+]

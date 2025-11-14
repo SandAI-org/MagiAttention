@@ -3,6 +3,54 @@
 In **MagiAttention**, many features need to be configured through environment variables. Below are some environment variables that can be set, along with their descriptions.
 
 
+## For Correctness
+
+**MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE**
+
+Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial out during dist-attn forward
+to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
+
+```{note}
+1. Inside the ffa forward kernel, we always use high-precision (fp32) accumulation for partial out.
+
+2. We always use high-precision (fp32) lse everywhere.
+
+3. This feature works for out only when enabling qo comm.
+```
+
+
+**MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE**
+
+Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial dq,dk,dv during dist-attn backward
+to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
+
+```{note}
+1. Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dq,dk,dv.
+
+2. This feature works for dq only when enabling qo comm.
+```
+
+
+**MAGI_ATTENTION_DSINK_ALL_REDUCE_OP**
+
+Set the value of this env variable to control the all-reduce op for sink gradients within `dist_attn_func` when involving attention sink. The default value is `none`. And options are within {`none`, `sum`, `avg`}.
+
+
+```{note}
+For now we only accept global replicated sink tensor as input to feed into `dist_attn_func`, and the gradients of sink in each cp rank are partial and requires to be sum-reduced across cp ranks.
+
+However, since sink tensor is learnable, it will be considered as a regular parameter in the model similar to `bias` in `nn.Linear` layer.
+
+So under some popular training frameworks, such as Megatron-LM, FSDP, the sum-reduction across cp ranks of the partial gradients of sink might be automatically applied within the whole `dp x cp` mesh.
+
+To avoid repeated reduction, we provide this environment variable to specify the all-reduce op for sink gradients within `dist_attn_func`, whose default value is `none` to NOT apply any reduction to sink gradients by `dist_attn_func` and let the framework handle it.
+
+However, under the scenarios w/o any framework mechanism to reduce parameters across cp ranks, you have to specify this environment variable to `sum`.
+
+And sometimes, `avg` might also be an option when you need to scale the sink gradients by `1/cp`.
+```
+
+
 ## For Performance
 
 **MAGI_ATTENTION_HIERARCHICAL_COMM**
@@ -41,32 +89,6 @@ Toggle this env variable to `1` to enable native kernel implementation for group
 ```{note}
 This feature is experimental and under early development for now, and not compatible with many other features,
 thus please do NOT enable it unless you know exactly what you are doing.
-```
-
-
-**MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE**
-
-Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial out during dist-attn forward
-to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
-
-```{note}
-1. Inside the ffa forward kernel, we always use high-precision (fp32) accumulation for partial out.
-
-2. We always use high-precision (fp32) lse everywhere.
-
-3. This feature works for out only when enabling qo comm.
-```
-
-
-**MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE**
-
-Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial dq,dk,dv during dist-attn backward
-to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
-
-```{note}
-1. Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dq,dk,dv.
-
-2. This feature works for dq only when enabling qo comm.
 ```
 
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**

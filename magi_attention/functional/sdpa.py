@@ -19,7 +19,13 @@ from einops import reduce
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import get_attn_mask_from_ffa_args, to_higher_fp_dtype
 
-from .utils import correct_attn_out_lse_with_sink, safe_softmax, sink_bwd, softmax_bwd
+from .utils import (
+    correct_attn_out_lse_with_sink,
+    safe_lse,
+    safe_softmax,
+    sink_bwd,
+    softmax_bwd,
+)
 
 __all__ = [
     "sdpa_fwd",
@@ -99,10 +105,7 @@ def sdpa_fwd_calc(
     )
     attn_weight += attn_bias
 
-    # NOTE: this lse is numerically stabilized according to
-    # https://pytorch.org/docs/stable/generated/torch.logsumexp.html#torch-logsumexp
-    # and `-inf` will result in `-inf` correctly as well
-    lse = torch.logsumexp(attn_weight, dim=-1, keepdim=True)
+    lse = safe_lse(attn_weight, dim=-1, keepdim=True)
 
     # NOTE: pytorch softmax has many limitations and bugs
     # thus we use our own safe_softmax with lse involved

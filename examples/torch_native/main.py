@@ -25,19 +25,13 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Partial, Shard, distribute_tensor
 from torch.optim.lr_scheduler import LinearLR
 
-from magi_attention.api import magi_attn_varlen_dispatch, undispatch
-from magi_attention.api.functools import (
+from magi_attention.api import (
+    DistAttnConfig,
     compute_pad_size,
     infer_varlen_mask_from_batch,
+    magi_attn_varlen_dispatch,
     squash_batch_dim,
-)
-from magi_attention.common.enum import AttnOverlapMode
-from magi_attention.config import (
-    DispatchConfig,
-    DistAttnConfig,
-    MinHeapDispatchAlg,
-    OverlapConfig,
-    UniformOverlapAlg,
+    undispatch,
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeKey
 
@@ -247,20 +241,7 @@ def prepare_data(device_mesh, train_iter):
 def prepare_magi_attention(input, cu_seqlens_q, cu_seqlens_k, pad_size, cp_group):
     # ---   magi_attn_flex_dispatch   --- #
     # an example of distattnconfig
-    dist_attn_config = DistAttnConfig(
-        dispatch_config=DispatchConfig(alg=MinHeapDispatchAlg()),
-        overlap_config=OverlapConfig(
-            enable=True,
-            mode=AttnOverlapMode.STATIC,
-            degree=4,
-            min_chunk_size=13,
-            max_num_chunks=52,
-            alg=UniformOverlapAlg(
-                random_costs=True,
-                random_seed=42,
-            ),
-        ),
-    )
+    dist_attn_config = DistAttnConfig()
 
     # you can also use fa_varlen-like varlen dispatch interface directly
     x_padded, dist_attn_runtime_key = magi_attn_varlen_dispatch(
