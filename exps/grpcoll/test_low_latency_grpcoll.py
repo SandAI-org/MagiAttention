@@ -34,8 +34,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+# mypy: disable-error-code="union-attr,index"
 import argparse
-import os
 import random
 from functools import partial
 
@@ -44,7 +44,7 @@ import torch.distributed as dist
 
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
-from magi_attention.comm.primitive.grpcoll.utils import unpermute_tensor
+from magi_attention.comm.primitive.grpcoll.utils import unpermute_output
 
 # isort: split
 from grpcoll_utils import (
@@ -58,7 +58,7 @@ from grpcoll_utils import (
     init_dist,
     per_token_cast_back,
     sim_gemm,
-    transfer_group_cast_meta_to_dispatch_meta,
+    transfer_native_group_cast_meta,
 )
 
 
@@ -170,7 +170,7 @@ def test_main(
         _,  # num_tokens_per_expert
         range_gather_post_dispatch_kwargs,
         _,  # range_gather_pre_combine_kwargs
-    ) = transfer_group_cast_meta_to_dispatch_meta(
+    ) = transfer_native_group_cast_meta(
         rank=rank,
         num_ranks=num_ranks,
         num_nodes=1,
@@ -254,7 +254,7 @@ def test_main(
                                 round_scale=round_scale,
                                 use_ue8m0=use_ue8m0,
                                 cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
-                                async_finish=not return_recv_hook,
+                                async_op=not return_recv_hook,
                                 return_recv_hook=return_recv_hook,
                             )
 
@@ -294,8 +294,8 @@ def test_main(
                         # output_split_size_list and src_index_list
                         if random_permute_output:
                             recv_x_before_rg = recv_x.clone()
-                            recv_x = unpermute_tensor(
-                                tensor=recv_x,
+                            recv_x = unpermute_output(
+                                output=recv_x,
                                 unperm_after_a2a_kwargs=range_gather_post_dispatch_kwargs,
                             )
                             assert recv_x_before_rg.shape == recv_x.shape
@@ -321,7 +321,7 @@ def test_main(
                         )
                         all_topk_idx = torch.empty(
                             (num_ranks, num_tokens, num_topk),
-                            dtype=topk_idx.dtype,  # type: ignore[union-attr]
+                            dtype=topk_idx.dtype,
                             device="cuda",
                         )
                         dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
@@ -418,7 +418,7 @@ def test_main(
                                 topk_weights,
                                 handle,
                                 use_logfmt=use_logfmt,
-                                async_finish=not return_recv_hook,
+                                async_op=not return_recv_hook,
                                 zero_copy=zero_copy,
                                 return_recv_hook=return_recv_hook,
                                 out=out,
@@ -469,7 +469,7 @@ def test_main(
             num_experts,
             cumulative_local_expert_recv_stats=cumulative_local_expert_recv_stats,
             use_fp8=True,
-            async_finish=False,
+            async_op=False,
             return_recv_hook=return_recv_hook,
         )
         large_gemm_with_hook(hook) if return_recv_hook else None
@@ -487,7 +487,7 @@ def test_main(
     num_fp8_bytes, num_bf16_bytes = (hidden + hidden / 128 * 4 + 16), hidden * 2
     num_dispatch_comm_bytes, num_combine_comm_bytes = 0, 0
     for i in range(num_tokens):
-        num_selections = (topk_idx[i] != -1).sum().item()  # type: ignore[index]
+        num_selections = (topk_idx[i] != -1).sum().item()
         num_dispatch_comm_bytes += num_fp8_bytes * num_selections
         num_combine_comm_bytes += num_bf16_bytes * num_selections
 
@@ -547,7 +547,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     assert num_topk <= 9  # kNumMaxTopK = 9
     num_local_experts = num_experts // num_ranks
     num_qps_per_rank = num_local_experts
-    allow_nvlink = os.environ.get("GRPCOLL_TEST_LOW_LATENCY_ALLOW_NVLINK", "1") == "1"
+    allow_nvlink = True
 
     num_device_sms = 132  # for Hopper
     num_warp_groups = (num_experts + num_device_sms - 1) // num_device_sms

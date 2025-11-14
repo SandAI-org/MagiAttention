@@ -38,6 +38,9 @@ def a2av_group_cast_impl(
     src_index: list[int],
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -54,6 +57,9 @@ def a2av_group_cast_impl(
     src_index: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -69,19 +75,28 @@ def a2av_group_cast_impl(
     src_index: list[int] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Group-cast implementation based on all2all_v"""
+
     # ---------    check     --------- #
 
     # check functionalities
-    assert output is not None, "A2A-based group-cast only supports output is given"
+    assert output is not None, "A2A-based group-cast only supports output to be given"
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_indices, src_index], list
     ), (
-        "This API only supports host meta interface, "
+        "A2A-based group-cast only supports host meta interface, "
         "thus the input_split_sizes, output_split_sizes, dst_indices, src_index should all be list type"
     )
+    if cast_lse:
+        assert input_lse is not None and output_lse is not None, (
+            "A2A-based group-cast only supports input_lse and output_lse to be given"
+            "if cast_lse is True"
+        )
 
     # check shapes
     assert len(input_split_sizes) == len(dst_indices), (
@@ -103,8 +118,6 @@ def a2av_group_cast_impl(
 
     # ---------    calc group cast a2a args     --------- #
 
-    world_size = dist.get_world_size(group)
-
     (
         a2a_output,
         a2a_input,
@@ -118,20 +131,46 @@ def a2av_group_cast_impl(
         output_split_size_list=output_split_sizes,
         dst_indices_list=dst_indices,
         src_index_list=src_index,
-        world_size=world_size,
+        world_size=dist.get_world_size(group),
+        cast_lse=cast_lse,
+        input_lse=input_lse,
+        output_lse=output_lse,
         **kwargs,
     )
 
     # ---------    lauch a2a comm kernel     --------- #
 
-    work = all2all_v(
-        input=a2a_input,
-        output=a2a_output,
-        input_split_size_list=a2a_input_split_size_list,
-        output_split_size_list=a2a_output_split_size_list,
-        group=group,
-        async_op=async_op,
-    )
+    if cast_lse:
+        # NOTE: we can not fuse lse comm with out comm based on nccl APIs
+        # due to different shape and dtype
+        a2a_input, a2a_input_lse = a2a_input
+        a2a_output, a2a_output_lse = a2a_output
+        work_out = all2all_v(
+            input=a2a_input,
+            output=a2a_output,
+            input_split_size_list=a2a_input_split_size_list,
+            output_split_size_list=a2a_output_split_size_list,
+            group=group,
+            async_op=async_op,
+        )
+        work_lse = all2all_v(
+            input=a2a_input_lse,
+            output=a2a_output_lse,
+            input_split_size_list=a2a_input_split_size_list,
+            output_split_size_list=a2a_output_split_size_list,
+            group=group,
+            async_op=async_op,
+        )
+        work = [work_out, work_lse]
+    else:
+        work = all2all_v(
+            input=a2a_input,
+            output=a2a_output,
+            input_split_size_list=a2a_input_split_size_list,
+            output_split_size_list=a2a_output_split_size_list,
+            group=group,
+            async_op=async_op,
+        )
 
     return WorkWithPostProcessFn(
         work=GeneralWork(work=work),
@@ -156,6 +195,7 @@ def a2av_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -176,6 +216,7 @@ def a2av_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -195,11 +236,13 @@ def a2av_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Group-reduce implementation based on all2all_v"""
+
     # ---------    check     --------- #
 
     # check functionalities
@@ -209,9 +252,12 @@ def a2av_group_reduce_impl(
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_index, src_indices], list
     ), (
-        "This API only supports host meta interface, "
+        "A2A-based group-reduce only supports host meta interface, "
         "thus the input_split_sizes, output_split_sizes, dst_index, src_indice should all be list type"
     )
+    assert (
+        comm_dtype is None or comm_dtype == input.dtype
+    ), "A2A-based group-reduce dose not support comm_dtype different from input.dtype"
 
     # check shapes
     assert len(input_split_sizes) == len(dst_index), (
@@ -233,8 +279,6 @@ def a2av_group_reduce_impl(
 
     # ---------    calc group reduce a2a args     --------- #
 
-    world_size = dist.get_world_size(group)
-
     (
         a2a_output,
         a2a_input,
@@ -248,7 +292,7 @@ def a2av_group_reduce_impl(
         output_split_size_list=output_split_sizes,
         dst_index_list=dst_index,
         src_indices_list=src_indices,
-        world_size=world_size,
+        world_size=dist.get_world_size(group),
         reduce_op=reduce_op,
         input_lse=input_lse,
         output_lse=output_lse,
@@ -258,8 +302,8 @@ def a2av_group_reduce_impl(
     # ---------    lauch a2a comm kernel     --------- #
 
     if reduce_op == "lse":
-        # FIXME: for now, we can not fuse lse comm with out comm
-        # due to different shape and dtype, which should be considered and fixed in the future
+        # NOTE: we can not fuse lse comm with out comm based on nccl APIs
+        # due to different shape and dtype
         a2a_input, a2a_input_lse = a2a_input
         a2a_output, a2a_output_lse = a2a_output
         work_out = all2all_v(

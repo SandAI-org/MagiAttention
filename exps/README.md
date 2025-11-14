@@ -89,12 +89,32 @@ bash run_benchmark.sh
 
 ### Native Group Collective Integration Tests and Performance Tuning
 
-TODO ... (add more instructions to reproduce the experiments)
-
 basic running command:
 
 ```bash
 cd exps/grpcoll
 
+# by default, this test only runs the intra-node mode
+# and if you want to test other modes,
+# you can create a `.env` file
+# and add `TEST_MODE=xxx` into it, where xxx is one of `intra_node`, `inter_node`, `low_latency`
+
+# As for testing inter-node mode,
+# you also need to add your own master node IP `MASTER_ADDR=xxx` into the `.env` file
+# and pass the node rank as the first argument of the following command, e.g. `bash run_grpcoll_test.sh $NODE`
+
 bash run_grpcoll_test.sh
+```
+
+
+### Device All-to-All-V PoC Test
+
+TODO ... (add more instructions to reproduce the experiments)
+
+basic running command:
+
+```bash
+cd exps/device_a2av
+
+bash run.sh
 ```

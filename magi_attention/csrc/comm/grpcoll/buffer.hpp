@@ -51,10 +51,13 @@
 #include <tuple>
 #include <vector>
 
-#include "config.hpp"
-#include "event.hpp"
+#include "kernels/api.cuh"
 #include "kernels/configs.cuh"
 #include "kernels/exception.cuh"
+#include "kernels/reduce_op.cuh"
+
+#include "config.hpp"
+#include "event.hpp"
 #include "meta.hpp"
 
 #ifndef TORCH_EXTENSION_NAME
@@ -64,7 +67,7 @@
 namespace magi_attn_comm::grpcoll {
 
 struct Buffer {
-  EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 8, "The number of maximum NVLink peers must be 8");
+  GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 8, "The number of maximum NVLink peers must be 8");
 
  private:
   // Low-latency mode buffer
@@ -105,16 +108,21 @@ struct Buffer {
   // Workspace
   void* workspace = nullptr;
 
-  // Host-side MoE info
-  volatile int* moe_recv_counter = nullptr;
-  int* moe_recv_counter_mapped = nullptr;
+  // Host-side rank-level counter for num_recv_tokens_this_rank
+  volatile int* grpcoll_recv_counter = nullptr;
+  // Device-side rank-level mapped counter for num_recv_tokens_this_rank
+  int* grpcoll_recv_counter_mapped = nullptr;
 
-  // Host-side expert-level MoE info
+  // TODO: remove this counter
+  // Host-side expert-level counter for num_recv_tokens_per_local_expert_this_rank
   volatile int* moe_recv_expert_counter = nullptr;
+  // Device-side expert-level mapped counter for num_recv_tokens_per_local_expert_this_rank
   int* moe_recv_expert_counter_mapped = nullptr;
 
-  // Host-side RDMA-level MoE info
+  // TODO: rename this counter
+  // Host-side RDMA-level counter for num_recv_tokens_this_node
   volatile int* moe_recv_rdma_counter = nullptr;
+  // Device-side RDMA-level mapped counter for num_recv_tokens_this_node
   int* moe_recv_rdma_counter_mapped = nullptr;
 
  public:
@@ -149,51 +157,70 @@ struct Buffer {
 
   void destroy();
 
-  std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>> get_dispatch_layout(
-      const torch::Tensor& topk_idx,
-      int num_experts,
+  std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> get_group_cast_meta(
+      const torch::Tensor& t2r_idx,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_comm_stream);
 
   std::tuple<
+      /* 1st group of output data */
       torch::Tensor,
       std::optional<torch::Tensor>,
+      /* 2nd group of output data */
       std::optional<torch::Tensor>,
+      /* 3rd group of output data */
       std::optional<torch::Tensor>,
-      std::vector<int>,
+      /* handle */
       torch::Tensor,
       torch::Tensor,
       torch::Tensor,
       torch::Tensor,
       torch::Tensor,
+      /* event */
       std::optional<EventHandle>>
-  intranode_dispatch(
+  intranode_group_cast(
+      /* 1st group of input / output data*/
       const torch::Tensor& x,
       std::optional<torch::Tensor>& recv_x_buf,
-      const std::optional<torch::Tensor>& x_scales,
-      const std::optional<torch::Tensor>& topk_idx,
-      const std::optional<torch::Tensor>& topk_weights,
+      const std::optional<torch::Tensor>& lse,
+      std::optional<torch::Tensor>& recv_lse_buf,
+      /* 2nd group of input / output data*/
+      const std::optional<torch::Tensor>& x_2nd,
+      std::optional<torch::Tensor>& recv_x_buf_2nd,
+      /* 3rd group of input / output data*/
+      const std::optional<torch::Tensor>& x_3rd,
+      std::optional<torch::Tensor>& recv_x_buf_3rd,
+      /* other metadata */
       const std::optional<torch::Tensor>& num_tokens_per_rank,
       const torch::Tensor& is_token_in_rank,
-      const std::optional<torch::Tensor>& num_tokens_per_expert,
       int cached_num_recv_tokens,
       const std::optional<torch::Tensor>& cached_rank_prefix_matrix,
       const std::optional<torch::Tensor>& cached_channel_prefix_matrix,
       const std::optional<torch::Tensor>& post_perm_idx,
-      int expert_alignment,
-      int num_worst_tokens,
       const Config& config,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_comm_stream);
 
-  std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> intranode_combine(
+  std::tuple<
+      /* 1st group of output data */
+      torch::Tensor,
+      std::optional<torch::Tensor>,
+      /* 2nd group of output data */
+      std::optional<torch::Tensor>,
+      /* event */
+      std::optional<EventHandle>>
+  intranode_group_reduce(
+      /* 1st group of input / output data*/
       const torch::Tensor& x,
-      std::optional<torch::Tensor>& combined_x_buf,
-      const std::optional<torch::Tensor>& topk_weights,
-      const std::optional<torch::Tensor>& bias_0,
-      const std::optional<torch::Tensor>& bias_1,
+      std::optional<torch::Tensor>& reduced_x_buf,
+      const std::optional<torch::Tensor>& lse,
+      std::optional<torch::Tensor>& reduced_lse_buf,
+      /* 2nd group of input / output data*/
+      const std::optional<torch::Tensor>& x_2nd,
+      std::optional<torch::Tensor>& reduced_x_buf_2nd,
+      /* other metadata */
       const std::optional<torch::Tensor>& pre_perm_idx,
       const torch::Tensor& src_idx,
       const torch::Tensor& rank_prefix_matrix,
@@ -201,18 +228,15 @@ struct Buffer {
       const torch::Tensor& send_head,
       const Config& config,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_comm_stream,
-      int reduce_op,
+      const std::string& reduce_op,
       bool acc_reduce,
-      bool allow_empty_init_out_buf);
+      std::optional<c10::ScalarType> comm_dtype);
 
   std::tuple<
       torch::Tensor,
-      std::optional<torch::Tensor>,
-      std::optional<torch::Tensor>,
-      std::optional<torch::Tensor>,
-      std::vector<int>,
+      /* handle */
       torch::Tensor,
       torch::Tensor,
       std::optional<torch::Tensor>,
@@ -222,8 +246,9 @@ struct Buffer {
       std::optional<torch::Tensor>,
       std::optional<torch::Tensor>,
       std::optional<torch::Tensor>,
+      /* event */
       std::optional<EventHandle>>
-  internode_dispatch(
+  internode_group_cast(
       const torch::Tensor& x,
       std::optional<torch::Tensor>& recv_x_buf,
       const std::optional<torch::Tensor>& x_scales,
@@ -239,13 +264,12 @@ struct Buffer {
       const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
       const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix,
       const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
-      int expert_alignment,
       const Config& config,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_comm_stream);
 
-  std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>> internode_combine(
+  std::tuple<torch::Tensor, std::optional<EventHandle>> internode_group_reduce(
       const torch::Tensor& x,
       std::optional<torch::Tensor>& combined_x_buf,
       const std::optional<torch::Tensor>& topk_weights,
@@ -260,11 +284,10 @@ struct Buffer {
       const torch::Tensor& combined_nvl_head,
       const Config& config,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_comm_stream,
-      int reduce_op,
-      bool acc_reduce,
-      bool allow_empty_init_out_buf);
+      const std::string& reduce_op,
+      bool acc_reduce);
 
   void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 
@@ -278,7 +301,7 @@ struct Buffer {
       bool use_fp8,
       bool round_scale,
       bool use_ue8m0,
-      bool async,
+      bool async_op,
       bool return_recv_hook);
 
   std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>> low_latency_combine(
@@ -291,7 +314,7 @@ struct Buffer {
       int num_experts,
       bool use_logfmt,
       bool zero_copy,
-      bool async,
+      bool async_op,
       bool return_recv_hook,
       const std::optional<torch::Tensor>& out = std::nullopt);
 

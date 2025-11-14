@@ -46,6 +46,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
     const at::Tensor& q_ranges,
@@ -72,7 +73,10 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
   int const head_size = q.size(2);
+  int const total_sink = sink_.has_value() ? sink_->size(0) : 0;
+  auto opts = q.options();
 
+  // Check q, k, v (dtype, device, layout)
   auto q_type = q.scalar_type();
   TORCH_CHECK(q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16, "Flexible Flash Attention only supports fp16 and bf16 data type");
   TORCH_CHECK(k.scalar_type() == q_type, "query and key must have the same dtype");
@@ -94,6 +98,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   CHECK_CONTIGUOUS(q_ranges);
   CHECK_CONTIGUOUS(k_ranges);
 
+  // Init attn_type_map
   at::Tensor attn_type_map;
   bool const has_attn_type_map = attn_type_map_.has_value();
   if (has_attn_type_map) {
@@ -144,14 +149,12 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   TORCH_CHECK(head_size % 8 == 0, "head_size should be a multiple of 8");
   TORCH_CHECK(num_heads_qo % num_heads_kv == 0, "Number of heads in key/value must divide number of heads in query");
 
-  auto opts = q.options();
   // Define a helper function to round up to multiple of m
-  auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
   int const head_size_rounded = round_up_headdim(head_size);
-  int const total_q_rounded = round_multiple(total_q + 128 - 1, 128);
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
+  // Init softmax_lse tensors to return
   at::Tensor softmax_lse;
   // If softmax_lse is provided, check its dtype, device, and layout.
   // Otherwise, create a new tensor with the appropriate dtype and shape.
@@ -168,6 +171,20 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
   }
 
+  // Init optional sink
+  at::Tensor sink;
+  if (sink_.has_value()) {
+    sink = sink_.value();
+    TORCH_CHECK(sink.scalar_type() == at::kFloat, "sink must has dtype float");
+    CHECK_DEVICE(sink);
+    TORCH_CHECK(sink.dim() == 2, "sink must be 2D");
+    CHECK_SHAPE(sink, total_sink, num_heads_qo);
+    CHECK_CONTIGUOUS(sink);
+  } else {
+    // Create a dummy empty sink tensor with zero size
+    sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+  }
+
   // Determine the output type
   at::ScalarType out_type;
   if (out_type_.has_value())
@@ -178,9 +195,9 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     out_type = !disable_fwd_atomic_reduction ? at::kFloat : q_type; // Use float32 to ensure numerical stability when enable atomic reduction
   TORCH_CHECK(out_type == at::kFloat || out_type == at::kBFloat16 || out_type == at::kHalf);
 
-  // If the output tensor 'out' is provided, check its dtype, device, and
-  // layout. Otherwise, create a new output tensor with the appropriate dtype
-  // and shape.
+  // Init output tensors to return
+  // If the output tensor 'out' is provided, check its dtype, device, and layout.
+  // Otherwise, create a new output tensor with the appropriate dtype and shape.
   at::Tensor out;
   if (out_.has_value()) {
     out = out_.value();
@@ -218,7 +235,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       batch_size,
       total_q,
       total_k,
-      total_q_rounded,
+      total_sink,
       num_heads_qo,
       num_heads_kv,
       head_size,
@@ -226,24 +243,25 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       q,
       k,
       v,
+      sink,
       out,
-      /*q_ranges*/ q_ranges.data_ptr(),
-      /*k_ranges*/ k_ranges.data_ptr(),
-      /*range_locks*/ range_locks.data_ptr(),
-      /*deterministic*/ deterministic,
-      /*determin_range_locks*/ deterministic ? determin_range_locks.data_ptr() : nullptr,
-      /*determin_conflict_state*/ deterministic ? determin_conflict_state.data_ptr() : nullptr,
-      /*attn_type_map*/ has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
-      /*merge_batch_size*/ merge_batch_size,
-      /*merge_q_ranges*/ has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
-      /*qk_map*/ has_qk_map ? qk_map.data_ptr() : nullptr,
-      /*unique_count*/ has_unique_count ? unique_count.data_ptr() : nullptr,
-      /*softmax_lse*/ softmax_lse.data_ptr(),
-      /*softmax_scale*/ softmax_scale,
-      /*tile_count_semaphore*/ tile_count_semaphore.data_ptr(),
-      /*softcap*/ softcap,
-      /*sm_margin*/ sm_margin,
-      /*disable_fwd_atomic_reduction*/ disable_fwd_atomic_reduction);
+      /*q_ranges=*/q_ranges.data_ptr(),
+      /*k_ranges=*/k_ranges.data_ptr(),
+      /*range_locks=*/range_locks.data_ptr(),
+      /*deterministic=*/deterministic,
+      /*determin_range_locks=*/deterministic ? determin_range_locks.data_ptr() : nullptr,
+      /*determin_conflict_state=*/deterministic ? determin_conflict_state.data_ptr() : nullptr,
+      /*attn_type_map=*/has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
+      /*merge_batch_size=*/merge_batch_size,
+      /*merge_q_ranges=*/has_merge_q_ranges ? merge_q_ranges.data_ptr() : nullptr,
+      /*qk_map=*/has_qk_map ? qk_map.data_ptr() : nullptr,
+      /*unique_count=*/has_unique_count ? unique_count.data_ptr() : nullptr,
+      /*softmax_lse=*/softmax_lse.data_ptr(),
+      /*softmax_scale=*/softmax_scale,
+      /*tile_count_semaphore=*/tile_count_semaphore.data_ptr(),
+      /*softcap=*/softcap,
+      /*sm_margin=*/sm_margin,
+      /*disable_fwd_atomic_reduction=*/disable_fwd_atomic_reduction);
 
   return {params, out, softmax_lse};
 }

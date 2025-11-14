@@ -14,6 +14,8 @@
 
 from dataclasses import dataclass
 
+import torch
+
 
 class Config:
     ...
@@ -71,3 +73,100 @@ class GrpCollConfig:
             low_latency_mode=False,
             explicitly_destroy=True,
         )
+
+    @staticmethod
+    def get_default_group_cast_config(num_ranks: int) -> "GrpCollConfig":
+        """
+        Get a recommended dispatch config.
+
+        Argument:
+            num_ranks: the number of ranks.
+
+        Returns:
+            config: the recommended config.
+        """
+
+        # TODO: automatically tune
+        config_map = {
+            2: GrpCollConfig(24, 24, 256, 6, 128),
+            4: GrpCollConfig(24, 6, 256, 6, 128),
+            8: GrpCollConfig(24, 6, 256, 6, 128),
+            16: GrpCollConfig(24, 36, 288, 20, 128),
+            24: GrpCollConfig(24, 8, 288, 32, 128),
+            32: GrpCollConfig(24, 32, 288, 32, 128),
+            64: GrpCollConfig(24, 20, 288, 28, 128),
+            128: GrpCollConfig(24, 20, 560, 32, 128),
+            144: GrpCollConfig(24, 32, 720, 12, 128),
+            160: GrpCollConfig(24, 28, 720, 12, 128),
+        }
+        assert num_ranks in config_map, f"Unsupported number of ranks: {num_ranks}"
+        return config_map[num_ranks]
+
+    @staticmethod
+    def get_default_group_reduce_config(num_ranks: int) -> "GrpCollConfig":
+        """
+        Get a recommended combine config.
+
+        Argument:
+            num_ranks: the number of ranks.
+
+        Returns:
+            config: the recommended config.
+        """
+
+        # TODO: automatically tune
+        config_map = {
+            2: GrpCollConfig(24, 10, 256, 6, 128),
+            4: GrpCollConfig(24, 9, 256, 6, 128),
+            8: GrpCollConfig(24, 4, 256, 6, 128),
+            16: GrpCollConfig(24, 4, 288, 12, 128),
+            24: GrpCollConfig(24, 1, 288, 8, 128),
+            32: GrpCollConfig(24, 1, 288, 8, 128),
+            64: GrpCollConfig(24, 1, 288, 20, 128),
+            128: GrpCollConfig(24, 1, 560, 12, 128),
+            144: GrpCollConfig(24, 2, 720, 8, 128),
+            160: GrpCollConfig(24, 2, 720, 8, 128),
+        }
+        assert num_ranks in config_map, f"Unsupported number of ranks: {num_ranks}"
+        return config_map[num_ranks]
+
+    @staticmethod
+    def get_min_num_nvl_bytes(
+        num_sms: int,
+        num_ranks: int,
+        hidden_size: int,
+        nvl_buffer_size: int,
+        dtype: torch.dtype,
+        transfer_lse: bool = False,
+        num_heads: int | None = None,
+        num_groups: int = 1,
+    ) -> int:
+        if transfer_lse:
+            assert (
+                num_heads is not None
+            ), "num_heads must be set when transfer_lse is True"
+            assert (
+                hidden_size % num_heads == 0
+            ), "hidden_size must be divisible by num_heads"
+        else:
+            num_heads = 0
+
+        assert num_sms % 2 == 0, "num_sms must be even"
+        num_channels = num_sms // 2
+
+        # fmt: off
+        return (
+            # rank prefix matrix
+            num_ranks * num_ranks * torch.int32.itemsize
+            # channel start/end offset + queue head/tail
+            + num_channels * num_ranks * torch.int32.itemsize * 4
+            # token data buffer
+            + num_channels * num_ranks * nvl_buffer_size * hidden_size * dtype.itemsize * num_groups
+            # src idx
+            + num_channels * num_ranks * nvl_buffer_size * torch.int32.itemsize
+            # lse data buffer
+            + num_channels * num_ranks * nvl_buffer_size * num_heads * torch.float32.itemsize
+            # max padding bytes to align for vectorized token data buffer (int4)
+            + 16 * num_groups
+        )
+        # fmt: on

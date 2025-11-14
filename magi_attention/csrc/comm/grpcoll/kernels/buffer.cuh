@@ -42,10 +42,12 @@
 
 #include "configs.cuh"
 #include "exception.cuh"
+#include "utils.cuh"
 
 namespace magi_attn_comm::grpcoll {
 
-template <typename dtype_t>
+// TODO: support non-inplace updated template parameter
+template <typename dtype_t, size_t kAlignment = 1>
 struct Buffer {
  private:
   uint8_t* ptr;
@@ -53,24 +55,37 @@ struct Buffer {
  public:
   int total_bytes;
 
-  __device__ __forceinline__ Buffer() : ptr(nullptr), total_bytes(0) {}
+  DEVICE_INLINE Buffer() : ptr(nullptr), total_bytes(0) {}
 
-  __device__ __forceinline__ Buffer(void*& gbl_ptr, int num_elems, int offset = 0) {
-    total_bytes = num_elems * sizeof(dtype_t);
-    ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + offset * sizeof(dtype_t);
-    gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
+  DEVICE_INLINE Buffer(void*& gbl_ptr, int num_elems, int elem_offset = 0) {
+    total_bytes = num_elems * sizeof(dtype_t); // the total bytes of this block
+    ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + elem_offset * sizeof(dtype_t); // the start ptr within this block
+
+    // advance `ptr` to align the address to `kAlignment` bytes if necessary
+    size_t pad_bytes_to_align = 0;
+    if constexpr (kAlignment > 1) {
+      auto ptr_addr = reinterpret_cast<size_t>(ptr);
+      pad_bytes_to_align = ptr_addr % kAlignment;
+      if (pad_bytes_to_align != 0)
+        pad_bytes_to_align = kAlignment - pad_bytes_to_align;
+      ptr += pad_bytes_to_align;
+    }
+
+    // In-place advance the `gbl_ptr` across this block
+    // and further advance the pad bytes as the `ptr` if necessary
+    gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes + pad_bytes_to_align;
   }
 
-  __device__ __forceinline__ Buffer advance_also(void*& gbl_ptr) {
+  DEVICE_INLINE Buffer advance_also(void*& gbl_ptr) {
     gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
     return *this;
   }
 
-  __device__ __forceinline__ dtype_t* buffer() {
+  DEVICE_INLINE dtype_t* buffer() {
     return reinterpret_cast<dtype_t*>(ptr);
   }
 
-  __device__ __forceinline__ dtype_t& operator[](int idx) {
+  DEVICE_INLINE dtype_t& operator[](int idx) {
     return buffer()[idx];
   }
 };
@@ -84,8 +99,8 @@ struct AsymBuffer {
  public:
   int total_bytes;
 
-  __device__ __forceinline__ AsymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
-    EP_STATIC_ASSERT(kNumRanks == 1, "");
+  DEVICE_INLINE AsymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
+    GRPCOLL_STATIC_ASSERT(kNumRanks == 1, "");
     num_bytes = num_elems * sizeof(dtype_t);
 
     int per_channel_bytes = num_bytes * num_ranks;
@@ -94,8 +109,8 @@ struct AsymBuffer {
     gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
   }
 
-  __device__ __forceinline__ AsymBuffer(void** gbl_ptrs, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
-    EP_STATIC_ASSERT(kNumRanks > 1, "");
+  DEVICE_INLINE AsymBuffer(void** gbl_ptrs, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
+    GRPCOLL_STATIC_ASSERT(kNumRanks > 1, "");
     num_bytes = num_elems * sizeof(dtype_t);
 
     int per_channel_bytes = num_bytes * num_ranks;
@@ -106,31 +121,31 @@ struct AsymBuffer {
     }
   }
 
-  __device__ __forceinline__ void advance(int shift) {
+  DEVICE_INLINE void advance(int shift) {
 #pragma unroll
     for (int i = 0; i < kNumRanks; ++i)
       ptrs[i] = ptrs[i] + shift * sizeof(dtype_t);
   }
 
-  __device__ __forceinline__ AsymBuffer advance_also(void*& gbl_ptr) {
+  DEVICE_INLINE AsymBuffer advance_also(void*& gbl_ptr) {
     gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
     return *this;
   }
 
   template <int kNumAlsoRanks>
-  __device__ __forceinline__ AsymBuffer advance_also(void** gbl_ptrs) {
+  DEVICE_INLINE AsymBuffer advance_also(void** gbl_ptrs) {
     for (int i = 0; i < kNumAlsoRanks; ++i)
       gbl_ptrs[i] = reinterpret_cast<uint8_t*>(gbl_ptrs[i]) + total_bytes;
     return *this;
   }
 
-  __device__ __forceinline__ dtype_t* buffer(int idx = 0) {
-    EP_STATIC_ASSERT(kNumRanks == 1, "`buffer` is only available for single rank case");
+  DEVICE_INLINE dtype_t* buffer(int idx = 0) {
+    GRPCOLL_STATIC_ASSERT(kNumRanks == 1, "`buffer` is only available for single rank case");
     return reinterpret_cast<dtype_t*>(ptrs[0] + num_bytes * idx);
   }
 
-  __device__ __forceinline__ dtype_t* buffer_by(int rank_idx, int idx = 0) {
-    EP_STATIC_ASSERT(kNumRanks > 1, "`buffer` is only available for single rank case");
+  DEVICE_INLINE dtype_t* buffer_by(int rank_idx, int idx = 0) {
+    GRPCOLL_STATIC_ASSERT(kNumRanks > 1, "`buffer` is only available for single rank case");
     return reinterpret_cast<dtype_t*>(ptrs[rank_idx] + num_bytes * idx);
   }
 };
@@ -146,7 +161,7 @@ struct SymBuffer {
  public:
   int total_bytes;
 
-  __device__ __forceinline__ SymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1) {
+  DEVICE_INLINE SymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1) {
     num_bytes = num_elems * sizeof(dtype_t);
 
     int per_channel_bytes = num_bytes * num_ranks;
@@ -156,18 +171,18 @@ struct SymBuffer {
     gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
   }
 
-  __device__ __forceinline__ dtype_t* send_buffer(int idx = 0) {
-    EP_STATIC_ASSERT(kDecoupled, "`send_buffer` is only available for non-decoupled case");
+  DEVICE_INLINE dtype_t* send_buffer(int idx = 0) {
+    GRPCOLL_STATIC_ASSERT(kDecoupled, "`send_buffer` is only available for non-decoupled case");
     return reinterpret_cast<dtype_t*>(send_ptr + num_bytes * idx);
   }
 
-  __device__ __forceinline__ dtype_t* recv_buffer(int idx = 0) {
-    EP_STATIC_ASSERT(kDecoupled, "`recv_buffer` is only available for non-decoupled case");
+  DEVICE_INLINE dtype_t* recv_buffer(int idx = 0) {
+    GRPCOLL_STATIC_ASSERT(kDecoupled, "`recv_buffer` is only available for non-decoupled case");
     return reinterpret_cast<dtype_t*>(recv_ptr + num_bytes * idx);
   }
 
-  __device__ __forceinline__ dtype_t* buffer(int idx = 0) {
-    EP_STATIC_ASSERT(not kDecoupled, "`buffer` is only available for decoupled case");
+  DEVICE_INLINE dtype_t* buffer(int idx = 0) {
+    GRPCOLL_STATIC_ASSERT(not kDecoupled, "`buffer` is only available for decoupled case");
     return reinterpret_cast<dtype_t*>(send_ptr + num_bytes * idx);
   }
 };

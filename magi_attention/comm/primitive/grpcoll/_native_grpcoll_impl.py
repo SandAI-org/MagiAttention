@@ -18,7 +18,7 @@ import torch
 import torch.distributed as dist
 
 from magi_attention.common.enum import GroupReduceOp
-from magi_attention.utils import nvtx
+from magi_attention.utils import nvtx, wrap_to_list
 
 from ...work import GeneralWork, WorkWithPostProcessFn
 from ._buffer import GrpCollBuffer
@@ -27,8 +27,8 @@ from ._handle import GrpCollHandle
 from ._mgr import grpcoll_mgr
 from .utils import (
     get_a2av_perm_idxs_from_group_cast_meta,
-    get_dispatch_layout_from_group_cast_meta,
     get_group_reduce_handle_from_sym_group_cast,
+    get_native_group_cast_meta,
     maybe_lazy_init_buffer,
 )
 
@@ -52,6 +52,9 @@ def native_group_cast_impl(
     src_index: list[int],
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -68,6 +71,9 @@ def native_group_cast_impl(
     src_index: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -83,6 +89,9 @@ def native_group_cast_impl(
     src_index: list[int] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Native group-cast implementation"""
@@ -94,10 +103,17 @@ def native_group_cast_impl(
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
     assert config is not None and buffer is not None
 
+    # pack input and output
+    input: list[torch.Tensor] = wrap_to_list(input)
+    output: list[torch.Tensor] | None = (
+        wrap_to_list(output) if output is not None else output
+    )
+    num_groups = len(input)
+
     # get meta dict and handle
-    input_seqlen: int = input.size(0)
+    input_seqlen: int = input[0].size(0)
     output_seqlen: int | None = (
-        output.size(0) if output is not None else kwargs.pop("output_seqlen", None)
+        output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
     meta_dict: dict[str, Any] = kwargs.pop("native_group_cast_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
@@ -108,23 +124,21 @@ def native_group_cast_impl(
         num_tokens_per_rank = meta_dict["num_tokens_per_rank"]
         num_tokens_per_rdma_rank = meta_dict["num_tokens_per_rdma_rank"]
         is_token_in_rank = meta_dict["is_token_in_rank"]
-        num_tokens_per_expert = meta_dict["num_tokens_per_expert"]
         post_perm_idx = meta_dict["post_perm_idx"]
     else:
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
-        ) = get_dispatch_layout_from_group_cast_meta(
+        ) = get_native_group_cast_meta(
             input_split_sizes=input_split_sizes,
             dst_indices=dst_indices,
             group=group,
             input_seqlen=input_seqlen,
-            # HACK: leave a slot for topk_idx
+            # HACK: leave a slot for t2r_idx
             # since for now, we transfer the group_cast meta to it inside anyway
-            # which is helpful in the ep/nsa communication scenarios
-            topk_idx=kwargs.pop("topk_idx", None),
+            # which is helpful in the token-level communication scenarios such as ep, nsa
+            t2r_idx=kwargs.pop("t2r_idx", None),
         )
 
         # for group-cast, perm_to_a2av_idx is the post_perm_idx
@@ -138,25 +152,29 @@ def native_group_cast_impl(
     # launch dispatch kernel
     (
         recv_x,
-        _,  # recv_topk_idx
-        _,  # recv_topk_weights
-        _,  # recv_num_tokens_per_expert_list
+        recv_lse,
         handle,
         event,
-    ) = buffer.dispatch(
+    ) = buffer.group_cast(
         x=input,
         recv_x=output,
         handle=handle,
         num_tokens_per_rank=num_tokens_per_rank,
         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
         is_token_in_rank=is_token_in_rank,
-        num_tokens_per_expert=num_tokens_per_expert,
         post_perm_idx=post_perm_idx,
         config=config,
         previous_event=None,
-        async_finish=async_op,
+        async_op=async_op,
         allocate_on_comm_stream=False,
+        cast_lse=cast_lse,
+        lse=input_lse,
+        recv_lse=output_lse,
     )
+
+    # unpack recv_x
+    if num_groups == 1:
+        recv_x = recv_x[0]
 
     # HACK: prepare handle for symmetric group-reduce or cached group-cast
     handle_dict["group_cast"] = handle
@@ -165,7 +183,11 @@ def native_group_cast_impl(
     # prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(
         work=GeneralWork(event),
-        post_process_fn=lambda *args, **kwargs: recv_x,
+        post_process_fn=(
+            (lambda *args, **kwargs: (recv_x, recv_lse))
+            if cast_lse
+            else lambda *args, **kwargs: recv_x
+        ),
         async_op=async_op,
     )
 
@@ -188,6 +210,7 @@ def native_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -208,6 +231,7 @@ def native_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -227,6 +251,7 @@ def native_group_reduce_impl(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -240,10 +265,17 @@ def native_group_reduce_impl(
     buffer: GrpCollBuffer = grpcoll_mgr.get_buffer(group)
     assert config is not None and buffer is not None
 
+    # pack input and output
+    input: list[torch.Tensor] = wrap_to_list(input)
+    output: list[torch.Tensor] | None = (
+        wrap_to_list(output) if output is not None else output
+    )
+    num_groups = len(input)
+
     # get meta dict and handle
-    input_seqlen: int = input.size(0)
+    input_seqlen: int = input[0].size(0)
     output_seqlen: int | None = (
-        output.size(0) if output is not None else kwargs.pop("output_seqlen", None)
+        output[0].size(0) if output is not None else kwargs.pop("output_seqlen", None)
     )
     meta_dict: dict[str, Any] = kwargs.pop("native_group_reduce_meta_dict", {})
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
@@ -252,8 +284,8 @@ def native_group_reduce_impl(
         # FIXME: for now, we don't support individual group-reduce
         # since the necessary handle is not known until the symmetric group-cast returns
         handle = get_group_reduce_handle_from_sym_group_cast(
-            input=input,
-            output=output,
+            input=input[0],
+            output=output[0] if output is not None else None,
             input_split_sizes=input_split_sizes,
             output_split_sizes=output_split_sizes,
             dst_index=dst_index,
@@ -261,7 +293,7 @@ def native_group_reduce_impl(
             group=group,
             async_op=async_op,
             output_seqlen=output_seqlen,
-            topk_idx=kwargs.pop("topk_idx", None),
+            t2r_idx=kwargs.pop("t2r_idx", None),
         )
 
     # transfer symmetric group-cast meta args to dispatch meta args
@@ -278,30 +310,43 @@ def native_group_reduce_impl(
         )
 
     # launch combine kernel
-    combined_x, _, event = buffer.combine(
+    (
+        reduced_x,
+        reduced_lse,
+        event,
+    ) = buffer.group_reduce(
         x=input,
         handle=handle,
-        combined_x=output,
+        reduced_x=output,
         reduce_op=reduce_op,
         acc_reduce=acc_reduce,
         pre_perm_idx=pre_perm_idx,
         config=config,
         previous_event=None,
-        async_finish=async_op,
+        async_op=async_op,
         allocate_on_comm_stream=False,
-        allow_empty_init_out_buf=kwargs.pop("allow_empty_init_out_buf", False),
-        input_lse=input_lse,
-        output_lse=output_lse,
+        comm_dtype=comm_dtype,
+        lse=input_lse,
+        reduced_lse=output_lse,
     )
 
+    # unpack reduced_x
+    if num_groups == 1:
+        reduced_x = reduced_x[0]
+
     # HACK: prepare handle for symmetric group-cast or cached group-reduce
+    # REVIEW: should we empty the handle dict since the tensors in handle is inplace modified ?
     handle_dict["group_cast"] = handle
     handle_dict["group_reduce"] = handle
 
     # prepare work with post-process
     work_with_post_process_fn = WorkWithPostProcessFn(
         work=GeneralWork(event),
-        post_process_fn=lambda *args, **kwargs: combined_x,
+        post_process_fn=(
+            (lambda *args, **kwargs: (reduced_x, reduced_lse))
+            if reduce_op == "lse"
+            else lambda *args, **kwargs: reduced_x
+        ),
         async_op=async_op,
     )
 

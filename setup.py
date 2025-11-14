@@ -37,9 +37,11 @@ with open("./README.md", "r", encoding="utf-8") as fh:
 # Note: ninja build requires include_dirs to be absolute paths
 project_root = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_NAME = "magi_attention"
-NVIDIA_TOOLCHAIN_VERSION = {"nvcc": "12.6.85", "ptxas": "12.8.93"}
 exe_extension = sysconfig.get_config_var("EXE")
 USER_HOME = os.getenv("MAGI_ATTENTION_HOME")
+
+# For CUDA13.0: the cccl header path needs to be explicitly included
+CUDA13_CCCL_PATH = "/usr/local/cuda-13.0/include/cccl/"
 
 # For CI: allow forcing C++11 ABI to match NVCR images that use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
@@ -47,15 +49,24 @@ FORCE_CXX11_ABI = os.getenv("MAGI_ATTENTION_FORCE_CXX11_ABI", "0") == "1"
 # Skip building CUDA extension modules
 SKIP_CUDA_BUILD = os.getenv("MAGI_ATTENTION_SKIP_CUDA_BUILD", "0") == "1"
 
-# NOTE: this flag now only used for magi_attn_comm to disable sm90 features
+# NOTE: this flag now only works for `magi_attn_comm` to disable sm90 features
 # to be compatible with other architectures such as sm80
+# thus we won't put it into docs until all other extensions such as FFA supports architectures other than sm90
 DISABLE_SM90_FEATURES = os.getenv("MAGI_ATTENTION_DISABLE_SM90_FEATURES", "0") == "1"
+
+# NOTE: this flag now only works for `magi_attn_comm` to disable aggressive PTX instructions
+# such as LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
+# however, it is set default to `1` as `.L1::no_allocate` might not be safe to to load volatile data
+# according to this issue: https://github.com/deepseek-ai/DeepEP/issues/136
+# REVIEW: however, we well test it and find no correctness issue but a notable performance gain
+# so in the future we might need to dig deeper into this
+DISABLE_AGGRESSIVE_PTX_INSTRS = os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1") == "1"
 
 # We no longer build the flexible_flash_attention_cuda module
 # instead, we only pre-build some common options with ref_block_size=None if PREBUILD_FFA is True
 # and leave others built in jit mode
 PREBUILD_FFA = os.getenv("MAGI_ATTENTION_PREBUILD_FFA", "1") == "1"
-PREBUILD_FFA_JOBS = int(os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", "256"))
+PREBUILD_FFA_JOBS = int(os.getenv("MAGI_ATTENTION_PREBUILD_FFA_JOBS", "160"))
 
 # You can also set the flags below to skip building other ext modules
 SKIP_FFA_UTILS_BUILD = os.getenv("MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD", "0") == "1"
@@ -66,6 +77,7 @@ SKIP_MAGI_ATTN_COMM_BUILD = (
     os.getenv("MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD", "0") == "1"
 )
 
+# Defaults to enable verbose building magi_attention
 os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
 
 
@@ -152,9 +164,10 @@ def init_ext_modules() -> None:
     check_if_cuda_home_none(PACKAGE_NAME)
 
     _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-    assert bare_metal_version >= Version(
-        "12.8"
-    ), f"{PACKAGE_NAME} is only supported on CUDA 12.8 and above"
+    if bare_metal_version < Version("12.8"):
+        warnings.warn(
+            f"We recommend installing {PACKAGE_NAME} on well-tested CUDA 12.8 and above."
+        )
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
@@ -174,10 +187,12 @@ def build_ffa_utils_ext_module(
     sources = [
         f"{utils_dir_rel}/bindings.cpp",
         f"{utils_dir_rel}/unique_consecutive_pairs.cu",
+        f"{utils_dir_rel}/profile_utils.cu",
     ]
     include_dirs = [
         common_dir,
         utils_dir_abs,
+        CUDA13_CCCL_PATH,
     ]
 
     extra_compile_args = {
@@ -282,7 +297,7 @@ def build_magi_attn_comm_module(
     ]
 
     # init include dirs
-    include_dirs = [common_dir, grpcoll_dir_abs]
+    include_dirs = [CUDA13_CCCL_PATH, common_dir, grpcoll_dir_abs]
 
     # init extra compile args
     cxx_flags = [
@@ -295,11 +310,14 @@ def build_magi_attn_comm_module(
     ]
     nvcc_flags = [
         "-O3",
+        "-Xptxas",
+        "-v",
         "-Xcompiler",
-        "-O3",
+        "-std=c++17",
+        "-lineinfo",
         "-gencode",
-        "arch=compute_90,code=sm_90",
-    ]  # Explicitly specify sm_90
+        "arch=compute_90,code=sm_90",  # Explicitly specify sm_90
+    ]
 
     # extend flags, dirs and args
     library_dirs = []
@@ -327,31 +345,25 @@ def build_magi_attn_comm_module(
         )
 
     if DISABLE_SM90_FEATURES:
-        # Prefer A100
-        os.environ["TORCH_CUDA_ARCH_LIST"] = os.getenv("TORCH_CUDA_ARCH_LIST", "8.0")
-
-        # Disable some SM90 features: FP8, launch methods, and TMA
+        # Disable some SM90 features: FP8, launch methods, TMA
+        # as well as aggressive ptx instructions
         cxx_flags.append("-DDISABLE_SM90_FEATURES")
         nvcc_flags.append("-DDISABLE_SM90_FEATURES")
+        cxx_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
+        nvcc_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
 
         # Disable internode and low-latency kernels
         assert disable_nvshmem
     else:
-        # Prefer H800 series
-        os.environ["TORCH_CUDA_ARCH_LIST"] = os.getenv("TORCH_CUDA_ARCH_LIST", "9.0")
-
         # CUDA 12 flags
         nvcc_flags.extend(["-rdc=true", "--ptxas-options=--register-usage-level=10"])
 
-    # Disable LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
-    if os.environ["TORCH_CUDA_ARCH_LIST"].strip() != "9.0":
-        assert int(os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", 1)) == 1
-        os.environ["DISABLE_AGGRESSIVE_PTX_INSTRS"] = "1"
-
-    # Disable aggressive PTX instructions
-    if int(os.getenv("DISABLE_AGGRESSIVE_PTX_INSTRS", "1")):
-        cxx_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
-        nvcc_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
+        # Disable aggressive PTX instructions
+        # such as LD/ST tricks, as some CUDA version does not support `.L1::no_allocate`
+        # and `.L1::no_allocate` might not be safe to to load volatile data
+        if DISABLE_AGGRESSIVE_PTX_INSTRS:
+            cxx_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
+            nvcc_flags.append("-DDISABLE_AGGRESSIVE_PTX_INSTRS")
 
     # Put them together
     extra_compile_args = {
@@ -400,11 +412,12 @@ def prebuild_ffa_kernels() -> None:
     # determine the combinations of prebuild options
     directions = ["fwd", "bwd"]
     head_dims = [64, 128]
-    compute_dtypes = [torch.bfloat16, torch.float16]
-    out_dtypes = [torch.float32, torch.bfloat16, torch.float16]
+    compute_dtypes = [torch.float16, torch.bfloat16]
+    out_dtypes = [torch.float32, torch.float16, torch.bfloat16]
     softcaps = [False, True]
     disable_atomic_opts = [False, True]
     deterministics = [False, True]
+    profile_mode = [False]
 
     combos = itertools.product(
         directions,
@@ -414,11 +427,12 @@ def prebuild_ffa_kernels() -> None:
         softcaps,
         disable_atomic_opts,
         deterministics,
+        profile_mode,
     )
 
     # prebuild the kernels in parallel for the determined options
     def _build_one(args):
-        direction, h, cdtype, odtype, sc, da, det = args
+        direction, h, cdtype, odtype, sc, da, det, pro = args
         spec, uri = get_ffa_jit_spec(
             arch=(9, 0),
             direction=direction,
@@ -428,6 +442,7 @@ def prebuild_ffa_kernels() -> None:
             softcap=sc,
             disable_atomic_reduction=da,
             deterministic=det,
+            profile_mode=pro,
             ref_block_size=None,
         )
         spec.build()
@@ -473,7 +488,7 @@ if not SKIP_CUDA_BUILD:
     if magi_attn_ext_module is not None:
         ext_modules.append(magi_attn_ext_module)
 
-    # build utils ext module
+    # build ffa utils ext module
     ffa_utils_ext_module = build_ffa_utils_ext_module(
         repo_dir=repo_dir,
         csrc_dir=csrc_dir,
@@ -494,9 +509,7 @@ else:
     print(f"{title_left_str}Skipping CUDA build{title_right_str}")
 
 
-# init cmdclass
-
-
+# customize build extension
 class MagiAttnBuildExtension(BuildExtension):
     """
     A BuildExtension that switches its behavior based on the command.
@@ -532,6 +545,7 @@ class MagiAttnBuildExtension(BuildExtension):
             )
 
 
+# init cmdclass
 cmdclass = {"bdist_wheel": _bdist_wheel, "build_ext": MagiAttnBuildExtension}
 
 

@@ -22,14 +22,13 @@ import torch
 from magi_attention.comm.primitive.grpcoll.utils import (
     _calc_group_cast_a2a_input_args,
     _calc_group_reduce_a2a_input_args,
-    _get_a2av_perm_idxs_from_group_cast_meta_ref,
     get_a2av_perm_idxs_from_group_cast_meta,
-    sum_reduce_to_tensor,
-    transfer_splits_and_dst_idxs_to_topk_idx,
-    unpermute_tensor,
+    sum_reduce_output,
+    transfer_splits_and_dst_idxs_to_t2r_idx,
+    unpermute_output,
 )
 from magi_attention.testing import parameterize
-from magi_attention.utils import pad_and_pack_tensors
+from magi_attention.utils import pad_and_pack_tensors, perm_idxs2unperm_idxs
 
 
 class TestGroupCollectiveUtils(TestCase):
@@ -37,21 +36,21 @@ class TestGroupCollectiveUtils(TestCase):
     def device(self) -> int:
         return torch.cuda.current_device()
 
-    def test_unpermute_tensor(self):
+    def test_unpermute_output(self):
         # ---------    normal unperm idxs     --------- #
 
         x = torch.randn(6, 3, 4, device=self.device)
 
         unperm_idxs1 = [0, 2, 1]
         split_sizes1 = [2, 1, 3]
-        y1_ref = self._unpermute_tensor_ref(
-            input_tensor=x,
+        y1_ref = self._unpermute_output_ref(
+            output=x,
             unperm_index=self._calc_unpermute_index_tensor(
                 x, unperm_idxs1, split_sizes1
             ),
         )
-        y1 = unpermute_tensor(
-            x,
+        y1 = unpermute_output(
+            output=x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
                     [[0, 2], [3, 6], [2, 3]],
@@ -83,13 +82,13 @@ class TestGroupCollectiveUtils(TestCase):
 
         unperm_idxs2 = [2, 1, 0]
         split_sizes2 = [2, 3, 1]
-        y2_ref = self._unpermute_tensor_ref(
-            input_tensor=x,
+        y2_ref = self._unpermute_output_ref(
+            output=x,
             unperm_index=self._calc_unpermute_index_tensor(
                 x, unperm_idxs2, split_sizes2
             ),
         )
-        y2 = unpermute_tensor(
+        y2 = unpermute_output(
             x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
@@ -121,13 +120,13 @@ class TestGroupCollectiveUtils(TestCase):
 
         unperm_idxs3 = [2, 0, 1]
         split_sizes3 = [3, 1, 2]
-        y3_ref = self._unpermute_tensor_ref(
-            input_tensor=x,
+        y3_ref = self._unpermute_output_ref(
+            output=x,
             unperm_index=self._calc_unpermute_index_tensor(
                 x, unperm_idxs3, split_sizes3
             ),
         )
-        y3 = unpermute_tensor(
+        y3 = unpermute_output(
             x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor(
@@ -164,13 +163,13 @@ class TestGroupCollectiveUtils(TestCase):
         unperm_idxs4 = []
         split_sizes4 = [1, 2, 3]
 
-        y4_ref = self._unpermute_tensor_ref(
-            input_tensor=x,
+        y4_ref = self._unpermute_output_ref(
+            output=x,
             unperm_index=self._calc_unpermute_index_tensor(
                 x, unperm_idxs4, split_sizes4
             ),
         )
-        y4 = unpermute_tensor(
+        y4 = unpermute_output(
             x,
             unperm_after_a2a_kwargs={
                 "ranges": torch.tensor([], dtype=torch.int32, device=self.device),
@@ -185,7 +184,7 @@ class TestGroupCollectiveUtils(TestCase):
         self.assertTrue(torch.equal(y4, y4_ref))
         self.assertTrue(torch.equal(y4, emp))
 
-    def test_reduce_to_tensor(self):
+    def test_reduce_output(self):
         # ---------    init data     --------- #
 
         h = 128
@@ -209,7 +208,7 @@ class TestGroupCollectiveUtils(TestCase):
             num_src_list=num_src_list,
         )
 
-        reduced_output_ref = self._reduce_to_tensor_ref(
+        reduced_output_ref = self._reduce_output_ref(
             output=output,
             a2a_output=a2a_output,
             reduce_index=reduce_index_tensor,
@@ -253,7 +252,8 @@ class TestGroupCollectiveUtils(TestCase):
             "total_size": total_size,
         }
 
-        reduced_output = sum_reduce_to_tensor(
+        # TODO: test other reduce ops
+        reduced_output = sum_reduce_output(
             output=output_ref,
             a2a_output=a2a_output,
             range_reduce_kwargs=range_reduce_kwargs,
@@ -261,8 +261,6 @@ class TestGroupCollectiveUtils(TestCase):
 
         # ---------    check     --------- #
 
-        # NOTE: since the add order is different, we can not expect all-equal but all-close
-        # self.assertTrue(torch.equal(reduced_output_ref, reduced_output))
         torch.testing.assert_close(
             reduced_output_ref,
             reduced_output,
@@ -412,6 +410,18 @@ class TestGroupCollectiveUtils(TestCase):
             # fmt: off
             {
                 "output_split_size_list": [
+                    8, 2, 4, 7, 2, 5,  # group1
+                    5, 9, 7, 0, 0, 0,  # group2
+                ],
+                "src_index_list": [
+                    1, 1, 0, 0, 6, 2,  # group1
+                    6, 7, 5, 8, 8, 8,  # group2
+                ],
+                "output_seqlen": 56,
+                "world_size": 8,
+            },
+            {
+                "output_split_size_list": [
                     185, 302, 354, 517, 127, 55,  # group1
                     915, 519, 1047, 535, 117, 97,  # group2
                     697, 741, 372, 577, 422, 53,  # group3
@@ -436,26 +446,35 @@ class TestGroupCollectiveUtils(TestCase):
     )
     def test_a2av_perm_idxs_from_group_cast_meta(self, config):
         output_split_size_list = config["output_split_size_list"]
+        actual_output_seqlen = sum(output_split_size_list)
         src_index_list = config["src_index_list"]
+        output_seqlen = config.get("output_seqlen", None) or actual_output_seqlen
         world_size = config["world_size"]
 
-        _, ref_perm_to_a2av_idx = _get_a2av_perm_idxs_from_group_cast_meta_ref(
+        # get reference
+        _, ref_perm_to_a2av_idx = self._get_a2av_perm_idxs_from_group_cast_meta_ref(
             output_split_size_list=output_split_size_list,
             src_index_list=src_index_list,
             num_ranks=world_size,
         )
+        assert ref_perm_to_a2av_idx.size(0) == actual_output_seqlen
+        assert ref_perm_to_a2av_idx.dtype == torch.int64
 
         # use host meta
         perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=output_split_size_list,
             src_index=src_index_list,
             num_ranks=world_size,
+            output_seqlen=output_seqlen,
         )
 
-        assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
+        assert perm_to_a2av_idx.size(0) == output_seqlen
+        assert perm_to_a2av_idx.dtype == torch.int64
+        assert torch.equal(
+            perm_to_a2av_idx[:actual_output_seqlen], ref_perm_to_a2av_idx
+        )
 
         # use device meta
-
         output_split_sizes = torch.tensor(
             output_split_size_list,
             dtype=torch.int64,
@@ -466,14 +485,18 @@ class TestGroupCollectiveUtils(TestCase):
             dtype=torch.int64,
             device="cuda",
         )
-
         perm_to_a2av_idx = get_a2av_perm_idxs_from_group_cast_meta(
             output_split_sizes=output_split_sizes,
             src_index=src_index,
             num_ranks=world_size,
+            output_seqlen=output_seqlen,
         )
 
-        assert torch.equal(perm_to_a2av_idx, ref_perm_to_a2av_idx)
+        assert perm_to_a2av_idx.size(0) == output_seqlen
+        assert perm_to_a2av_idx.dtype == torch.int64
+        assert torch.equal(
+            perm_to_a2av_idx[:actual_output_seqlen], ref_perm_to_a2av_idx
+        )
 
     @parameterize(
         "config",
@@ -504,13 +527,13 @@ class TestGroupCollectiveUtils(TestCase):
             # fmt: on
         ],
     )
-    def test_transfer_splits_and_dst_idxs_to_topk_idxs(self, config):
+    def test_transfer_splits_and_dst_idxs_to_t2r_idx(self, config):
         input_split_size_list = config["input_split_size_list"]
         dst_indices_list = config["dst_indices_list"]
         world_size = config["world_size"]
 
         # use host meta as ref
-        ref_topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+        ref_t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
             input_split_sizes=input_split_size_list,
             dst_indices=dst_indices_list,
             num_ranks=world_size,
@@ -538,13 +561,13 @@ class TestGroupCollectiveUtils(TestCase):
             device="cuda",
         )
 
-        topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+        t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
             input_split_sizes=input_split_sizes,
             dst_indices=dst_indices,
             num_ranks=world_size,
         )
 
-        assert torch.equal(topk_idx, ref_topk_idx)
+        assert torch.equal(t2r_idx, ref_t2r_idx)
 
     def _seqlens2curanges(
         self,
@@ -556,16 +579,16 @@ class TestGroupCollectiveUtils(TestCase):
             for i in range(len(cu_seqlens))
         ]
 
-    def _unpermute_tensor_ref(
+    def _unpermute_output_ref(
         self,
-        input_tensor: torch.Tensor,
+        output: torch.Tensor,
         unperm_index: torch.LongTensor,
     ) -> torch.Tensor:
         """unpermute a2a output to output (deprecated as reference)
         as a post-processing func for group_cast
         """
 
-        return input_tensor.index_select(
+        return output.index_select(
             dim=0,
             index=unperm_index,
         )
@@ -713,7 +736,7 @@ class TestGroupCollectiveUtils(TestCase):
             a2a_output_unperm_index_tensor,
         )
 
-    def _reduce_to_tensor_ref(
+    def _reduce_output_ref(
         self,
         output: torch.Tensor,
         a2a_output: torch.Tensor,
@@ -901,6 +924,56 @@ class TestGroupCollectiveUtils(TestCase):
             a2a_output_reduce_ranges_list,
             output_size_ranges,
         )
+
+    def _get_a2av_perm_idxs_from_group_cast_meta_ref(
+        self,
+        output_split_size_list: list[int],
+        src_index_list: list[int],
+        num_ranks: int,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.int64,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # count the total split size of each rank
+        rank_split_sizes = [0] * (num_ranks + 1)
+        for i in range(len(output_split_size_list)):
+            rank_split_sizes[src_index_list[i]] += output_split_size_list[i]
+
+        # count the global rank offset
+        a2av_rank_offsets = list(accumulate([0] + rank_split_sizes))[:-1]
+
+        # a2a_output[unperm_from_a2av_idx] => output
+        unperm_from_a2av_idx: list[int] = []
+        current_offset_within_rank = [0] * (num_ranks + 1)
+        for i in range(len(output_split_size_list)):
+            target_size = output_split_size_list[i]
+            target_rank = src_index_list[i]
+
+            # get the start offset of the target buffer sent from the target rank
+            global_start_offset_in_output = (
+                a2av_rank_offsets[target_rank] + current_offset_within_rank[target_rank]
+            )
+            unperm_from_a2av_idx.extend(
+                range(
+                    global_start_offset_in_output,
+                    global_start_offset_in_output + target_size,
+                )
+            )
+            current_offset_within_rank[target_rank] += target_size
+
+        # output[perm_to_a2av_idx] => a2a_output
+        perm_to_a2av_idx = perm_idxs2unperm_idxs(unperm_from_a2av_idx)
+
+        # convert to tensor
+        (
+            unperm_from_a2av_idx,
+            perm_to_a2av_idx,
+        ) = torch.tensor(
+            unperm_from_a2av_idx + perm_to_a2av_idx,
+            dtype=dtype,
+            device=device,
+        ).chunk(2)
+
+        return unperm_from_a2av_idx, perm_to_a2av_idx
 
 
 if __name__ == "__main__":

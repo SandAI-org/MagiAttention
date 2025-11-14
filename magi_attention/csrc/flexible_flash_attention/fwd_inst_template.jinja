@@ -6,6 +6,7 @@
 #include "flex_flash_common.hpp"
 #include "flash_fwd_launch_template.h"
 #include "flex_flash_fwd.hpp"
+#include "utils/profile_utils.h"
 
 // Compile-time constants provided by Jinja arguments
 static constexpr int kArch = {{ arch_sm_num }};
@@ -15,6 +16,8 @@ static constexpr int kHeadDim = {{ head_dim }};
 static constexpr bool kHasSoftcap = {{ has_softcap }};
 static constexpr bool kDisableAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
+static constexpr bool kProfileMode = {{ profile_mode }};
+
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
 static constexpr int kBlockM = {{ kblock_m }};
@@ -23,7 +26,7 @@ static constexpr int kBlockN = {{ kblock_n }};
 static constexpr int kBlockM = std::get<0>(tile_size_fwd_sm90(kHeadDim, /*element_size*/2, kHasSoftcap));
 static constexpr int kBlockN = std::get<1>(tile_size_fwd_sm90(kHeadDim, /*element_size*/2, kHasSoftcap));
 {% endif %}
-static constexpr bool SwapAB = {{ swap_ab }};
+static constexpr bool kSwapAB = {{ swap_ab }};
 
 // Runtime contract checks to ensure consistency with compile-time constraints
 static inline void _check_runtime_contract(
@@ -60,6 +63,7 @@ std::vector<at::Tensor> mha_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    const std::optional<at::Tensor>& sink_,
     std::optional<at::Tensor>& out_,
     std::optional<at::Tensor>& softmax_lse_,
     const at::Tensor& q_ranges,
@@ -74,25 +78,41 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<at::ScalarType> out_type_,
     bool const deterministic,
     int const sm_margin) {
-
   _check_runtime_contract(q, out_type_, softcap, disable_fwd_atomic_reduction);
 
   // kBlockM/kBlockN are compile-time constants already determined
 
   // Parameter preparation
   auto [params, out, softmax_lse] = prepare_mha_fwd(
-      q, k, v, out_, softmax_lse_, q_ranges, k_ranges,
+      q, k, v, sink_, out_, softmax_lse_, q_ranges, k_ranges,
       attn_type_map_, merge_q_ranges_, qk_map_,
       unique_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
       out_type_, deterministic, sm_margin, kBlockM);
+  
+  if constexpr (kProfileMode)
+    MagiEvents::stop("fwd_prepare");
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
   // Kernel launch (single variant)
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kDeterministic, SwapAB>(params, stream);
+  if constexpr (kProfileMode) 
+    MagiEvents::start("fwd_run");
+  
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kDeterministic, kSwapAB, kProfileMode>(params, stream);
+  
+  if constexpr (kProfileMode) 
+    MagiEvents::stop("fwd_run");
 
-  // Post-processing: fast zero fill for uncovered regions (to match library interface)
-  run_fast_zero_fill(params, stream);
+  // Post-processing: 
+  // 1. fast zero fill for uncovered regions (to match library interface)
+  // 2. correct out and lse with attention sink if required
+  if constexpr (kProfileMode)
+    MagiEvents::start("fwd_postprocess");
+  
+  run_flash_fwd_post_process(params, stream);
+  
+  if constexpr (kProfileMode)
+    MagiEvents::stop("fwd_postprocess");
 
   return {out, softmax_lse};
 }

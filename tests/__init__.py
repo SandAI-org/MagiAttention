@@ -11,3 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+import os
+
+# Enable sanity check in every unitest by default
+os.environ["MAGI_ATTENTION_SANITY_CHECK"] = "1"
+
+# Enable verbose building magi_attention in every unitest by default
+os.environ["MAGI_ATTENTION_BUILD_VERBOSE"] = "1"
+
+# Enable sum-reduction of dsink in every unitest by default
+os.environ["MAGI_ATTENTION_DSINK_ALL_REDUCE_OP"] = "sum"

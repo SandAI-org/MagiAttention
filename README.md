@@ -31,11 +31,11 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 ## Latest News 🔥
 
-- [2025/9] 📌 We release [MagiAttention-v1.0.4](https://github.com/SandAI-org/MagiAttention/tree/v1.0.4) to update the API, support compilable and jit-built ffa, optimize the performance for sparse scenarios, reduce the workspace memory usage, and engage some experimental features in progress.
-- [2025/7] 🚀 We release [MagiAttention-v1.0.3](https://github.com/SandAI-org/MagiAttention/tree/v1.0.3) with improvements including [documentation](https://SandAI-org.github.io/MagiAttention/docs/), support for all four mask types with arbitary overlapping, deterministic mode, API updates, FFA performance enhancements with bug fixes, optimized dispatch solvers, hierarchical-comm support, and example codes to train Llama-3 1B model with MagiAttention + FSDP / Transformers.
-- [2025/6] 📌 We release [MagiAttention-v1.0.2](https://github.com/SandAI-org/MagiAttention/tree/v1.0.2) to provide the example code to **integrate Megatron with MagiAttention** with several training convergence experiments (*see [here](./example/megatron/README.md) for more details*), with some bug fixes and a simple roadmap.
-- [2025/5] 📌 We release [MagiAttention-v1.0.1](https://github.com/SandAI-org/MagiAttention/tree/v1.0.1) to support overlapped q_ranges when all mask types are `FULL`, with some code cleanup and bug fixes.
-- [2025/4] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/tree/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/blog/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
+- [2025/9] 📌 We release [MagiAttention-v1.0.4](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.4) to update the API, support compilable and jit-built ffa, optimize the performance for sparse scenarios, reduce the workspace memory usage, and engage some experimental features in progress.
+- [2025/7] 🚀 We release [MagiAttention-v1.0.3](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.3) with improvements including [documentation](https://SandAI-org.github.io/MagiAttention/docs/), support for all four mask types with arbitary overlapping, deterministic mode, API updates, FFA performance enhancements with bug fixes, optimized dispatch solvers, hierarchical-comm support, and example codes to train Llama-3 1B model with MagiAttention + FSDP / Transformers.
+- [2025/6] 📌 We release [MagiAttention-v1.0.2](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.2) to provide the example code to **integrate Megatron with MagiAttention** with several training convergence experiments (*see [here](./example/megatron/README.md) for more details*), with some bug fixes and a simple roadmap.
+- [2025/5] 📌 We release [MagiAttention-v1.0.1](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.1) to support overlapped q_ranges when all mask types are `FULL`, with some code cleanup and bug fixes.
+- [2025/4] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/blog/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
 
 
 # About
@@ -68,18 +68,26 @@ Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
 
 ### Step1: Activate an NGC pytorch docker container
 
-* release note: [here](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/rel-25-05.html#rel-25-05)
-* docker image version: nvcr.io/nvidia/pytorch:25.05-py3
+* NGC pytorch docker release note: [here](https://docs.nvidia.com/deeplearning/frameworks/pytorch-release-notes/)
 * docker run command:
 
     ```bash
-    docker run --name {container_name} -v {host_mnt_root}:{container_mnt_root} -it -d --privileged --gpus all --network host --ipc host --ulimit memlock=-1 --ulimit stack=67108864 nvcr.io/nvidia/pytorch:25.05-py3 /bin/bash
+    # choose one compatible version
+    MAJOR_VERSION=25
+    MINOR_VERSION=10 # choose from {05, 06, 08, 09, 10}
+
+    # specify your own names and paths
+    CONTAINER_NAME=...
+    HOST_MNT_ROOT=...
+    CONTAINER_MNT_ROOT=...
+
+    docker run --name ${CONTAINER_NAME} -v ${HOST_MNT_ROOT}:${CONTAINER_MNT_ROOT} -it -d --privileged --gpus all --network host --ipc host --ulimit memlock=-1 --ulimit stack=67108864 nvcr.io/nvidia/pytorch:${MAJOR_VERSION}.${MINOR_VERSION}-py3 /bin/bash
     ```
 
 * docker exec command:
 
     ```bash
-    docker exec -it {container_name} /bin/bash
+    docker exec -it ${CONTAINER_NAME} /bin/bash
     ```
 
 ### Step2: Install required packages
@@ -337,11 +345,12 @@ For more information, you can refer to `example/transformers/README.md`.
 - [ ] **[WIP]** Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*)
 - [ ] **[WIP]** Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
 - [ ] **[WIP]** Support `Dynamic DistAttnSolver` with query/output communication pattern, one for either hybrid attention model or dynamic mask scenarios like sparse attention, the other for reducing communication overhead for many cases when only communicating key/value is not the best choice.
-- [ ] Support other attention patterns including cross-attention, sink tokens (*w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453)*) and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
-- [ ] Support Blackwell as well as other GPU architectures.
+- [ ] Support other attention patterns including cross-attention, and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
+- [ ] Support Ampere, Blackwell as well as other GPU architectures.
 - [ ] Provide a more comprehensive documentation with tutorials, and a more detailed technical blog.
 - [ ] Provide more example codes and recipes for various training scenarios.
 - [ ] Upgrade `MagiAttention` to a distributed native `Flex-Flash-Attention` kernel (*as a major version update*).
+- [x] Support learnable attention sink (*w.r.t. [StreamingLLM](https://arxiv.org/abs/2309.17453)*).
 - [x] Refactor `Distributed Attention Solver` to support all mask types with all kinds of overlap.
 - [x] Improve `Dispatch Solver` to reduce necessary communication volumn while remaining balance in computation (*especially for varlen mask patterns*).
 - [x] Build a comprehensive `CP Benchmark` to better compare the performance of different context parallel strategies under various mask patterns and other training configurations.

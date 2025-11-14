@@ -136,6 +136,7 @@ class DistAttnRuntimeMgr:
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        sink: torch.Tensor | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -144,6 +145,7 @@ class DistAttnRuntimeMgr:
             k=k,
             v=v,
             dist_attn_runtime=self.dist_attn_runtime,
+            sink=sink,
             softmax_scale=softmax_scale,
             softcap=softcap,
         )

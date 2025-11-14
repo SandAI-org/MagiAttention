@@ -85,49 +85,51 @@ class AttnRanges:
     """
     A dataclass to manage a list of 'AttnRange' objects for attention computation
 
-    Advanced methods (make_range_local, make_ranges_local, to_local_ranges, find_hole_ranges, find_overlap_ranges)
-    NOTE: These advanced methods are designed to facilitate various range mappings
+    Advanced methods, including make_range_local, make_ranges_local, to_local_ranges,
+    find_hole_ranges, find_overlap_ranges, etc, are designed to facilitate various range mappings
+
     NOTE: What are the local_ranges of AttnRanges?
         Since each attn_range in AttnRanges describes a continuous storage in actual memory,
         AttnRanges can choose to map to a continuous storage in actual memory that satisfies:
             1. It can store all attn_ranges in AttnRanges
             2. All attn_ranges are stored in order (by range.start and range.end)
         So the local_ranges of AttnRanges are the actual positions of each attn_range in this memory
-    Example::
+
+    Example:
         The local_ranges of [[5, 10), [15, 20), [25, 30)] are [[0, 5), [5, 10), [10, 15)]
         The local_ranges of [[5, 10), [25, 30), [15, 20)] are [[0, 5), [5, 10), [10, 15)]
         Their mapping relationships are as follows:
         .....[5, 10).....[15, 20).....[25, 30).....
                 |           |             |
              [0, 5)      [5, 10)      [10, 15)
+
     NOTE: Explanation of sorted and merged for AttnRanges:
         sorted requires that each attn_range in AttnRanges is sorted by start in ascending order
         merged requires that each attn_range in AttnRanges is sorted by start in ascending order,
         and adjacent attn_ranges have no overlap
 
-
     NOTE:
         Generally, the naming convention for attn_ranges in this repo follows these rules:
         attn ranges naming qualifier convention:
             [DIST]_[SCOPE]_[PERM]_[ORDER]_[NAME]_ranges_[SUFFIX...]
-                DIST: host/remote/total - indicates whether ranges are on host or remote device
-                    * host: ranges are on host
-                    * remote: ranges are on remote device
-                    * total: ranges are not on host or remote device, e.g. original reference ranges
-                SCOPE: global/local - indicates whether ranges use global or local indices
-                    * global: ranges use global indices
-                    * local: ranges use local indices
-                PERM: unperm/perm - indicates whether ranges have been permuted
-                    * unperm: ranges have not been permuted
-                    * perm: ranges have been permuted
-                ORDER: unordered/sorted/merged - indicates whether ranges are sorted or merged,
-                    * unordered: ranges are not sorted
-                    * sorted: ranges are sorted by start
-                    * merged: ranges are merged
-                NAME: the name of the ranges
-                SUFFIX: per_rank/per_stage/etc - additional qualifiers for list[AttnRanges]
+                - DIST: host/remote/total - indicates whether ranges are on host or remote device
+                    - host: ranges are on host
+                    - remote: ranges are on remote device
+                    - total: ranges are not on host or remote device, e.g. original reference ranges
+                - SCOPE: global/local - indicates whether ranges use global or local indices
+                    - global: ranges use global indices
+                    - local: ranges use local indices
+                - PERM: unperm/perm - indicates whether ranges have been permuted
+                    - unperm: ranges have not been permuted
+                    - perm: ranges have been permuted
+                - ORDER: unordered/sorted/merged - indicates whether ranges are sorted or merged,
+                    - unordered: ranges are not sorted
+                    - sorted: ranges are sorted by start
+                    - merged: ranges are merged
+                - NAME: the name of the ranges
+                - SUFFIX: per_rank/per_stage/etc - additional qualifiers for list[AttnRanges]
 
-        Example::
+        Example:
             host_global_sorted_unperm_ranges_per_rank
             remote_local_merged_perm_ranges_per_stage
     """

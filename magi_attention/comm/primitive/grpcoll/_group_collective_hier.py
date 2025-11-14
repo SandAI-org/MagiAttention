@@ -32,8 +32,8 @@ from .utils import (
     _calc_group_reduce_a2a_input_meta_args,
     _calc_group_reduce_a2a_output_meta_args,
     _calc_unperm_range_gather_kwargs_from_split_size_list,
-    sum_reduce_to_tensor,
-    unpermute_tensor,
+    sum_reduce_output,
+    unpermute_output,
 )
 
 __all__ = [
@@ -141,7 +141,7 @@ class HierGroupCastMetaSolver:
         stashed_tensors: list[torch.Tensor] | None = None,
     ):
         core_post_process_fn_hier = partial(
-            unpermute_tensor,
+            unpermute_output,
             unperm_after_a2a_kwargs=self.unperm_after_a2a_kwargs_hier,
         )
 
@@ -578,6 +578,9 @@ def hier_group_cast_impl_with_a2av(
     src_index: list[int],
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -594,6 +597,9 @@ def hier_group_cast_impl_with_a2av(
     src_index: torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     ...
@@ -609,6 +615,9 @@ def hier_group_cast_impl_with_a2av(
     src_index: list[int] | torch.Tensor,
     group: dist.ProcessGroup,
     async_op: bool = False,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> WorkWithPostProcessFn:
     """Hierarchical group-cast implementation based on all2all_v"""
@@ -617,19 +626,18 @@ def hier_group_cast_impl_with_a2av(
     # check functionalities
     assert (
         not magi_attention.comm.is_native_grpcoll_enable()
-    ), "Hierarchical group-cast is not compatible with native grpcoll implementation"
-    assert (
-        async_op
-    ), "async_op must be True for hierarchical group-cast collective by now"
+    ), "A2A-based hierarchical group-cast is not compatible with native grpcoll implementation"
+    assert async_op, "A2A-based hierarchical group-cast only supports async_op"
     assert (
         output_tensor is not None
     ), "A2A-based hierarchical group-cast only supports output is given"
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_indices, src_index], list
     ), (
-        "This API only supports host meta interface, "
+        "A2A-based hierarchical group-cast only supports host meta interface, "
         "thus the input_split_sizes, output_split_sizes, dst_indices, src_index should all be list type"
     )
+    assert not cast_lse, "A2A-based hierarchical group-cast does not support lse cast"
 
     # check shapes
     assert len(input_split_sizes) == len(dst_indices), (
@@ -865,13 +873,13 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         stashed_tensors: list[torch.Tensor] | None = None,
     ) -> Callable[[torch.Tensor], torch.Tensor]:
         post_process_fn_pre_intra = partial(
-            sum_reduce_to_tensor,  # TODO: support other reduce ops
+            sum_reduce_output,  # TODO: support other reduce ops
             a2a_output=a2a_output_pre_intra,
             range_reduce_kwargs=self.range_reduce_kwargs_pre_intra,
         )
 
         post_process_fn_inter = partial(
-            sum_reduce_to_tensor,  # TODO: support other reduce ops
+            sum_reduce_output,  # TODO: support other reduce ops
             a2a_output=a2a_output_inter,
             range_reduce_kwargs=self.range_reduce_kwargs_inter,
         )
@@ -1081,7 +1089,7 @@ class HierGroupReduceMetaSolver(HierGroupCastMetaSolver):
         )
 
         self.pre_process_fn_hier = partial(
-            unpermute_tensor, unperm_after_a2a_kwargs=self.perm_before_a2a_kwargs_hier
+            unpermute_output, unperm_after_a2a_kwargs=self.perm_before_a2a_kwargs_hier
         )
 
 
@@ -1138,6 +1146,7 @@ def hier_group_reduce_impl_with_a2av(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -1158,6 +1167,7 @@ def hier_group_reduce_impl_with_a2av(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -1177,6 +1187,7 @@ def hier_group_reduce_impl_with_a2av(
     async_op: bool = False,
     reduce_op: GroupReduceOp = "sum",
     acc_reduce: bool = True,
+    comm_dtype: torch.dtype | None = None,
     input_lse: torch.Tensor | None = None,
     output_lse: torch.Tensor | None = None,
     **kwargs,
@@ -1187,20 +1198,21 @@ def hier_group_reduce_impl_with_a2av(
     # check functionalities
     assert (
         not magi_attention.comm.is_native_grpcoll_enable()
-    ), "Hierarchical group-reduce is not compatible with native grpcoll implementation"
+    ), "A2A-based hierarchical group-reduce is not compatible with native grpcoll implementation"
     assert (
         acc_reduce and output_tensor is not None
     ), "A2A-based hierarchical group-reduce only supports acc_reduce=True and output is given"
-    assert (
-        async_op
-    ), "async_op must be True for hierarchical group-reduce collective by now"
+    assert async_op, "A2A-based hierarchical group-reduce only supports async_op"
     assert (
         reduce_op == "sum"
-    ), "hierarchical group reduce only supports sum reduction by now"
+    ), "A2A-based hierarchical group-reduce only supports sum reduction"
+    assert (
+        comm_dtype is None or comm_dtype == input_tensor.dtype
+    ), "A2A-based hierarchical group-reduce does not support comm_dtype different from input.dtype"
     assert is_list_type_all(
         [input_split_sizes, output_split_sizes, dst_index, src_indices], list
     ), (
-        "This API only supports host meta interface, "
+        "A2A-based hierarchical group-reduce only supports host meta interface, "
         "thus the input_split_sizes, output_split_sizes, dst_index, src_indice should all be list type"
     )
 

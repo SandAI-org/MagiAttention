@@ -37,7 +37,7 @@ from magi_attention.common.range_op.utils import (
     _calc_ranges_row_map,
 )
 from magi_attention.common.ranges import NaiveRanges
-from magi_attention.utils import is_list_type_all, nvtx, perm_idxs2unperm_idxs
+from magi_attention.utils import is_list_type_all, nvtx
 
 # ------------------        common helpers       ------------------ #
 
@@ -351,8 +351,8 @@ def sanity_check_for_group_cast_meta_args_per_rank(
 
 
 @nvtx.instrument_nvtx
-def unpermute_tensor(
-    tensor: torch.Tensor,
+def unpermute_output(
+    output: torch.Tensor,
     unperm_after_a2a_kwargs: dict,
 ) -> torch.Tensor:
     """unpermute a2a output to output
@@ -360,9 +360,32 @@ def unpermute_tensor(
     """
 
     return range_gather(
-        input=tensor,
+        input=output,
         **unperm_after_a2a_kwargs,
     )
+
+
+@nvtx.instrument_nvtx
+def unpermute_output_with_lse(
+    output: torch.Tensor,
+    output_lse: torch.Tensor,
+    unperm_after_a2a_kwargs: dict,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """unpermute a2a output and a2a_output_lse to output and output_lse
+    as a post-processing func for group_cast
+    """
+
+    output = range_gather(
+        input=output,
+        **unperm_after_a2a_kwargs,
+    )
+
+    output_lse = range_gather(
+        input=output_lse,
+        **unperm_after_a2a_kwargs,
+    )
+
+    return output, output_lse
 
 
 @nvtx.instrument_nvtx
@@ -409,8 +432,10 @@ def _calc_group_cast_a2a_input_args(
     input_split_size_list: list[int],
     dst_indices_list: list[list[int]],
     world_size: int,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
     **kwargs,
-) -> tuple[torch.Tensor, list[int]]:
+) -> tuple[OutMaybeWithLSE, list[int]]:
     # -----     group_cast_a2a_input meta args     ----- #
 
     # check if pre-calculated
@@ -434,6 +459,12 @@ def _calc_group_cast_a2a_input_args(
         input=input,
         **perm_before_a2a_kwargs,
     )
+    if cast_lse:
+        a2a_input_lse = range_gather(
+            input=input_lse,
+            **perm_before_a2a_kwargs,
+        )
+        a2a_input = (a2a_input, a2a_input_lse)
 
     return a2a_input, a2a_input_split_size
 
@@ -510,8 +541,10 @@ def _calc_group_cast_a2a_output_args(
     output_split_size_list: list[int],
     src_index_list: list[int],
     world_size: int,
+    cast_lse: bool = False,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
-) -> tuple[torch.Tensor, list[int], dict]:
+) -> tuple[OutMaybeWithLSE, list[int], dict]:
     # -----     group_cast_a2a_output meta args     ----- #
 
     # check if pre-calculated
@@ -531,6 +564,10 @@ def _calc_group_cast_a2a_output_args(
     # -----     group_cast_a2a_output tensor args     ----- #
 
     a2a_output = output
+    if cast_lse:
+        assert output_lse is not None
+        a2a_output_lse = output_lse
+        a2a_output = (a2a_output, a2a_output_lse)
 
     return (
         a2a_output,
@@ -549,13 +586,16 @@ def calc_group_cast_a2a_args(
     dst_indices_list: list[list[int]],
     src_index_list: list[int],
     world_size: int,
+    cast_lse: bool = False,
+    input_lse: torch.Tensor | None = None,
+    output_lse: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
+    OutMaybeWithLSE,
+    OutMaybeWithLSE,
     list[int],
     list[int],
-    Callable[[torch.Tensor], torch.Tensor],
+    Callable[[OutMaybeWithLSE], OutMaybeWithLSE],
 ]:
     # ---------    calc a2a_input_split_size and a2a input     --------- #
 
@@ -564,6 +604,8 @@ def calc_group_cast_a2a_args(
         input_split_size_list=input_split_size_list,
         dst_indices_list=dst_indices_list,
         world_size=world_size,
+        cast_lse=cast_lse,
+        input_lse=input_lse,
         **kwargs,
     )
 
@@ -578,15 +620,23 @@ def calc_group_cast_a2a_args(
         output_split_size_list=output_split_size_list,
         src_index_list=src_index_list,
         world_size=world_size,
+        cast_lse=cast_lse,
+        output_lse=output_lse,
         **kwargs,
     )
 
     # ---------    prepare post-process fn    --------- #
 
-    post_process_fn = partial(
-        unpermute_tensor,
-        unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
-    )
+    if cast_lse:
+        post_process_fn = partial(
+            unpermute_output_with_lse,
+            unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
+        )
+    else:
+        post_process_fn = partial(
+            unpermute_output,
+            unperm_after_a2a_kwargs=unperm_after_a2a_kwargs,
+        )
 
     return (
         a2a_output,
@@ -667,7 +717,7 @@ def sanity_check_for_group_reduce_meta_args_per_rank(
 
 
 @nvtx.instrument_nvtx
-def sum_reduce_to_tensor(
+def sum_reduce_output(
     output: torch.Tensor,
     a2a_output: torch.Tensor,
     range_reduce_kwargs: dict,
@@ -687,7 +737,7 @@ def sum_reduce_to_tensor(
 
 
 @nvtx.instrument_nvtx
-def avg_reduce_to_tensor(
+def avg_reduce_output(
     output: torch.Tensor,
     a2a_output: torch.Tensor,
     range_reduce_kwargs: dict,
@@ -707,7 +757,7 @@ def avg_reduce_to_tensor(
 
 
 @nvtx.instrument_nvtx
-def lse_reduce_to_tensor(
+def lse_reduce_output(
     output: torch.Tensor,
     output_lse: torch.Tensor,
     a2a_output: torch.Tensor,
@@ -789,6 +839,7 @@ def _calc_group_reduce_a2a_input_args(
         **perm_before_a2a_kwargs,
     )
     if reduce_op == "lse":
+        assert input_lse is not None
         a2a_input_lse = range_gather(
             input=input_lse,
             **perm_before_a2a_kwargs,
@@ -890,10 +941,11 @@ def _calc_group_reduce_a2a_output_args(
         dtype=output.dtype,
     )
     if reduce_op == "lse":
+        assert output_lse is not None
         a2a_output_lse = torch.empty(
-            [sum(a2a_output_split_size), *output_lse.shape[1:]],  # type: ignore[union-attr]
+            [sum(a2a_output_split_size), *output_lse.shape[1:]],
             device=output.device,
-            dtype=output_lse.dtype,  # type: ignore[union-attr]
+            dtype=output_lse.dtype,
         )
         a2a_output = (a2a_output, a2a_output_lse)
 
@@ -961,20 +1013,20 @@ def calc_group_reduce_a2a_args(
     match reduce_op:
         case "lse":
             post_process_fn = partial(
-                lse_reduce_to_tensor,
+                lse_reduce_output,
                 a2a_output=a2a_output[0],  # a2a_output
                 a2a_output_lse=a2a_output[1],  # a2a_output_lse
                 range_reduce_kwargs=range_reduce_kwargs,
             )
         case "sum":
             post_process_fn = partial(
-                sum_reduce_to_tensor,
+                sum_reduce_output,
                 a2a_output=a2a_output,
                 range_reduce_kwargs=range_reduce_kwargs,
             )
         case "avg":
             post_process_fn = partial(
-                avg_reduce_to_tensor,
+                avg_reduce_output,
                 a2a_output=a2a_output,
                 range_reduce_kwargs=range_reduce_kwargs,
             )
@@ -1104,12 +1156,14 @@ def get_group_reduce_handle_from_sym_group_cast(
     group: dist.ProcessGroup,
     async_op: bool = False,
     output_seqlen: int | None = None,
-    topk_idx: torch.Tensor | None = None,
+    t2r_idx: torch.Tensor | None = None,
 ) -> GrpCollHandle:
     from ._buffer import GrpCollBuffer
     from ._native_grpcoll_impl import native_group_cast_impl
 
     # prepare dummpy input/output for symmetric group-cast
+    sym_gc_output_seqlen = input.size(0)
+    hidden_size_alignment = GrpCollBuffer.get_hidden_size_alignment(input.dtype)
     if output is not None:
         sym_gc_input_seqlen = output.size(0)
     elif output_seqlen is not None:
@@ -1119,17 +1173,18 @@ def get_group_reduce_handle_from_sym_group_cast(
     else:
         # NOTE: had better pass output_seqlen to avoid gpu-cpu sync
         sym_gc_input_seqlen = output_split_sizes.sum().item()
-    sym_gc_output_seqlen = input.size(0)
+
     sym_gc_dummy_input = torch.empty(
-        (sym_gc_input_seqlen, GrpCollBuffer.hidden_size_alignment),
-        dtype=torch.bfloat16,
-        device="cuda",
+        (sym_gc_input_seqlen, hidden_size_alignment),
+        dtype=input.dtype,
+        device=input.device,
     )
+
     sym_gc_dummy_output = (
         torch.empty(
-            (sym_gc_output_seqlen, GrpCollBuffer.hidden_size_alignment),
-            dtype=torch.bfloat16,
-            device="cuda",
+            (sym_gc_output_seqlen, hidden_size_alignment),
+            dtype=input.dtype,
+            device=input.device,
         )
         if output is not None
         else None
@@ -1150,7 +1205,7 @@ def get_group_reduce_handle_from_sym_group_cast(
         async_op=async_op,
         # additional kwargs
         native_grpcoll_handle_dict=native_grpcoll_handle_dict,
-        topk_idx=topk_idx,
+        t2r_idx=t2r_idx,
         output_seqlen=sym_gc_output_seqlen,
     )
     sym_work_gc.wait_post_process()
@@ -1221,7 +1276,7 @@ def _varlen_for_each_copy_triton(
 
 
 @overload
-def transfer_splits_and_dst_idxs_to_topk_idx(
+def transfer_splits_and_dst_idxs_to_t2r_idx(
     input_split_sizes: list[int],
     dst_indices: list[list[int]],
     num_ranks: int,
@@ -1233,7 +1288,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
 
 
 @overload
-def transfer_splits_and_dst_idxs_to_topk_idx(
+def transfer_splits_and_dst_idxs_to_t2r_idx(
     input_split_sizes: torch.Tensor,
     dst_indices: torch.Tensor,
     num_ranks: int,
@@ -1245,7 +1300,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
 
 
 @nvtx.instrument_nvtx
-def transfer_splits_and_dst_idxs_to_topk_idx(
+def transfer_splits_and_dst_idxs_to_t2r_idx(
     input_split_sizes: list[int] | torch.Tensor,
     dst_indices: list[list[int]] | torch.Tensor,
     num_ranks: int,
@@ -1283,7 +1338,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
             all_meta_size_list
         )
 
-        topk_idx = torch.full(
+        t2r_idx = torch.full(
             (num_splits, num_ranks),  # assuming num_local_experts == 1
             fill_value=-1,
             dtype=dtype,
@@ -1291,7 +1346,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
         )
 
         _varlen_for_each_copy_triton(
-            dst=topk_idx,
+            dst=t2r_idx,
             src=dst_indices_tensor,
             num_dst=num_dst_tensor,
             cu_num_dst=cu_num_dst_tensor,
@@ -1301,7 +1356,7 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
         # NOTE: had better pass input_seqlen to avoid gpu-cpu sync
         if input_seqlen is None:
             input_seqlen = input_split_sizes.sum().item()  # type: ignore[union-attr]
-        topk_idx = dst_indices.to(dtype=dtype, device=device)  # type: ignore[union-attr]
+        t2r_idx = dst_indices.to(dtype=dtype, device=device)  # type: ignore[union-attr]
         split_size_tensor = input_split_sizes.to(device=device)  # type: ignore[union-attr]
     else:
         raise ValueError(
@@ -1310,64 +1365,63 @@ def transfer_splits_and_dst_idxs_to_topk_idx(
         )
 
     # shape: (num_splits, num_ranks) -> (input_seqlen, num_ranks)
-    topk_idx = topk_idx.repeat_interleave(
+    t2r_idx = t2r_idx.repeat_interleave(
         split_size_tensor,
         dim=0,
         output_size=input_seqlen,
     )
 
-    return topk_idx
+    return t2r_idx
 
 
 @overload
-def get_dispatch_layout_from_group_cast_meta(
+def get_native_group_cast_meta(
     input_split_sizes: list[int],
     dst_indices: list[list[int]],
     group: dist.ProcessGroup,
-    topk_idx: torch.Tensor | None = None,
+    t2r_idx: torch.Tensor | None = None,
     input_seqlen: int | None = None,
     num_nodes: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     ...
 
 
 @overload
-def get_dispatch_layout_from_group_cast_meta(
+def get_native_group_cast_meta(
     input_split_sizes: torch.Tensor,
     dst_indices: torch.Tensor,
     group: dist.ProcessGroup,
-    topk_idx: torch.Tensor | None = None,
+    t2r_idx: torch.Tensor | None = None,
     input_seqlen: int | None = None,
     num_nodes: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     ...
 
 
 @nvtx.instrument_nvtx
-def get_dispatch_layout_from_group_cast_meta(
+def get_native_group_cast_meta(
     input_split_sizes: list[int] | torch.Tensor,
     dst_indices: list[list[int]] | torch.Tensor,
     group: dist.ProcessGroup,
-    topk_idx: torch.Tensor | None = None,
+    t2r_idx: torch.Tensor | None = None,
     input_seqlen: int | None = None,
     num_nodes: int | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     from ._buffer import GrpCollBuffer
     from ._mgr import grpcoll_mgr
 
     num_ranks = group.size()
-    num_experts = num_ranks
 
     # TODO: support directly pass input_split_sizes and dst_indices
-    # and no need to transfer to topk_idx first
-    if topk_idx is None:
-        topk_idx = transfer_splits_and_dst_idxs_to_topk_idx(
+    # and no need to transfer to t2r_idx first
+    if t2r_idx is None:
+        t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
             input_split_sizes=input_split_sizes,
             dst_indices=dst_indices,
             num_ranks=num_ranks,
@@ -1382,14 +1436,12 @@ def get_dispatch_layout_from_group_cast_meta(
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             _,  # event_overlap
-        ) = buffer.get_dispatch_layout(
-            topk_idx=topk_idx,
-            num_experts=num_experts,
+        ) = buffer.get_group_cast_meta(
+            t2r_idx=t2r_idx,
             previous_event=None,
-            async_finish=False,
+            async_op=False,
             allocate_on_comm_stream=False,
         )
     else:
@@ -1400,23 +1452,20 @@ def get_dispatch_layout_from_group_cast_meta(
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             _,  # event_overlap,
-        ) = GrpCollBuffer.get_dispatch_meta_from_topk_idx(
-            topk_idx=topk_idx,
+        ) = GrpCollBuffer.get_group_cast_meta_from_t2r_idx(
+            t2r_idx=t2r_idx,
             num_ranks=num_ranks,
             num_nodes=num_nodes,
-            num_experts=num_experts,
             previous_event=None,
-            async_finish=False,
+            async_op=False,
             allocate_on_meta_stream=False,
         )
 
     return (
         num_tokens_per_rank,
         num_tokens_per_rdma_rank,
-        num_tokens_per_expert,
         is_token_in_rank,
     )
 
@@ -1500,58 +1549,8 @@ def get_a2av_perm_idxs_from_group_cast_meta(
         num_ranks=num_ranks,
         output_seqlen=output_seqlen,
         previous_event=None,
-        async_finish=False,
+        async_op=False,
         allocate_on_meta_stream=False,
     )
 
     return perm_to_a2av_idx
-
-
-def _get_a2av_perm_idxs_from_group_cast_meta_ref(
-    output_split_size_list: list[int],
-    src_index_list: list[int],
-    num_ranks: int,
-    device: str = "cuda",
-    dtype: torch.dtype = torch.int64,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # count the total split size of each rank
-    rank_split_sizes = [0] * num_ranks
-    for i in range(len(output_split_size_list)):
-        rank_split_sizes[src_index_list[i]] += output_split_size_list[i]
-
-    # count the global rank offset
-    a2av_rank_offsets = list(accumulate([0] + rank_split_sizes))[:-1]
-
-    # a2a_output[unperm_from_a2av_idx] => output
-    unperm_from_a2av_idx: list[int] = []
-    current_offset_within_rank = [0] * num_ranks
-    for i in range(len(output_split_size_list)):
-        target_size = output_split_size_list[i]
-        target_rank = src_index_list[i]
-
-        # get the start offset of the target buffer sent from the target rank
-        global_start_offset_in_output = (
-            a2av_rank_offsets[target_rank] + current_offset_within_rank[target_rank]
-        )
-        unperm_from_a2av_idx.extend(
-            range(
-                global_start_offset_in_output,
-                global_start_offset_in_output + target_size,
-            )
-        )
-        current_offset_within_rank[target_rank] += target_size
-
-    # output[perm_to_a2av_idx] => a2a_output
-    perm_to_a2av_idx = perm_idxs2unperm_idxs(unperm_from_a2av_idx)
-
-    # convert to tensor
-    (
-        unperm_from_a2av_idx,
-        perm_to_a2av_idx,
-    ) = torch.tensor(
-        unperm_from_a2av_idx + perm_to_a2av_idx,
-        dtype=dtype,
-        device=device,
-    ).chunk(2)
-
-    return unperm_from_a2av_idx, perm_to_a2av_idx

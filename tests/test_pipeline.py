@@ -23,8 +23,8 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests
 
 import magi_attention
-import magi_attention.testing
 from magi_attention import init_dist_attn_runtime_mgr
+from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
 from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
 from magi_attention.common.ranges import AttnRanges
@@ -51,9 +51,13 @@ from magi_attention.testing.precision import (
     H100_NVLINK_A2A_BWU,
     H100_NVLINK_BANDWIDTH,
     H100_TFLOPS_16,
+    MAX_MISMATCH_THRES,
+    MISMATCH_THRES_RATIO,
+    NORM_RTOL_RATIO,
+    assert_close,
     calc_inf_norm,
     extract_mismatch_threshold,
-    torch_attn_ref,
+    ref_attn_func,
 )
 from magi_attention.utils import (
     get_a2a_corr_factor,
@@ -107,26 +111,24 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         # -----    set up for native grpcoll   ---- #
 
         if magi_attention.comm.is_native_grpcoll_enable():
-            if self.world_size in (2, 4, 8):
-                for nccl_group in self.nccl_groups:
-                    grpcoll_mgr.register_buffer(
-                        group=nccl_group,
-                        config=GrpCollConfig(
-                            num_nvl_bytes=int(2e9)
-                            * self.world_size
-                            // 8,  # 2GB for 8 ranks
-                        ),
-                    )
-                    grpcoll_mgr.check_registered(group=nccl_group)
+            for nccl_group in self.nccl_groups:
+                grpcoll_mgr.register_buffer(
+                    group=nccl_group,
+                    config=GrpCollConfig(
+                        num_nvl_bytes=int(2e9)
+                        * self.world_size
+                        // 8,  # 2GB for 8 ranks
+                    ),
+                )
+                grpcoll_mgr.check_registered(group=nccl_group)
 
     def destroy_pg(self):
         # -----    clean up for native grpcoll   ---- #
 
         if magi_attention.comm.is_native_grpcoll_enable():
-            if self.world_size in (2, 4, 8):
-                for nccl_group in self.nccl_groups:
-                    grpcoll_mgr.release_buffer(group=nccl_group)
-                    grpcoll_mgr.check_released(group=nccl_group)
+            for nccl_group in self.nccl_groups:
+                grpcoll_mgr.release_buffer(group=nccl_group)
+                grpcoll_mgr.check_released(group=nccl_group)
 
         super().destroy_pg()
 
@@ -497,6 +499,12 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
+        random_flags_mode: bool = False,  # TODO: implement random flags mode
+        # FIXME: for now, either lse calculation or applying attn sink
+        # requires torch impl of ref_attn_func
+        # which causes OOM for this test, thus skipped for now
+        test_lse: bool = False,
+        test_sink: bool = False,
         run_bwd: bool = True,
     ):
         # -----    switch mode   ---- #
@@ -531,15 +539,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         # -----    skip for native grpcoll   ---- #
 
         if magi_attention.comm.is_native_grpcoll_enable():
-            # TODO: support other dtypes besides bf16
-            if dtype != torch.bfloat16:
-                return
-            # TODO: support other world sizes
-            if self.world_size not in (2, 4, 8):
-                return
-            # FIXME: figure out the alignment requirement
             hidden_size_kv = num_heads[1] * head_dim
-            if hidden_size_kv % 256 != 0:
+            if hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(dtype) != 0:
                 return
 
         # -----    construct test case name   ---- #
@@ -582,6 +583,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
+        total_seqlen_sink: int = (
+            attn_config.get("total_seqlen_sink", 0) if test_sink else 0
+        )
         chunk_size: int = attn_config["chunk_size"]
         num_heads_q, num_heads_kv = num_heads
         softmax_scale = (  # choose softmax_scale by rule
@@ -688,9 +692,22 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dtype=dtype,
                 requires_grad=run_bwd,
             )
+            total_sink = (
+                torch.randn(
+                    total_seqlen_sink,
+                    num_heads_q,
+                    device=self.device,
+                    dtype=dtype,
+                    requires_grad=run_bwd,
+                )
+                if total_seqlen_sink > 0
+                else None
+            )
             dist.all_reduce(total_q.data, group=self.nccl_group)
             dist.all_reduce(total_k.data, group=self.nccl_group)
             dist.all_reduce(total_v.data, group=self.nccl_group)
+            if total_sink is not None:
+                dist.all_reduce(total_sink.data, group=self.nccl_group)
 
             # -----   dispatch global qkv to local qkv   ---- #
 
@@ -698,24 +715,28 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             local_k = dist_attn_runtime_mgr.dispatch_kv(total_k)
             local_v = dist_attn_runtime_mgr.dispatch_kv(total_v)
 
-            # -----   run dist attn forward on local qkv for local o   ---- #
+            # -----   run dist attn forward on local qkv for local out   ---- #
 
             if self.profile_mode:
                 # barrier before fwd to wait for the processes with slow solver
                 dist.barrier()
                 torch.cuda.synchronize()
 
-            local_out, _ = dist_attn_runtime_mgr.calc_attn(
+            local_out, local_lse = dist_attn_runtime_mgr.calc_attn(
                 q=local_q,
                 k=local_k,
                 v=local_v,
+                sink=total_sink,
                 softmax_scale=softmax_scale,
                 softcap=softcap,
             )
 
-            # -----   undispatch local o to global o   ---- #
+            # -----   undispatch local out to global out   ---- #
 
             total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
+            total_lse = (
+                dist_attn_runtime_mgr.undispatch_qo(local_lse) if test_lse else None
+            )
 
             # -----   run backward   ---- #
 
@@ -734,11 +755,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     total_k.grad,
                     total_v.grad,
                 )
+                grad_total_sink = total_sink.grad if total_sink is not None else None
             else:
-                grad_total_q = None
-                grad_total_k = None
-                grad_total_v = None
                 grad_total_out = None
+                grad_total_q, grad_total_k, grad_total_v = None, None, None
+                grad_total_sink = None
 
             # -----   assert close if not using profile mode   ---- #
 
@@ -756,10 +777,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     total_q=total_q,
                     total_k=total_k,
                     total_v=total_v,
+                    total_sink=total_sink,
                     total_out=total_out,
+                    total_lse=total_lse,
                     grad_total_q=grad_total_q,
                     grad_total_k=grad_total_k,
                     grad_total_v=grad_total_v,
+                    grad_total_sink=grad_total_sink,
                     grad_total_out=grad_total_out,
                     dtype=dtype,
                     run_bwd=run_bwd,
@@ -778,33 +802,94 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         total_q: torch.Tensor,
         total_k: torch.Tensor,
         total_v: torch.Tensor,
+        total_sink: torch.Tensor | None,
         total_out: torch.Tensor,
+        total_lse: torch.Tensor | None,
         grad_total_q: torch.Tensor | None,
         grad_total_k: torch.Tensor | None,
         grad_total_v: torch.Tensor | None,
+        grad_total_sink: torch.Tensor | None,
         grad_total_out: torch.Tensor | None,
         dtype: torch.dtype,
         run_bwd: bool,
         test_case: str = "",
+        err_ratio_dict: dict[str, float] = {},
     ) -> None:
-        # -----   customize tolerance threshold  ---- #
+        # -----   customize tolerance / threshold  ---- #
 
         o_atol = EPSILON
         o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
+        o_norm_rtol_ratio = err_ratio_dict.get("o_norm_rtol_ratio", NORM_RTOL_RATIO)
+        o_min_norm_rtol = err_ratio_dict.get("o_min_norm_rtol", 0.0)
+        o_mismatch_thres_ratio = err_ratio_dict.get(
+            "o_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        o_min_mismatch_thres = err_ratio_dict.get("o_min_mismatch_thres", 0.0)
+        o_max_mismatch_thres = err_ratio_dict.get(
+            "o_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
+
+        lse_atol = EPSILON
+        lse_rtol = 0.001
+        lse_norm_rtol_ratio = err_ratio_dict.get("lse_norm_rtol_ratio", NORM_RTOL_RATIO)
+        lse_min_norm_rtol = err_ratio_dict.get("lse_min_norm_rtol", 0.0)
+        lse_mismatch_thres_ratio = err_ratio_dict.get(
+            "lse_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        lse_min_mismatch_thres = err_ratio_dict.get("lse_min_mismatch_thres", 0.0)
+        lse_max_mismatch_thres = err_ratio_dict.get(
+            "lse_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dq_atol = EPSILON
         dq_rtol = {torch.bfloat16: 0.3, torch.float16: 0.2}.get(dtype, 0.2)
+        dq_norm_rtol_ratio = err_ratio_dict.get("dq_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dq_min_norm_rtol = err_ratio_dict.get("dq_min_norm_rtol", 0.0)
+        dq_mismatch_thres_ratio = err_ratio_dict.get(
+            "dq_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dq_min_mismatch_thres = err_ratio_dict.get("dq_min_mismatch_thres", 0.0)
+        dq_max_mismatch_thres = err_ratio_dict.get(
+            "dq_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dk_atol = EPSILON
         dk_rtol = {torch.bfloat16: 0.15, torch.float16: 0.08}.get(dtype, 0.08)
+        dk_norm_rtol_ratio = err_ratio_dict.get("dk_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dk_min_norm_rtol = err_ratio_dict.get("dk_min_norm_rtol", 0.0)
+        dk_mismatch_thres_ratio = err_ratio_dict.get(
+            "dk_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dk_min_mismatch_thres = err_ratio_dict.get("dk_min_mismatch_thres", 0.0)
+        dk_max_mismatch_thres = err_ratio_dict.get(
+            "dk_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         dv_atol = EPSILON
         dv_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
+        dv_norm_rtol_ratio = err_ratio_dict.get("dv_norm_rtol_ratio", NORM_RTOL_RATIO)
+        dv_min_norm_rtol = err_ratio_dict.get("dv_min_norm_rtol", 0.0)
+        dv_mismatch_thres_ratio = err_ratio_dict.get(
+            "dv_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dv_min_mismatch_thres = err_ratio_dict.get("dv_min_mismatch_thres", 0.0)
+        dv_max_mismatch_thres = err_ratio_dict.get(
+            "dv_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
-        # NOTE: an experimental value from magi_attention testing
-        mismatch_thres_ratio: float = 2.0
-        # NOTE: an experimental value from fa testing
-        norm_rtol_ratio: float = 2.0
+        dsink_atol = EPSILON
+        dsink_rtol = 0.05
+        dsink_norm_rtol_ratio = err_ratio_dict.get(
+            "dsink_norm_rtol_ratio", NORM_RTOL_RATIO
+        )
+        dsink_min_norm_rtol = err_ratio_dict.get("dsink_min_norm_rtol", 0.0)
+        dsink_mismatch_thres_ratio = err_ratio_dict.get(
+            "dsink_mismatch_thres_ratio", MISMATCH_THRES_RATIO
+        )
+        dsink_min_mismatch_thres = err_ratio_dict.get("dsink_min_mismatch_thres", 0.0)
+        dsink_max_mismatch_thres = err_ratio_dict.get(
+            "dsink_max_mismatch_thres", MAX_MISMATCH_THRES
+        )
 
         # -----   build attn mask   ---- #
 
@@ -817,11 +902,13 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             device=self.device,
         )
 
-        # -----   ref1. torch ref with high precision (fp32)   ---- #
+        # -----   ref1. torch ref with high precision (fp64)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
+        if total_sink is not None:
+            total_sink.grad = None
 
-        total_out_ref_high_precision = torch_attn_ref(
+        total_out_ref_high_precision, total_lse_ref_high_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -829,7 +916,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             softmax_scale=softmax_scale,
             softcap=softcap,
             layout="thd",
+            backend="torch" if total_sink is not None else "sdpa",
             high_precision=True,
+            return_lse=total_lse is not None,
         )
 
         if run_bwd:
@@ -843,12 +932,17 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 total_k.grad,
                 total_v.grad,
             )
+            grad_total_sink_ref_high_precision = (
+                total_sink.grad if total_sink is not None else None
+            )
 
         # -----   ref2. torch ref with low precision (fp16/bf16)   ---- #
 
         total_q.grad, total_k.grad, total_v.grad = None, None, None
+        if total_sink is not None:
+            total_sink.grad = None
 
-        total_out_ref_low_precision = torch_attn_ref(
+        total_out_ref_low_precision, total_lse_ref_low_precision = ref_attn_func(
             q=total_q,
             k=total_k,
             v=total_v,
@@ -856,7 +950,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             softmax_scale=softmax_scale,
             softcap=softcap,
             layout="thd",
+            backend="torch" if total_sink is not None else "sdpa",
             high_precision=False,
+            return_lse=total_lse is not None,
         )
 
         if run_bwd:
@@ -869,6 +965,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 total_q.grad,
                 total_k.grad,
                 total_v.grad,
+            )
+            grad_total_sink_ref_low_precision = (
+                total_sink.grad if total_sink is not None else None
             )
 
         # -----   init error message list   ---- #
@@ -885,8 +984,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         try:
             self.assertLessEqual(
                 out_norm,
-                norm_rtol_ratio * out_ref_norm,
-                msg=f"For {test_case=}: {out_norm=} should be no greater than {norm_rtol_ratio}x of {out_ref_norm=}",
+                max(o_min_norm_rtol, o_norm_rtol_ratio * out_ref_norm),
+                msg=(
+                    f"For {test_case=}: {out_norm=} should be no greater than "
+                    f"max({o_min_norm_rtol}, {o_norm_rtol_ratio} x {out_ref_norm=})",
+                ),
             )
         except Exception as e:
             err_msg_list.append(str(e))
@@ -897,10 +999,12 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             expected=total_out_ref_high_precision,
             atol=o_atol,
             rtol=o_rtol,
-            mismatch_thres_ratio=mismatch_thres_ratio,
+            mismatch_thres_ratio=o_mismatch_thres_ratio,
+            min_mismatch_thres=o_min_mismatch_thres,
+            max_mismatch_thres=o_max_mismatch_thres,
         )
         try:
-            magi_attention.testing.assert_close(
+            assert_close(
                 total_out,
                 total_out_ref_high_precision,
                 atol=o_atol,
@@ -910,6 +1014,50 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             )
         except Exception as e:
             err_msg_list.append(str(e))
+
+        # -----   assert close for fwd lse   ---- #
+
+        if total_lse is not None:
+            # fa style with Linf norm
+            lse_norm = calc_inf_norm(total_lse, total_lse_ref_high_precision)
+            lse_ref_norm = calc_inf_norm(
+                total_lse_ref_low_precision, total_lse_ref_high_precision
+            )
+            try:
+                self.assertLessEqual(
+                    lse_norm,
+                    max(lse_min_norm_rtol, lse_norm_rtol_ratio * lse_ref_norm),
+                    msg=(
+                        f"For {test_case=}: {lse_norm=} should be no greater than "
+                        f"max({lse_min_norm_rtol}, {lse_norm_rtol_ratio} x {lse_ref_norm=})"
+                    ),
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
+
+            # torch style with atol + rtol + mismatch threshold
+            lse_thres = extract_mismatch_threshold(
+                actual=total_lse_ref_low_precision,
+                expected=total_lse_ref_high_precision,
+                atol=lse_atol,
+                rtol=lse_rtol,
+                mismatch_thres_ratio=lse_mismatch_thres_ratio,
+                min_mismatch_thres=lse_min_mismatch_thres,
+                max_mismatch_thres=lse_max_mismatch_thres,
+            )
+            try:
+                assert_close(
+                    total_lse,
+                    total_lse_ref_high_precision,
+                    atol=lse_atol,
+                    rtol=lse_rtol,
+                    mismatch_threshold=lse_thres,
+                    test_case=f"{test_case} => lse",
+                )
+            except Exception as e:
+                err_msg_list.append(str(e))
+
+        # -----   assert close for bwd   ---- #
 
         if run_bwd:
             # -----   assert close for bwd dq   ---- #
@@ -922,8 +1070,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             try:
                 self.assertLessEqual(
                     dq_norm,
-                    norm_rtol_ratio * dq_ref_norm,
-                    msg=f"For {test_case=}: {dq_norm=} should be no greater than {norm_rtol_ratio}x of {dq_ref_norm=}",
+                    max(dq_min_norm_rtol, dq_norm_rtol_ratio * dq_ref_norm),
+                    msg=(
+                        f"For {test_case=}: {dq_norm=} should be no greater than "
+                        f"max({dq_min_norm_rtol}, {dq_norm_rtol_ratio} x {dq_ref_norm=})"
+                    ),
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -934,10 +1085,12 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 expected=grad_total_q_ref_high_precision,
                 atol=dq_atol,
                 rtol=dq_rtol,
-                mismatch_thres_ratio=mismatch_thres_ratio,
+                mismatch_thres_ratio=dq_mismatch_thres_ratio,
+                min_mismatch_thres=dq_min_mismatch_thres,
+                max_mismatch_thres=dq_max_mismatch_thres,
             )
             try:
-                magi_attention.testing.assert_close(
+                assert_close(
                     grad_total_q,
                     grad_total_q_ref_high_precision,
                     atol=dq_atol,
@@ -958,8 +1111,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             try:
                 self.assertLessEqual(
                     dk_norm,
-                    norm_rtol_ratio * dk_ref_norm,
-                    msg=f"For {test_case=}: {dk_norm=} should be no greater than {norm_rtol_ratio}x of {dk_ref_norm=}",
+                    max(dk_min_norm_rtol, dk_norm_rtol_ratio * dk_ref_norm),
+                    msg=(
+                        f"For {test_case=}: {dk_norm=} should be no greater than "
+                        f"max({dk_min_norm_rtol}, {dk_norm_rtol_ratio} x {dk_ref_norm=})"
+                    ),
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -970,10 +1126,12 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 expected=grad_total_k_ref_high_precision,
                 atol=dk_atol,
                 rtol=dk_rtol,
-                mismatch_thres_ratio=mismatch_thres_ratio,
+                mismatch_thres_ratio=dk_mismatch_thres_ratio,
+                min_mismatch_thres=dk_min_mismatch_thres,
+                max_mismatch_thres=dk_max_mismatch_thres,
             )
             try:
-                magi_attention.testing.assert_close(
+                assert_close(
                     grad_total_k,
                     grad_total_k_ref_high_precision,
                     atol=dk_atol,
@@ -994,8 +1152,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             try:
                 self.assertLessEqual(
                     dv_norm,
-                    norm_rtol_ratio * dv_ref_norm,
-                    msg=f"For {test_case=}: {dv_norm=} should be no greater than {norm_rtol_ratio}x of {dv_ref_norm=}",
+                    max(dv_min_norm_rtol, dv_norm_rtol_ratio * dv_ref_norm),
+                    msg=(
+                        f"For {test_case=}: {dv_norm=} should be no greater than "
+                        f"max({dv_min_norm_rtol}, {dv_norm_rtol_ratio} x {dv_ref_norm=})"
+                    ),
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -1006,10 +1167,12 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 expected=grad_total_v_ref_high_precision,
                 atol=dv_atol,
                 rtol=dv_rtol,
-                mismatch_thres_ratio=mismatch_thres_ratio,
+                mismatch_thres_ratio=dv_mismatch_thres_ratio,
+                min_mismatch_thres=dv_min_mismatch_thres,
+                max_mismatch_thres=dv_max_mismatch_thres,
             )
             try:
-                magi_attention.testing.assert_close(
+                assert_close(
                     grad_total_v,
                     grad_total_v_ref_high_precision,
                     atol=dv_atol,
@@ -1019,6 +1182,53 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
+
+            # -----   assert close for bwd dsink   ---- #
+
+            if total_sink is not None:
+                # fa style with Linf norm
+                dsink_norm = calc_inf_norm(
+                    grad_total_sink, grad_total_sink_ref_high_precision
+                )
+                dsink_ref_norm = calc_inf_norm(
+                    grad_total_sink_ref_low_precision,
+                    grad_total_sink_ref_high_precision,
+                )
+                try:
+                    self.assertLessEqual(
+                        dsink_norm,
+                        max(
+                            dsink_min_norm_rtol, dsink_norm_rtol_ratio * dsink_ref_norm
+                        ),
+                        msg=(
+                            f"For {test_case=}: {dsink_norm=} should be no greater than "
+                            f"max({dsink_min_norm_rtol}, {dsink_norm_rtol_ratio} x {dsink_ref_norm=})"
+                        ),
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
+
+                # torch style with atol + rtol + mismatch threshold
+                dsink_thres = extract_mismatch_threshold(
+                    actual=grad_total_sink_ref_low_precision,
+                    expected=grad_total_sink_ref_high_precision,
+                    atol=dsink_atol,
+                    rtol=dsink_rtol,
+                    mismatch_thres_ratio=dsink_mismatch_thres_ratio,
+                    min_mismatch_thres=dsink_min_mismatch_thres,
+                    max_mismatch_thres=dsink_max_mismatch_thres,
+                )
+                try:
+                    assert_close(
+                        grad_total_sink,
+                        grad_total_sink_ref_high_precision,
+                        atol=dsink_atol,
+                        rtol=dsink_rtol,
+                        mismatch_threshold=dsink_thres,
+                        test_case=f"{test_case} => dsink",
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
 
         # -----   raise error if any error occurs   ---- #
 

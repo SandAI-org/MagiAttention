@@ -46,77 +46,26 @@ namespace magi_attn_comm::grpcoll {
 
 namespace layout {
 
-template <int kNumThreads, int kNumExpertsPerSM, int kNumRanksPerSM>
-__global__ void get_dispatch_layout(
-    const int64_t* topk_idx,
+template <int kNumThreads, int kNumRanksPerSM>
+__global__ void get_group_cast_meta(
+    const int64_t* t2r_idx,
     int* num_tokens_per_rank,
     int* num_tokens_per_rdma_rank,
-    int* num_tokens_per_expert,
     bool* is_token_in_rank,
     int num_tokens,
-    int num_topk,
-    int num_ranks,
-    int num_experts) {
-  auto sm_id = static_cast<int>(blockIdx.x);
-  auto thread_id = static_cast<int>(threadIdx.x);
-
-  // Count expert statistics
-  // by the first (num_experts // kNumExpertsPerSM) SMs
-  __shared__ int num_tokens_per_expert_per_thread[kNumThreads][kNumExpertsPerSM];
-  int expert_begin_idx = sm_id * kNumExpertsPerSM, expert_end_idx = min(expert_begin_idx + kNumExpertsPerSM, num_experts);
-  if (expert_begin_idx < expert_end_idx) {
-    /** Per-thread count
-     * 1. num_tokens_per_expert_per_thread[tid][local_eid]:
-     *    the num of tokens sent to expert local_eid by thread tid in this SM,
-     *    covering the token with idxs: [tid + i * kNumThreads], i=0,1,2,...
-     */
-#pragma unroll
-    for (int i = 0; i < kNumExpertsPerSM; ++i)
-      num_tokens_per_expert_per_thread[thread_id][i] = 0;
-#pragma unroll
-    for (int i = thread_id; i < num_tokens; i += kNumThreads) {
-      auto shifted_topk_idx = topk_idx + i * num_topk;
-#pragma unroll
-      for (int j = 0, expert_idx; j < num_topk; ++j) {
-        expert_idx = static_cast<int>(shifted_topk_idx[j]);
-        if (expert_begin_idx <= expert_idx and expert_idx < expert_end_idx)
-          ++num_tokens_per_expert_per_thread[thread_id][expert_idx - expert_begin_idx];
-      }
-    }
-    __syncthreads();
-
-    /** Sum up
-     * 1. for num_tokens_per_expert:
-     *  each thread tid in this SM will sum up the num of tokens sent to eid (expert_begin_idx + tid)
-     *  by looping over the partial results in num_tokens_per_expert_per_thread[:][tid]
-     */
-    EP_STATIC_ASSERT(kNumExpertsPerSM <= kNumThreads, "Too many experts per SM");
-    if (expert_begin_idx + thread_id < expert_end_idx) {
-      int sum = 0;
-#pragma unroll
-      for (int i = 0; i < kNumThreads; ++i)
-        sum += num_tokens_per_expert_per_thread[i][thread_id];
-      num_tokens_per_expert[expert_begin_idx + thread_id] = sum;
-    }
-    return;
-  }
+    int num_ranks) {
+  const auto sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
 
   if (num_tokens_per_rdma_rank != nullptr)
-    EP_DEVICE_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0 and num_ranks > NUM_MAX_NVL_PEERS);
+    GRPCOLL_DEVICE_ASSERT(num_ranks % NUM_MAX_NVL_PEERS == 0 and num_ranks > NUM_MAX_NVL_PEERS);
 
   // Count rank statistics
-  // by the last (num_ranks // kNumRanksPerSM) SMs
   constexpr int kNumRDMARanksPerSM = kNumRanksPerSM / NUM_MAX_NVL_PEERS;
   __shared__ int num_tokens_per_rank_per_thread[kNumThreads][kNumRanksPerSM];
   __shared__ int num_tokens_per_rdma_rank_per_thread[kNumThreads][kNumRDMARanksPerSM];
-  auto sm_begin = (num_experts + kNumExpertsPerSM - 1) / kNumExpertsPerSM;
-  int rank_begin_idx = (sm_id - sm_begin) * kNumRanksPerSM, rank_end_idx = min(rank_begin_idx + kNumRanksPerSM, num_ranks);
+  int rank_begin_idx = sm_id * kNumRanksPerSM, rank_end_idx = min(rank_begin_idx + kNumRanksPerSM, num_ranks);
   int rdma_rank_begin_idx = rank_begin_idx / NUM_MAX_NVL_PEERS, rdma_rank_end_idx = rank_end_idx / NUM_MAX_NVL_PEERS;
   if (rank_begin_idx < rank_end_idx) {
-    const auto num_expert_per_rank = num_experts / num_ranks;
-    auto expert_begin = rank_begin_idx * num_expert_per_rank;
-    auto expert_end = rank_end_idx * num_expert_per_rank;
-
     /** Per-thread count
      * 1. num_tokens_per_rank_per_thread[tid][local_rid]:
      *  the num of tokens sent to rank rid (local_rid + rank_begin_idx)
@@ -144,15 +93,14 @@ __global__ void get_dispatch_layout(
       num_tokens_per_rdma_rank_per_thread[thread_id][i] = 0;
 #pragma unroll
     for (int i = thread_id; i < num_tokens; i += kNumThreads) {
-      auto shifted_topk_idx = topk_idx + i * num_topk;
+      auto shifted_t2r_idx = t2r_idx + i * num_ranks;
       int is_in_rank[kNumRanksPerSM] = {0}, is_in_rdma_rank[kNumRDMARanksPerSM] = {0};
 #pragma unroll
-      for (int j = 0, expert_idx, rank_idx; j < num_topk; ++j) {
-        expert_idx = static_cast<int>(shifted_topk_idx[j]);
-        if (expert_begin <= expert_idx and expert_idx < expert_end) {
-          // Count single rank
-          rank_idx = expert_idx / num_expert_per_rank - rank_begin_idx;
-          is_in_rank[rank_idx]++, is_in_rdma_rank[rank_idx / NUM_MAX_NVL_PEERS]++;
+      for (int j = 0, local_rank_idx, global_rank_idx; j < num_ranks; ++j) {
+        global_rank_idx = static_cast<int>(shifted_t2r_idx[j]);
+        if (rank_begin_idx <= global_rank_idx and global_rank_idx < rank_end_idx) {
+          local_rank_idx = global_rank_idx - rank_begin_idx;
+          is_in_rank[local_rank_idx]++, is_in_rdma_rank[local_rank_idx / NUM_MAX_NVL_PEERS]++;
         }
       }
 
@@ -181,7 +129,7 @@ __global__ void get_dispatch_layout(
      * 3. for is_token_in_rank:
      *  it has no need to sum up
      */
-    EP_STATIC_ASSERT(kNumRanksPerSM <= kNumThreads, "Too many ranks per SM");
+    GRPCOLL_STATIC_ASSERT(kNumRanksPerSM <= kNumThreads, "Too many ranks per SM");
     if (rank_begin_idx + thread_id < rank_end_idx) {
       int sum = 0;
 #pragma unroll
@@ -200,36 +148,21 @@ __global__ void get_dispatch_layout(
   }
 }
 
-void get_dispatch_layout(
-    const int64_t* topk_idx,
+void get_group_cast_meta(
+    const int64_t* t2r_idx,
     int* num_tokens_per_rank,
     int* num_tokens_per_rdma_rank,
-    int* num_tokens_per_expert,
     bool* is_token_in_rank,
     int num_tokens,
-    int num_topk,
     int num_ranks,
-    int num_experts,
     cudaStream_t stream) {
-  constexpr int kNumThreads = 256, kNumExpertsPerSM = 4, kNumRanksPerSM = 8;
-  int num_sms_for_expert_stats = (num_experts + kNumExpertsPerSM - 1) / kNumExpertsPerSM;
-  int num_sms_for_rank_stats = (num_ranks + kNumRanksPerSM - 1) / kNumRanksPerSM;
-  int num_sms = num_sms_for_expert_stats + num_sms_for_rank_stats;
-  EP_STATIC_ASSERT(kNumRanksPerSM % NUM_MAX_NVL_PEERS == 0, "Invalid number of ranks per SM");
+  constexpr int kNumThreads = 256, kNumRanksPerSM = 8;
+  int num_sms = (num_ranks + kNumRanksPerSM - 1) / kNumRanksPerSM;
+  GRPCOLL_STATIC_ASSERT(kNumRanksPerSM % NUM_MAX_NVL_PEERS == 0, "Invalid number of ranks per SM");
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   LAUNCH_KERNEL(
-      &cfg,
-      (get_dispatch_layout<kNumThreads, kNumExpertsPerSM, kNumRanksPerSM>),
-      topk_idx,
-      num_tokens_per_rank,
-      num_tokens_per_rdma_rank,
-      num_tokens_per_expert,
-      is_token_in_rank,
-      num_tokens,
-      num_topk,
-      num_ranks,
-      num_experts);
+      &cfg, (get_group_cast_meta<kNumThreads, kNumRanksPerSM>), t2r_idx, num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, num_tokens, num_ranks);
 }
 
 template <int kNumThreads, int kMaxNumRanks>
@@ -276,7 +209,7 @@ __global__ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64
 
   // prefix sum for each rank by thread 0
   // rank_split_sizes[rid][rid]: the start offset of the a2av split buffer recved from rank rid
-  // NOTE: since num_ranks are usually small, we don't need to use Blelloch scan algorithm
+  // NOTES: since num_ranks are usually small, we don't need to use Blelloch scan algorithm
   if (thread_id == 0) {
     int64_t prefix_sum = 0;
 #pragma unroll
@@ -319,8 +252,8 @@ __global__ void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64
 
 void get_a2av_perm_idx(const int64_t* output_split_sizes, const int64_t* src_idx, int64_t* perm_to_a2av_idx, int num_ranks, int num_splits, cudaStream_t stream) {
   constexpr int num_sms = 1, kNumThreads = 256, kMaxNumRanks = 16;
-  EP_STATIC_ASSERT(kNumThreads >= kMaxNumRanks, "kNumThreads should NOT less than kMaxNumRanks");
-  EP_HOST_ASSERT(num_ranks <= kMaxNumRanks);
+  GRPCOLL_STATIC_ASSERT(kNumThreads >= kMaxNumRanks, "kNumThreads should NOT less than kMaxNumRanks");
+  GRPCOLL_HOST_ASSERT(num_ranks <= kMaxNumRanks);
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   LAUNCH_KERNEL(&cfg, (get_a2av_perm_idx<kNumThreads, kMaxNumRanks>), output_split_sizes, src_idx, perm_to_a2av_idx, num_ranks, num_splits);

@@ -80,15 +80,17 @@ struct type_caster<at::ScalarType> {
 //   });
 // }
 
-std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
+std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd(
     const at::Tensor& dout,
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    const std::optional<at::Tensor>& sink_,
     const at::Tensor& out,
     std::optional<const at::Tensor>& dq_,
     std::optional<const at::Tensor>& dk_,
     std::optional<const at::Tensor>& dv_,
+    std::optional<const at::Tensor>& dsink_,
     const at::Tensor& softmax_lse,
     const at::Tensor& q_ranges,
     const at::Tensor& k_ranges,
@@ -120,6 +122,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
   int const head_size = q.size(2);
+  int const total_sink = sink_.has_value() ? sink_->size(0) : 0;
+  auto opts = q.options();
 
   // Check q, k, v, out, dout (dtype, device, layout)
   auto q_type = q.scalar_type();
@@ -151,6 +155,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   CHECK_CONTIGUOUS(q_ranges);
   CHECK_CONTIGUOUS(k_ranges);
 
+  // Init attn_type_map
   at::Tensor attn_type_map;
   bool const has_attn_type_map = attn_type_map_.has_value();
   if (has_attn_type_map) {
@@ -160,6 +165,20 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
     CHECK_SHAPE(attn_type_map, batch_size);
     CHECK_CONTIGUOUS(attn_type_map);
   }
+
+  // Init optional sink
+  at::Tensor sink;
+  if (sink_.has_value()) {
+    sink = sink_.value();
+  } else {
+    // Create a dummy empty sink tensor with zero size
+    sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+  }
+  TORCH_CHECK(sink.scalar_type() == at::kFloat, "sink must has dtype float");
+  CHECK_DEVICE(sink);
+  TORCH_CHECK(sink.dim() == 2, "sink must be 2D");
+  CHECK_SHAPE(sink, total_sink, num_heads_qo);
+  CHECK_CONTIGUOUS(sink);
 
   // Check merge_k_ranges, bwd_kq_map (dtype, device, layout) if given
   int merge_batch_size = batch_size;
@@ -234,10 +253,10 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   // Check dk_type is same as dv_type
   TORCH_CHECK(dk_type == dv_type, "dk and dv must have the same dtype");
 
-  auto opts = q.options();
-  // dq, dk, dv are output tensors, if they are not given, we will create them.
+  // Init gradient tensors to return
+  // dq, dk, dv, dsink are output tensors, if they are not given, we will create them.
   // If they are given, we will check dtype, device and layout.
-  at::Tensor dq, dk, dv;
+  at::Tensor dq, dk, dv, dsink;
   if (dq_.has_value()) {
     dq = dq_.value();
     TORCH_CHECK(dq.scalar_type() == dq_type, "dq must have the same dtype as dq_type (if given)");
@@ -265,13 +284,40 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
   } else {
     dv = torch::zeros_like(v, opts.dtype(dv_type));
   }
+  if (sink_.has_value()) {
+    if (dsink_.has_value()) {
+      dsink = dsink_.value();
+    } else {
+      dsink = torch::zeros_like(sink_.value());
+    }
+  } else {
+    // Create a dummy empty dsink tensor with zero size
+    dsink = torch::empty_like(sink);
+  }
+  TORCH_CHECK(dsink.dtype() == sink.dtype(), "dsink must have the same dtype as sink (if given)");
+  CHECK_DEVICE(dsink);
+  CHECK_SHAPE(dsink, total_sink, num_heads_qo);
+  CHECK_CONTIGUOUS(dsink);
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
-  // add a new dimension(4) for TMA alignment(16bytes)
-  // actually, we only use index 0 of dimension 4.
+  // Create the rounded total_q to allocate dPsum and LSE_log2
+  // to avoid OOB when loading them at the query tensor's seqlen boundary
   int const total_q_rounded = round_multiple(total_q + kBlockM - 1, kBlockM);
 
+  // Create dsink_reduce_buf, which is a workspace to store the block-reduced dsink results
+  // NOTE: when sink is not provided, dsink_reduce_buf is a dummy empty tensor consuming no memory overhead
+  int const num_m_block = cute::ceil_div(total_q_rounded, kBlockM);
+  at::Tensor dsink_reduce_buf = torch::empty({num_m_block, total_sink, num_heads_qo}, opts.dtype(torch::kFloat));
+
+  // Create dsink_reduce_cnt, which is a semaphore to count the number of blocks
+  // who's finished block reduction of dsink into dsink_reduce_buf for each head, so as to find the last finished block
+  // which will reduce across blocks over dsink_reduce_buf to get the final reduced dsink
+  // NOTE: when sink is not provided, dsink_reduce_cnt is a dummy zero tensor consuming no memory overhead
+  at::Tensor dsink_reduce_cnt = torch::zeros({num_heads_qo * (total_sink > 0)}, opts.dtype(torch::kUInt32));
+
+  // NOTE: we add a new dimension (4) for TMA alignment (16 bytes)
+  // actually, we only use index 0 of the new dimension (4).
   at::Tensor softmax_d = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
   at::Tensor softmax_lse_log2 = torch::empty({num_heads_qo, total_q_rounded, 4}, opts.dtype(torch::kFloat));
 
@@ -299,6 +345,8 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
       total_q,
       total_k,
       total_q_rounded,
+      num_m_block,
+      total_sink,
       num_heads_qo,
       num_heads_kv,
       head_size,
@@ -306,31 +354,35 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor> prepare_mha_bwd
       q,
       k,
       v,
+      sink,
       out,
       dout, // input tensors
       dq,
       dk,
-      dv, // output tensors
-      /*q_ranges*/ q_ranges.data_ptr(),
-      /*k_ranges*/ k_ranges.data_ptr(),
-      /*attn_type_map*/ has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
-      /*merge_batch_size*/ merge_batch_size,
-      /*merge_k_ranges*/ has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,
-      /*bwd_kq_map*/ has_bwd_kq_map ? bwd_kq_map.data_ptr() : nullptr,
-      /*bwd_unique_count*/ has_bwd_unique_count ? bwd_unique_count.data_ptr() : nullptr,
-      /*softmax_lse*/ softmax_lse.data_ptr(),
-      /*softmax_lse_log2*/ softmax_lse_log2.data_ptr(),
-      /*dsoftmax_sum*/ softmax_d.data_ptr(),
-      /*softmax_scale*/ softmax_scale,
-      /*tile_count_semaphore*/ tile_count_semaphore.data_ptr(),
-      /*softcap*/ softcap,
-      /*deterministic*/ deterministic,
-      /*determin_range_locks*/ determin_range_locks.data_ptr(),
-      /*determin_conflict_state*/ determin_conflict_state.data_ptr(),
-      /*dq_determin_conflict_state*/ dq_determin_conflict_state.data_ptr(),
-      /*dq_determin_range_locks*/ dq_determin_range_locks.data_ptr(),
-      /*sm_margin*/ sm_margin,
-      /*disable_bwd_dkv_atomic_reduction*/ disable_bwd_dkv_atomic_reduction);
+      dv,
+      dsink, // output tensors
+      dsink_reduce_buf,
+      dsink_reduce_cnt, // workspace tensors
+      /*q_ranges=*/q_ranges.data_ptr(),
+      /*k_ranges=*/k_ranges.data_ptr(),
+      /*attn_type_map=*/has_attn_type_map ? attn_type_map.data_ptr() : nullptr,
+      /*merge_batch_size=*/merge_batch_size,
+      /*merge_k_ranges=*/has_merge_k_ranges ? merge_k_ranges.data_ptr() : nullptr,
+      /*bwd_kq_map=*/has_bwd_kq_map ? bwd_kq_map.data_ptr() : nullptr,
+      /*bwd_unique_count=*/has_bwd_unique_count ? bwd_unique_count.data_ptr() : nullptr,
+      /*softmax_lse=*/softmax_lse.data_ptr(),
+      /*softmax_lse_log2=*/softmax_lse_log2.data_ptr(),
+      /*dsoftmax_sum=*/softmax_d.data_ptr(),
+      /*softmax_scale=*/softmax_scale,
+      /*tile_count_semaphore=*/tile_count_semaphore.data_ptr(),
+      /*softcap=*/softcap,
+      /*deterministic=*/deterministic,
+      /*determin_range_locks=*/determin_range_locks.data_ptr(),
+      /*determin_conflict_state=*/determin_conflict_state.data_ptr(),
+      /*dq_determin_conflict_state=*/dq_determin_conflict_state.data_ptr(),
+      /*dq_determin_range_locks=*/dq_determin_range_locks.data_ptr(),
+      /*sm_margin=*/sm_margin,
+      /*disable_bwd_dkv_atomic_reduction=*/disable_bwd_dkv_atomic_reduction);
 
-  return {params, dq, dk, dv};
+  return {params, dq, dk, dv, dsink};
 }

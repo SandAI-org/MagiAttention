@@ -33,6 +33,7 @@ struct Qkv_params {
   void* __restrict__ q_ptr;
   void* __restrict__ k_ptr;
   void* __restrict__ v_ptr;
+  void* __restrict__ sink_ptr;
 
   // The stride between rows of the Q, K and V matrices.
   index_t q_batch_stride;
@@ -68,7 +69,7 @@ struct Flash_fwd_params : public Qkv_params {
 
   // Dimensions params
   int b, d, d_rounded;
-  int total_q, total_k, total_q_rounded;
+  int total_q, total_k, total_sink;
 
   // The scaling factors for the kernel.
   float scale_softmax;
@@ -102,12 +103,19 @@ struct Flash_fwd_params : public Qkv_params {
   int arch;
   int num_sm;
   int* __restrict__ tile_count_semaphore;
+
+  bool has_sink() const {
+    return total_sink > 0;
+  }
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Flash_bwd_params : public Flash_fwd_params {
   using index_t = int64_t;
+
+  // Dimensions params
+  int total_q_rounded, num_m_block;
 
   // RangeMerge params
   int2* __restrict__ merge_k_ranges;
@@ -117,11 +125,16 @@ struct Flash_bwd_params : public Flash_fwd_params {
   // Dtype params
   at::ScalarType dkv_type;
 
-  // The dO and dQKV matrices.
+  // The dO, dQ, dK and dV matrices.
   void* __restrict__ do_ptr;
   void* __restrict__ dq_ptr;
   void* __restrict__ dk_ptr;
   void* __restrict__ dv_ptr;
+
+  // The dsink-related matrices and workspace
+  void* __restrict__ dsink_ptr;
+  void* __restrict__ dsink_reduce_buf_ptr;
+  void* __restrict__ dsink_reduce_cnt_ptr;
 
   // To accumulate dQ
   void* __restrict__ dq_accum_ptr;
@@ -155,8 +168,8 @@ struct Flash_bwd_params : public Flash_fwd_params {
 template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction, bool Deterministic>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
 
-template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic>
+template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic, bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream);
 
 template <typename T_out, uint32_t kHeadDim>
-void run_fast_zero_fill_(Flash_fwd_params& params, cudaStream_t stream);
+void run_flash_fwd_post_process_(Flash_fwd_params& params, cudaStream_t stream);

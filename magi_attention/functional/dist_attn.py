@@ -12,20 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: disable-error-code="union-attr,list-item"
+import warnings
 from typing import Any, TypeAlias
 
 import torch
 import torch.distributed as dist
+from torch.distributed import ReduceOp
 
 import magi_attention
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
-from magi_attention.comm.work import WorkWithPostProcessFn
+from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
-from .utils import correct_attn_fwd_result
+from .utils import calc_lse_sink_compiled, correct_attn_fwd_result, sink_bwd_compiled
 
 FusedOrTupleTensor: TypeAlias = torch.Tensor | tuple[torch.Tensor, ...]
 WorkWithBuffer: TypeAlias = (
@@ -48,10 +51,10 @@ class DistAttnRuntime:
     remote_q_work_with_buffer_per_stage: list[WorkWithBuffer]
     remote_kv_work_with_buffer_per_stage: list[WorkWithBuffer]
     partial_out_lse_reduce_work_per_stage: list[WorkWithPostProcessFn]
-    remote_lse_work_with_buffer_per_stage: list[WorkWithBuffer]
-    remote_qo_do_work_with_buffer_per_stage: list[WorkWithBuffer]
+    remote_qo_do_lse_work_with_buffer_per_stage: list[WorkWithBuffer]
     partial_dq_reduce_work_per_stage: list[WorkWithPostProcessFn]
     partial_dkv_reduce_work_per_stage: list[WorkWithPostProcessFn]
+    partial_dsink_reduce_work: WorkWithPostProcessFn
 
     def __init__(
         self,
@@ -64,71 +67,54 @@ class DistAttnRuntime:
         self.calc_meta = calc_meta
         self.cp_group_gc = cp_group_gc
         self.cp_group_gr = cp_group_gr
-        self.deterministic = magi_attention.is_deterministic_mode_enable()
         self.overlap_degree = comm_meta.overlap_degree
-        self.prefetch_stage_by_stage = (
-            magi_attention.is_cuda_device_max_connections_one()
-        )
 
-        # ----------    flags for fwd   --------- #
+        # ----------    other control flags for fwd   --------- #
 
-        self.fwd_sm_margin = magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
+        # NOTE: we now always concat kv together for comm unless using native grpcoll
+        self.concat_kv = not self.use_native_grpcoll
 
-        # NOTE: we now always concat kv and dkv together for comm
-        self.concat_kv = True
-
-        # NOTE: when enabling FFA fwd high precision reduce,
-        # we won't downcast partial out to q dtype before group-reduce comm,
-        # to trade-off double comm overhead for increased precision and less dtype-cast overhead
-        # and this works for out only when `is_qo_comm_enable` is ``True``
-        self.fwd_hp_reduce = (
-            magi_attention.comm.is_ffa_fwd_high_precision_reduce_enable()
-        )
-
-        # NOTE: when neither using sdpa backend nor qo comm,
+        # NOTE: when disabling qo comm
+        # if not using sdpa backend,
         # we will use accumulative buffer for partial out and lse
         # to avoid the storage of partial results
         # and an additional explicit `correct_attn_fwd_result`
-        self.fwd_out_lse_use_acc = (
-            not magi_attention.comm.is_qo_comm_enable()
-            and not magi_attention.is_sdpa_backend_enable()
-        )
+        self.fwd_out_lse_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend
 
-        # NOTE: when enabling qo comm and disabling FFA fwd high precision reduce
+        # NOTE: when enabling qo comm
+        # and neither using native grpcoll nor enabling fwd high precision reduce
         # we're supposed to initialize the partial local out in low precision
         self.fwd_local_out_lp_init = (
-            magi_attention.comm.is_qo_comm_enable() and not self.fwd_hp_reduce
+            self.enable_qo_comm
+            and not self.use_native_grpcoll
+            and not self.fwd_hp_reduce
         )
 
-        # ----------    flags for bwd   --------- #
+        # ----------    other control flags for bwd   --------- #
 
-        self.bwd_sm_margin = magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
+        # NOTE: we now always concat dkv together for comm unless using native grpcoll
+        self.concat_dkv = not self.use_native_grpcoll
 
-        # NOTE: we concat q,o,do in dist-attn bwd when qo comm is enabled
-        self.concat_qo_do = magi_attention.comm.is_qo_comm_enable()
+        # NOTE: when enabling qo comm
+        # we always concat q,o,do together for comm unless using native grpcoll
+        self.concat_qo_do = self.enable_qo_comm and not self.use_native_grpcoll
 
-        # NOTE: when enabling FFA bwd high precision reduce,
-        # we won't downcast downcast partial dq,dk,dv to q,k,v dtype before group-reduce comm,
-        # to trade-off double comm overhead for increased precision and less dtype-cast overhead
-        # and this works for dq only when `is_qo_comm_enable` is ``True``
-        self.bwd_hp_reduce = (
-            magi_attention.comm.is_ffa_bwd_high_precision_reduce_enable()
-        )
-
-        # NOTE: when neither using sdpa backend nor qo comm
+        # NOTE: when disabling qo comm
+        # if not using sdpa backend,
         # we will use accumulative buffer for partial dq
         # to avoid an additional explicit `add_`
-        self.bwd_dq_use_acc = (
-            not magi_attention.comm.is_qo_comm_enable()
-            and not magi_attention.is_sdpa_backend_enable()
-        )
+        self.bwd_dq_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend
 
-        # NOTE: when disabling FFA bwd high precision reduce
+        # NOTE: when neither using native grpcoll nor enabling bwd high precision reduce
         # we're supposed to initialize the partial local dk,dv in low precision
-        # and the same applies to dq if enabling qo comm
-        self.bwd_local_dkv_lp_init = not self.bwd_hp_reduce
+        # and the same applies to dq when enabling qo comm
+        self.bwd_local_dkv_lp_init = (
+            not self.use_native_grpcoll and not self.bwd_hp_reduce
+        )
         self.bwd_local_dq_lp_init = (
-            magi_attention.comm.is_qo_comm_enable() and not self.bwd_hp_reduce
+            self.enable_qo_comm
+            and not self.use_native_grpcoll
+            and not self.bwd_hp_reduce
         )
 
         # ----------    internal temporary work list   --------- #
@@ -147,28 +133,33 @@ class DistAttnRuntime:
         overlap_stage: int | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
+        sink: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Apply forward partial attention with given q,kv for the given overlap stage
 
         Args:
-            q (torch.Tensor): current q
+            q (torch.Tensor): current q tensor
             kv (FusedOrTupleTensor): current kv fused or tupled tensor
             out_acc (torch.Tensor, optional): accumulative buffer for out
             lse_acc (torch.Tensor, optional): accumulative buffer for lse
             overlap_stage (int, optional): given overlap stage. Defaults to None.
 
             softmax_scale (float, optional): softmax scale.
-                Defaults to None to use default value: 1/sqrt(head_dim)
-            softcap (float, optional): softcap. Defaults to 0.
+                Defaults to ``None`` to use default value: ``1/sqrt(head_dim)``
+            softcap (float, optional): softcap. Defaults to ``0``.
+
+            sink (torch.Tensor, optional): sink tensor.
+                Defaults to ``None`` to not apply attention sink.
 
         Returns:
-            out (torch.Tensor | None): partial out, or None if skipped
-            lse (torch.Tensor | None): partial log-sum-exp, or None if skipped
+            out (torch.Tensor | None): partial out, or ``None`` if skipped
+            lse (torch.Tensor | None): partial log-sum-exp, or ``None`` if skipped
 
         Shape:
             q: [num_tokens_q, num_heads_q, head_dim]
             kv: [num_tokens_kv*2, num_heads_kv, head_dim]
+            sink: [num_tokens_sink, num_heads_q]
             out: [num_tokens_q, num_heads_q, head_dim]
             lse: [num_tokens_q, num_heads_q]
             out_acc: [num_tokens_q, num_heads_q, head_dim]
@@ -185,27 +176,15 @@ class DistAttnRuntime:
 
         # skipped case
         if attn_arg.can_skip(is_bwd=False):
-            partial_out, partial_lse = None, None
             if is_host_stage:
-                hp_init_dtype = max_fp_dtype(q.dtype, torch.float32)
-                # NOTE: we can NOT use empty_like here,
-                # since when all attn computations are skipped for certain q range
-                # we have nowhere to zero-fill it
-                partial_out = torch.zeros_like(
-                    q,
-                    dtype=q.dtype if self.fwd_local_out_lp_init else hp_init_dtype,
-                    device=q.device,
+                return self._init_out_lse_skipped_host_stage(
+                    q=q,
+                    sink=sink,
                 )
-                partial_lse = torch.full(
-                    (q.size(0), q.size(1)),
-                    fill_value=float("-inf"),
-                    dtype=hp_init_dtype,  # lse always in high-precision
-                    device=q.device,
-                )
-            return partial_out, partial_lse
+            return None, None
 
         # attention forward pass
-        k, v = self._maybe_chunk_kv(kv)
+        k, v = self._maybe_chunk(kv, num_chunks=2)
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
@@ -215,11 +194,14 @@ class DistAttnRuntime:
             f"{attn_arg.q_ranges=} | "
             f"{attn_arg.k_ranges=}"
         ):
-            if magi_attention.is_sdpa_backend_enable():
+            if self.use_sdpa_backend:
                 partial_out, partial_lse = sdpa_fwd(
                     q=q,
                     k=k,
                     v=v,
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
                     attn_arg=attn_arg,
                     softmax_scale=_softmax_scale,
                     softcap=softcap,
@@ -229,6 +211,9 @@ class DistAttnRuntime:
                     q=q,
                     k=k,
                     v=v,
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
                     out=out_acc,  # directly reduce to out_acc
                     lse=lse_acc,  # directly reduce to lse_acc
                     **attn_arg.to_ffa_args(is_bwd=False),
@@ -240,9 +225,9 @@ class DistAttnRuntime:
                     deterministic=self.deterministic,
                     softcap=softcap,
                     sm_margin=self.fwd_sm_margin,
-                    # NOTE: increase the partial out precision temporarily,
-                    # to reduce the error caused by the out correction
-                    out_type=torch.float32,
+                    # NOTE: always use high-precision for the partial out,
+                    # to reduce the error caused by the out/lse correction
+                    out_type=self.hp_dtype,
                     # NOTE: when using accumulative buffer, we need to always enable atomic reduction
                     # unless it is the first call when accumulative buffer is still None
                     disable_fwd_atomic_reduction=(
@@ -281,7 +266,7 @@ class DistAttnRuntime:
 
         # wait for host/remote qkv prepared for current stage
         if is_host_stage:
-            local_kv = self._maybe_concat_kv(*local_kv)
+            local_kv = self._maybe_concat(*local_kv, need_concat=self.concat_kv)
             curr_q = local_q
             curr_kv = local_kv
         else:
@@ -310,7 +295,7 @@ class DistAttnRuntime:
             # when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
             # we issue all fetch-remote comms in advance of ffa fwd
             # and ffa fwd can still overlap with these comms
-            # with the support of non-zero `sm_margin`, thx to persistent kernel design
+            # with the support of non-zero `sm_margin`, thanks to persistent kernel design
             self.remote_q_work_with_buffer_per_stage = [
                 self._fetch_remote_q(local_q=local_q, overlap_stage=ith_stage)
                 for ith_stage in range(self.overlap_degree)
@@ -338,9 +323,9 @@ class DistAttnRuntime:
 
         Args:
             partial_remote_out (torch.Tensor, optional):
-                partial remote out in float32 dtype, or None if skipped
+                partial remote out in float32 dtype, or ``None`` if skipped
             partial_remote_lse (torch.Tensor, optional):
-                partial remote lse in float32 dtype, or None if skipped
+                partial remote lse in float32 dtype, or ``None`` if skipped
             partial_local_out (torch.Tensor): partial local out to be reduced
             partial_local_lse (torch.Tensor): partial local lse to be reduced
             ref_remote_out (torch.Tensor):
@@ -400,6 +385,20 @@ class DistAttnRuntime:
 
         return local_out, local_lse
 
+    def save_tensors_for_bwd(
+        self,
+        ctx,
+        local_q: torch.Tensor,
+        local_kv: FusedOrTupleTensor,
+        local_out: torch.Tensor,
+        local_lse: torch.Tensor,
+        global_sink: torch.Tensor | None,
+    ) -> None:
+        if self.concat_kv:  # local_kv is a fused tensor
+            ctx.save_for_backward(local_q, local_kv, local_out, local_lse, global_sink)
+        else:  # local_kv are tupled tensors
+            ctx.save_for_backward(local_q, *local_kv, local_out, local_lse, global_sink)
+
     # ----------    API for bwd   --------- #
 
     @nvtx.instrument_nvtx
@@ -412,7 +411,8 @@ class DistAttnRuntime:
         overlap_stage: int | None = None,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
-    ) -> tuple[torch.Tensor | None, FusedOrTupleTensor | None]:
+        sink: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, FusedOrTupleTensor | None, torch.Tensor | None]:
         """
         Apply backward partial attention with given qo_do,kv,lse for the given overlap stage
 
@@ -424,21 +424,26 @@ class DistAttnRuntime:
             overlap_stage (int, optional): given overlap stage. Defaults to None.
 
             softmax_scale (float, optional): softmax scale.
-                Defaults to None to use default value: 1/sqrt(head_dim)
-            softcap (float, optional): softcap. Defaults to 0.
+                Defaults to ``None`` to use default value: ``1/sqrt(head_dim)``
+            softcap (float, optional): softcap. Defaults to ``0``.
+
+            sink (torch.Tensor, optional): sink tensor.
+                Defaults to ``None`` to not apply backward of sink to compute partial dsink.
 
         Returns:
-            partial_dq (torch.Tensor | None): partial dq, or None if skipped
-            partial_dkv (FusedOrTupleTensor | None): partial dkv, or None if skipped
+            partial_dq (torch.Tensor | None): partial dq, or ``None`` if skipped
+            partial_dkv (FusedOrTupleTensor | None): partial dkv, or ``None`` if skipped
+            partial_dsink (torch.Tensor | None): partial dsink, or ``None`` if skipped
 
         Shape:
             qo_do: [num_tokens_q*3, num_heads_q, head_dim]
             kv: [num_tokens_kv*2, num_heads_kv, head_dim]
+            sink: [num_tokens_sink, num_heads_q]
             lse: [num_tokens_q, num_heads_q]
             partial_dq: [num_tokens_q, num_heads_q, head_dim]
             partial_dkv: [num_tokens_kv*2, num_heads_kv, head_dim]
+            partial_dsink: [num_tokens_sink, num_heads_q]
         """
-        assert self.concat_kv, "only support concat_kv"
 
         is_host_stage = self.is_host_stage(overlap_stage)
 
@@ -451,64 +456,78 @@ class DistAttnRuntime:
 
         # skipped case
         if attn_arg.can_skip(is_bwd=True):
-            partial_dq, partial_dkv = None, None
             if is_host_stage:
-                q, _, _ = self._maybe_chunk_qo_do(qo_do)
-                # NOTE: if local_dq and local_dkv calculation are skipped,
-                # we need to zeros initialize them since they might be reduced later
-                partial_dq = torch.zeros_like(
-                    q,
-                    dtype=q.dtype
-                    if self.bwd_local_dq_lp_init
-                    else max_fp_dtype(q.dtype, torch.float32),
+                return self._init_dq_dkv_dsink_skipped_host_stage(
+                    qo_do=qo_do,
+                    kv=kv,
+                    lse=lse,
+                    sink=sink,
                 )
-                partial_dkv = torch.zeros_like(
-                    kv,
-                    dtype=kv.dtype  # type: ignore[union-attr]
-                    if self.bwd_local_dkv_lp_init
-                    else max_fp_dtype(kv.dtype, torch.float32),  # type: ignore[union-attr]
-                )
-            return partial_dq, partial_dkv
+            return None, None, None
 
-        # attention backward pass
-        q, o, do = self._maybe_chunk_qo_do(qo_do)
-        k, v = self._maybe_chunk_kv(kv)
+        # prepare tensors and other meta
+        q, o, do = self._maybe_chunk(qo_do, num_chunks=3)
+        k, v = self._maybe_chunk(kv, num_chunks=2)
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
-        if magi_attention.is_sdpa_backend_enable():
-            partial_dq, partial_dk, partial_dv = sdpa_bwd(
+        if self.concat_kv:  # kv is a fused tensor
+            dkv_shape = kv.shape
+        else:  # kv are tupled tensors
+            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
+
+        # attention backward pass
+        if self.use_sdpa_backend:
+            partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
                 do=do,
                 q=q,
                 k=k,
                 v=v,
+                # NOTE: dsink should be computed only once
+                # thus we only compute it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
                 o=o,
                 lse=lse,
                 attn_arg=attn_arg,
                 softmax_scale=_softmax_scale,
                 softcap=softcap,
             )
-            partial_dkv = self._maybe_concat_kv(partial_dk, partial_dv)
+            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=True)
         else:
+            # init partial_dkv buffer
             # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
             # and we need to zero-initialize partial_dkv since it needs to be reduced
-            partial_dkv = torch.zeros_like(kv, dtype=torch.float32)
-            partial_dk, partial_dv = self._maybe_chunk_kv(partial_dkv)
-            partial_dq, partial_dk, partial_dv = _flex_flash_attn_backward(
+            partial_dkv = torch.zeros(
+                dkv_shape,
+                dtype=self.hp_dtype,
+                device=k.device,
+            )
+            partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
+
+            (
+                partial_dq,
+                partial_dk,
+                partial_dv,
+                partial_dsink,
+            ) = _flex_flash_attn_backward(
                 dout=do,
                 q=q,
                 k=k,
                 v=v,
+                # NOTE: dsink should be computed only once
+                # thus we only compute it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
                 out=o,
                 lse=lse,
                 dq=dq_acc,  # directly reduce to dq_acc
                 dk=partial_dk,
                 dv=partial_dv,
-                # NOTE: increase the partial dq, dkv precision temporarily,
+                dsink=None,  # let kernel initialize dsink if required
+                # NOTE: always use high precision for the partial dq, dkv
                 # to reduce the error caused by the atomic reduction inside the kernel
-                dq_type=torch.float32,
-                dk_type=torch.float32,
-                dv_type=torch.float32,
+                dq_type=self.hp_dtype,
+                dk_type=self.hp_dtype,
+                dv_type=self.hp_dtype,
                 **attn_arg.to_ffa_args(is_bwd=True),
                 merge_k_ranges=None,
                 bwd_kq_map=None,
@@ -524,11 +543,13 @@ class DistAttnRuntime:
         if is_host_stage:
             if self.bwd_local_dq_lp_init:
                 partial_dq = partial_dq.to(q.dtype)
-
             if self.bwd_local_dkv_lp_init:
-                partial_dkv = partial_dkv.to(kv.dtype)  # type: ignore[union-attr]
+                partial_dkv = partial_dkv.to(kv.dtype)
 
-        return partial_dq, partial_dkv
+        if not self.concat_dkv:  # make partial_dkv tupled tensors
+            partial_dkv = (partial_dk, partial_dv)
+
+        return partial_dq, partial_dkv, partial_dsink
 
     @nvtx.instrument_nvtx
     def get_curr_qo_do_kv_lse_and_fetch_next(
@@ -558,10 +579,10 @@ class DistAttnRuntime:
 
         # wait for host/remote qo_do,kv,lse prepared for current stage
         if is_host_stage:
-            local_qo_do = self._maybe_concat_qo_do(*local_qo_do)
-            curr_qo_do = local_qo_do
-            curr_kv = local_kv
-            curr_lse = local_lse
+            local_qo_do = self._maybe_concat(
+                *local_qo_do, need_concat=self.concat_qo_do
+            )
+            curr_qo_do, curr_kv, curr_lse = local_qo_do, local_kv, local_lse
         else:
             curr_remote_stage = self.get_curr_remote_stage(overlap_stage)
             (
@@ -570,26 +591,15 @@ class DistAttnRuntime:
             ) = self.remote_kv_work_with_buffer_per_stage[curr_remote_stage]
             curr_kv = curr_remote_kv_work.wait_post_process(curr_remote_kv_buffer)
             (
-                curr_remote_qo_do_work,
-                curr_remote_qo_do_buffer,
-            ) = self.remote_qo_do_work_with_buffer_per_stage[curr_remote_stage]
-            curr_qo_do = curr_remote_qo_do_work.wait_post_process(
-                curr_remote_qo_do_buffer
+                curr_remote_qo_do_lse_work,
+                curr_remote_qo_do_lse_buffer,
+            ) = self.remote_qo_do_lse_work_with_buffer_per_stage[curr_remote_stage]
+            curr_qo_do, curr_lse = curr_remote_qo_do_lse_work.wait_post_process(
+                curr_remote_qo_do_lse_buffer
             )
-            (
-                curr_remote_lse_work,
-                curr_remote_lse_buffer,
-            ) = self.remote_lse_work_with_buffer_per_stage[curr_remote_stage]
-            curr_lse = curr_remote_lse_work.wait_post_process(curr_remote_lse_buffer)
 
         # pre-fetch remote qo_do,kv,lse for next stage(s)
         if self.prefetch_stage_by_stage and not is_last_remote_stage:
-            (
-                self.remote_lse_work_with_buffer_per_stage[next_stage]
-            ) = self._fetch_remote_lse(
-                local_lse=local_lse,
-                overlap_stage=next_stage,
-            )
             (
                 self.remote_kv_work_with_buffer_per_stage[next_stage]
             ) = self._fetch_remote_kv(
@@ -597,29 +607,24 @@ class DistAttnRuntime:
                 overlap_stage=next_stage,
             )
             (
-                self.remote_qo_do_work_with_buffer_per_stage[next_stage]
-            ) = self._fetch_remote_qo_do(
+                self.remote_qo_do_lse_work_with_buffer_per_stage[next_stage]
+            ) = self._fetch_remote_qo_do_lse(
                 local_qo_do=local_qo_do,
+                local_lse=local_lse,
                 overlap_stage=next_stage,
             )
         elif is_host_stage:
             # NOTE: when `CUDA_DEVICE_MAX_CONNECTIONS` > 1,
             # we issue all fetch-remote comms in advance of ffa bwd
             # and ffa bwd can still overlap with these comms
-            # with the support of `sm_margin`, thx to persistent kernel design
+            # with the support of `sm_margin`, thanks to persistent kernel design
             self.remote_kv_work_with_buffer_per_stage = [
                 self._fetch_remote_kv(local_kv=local_kv, overlap_stage=ith_stage)
                 for ith_stage in range(self.overlap_degree)
             ]
-            self.remote_qo_do_work_with_buffer_per_stage = [
-                self._fetch_remote_qo_do(
+            self.remote_qo_do_lse_work_with_buffer_per_stage = [
+                self._fetch_remote_qo_do_lse(
                     local_qo_do=local_qo_do,
-                    overlap_stage=ith_stage,
-                )
-                for ith_stage in range(self.overlap_degree)
-            ]
-            self.remote_lse_work_with_buffer_per_stage = [
-                self._fetch_remote_lse(
                     local_lse=local_lse,
                     overlap_stage=ith_stage,
                 )
@@ -647,13 +652,13 @@ class DistAttnRuntime:
 
         Args:
             partial_remote_dq (torch.Tensor, optional):
-                partial remote dq in float32 dtype, or None if skipped
+                partial remote dq in float32 dtype, or ``None`` if skipped
             partial_local_dq (torch.Tensor): partial local dq to be reduced
             ref_remote_qo_do (FusedOrTupleTensor):
                 reference remote qo_do fused or tupled tensor,
                 to provide meta info like dtype and shape
             partial_remote_dkv (FusedOrTupleTensor, optional):
-                partial remote dkv in float32 dtype, or None if skipped
+                partial remote dkv in float32 dtype, or ``None`` if skipped
             partial_local_dkv (FusedOrTupleTensor): partial local dkv to be reduced
             ref_remote_kv (FusedOrTupleTensor):
                 reference remote kv fused or tupled tensor, to provide meta info like dtype and shape
@@ -671,7 +676,7 @@ class DistAttnRuntime:
         )
 
         # reduce ith partial dq
-        ref_remote_q, _, _ = self._maybe_chunk_qo_do(ref_remote_qo_do)
+        ref_remote_q, _, _ = self._maybe_chunk(ref_remote_qo_do, num_chunks=3)
         (
             self.partial_dq_reduce_work_per_stage[overlap_stage]
         ) = self._reduce_partial_dq(
@@ -682,30 +687,53 @@ class DistAttnRuntime:
         )
 
     @nvtx.instrument_nvtx
-    def prepare_reduced_local_dq_dk_dv(
+    def reduce_partial_dsink(
+        self,
+        partial_global_dsink: torch.Tensor | None,
+    ) -> None:
+        """
+        Reduce partial global dsink to replicated global dsink
+        and assign the returned work to self.partial_dsink_reduce_work
+
+        Args:
+            partial_global_dsink (torch.Tensor, optional):
+                partial global dsink to be reduced if given
+        """
+        self.partial_dsink_reduce_work = self._reduce_partial_dsink(
+            partial_global_dsink=partial_global_dsink,
+        )
+
+    @nvtx.instrument_nvtx
+    def prepare_reduced_local_dqkv_global_dsink(
         self,
         partial_local_dq: torch.Tensor,
-        partial_local_dkv: torch.Tensor,
+        partial_local_dkv: FusedOrTupleTensor,
+        partial_global_dsink: torch.Tensor | None,
         ref_local_dq: torch.Tensor,
-        ref_local_dkv: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ref_local_dkv: FusedOrTupleTensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
-        Prepare the final reduced local dq,dk,dv
-        before returning from backward
+        Prepare the final reduced local dq,dk,dv before returning from backward
         with clearing the temporary work list
 
         Args:
             partial_local_dq (torch.Tensor): partial local dq to be reduced
-            partial_local_dkv (torch.Tensor): partial local dkv to be reduced
+            partial_local_dkv (FusedOrTupleTensor):
+                partial local dkv fused or tupled tensor to be reduced
+            partial_global_dsink (torch.Tensor, optional):
+                partial global dsink to be reduced if given
+
             ref_local_dq (torch.Tensor):
                 reference local dq, to provide meta info like dtype and shape
-            ref_local_dkv (torch.Tensor):
-                reference local dkv, to provide meta info like dtype and shape
+            ref_local_dkv (FusedOrTupleTensor):
+                reference local dkv fused or tupled tensor, to provide meta info like dtype and shape
 
         Returns:
             local_dq (torch.Tensor): reduced local dq tensor
             local_dk (torch.Tensor): reduced local dk tensor
             local_dv (torch.Tensor): reduced local dv tensor
+            global_dsink (torch.Tensor, optional):
+                reduced global dsink tensor (replicated among cp ranks) if required
         """
         # wait for all partial dq reduced
         for partial_dq_reduce_work in self.partial_dq_reduce_work_per_stage:
@@ -722,18 +750,103 @@ class DistAttnRuntime:
                 partial_local_dkv
             )
 
-        # cast final local dkv to kv dtype
-        local_dkv = partial_local_dkv.to(ref_local_dkv.dtype)
+        # cast final local dkv to kv dtype and chunk to dk and dv
+        if self.concat_kv:  # ref_local_dkv is a fused tensor
+            kv_dtype = ref_local_dkv.dtype
+        else:  # ref_local_dkv are tupled tensors
+            kv_dtype = ref_local_dkv[0].dtype
 
-        # chunk final local dkv into dk and dv
-        local_dk, local_dv = self._maybe_chunk_kv(local_dkv)
+        if self.concat_dkv:
+            local_dkv = partial_local_dkv.to(kv_dtype)
+            local_dk, local_dv = self._maybe_chunk(local_dkv, num_chunks=2)
+        else:
+            local_dk, local_dv = self._maybe_chunk(partial_local_dkv, num_chunks=2)
+            local_dk = local_dk.to(kv_dtype)
+            local_dv = local_dv.to(kv_dtype)
+
+        # wait for partial global dsink reduced
+        global_dsink = self.partial_dsink_reduce_work.wait_post_process(
+            partial_global_dsink
+        )
 
         # reset the temporary work list
         self._reset_work_list()
 
-        return local_dq, local_dk, local_dv
+        return local_dq, local_dk, local_dv, global_dsink
+
+    def load_tensors_from_fwd(
+        self, ctx
+    ) -> tuple[
+        torch.Tensor,
+        FusedOrTupleTensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ]:
+        if self.concat_kv:  # local kv is a fused tensor
+            local_q, local_kv, local_out, local_lse, global_sink = ctx.saved_tensors
+        else:  # local kv are tupled tensors
+            (
+                local_q,
+                local_k,
+                local_v,
+                local_out,
+                local_lse,
+                global_sink,
+            ) = ctx.saved_tensors
+            local_kv = (local_k, local_v)
+
+        return local_q, local_kv, local_out, local_lse, global_sink
 
     # ----------    common API   --------- #
+
+    @property
+    def deterministic(self) -> bool:
+        return magi_attention.is_deterministic_mode_enable()
+
+    @property
+    def prefetch_stage_by_stage(self) -> bool:
+        return magi_attention.is_cuda_device_max_connections_one()
+
+    @property
+    def use_sdpa_backend(self) -> bool:
+        return magi_attention.is_sdpa_backend_enable()
+
+    @property
+    def use_native_grpcoll(self) -> bool:
+        return magi_attention.comm.is_native_grpcoll_enable()
+
+    @property
+    def enable_qo_comm(self) -> bool:
+        return magi_attention.comm.is_qo_comm_enable()
+
+    @property
+    def hp_dtype(self) -> torch.dtype:
+        return torch.float32
+
+    @property
+    def fwd_sm_margin(self) -> int:
+        return magi_attention.comm.ffa_fwd_sm_margin_save_for_comm()
+
+    @property
+    def bwd_sm_margin(self) -> int:
+        return magi_attention.comm.ffa_bwd_sm_margin_save_for_comm()
+
+    @property
+    def fwd_hp_reduce(self) -> bool:
+        return magi_attention.comm.is_fwd_high_precision_reduce_enable()
+
+    @property
+    def bwd_hp_reduce(self) -> bool:
+        return magi_attention.comm.is_bwd_high_precision_reduce_enable()
+
+    @property
+    def dsink_reduce_op(self) -> ReduceOp | None:
+        return {
+            "none": None,
+            "sum": ReduceOp.SUM,
+            "avg": ReduceOp.AVG,
+        }[magi_attention.comm.dsink_all_reduce_op()]
 
     def is_host_stage(self, overlap_stage: int | None) -> bool:
         """
@@ -790,23 +903,35 @@ class DistAttnRuntime:
             remote_kv_buffer: [num_tokens_kv_remote_i*2, num_heads_kv, head_dim],
                 for i = 0, 1, ..., overlap_degree - 1
         """
-        assert self.concat_kv, "only support concat_kv"
-        _, num_heads, head_dim = local_kv.shape  # type: ignore[union-attr]
+
+        # prepare the meta info
+        if self.concat_kv:
+            _, num_heads, head_dim = local_kv.shape
+            dtype = local_kv.dtype
+            device = local_kv.device
+        else:
+            _, num_heads, head_dim = local_kv[0].shape
+            dtype = local_kv[0].dtype
+            device = local_kv[0].device
 
         # get the group-cast args for kv
         group_cast_args = self.comm_meta.kv_group_collective_args_list[
             overlap_stage
         ].to_group_cast_args()
         remote_kv_seqlen = self.comm_meta.num_remote_kv_tokens_per_stage[overlap_stage]
+        if not self.concat_kv:
+            remote_kv_seqlen *= 2  # still x2 to allocate once
 
         # init remote kv buffer
         remote_kv_buffer = torch.empty(
             remote_kv_seqlen,
             num_heads,
             head_dim,
-            dtype=local_kv.dtype,  # type: ignore[union-attr]
-            device=local_kv.device,  # type: ignore[union-attr]
+            dtype=dtype,
+            device=device,
         )
+        if not self.concat_kv:  # chunk to k,v individual buffers
+            remote_kv_buffer = self._maybe_chunk(remote_kv_buffer, num_chunks=2)
 
         # launch group cast kernel
         remote_kv_work = group_cast(
@@ -845,7 +970,7 @@ class DistAttnRuntime:
                 for i = 0, 1, ..., overlap_degree - 1
         """
 
-        if not magi_attention.comm.is_qo_comm_enable():
+        if not self.enable_qo_comm:
             remote_q_buffer = local_q
             remote_q_work = WorkWithPostProcessFn(post_process_fn=lambda x: x)
             return remote_q_work, remote_q_buffer
@@ -879,131 +1004,176 @@ class DistAttnRuntime:
         return remote_q_work, remote_q_buffer
 
     @nvtx.instrument_nvtx
-    def _fetch_remote_qo_do(
+    def _fetch_remote_qo_do_lse(
         self,
         local_qo_do: FusedOrTupleTensor,
-        overlap_stage: int,
-    ) -> WorkWithBuffer:
-        """
-        Fetch remote q, o, do buffer from other ranks to local for the given overlap stage,
-        and return the corresponding work and buffer
-
-        Args:
-            local_qo_do (FusedOrTupleTensor): the local q, o, do (fused or tupled) tensor
-            overlap_stage (int): current overlap stage
-
-        Returns:
-            WorkWithBuffer:
-                remote_qo_do_work (WorkWithPostProcessFn):
-                    communication handle, used to wait for communication completion
-                remote_qo_do_buffer (FusedOrTupleTensor): remote q, o, do buffer
-
-        Shape:
-            local_qo_do: [num_tokens_qo_do_local*3, num_heads_q, head_dim]
-            remote_qo_do_buffer: [num_tokens_qo_do_remote_i*3, num_heads_q, head_dim],
-                for i = 0, 1, ..., overlap_degree - 1
-        """
-
-        if not magi_attention.comm.is_qo_comm_enable():
-            remote_qo_do_buffer = local_qo_do
-            remote_qo_do_work = WorkWithPostProcessFn(
-                post_process_fn=lambda x: x  # take q,o,do and return q,o,do
-            )
-            return remote_qo_do_work, remote_qo_do_buffer
-
-        assert self.concat_qo_do, "only support concat_qo_do"
-        _, num_heads, head_dim = local_qo_do.shape  # type: ignore[union-attr]
-
-        # get the group-cast args for q,o,do
-        group_cast_args = self.comm_meta.qo_do_group_collective_args_list[
-            overlap_stage
-        ].to_group_cast_args()
-        remote_qo_do_seqlen = self.comm_meta.num_remote_qo_do_tokens_per_stage[
-            overlap_stage
-        ]
-
-        # init remote q,o,do output buffer
-        remote_qo_do_buffer = torch.empty(
-            remote_qo_do_seqlen,
-            num_heads,
-            head_dim,
-            dtype=local_qo_do.dtype,  # type: ignore[union-attr]
-            device=local_qo_do.device,  # type: ignore[union-attr]
-        )
-
-        # launch group cast kernel
-        remote_qo_do_work = group_cast(
-            input=local_qo_do,
-            output=remote_qo_do_buffer,
-            **group_cast_args,
-            group=self.cp_group_gc,
-            async_op=True,
-        )
-
-        return remote_qo_do_work, remote_qo_do_buffer
-
-    @nvtx.instrument_nvtx
-    def _fetch_remote_lse(
-        self,
         local_lse: torch.Tensor,
         overlap_stage: int,
     ) -> WorkWithBuffer:
         """
-        Fetch remote lse buffer from other ranks to local for the given overlap stage,
+        Fetch remote q, o, do, lse buffer from other ranks to local for the given overlap stage,
         and return the corresponding work and buffer
 
         Args:
+            local_qo_do (FusedOrTupleTensor): the local q, o, do (fused or tupled) tensor
             local_lse (torch.Tensor): the local lse tensor
             overlap_stage (int): current overlap stage
 
         Returns:
             WorkWithBuffer:
-                remote_lse_work (WorkWithPostProcessFn):
+                remote_qo_do_lse_work (WorkWithPostProcessFn):
                     communication handle, used to wait for communication completion
-                remote_lse_buffer (torch.Tensor): remote lse buffer
+                remote_qo_do_lse_buffer:
+                    - remote_qo_do_buffer (FusedOrTupleTensor): remote q, o, do buffer
+                    - remote_lse_buffer (torch.Tensor): remote lse buffer
 
         Shape:
+            local_qo_do: [num_tokens_qo_do_local*3, num_heads_q, head_dim]
             local_lse: [num_tokens_q_local, num_heads_q]
-            remote_lse_buffer: [num_tokens_q_remote_i, num_heads_q],
-                for i = 0, 1, ..., overlap_degree - 1
+            remote_qo_do_lse_buffer:
+                - remote_qo_do_buffer: [num_tokens_q_remote_i*3, num_heads_q, head_dim],
+                    for i = 0, 1, ..., overlap_degree - 1
+                - remote_lse_buffer: [num_tokens_q_remote_i, num_heads_q],
+                    for i = 0, 1, ..., overlap_degree - 1
         """
-        # HACK: since lse usually has different shape and dtype from q,o,do
-        # we can not trivially fuse lse comm with qo comm, thus here we use specific comm to fetch lse
-        # try to find a better way to handle it in the future
 
-        if not magi_attention.comm.is_qo_comm_enable():
-            remote_lse_buffer = local_lse
-            remote_lse_work = WorkWithPostProcessFn(
-                post_process_fn=lambda x: x  # take lse and return lse
+        if not self.enable_qo_comm:
+            remote_qo_do_lse_buffer = (local_qo_do, local_lse)
+            remote_qo_do_lse_work = WorkWithPostProcessFn(
+                post_process_fn=lambda x: x  # take q,o,do,lse and return q,o,do,lse
             )
-            return remote_lse_work, remote_lse_buffer
+            return remote_qo_do_lse_work, remote_qo_do_lse_buffer
 
-        _, num_heads = local_lse.shape
+        # prepare the meta info
+        if self.concat_qo_do:  # local_qo_do is a fused tensor
+            _, num_heads, head_dim = local_qo_do.shape
+            dtype = local_qo_do.dtype
+            device = local_qo_do.device
+        else:  # local_qo_do are tupled tensors
+            _, num_heads, head_dim = local_qo_do[0].shape
+            dtype = local_qo_do[0].dtype
+            device = local_qo_do[0].device
 
-        # get the group-cast args for lse
-        group_cast_args = self.comm_meta.qo_group_collective_args_list[
-            overlap_stage
-        ].to_group_cast_args()
-        remote_lse_seqlen = self.comm_meta.num_remote_qo_tokens_per_stage[overlap_stage]
+        if self.use_native_grpcoll:
+            assert (
+                not self.concat_qo_do
+            ), "Only support native grpcoll without concating q,o,do"
 
-        # init remote lse buffer with the shape: [sq, nhq]
-        remote_lse_buffer = torch.empty(
-            remote_lse_seqlen,
-            num_heads,
-            dtype=local_lse.dtype,
-            device=local_lse.device,
-        )
+            # get the group-cast args
+            group_cast_args = self.comm_meta.qo_group_collective_args_list[
+                overlap_stage
+            ].to_group_cast_args()
+            remote_lse_seqlen = self.comm_meta.num_remote_qo_tokens_per_stage[
+                overlap_stage
+            ]
+            remote_qo_do_seqlen = remote_lse_seqlen * 3
 
-        # launch group cast kernel
-        remote_lse_work = group_cast(
-            input=local_lse,
-            output=remote_lse_buffer,
-            **group_cast_args,
-            group=self.cp_group_gc,
-            async_op=True,
-        )
+            # init remote lse buffer
+            remote_lse_buffer = torch.empty(
+                (remote_lse_seqlen, num_heads),
+                dtype=self._maybe_hp_dtype(
+                    dtype, need_hp_dtype=True
+                ),  # lse always in high-precision
+                device=device,
+            )
 
-        return remote_lse_work, remote_lse_buffer
+            # init remote qo_do buffers
+            remote_qo_do_buffer = torch.empty(
+                (remote_qo_do_seqlen, num_heads, head_dim),
+                dtype=dtype,
+                device=device,
+            )
+            remote_qo_do_buffer = self._maybe_chunk(remote_qo_do_buffer, num_chunks=3)
+
+            # launch group cast kernel
+            remote_qo_do_lse_work = group_cast(
+                input=local_qo_do,
+                output=remote_qo_do_buffer,
+                **group_cast_args,
+                group=self.cp_group_gc,
+                async_op=True,
+                cast_lse=True,
+                input_lse=local_lse,
+                output_lse=remote_lse_buffer,
+            )
+
+            # pack the buffers for qo_do and lse together
+            remote_qo_do_lse_buffer = (remote_qo_do_buffer, remote_lse_buffer)
+        else:
+            # HACK: since lse usually has different shape and dtype from q,o,do
+            # and we concat the q,o,do along the seqlen dim for non-native grpcoll,
+            # resulting in different seqlen between q,o,do and lse as well,
+            # we can not trivially fuse lse comm with q,o,do comm,
+            # thus here we use specific comm to fetch lse
+
+            # -------   for lse   ------- #
+
+            # get the group-cast args for lse
+            group_cast_args_lse = self.comm_meta.qo_group_collective_args_list[
+                overlap_stage
+            ].to_group_cast_args()
+            remote_lse_seqlen = self.comm_meta.num_remote_qo_tokens_per_stage[
+                overlap_stage
+            ]
+
+            # init remote lse buffer
+            remote_lse_buffer = torch.empty(
+                (remote_lse_seqlen, num_heads),
+                dtype=self._maybe_hp_dtype(
+                    dtype, need_hp_dtype=True
+                ),  # lse always in high-precision
+                device=device,
+            )
+
+            # launch group cast kernel for lse
+            remote_lse_work = group_cast(
+                input=local_lse,
+                output=remote_lse_buffer,
+                **group_cast_args_lse,
+                group=self.cp_group_gc,
+                async_op=True,
+            )
+
+            # -------   for q,o,do   ------- #
+
+            # get the group-cast args for q,o,do
+            group_cast_args_qo_do = self.comm_meta.qo_do_group_collective_args_list[
+                overlap_stage
+            ].to_group_cast_args()
+            remote_qo_do_seqlen = self.comm_meta.num_remote_qo_do_tokens_per_stage[
+                overlap_stage
+            ]
+
+            # init remote q,o,do output buffer
+            remote_qo_do_buffer = torch.empty(
+                (remote_qo_do_seqlen, num_heads, head_dim),
+                dtype=dtype,
+                device=device,
+            )
+
+            # launch group cast kernel for qo_do
+            assert isinstance(local_qo_do, torch.Tensor)  # mypy
+            remote_qo_do_work = group_cast(
+                input=local_qo_do,
+                output=remote_qo_do_buffer,
+                **group_cast_args_qo_do,
+                group=self.cp_group_gc,
+                async_op=True,
+            )
+
+            # pack the works for qo_do and lse together
+            remote_qo_do_lse_work = WorkWithPostProcessFn(
+                work=GeneralWork([remote_qo_do_work.work, remote_lse_work.work]),
+                post_process_fn=lambda x: (  # take qo_do, lse and return qo_do, lse
+                    remote_qo_do_work.post_process_fn(x[0]),
+                    remote_lse_work.post_process_fn(x[1]),
+                ),
+            )
+
+            # pack the buffers for qo_do and lse together
+            remote_qo_do_lse_buffer = (remote_qo_do_buffer, remote_lse_buffer)
+
+        return remote_qo_do_lse_work, remote_qo_do_lse_buffer
 
     @nvtx.instrument_nvtx
     def _reduce_partial_out_lse(
@@ -1021,9 +1191,9 @@ class DistAttnRuntime:
 
         Args:
             partial_remote_out (torch.Tensor, optional):
-                partial remote out in float32 dtype, or None if skipped
+                partial remote out in float32 dtype, or ``None`` if skipped
             partial_remote_lse (torch.Tensor, optional):
-                partial remote lse in float32 dtype, or None if skipped
+                partial remote lse in float32 dtype, or ``None`` if skipped
             partial_local_out (torch.Tensor): partial local out to be reduced
             partial_local_lse (torch.Tensor): partial local lse to be reduced
             ref_remote_out (torch.Tensor):
@@ -1033,27 +1203,56 @@ class DistAttnRuntime:
         Returns:
             partial_out_lse_reduce_work (WorkWithPostProcessFn): partial out and lse group-reduce work
         """
-        if magi_attention.comm.is_qo_comm_enable():
+        if self.enable_qo_comm:
             # get the group-reduce args for out and lse
-            group_reduce_args = self.comm_meta.out_lse_group_collective_args_list[
+            if self.use_native_grpcoll:  # just the same as original qo args
+                group_collective_args_list = (
+                    self.comm_meta.qo_group_collective_args_list
+                )
+            else:  # the specific args for out and lse
+                group_collective_args_list = (
+                    self.comm_meta.out_lse_group_collective_args_list  # type: ignore[assignment]
+                )
+
+            group_reduce_args = group_collective_args_list[
                 overlap_stage
             ].to_group_reduce_args()
 
-            # init remote dkv buffer
-            if partial_remote_out is None:  # skipped
-                hp_init_dtype = max_fp_dtype(ref_remote_out.dtype, torch.float32)
+            # init remote out/lse buffer
+            if partial_remote_out is None:
+                # skipped for this rank, but still reduced from other ranks
                 partial_remote_out = torch.empty_like(
                     ref_remote_out,
-                    dtype=hp_init_dtype if self.fwd_hp_reduce else ref_remote_out.dtype,
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_out.dtype,
+                        # out always in high-precision if using native grpcoll
+                        need_hp_dtype=(self.use_native_grpcoll or self.fwd_hp_reduce),
+                    ),
                     device=ref_remote_out.device,
                 )
                 partial_remote_lse = torch.empty(
-                    (ref_remote_out.size(0), ref_remote_out.size(1)),  # [sq, nhq]
-                    dtype=hp_init_dtype,  # lse always in high-precision
+                    (ref_remote_out.size(0), ref_remote_out.size(1)),
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_out.dtype,
+                        need_hp_dtype=True,  # lse always in high-precision
+                    ),
                     device=ref_remote_out.device,
                 )
-            elif not self.fwd_hp_reduce:
+            elif not self.use_native_grpcoll and not self.fwd_hp_reduce:
+                # downcast to the same dtype as out
+                # if using non-native grpcoll and not reduce in high-precision
                 partial_remote_out = partial_remote_out.to(ref_remote_out.dtype)
+
+            # init some additional kwargs for native grpcoll
+            partial_out_lse_reduce_kwargs: dict[str, Any] = {}
+            if self.use_native_grpcoll:
+                partial_out_lse_reduce_kwargs.update(
+                    acc_reduce=True,
+                    reduce_op="lse",
+                    comm_dtype=self._maybe_hp_dtype(
+                        ref_remote_out.dtype, self.fwd_hp_reduce
+                    ),
+                )
 
             # launch group-reduce kernel
             partial_out_lse_reduce_work = group_reduce(
@@ -1064,13 +1263,13 @@ class DistAttnRuntime:
                 **group_reduce_args,
                 group=self.cp_group_gr,
                 async_op=True,
+                **partial_out_lse_reduce_kwargs,
             )
         else:
             if not self.fwd_out_lse_use_acc and partial_remote_out is not None:
-                # the partial remote out and lse have NOT been reduced to
+                # NOTE: the partial remote out and lse have NOT been reduced to
                 # partial local out and lse by neither ffa fwd kernel nor group-reduce
                 # thus we need to manually reduce here
-
                 correct_attn_fwd_result(
                     out_list=[partial_local_out, partial_remote_out],
                     lse_list=[partial_local_lse, partial_remote_lse],
@@ -1096,7 +1295,7 @@ class DistAttnRuntime:
 
         Args:
             partial_remote_dkv (FusedOrTupleTensor, optional):
-                partial remote dkv fused or tupled tensor, or None if skipped
+                partial remote dkv fused or tupled tensor, or ``None`` if skipped
             partial_local_dkv (FusedOrTupleTensor):
                 partial local dkv fused or tupled tensor to be reduced
             ref_remote_dkv (FusedOrTupleTensor):
@@ -1106,23 +1305,53 @@ class DistAttnRuntime:
         Returns:
             partial_dkv_reduce_work (WorkWithPostProcessFn): partial dkv group-reduce work
         """
-        assert self.concat_kv, "only support concat_kv"
+
+        # prepare the meta info
+        if self.concat_kv:  # ref_remote_dkv is a fused tensor
+            dtype = ref_remote_dkv.dtype
+            device = ref_remote_dkv.device
+            remote_dkv_shape = ref_remote_dkv.shape
+        else:  # ref_remote_dkv are tupled tensors
+            dtype = ref_remote_dkv[0].dtype
+            device = ref_remote_dkv[0].device
+            remote_dkv_shape = (
+                ref_remote_dkv[0].shape[0] * 2,
+                *ref_remote_dkv[0].shape[1:],
+            )
 
         # get the group-reduce args for dkv
         group_reduce_args = self.comm_meta.kv_group_collective_args_list[
             overlap_stage
         ].to_group_reduce_args()
 
-        # init remote dkv buffer
-        if partial_remote_dkv is None:  # skipped
-            partial_remote_dkv = torch.empty_like(
-                ref_remote_dkv,
-                dtype=max_fp_dtype(ref_remote_dkv.dtype, torch.float32)  # type: ignore[union-attr]
-                if self.bwd_hp_reduce
-                else ref_remote_dkv.dtype,  # type: ignore[union-attr]
+        # init remote dkv buffer(s)
+        if partial_remote_dkv is None:
+            # skipped for this rank, but still reduced from other ranks
+            partial_remote_dkv = torch.empty(
+                remote_dkv_shape,
+                dtype=self._maybe_hp_dtype(
+                    dtype,
+                    # dkv always in high-precision if using native grpcoll
+                    need_hp_dtype=(self.use_native_grpcoll or self.bwd_hp_reduce),
+                ),
+                device=device,
             )
-        elif not self.bwd_hp_reduce:
-            partial_remote_dkv = partial_remote_dkv.to(ref_remote_dkv.dtype)  # type: ignore[union-attr]
+            if not self.concat_dkv:
+                partial_remote_dkv = self._maybe_chunk(partial_remote_dkv, num_chunks=2)
+        elif not self.use_native_grpcoll and not self.bwd_hp_reduce:
+            assert self.concat_dkv
+            # downcast to the same dtype as dkv
+            # if using non-native grpcoll and not reduce in high-precision
+            partial_remote_dkv = partial_remote_dkv.to(dtype)
+
+        # init some additional kwargs for native grpcoll
+        partial_dkv_reduce_kwargs: dict[str, Any] = {}
+        if self.use_native_grpcoll:
+            partial_dkv_reduce_kwargs.update(
+                acc_reduce=True,
+                reduce_op="sum",
+                comm_dtype=self._maybe_hp_dtype(dtype, self.bwd_hp_reduce),
+            )
 
         # launch group-reduce kernel
         partial_dkv_reduce_work = group_reduce(
@@ -1131,6 +1360,7 @@ class DistAttnRuntime:
             **group_reduce_args,
             group=self.cp_group_gr,
             async_op=True,
+            **partial_dkv_reduce_kwargs,
         )
 
         return partial_dkv_reduce_work
@@ -1148,7 +1378,7 @@ class DistAttnRuntime:
 
         Args:
             partial_remote_dq (torch.Tensor, optional):
-                partial remote dq in float32 dtype, or None if skipped
+                partial remote dq in float32 dtype, or ``None`` if skipped
             partial_local_dq (torch.Tensor): partial local dq to be reduced
             ref_remote_dq (torch.Tensor):
                 reference remote dq, to provide meta info like dtype and shape
@@ -1157,22 +1387,38 @@ class DistAttnRuntime:
         Returns:
             partial_dq_reduce_work (WorkWithPostProcessFn): partial dq group-reduce work
         """
-        if magi_attention.comm.is_qo_comm_enable():
+        if self.enable_qo_comm:
             # get the group-reduce args for dq
             group_reduce_args = self.comm_meta.qo_group_collective_args_list[
                 overlap_stage
             ].to_group_reduce_args()
 
             # init remote dq buffer
-            if partial_remote_dq is None:  # skipped
+            if partial_remote_dq is None:
+                # skipped for this rank, but still reduced from other ranks
                 partial_remote_dq = torch.empty_like(
                     ref_remote_dq,
-                    dtype=max_fp_dtype(ref_remote_dq.dtype, torch.float32)
-                    if self.bwd_hp_reduce
-                    else ref_remote_dq.dtype,
+                    dtype=self._maybe_hp_dtype(
+                        ref_remote_dq.dtype,
+                        # dq always in high-precision if using native grpcoll
+                        need_hp_dtype=(self.use_native_grpcoll or self.bwd_hp_reduce),
+                    ),
                 )
-            elif not self.bwd_hp_reduce:
+            elif not self.use_native_grpcoll and not self.bwd_hp_reduce:
+                # downcast to the same dtype as dq
+                # if using non-native grpcoll and not reduce in high-precision
                 partial_remote_dq = partial_remote_dq.to(ref_remote_dq.dtype)
+
+            # init some additional kwargs for native grpcoll
+            partial_dq_reduce_kwargs: dict[str, Any] = {}
+            if self.use_native_grpcoll:
+                partial_dq_reduce_kwargs.update(
+                    acc_reduce=True,
+                    reduce_op="sum",
+                    comm_dtype=self._maybe_hp_dtype(
+                        ref_remote_dq.dtype, self.bwd_hp_reduce
+                    ),
+                )
 
             # launch group-reduce kernel
             partial_dq_reduce_work = group_reduce(
@@ -1181,10 +1427,11 @@ class DistAttnRuntime:
                 **group_reduce_args,
                 group=self.cp_group_gr,
                 async_op=True,
+                **partial_dq_reduce_kwargs,
             )
         else:
             if not self.bwd_dq_use_acc and partial_remote_dq is not None:
-                # the partial remote dq has NOT been reduced to partial local dq
+                # NOTE: the partial remote dq has NOT been reduced to partial local dq
                 # by neither ffa bwd kernel nor group-reduce
                 # thus we need to manually reduce here
                 partial_local_dq.add_(partial_remote_dq)
@@ -1195,75 +1442,186 @@ class DistAttnRuntime:
 
         return partial_dq_reduce_work
 
-    def _maybe_concat_kv(
+    @nvtx.instrument_nvtx
+    def _reduce_partial_dsink(
         self,
-        k: torch.Tensor,
-        v: torch.Tensor,
-    ) -> FusedOrTupleTensor:
+        partial_global_dsink: torch.Tensor | None,
+    ) -> WorkWithPostProcessFn:
         """
-        Maybe concatenate k, v tensors
-        into a fused or tupled kv along the seqlen dim
-        """
-        # TODO: whether can we pack kv togather along certain dim
-        # to enhance the performance of ffa kernel
-        return torch.cat([k, v], dim=0) if self.concat_kv else (k, v)
+        Reduce partial global dsink to replicated global dsink
 
-    def _maybe_chunk_kv(
-        self,
-        kv: FusedOrTupleTensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Maybe chunk the kv fused or tupled tensor
-        into k, v tensor views along the seqlen dim
-        """
-        return torch.chunk(kv, 2, dim=0) if self.concat_kv else kv
+        Args:
+            partial_global_dsink (torch.Tensor, optional):
+                partial global dsink to be reduced if given
 
-    def _maybe_concat_qo_do(
+        Returns:
+            partial_dsink_reduce_work (WorkWithPostProcessFn):
+                partial global dsink all-reduce work if required
+        """
+        if partial_global_dsink is not None:
+            if (op := self.dsink_reduce_op) is not None:  # required to reduce
+                work = dist.all_reduce(
+                    partial_global_dsink,
+                    op=op,
+                    group=self.cp_group_gc,
+                    async_op=True,
+                )
+                partial_dsink_reduce_work = WorkWithPostProcessFn(
+                    work=GeneralWork(work),
+                    post_process_fn=lambda x: x,  # take partial dsink and return in-place reduced dsink
+                )
+            else:  # let the caller handle the reduction
+                warnings.warn(
+                    "The dsink reduction is skipped by default "
+                    "since usually the training framework will handle it automatically. "
+                    "However, under the scenarios w/o any framework mechanism to reduce parameters across cp ranks, "
+                    "you can set the env var `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP` to `sum` "
+                    "to let `magi_attention` apply reduction. Otherwise, you might need to reduce the dsink manually."
+                    ""
+                )
+                partial_dsink_reduce_work = WorkWithPostProcessFn(
+                    work=None,
+                    post_process_fn=lambda x: x,  # take partial dsink and return partial dsink
+                )
+        else:
+            partial_dsink_reduce_work = WorkWithPostProcessFn(
+                work=None, post_process_fn=lambda *args, **kwargs: None  # return None
+            )
+
+        return partial_dsink_reduce_work
+
+    def _init_out_lse_skipped_host_stage(
         self,
         q: torch.Tensor,
-        o: torch.Tensor,
-        do: torch.Tensor,
-    ) -> FusedOrTupleTensor:
-        """
-        Maybe concatenate q, o, do tensors
-        into a fused or tupled qo_do along the seqlen dim
-        """
-        # TODO: whether can we pack q, o, do togather along certain dim
-        # to enhance the performance of ffa kernel
-        return torch.cat([q, o, do], dim=0) if self.concat_qo_do else (q, o, do)
+        sink: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # NOTE: we can NOT use empty initialization here,
+        # since we have nowhere to zero-fill it
+        # when all attn computations are skipped for certain q range
+        out = torch.zeros_like(
+            q,
+            dtype=self._maybe_hp_dtype(q.dtype, not self.fwd_local_out_lp_init),
+            device=q.device,
+        )
 
-    def _maybe_chunk_qo_do(
+        if sink is not None:
+            # in skipped host stage if sink is given,
+            # we directly use lse_sink to initialize lse
+            lse = calc_lse_sink_compiled(
+                sink=sink,
+                seqlen_lse=q.size(0),
+            )
+        else:
+            lse = torch.full(
+                (q.size(0), q.size(1)),  # [sq, nhq]
+                fill_value=float("-inf"),
+                dtype=self._maybe_hp_dtype(
+                    q.dtype, need_hp_dtype=True
+                ),  # lse always in high-precision
+                device=q.device,
+            )
+
+        return out, lse
+
+    def _init_dq_dkv_dsink_skipped_host_stage(
         self,
         qo_do: FusedOrTupleTensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        kv: FusedOrTupleTensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
+        q, o, do = self._maybe_chunk(qo_do, num_chunks=3)
+        k, _ = self._maybe_chunk(kv, num_chunks=2)
+        if self.concat_kv:  # kv is a fused tensor
+            dkv_shape = kv.shape
+        else:  # kv are tupled tensors
+            dkv_shape = (k.shape[0] * 2, *k.shape[1:])
+
+        # NOTE: if local_dq and local_dkv calculation are skipped,
+        # we need to zero-initialize them since they might be reduced later
+        dq = torch.zeros_like(
+            q,
+            dtype=self._maybe_hp_dtype(q.dtype, not self.bwd_local_dq_lp_init),
+        )
+
+        dkv = torch.zeros(
+            dkv_shape,
+            dtype=self._maybe_hp_dtype(k.dtype, not self.bwd_local_dkv_lp_init),
+            device=k.device,
+        )
+        if not self.concat_dkv:  # make partial_dkv tupled tensors
+            dkv = self._maybe_chunk(dkv, num_chunks=2)
+
+        # in skipped host stage,
+        # we directly calculate dsink here
+        if sink is not None:
+            dsink = sink_bwd_compiled(
+                sink=sink,
+                lse=lse,
+                o=o,
+                do=do,
+            )
+        else:
+            dsink = None
+
+        return dq, dkv, dsink
+
+    def _maybe_concat(
+        self,
+        *x: torch.Tensor,
+        need_concat: bool = False,
+    ) -> FusedOrTupleTensor:
         """
-        Maybe chunk the qo_do fused or tupled tensor
-        into q, o, do tensor views along the seqlen dim
+        Maybe concatenate given tensors
+        into a fused tensor along first dim
+        if `need_concat` is ``True``
+        otherwise return the tupled tensors
         """
-        return torch.chunk(qo_do, 3, dim=0) if self.concat_qo_do else qo_do
+        return torch.cat(x, dim=0) if need_concat else x
+
+    def _maybe_chunk(
+        self,
+        x: FusedOrTupleTensor,
+        num_chunks: int,
+    ) -> tuple[torch.Tensor, ...]:
+        """
+        Maybe chunk the fused tensor
+        into the tupled tensor views along the seqlen dim
+        if it is concatenated before
+        """
+        return torch.chunk(x, num_chunks, dim=0) if isinstance(x, torch.Tensor) else x
+
+    def _maybe_hp_dtype(
+        self, dtype: torch.dtype, need_hp_dtype: bool = True
+    ) -> torch.dtype:
+        """Maybe return higher precision dtype at least as `self.hp_dtype`
+        for the given `dtype`, if `need_hp_dtype` is ``True``
+
+        NOTE: for the `dtype` that is already higher than `self.hp_dtype`,
+        this function will always return the same `dtype`, no matter the `need_hp_dtype`
+        """
+        return max_fp_dtype(dtype, self.hp_dtype) if need_hp_dtype else dtype
 
     def _reset_work_list(self):
         self.remote_q_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # fwd
         self.remote_kv_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # fwd + bwd
         self.partial_out_lse_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # fwd
-        self.remote_lse_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
-        ] * self.overlap_degree  # bwd
-        self.remote_qo_do_work_with_buffer_per_stage: list[WorkWithBuffer] = [
-            None  # type: ignore[list-item]
+        self.remote_qo_do_lse_work_with_buffer_per_stage: list[WorkWithBuffer] = [
+            None
         ] * self.overlap_degree  # bwd
         self.partial_dq_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # bwd
         self.partial_dkv_reduce_work_per_stage: list[WorkWithPostProcessFn] = [
-            None  # type: ignore[list-item]
+            None
         ] * self.overlap_degree  # bwd
+        self.partial_dsink_reduce_work: WorkWithPostProcessFn = None  # bwd
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, DistAttnRuntime):
@@ -1285,6 +1643,7 @@ class DistAttnFunc(torch.autograd.Function):
         local_q: torch.Tensor,
         local_k: torch.Tensor,
         local_v: torch.Tensor,
+        global_sink: torch.Tensor | None,
         dist_attn_runtime: DistAttnRuntime,
         softmax_scale: float | None = None,
         softcap: float = 0.0,
@@ -1296,6 +1655,9 @@ class DistAttnFunc(torch.autograd.Function):
             local_q (torch.Tensor): local q tensor
             local_k (torch.Tensor): local k tensor
             local_v (torch.Tensor): local v tensor
+            global_sink (torch.Tensor | None): optional global sink tensor
+                to apply attention sink if given
+
             dist_attn_runtime(DistAttnRuntime): dist attn runtime
 
             softmax_scale (float, optional): softmax scale.
@@ -1303,14 +1665,13 @@ class DistAttnFunc(torch.autograd.Function):
             softcap (float, optional): softcap. Defaults to 0.
 
         Returns:
-            local_out (torch.Tensor): local out tensor
-
-            local_lse (torch.Tensor): local lse tensor
+            tuple[torch.Tensor, torch.Tensor]: local out tensor and local lse tensor
 
         Shape:
             local_q: [num_tokens_q_local, num_heads_q, head_dim]
             local_k: [num_tokens_kv_local, num_heads_kv, head_dim]
             local_v: [num_tokens_kv_local, num_heads_kv, head_dim]
+            global_sink: [num_tokens_sink_global, num_heads_q]
             local_out: [num_tokens_q_local, num_heads_q, head_dim]
             local_lse: [num_tokens_q_local, num_heads_q]
         """
@@ -1329,6 +1690,7 @@ class DistAttnFunc(torch.autograd.Function):
             overlap_stage=None,
             softmax_scale=softmax_scale,
             softcap=softcap,
+            sink=global_sink,
         )
         assert partial_local_out is not None and partial_local_lse is not None
 
@@ -1361,6 +1723,7 @@ class DistAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
                 softmax_scale=softmax_scale,
                 softcap=softcap,
+                sink=global_sink,
             )
 
             # reduce ith partial out with partial lse
@@ -1382,7 +1745,14 @@ class DistAttnFunc(torch.autograd.Function):
             ref_local_out=local_q,
         )
 
-        ctx.save_for_backward(local_q, local_kv, local_out, local_lse)
+        dist_attn_runtime.save_tensors_for_bwd(
+            ctx,
+            local_q=local_q,
+            local_kv=local_kv,
+            local_out=local_out,
+            local_lse=local_lse,
+            global_sink=global_sink,
+        )
         ctx.dist_attn_runtime = dist_attn_runtime
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
@@ -1391,8 +1761,14 @@ class DistAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor, *args):  # pragma: no cover
-        local_q, local_kv, local_out, local_lse = ctx.saved_tensors
         dist_attn_runtime: DistAttnRuntime = ctx.dist_attn_runtime
+        (
+            local_q,
+            local_kv,
+            local_out,
+            local_lse,
+            global_sink,
+        ) = dist_attn_runtime.load_tensors_from_fwd(ctx)
         softmax_scale: float | None = ctx.softmax_scale
         softcap: float = ctx.softcap
 
@@ -1413,6 +1789,7 @@ class DistAttnFunc(torch.autograd.Function):
         (
             partial_local_dq,
             partial_local_dkv,
+            partial_global_dsink,
         ) = dist_attn_runtime.apply_bwd_partial_attn(
             qo_do=local_qo_do,
             kv=local_kv,
@@ -1420,8 +1797,15 @@ class DistAttnFunc(torch.autograd.Function):
             overlap_stage=None,
             softmax_scale=softmax_scale,
             softcap=softcap,
+            sink=global_sink,
         )
         assert partial_local_dq is not None and partial_local_dkv is not None
+        assert global_sink is None or partial_global_dsink is not None
+
+        # reduce partial global dsink if required
+        dist_attn_runtime.reduce_partial_dsink(
+            partial_global_dsink=partial_global_dsink,
+        )
 
         # loop into remote stages
         for ith_overlap_stage in range(dist_attn_runtime.overlap_degree):
@@ -1443,6 +1827,7 @@ class DistAttnFunc(torch.autograd.Function):
             (
                 partial_remote_dq,
                 partial_remote_dkv,
+                _,  # partial_global_dsink
             ) = dist_attn_runtime.apply_bwd_partial_attn(
                 qo_do=curr_remote_qo_do,
                 kv=curr_remote_kv,
@@ -1451,6 +1836,7 @@ class DistAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
                 softmax_scale=softmax_scale,
                 softcap=softcap,
+                sink=global_sink,
             )
 
             # reduce ith partial dq,dkv
@@ -1465,11 +1851,17 @@ class DistAttnFunc(torch.autograd.Function):
                 overlap_stage=ith_overlap_stage,
             )
 
-        # prepare reduced local dq,dk,dv
+        # prepare reduced local dq,dk,dv and maybe global dsink
         # before returning from backward
-        local_dq, local_dk, local_dv = dist_attn_runtime.prepare_reduced_local_dq_dk_dv(
+        (
+            local_dq,
+            local_dk,
+            local_dv,
+            global_dsink,
+        ) = dist_attn_runtime.prepare_reduced_local_dqkv_global_dsink(
             partial_local_dq=partial_local_dq,
             partial_local_dkv=partial_local_dkv,
+            partial_global_dsink=partial_global_dsink,
             ref_local_dq=local_q,
             ref_local_dkv=local_kv,
         )
@@ -1478,6 +1870,7 @@ class DistAttnFunc(torch.autograd.Function):
             local_dq,
             local_dk,
             local_dv,
+            global_dsink,
             None,  # dist_attn_runtime
             None,  # softmax_scale
             None,  # softcap
@@ -1489,28 +1882,36 @@ def dist_attn_func(
     k: torch.Tensor,
     v: torch.Tensor,
     dist_attn_runtime: DistAttnRuntime,
+    sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Distributed attention autograd function
 
     Args:
-        q (torch.Tensor): local q
-        k (torch.Tensor): local k
-        v (torch.Tensor): local v
+        q (torch.Tensor): local q tensor
+        k (torch.Tensor): local k tensor
+        v (torch.Tensor): local v tensor
+
         dist_attn_runtime (DistAttnRuntime): distributed attention runtime
 
+        sink (torch.Tensor, optional): global sink tensor (replicated among cp ranks).
+            Defaults to ``None`` to not apply attention sink.
+
+        NOTE: for now, we only support sink tensor with dtype=torch.float32
+
         softmax_scale (float, optional): softmax scale.
-            Defaults to None to use default value: 1/sqrt(head_dim)
-        softcap (float, optional): softcap. Defaults to 0.
+            Defaults to ``None`` to use default value: ``1/sqrt(head_dim)``
+        softcap (float, optional): softcap. Defaults to ``0.0``.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: local out and local lse
+        tuple[torch.Tensor, torch.Tensor]: local out tensor and local lse tensor
 
     Shapes:
         q: [num_tokens_q_local, num_heads_q, head_dim]
         k: [num_tokens_kv_local, num_heads_kv, head_dim]
         v: [num_tokens_kv_local, num_heads_kv, head_dim]
+        sink: [num_tokens_sink_global, num_heads_q]
         out: [num_tokens_q_local, num_heads_q, head_dim]
         lse: [num_tokens_q_local, num_heads_q]
     """
@@ -1518,6 +1919,7 @@ def dist_attn_func(
         q,
         k,
         v,
+        sink,
         dist_attn_runtime,
         softmax_scale,
         softcap,

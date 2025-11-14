@@ -3,6 +3,54 @@
 In **MagiAttention**, many features need to be configured through environment variables. Below are some environment variables that can be set, along with their descriptions.
 
 
+## For Correctness
+
+**MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE**
+
+Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial out during dist-attn forward
+to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
+
+```{note}
+1. Inside the ffa forward kernel, we always use high-precision (fp32) accumulation for partial out.
+
+2. We always use high-precision (fp32) lse everywhere.
+
+3. This feature works for out only when enabling qo comm.
+```
+
+
+**MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE**
+
+Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial dq,dk,dv during dist-attn backward
+to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
+
+```{note}
+1. Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dq,dk,dv.
+
+2. This feature works for dq only when enabling qo comm.
+```
+
+
+**MAGI_ATTENTION_DSINK_ALL_REDUCE_OP**
+
+Set the value of this env variable to control the all-reduce op for sink gradients within `dist_attn_func` when involving attention sink. The default value is `none`. And options are within {`none`, `sum`, `avg`}.
+
+
+```{note}
+For now we only accept global replicated sink tensor as input to feed into `dist_attn_func`, and the gradients of sink in each cp rank are partial and requires to be sum-reduced across cp ranks.
+
+However, since sink tensor is learnable, it will be considered as a regular parameter in the model similar to `bias` in `nn.Linear` layer.
+
+So under some popular training frameworks, such as Megatron-LM, FSDP, the sum-reduction across cp ranks of the partial gradients of sink might be automatically applied within the whole `dp x cp` mesh.
+
+To avoid repeated reduction, we provide this environment variable to specify the all-reduce op for sink gradients within `dist_attn_func`, whose default value is `none` to NOT apply any reduction to sink gradients by `dist_attn_func` and let the framework handle it.
+
+However, under the scenarios w/o any framework mechanism to reduce parameters across cp ranks, you have to specify this environment variable to `sum`.
+
+And sometimes, `avg` might also be an option when you need to scale the sink gradients by `1/cp`.
+```
+
+
 ## For Performance
 
 **MAGI_ATTENTION_HIERARCHICAL_COMM**
@@ -43,32 +91,6 @@ This feature is experimental and under early development for now, and not compat
 thus please do NOT enable it unless you know exactly what you are doing.
 ```
 
-
-**MAGI_ATTENTION_FFA_FORWARD_HIGH_PRECISION_REDUCE**
-
-Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial out during dist-attn forward
-to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
-
-```{note}
-1. Inside the ffa forward kernel, we always use high-precision (fp32) accumulation for partial out.
-
-2. We always use high-precision (fp32) lse everywhere.
-
-3. This feature works for out only when enabling qo comm.
-```
-
-
-**MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE**
-
-Toggle this env variable to `1` to enable high-precision (fp32) reduce for partial dq,dk,dv during dist-attn backward
-to trade-off double comm overhead for increased precision and less dtype-cast overhead. The default value is `0`.
-
-```{note}
-1. Inside the ffa backward kernel, we always use high-precision (fp32) accumulation for partial dq,dk,dv.
-
-2. This feature works for dq only when enabling qo comm.
-```
-
 **MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE**
 
 Set the value of this env variable to control the size of `dist_attn_runtime_dict`. The default value is `100`.
@@ -97,6 +119,14 @@ This is only supposed to be used for testing or debugging, since the performance
 Toggle this env variable to `1` to enable deterministic mode to use deterministic algorithms for all magi_attention kernels. The default value is `0`.
 
 
+**MAGI_ATTENTION_PROFILE_MODE**
+
+Toggle this env variable to `1` to enable profiling mode to profile all magi_attention kernels, by now mainly for ffa kernels (*see [here](https://github.com/SandAI-org/MagiAttention/tree/main/exps/attn/profile_ffa) for more details*). The default value is `0`.
+
+```{note}
+This is only supposed to be used for development. Please do NOT enable it in production.
+```
+
 ## For Build
 
 ### JIT
@@ -113,9 +143,19 @@ Toggle this env variable to `1` to enable verbose output during the JIT compilat
 
 Toggle this env variable to `1` to enable debug flags for the C++/CUDA compiler. This includes options like `-g` (debugging symbols) and other flags to get more detailed information, such as register usage. The default value is `0`.
 
+
+**MAGI_ATTENTION_NO_BUILD_CACHE**
+
+Toggle this env variable to `1` to disable caching for built ffa kernels. The default value is `0`.
+
+**MAGI_ATTENTION_FORCE_JIT_BUILD**
+
+Toggle this env variable to `1` to force building FFA in JIT mode, even the pre-built AOT `libs` exists. The default value is `0`.
+
 **NVCC_THREADS**
 
 Sets the number of threads for `nvcc`'s `--split-compile` option, which can speed up the JIT compilation of CUDA kernels. The default value is `4`.
+
 
 ### AOT
 
@@ -126,7 +166,7 @@ Toggle this env variable to `1` to enable pre-build ffa kernels for some common 
 
 **MAGI_ATTENTION_PREBUILD_FFA_JOBS**
 
-Set the value of this env variable to control the number of jobs used to pre-build ffa kernels. The default value is `256`.
+Set the value of this env variable to control the number of jobs used to pre-build ffa kernels. The default value is `160`.
 
 
 **MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD**

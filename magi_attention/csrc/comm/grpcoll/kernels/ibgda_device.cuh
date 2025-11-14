@@ -53,9 +53,9 @@
 
 namespace magi_attn_comm::grpcoll {
 
-EP_STATIC_ASSERT(NVSHMEMI_IBGDA_MIN_QP_DEPTH >= 64, "Invalid QP minimum depth");
+GRPCOLL_STATIC_ASSERT(NVSHMEMI_IBGDA_MIN_QP_DEPTH >= 64, "Invalid QP minimum depth");
 
-__device__ static __forceinline__ uint64_t HtoBE64(uint64_t x) {
+DEVICE_INLINE static uint64_t HtoBE64(uint64_t x) {
   uint64_t ret;
   asm("{\n\t"
       ".reg .b32 ign;\n\t"
@@ -73,7 +73,7 @@ __device__ static __forceinline__ uint64_t HtoBE64(uint64_t x) {
   return ret;
 }
 
-__device__ static __forceinline__ uint32_t HtoBE32(uint32_t x) {
+DEVICE_INLINE static uint32_t HtoBE32(uint32_t x) {
   uint32_t ret;
   asm("{\n\t"
       ".reg .b32 ign;\n\t"
@@ -84,7 +84,7 @@ __device__ static __forceinline__ uint32_t HtoBE32(uint32_t x) {
   return ret;
 }
 
-__device__ static __forceinline__ uint16_t HtoBE16(uint16_t x) {
+DEVICE_INLINE static uint16_t HtoBE16(uint16_t x) {
   // TODO: simplify PTX using 16-bit instructions
   auto a = static_cast<uint32_t>(x);
   uint32_t d;
@@ -109,17 +109,17 @@ typedef struct {
   uint64_t reserved;
 } __attribute__((__packed__)) ibgda_atomic_32_masked_fa_seg_t;
 
-__device__ static __forceinline__ nvshmemi_ibgda_device_state_t* ibgda_get_state() {
+DEVICE_INLINE static nvshmemi_ibgda_device_state_t* ibgda_get_state() {
   return &nvshmemi_ibgda_device_state_d;
 }
 
-__device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
+DEVICE_INLINE static nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
   auto state = ibgda_get_state();
   const auto num_rc_per_pe = ibgda_get_state()->num_rc_per_pe;
   return &state->globalmem.rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
 }
 
-__device__ static __forceinline__ void ibgda_lock_acquire(int* lock) {
+DEVICE_INLINE static void ibgda_lock_acquire(int* lock) {
   while (atomicCAS(lock, 0, 1) == 1)
     ;
 
@@ -127,14 +127,14 @@ __device__ static __forceinline__ void ibgda_lock_acquire(int* lock) {
   memory_fence_cta();
 }
 
-__device__ static __forceinline__ void ibgda_lock_release(int* lock) {
+DEVICE_INLINE static void ibgda_lock_release(int* lock) {
   memory_fence_cta();
 
   // Prevent reordering before lock is released
   st_na_relaxed(lock, 0);
 }
 
-__device__ static __forceinline__ void ibgda_update_dbr(nvshmemi_ibgda_device_qp_t* qp, uint32_t dbrec_head) {
+DEVICE_INLINE static void ibgda_update_dbr(nvshmemi_ibgda_device_qp_t* qp, uint32_t dbrec_head) {
   // `DBREC` contains the index of the next empty `WQEBB`
   __be32 dbrec_val;
   __be32* dbrec_ptr = qp->tx_wq.dbrec;
@@ -151,15 +151,15 @@ __device__ static __forceinline__ void ibgda_update_dbr(nvshmemi_ibgda_device_qp
   st_na_release(dbrec_ptr, dbrec_val);
 }
 
-__device__ static __forceinline__ void ibgda_ring_db(nvshmemi_ibgda_device_qp_t* qp, uint16_t prod_idx) {
+DEVICE_INLINE static void ibgda_ring_db(nvshmemi_ibgda_device_qp_t* qp, uint16_t prod_idx) {
   auto bf_ptr = reinterpret_cast<uint64_t*>(qp->tx_wq.bf);
   ibgda_ctrl_seg_t ctrl_seg = {.opmod_idx_opcode = HtoBE32(prod_idx << 8), .qpn_ds = HtoBE32(qp->qpn << 8)};
 
-  EP_STATIC_ASSERT(sizeof(decltype(&ctrl_seg)) == sizeof(uint64_t), "");
+  GRPCOLL_STATIC_ASSERT(sizeof(decltype(&ctrl_seg)) == sizeof(uint64_t), "");
   st_na_release(bf_ptr, *(reinterpret_cast<uint64_t*>(&ctrl_seg)));
 }
 
-__device__ static __forceinline__ void ibgda_post_send(nvshmemi_ibgda_device_qp_t* qp, uint64_t new_prod_idx) {
+DEVICE_INLINE static void ibgda_post_send(nvshmemi_ibgda_device_qp_t* qp, uint64_t new_prod_idx) {
   nvshmemi_ibgda_device_qp_management_t* mvars = &qp->mvars;
   uint64_t old_prod_idx;
 
@@ -175,7 +175,7 @@ __device__ static __forceinline__ void ibgda_post_send(nvshmemi_ibgda_device_qp_
 }
 
 template <bool kAlwaysDoPostSend>
-__device__ static __forceinline__ void ibgda_submit_requests(nvshmemi_ibgda_device_qp_t* qp, uint64_t base_wqe_idx, uint32_t num_wqes, int message_idx = 0) {
+DEVICE_INLINE static void ibgda_submit_requests(nvshmemi_ibgda_device_qp_t* qp, uint64_t base_wqe_idx, uint32_t num_wqes, int message_idx = 0) {
   auto state = ibgda_get_state();
   nvshmemi_ibgda_device_qp_management_t* mvars = &qp->mvars;
   uint64_t new_wqe_idx = base_wqe_idx + num_wqes;
@@ -197,7 +197,7 @@ __device__ static __forceinline__ void ibgda_submit_requests(nvshmemi_ibgda_devi
   }
 }
 
-__device__ static __forceinline__ void ibgda_write_rdma_write_inl_wqe(
+DEVICE_INLINE static void ibgda_write_rdma_write_inl_wqe(
     nvshmemi_ibgda_device_qp_t* qp,
     const uint32_t* val,
     uint64_t raddr,
@@ -228,17 +228,23 @@ __device__ static __forceinline__ void ibgda_write_rdma_write_inl_wqe(
   if (imm != std::numeric_limits<uint32_t>::max())
     ctrl_seg.imm = HtoBE32(imm);
 
-  EP_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == 16, "sizeof(*ctrl_seg_ptr) == 16");
-  EP_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == 16, "sizeof(*raddr_seg_ptr) == 16");
-  EP_STATIC_ASSERT(sizeof(*inl_seg_ptr) == 4, "sizeof(*inl_seg_ptr) == 4");
+  GRPCOLL_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == 16, "sizeof(*ctrl_seg_ptr) == 16");
+  GRPCOLL_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == 16, "sizeof(*raddr_seg_ptr) == 16");
+  GRPCOLL_STATIC_ASSERT(sizeof(*inl_seg_ptr) == 4, "sizeof(*inl_seg_ptr) == 4");
   st_na_relaxed(reinterpret_cast<int4*>(ctrl_seg_ptr), *reinterpret_cast<const int4*>(&ctrl_seg));
   st_na_relaxed(reinterpret_cast<int4*>(raddr_seg_ptr), *reinterpret_cast<const int4*>(&raddr_seg));
   st_na_relaxed(reinterpret_cast<uint32_t*>(inl_seg_ptr), *reinterpret_cast<const uint32_t*>(&inl_seg));
   st_na_relaxed(reinterpret_cast<uint32_t*>(wqe_data_ptr), *reinterpret_cast<const uint32_t*>(val));
 }
 
-__device__ static __forceinline__ uint64_t
-ibgda_get_lkey_and_rkey(uint64_t laddr, __be32* lkey, uint64_t raddr, int dst_pe, uint64_t* out_raddr, __be32* out_rkey, uint32_t dev_idx) {
+DEVICE_INLINE static uint64_t ibgda_get_lkey_and_rkey(
+    uint64_t laddr,
+    __be32* lkey,
+    uint64_t raddr,
+    int dst_pe,
+    uint64_t* out_raddr,
+    __be32* out_rkey,
+    uint32_t dev_idx) {
   auto state = ibgda_get_state();
   auto heap_start = reinterpret_cast<uint64_t>(nvshmemi_device_state_d.heap_base);
   auto log2_cumem_granularity = state->log2_cumem_granularity;
@@ -266,7 +272,7 @@ ibgda_get_lkey_and_rkey(uint64_t laddr, __be32* lkey, uint64_t raddr, int dst_pe
   return min(lchunk_size, rchunk_size);
 }
 
-__device__ static __forceinline__ void ibgda_get_rkey(uint64_t addr, int dst_pe, uint64_t* out_raddr, __be32* out_rkey, uint32_t dev_idx) {
+DEVICE_INLINE static void ibgda_get_rkey(uint64_t addr, int dst_pe, uint64_t* out_raddr, __be32* out_rkey, uint32_t dev_idx) {
   auto state = ibgda_get_state();
   auto heap_start = reinterpret_cast<uint64_t>(nvshmemi_device_state_d.heap_base);
 
@@ -282,18 +288,18 @@ __device__ static __forceinline__ void ibgda_get_rkey(uint64_t addr, int dst_pe,
   *out_rkey = device_key.key;
 }
 
-__device__ static __forceinline__ uint64_t ibgda_reserve_wqe_slots(nvshmemi_ibgda_device_qp_t* qp, uint32_t num_wqes) {
+DEVICE_INLINE static uint64_t ibgda_reserve_wqe_slots(nvshmemi_ibgda_device_qp_t* qp, uint32_t num_wqes) {
   auto mvars = &qp->mvars;
   return atomicAdd(reinterpret_cast<unsigned long long*>(&mvars->tx_wq.resv_head), static_cast<unsigned long long>(num_wqes));
 }
 
-__device__ static __forceinline__ void* ibgda_get_wqe_ptr(nvshmemi_ibgda_device_qp_t* qp, uint16_t wqe_idx) {
+DEVICE_INLINE static void* ibgda_get_wqe_ptr(nvshmemi_ibgda_device_qp_t* qp, uint16_t wqe_idx) {
   uint16_t cnt = qp->tx_wq.nwqes;
   uint16_t idx = wqe_idx & (cnt - 1);
   return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(qp->tx_wq.wqe) + (idx << MLX5_SEND_WQE_SHIFT));
 }
 
-__device__ static __forceinline__ void nvshmemi_ibgda_rma_p(int* rptr, const int value, int dst_pe, int qp_id, uint32_t imm = std::numeric_limits<uint32_t>::max()) {
+DEVICE_INLINE static void nvshmemi_ibgda_rma_p(int* rptr, const int value, int dst_pe, int qp_id, uint32_t imm = std::numeric_limits<uint32_t>::max()) {
   // Get rkey
   // NOTES: the `p` operation will not cross multiple remote chunks
   __be32 rkey;
@@ -311,7 +317,7 @@ __device__ static __forceinline__ void nvshmemi_ibgda_rma_p(int* rptr, const int
   ibgda_submit_requests<true>(qp, base_wqe_idx, 1);
 }
 
-__device__ static __forceinline__ void ibgda_write_rdma_write_wqe(
+DEVICE_INLINE static void ibgda_write_rdma_write_wqe(
     nvshmemi_ibgda_device_qp_t* qp,
     uint64_t laddr,
     __be32 lkey,
@@ -345,15 +351,15 @@ __device__ static __forceinline__ void ibgda_write_rdma_write_wqe(
   ctrl_seg.fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
   ctrl_seg.opmod_idx_opcode = HtoBE32((wqe_idx << 8) | MLX5_OPCODE_RDMA_WRITE);
 
-  EP_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == 16, "sizeof(*ctrl_seg_ptr) == 16");
-  EP_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == 16, "sizeof(*raddr_seg_ptr) == 16");
-  EP_STATIC_ASSERT(sizeof(*data_seg_ptr) == 16, "sizeof(*data_seg_ptr) == 16");
+  GRPCOLL_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == 16, "sizeof(*ctrl_seg_ptr) == 16");
+  GRPCOLL_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == 16, "sizeof(*raddr_seg_ptr) == 16");
+  GRPCOLL_STATIC_ASSERT(sizeof(*data_seg_ptr) == 16, "sizeof(*data_seg_ptr) == 16");
   st_na_relaxed(reinterpret_cast<int4*>(ctrl_seg_ptr), *reinterpret_cast<const int4*>(&ctrl_seg));
   st_na_relaxed(reinterpret_cast<int4*>(raddr_seg_ptr), *reinterpret_cast<const int4*>(&raddr_seg));
   st_na_relaxed(reinterpret_cast<int4*>(data_seg_ptr), *reinterpret_cast<const int4*>(&data_seg));
 }
 
-__device__ static __forceinline__ void ibgda_write_empty_recv_wqe(void* out_wqe) {
+DEVICE_INLINE static void ibgda_write_empty_recv_wqe(void* out_wqe) {
   auto* data_seg_ptr = reinterpret_cast<struct mlx5_wqe_data_seg*>(out_wqe);
   struct mlx5_wqe_data_seg data_seg;
 
@@ -362,19 +368,12 @@ __device__ static __forceinline__ void ibgda_write_empty_recv_wqe(void* out_wqe)
   data_seg.lkey = HtoBE64(MLX5_INVALID_LKEY);
   data_seg.addr = 0;
 
-  EP_STATIC_ASSERT(sizeof(mlx5_wqe_data_seg) == sizeof(int4), "Invalid data type length");
+  GRPCOLL_STATIC_ASSERT(sizeof(mlx5_wqe_data_seg) == sizeof(int4), "Invalid data type length");
   st_na_relaxed(reinterpret_cast<int4*>(data_seg_ptr), *reinterpret_cast<const int4*>(&data_seg));
 }
 
 template <bool kAlwaysDoPostSend = false>
-__device__ static __forceinline__ void nvshmemi_ibgda_put_nbi_warp(
-    uint64_t req_rptr,
-    uint64_t req_lptr,
-    size_t bytes,
-    int dst_pe,
-    int qp_id,
-    int lane_id,
-    int message_idx) {
+DEVICE_INLINE static void nvshmemi_ibgda_put_nbi_warp(uint64_t req_rptr, uint64_t req_lptr, size_t bytes, int dst_pe, int qp_id, int lane_id, int message_idx) {
   // Get lkey and rkey, store them into lanes
   uint32_t num_wqes = 0;
   __be32 my_lkey = 0;
@@ -393,19 +392,19 @@ __device__ static __forceinline__ void nvshmemi_ibgda_put_nbi_warp(
     }
 
     // Move one more message
-    auto chunk_size = __shfl_sync(0xffffffff, my_chunk_size, static_cast<int>(num_wqes));
+    auto chunk_size = broadcast_in_warp(/*val=*/my_chunk_size, /*src_lane=*/static_cast<int>(num_wqes));
     remaining_bytes -= chunk_size;
     req_lptr += chunk_size;
     req_rptr += chunk_size;
     ++num_wqes;
   }
-  EP_DEVICE_ASSERT(num_wqes <= 32);
+  GRPCOLL_DEVICE_ASSERT(num_wqes <= WARP_SIZE);
 
   // Process WQE
   uint64_t base_wqe_idx = 0;
   if (lane_id == 0)
     base_wqe_idx = ibgda_reserve_wqe_slots(qp, num_wqes);
-  base_wqe_idx = __shfl_sync(0xffffffff, base_wqe_idx, 0);
+  base_wqe_idx = broadcast_in_warp(base_wqe_idx);
   if (lane_id < num_wqes) {
     auto wqe_idx = base_wqe_idx + lane_id;
     auto wqe_ptr = ibgda_get_wqe_ptr(qp, wqe_idx);
@@ -419,7 +418,7 @@ __device__ static __forceinline__ void nvshmemi_ibgda_put_nbi_warp(
   __syncwarp();
 }
 
-__device__ static __forceinline__ void ibgda_write_amo_add_wqe(
+DEVICE_INLINE static void ibgda_write_amo_add_wqe(
     nvshmemi_ibgda_device_qp_t* qp,
     const int& value,
     uint64_t laddr,
@@ -455,17 +454,17 @@ __device__ static __forceinline__ void ibgda_write_amo_add_wqe(
   data_seg.lkey = lkey;
   data_seg.addr = HtoBE64(laddr);
 
-  EP_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == sizeof(int4), "Invalid vectorization");
-  EP_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == sizeof(int4), "Invalid vectorization");
-  EP_STATIC_ASSERT(sizeof(*atomic_seg_ptr) == sizeof(int4), "Invalid vectorization");
-  EP_STATIC_ASSERT(sizeof(*data_seg_ptr) == sizeof(int4), "Invalid vectorization");
+  GRPCOLL_STATIC_ASSERT(sizeof(*ctrl_seg_ptr) == sizeof(int4), "Invalid vectorization");
+  GRPCOLL_STATIC_ASSERT(sizeof(*raddr_seg_ptr) == sizeof(int4), "Invalid vectorization");
+  GRPCOLL_STATIC_ASSERT(sizeof(*atomic_seg_ptr) == sizeof(int4), "Invalid vectorization");
+  GRPCOLL_STATIC_ASSERT(sizeof(*data_seg_ptr) == sizeof(int4), "Invalid vectorization");
   st_na_relaxed(reinterpret_cast<int4*>(ctrl_seg_ptr), *reinterpret_cast<int4*>(&ctrl_seg));
   st_na_relaxed(reinterpret_cast<int4*>(raddr_seg_ptr), *reinterpret_cast<int4*>(&raddr_seg));
   st_na_relaxed(reinterpret_cast<int4*>(atomic_seg_ptr), *reinterpret_cast<int4*>(&atomic_seg_1));
   st_na_relaxed(reinterpret_cast<int4*>(data_seg_ptr), *reinterpret_cast<int4*>(&data_seg));
 }
 
-__device__ __forceinline__ void nvshmemi_ibgda_amo_nonfetch_add(void* rptr, const int& value, int pe, int qp_id, bool is_local_copy = false) {
+DEVICE_INLINE void nvshmemi_ibgda_amo_nonfetch_add(void* rptr, const int& value, int pe, int qp_id, bool is_local_copy = false) {
   if (is_local_copy) {
     atomicAdd(static_cast<unsigned long long*>(rptr), value);
   } else {
@@ -484,7 +483,7 @@ __device__ __forceinline__ void nvshmemi_ibgda_amo_nonfetch_add(void* rptr, cons
   }
 }
 
-__device__ __forceinline__ uint64_t nvshmemi_get_p2p_ptr(const uint64_t& ptr, const int& rank, const int& dst_rank) {
+DEVICE_INLINE uint64_t nvshmemi_get_p2p_ptr(const uint64_t& ptr, const int& rank, const int& dst_rank) {
   // Local rank, no need for mapping
   if (rank == dst_rank)
     return ptr;
@@ -501,7 +500,7 @@ __device__ __forceinline__ uint64_t nvshmemi_get_p2p_ptr(const uint64_t& ptr, co
 // This is a simplified version of NVSHMEM's `ibgda_poll_cq`.
 // Note that this implementation does not guarantee thread safety,
 // so we must ensure that no other threads are concurrently using the same QP.
-__device__ static __forceinline__ void ibgda_poll_cq(nvshmemi_ibgda_device_cq_t* cq, uint64_t idx) {
+DEVICE_INLINE static void ibgda_poll_cq(nvshmemi_ibgda_device_cq_t* cq, uint64_t idx) {
   const auto cqe64 = static_cast<mlx5_cqe64*>(cq->cqe);
   const uint32_t ncqes = cq->ncqes;
   memory_fence_cta();
@@ -524,7 +523,7 @@ __device__ static __forceinline__ void ibgda_poll_cq(nvshmemi_ibgda_device_cq_t*
 }
 
 // Wait until wqe `idx - 1` is completed.
-__device__ static __forceinline__ void nvshmemi_ibgda_quiet(int dst_pe, int qp_id) {
+DEVICE_INLINE static void nvshmemi_ibgda_quiet(int dst_pe, int qp_id) {
   auto qp = ibgda_get_rc(dst_pe, qp_id);
   auto state = ibgda_get_state();
   uint64_t prod_idx = state->use_async_postsend ? ld_na_relaxed(qp->tx_wq.prod_idx) : ld_na_relaxed(&qp->mvars.tx_wq.ready_head);

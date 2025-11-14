@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
 import os
+from contextlib import contextmanager
 from functools import partial, wraps
+from typing import Callable
 
 from magi_attention.utils import wrap_to_list
 
 
-@contextlib.contextmanager
+@contextmanager
 def switch_envvar_context(envvar_name: str | list[str], enable: bool = True):
     envvar_name_list = wrap_to_list(envvar_name)
     old_value_list = []
@@ -64,10 +65,54 @@ switch_deterministic_mode_decorator = switch_envvar_decorator(
     envvar_name="MAGI_ATTENTION_DETERMINISTIC_MODE"
 )
 
-enable_sdpa_backend_context = partial(
+switch_sdpa_backend_context = partial(
     switch_envvar_context, envvar_name="MAGI_ATTENTION_SDPA_BACKEND"
 )
 
-enable_sdpa_backend_decorator = switch_envvar_decorator(
+switch_sdpa_backend_decorator = switch_envvar_decorator(
     envvar_name="MAGI_ATTENTION_SDPA_BACKEND"
 )
+
+switch_ffa_verbose_jit_build_context = partial(
+    switch_envvar_context, envvar_name="MAGI_ATTENTION_BUILD_VERBOSE"
+)
+
+switch_ffa_verbose_jit_build_decorator = switch_envvar_decorator(
+    envvar_name="MAGI_ATTENTION_BUILD_VERBOSE"
+)
+
+
+def switch_envvars(
+    envvar_name_list: list[str], enable_list: list[bool]
+) -> Callable[[], None]:
+    """Switch the given list of environment variables
+    to the corr. given value indicated by the list of `enable`,
+    and return a call back function to switch them back.
+
+    NOTE: this is helpful when switching multiple environment variables at once,
+    as chaining several ``switch_envvar_context`` calls in a single ``with`` statement
+    can become unwieldy and lead to excessive indentation.
+
+    Args:
+        enable_list (bool, optional): ``enable_list[i]`` indicates whether to
+            enable the ith environment variable in the ``envvar_name_list``.
+
+    Returns:
+        Callable[[], None]: the call back function to switch the environment variables back
+    """
+    assert len(envvar_name_list) == len(enable_list), (
+        "envvar_name_list and enable_list should have the same length, "
+        f"but got {len(envvar_name_list)=} and {len(enable_list)=}."
+    )
+
+    ctx_mgr_lis = []
+    for envvar_name, enable in zip(envvar_name_list, enable_list):
+        ctx_mgr = switch_envvar_context(envvar_name=envvar_name, enable=enable)
+        ctx_mgr.__enter__()
+        ctx_mgr_lis.append(ctx_mgr)
+
+    def switch_envvars_back():
+        for ctx_mgr in reversed(ctx_mgr_lis):
+            ctx_mgr.__exit__(None, None, None)
+
+    return switch_envvars_back

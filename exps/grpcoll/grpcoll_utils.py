@@ -309,7 +309,7 @@ def bench_kineto(
     for name in kernel_names:
         assert (
             sum([name in line for line in prof_lines]) == 1
-        ), f"Errors of the kernel {name} in the profiling table"
+        ), f"Errors of the kernel {name} in the profiling table: {prof_lines=}"
 
     # Save chrome traces
     if trace_path is not None:
@@ -378,7 +378,7 @@ def inplace_unique(x: torch.Tensor, num_slots: int):
     x[:, :valid_len] = sorted_bin_idx[:, :valid_len]
 
 
-def transfer_group_cast_meta_to_dispatch_meta(
+def transfer_native_group_cast_meta(
     rank: int,
     num_ranks: int,
     num_nodes: int,
@@ -529,12 +529,12 @@ def transfer_group_cast_meta_to_dispatch_meta(
     # construct post-permute args to transfer rank order
     # to the order indicated by output_split_size_list and src_index_list
     if use_a2a_order_output:
-        range_gather_post_dispatch_kwargs: dict[str, Any] = {}
-        range_gather_pre_combine_kwargs: dict[str, Any] = {}
+        range_gather_post_group_cast_kwargs: dict[str, Any] = {}
+        range_gather_pre_group_reduce_kwargs: dict[str, Any] = {}
     else:
         (
             _,  # a2a_output_split_size
-            range_gather_post_dispatch_kwargs,
+            range_gather_post_group_cast_kwargs,
         ) = _calc_group_cast_a2a_output_meta_args(
             output_split_size_list=output_split_size_list,
             src_index_list=src_index_list,
@@ -547,7 +547,7 @@ def transfer_group_cast_meta_to_dispatch_meta(
 
         (
             _,  # a2a_input_split_size
-            range_gather_pre_combine_kwargs,
+            range_gather_pre_group_reduce_kwargs,
         ) = _calc_group_reduce_a2a_input_meta_args(
             input_split_size_list=output_split_size_list,
             dst_index_list=src_index_list,
@@ -564,6 +564,6 @@ def transfer_group_cast_meta_to_dispatch_meta(
         topk_idx,
         topk_weights,
         num_tokens_per_expert,
-        range_gather_post_dispatch_kwargs,
-        range_gather_pre_combine_kwargs,
+        range_gather_post_group_cast_kwargs,
+        range_gather_pre_group_reduce_kwargs,
     )

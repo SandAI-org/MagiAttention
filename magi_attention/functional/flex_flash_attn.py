@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+from contextlib import contextmanager
+
 import torch
 from packaging import version
 
@@ -23,7 +26,7 @@ from ._flex_flash_attn_jit import get_ffa_jit_mod
 # We need to import the CUDA kernels after importing torch
 is_ffa_utils_installed = False
 try:
-    from magi_attention import flexible_flash_attention_utils_cuda  # type: ignore[attr-defined]
+    from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]
 
     is_ffa_utils_installed = True
 except ImportError:
@@ -61,10 +64,13 @@ else:
     _torch_register_fake_wrapper = noop_register_fake_wrapper
 
 
+profile_mode = os.environ.get("MAGI_ATTENTION_PROFILE_MODE", "0") == "1"
+
+
 # -------------------       helpers   ------------------- #
 
 
-def maybe_contiguous(x):
+def maybe_contiguous(x: torch.Tensor) -> torch.Tensor:
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
@@ -81,6 +87,8 @@ def merge_ranges(
         inner_ranges (torch.Tensor): A tensor of shape `[num_ranges, 2]`,
             where each row is paired with the corresponding row in
             `outer_ranges`, representing the inner ranges (e.g., K-block ranges).
+        attn_type_map (torch.Tensor): A tensor of shape `[num_ranges]`,
+            representing the attn_type of each range.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -108,7 +116,7 @@ def merge_ranges(
         ...     sorted_attn_type_map,
         ...     range_map,
         ...     unique_count,
-        ... ) = merge_ranges(outer_ranges, inner_ranges)
+        ... ) = merge_ranges(outer_ranges, inner_ranges, attn_type_map)
         >>> print("Unique Merged Outer Ranges:", merge_outer_ranges)
         Unique Merged Outer Ranges:
          tensor([[10, 20],
@@ -153,9 +161,7 @@ def merge_ranges(
         merge_outer_ranges,
         range_map,
         unique_count,
-    ) = flexible_flash_attention_utils_cuda.unique_consecutive_pairs(
-        sorted_outer_ranges
-    )
+    ) = ffa_utils.unique_consecutive_pairs(sorted_outer_ranges)
 
     return (
         merge_outer_ranges,
@@ -165,6 +171,17 @@ def merge_ranges(
         range_map,
         unique_count,
     )
+
+
+@contextmanager
+def maybe_profile_ffa_ctx(event_name: str):
+    if profile_mode:
+        ffa_utils.start_event(event_name)
+
+    yield
+
+    if profile_mode:
+        ffa_utils.stop_event(event_name)
 
 
 # -------------------       ffa forward   ------------------- #
@@ -180,6 +197,7 @@ def _flex_flash_attn_forward_compilable(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out_: torch.Tensor,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
@@ -199,10 +217,6 @@ def _flex_flash_attn_forward_compilable(
     swap_ab: bool = False,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
-    q, k, v, q_ranges, k_ranges = [
-        maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
-    ]
-
     mod = get_ffa_jit_mod(
         direction="fwd",
         head_dim=q.shape[-1],
@@ -212,6 +226,7 @@ def _flex_flash_attn_forward_compilable(
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_fwd_atomic_reduction,
         deterministic=deterministic,
+        profile_mode=profile_mode,
         ref_block_size=(kblock_m, kblock_n)
         if kblock_m is not None and kblock_n is not None
         else None,
@@ -222,6 +237,7 @@ def _flex_flash_attn_forward_compilable(
         q,
         k,
         v,
+        sink,
         out_,
         lse,
         q_ranges,
@@ -244,6 +260,7 @@ def _flex_flash_attn_forward_compilable_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out_: torch.Tensor,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
@@ -269,6 +286,7 @@ def _flex_flash_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out: torch.Tensor | None,
     lse: torch.Tensor | None,
     q_ranges: torch.Tensor,
@@ -286,8 +304,12 @@ def _flex_flash_attn_forward(
     sm_margin: int,
     swap_ab: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    q, k, v, q_ranges, k_ranges = [
-        maybe_contiguous(x) for x in (q, k, v, q_ranges, k_ranges)
+    if profile_mode:  # NOTE: stop_event is called inside the kernel
+        ffa_utils.start_event("fwd_prepare")
+
+    # make all input tensors contiguous before initializing output buffers
+    q, k, v, sink, q_ranges, k_ranges = [
+        maybe_contiguous(x) for x in (q, k, v, sink, q_ranges, k_ranges)
     ]
 
     out = (
@@ -316,13 +338,13 @@ def _flex_flash_attn_forward(
     else:
         kblock_m = None
         kblock_n = None
-
     # NOTE: we can not directly compile `_flex_flash_attn_forward`
     # since torch.compile does not allow returning the mutated args (out, lse)
     _flex_flash_attn_forward_compilable(
         q=q,
         k=k,
         v=v,
+        sink=sink,
         out_=out,
         lse=lse,
         q_ranges=q_ranges,
@@ -350,7 +372,7 @@ def _flex_flash_attn_forward(
 
 @_torch_custom_op_wrapper(
     "flex_flash_attn::_flex_flash_attn_backward_compilable",
-    mutates_args=("dq", "dk", "dv"),
+    mutates_args=("dq", "dk", "dv", "dsink"),
     device_types="cuda",
 )
 def _flex_flash_attn_backward_compilable(
@@ -358,10 +380,12 @@ def _flex_flash_attn_backward_compilable(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out_: torch.Tensor,
     dq: torch.Tensor,
     dk: torch.Tensor,
     dv: torch.Tensor,
+    dsink: torch.Tensor | None,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -379,7 +403,6 @@ def _flex_flash_attn_backward_compilable(
     sm_margin: int,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
-
     mod = get_ffa_jit_mod(
         direction="bwd",
         head_dim=q.shape[-1],
@@ -389,25 +412,28 @@ def _flex_flash_attn_backward_compilable(
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         deterministic=deterministic,
+        profile_mode=profile_mode,
     )
-
-    dout, q, k, v, out_, q_ranges, k_ranges = [
-        maybe_contiguous(x) for x in (dout, q, k, v, out_, q_ranges, k_ranges)
-    ]
 
     (
         dq,
         dk,
         dv,
+        # NOTE: when sink is not given
+        # a new zero-sized empty dsink will be returned for convenience
+        # no matter whether dsink buffer is given
+        dsink,
     ) = mod.bwd(
         dout,
         q,
         k,
         v,
+        sink,
         out_,
         dq,
         dk,
         dv,
+        dsink,
         lse,
         q_ranges,
         k_ranges,
@@ -432,10 +458,12 @@ def _flex_flash_attn_backward_compilable_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out_: torch.Tensor,
     dq: torch.Tensor,
     dk: torch.Tensor,
     dv: torch.Tensor,
+    dsink: torch.Tensor | None,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -461,10 +489,12 @@ def _flex_flash_attn_backward(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    sink: torch.Tensor | None,
     out: torch.Tensor,
     dq: torch.Tensor | None,
     dk: torch.Tensor | None,
     dv: torch.Tensor | None,
+    dsink: torch.Tensor | None,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -480,22 +510,40 @@ def _flex_flash_attn_backward(
     dv_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    if profile_mode:  # NOTE: stop_event is called inside the kernel
+        ffa_utils.start_event("bwd_prepare")
+
+    # make all input tensors contiguous before initializing output buffers
+    # NOTE: in backward, torch.compiler allows neither making nor checking contiguity
+    # so we just skip here, but check inside the kernel
+    if not torch.compiler.is_compiling():
+        dout, q, k, v, sink, out, q_ranges, k_ranges = [
+            maybe_contiguous(x) for x in (dout, q, k, v, sink, out, q_ranges, k_ranges)
+        ]
+
     dq = torch.zeros_like(q, dtype=dq_type or torch.float32) if dq is None else dq
     dk = torch.zeros_like(k, dtype=dk_type or torch.float32) if dk is None else dk
     dv = torch.zeros_like(v, dtype=dv_type or torch.float32) if dv is None else dv
+    dsink = (
+        (torch.zeros_like(sink, dtype=torch.float32) if dsink is None else dsink)
+        if sink is not None
+        else None
+    )
 
     # NOTE: we can not directly compile `_flex_flash_attn_backward`
-    # since torch.compile does not allow returning the mutated args (dq, dk, dv)
+    # since torch.compile does not allow returning the mutated args (dq, dk, dv, dsink)
     _flex_flash_attn_backward_compilable(
         dout=dout,
         q=q,
         k=k,
         v=v,
+        sink=sink,
         out_=out,
         dq=dq,
         dk=dk,
         dv=dv,
+        dsink=dsink,
         lse=lse,
         q_ranges=q_ranges,
         k_ranges=k_ranges,
@@ -513,7 +561,7 @@ def _flex_flash_attn_backward(
         sm_margin=sm_margin,
     )
 
-    return dq, dk, dv
+    return dq, dk, dv, dsink
 
 
 # -------------------       ffa autograd   ------------------- #
@@ -523,98 +571,76 @@ class FlexFlashAttnFunc(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        q,
-        k,
-        v,
-        q_ranges,
-        k_ranges,
-        attn_type_map,
-        softmax_scale,
-        softcap=0.0,
-        deterministic=False,
-        sm_margin=0,
-        disable_fwd_atomic_reduction=False,
-        auto_range_merge=False,
-        ref_block_size=None,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sink: torch.Tensor | None,
+        q_ranges: torch.Tensor,
+        k_ranges: torch.Tensor,
+        attn_type_map: torch.Tensor | None,
+        softmax_scale: float | None = None,
+        softcap: float = 0.0,
+        deterministic: bool = False,
+        sm_margin: int = 0,
+        disable_fwd_atomic_reduction: bool = False,
+        auto_range_merge: bool = False,
+        ref_block_size: tuple[int, int] | None = None,
         swap_ab=False,
     ):
-        if softmax_scale is None:
-            softmax_scale = q.shape[-1] ** (-0.5)
+        softmax_scale = (
+            q.shape[-1] ** (-0.5) if softmax_scale is None else softmax_scale
+        )
 
         if auto_range_merge:
-            (
-                merge_q_ranges,
-                fwd_q_ranges,
-                fwd_k_ranges,
-                fwd_attn_type_map,
-                fwd_qk_map,
-                fwd_unique_count,
-            ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
-            (
-                merge_k_ranges,
-                bwd_k_ranges,
-                bwd_q_ranges,
-                bwd_attn_type_map,
-                bwd_kq_map,
-                bwd_unique_count,
-            ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
+            with maybe_profile_ffa_ctx("fwd_range_merge"):
+                (
+                    merge_q_ranges,
+                    fwd_q_ranges,
+                    fwd_k_ranges,
+                    fwd_attn_type_map,
+                    fwd_qk_map,
+                    fwd_unique_count,
+                ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
             fwd_attn_type_map = attn_type_map
-            bwd_q_ranges = q_ranges
-            bwd_k_ranges = k_ranges
-            bwd_attn_type_map = attn_type_map
             merge_q_ranges = None
-            merge_k_ranges = None
             fwd_qk_map = None
-            bwd_kq_map = None
             fwd_unique_count = None
-            bwd_unique_count = None
 
         out, lse = _flex_flash_attn_forward(
-            q,
-            k,
-            v,
-            None,  # out
-            None,  # lse
-            fwd_q_ranges,
-            fwd_k_ranges,
-            fwd_attn_type_map,
-            merge_q_ranges,
-            fwd_qk_map,
-            fwd_unique_count,
-            ref_block_size,
-            softmax_scale,
-            softcap,
-            disable_fwd_atomic_reduction,
-            q.dtype if disable_fwd_atomic_reduction else torch.float32,  # out_type
-            deterministic,
-            sm_margin,
-            swap_ab,
+            q=q,
+            k=k,
+            v=v,
+            sink=sink,
+            out=None,
+            lse=None,
+            q_ranges=fwd_q_ranges,
+            k_ranges=fwd_k_ranges,
+            attn_type_map=fwd_attn_type_map,
+            merge_q_ranges=merge_q_ranges,
+            qk_map=fwd_qk_map,
+            fwd_unique_count=fwd_unique_count,
+            ref_block_size=ref_block_size,
+            softmax_scale=softmax_scale,
+            softcap=softcap,
+            disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
+            out_type=q.dtype
+            if disable_fwd_atomic_reduction
+            else torch.float32,  # out_type
+            deterministic=deterministic,
+            sm_margin=sm_margin,
+            swap_ab=swap_ab,
         )
 
         # Cast output to the same dtype as q
-        out = out.to(q.dtype)
+        with maybe_profile_ffa_ctx("fwd_cast"):
+            out = out.to(q.dtype)
 
-        if auto_range_merge:
-            ctx.save_for_backward(
-                q,
-                k,
-                v,
-                out,
-                lse,
-                bwd_q_ranges,
-                bwd_k_ranges,
-                bwd_attn_type_map,
-                merge_k_ranges,
-                bwd_kq_map,
-                bwd_unique_count,
-            )
-        else:
-            ctx.save_for_backward(
-                q, k, v, out, lse, bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map
-            )
+        ctx.save_for_backward(
+            q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map
+        )
 
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
@@ -625,52 +651,45 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         return out, lse
 
     @staticmethod
-    def backward(ctx, dout, *args):
-        if ctx.auto_range_merge:
-            (
-                q,
-                k,
-                v,
-                out,
-                lse,
-                bwd_q_ranges,
-                bwd_k_ranges,
-                bwd_attn_type_map,
-                merge_k_ranges,
-                bwd_kq_map,
-                bwd_unique_count,
-            ) = ctx.saved_tensors
-        else:
-            (
-                q,
-                k,
-                v,
-                out,
-                lse,
-                bwd_q_ranges,
-                bwd_k_ranges,
-                bwd_attn_type_map,
-            ) = ctx.saved_tensors
-            merge_k_ranges = None
-            bwd_kq_map = None
-            bwd_unique_count = None
+    def backward(ctx, dout: torch.Tensor, *args):  # pragma: no cover
+        q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map = ctx.saved_tensors
 
-        dq, dk, dv = _flex_flash_attn_backward(
-            dout,
-            q,
-            k,
-            v,
-            out,
-            None,  # dq
-            None,  # dk
-            None,  # dv
-            lse,
-            bwd_q_ranges,
-            bwd_k_ranges,
-            bwd_attn_type_map,
-            merge_k_ranges,
-            bwd_kq_map,
-            bwd_unique_count,
+        if ctx.auto_range_merge:
+            with maybe_profile_ffa_ctx("bwd_range_merge"):
+                (
+                    merge_k_ranges,
+                    bwd_k_ranges,
+                    bwd_q_ranges,
+                    bwd_attn_type_map,
+                    bwd_kq_map,
+                    bwd_unique_count,
+                ) = merge_ranges(k_ranges, q_ranges, attn_type_map=attn_type_map)
+        else:
+            bwd_q_ranges, bwd_k_ranges, bwd_attn_type_map = (
+                q_ranges,
+                k_ranges,
+                attn_type_map,
+            )
+            merge_k_ranges, bwd_kq_map, bwd_unique_count = None, None, None
+
+        dq, dk, dv, dsink = _flex_flash_attn_backward(
+            dout=dout,
+            q=q,
+            k=k,
+            v=v,
+            sink=sink,
+            out=out,
+            dq=None,
+            dk=None,
+            dv=None,
+            dsink=None,
+            lse=lse,
+            q_ranges=bwd_q_ranges,
+            k_ranges=bwd_k_ranges,
+            attn_type_map=bwd_attn_type_map,
+            merge_k_ranges=merge_k_ranges,
+            bwd_kq_map=bwd_kq_map,
+            bwd_unique_count=bwd_unique_count,
             softmax_scale=ctx.softmax_scale,
             softcap=ctx.softcap,
             disable_bwd_dkv_atomic_reduction=False,
@@ -681,14 +700,20 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             sm_margin=ctx.sm_margin,
         )
 
-        dq = dq.to(q.dtype)
-        dk = dk.to(k.dtype)
-        dv = dv.to(v.dtype)
+        # Cast gradients to the same dtype as inputs
+        with maybe_profile_ffa_ctx("bwd_cast"):
+            dq = dq.to(q.dtype)
+            dk = dk.to(k.dtype)
+            dv = dv.to(v.dtype)
+            if sink is not None:
+                assert dsink is not None  # mypy
+                dsink = dsink.to(sink.dtype)
 
         return (
             dq,  # q
             dk,  # k
             dv,  # v
+            dsink,  # sink
             None,  # q_ranges
             None,  # k_ranges
             None,  # attn_type_map
@@ -713,6 +738,7 @@ def flex_flash_attn_func(
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor | None = None,
+    sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
     deterministic: bool = False,
@@ -730,9 +756,11 @@ def flex_flash_attn_func(
         q (torch.Tensor): Query tensor.
         k (torch.Tensor): Key tensor.
         v (torch.Tensor): Value tensor.
-        q_ranges (torch.Tensor): query ranges tensor to represent the attn mask.
-        k_ranges (torch.Tensor): key ranges tensor to represent the attn mask.
-        attn_type_map (torch.Tensor): Attention type map tenspr with dtype=torch.int32.
+
+        q_ranges (torch.Tensor): Query ranges tensor to represent the attn mask.
+        k_ranges (torch.Tensor): Key ranges tensor to represent the attn mask.
+        attn_type_map (torch.Tensor, optional): Attention type map tensor with dtype=torch.int32,
+            Defaults to ``None`` to apply full attention for all ranges.
             The values specify the attention type for each token:
 
                 - 0: full attention
@@ -742,23 +770,33 @@ def flex_flash_attn_func(
 
             More information about the attention type map can be found in the ``Note`` below.
 
+        sink (torch.Tensor, optional): Learnable sink token tensor.
+            Defaults to ``None`` to not apply attention sink.
+
         softmax_scale (float, optional): Softmax scale.
             Defaults to ``None`` to use: ``1/sqrt(head_dim)``.
         softcap (float, optional): Softcap. Defaults to ``0.0``.
+
         deterministic (bool, optional): Whether to use deterministic attention. Defaults to ``False``.
-        sm_margin (int, optional): the amount of SMs(streaming multiprocessors) reserved for communication.
-        disable_fwd_atomic_reduction (bool):
-            Whether to disable forward atomic reduction:
 
-                If you can ensure q_ranges has no overlap, you can set this to True for better performance.
-                Overlap in q_ranges is defined as: if any two q_ranges have non-empty intersection, then there is overlap.
-                For example, q_ranges = ``[[0, 15], [10, 20], [20, 30]]`` has overlap because
-                ``[0, 15]`` and ``[10, 20]`` intersect. While q_ranges = ``[[0, 15], [15, 20], [20, 30]]`` has no overlap.
+        sm_margin (int, optional): The amount of SMs reserved out,
+            useful when considering overlapping with other kernels such as communication kernels.
+            Defaults to ``0`` to use all available SMs.
 
-        auto_range_merge (bool, optional): Whether to automatically merge k_ranges for the same q_range.
-            Defaults to ``False``.
+        disable_fwd_atomic_reduction (bool, optional):
+            Whether to disable forward atomic reduction. Defaults to ``False``.
 
-            **Note:** This flag is usually used in sparse attention cases but still under development.
+                If you can ensure ``q_ranges`` is non-overlapped,
+                you can set this to ``True`` for better performance.
+                The "overlap" term among ``q_ranges`` is defined as:
+                if any two ``q_range`` in ``q_ranges`` have non-empty intersection, then it is overlapped.
+                For example, ``q_ranges`` = ``[[0, 15], [10, 20], [20, 30]]`` is overlapped
+                since ``q_range1`` = ``[0, 15]`` and ``q_range2`` = ``[10, 20]`` intersect,
+                while `` q_ranges`` = ``[[0, 15], [15, 20], [20, 30]]`` then is non-overlapped.
+
+        auto_range_merge (bool, optional):
+            Whether to automatically merge k_ranges for the same q_range. Defaults to ``False``.
+            **Note:** This flag is useful for sparse attention scenarios but still under development.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
@@ -766,17 +804,18 @@ def flex_flash_attn_func(
             - lse (torch.Tensor): Log-sum-exp values with dtype=torch.float32.
 
     Shape:
-        - q: (num_tokens_q, num_heads, head_dim)
-        - k: (num_tokens_kv, num_heads, head_dim)
-        - v: (num_tokens_kv, num_heads, head_dim)
+        - q: (num_tokens_q, num_heads_q, head_dim)
+        - k: (num_tokens_kv, num_heads_kv, head_dim)
+        - v: (num_tokens_kv, num_heads_kv, head_dim)
+        - sink: (num_tokens_sink, num_heads_q)
         - q_ranges: (num_ranges, 2)
         - k_ranges: (num_ranges, 2)
-        - attn_type_map: (num_ranges, )
-        - out: (num_tokens_q, num_heads, head_dim)
-        - lse: (num_heads, num_tokens_q)
+        - attn_type_map: (num_ranges,)
+        - out: (num_tokens_q, num_heads_q, head_dim)
+        - lse: (num_tokens_q, num_heads_q)
 
     Note:
-        The `attn_type_map` explains the semantics of different attention mask types.
+        The ``attn_type_map`` explains the semantics of different attention mask types.
         In addition to the descriptions below, see our blog for a visual explanation:
         https://sandai-org.github.io/MagiAttention/blog/#flex-flash-attn
 
@@ -880,6 +919,7 @@ def flex_flash_attn_func(
         q,
         k,
         v,
+        sink,
         q_ranges,
         k_ranges,
         attn_type_map,

@@ -24,11 +24,26 @@ from magi_attention.common.jit import env as jit_env
 from magi_attention.common.jit.core import JitSpec, gen_jit_spec
 from magi_attention.common.jit.utils import write_if_different
 
+# isort: off
+# We need to import the CUDA kernels after importing torch
+is_ffa_utils_installed = False
+try:
+    from magi_attention import flexible_flash_attention_utils_cuda as ffa_utils  # type: ignore[attr-defined]
+
+    is_ffa_utils_installed = True
+except ImportError:
+    pass
+
+# isort: on
+
 _DTYPE_TO_CUTLASS = {
     torch.float16: "cutlass::half_t",
     torch.bfloat16: "cutlass::bfloat16_t",
     torch.float32: "float",
 }
+
+# Whether to disable caching (caching is enabled by default)
+no_build_cache = os.getenv("MAGI_ATTENTION_NO_BUILD_CACHE", "0") == "1"
 
 
 def tile_size_fwd_sm90(head_dim: int, softcap: bool) -> tuple[int, int]:
@@ -69,6 +84,7 @@ def get_ffa_uri(
     softcap: bool,
     disable_atomic_reduction: bool,
     deterministic: bool,
+    profile_mode: bool,
     kblock_m: int | None,
     kblock_n: int | None,
     swap_ab: bool,
@@ -86,6 +102,7 @@ def get_ffa_uri(
         f"{'' if disable_atomic_reduction else '_atomic'}"
         f"{'_deterministic' if deterministic else ''}"
         f"{'_swapab' if swap_ab else ''}"
+        f"{'_profile_mode' if profile_mode else ''}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -152,6 +169,7 @@ def get_ffa_jit_spec(
     softcap: bool,
     disable_atomic_reduction: bool,
     deterministic: bool,
+    profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
 ) -> tuple[JitSpec, str]:
@@ -179,6 +197,7 @@ def get_ffa_jit_spec(
         softcap,
         disable_atomic_reduction,
         deterministic,
+        profile_mode,
         kblock_m,
         kblock_n,
         swap_ab,
@@ -200,6 +219,7 @@ def get_ffa_jit_spec(
     out_t = _DTYPE_TO_CUTLASS[output_dtype]
     has_softcap = bool(softcap)
     disable_atomic = bool(disable_atomic_reduction)
+    profile_mode = bool(profile_mode)
 
     rendered = template.render(
         arch_sm_num=arch_sm_num,
@@ -209,6 +229,7 @@ def get_ffa_jit_spec(
         has_softcap=str(has_softcap).lower(),
         disable_atomic=str(disable_atomic).lower(),
         deterministic=str(deterministic).lower(),
+        profile_mode=str(profile_mode).lower(),
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
         swap_ab=str(swap_ab).lower(),
@@ -222,14 +243,18 @@ def get_ffa_jit_spec(
 
     common_sources = [
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flex_flash_common.cpp",
-        jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "fast_zero_fill.cu",
+        jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR / "flash_fwd_postprocess.cu",
     ]
+
+    # For CUDA13.0: the cccl header path needs to be explicitly included
+    CUDA13_CCCL_PATH = "/usr/local/cuda-13.0/include/cccl/"
 
     include_dirs = [
         jit_env.MAGI_ATTENTION_INCLUDE_DIR.resolve(),
         jit_env.FLEXIBLE_FLASH_ATTENTION_CSRC_DIR.resolve(),
         jit_env.CUTLASS_INCLUDE_DIRS[0].resolve(),
         jit_env.CUTLASS_INCLUDE_DIRS[1].resolve(),
+        CUDA13_CCCL_PATH,
     ]
 
     # Disable other head dimensions to reduce compile time
@@ -254,7 +279,22 @@ def get_ffa_jit_spec(
             extra_include_paths=[str(x) for x in include_dirs],
             needs_device_linking=False,
         )
-        return common_spec.build_and_get_objects()
+
+        common_objects = common_spec.build_and_get_objects()
+
+        if profile_mode:
+            assert is_ffa_utils_installed, (
+                "The `flexible_flash_attention_utils_cuda` "
+                "extension module is not installed. "
+                "This is a required dependency for JIT compilation when enabling profile mode."
+            )
+
+            # add utils.so (dynamic linking)
+            utils_so_path = Path(ffa_utils.__file__)
+
+            common_objects += [str(utils_so_path)]
+
+        return common_objects
 
     spec = gen_jit_spec(
         name=uri,
@@ -278,6 +318,7 @@ def get_ffa_jit_mod(
     softcap: bool,
     disable_atomic_reduction: bool,
     deterministic: bool,
+    profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
     swap_ab: bool = False,
 ) -> Any:
@@ -294,6 +335,7 @@ def get_ffa_jit_mod(
         softcap,
         disable_atomic_reduction,
         deterministic,
+        profile_mode,
         ref_block_size,
         swap_ab,
     )
@@ -301,6 +343,5 @@ def get_ffa_jit_mod(
     return spec.build_and_load()
 
 
-# Disable caching when MAGI_ATTENTION_NO_CACHE=1 (caching is enabled by default)
-if os.getenv("MAGI_ATTENTION_NO_CACHE", "0") != "1":
+if no_build_cache:
     get_ffa_jit_mod = lru_cache(maxsize=None)(get_ffa_jit_mod)

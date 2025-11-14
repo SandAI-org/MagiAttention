@@ -50,7 +50,8 @@ template <
     bool DisableFwdAtomicReduction,
     bool Deterministic,
     bool MergeRange,
-    bool SwapAB>
+    bool SwapAB,
+    bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
@@ -126,14 +127,14 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       params.determin_range_locks,
   };
 
-  typename flash::TileSchedulerArguments scheduler_args{/*num_heads*/ params.h_qo,
-                                                        /*num_batches*/ params.merge_batch_size,
-                                                        /*tile_count_semaphore*/ params.tile_count_semaphore,
-                                                        /*ranges*/ params.q_ranges,
-                                                        /*merge_ranges*/ params.merge_q_ranges,
-                                                        /*range_map*/ params.qk_map,
-                                                        /*determin_conflict_state*/ params.determin_conflict_state,
-                                                        /*unique_count*/ params.unique_count};
+  typename flash::TileSchedulerArguments scheduler_args{/*num_heads=*/params.h_qo,
+                                                        /*num_batches=*/params.merge_batch_size,
+                                                        /*tile_count_semaphore=*/params.tile_count_semaphore,
+                                                        /*ranges=*/params.q_ranges,
+                                                        /*merge_ranges=*/params.merge_q_ranges,
+                                                        /*range_map=*/params.qk_map,
+                                                        /*determin_conflict_state=*/params.determin_conflict_state,
+                                                        /*unique_count=*/params.unique_count};
 
   int device;
   CHECK_CUDA(cudaGetDevice(&device));
@@ -176,7 +177,8 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool Deterministic,
-    bool SwapAB>
+    bool SwapAB,
+    bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // TODO: support cluster launch
@@ -184,7 +186,20 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   CLUSTER_SWITCH(cutlass::ceil_div(params.total_q, kBlockM) % 2 == 0, Use_cluster, [&] {
     static constexpr int ClusterM = Enable_cluster && Use_cluster ? 2 : 1;
     BOOL_SWITCH(params.merge_q_ranges != nullptr, MergeRange, [&] {
-      run_flash_fwd<Arch, kBlockM, kBlockN, kHeadDim, ClusterM, T, T_out, Has_softcap, DisableFwdAtomicReduction, Deterministic, MergeRange, SwapAB>(params, stream);
+      run_flash_fwd<
+          /*Arch=*/Arch,
+          /*kBlockM=*/kBlockM,
+          /*kBlockN=*/kBlockN,
+          /*kHeadDim=*/kHeadDim,
+          /*ClusterM=*/ClusterM,
+          /*Element=*/T,
+          /*ElementOut=*/T_out,
+          /*Has_softcap=*/Has_softcap,
+          /*DisableFwdAtomicReduction=*/DisableFwdAtomicReduction,
+          /*Deterministic=*/Deterministic,
+          /*MergeRange=*/MergeRange,
+          /*SwapAB=*/SwapAB,
+          /*ProfileMode=*/kProfileMode>(params, stream);
     });
   });
 }

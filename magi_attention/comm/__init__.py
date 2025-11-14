@@ -85,7 +85,7 @@ def is_qo_comm_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_QO_COMM", "0") == "1"
 
 
-def is_ffa_fwd_high_precision_reduce_enable() -> bool:
+def is_fwd_high_precision_reduce_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable high-precision (fp32) reduce
     for partial out during dist-attn forward
@@ -101,12 +101,10 @@ def is_ffa_fwd_high_precision_reduce_enable() -> bool:
 
     3. this feature works for out only when enabling qo comm
     """
-    return (
-        os.environ.get("MAGI_ATTENTION_FFA_FORWARD_HIGH_PRECISION_REDUCE", "0") == "1"
-    )
+    return os.environ.get("MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE", "0") == "1"
 
 
-def is_ffa_bwd_high_precision_reduce_enable() -> bool:
+def is_bwd_high_precision_reduce_enable() -> bool:
     """
     Toggle this env variable to ``1`` to enable high-precision (fp32) reduce
     for partial dq,dk,dv during dist-attn backward
@@ -120,9 +118,7 @@ def is_ffa_bwd_high_precision_reduce_enable() -> bool:
 
     2. this feature works for dq only when enabling qo comm
     """
-    return (
-        os.environ.get("MAGI_ATTENTION_FFA_BACKWARD_HIGH_PRECISION_REDUCE", "0") == "1"
-    )
+    return os.environ.get("MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE", "0") == "1"
 
 
 def is_native_grpcoll_enable() -> bool:
@@ -136,3 +132,41 @@ def is_native_grpcoll_enable() -> bool:
     thus please do NOT enable it unless you know exactly what you are doing
     """
     return os.environ.get("MAGI_ATTENTION_NATIVE_GRPCOLL", "0") == "1"
+
+
+def dsink_all_reduce_op() -> str:
+    """
+    Set the value of this env variable to control the all-reduce op
+    for sink gradients within ``dist_attn_func`` when involving attention sink.
+
+    Default value is ``none``. And options are within {``none``, ``sum``, ``avg``}.
+
+    NOTE: When involving attention sink,
+    for now we only accept global replicated sink tensor as input to feed into ``dist_attn_func``,
+    and the gradients of sink in each cp rank are partial and requires to be sum-reduced across cp ranks.
+
+    However, since sink tensor is learnable, it will be considered as a regular parameter in the model
+    similar to ``bias`` in ``nn.Linear`` layer.
+
+    So under some popular training frameworks, such as Megatron-LM, FSDP,the sum-reduction across cp ranks
+    of the partial gradients of sink might be automatically applied within the whole ``dp x cp`` mesh.
+
+    To avoid repeated reduction, we provide this environment variable
+    to specify the all-reduce op for sink gradients within ``dist_attn_func``.
+
+    Defaults to ``none`` to NOT apply any reduction to sink gradients by ``dist_attn_func`` and let the framework handle it.
+
+    However, under the scenarios w/o any framework mechanism to reduce parameters across cp ranks,
+    you have to specify this environment variable to ``sum``.
+
+    And sometimes, ``avg`` might also be an option when you need to scale the sink gradients by ``1/cp``.
+    """
+
+    op = os.environ.get("MAGI_ATTENTION_DSINK_ALL_REDUCE_OP", "none")
+    assert op in (
+        "none",
+        "sum",
+        "avg",
+    ), f"Invalid value of MAGI_ATTENTION_DSINK_ALL_REDUCE_OP: {op}"
+
+    return op

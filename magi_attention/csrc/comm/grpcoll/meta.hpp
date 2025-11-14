@@ -28,18 +28,17 @@
 
 namespace magi_attn_comm::grpcoll {
 struct Meta {
-  static std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>> get_dispatch_meta_from_topk_idx(
-      const torch::Tensor& topk_idx,
+  static std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, std::optional<EventHandle>> get_group_cast_meta_from_t2r_idx(
+      const torch::Tensor& t2r_idx,
       int num_ranks,
       int num_rdma_ranks,
-      int num_experts,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_meta_stream,
       std::optional<at::cuda::CUDAStream> meta_stream) {
-    EP_HOST_ASSERT(topk_idx.dim() == 2);
-    EP_HOST_ASSERT(topk_idx.is_contiguous());
-    EP_HOST_ASSERT(num_experts > 0);
+    GRPCOLL_HOST_ASSERT(t2r_idx.dim() == 2);
+    GRPCOLL_HOST_ASSERT(t2r_idx.is_contiguous());
+    GRPCOLL_HOST_ASSERT(num_ranks > 0);
 
     // Get meta stream
     at::cuda::CUDAStream meta_stream_ = meta_stream.has_value() ? meta_stream.value() : at::cuda::getStreamFromPool();
@@ -48,7 +47,7 @@ struct Meta {
     // NOTES: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
     if (allocate_on_meta_stream) {
-      EP_HOST_ASSERT(previous_event.has_value() and async);
+      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
       at::cuda::setCurrentCUDAStream(meta_stream_);
     }
 
@@ -59,39 +58,34 @@ struct Meta {
       stream_wait(meta_stream_, compute_stream);
     }
 
-    auto num_tokens = static_cast<int>(topk_idx.size(0)), num_topk = static_cast<int>(topk_idx.size(1));
+    auto num_tokens = static_cast<int>(t2r_idx.size(0));
+    GRPCOLL_HOST_ASSERT(t2r_idx.size(1) == num_ranks);
     auto num_tokens_per_rank = torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     auto num_tokens_per_rdma_rank = std::optional<torch::Tensor>();
-    auto num_tokens_per_expert = torch::empty({num_experts}, dtype(torch::kInt32).device(torch::kCUDA));
     auto is_token_in_rank = torch::empty({num_tokens, num_ranks}, dtype(torch::kBool).device(torch::kCUDA));
     if (num_rdma_ranks > 1)
       num_tokens_per_rdma_rank = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
-    layout::get_dispatch_layout(
-        // input ptr
-        topk_idx.data_ptr<int64_t>(),
-        // output ptr
-        num_tokens_per_rank.data_ptr<int>(),
-        num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
-        num_tokens_per_expert.data_ptr<int>(),
-        is_token_in_rank.data_ptr<bool>(),
-        // meta
-        num_tokens,
-        num_topk,
-        num_ranks,
-        num_experts,
-        // stream
-        meta_stream_);
+    layout::get_group_cast_meta(
+        /*t2r_idx=*/t2r_idx.data_ptr<int64_t>(),
+        /*num_tokens_per_rank=*/num_tokens_per_rank.data_ptr<int>(),
+        /*num_tokens_per_rdma_rank=*/num_tokens_per_rdma_rank.has_value() ? num_tokens_per_rdma_rank.value().data_ptr<int>() : nullptr,
+        /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
+        /*num_tokens=*/num_tokens,
+        /*num_ranks=*/num_ranks,
+        /*stream=*/meta_stream_);
 
     // Wait streams
     std::optional<EventHandle> event;
-    if (async) {
+    if (async_op) {
       event = EventHandle(meta_stream_);
-      for (auto& t : {topk_idx, num_tokens_per_rank, num_tokens_per_expert, is_token_in_rank}) {
+      // record tensors on meta stream
+      for (auto& t : {t2r_idx, num_tokens_per_rank, is_token_in_rank}) {
         t.record_stream(meta_stream_);
         if (allocate_on_meta_stream)
           t.record_stream(compute_stream);
       }
+      // record optional tensors on meta stream
       for (auto& to : {num_tokens_per_rdma_rank}) {
         to.has_value() ? to->record_stream(meta_stream_) : void();
         if (allocate_on_meta_stream)
@@ -105,7 +99,7 @@ struct Meta {
     if (allocate_on_meta_stream)
       at::cuda::setCurrentCUDAStream(compute_stream);
 
-    return {num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank, event};
+    return {num_tokens_per_rank, num_tokens_per_rdma_rank, is_token_in_rank, event};
   }
 
   static std::tuple<torch::Tensor, std::optional<EventHandle>> get_a2av_perm_idx_from_src_idx(
@@ -114,13 +108,13 @@ struct Meta {
       int num_tokens,
       int num_ranks,
       std::optional<EventHandle>& previous_event,
-      bool async,
+      bool async_op,
       bool allocate_on_meta_stream,
       std::optional<at::cuda::CUDAStream> meta_stream) {
-    EP_HOST_ASSERT(output_split_sizes.dim() == 1 && src_idx.dim() == 1);
-    EP_HOST_ASSERT(output_split_sizes.is_contiguous() && src_idx.is_contiguous());
-    EP_HOST_ASSERT(output_split_sizes.size(0) == src_idx.size(0));
-    EP_HOST_ASSERT(num_ranks > 0);
+    GRPCOLL_HOST_ASSERT(output_split_sizes.dim() == 1 && src_idx.dim() == 1);
+    GRPCOLL_HOST_ASSERT(output_split_sizes.is_contiguous() && src_idx.is_contiguous());
+    GRPCOLL_HOST_ASSERT(output_split_sizes.size(0) == src_idx.size(0));
+    GRPCOLL_HOST_ASSERT(num_ranks > 0);
 
     // Get meta stream
     at::cuda::CUDAStream meta_stream_ = meta_stream.has_value() ? meta_stream.value() : at::cuda::getStreamFromPool();
@@ -129,7 +123,7 @@ struct Meta {
     // NOTES: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
     if (allocate_on_meta_stream) {
-      EP_HOST_ASSERT(previous_event.has_value() and async);
+      GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
       at::cuda::setCurrentCUDAStream(meta_stream_);
     }
 
@@ -157,7 +151,7 @@ struct Meta {
 
     // Wait streams
     std::optional<EventHandle> event;
-    if (async) {
+    if (async_op) {
       event = EventHandle(meta_stream_);
       for (auto& t : {output_split_sizes, src_idx, perm_to_a2av_idx}) {
         t.record_stream(meta_stream_);

@@ -54,13 +54,11 @@ class GrpCollIntraHandle(GrpCollHandle):
         is_token_in_rank[i][r]: whether ith token is sent to rank r (bool values)
 
     send_head: shape=[num_tokens, num_ranks]:
-        send_head[i, r]: the offset in the corr. channel of send token i
-        if it needs to be sent to rank r since the cached_channel_tail_idx starts at 0
-        when token_idx == token_start_idx for the corr. channel
-        thus the send_head[:, r] will be several cu_seqlens like:
+        send_head[i, r]: the offset in the corr. channel of send token i if it needs to be sent to rank r
+        since the cached_channel_tail_idx starts at 0, so when token_idx == token_start_idx for the corr. channel
+        the send_head[:, r] will be several cu_seqlens that look like:
             [0, 1, ... channel0_size, 0, 1, ... channel1_size, ...]
-        and if is_token_in_rank[i, r] == -1, then send_head[i, r] == -1
-        as well (and should be ignored in the cu_seqlens above)
+        and if is_token_in_rank[i, r] == -1, then send_head[i, r] == -1 and should be ignored in the cu_seqlens above
     """
 
     rank_prefix_matrix: torch.Tensor

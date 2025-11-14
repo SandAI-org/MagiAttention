@@ -34,14 +34,16 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+# mypy: disable-error-code="union-attr"
 import math
 import os
-from typing import Callable, Union
+from typing import Callable
 
 import torch
 import torch.distributed as dist
 
 from magi_attention.common.enum import GroupReduceOp
+from magi_attention.utils import wrap_to_list
 
 from ._config import GrpCollConfig
 from ._event import EventHandle, EventOverlap
@@ -76,9 +78,7 @@ class GrpCollBuffer:
         runtime: the C++ runtime.
     """
 
-    num_sms: int = 20
-    hidden_size_alignment: int = 2 * 128
-    hidden_size_ub: int = 64 * 128  # upper bound
+    # TODO: make it enum in cpp backend
     reduce_op_str2int_map = {
         "sum": 0,
         "avg": 1,
@@ -93,7 +93,6 @@ class GrpCollBuffer:
         low_latency_mode: bool = False,
         num_qps_per_rank: int = 24,
         allow_nvlink_for_low_latency_mode: bool = True,
-        allow_mnnvl: bool = False,
         explicitly_destroy: bool = False,
     ) -> None:
         """
@@ -110,19 +109,18 @@ class GrpCollBuffer:
                 this is somehow incompatible with the hook-based overlapping.
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
                 please make sure all connections are via NVLink.
-            allow_mnnvl: whether to allow MNNVL
             explicitly_destroy: If this flag is set to True, you need to explicitly call `destroy()` to release resources;
                 otherwise, the resources will be released by the destructor.
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
         """
 
+        # Checks
         assert (
             is_magi_attn_comm_installed
         ), "The `magi_attn_comm` extension module is not installed."
-
         check_nvlink_connections(group)
 
-        # Initialize the CPP runtime
+        # Set attributes
         self.rank = group.rank()
         self.group_size = group.size()
         self.group = group
@@ -131,7 +129,8 @@ class GrpCollBuffer:
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
 
-        # TODO: make the runtime API torch compilable
+        # Initialize the CPP backend of grpcoll buffer as runtime
+        # TODO: make the runtime API compatible with `torch.compile`
         self.runtime = grpcoll.Buffer(
             self.rank,
             self.group_size,
@@ -141,21 +140,17 @@ class GrpCollBuffer:
             explicitly_destroy,
         )
 
-        # Synchronize device IDs
-        device_ids = [
-            None,
-        ] * self.group_size
+        # All gather device IDs
+        device_ids = [None] * self.group_size
         local_device_id = self.runtime.get_local_device_id()
         dist.all_gather_object(device_ids, local_device_id, group)
 
-        # Synchronize IPC handles
-        ipc_handles = [
-            None,
-        ] * self.group_size
+        # All gather NVLink IPC handles
+        ipc_handles = [None] * self.group_size
         local_ipc_handle = self.runtime.get_local_ipc_handle()
         dist.all_gather_object(ipc_handles, local_ipc_handle, group)
 
-        # Synchronize NVSHMEM unique IDs
+        # Get NVSHMEM unique IDs from the root rank
         root_unique_id = None
         if self.runtime.get_num_rdma_ranks() > 1 or low_latency_mode:
             # Enable IBGDA
@@ -176,14 +171,11 @@ class GrpCollBuffer:
             # NOTES: NVSHMEM initialization requires at least 256 MiB
             os.environ["NVSHMEM_CUMEM_GRANULARITY"] = f"{2 ** 29}"
 
-            if not allow_mnnvl:
-                # Disable multi-node NVLink detection
-                os.environ["NVSHMEM_DISABLE_MNNVL"] = "1"
+            # Disable multi-node NVLink detection
+            os.environ["NVSHMEM_DISABLE_MNNVL"] = "1"
 
-            # Synchronize using the root ID
-            nvshmem_unique_ids = [
-                None,
-            ] * self.group_size
+            # Broadcast NVSHMEM unique IDs from the root rank
+            nvshmem_unique_ids = [None] * self.group_size
             if (low_latency_mode and self.rank == 0) or (
                 not low_latency_mode and self.runtime.get_rdma_rank() == 0
             ):
@@ -193,9 +185,15 @@ class GrpCollBuffer:
                 0 if low_latency_mode else self.runtime.get_root_rdma_rank(True)
             ]
 
-        # Make CPP runtime available
+        # Synchronize device IDs, NVLink IPC handles and NVSHMEM unique IDs
+        # and make the runtime available
+        assert (
+            not self.runtime.is_available()
+        ), "Runtime is already available before initialization"
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
-        assert self.runtime.is_available()
+        assert (
+            self.runtime.is_available()
+        ), "Runtime is still not available after initialization"
 
     def destroy(self):
         """
@@ -207,32 +205,6 @@ class GrpCollBuffer:
 
         self.runtime.destroy()
         self.runtime = None
-
-    @staticmethod
-    def is_sm90_compiled():
-        return grpcoll.is_sm90_compiled()
-
-    @staticmethod
-    def set_num_sms(new_num_sms: int) -> None:
-        """
-        Set the number of SMs to use in high-throughput kernels.
-
-        Arguments:
-            new_num_sms: the new number to be set.
-        """
-
-        assert new_num_sms % 2 == 0, "The SM count must be even"
-        GrpCollBuffer.num_sms = new_num_sms
-
-    @staticmethod
-    def capture() -> EventOverlap:
-        """
-        Capture a CUDA event on the current stream, i.e. `torch.cuda.current_stream()`.
-
-        Returns:
-            event: the captured event.
-        """
-        return EventOverlap(EventHandle())
 
     def get_comm_stream(self) -> torch.Stream:
         """
@@ -271,117 +243,45 @@ class GrpCollBuffer:
         assert tensor.numel() >= size.numel()
         return tensor[: size.numel()].view(size)
 
-    @staticmethod
-    def _unpack_bias(bias: Union[torch.Tensor, torch.Tensor | torch.Tensor]):
-        bias_0, bias_1 = None, None
-        if isinstance(bias, torch.Tensor):
-            bias_0 = bias
-        elif isinstance(bias, tuple):
-            assert len(bias) == 2
-            bias_0, bias_1 = bias
-        return bias_0, bias_1
-
-    @staticmethod
-    def get_dispatch_config(num_ranks: int) -> GrpCollConfig:
-        """
-        Get a recommended dispatch config.
-
-        Argument:
-            num_ranks: the number of ranks.
-
-        Returns:
-            config: the recommended config.
-        """
-
-        # TODO: automatically tune
-        config_map = {
-            2: GrpCollConfig(GrpCollBuffer.num_sms, 24, 256, 6, 128),
-            4: GrpCollConfig(GrpCollBuffer.num_sms, 6, 256, 6, 128),
-            8: GrpCollConfig(GrpCollBuffer.num_sms, 6, 256, 6, 128),
-            16: GrpCollConfig(GrpCollBuffer.num_sms, 36, 288, 20, 128),
-            24: GrpCollConfig(GrpCollBuffer.num_sms, 8, 288, 32, 128),
-            32: GrpCollConfig(GrpCollBuffer.num_sms, 32, 288, 32, 128),
-            64: GrpCollConfig(GrpCollBuffer.num_sms, 20, 288, 28, 128),
-            128: GrpCollConfig(GrpCollBuffer.num_sms, 20, 560, 32, 128),
-            144: GrpCollConfig(GrpCollBuffer.num_sms, 32, 720, 12, 128),
-            160: GrpCollConfig(GrpCollBuffer.num_sms, 28, 720, 12, 128),
-        }
-        assert num_ranks in config_map, f"Unsupported number of EP ranks: {num_ranks}"
-        return config_map[num_ranks]
-
-    @staticmethod
-    def get_combine_config(num_ranks: int) -> GrpCollConfig:
-        """
-        Get a recommended combine config.
-
-        Argument:
-            num_ranks: the number of ranks.
-
-        Returns:
-            config: the recommended config.
-        """
-
-        # TODO: automatically tune
-        config_map = {
-            2: GrpCollConfig(GrpCollBuffer.num_sms, 10, 256, 6, 128),
-            4: GrpCollConfig(GrpCollBuffer.num_sms, 9, 256, 6, 128),
-            8: GrpCollConfig(GrpCollBuffer.num_sms, 4, 256, 6, 128),
-            16: GrpCollConfig(GrpCollBuffer.num_sms, 4, 288, 12, 128),
-            24: GrpCollConfig(GrpCollBuffer.num_sms, 1, 288, 8, 128),
-            32: GrpCollConfig(GrpCollBuffer.num_sms, 1, 288, 8, 128),
-            64: GrpCollConfig(GrpCollBuffer.num_sms, 1, 288, 20, 128),
-            128: GrpCollConfig(GrpCollBuffer.num_sms, 1, 560, 12, 128),
-            144: GrpCollConfig(GrpCollBuffer.num_sms, 2, 720, 8, 128),
-            160: GrpCollConfig(GrpCollBuffer.num_sms, 2, 720, 8, 128),
-        }
-        assert num_ranks in config_map, f"Unsupported number of EP ranks: {num_ranks}"
-        return config_map[num_ranks]
-
     @classmethod
-    def get_dispatch_meta_from_topk_idx(
+    def get_group_cast_meta_from_t2r_idx(
         cls,
-        topk_idx: torch.Tensor,
+        t2r_idx: torch.Tensor,
         num_ranks: int,
         num_nodes: int,
-        num_experts: int,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_meta_stream: bool = False,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, EventOverlap
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, EventOverlap]:
         """
         Calculate the dispatch meta from the topk indices required for later communication.
 
         NOTE:
-            1. this is for now a static replacement API for ``buffer.get_dispatch_layout``
+            1. this is for now a static replacement API for `buffer.get_group_cast_meta`
             when the buffer runtime is not available.
 
-            2. this API is excuted not on the buffer comm stream but on a hidden ``meta_stream``
+            2. this API is excuted not on the buffer comm stream but on a hidden `meta_stream`
             since the buffer runtime is not available.
         """
 
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             event,
-        ) = grpcoll.Meta.get_dispatch_meta_from_topk_idx(
-            topk_idx,
+        ) = grpcoll.Meta.get_group_cast_meta_from_t2r_idx(
+            t2r_idx,
             num_ranks,
             num_nodes,
-            num_experts,
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_meta_stream,
-            None,  # auto set hidden meta_stream
+            None,  # meta_stream, auto set
         )
 
         return (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             EventOverlap(event),
         )
@@ -394,7 +294,7 @@ class GrpCollBuffer:
         output_seqlen: int,
         num_ranks: int,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_meta_stream: bool = False,
     ) -> tuple[torch.Tensor, EventOverlap]:
         """
@@ -407,7 +307,7 @@ class GrpCollBuffer:
             num_ranks (int): the number of ranks
             previous_event (EventOverlap | None, optional):
                 the event to wait before actually executing the kernel. Defaults to None.
-            async_finish (bool, optional):
+            async_op (bool, optional):
                 the current stream will not wait for the meta kernels to be finished if set. Defaults to False.
             allocate_on_meta_stream (bool, optional):
                 control whether all the allocated tensors' ownership to be on the hidden meta stream. Defaults to False.
@@ -415,7 +315,7 @@ class GrpCollBuffer:
         Returns:
             perm_to_a2av_idxs (torch.Tensor): the permutation indices to transfer the output buffer to all2all-v rank order,
                 i.e. output[perm_to_a2av_idxs] => a2av_output
-            event (EventOverlap): the event after executing the kernel (valid only if `async_finish` is set).
+            event (EventOverlap): the event after executing the kernel (valid only if `async_op` is set).
         """
 
         (
@@ -427,9 +327,9 @@ class GrpCollBuffer:
             output_seqlen,  # num_tokens
             num_ranks,
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_meta_stream,
-            None,  # auto set hidden meta_stream
+            None,  # meta_stream, auto set
         )
 
         return (
@@ -437,163 +337,151 @@ class GrpCollBuffer:
             EventOverlap(event),
         )
 
-    def get_dispatch_layout(
+    def get_group_cast_meta(
         self,
-        topk_idx: torch.Tensor,
-        num_experts: int,
+        t2r_idx: torch.Tensor,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, EventOverlap
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, EventOverlap]:
         """
         Calculate the layout required for later communication.
 
         Arguments:
-            topk_idx: `[num_tokens, num_topk]`, dtype must be `torch.int64`, the expert indices selected by each token,
-                `-1` means no selections.
-            num_experts: the number of experts.
+            t2r_idx: `[num_tokens, num_ranks]`, dtype must be `torch.int64`,
+                the rank indices selected by each token, `-1` means no selections.
             previous_event: the event to wait before actually executing the kernel.
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            async_op: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
 
         Returns:
             num_tokens_per_rank: `[num_ranks]` with `torch.int`, the number of tokens to be sent to each rank.
             num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
                 rank (with the same GPU index), return `None` for intranode settings.
-            num_tokens_per_expert: `[num_experts]` with `torch.int`, the number of tokens to be sent to each expert.
             is_token_in_rank: `[num_tokens, num_ranks]` with `torch.bool`, whether a token be sent to a rank.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
+            event: the event after executing the kernel (valid only if `async_op` is set).
         """
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             event,
-        ) = self.runtime.get_dispatch_layout(
-            topk_idx,
-            num_experts,
+        ) = self.runtime.get_group_cast_meta(
+            t2r_idx,
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_comm_stream,
         )
 
         return (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
             is_token_in_rank,
             EventOverlap(event),
         )
 
-    def dispatch(
+    def group_cast(
         self,
-        x: torch.Tensor,
-        recv_x: torch.Tensor | None = None,
+        x: torch.Tensor | list[torch.Tensor],
+        recv_x: torch.Tensor | list[torch.Tensor] | None = None,
         handle: GrpCollHandle | None = None,
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
-        num_tokens_per_expert: torch.Tensor | None = None,
-        topk_idx: torch.Tensor | None = None,
-        topk_weights: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
-        expert_alignment: int = 1,
-        num_worst_tokens: int = 0,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
+        cast_lse: bool = False,
+        lse: torch.Tensor | None = None,
+        recv_lse: torch.Tensor | None = None,
     ) -> tuple[
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        list[int],
-        GrpCollHandle,
-        EventOverlap,
+        list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
     ]:
         """
-        Dispatch tokens to different ranks, both intranode and internode settings are supported.
+        Group cast tokens to different ranks, both intranode and internode settings are supported.
         Intranode kernels require all the ranks should be visible via NVLink.
         Internode kernels require the ranks in a node should be visible via NVLink, while the ranks with the same GPU
             index should be visible via RDMA.
 
         Arguments:
-            x: `torch.Tensor` or tuple of `torch.Tensor`, for the first type, the shape must be `[num_tokens, hidden]`,
-                and type must be `torch.bfloat16`; for the second type, the first element of the tuple must be shaped as
-                `[num_tokens, hidden]` with type `torch.float8_e4m3fn`, the second must be `[num_tokens, hidden // 128]`
-                 (requiring divisible) with type `torch.float`.
-            recv_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
+            x: groups of tokens in a list of tensors to be sent simultaneously.
+            recv_x: received tokens buffer to return, if given,
+                or `None` to allocate a new buffer to return for each group of `x`.
             handle: an optional communication handle, if set, the CPU will reuse the layout information to save some time.
             num_tokens_per_rank: `[num_ranks]` with `torch.int`, the number of tokens to be sent to each rank.
             num_tokens_per_rdma_rank: `[num_rdma_ranks]` with `torch.int`, the number of tokens to be sent to each RDMA
                 rank (with the same GPU index), return `None` for intranode settings.
             is_token_in_rank: `[num_tokens, num_ranks]` with `torch.bool`, whether a token be sent to a rank.
-            num_tokens_per_expert: `[num_experts]` with `torch.int`, the number of tokens to be sent to each expert.
-            topk_idx: `[num_tokens, num_topk]` with `torch.int64`, the expert indices selected by each token,
-                `-1` means no selections.
-            topk_weights: `[num_tokens, num_topk]` with `torch.float`, the expert weights of each token to dispatch.
             post_perm_idx: `[num_recv_tokens]` with `torch.int64`, the post-permutation indices of each token,
                 i.e. recv_x[post_perm_idx] can recover to the original recv_x in rank order.
-            expert_alignment: align the number of tokens received by each local expert to this variable.
-            num_worst_tokens: the worst number of tokens to receive, if specified, there will be no CPU sync, and it
-                will be CUDA-graph compatible. Please also notice that this flag is for intranode only.
-            config: the performance tuning config.
-            previous_event: the event to wait before actually executing the kernel.
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            config: the performance tuning config if given.
+            previous_event: the event to wait before actually executing the kernel if given.
+            async_op: the current stream will not wait for the communication kernels to be finished if set.
+                Defaults to `False`.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
+                Defaults to `False`.
+
+            cast_lse: whether to cast the given `lse` along with the x and write it to `recv_lse`.
+                Defaults to `False`.
+            lse: the logsumexp of each token in `x` for each attention head,
+                with shape `[num_tokens, num_heads]`, to be sent along with `x`,
+                only required and used when `cast_lse` is `True`.
+            recv_lse: the logsumexp of each token in `recv_x` for each attention head,
+                with shape `[num_recv_tokens, num_heads]`, to be received along with `recv_x`,
+                when `cast_lse` is `True`.
 
         Returns:
-            recv_x: received tokens, the same type and tuple as the input `x`, but the number of tokens equals to the
-                received token count.
-            recv_topk_idx: received expert indices.
-            recv_topk_weights: received expert weights.
-            num_recv_tokens_per_expert_list: Python list shaped `[num_local_experts]`, the received token count by
-                each local expert, aligned to the input `expert_alignment`. If `num_worst_tokens` is specified, the list
-                will be empty.
+            recv_x: received tokens for each group,
+                with the same type and number of groups as the input group `x`,
+                while the number of tokens equals to the received token count.
+            recv_lse: the logsumexp of each token in `reduced_x` for each attention head,
+                with shape `[num_recv_tokens, num_heads]`,
+                valid if `cast_lse` is `True`, otherwise `None`.
             handle: the returned communication handle.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
+            event: the event after executing the kernel (valid only if `async_op` is set).
         """
         is_out_buf_given = recv_x is not None
 
-        # TODO: support other dtypes
-        assert (
-            x.dtype == torch.bfloat16  # type: ignore[union-attr]
-        ), f"Only support bfloat16 input for now, but got {x.dtype=}."  # type: ignore[union-attr]
-        assert (
-            not is_out_buf_given or recv_x.dtype == torch.bfloat16  # type: ignore[union-attr]
-        ), f"Only support bfloat16 output buffer for now, but got {recv_x.dtype=}."  # type: ignore[union-attr]
-
-        # FIXME: figure out the alignment requirement
-        hidden_shape = x.shape[1:]  # type: ignore[union-attr]
-        hidden_size = math.prod(hidden_shape)
-        assert hidden_size % GrpCollBuffer.hidden_size_alignment == 0, (
-            f"The hidden size should be a multiple of {GrpCollBuffer.hidden_size_alignment}, "
-            f"but got {hidden_size=}."
-        )
-        assert hidden_size < GrpCollBuffer.hidden_size_ub, (
-            f"The hidden size should be less than {GrpCollBuffer.hidden_size_ub}, "
-            f"but got {hidden_size=}."
-        )
+        x = wrap_to_list(x)
+        num_groups = len(x)
         if is_out_buf_given:
-            assert recv_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
-                "The hidden shape (except dim0) of input and output buffer should be the same, "
-                f"but got {x.shape=}, {recv_x.shape=}."  # type: ignore[union-attr]
+            assert recv_x is not None  # mypy
+            recv_x = wrap_to_list(recv_x)
+            assert len(recv_x) == len(x), (
+                "The number of groups of input and output buffer should be the same, "
+                f"but got {len(x)=}, {len(recv_x)=}."
             )
 
+        hidden_shape = x[0].shape[1:]
+        hidden_size = math.prod(hidden_shape)
+        if is_out_buf_given:
+            assert recv_x is not None  # mypy
+            for i in range(num_groups):
+                assert recv_x[i].shape[1:] == hidden_shape, (
+                    "The hidden shape (except dim0) of input and output buffer should be the same, "
+                    f"but got {x[i].shape=}, {recv_x[i].shape=}."
+                )
+
         # Default config
-        config = self.get_dispatch_config(self.group_size) if config is None else config
+        config = (
+            GrpCollConfig.get_default_group_cast_config(self.group_size)
+            if config is None
+            else config
+        )
 
         # View input/output to 2D shape
-        x = x.view(-1, hidden_size)  # type: ignore[union-attr]
+        for i in range(num_groups):
+            x[i] = x[i].view(-1, hidden_size)
         if is_out_buf_given:
-            recv_x = recv_x.view(-1, hidden_size)  # type: ignore[union-attr]
+            assert recv_x is not None  # mypy
+            for i in range(num_groups):
+                recv_x[i] = recv_x[i].view(-1, hidden_size)
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
-            return self._internode_dispatch(
+            return self._internode_group_cast(
                 x=x,
                 recv_x=recv_x,
                 config=config,
@@ -602,19 +490,18 @@ class GrpCollBuffer:
                 num_tokens_per_rank=num_tokens_per_rank,
                 num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
                 is_token_in_rank=is_token_in_rank,
-                num_tokens_per_expert=num_tokens_per_expert,
-                topk_idx=topk_idx,
-                topk_weights=topk_weights,
+                num_tokens_per_expert=num_tokens_per_rank,  # FIXME: remove expert concept
                 post_perm_idx=post_perm_idx,
-                expert_alignment=expert_alignment,
-                num_worst_tokens=num_worst_tokens,
                 previous_event=previous_event,
-                async_finish=async_finish,
+                async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
+                cast_lse=cast_lse,
+                lse=lse,
+                recv_lse=recv_lse,
             )
 
         # Intranode
-        return self._intranode_dispatch(
+        return self._intranode_group_cast(
             x=x,
             recv_x=recv_x,
             config=config,
@@ -622,256 +509,242 @@ class GrpCollBuffer:
             hidden_shape=hidden_shape,
             num_tokens_per_rank=num_tokens_per_rank,
             is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
             post_perm_idx=post_perm_idx,
-            expert_alignment=expert_alignment,
-            num_worst_tokens=num_worst_tokens,
             previous_event=previous_event,
-            async_finish=async_finish,
+            async_op=async_op,
             allocate_on_comm_stream=allocate_on_comm_stream,
+            cast_lse=cast_lse,
+            lse=lse,
+            recv_lse=recv_lse,
         )
 
-    def combine(
+    def group_reduce(
         self,
-        x: torch.Tensor,
+        x: torch.Tensor | list[torch.Tensor],
         handle: GrpCollHandle,
-        combined_x: torch.Tensor | None = None,
+        reduced_x: torch.Tensor | list[torch.Tensor] | None = None,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
-        topk_weights: torch.Tensor | None = None,
-        bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         pre_perm_idx: torch.Tensor | None = None,
         config: GrpCollConfig | None = None,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
-        allow_empty_init_out_buf: bool = False,
-        **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
+        comm_dtype: torch.dtype | None = None,
+        lse: torch.Tensor | None = None,
+        reduced_lse: torch.Tensor | None = None,
+    ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """
-        Combine (reduce) tokens (addition **without** weights) from different ranks, both intranode and internode
+        Group reduce tokens (addition **without** weights) from different ranks, both intranode and internode
             settings are supported.
         Intranode kernels require all the ranks should be visible via NVLink.
         Internode kernels require the ranks in a node should be visible via NVLink, while the ranks with the same GPU
             index should be visible via RDMA.
 
         Arguments:
-            x: `[num_tokens, hidden]` with `torch.bfloat16`, the tokens to send for reducing to its original ranks.
+            x: groups of tokens in a list of tensors to be reduced simultaneously.
             handle: a must-set communication handle, you can obtain this from the dispatch function.
-            combined_x: received tokens buffer to return, if given, or `None` to allocate a new buffer to return.
+            reduced_x: received reduced tokens buffer to return, if given,
+                or `None` to allocate a new buffer to return for each group of `x`.
             reduce_op (GroupReduceOp): the reduce operation to use. Defaults to "sum"
                 - "sum": sum reduction
                 - "avg": average reduction
                 - "lse": log-sum-exp weighted average reduction, with lse correction
-            acc_reduce (bool): whether to accumulate the reduction to the given combined_x buffer. Defaults to False.
-            topk_weights: `[num_tokens, num_topk]` with `torch.float`,
-                the tokens' top-k weights for reducing to its original ranks.
+            acc_reduce (bool): whether to accumulate the reduction to the given reduced_x buffer. Defaults to False.
             config: the performance tuning config.
             previous_event: the event to wait before actually executing the kernel.
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            async_op: the current stream will not wait for the communication kernels to be finished if set.
             allocate_on_comm_stream: control whether all the allocated tensors' ownership to be on the communication stream.
-            allow_empty_init_out_buf: whether to allow empty-initialize the output buffer if not given,
-                this is useful when the user knows that no token is missed to be reduced in the output buffer
-                such as during the ep communication scenario,
-                but it is unsafe to set it to True in the general group-reduce case
-            kwargs: additional arguments for the kernel.
+            comm_dtype: the communication dtype. Defaults to `x.dtype` if not given.
+
+            lse: the logsumexp of each token in `x` for each attention head,
+                with shape `[num_tokens, num_heads]`, to be sent along with `x`,
+                only required and used when `reduce_op` is "lse".
+            reduced_lse: the logsumexp of each token in `reduced_x` for each attention head,
+                with shape `[num_recv_tokens, num_heads]`, to be received and reduced along with `reduced_x`,
+                when `reduce_op` is "lse".
 
         Returns:
-            combined_x: the reduced token from its dispatched ranks.
-            recv_topk_weights: the reduced top-k weights from its dispatch ranks.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
+            reduced_x: reduced tokens for each group,
+                with the same type and number of groups as the input group `x`,
+                while the number of tokens equals to the received token count.
+            reduced_lse: the reduced logsumexp of each token in `reduced_x` for each attention head,
+                with shape `[num_recv_tokens, num_heads]`,
+                valid if `reduce_op` is "lse", otherwise `None`.
+            event: the event after executing the kernel (valid only if `async_op` is set).
         """
-        is_out_buf_given = combined_x is not None
+        is_out_buf_given = reduced_x is not None
 
-        # TODO: support other dtypes
-        assert (
-            x.dtype == torch.bfloat16
-        ), f"Only support bfloat16 input for now, but got {x.dtype=}."
-        assert (
-            not is_out_buf_given or combined_x.dtype == torch.bfloat16  # type: ignore[union-attr]
-        ), f"Only support bfloat16 output buffer for now, but got {combined_x.dtype=}."  # type: ignore[union-attr]
-        # TODO: support other reduce ops
-        assert reduce_op == "sum", "Only support sum-reduce for now"
-
-        # FIXME: figure out the alignment requirement
-        hidden_shape = x.shape[1:]
-        hidden_size = math.prod(hidden_shape)
-        assert hidden_size % GrpCollBuffer.hidden_size_alignment == 0, (
-            f"The hidden size should be a multiple of {GrpCollBuffer.hidden_size_alignment}, "
-            f"but got {hidden_size=}."
-        )
-        assert hidden_size < GrpCollBuffer.hidden_size_ub, (
-            f"The hidden size should be less than {GrpCollBuffer.hidden_size_ub}, "
-            f"but got {hidden_size=}."
-        )
+        x = wrap_to_list(x)
+        num_groups = len(x)
         if is_out_buf_given:
-            assert combined_x.shape[1:] == hidden_shape, (  # type: ignore[union-attr]
-                "The hidden shape (except dim0) of input and output buffer should be the same, "
-                f"but got {x.shape=}, {combined_x.shape=}."  # type: ignore[union-attr]
+            assert reduced_x is not None  # mypy
+            reduced_x = wrap_to_list(reduced_x)
+            assert len(reduced_x) == len(x), (
+                "The number of groups of input and output buffer should be the same, "
+                f"but got {len(x)=}, {len(reduced_x)=}."
             )
 
+        hidden_shape = x[0].shape[1:]
+        hidden_size = math.prod(hidden_shape)
+        if is_out_buf_given:
+            assert reduced_x is not None  # mypy
+            for i in range(num_groups):
+                assert reduced_x[i].shape[1:] == hidden_shape, (
+                    "The hidden shape (except dim0) of input and output buffer should be the same, "
+                    f"but got {x[i].shape=}, {reduced_x[i].shape=}."
+                )
+
         # Default config
-        config = self.get_combine_config(self.group_size) if config is None else config
+        config = (
+            GrpCollConfig.get_default_group_reduce_config(self.group_size)
+            if config is None
+            else config
+        )
 
         # View input/output to 2D shape
-        x = x.view(-1, hidden_size)
+        for i in range(num_groups):
+            x[i] = x[i].view(-1, hidden_size)
         if is_out_buf_given:
-            combined_x = combined_x.view(-1, hidden_size)  # type: ignore[union-attr]
+            assert reduced_x is not None  # mypy
+            for i in range(num_groups):
+                reduced_x[i] = reduced_x[i].view(-1, hidden_size)
 
         # Internode
         if self.runtime.get_num_rdma_ranks() > 1:
-            return self._internode_combine(
+            return self._internode_group_reduce(
                 x=x,
-                combined_x=combined_x,
+                reduced_x=reduced_x,
                 config=config,
                 handle=handle,
                 hidden_shape=hidden_shape,
                 reduce_op=reduce_op,
                 acc_reduce=acc_reduce,
-                topk_weights=topk_weights,
-                bias=bias,
                 pre_perm_idx=pre_perm_idx,
                 previous_event=previous_event,
-                async_finish=async_finish,
+                async_op=async_op,
                 allocate_on_comm_stream=allocate_on_comm_stream,
-                allow_empty_init_out_buf=allow_empty_init_out_buf,
+                comm_dtype=comm_dtype,
+                lse=lse,
+                reduced_lse=reduced_lse,
             )
 
         # Intranode
-        return self._intranode_combine(
+        return self._intranode_group_reduce(
             x=x,
-            combined_x=combined_x,
+            reduced_x=reduced_x,
             config=config,
             handle=handle,
             hidden_shape=hidden_shape,
             reduce_op=reduce_op,
             acc_reduce=acc_reduce,
-            topk_weights=topk_weights,
-            bias=bias,
             pre_perm_idx=pre_perm_idx,
             previous_event=previous_event,
-            async_finish=async_finish,
+            async_op=async_op,
             allocate_on_comm_stream=allocate_on_comm_stream,
-            allow_empty_init_out_buf=allow_empty_init_out_buf,
+            comm_dtype=comm_dtype,
+            lse=lse,
+            reduced_lse=reduced_lse,
         )
 
-    def _intranode_dispatch(
+    def _intranode_group_cast(
         self,
-        x: torch.Tensor,
-        recv_x: torch.Tensor | None,
+        x: list[torch.Tensor],
+        recv_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
         num_tokens_per_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
-        num_tokens_per_expert: torch.Tensor | None = None,
-        topk_idx: torch.Tensor | None = None,
-        topk_weights: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
-        expert_alignment: int = 1,
-        num_worst_tokens: int = 0,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
+        cast_lse: bool = False,
+        lse: torch.Tensor | None = None,
+        recv_lse: torch.Tensor | None = None,
     ) -> tuple[
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        list[int],
-        GrpCollIntraHandle,
-        EventOverlap,
+        list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
     ]:
-        # Launch the kernel with cached or non-cached mode
-        if handle is not None:
-            assert topk_idx is None and topk_weights is None
+        """Intranode group cast implementation"""
+
+        # Unpack handle if given
+        is_handle_given = handle is not None
+        if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollIntraHandle)
-
-            (
-                recv_x,
-                _,  # recv_x_scales
-                _,  # recv_topk_idx
-                _,  # recv_topk_weights
-                _,  # num_recv_tokens_per_expert_list
-                _,  # rank_prefix_matrix
-                _,  # channel_prefix_matrix
-                _,  # recv_channel_prefix_matrix
-                _,  # recv_src_idx
-                _,  # send_head
-                event,
-            ) = self.runtime.intranode_dispatch(
-                x,
-                recv_x,
-                None,  # x_scales
-                None,  # topk_idx
-                None,  # topk_weights
-                None,  # num_tokens_per_rank
-                handle.is_token_in_rank,
-                None,  # num_tokens_per_expert
-                handle.num_recv_tokens,
-                handle.rank_prefix_matrix,
-                handle.channel_prefix_matrix,
-                post_perm_idx,
-                expert_alignment,
-                num_worst_tokens,
-                config.to_kernel_config(),
-                getattr(previous_event, "event", None),
-                async_finish,
-                allocate_on_comm_stream,
-            )
-
-            # View output to hidden shape
-            recv_x = recv_x.view(-1, *hidden_shape)
-
-            return (  # type: ignore[return-value]
-                recv_x,
-                None,  # recv_topk_idx
-                None,  # recv_topk_weights
-                None,  # num_recv_tokens_per_expert_list
-                handle,
-                EventOverlap(event),
-            )
+            num_tokens_per_rank = None
+            is_token_in_rank = handle.is_token_in_rank
+            num_recv_tokens = handle.num_recv_tokens
+            rank_prefix_matrix = handle.rank_prefix_matrix
+            channel_prefix_matrix = handle.channel_prefix_matrix
         else:
-            assert (
-                num_tokens_per_rank is not None
-                and is_token_in_rank is not None
-                and num_tokens_per_expert is not None
-            )
+            assert num_tokens_per_rank is not None and is_token_in_rank is not None
+            num_recv_tokens = 0
+            rank_prefix_matrix = None
+            channel_prefix_matrix = None
 
-            (
-                recv_x,
-                _,  # recv_x_scales
-                recv_topk_idx,
-                recv_topk_weights,
-                num_recv_tokens_per_expert_list,
-                rank_prefix_matrix,
-                channel_prefix_matrix,
-                recv_channel_prefix_matrix,
-                recv_src_idx,
-                send_head,
-                event,
-            ) = self.runtime.intranode_dispatch(
-                x,
-                recv_x,
-                None,  # x_scales
-                topk_idx,
-                topk_weights,
-                num_tokens_per_rank,
-                is_token_in_rank,
-                num_tokens_per_expert,
-                0,  # num_recv_tokens
-                None,  # rank_prefix_matrix
-                None,  # channel_prefix_matrix
-                post_perm_idx,
-                expert_alignment,
-                num_worst_tokens,
-                config.to_kernel_config(),
-                getattr(previous_event, "event", None),
-                async_finish,
-                allocate_on_comm_stream,
-            )
+        # Prepare lse and recv_lse
+        if cast_lse:
+            assert lse is not None, "lse should not be None when `cast_lse` is set"
+        else:  # no need to cast lse, even passed in
+            lse = None
+            recv_lse = None
 
+        # Unpack (x,recv_x) groups
+        num_groups = len(x)
+        assert 1 <= num_groups <= 3, "num_groups only supports {1,2,3}"
+        x_1st = x[0]
+        recv_x_1st = recv_x[0] if recv_x is not None else None
+        if num_groups > 1:
+            x_2nd = x[1]
+            recv_x_2nd = recv_x[1] if recv_x is not None else None
+        else:
+            x_2nd = None
+            recv_x_2nd = None
+        if num_groups > 2:
+            x_3rd = x[2]
+            recv_x_3rd = recv_x[2] if recv_x is not None else None
+        else:
+            x_3rd = None
+            recv_x_3rd = None
+
+        # Launch the intranode group cast kernel
+        (
+            recv_x_1st,
+            recv_lse,
+            recv_x_2nd,
+            recv_x_3rd,
+            # handle
+            rank_prefix_matrix,
+            channel_prefix_matrix,
+            recv_channel_prefix_matrix,
+            recv_src_idx,
+            send_head,
+            # event
+            event,
+        ) = self.runtime.intranode_group_cast(
+            x_1st,
+            recv_x_1st,
+            lse,
+            recv_lse,
+            x_2nd,
+            recv_x_2nd,
+            x_3rd,
+            recv_x_3rd,
+            num_tokens_per_rank,
+            is_token_in_rank,
+            num_recv_tokens,
+            rank_prefix_matrix,
+            channel_prefix_matrix,
+            post_perm_idx,
+            config.to_kernel_config(),
+            getattr(previous_event, "event", None),
+            async_op,
+            allocate_on_comm_stream,
+        )
+
+        # Prepare the intranode handle for non-cached mode
+        if not is_handle_given:
             handle = GrpCollIntraHandle(
                 rank_prefix_matrix=rank_prefix_matrix,
                 channel_prefix_matrix=channel_prefix_matrix,
@@ -881,46 +754,80 @@ class GrpCollBuffer:
                 send_head=send_head,
             )
 
-            # View output to hidden shape
-            recv_x = recv_x.view(-1, *hidden_shape)
+        # Pack recv_x groups
+        recv_x = [
+            recv_x_1st,
+        ]
+        if num_groups > 1:
+            recv_x.append(recv_x_2nd)
+        if num_groups > 2:
+            recv_x.append(recv_x_3rd)
 
-            return (
-                recv_x,
-                recv_topk_idx,
-                recv_topk_weights,
-                num_recv_tokens_per_expert_list,
-                handle,
-                EventOverlap(event),
-            )
+        # View output to hidden shape
+        for i in range(num_groups):
+            recv_x[i] = recv_x[i].view(-1, *hidden_shape)
 
-    def _intranode_combine(
+        return (
+            recv_x,
+            recv_lse,
+            handle,  # type: ignore[return-value]
+            EventOverlap(event),
+        )
+
+    def _intranode_group_reduce(
         self,
-        x: torch.Tensor,
-        combined_x: torch.Tensor | None,
+        x: list[torch.Tensor],
+        reduced_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
-        topk_weights: torch.Tensor | None = None,
-        bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         pre_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
-        allow_empty_init_out_buf: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
+        comm_dtype: torch.dtype | None = None,
+        lse: torch.Tensor | None = None,
+        reduced_lse: torch.Tensor | None = None,
+    ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
+        """Intranode group reduce implementation"""
+
         assert isinstance(handle, GrpCollIntraHandle)
 
-        bias_0, bias_1 = GrpCollBuffer._unpack_bias(bias)
+        # Prepare lse and reduced_lse
+        if reduce_op == "lse":
+            assert lse is not None, "lse should not be None when `reduce_op == lse`"
+        else:  # no need to reduce lse, even passed in
+            lse = None
+            reduced_lse = None
 
-        # Launch the kernel
-        combined_x, recv_topk_weights, event = self.runtime.intranode_combine(
-            x,
-            combined_x,
-            topk_weights,
-            bias_0,
-            bias_1,
+        # Unpack (x,reduced_x) groups
+        num_groups = len(x)
+        assert 1 <= num_groups <= 2, "num_groups only supports {1,2}"
+        x_1st = x[0]
+        reduced_x_1st = reduced_x[0] if reduced_x is not None else None
+        if num_groups > 1:
+            x_2nd = x[1]
+            reduced_x_2nd = reduced_x[1] if reduced_x is not None else None
+        else:
+            x_2nd = None
+            reduced_x_2nd = None
+
+        # Launch the intranode group reduce kernel
+        (
+            reduced_x_1st,
+            reduced_lse,
+            reduced_x_2nd,
+            # event
+            event,
+        ) = self.runtime.intranode_group_reduce(
+            x_1st,
+            reduced_x_1st,
+            lse,
+            reduced_lse,
+            x_2nd,
+            reduced_x_2nd,
             pre_perm_idx,
             handle.recv_src_idx,  # src_idx
             handle.rank_prefix_matrix,  # rank_prefix_matrix
@@ -928,22 +835,30 @@ class GrpCollBuffer:
             handle.send_head,  # send_head
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_comm_stream,
-            GrpCollBuffer.reduce_op_str2int_map[reduce_op],
+            reduce_op,
             acc_reduce,
-            allow_empty_init_out_buf,
+            comm_dtype,
         )
 
+        # Pack reduced_x groups
+        reduced_x = [
+            reduced_x_1st,
+        ]
+        if num_groups > 1:
+            reduced_x.append(reduced_x_2nd)
+
         # View output to hidden shape
-        combined_x = combined_x.view(-1, *hidden_shape)
+        for i in range(num_groups):
+            reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
 
-        return combined_x, recv_topk_weights, EventOverlap(event)
+        return (reduced_x, reduced_lse, EventOverlap(event))
 
-    def _internode_dispatch(
+    def _internode_group_cast(
         self,
-        x: torch.Tensor,
-        recv_x: torch.Tensor | None,
+        x: list[torch.Tensor],
+        recv_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle | None,
         hidden_shape: torch.Size,
@@ -951,132 +866,102 @@ class GrpCollBuffer:
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
         num_tokens_per_expert: torch.Tensor | None = None,
-        topk_idx: torch.Tensor | None = None,
-        topk_weights: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
-        expert_alignment: int = 1,
-        num_worst_tokens: int = 0,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
+        cast_lse: bool = False,
+        lse: torch.Tensor | None = None,
+        recv_lse: torch.Tensor | None = None,
     ) -> tuple[
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        list[int],
-        GrpCollInterHandle,
-        EventOverlap,
+        list[torch.Tensor], torch.Tensor | None, GrpCollIntraHandle, EventOverlap
     ]:
-        """
-        Internode dispatch implementation, for more details, please refer to the `dispatch` docs.
-        Normally, you should not directly call this function.
-        """
-        assert post_perm_idx is None  # TODO: support post-perm for internode dispatch
-        assert (
-            num_worst_tokens == 0
-        ), "Internode dispatch does not support `num_worst_tokens > 0`"
+        """Internode group cast implementation"""
 
-        # Launch the kernel with cached or non-cached mode
-        if handle is not None:
+        # TODO: support lse for internode group cast
+        assert not cast_lse
+        # TODO: support post-perm for internode group cast
+        assert post_perm_idx is None
+
+        # Unpack handle if given
+        is_handle_given = handle is not None
+        if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollInterHandle)
-            assert topk_idx is None and topk_weights is None
-
-            (
-                recv_x,
-                _,  # recv_x_scales
-                _,  # recv_topk_idx
-                _,  # recv_topk_weights
-                _,  # num_recv_tokens_per_expert_list
-                _,  # rdma_channel_prefix_matrix
-                _,  # gbl_channel_prefix_matrix
-                _,  # recv_rdma_channel_prefix_matrix
-                _,  # recv_rdma_rank_prefix_sum
-                _,  # recv_gbl_channel_prefix_matrix
-                _,  # recv_gbl_rank_prefix_sum
-                _,  # recv_src_meta
-                _,  # send_rdma_head
-                _,  # send_nvl_head
-                event,
-            ) = self.runtime.internode_dispatch(
-                x,
-                recv_x,
-                None,  # x_scales
-                None,  # topk_idx
-                None,  # topk_weights
-                None,  # num_tokens_per_rank
-                None,  # num_tokens_per_rdma_rank
-                handle.is_token_in_rank,
-                None,  # num_tokens_per_expert
-                handle.num_recv_tokens,
-                handle.num_rdma_recv_tokens,
-                handle.rdma_channel_prefix_matrix,
-                handle.recv_rdma_rank_prefix_sum,
-                handle.gbl_channel_prefix_matrix,
-                handle.recv_gbl_rank_prefix_sum,
-                expert_alignment,
-                config.to_kernel_config(),
-                getattr(previous_event, "event", None),
-                async_finish,
-                allocate_on_comm_stream,
-            )
-
-            # View output to hidden shape
-            recv_x = recv_x.view(-1, *hidden_shape)
-
-            return (  # type: ignore[return-value]
-                recv_x,
-                None,  # recv_topk_idx
-                None,  # recv_topk_weights
-                None,  # num_recv_tokens_per_expert_list
-                handle,
-                EventOverlap(event),
-            )
+            num_tokens_per_rank = None
+            num_tokens_per_rdma_rank = None
+            num_tokens_per_expert = None
+            is_token_in_rank = handle.is_token_in_rank
+            num_recv_tokens = handle.num_recv_tokens
+            num_rdma_recv_tokens = handle.num_rdma_recv_tokens
+            rdma_channel_prefix_matrix = handle.rdma_channel_prefix_matrix
+            recv_rdma_rank_prefix_sum = handle.recv_rdma_rank_prefix_sum
+            gbl_channel_prefix_matrix = handle.gbl_channel_prefix_matrix
+            recv_gbl_rank_prefix_sum = handle.recv_gbl_rank_prefix_sum
         else:
             assert (
                 num_tokens_per_rank is not None
                 and is_token_in_rank is not None
                 and num_tokens_per_expert is not None
             )
+            num_recv_tokens = 0
+            num_rdma_recv_tokens = 0
+            rdma_channel_prefix_matrix = None
+            recv_rdma_rank_prefix_sum = None
+            gbl_channel_prefix_matrix = None
+            recv_gbl_rank_prefix_sum = None
 
-            (
-                recv_x,
-                _,  # recv_x_scales
-                recv_topk_idx,
-                recv_topk_weights,
-                num_recv_tokens_per_expert_list,
-                rdma_channel_prefix_matrix,
-                gbl_channel_prefix_matrix,
-                recv_rdma_channel_prefix_matrix,
-                recv_rdma_rank_prefix_sum,
-                recv_gbl_channel_prefix_matrix,
-                recv_gbl_rank_prefix_sum,
-                recv_src_meta,
-                send_rdma_head,
-                send_nvl_head,
-                event,
-            ) = self.runtime.internode_dispatch(
-                x,
-                recv_x,
-                None,  # x_scales
-                topk_idx,
-                topk_weights,
-                num_tokens_per_rank,
-                num_tokens_per_rdma_rank,
-                is_token_in_rank,
-                num_tokens_per_expert,
-                0,
-                0,
-                None,
-                None,
-                None,
-                None,
-                expert_alignment,
-                config.to_kernel_config(),
-                getattr(previous_event, "event", None),
-                async_finish,
-                allocate_on_comm_stream,
-            )
+        # Prepare lse and recv_lse
+        if cast_lse:
+            assert lse is not None, "lse should not be None when `cast_lse` is set"  # type: ignore[unreachable]
+        else:  # no need to cast lse, even passed in
+            lse = None
+            # recv_lse = None
 
+        # Unpack (x,recv_x) groups
+        num_groups = len(x)
+        assert num_groups == 1, "num_groups only supports {1,}"
+        x_1st = x[0]
+        recv_x_1st = recv_x[0] if recv_x is not None else None
+
+        # Launch the internode group cast kernel
+        (
+            recv_x_1st,
+            # handle
+            rdma_channel_prefix_matrix,
+            gbl_channel_prefix_matrix,
+            recv_rdma_channel_prefix_matrix,
+            recv_rdma_rank_prefix_sum,
+            recv_gbl_channel_prefix_matrix,
+            recv_gbl_rank_prefix_sum,
+            recv_src_meta,
+            send_rdma_head,
+            send_nvl_head,
+            # event
+            event,
+        ) = self.runtime.internode_group_cast(
+            x_1st,
+            recv_x_1st,
+            None,  # x_scales
+            None,  # topk_idx
+            None,  # topk_weights
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            is_token_in_rank,
+            num_tokens_per_expert,
+            num_recv_tokens,
+            num_rdma_recv_tokens,
+            rdma_channel_prefix_matrix,
+            recv_rdma_rank_prefix_sum,
+            gbl_channel_prefix_matrix,
+            recv_gbl_rank_prefix_sum,
+            config.to_kernel_config(),
+            getattr(previous_event, "event", None),
+            async_op,
+            allocate_on_comm_stream,
+        )
+
+        # Prepare the internode handle for non-cached mode
+        if not is_handle_given:
             handle = GrpCollInterHandle(
                 is_token_in_rank=is_token_in_rank,
                 rdma_channel_prefix_matrix=rdma_channel_prefix_matrix,
@@ -1090,54 +975,77 @@ class GrpCollBuffer:
                 send_nvl_head=send_nvl_head,
             )
 
-            # View output to hidden shape
-            recv_x = recv_x.view(-1, *hidden_shape)
+        # Pack recv_x groups
+        recv_x = [
+            recv_x_1st,
+        ]
 
-            return (
-                recv_x,
-                recv_topk_idx,
-                recv_topk_weights,
-                num_recv_tokens_per_expert_list,
-                handle,
-                EventOverlap(event),
-            )
+        # View output to hidden shape
+        for i in range(num_groups):
+            recv_x[i] = recv_x[i].view(-1, *hidden_shape)
 
-    def _internode_combine(
+        return (
+            recv_x,
+            None,  # recv_lse
+            handle,  # type: ignore[return-value]
+            EventOverlap(event),
+        )
+
+    def _internode_group_reduce(
         self,
-        x: torch.Tensor,
-        combined_x: torch.Tensor | None,
+        x: list[torch.Tensor],
+        reduced_x: list[torch.Tensor] | None,
         config: GrpCollConfig,
         handle: GrpCollHandle,
         hidden_shape: torch.Size,
         reduce_op: GroupReduceOp = "sum",
         acc_reduce: bool = False,
-        topk_weights: torch.Tensor | None = None,
-        bias: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]] = None,
         pre_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
-        async_finish: bool = False,
+        async_op: bool = False,
         allocate_on_comm_stream: bool = False,
-        allow_empty_init_out_buf: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, EventOverlap]:
-        """
-        Internode combine implementation, for more details, please refer to the `combine` docs.
-        Normally, you should not directly call this function.
-        """
-        assert pre_perm_idx is None  # TODO: Support pre_perm_idx for internode combine
+        comm_dtype: torch.dtype | None = None,
+        lse: torch.Tensor | None = None,
+        reduced_lse: torch.Tensor | None = None,
+    ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
+        """Internode group reduce implementation"""
+
+        # TODO: support pre_perm_idx for internode group reduce
+        assert (
+            pre_perm_idx is None
+        ), "Internode group reduce does not support `pre_perm_idx`"
+        # TODO: support specific comm dtype for internode group reduce
+        assert (
+            comm_dtype is None
+        ), "Internode group reduce does not support `comm_dtype`"
+
         assert isinstance(handle, GrpCollInterHandle)
 
-        # Unpack handle and bias
-        bias_0, bias_1 = GrpCollBuffer._unpack_bias(bias)
+        # Prepare lse and reduced_lse
+        if reduce_op == "lse":
+            assert lse is not None, "lse should not be None when `reduce_op == lse`"
+        else:  # no need to reduce lse, even passed in
+            lse = None
+            # reduced_lse = None
 
-        # Launch the kernel
-        combined_x, combined_topk_weights, event = self.runtime.internode_combine(
-            x,
-            combined_x,
-            topk_weights,
-            bias_0,
-            bias_1,
+        # Unpack (x,reduced_x) groups
+        num_groups = len(x)
+        assert num_groups == 1, "num_groups only supports {1,}"
+        x_1st = x[0]
+        reduced_x_1st = reduced_x[0] if reduced_x is not None else None
+
+        # Launch the internode group reduce kernel
+        (
+            reduced_x_1st,
+            event,
+        ) = self.runtime.internode_group_reduce(
+            x_1st,
+            reduced_x_1st,
+            None,  # topk_weights
+            None,  # bias_0
+            None,  # bias_1
             handle.recv_src_meta,  # src_meta
-            handle.is_token_in_rank,  # is_combined_token_in_rank
+            handle.is_token_in_rank,  # is_reduced_token_in_rank
             handle.recv_rdma_channel_prefix_matrix,  # rdma_channel_prefix_matrix
             handle.recv_rdma_rank_prefix_sum,  # rdma_rank_prefix_sum
             handle.recv_gbl_channel_prefix_matrix,  # gbl_channel_prefix_matrix
@@ -1145,19 +1053,25 @@ class GrpCollBuffer:
             handle.send_nvl_head,  # send_nvl_head
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
-            async_finish,
+            async_op,
             allocate_on_comm_stream,
-            GrpCollBuffer.reduce_op_str2int_map[reduce_op],
+            reduce_op,
             acc_reduce,
-            allow_empty_init_out_buf,
         )
 
+        # Pack reduced_x groups
+        reduced_x = [
+            reduced_x_1st,
+        ]
+
         # View output to hidden shape
-        combined_x = combined_x.view(-1, *hidden_shape)
+        for i in range(num_groups):
+            reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
 
-        return combined_x, combined_topk_weights, EventOverlap(event)
+        return (reduced_x, None, EventOverlap(event))  # reduced_lse
 
-    # TODO: deal with low-latency mode
+    # NOTE: remain original low-latency interface here for future potential usage,
+    # which won't be exposed to users for now, but guaranteed its compatibility internally
     def clean_low_latency_buffer(
         self, num_max_dispatch_tokens_per_rank: int, hidden: int, num_experts: int
     ) -> None:
@@ -1186,7 +1100,7 @@ class GrpCollBuffer:
         use_fp8: bool = True,
         round_scale: bool = False,
         use_ue8m0: bool = False,
-        async_finish: bool = False,
+        async_op: bool = False,
         return_recv_hook: bool = False,
     ) -> tuple[
         tuple[torch.Tensor, torch.Tensor], torch.Tensor, tuple, EventOverlap, Callable
@@ -1199,7 +1113,7 @@ class GrpCollBuffer:
             low-latency kernels' result tensors at a single moment.
 
         Arguments:
-            x: `torch.Tensor` with `torch.bfloat16`, shaped as `[num_tokens, hidden]`, only several hidden shapes are
+            x: `torch.Tensor` with `torch.bfloat16`, shaped as `[num_tokens, hidden_size]`, only several hidden shapes are
                 supported. The number of tokens to be dispatched must be less than `num_max_dispatch_tokens_per_rank`.
             topk_idx: `torch.Tensor` with `torch.int64`, shaped as `[num_tokens, num_topk]`, only several top-k shapes
                 are supported. `-1` indices (not selecting any expert) are supported.
@@ -1212,7 +1126,7 @@ class GrpCollBuffer:
                 the received data will be a tuple of FP8 tensor and scaling factors.
             round_scale: whether round the scaling factors into power of 2.
             use_ue8m0: whether use UE8M0 as scaling factor format (available only with `round_scale=True`).
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            async_op: the current stream will not wait for the communication kernels to be finished if set.
             return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
                 If you do not set this flag, the kernel will ensure the data's arrival.
@@ -1220,20 +1134,20 @@ class GrpCollBuffer:
         Returns:
             recv_x: a tensor or tuple with received tokens for each expert.
                 With `use_fp8=True`: the first element is a `torch.Tensor` shaped as
-                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.float8_e4m3fn`.
+                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden_size]` with `torch.float8_e4m3fn`.
                 The second tensor is the corresponding scales for the first element with shape
                 `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden // 128]` with `torch.float`,
                 if `use_ue8m0=False`. With `use_ue8m0=True`, the second one is packed and shaped as
                 `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden // 512]` with type `torch.int`.
                 Notice that, the last-two-dimension of the scaling tensors are in column-major for TMA compatibility.
                 With `use_fp8=False`, the result would be a tensor shaped as
-                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`.
+                `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden_size]` with `torch.bfloat16`.
                 Moreover, not all tokens are valid, only some of the `num_max_dispatch_tokens_per_rank * num_ranks` are,
                 as we do not synchronize CPU received count with GPU (also not incompatible with CUDA graph if synced).
             recv_count: a tensor shaped `[num_local_experts]` with type `torch.int`, indicating how many tokens each
                 expert receives. As mentioned before, not all tokens are valid in `recv_x`.
             handle: the communication handle to be used in the `low_latency_combine` function.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
+            event: the event after executing the kernel (valid only if `async_op` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         (
@@ -1253,7 +1167,7 @@ class GrpCollBuffer:
             use_fp8,
             round_scale,
             use_ue8m0,
-            async_finish,
+            async_op,
             return_recv_hook,
         )
         handle = (
@@ -1277,7 +1191,7 @@ class GrpCollBuffer:
             (packed_recv_x, packed_recv_x_scales) if use_fp8 else packed_recv_x,
             packed_recv_count,
             handle,
-            EventOverlap(event, tensors_to_record if async_finish else None),  # type: ignore[arg-type]
+            EventOverlap(event, tensors_to_record if async_op else None),  # type: ignore[arg-type]
             hook,
         )
 
@@ -1289,7 +1203,7 @@ class GrpCollBuffer:
         handle: tuple,
         use_logfmt: bool = False,
         zero_copy: bool = False,
-        async_finish: bool = False,
+        async_op: bool = False,
         return_recv_hook: bool = False,
         out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, EventOverlap, Callable]:
@@ -1301,7 +1215,7 @@ class GrpCollBuffer:
             low-latency kernels' result tensors at a single moment.
 
         Arguments:
-            x: `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden]` with `torch.bfloat16`,
+            x: `[num_local_experts, num_max_dispatch_tokens_per_rank * num_ranks, hidden_size]` with `torch.bfloat16`,
                 the local calculated tokens to be sent to this original rank and reduced.
             topk_idx: `[num_combined_tokens, num_topk]` with `torch.int64`, the expert indices selected by the dispatched
                 tokens. `-1` indices (not selecting any expert) are supported. Note that, `num_combined_tokens` equals
@@ -1312,15 +1226,15 @@ class GrpCollBuffer:
             use_logfmt: whether to use an internal "LogFMT with dynamic per-64-channel cast" format (10 bits).
             zero_copy: whether the tensor is already copied into the RDMA buffer, should be cooperative
                 with `get_next_low_latency_combine_buffer`.
-            async_finish: the current stream will not wait for the communication kernels to be finished if set.
+            async_op: the current stream will not wait for the communication kernels to be finished if set.
             return_recv_hook: return a receiving hook if set. If set, the kernel will just do the RDMA request issues,
                 but **without actually receiving the data**. You must call the received hook to make sure the data's arrival.
                 If you do not set this flag, the kernel will ensure the data's arrival.
             out: the in-place output tensor, if set, the kernel will write the result to this tensor and return it directly.
 
         Returns:
-            combined_x: the reduced token tensor, with shape `[num_combined_tokens, hidden]` and type `torch.bfloat16`.
-            event: the event after executing the kernel (valid only if `async_finish` is set).
+            combined_x: the reduced token tensor, with shape `[num_combined_tokens, hidden_size]` and type `torch.bfloat16`.
+            event: the event after executing the kernel (valid only if `async_op` is set).
             hook: the receiving hook function (valid only if `return_recv_hook` is set).
         """
         (
@@ -1340,7 +1254,7 @@ class GrpCollBuffer:
             num_experts,
             use_logfmt,
             zero_copy,
-            async_finish,
+            async_op,
             return_recv_hook,
             out,
         )
@@ -1354,7 +1268,7 @@ class GrpCollBuffer:
         )
         return (
             combined_x,
-            EventOverlap(event, tensors_to_record if async_finish else None),  # type: ignore[arg-type]
+            EventOverlap(event, tensors_to_record if async_op else None),  # type: ignore[arg-type]
             hook,
         )
 
@@ -1368,7 +1282,7 @@ class GrpCollBuffer:
 
         Returns:
             buffer: the raw RDMA low-latency buffer as a BF16 PyTorch tensor with shape
-                `[num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden]`, you should fill this buffer
+                `[num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden_size]`, you should fill this buffer
                 by yourself.
         """
         (
@@ -1406,3 +1320,25 @@ class GrpCollBuffer:
         return grpcoll.get_low_latency_rdma_size_hint(
             num_max_dispatch_tokens_per_rank, hidden, num_ranks, num_experts
         )
+
+    @staticmethod
+    def is_sm90_compiled() -> bool:
+        return grpcoll.is_sm90_compiled()
+
+    @staticmethod
+    def capture() -> EventOverlap:
+        """
+        Capture a CUDA event on the current stream, i.e. `torch.cuda.current_stream()`.
+
+        Returns:
+            event: the captured event.
+        """
+        return EventOverlap(EventHandle())
+
+    @staticmethod
+    def get_hidden_size_alignment(dtype: torch.dtype) -> int:
+        # At least for intranode group_reduce kernel,
+        # it requires the `hidden_size` in int4 to be divisible by WARP_SIZE
+        # thus for bf16/fp16, the hidden size alignment is:
+        #   WARP_SIZE * sizeof(int4) / sizeof(dtype) = 32 * 16 / 2 = 256
+        return 32 * 16 // dtype.itemsize

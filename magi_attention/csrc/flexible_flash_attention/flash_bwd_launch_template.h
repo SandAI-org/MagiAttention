@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <stdexcept>
+
 #include <cute/tensor.hpp>
 
 #include <cutlass/cluster_launch.hpp> // For ClusterLauncher
@@ -34,8 +36,60 @@
 #include "static_switch.h"
 #include "tile_scheduler.hpp"
 #include "tile_size.h"
+#include "utils/profile_utils.h"
 
 using namespace cute;
+
+template <typename PreprocessKernel, int kBlockM, typename Element, bool ProfileMode = false>
+void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
+  if constexpr (ProfileMode)
+    MagiEvents::start("bwd_preprocess");
+
+  typename PreprocessKernel::Arguments preprocess_args{
+      // O
+      static_cast<Element const*>(params.o_ptr),
+      {params.total_q, params.d, params.h_qo}, // shape_O: [sq, hd, nhq]
+      {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O: [nhq*hd, 1, hd]
+      // dO
+      static_cast<Element const*>(params.do_ptr),
+      {params.do_row_stride, _1{}, params.do_head_stride}, // stride_dO: [nhq*hd, 1, hd]
+      // dPsum
+      static_cast<float*>(params.dsoftmax_sum),
+      {_4{}, params.total_q_rounded, params.h_qo}, // shape_dPsum: [4, sq_rounded, nhq]
+      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_dPsum: [1, 4, sq_rounded*4]
+      // LSE
+      static_cast<float*>(params.softmax_lse_ptr),
+      {params.total_q, params.h_qo}, // shape_LSE: [sq, nhq]
+      {params.h_qo, _1{}}, // stride_LSE: [nhq, 1]
+      // LSE_log2
+      static_cast<float*>(params.softmax_lse_log2_ptr),
+      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2: [1, 4, sq_rounded*4]
+      // sink
+      static_cast<float*>(params.sink_ptr),
+      {params.total_sink, params.h_qo}, // shape_sink: [s_sink, nhq]
+      {params.h_qo, _1{}}, // stride_sink: [nhq, 1]
+      // dsink
+      static_cast<float*>(params.dsink_ptr),
+      static_cast<float*>(params.dsink_reduce_buf_ptr),
+      static_cast<unsigned int*>(params.dsink_reduce_cnt_ptr), // shape_dsink_reduce_cnt: [nhq,]
+      {params.num_m_block, params.total_sink, params.h_qo}, // shape_dsink_reduce_buf: [num_m_block, s_sink, nhq]
+      {params.total_sink * params.h_qo, params.h_qo, _1{}}, // stride_dsink_reduce_buf: [nhq, 1]
+      // meta
+      params.num_m_block,
+      params.total_q,
+      params.total_sink};
+
+  typename PreprocessKernel::Params preprocess_params = PreprocessKernel::to_underlying_arguments(preprocess_args);
+  dim3 grid_m(1, params.num_m_block, params.h_qo);
+
+  cutlass::kernel_launch<PreprocessKernel>(
+      grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, /*launch_with_pdl=*/false);
+
+  CHECK_CUDA_KERNEL_LAUNCH();
+
+  if constexpr (ProfileMode)
+    MagiEvents::stop("bwd_preprocess");
+}
 
 template <
     int Arch,
@@ -58,44 +112,31 @@ template <
     int AtomLayoutMdQ = 1,
     bool V_in_regs = false,
     bool RangeMerge = false,
-    bool DisableBwdDkvAtomicReduction = false>
+    bool DisableBwdDkvAtomicReduction = false,
+    bool ProfileMode = false>
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
 
   using TileShape_MK = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
-  using PreprocessKernel = flash::FlashAttnBwdPreprocess<
-      TileShape_MK,
-      Element,
-      ElementAccum,
-      ArchTag,
-      /*Clear_dQ=*/false,
-      /*Clear_dK=*/false,
-      /*Clear_dV=*/false>;
-  typename PreprocessKernel::Arguments preprocess_args{
-      static_cast<Element const*>(params.o_ptr),
-      {params.total_q, params.d, params.h_qo}, // shape_O
-      {params.o_row_stride, _1{}, params.o_head_stride}, // stride_O
-      static_cast<Element const*>(params.do_ptr),
-      {params.do_row_stride, _1{}, params.do_head_stride}, // stride_dO
-      static_cast<float*>(params.dsoftmax_sum),
-      {_4{}, params.total_q_rounded, params.h_qo}, // shape_dPsum
-      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_dPsum
-      {params.total_q, params.h_qo}, // shape_LSE
-      static_cast<float*>(params.softmax_lse_ptr),
-      {params.h_qo, _1{}}, // stride_LSE
-      static_cast<float*>(params.softmax_lse_log2_ptr),
-      {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2
-      params.q_ranges,
-      params.k_ranges,
-      params.total_q,
-      params.total_q_rounded};
-  typename PreprocessKernel::Params preprocess_params = PreprocessKernel::to_underlying_arguments(preprocess_args);
-  int num_m_block = cute::ceil_div(params.total_q_rounded, kBlockM);
-  dim3 grid_m(1, num_m_block, params.h_qo);
-  cutlass::kernel_launch<PreprocessKernel>(
-      grid_m, PreprocessKernel::MaxThreadsPerBlock, PreprocessKernel::SharedStorageSize, stream, preprocess_params, false /*launch_with_pdl*/);
-  CHECK_CUDA_KERNEL_LAUNCH();
+
+  // Launch the pre-processing kernel of the ffa backward pass
+  BOOL_SWITCH(params.has_sink(), Has_sink, [&] {
+    using PreprocessKernel = flash::FlashAttnBwdPreprocess<
+        /*TileShape_MK_=*/TileShape_MK,
+        /*Element=*/Element,
+        /*ElementAccum=*/ElementAccum,
+        /*ArchTag_=*/ArchTag,
+        /*Clear_dQ=*/false,
+        /*Clear_dK=*/false,
+        /*Clear_dV=*/false,
+        /*Has_sink=*/Has_sink>;
+    run_flash_bwd_pre_process<PreprocessKernel, kBlockM, Element, ProfileMode>(params, stream);
+  });
+
+  // Run the main kernel of the ffa backward pass
+  if constexpr (ProfileMode)
+    MagiEvents::start("bwd_run");
 
   using TileShape_MNK = cute::Shape<Int<kBlockM>, Int<kBlockN>, Int<kHeadDim>>;
   using ClusterShape = cute::Shape<_1, Int<1>, _1>; // Currently doesn't not support cluster
@@ -121,7 +162,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       AtomLayoutMdQ,
       V_in_regs>;
   using Scheduler = flash::
-      DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
+      DynamicPersistentTileScheduler<kBlockN, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, /*WarpSpecialized=*/Arch >= 90, Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueBwd<
       TileShape_MNK,
       ElementDkv,
@@ -175,14 +216,14 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.determin_range_locks,
   };
 
-  typename flash::TileSchedulerArguments scheduler_args{/*num_heads*/ params.h_qo,
-                                                        /*num_batches*/ params.merge_batch_size,
-                                                        /*tile_count_semaphore*/ params.tile_count_semaphore,
-                                                        /*ranges*/ params.k_ranges,
-                                                        /*merge_ranges*/ params.merge_k_ranges,
-                                                        /*range_map*/ params.bwd_kq_map,
-                                                        /*determin_conflict_state*/ params.determin_conflict_state,
-                                                        /*bwd_unique_count*/ params.bwd_unique_count};
+  typename flash::TileSchedulerArguments scheduler_args{/*num_heads=*/params.h_qo,
+                                                        /*num_batches=*/params.merge_batch_size,
+                                                        /*tile_count_semaphore=*/params.tile_count_semaphore,
+                                                        /*ranges=*/params.k_ranges,
+                                                        /*merge_ranges=*/params.merge_k_ranges,
+                                                        /*range_map=*/params.bwd_kq_map,
+                                                        /*determin_conflict_state=*/params.determin_conflict_state,
+                                                        /*bwd_unique_count=*/params.bwd_unique_count};
 
   int device;
   cudaGetDevice(&device);
@@ -191,6 +232,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   dim3 grid_dims = AttnKernel::get_grid_shape(kernel_params);
   dim3 block_dims = AttnKernel::get_block_shape();
   int smem_size = AttnKernel::SharedStorageSize;
+
+  /* DEBUG */
   // int smem_size_q = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_q));
   // int smem_size_do = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_do));
   // int smem_size_ds = sizeof(decltype((typename CollectiveMainloop::TensorStorage{}).smem_ds));
@@ -208,6 +251,7 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   // printf("smem_size = %d, q = %d, k = %d, v = %d, do = %d, ds = %d, dqacc = %d, lse = %d, dpsum = %d\n", smem_size,
   // smem_size_q, smem_size_k, smem_size_v, smem_size_do, smem_size_ds, smem_size_dqacc, smem_size_lse,
   // smem_size_dpsum);
+
   if constexpr (size(ClusterShape{}) > 1) {
     void const* kernel = (void const*)cutlass::device_kernel<AttnKernel>;
     if (smem_size >= 48 * 1024) {
@@ -222,13 +266,16 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
     cutlass::kernel_launch<AttnKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
   }
   CHECK_CUDA_KERNEL_LAUNCH();
+
+  if constexpr (ProfileMode)
+    MagiEvents::stop("bwd_run");
 }
 
-template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic>
+template <int Arch, typename T, typename TDkv, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic, bool ProfileMode>
 void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
-  static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
-  static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, sizeof(T) /*element_size*/, Has_softcap));
+  static constexpr int kBlockM = std::get<0>(tile_size_bwd_sm90(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
+  static constexpr int kBlockN = std::get<1>(tile_size_bwd_sm90(kHeadDim, /*element_size=*/sizeof(T), Has_softcap));
 
   // TODO: Add a specific tuning function for different kHeadDim
   static constexpr int Stages = 2;
@@ -267,6 +314,7 @@ void run_mha_bwd_(Flash_bwd_params& params, cudaStream_t stream) {
         /*AtomLayoutMdQ=*/AtomLayoutMdQ,
         /*V_in_regs=*/V_in_regs,
         /*RangeMerge=*/RangeMerge,
-        /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction>(params, stream);
+        /*DisableBwdDkvAtomicReduction=*/DisableBwdDkvAtomicReduction,
+        /*ProfileMode=*/ProfileMode>(params, stream);
   });
 }
