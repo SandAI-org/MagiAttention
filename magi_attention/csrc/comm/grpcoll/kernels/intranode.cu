@@ -373,9 +373,7 @@ void group_cast_kernel(
 
         // Check timeout
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-#ifdef GRPCOLL_DEBUG
           printf("grpcoll timeout for group cast senders, rank=%d, responsible_channel=%d\n", rank, responsible_channel);
-#endif
           trap();
         }
         // Rare cases to loop again
@@ -400,7 +398,7 @@ void group_cast_kernel(
           send_head[token_idx * kNumRanks + responsible_rank] = is_token_in_responsible_rank ? cached_channel_tail_idx : -1;
 
         // Skip if this token won't be sent to the responsible rank
-        if (not is_token_in_responsible_rank) {
+        if (!is_token_in_responsible_rank) {
           token_idx++;
           continue;
         }
@@ -547,9 +545,7 @@ void group_cast_kernel(
 
         // Check timeout
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-#ifdef GRPCOLL_DEBUG
           printf("grpcoll timeout for group cast receivers, rank=%d, responsible_channel=%d, tokens_to_recv=%d\n", rank, responsible_channel, num_tokens_to_recv);
-#endif
           trap();
         }
       }
@@ -897,8 +893,13 @@ __global__ void cached_notify_group_reduce(
     int token_start_idx, token_end_idx;
     get_channel_task_range(num_recv_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
-    // NOTES: `1 << 25` is a heuristic large number
-    int last_head = 1 << 25;
+    /** NOTE: the process below is to find the correct next valid head `p`
+     * for those `-1` entries, and in-place update them to the encoded `-p-1`
+     * since in the group-reduce stage, the receivers need to update the `expected_head`
+     * to next valid position by decoding with `-expected_head - 1` when they reach certain `-1` entry
+     * and the reason of encoding `-p-1` is to maintain the `-1` entries still negative
+     */
+    int last_head = 1 << 25; // NOTES: `1 << 25` is a heuristic large number
 #pragma unroll
     for (int token_idx_tail = token_end_idx - 1; token_idx_tail >= token_start_idx; token_idx_tail -= WARP_SIZE) {
       int token_idx = token_idx_tail - lane_id, expected_head = 0;
@@ -1109,9 +1110,7 @@ void group_reduce_kernel(
 
         // Check timeout
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-#ifdef GRPCOLL_DEBUG
           printf("grpcoll timeout for group reduce senders, rank=%d, responsible_channel=%d\n", rank, responsible_channel);
-#endif
           trap();
         }
         // Rare cases to loop again
@@ -1261,7 +1260,15 @@ void group_reduce_kernel(
         // Load queue tail for the responsible rank w.r.t. the responsible channel
         shared_channel_tail_idx[responsible_rank] = ld_acquire_sys_global(channel_tail_idx_ptr); // system scope, acquire order
 
-        // Get minimum head across all reduce warps
+        // Get minimum head across all reduce warps for each rank
+        // which will be stored into `channel_head_idx` to inform the sender
+        /** NOTE: the reason to get the minimum head is that:
+         *  different from group-cast sender/receiver and group-reduce sender,
+         *  the group-reduce receiver does not and cannot partition a specific warp groups for each rank
+         *  since it might need to reduce the partial hidden values of the same token from all src ranks
+         *  therefore, for certain rank, the queue head might be updated by any reduce warps
+         *  and thus we need to get the minimum head across all reduce warps
+         */
         int min_head = INT_MAX;
 #pragma unroll
         for (int i = 0; i < num_reduce_warps; ++i) {
@@ -1337,17 +1344,14 @@ void group_reduce_kernel(
           //  if it is sent to rank r in group_cast stage
           expected_head = ld_nc_global(send_head + token_idx * kNumRanks + responsible_rank); // non-cached load
 
-        // Wait for expected head for each rank to be ready
-        // i.e. the recv queue for each rank is non-empty
+        // Wait for the expected heads of this token for each rank to be all ready
         auto start_time = clock64();
         // NOTES: here we should check `expected_head >= 0` first
         // to avoid invalid `responsible_rank` when accessing `shared_channel_tail_idx`
         while (any_in_warp(/*pred=*/expected_head >= 0 and shared_channel_tail_idx[responsible_rank] <= expected_head)) {
           // Check timeout
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-#ifdef GRPCOLL_DEBUG
             printf("grpcoll timeout for group reduce receivers, rank=%d, responsible_channel=%d, expect_head=%d\n", rank, responsible_channel, expected_head);
-#endif
             trap();
           }
         }
@@ -1548,10 +1552,15 @@ void group_reduce_kernel(
           }
         }
 
-        // Update channel head idx for each rank
-        // which will be read by the warp0 to store the `channel_head_idx` to inform the sender
+        // Update channel head idx for each rank to shared memory
+        // which will be read by the warp0 to update the minimum head across all reduce warps
+        /** NOTE: for those `-1` entries of the original `send_head` generated in group-cast stage,
+         * we've already in-place updated them in `cached_notify_group_reduce` to the valid next position `p`,
+         * but encoded to `-p-1` to maintain them still negative like `-1`
+         * and we can decode the correct next expect head by `-expected_head - 1`
+         */
         if (responsible_rank < kNumRanks)
-          shared_warp_channel_head_idx[reduce_warp_id][responsible_rank] = (expected_head == -1) ? 0 : expected_head + 1;
+          shared_warp_channel_head_idx[reduce_warp_id][responsible_rank] = (expected_head < 0) ? -expected_head - 1 : expected_head + 1;
       }
 
       // Retired this warp by toggling the retire flag
