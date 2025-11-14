@@ -50,11 +50,13 @@ template <
     bool DisableFwdAtomicReduction,
     bool Deterministic,
     bool MergeRange,
+    bool SwapAB,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
-  static constexpr bool MmaPV_is_RS = true;
+  // if SwapAB, mma V @ P is SS mode
+  static constexpr bool MmaPV_is_RS = !SwapAB;
   static constexpr bool IntraWGOverlap = true;
 
   static constexpr int kStages = 2;
@@ -66,8 +68,18 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ClusterShape = cute::Shape<Int<ClusterM>, _1, _1>;
 
   // Get Mainloop, TileScheduler, Epilogue and AttnKernel
-  using CollectiveMainloop =
-      flash::CollectiveMainloopFwdSm90<kStages, ClusterShape, TileShape_MNK, Element, float, cutlass::arch::Sm90, Has_softcap, MmaPV_is_RS, IntraWGOverlap, MergeRange>;
+  using CollectiveMainloop = flash::CollectiveMainloopFwdSm90<
+      kStages,
+      ClusterShape,
+      TileShape_MNK,
+      Element,
+      float,
+      cutlass::arch::Sm90,
+      Has_softcap,
+      MmaPV_is_RS,
+      IntraWGOverlap,
+      MergeRange,
+      SwapAB>;
   using Scheduler = flash::
       DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
@@ -78,7 +90,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       typename Scheduler::BlockCoordType,
       CollectiveMainloop::NumMmaThreads,
       DisableFwdAtomicReduction,
-      Deterministic>;
+      Deterministic,
+      SwapAB>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
 
   typename CollectiveMainloop::StrideV v_strides = make_stride(params.v_row_stride, _1{}, params.v_head_stride);
@@ -164,6 +177,7 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool Deterministic,
+    bool SwapAB,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
@@ -184,6 +198,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
           /*DisableFwdAtomicReduction=*/DisableFwdAtomicReduction,
           /*Deterministic=*/Deterministic,
           /*MergeRange=*/MergeRange,
+          /*SwapAB=*/SwapAB,
           /*ProfileMode=*/kProfileMode>(params, stream);
     });
   });

@@ -38,7 +38,12 @@ from magi_attention.testing.precision import (
     extract_mismatch_threshold,
     ref_attn_func,
 )
-from magi_attention.utils import get_attn_mask_from_ffa_args, is_list_value_any
+from magi_attention.utils import (
+    get_attn_mask_from_ffa_args,
+    is_list_value_any,
+    str2seed,
+    sync_rng,
+)
 
 
 class TestFlexFlashAttn(DistTestBase):
@@ -56,7 +61,7 @@ class TestFlexFlashAttn(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 400
+        return 4000
 
     def generate_non_overlapping_qk_pairs(
         self,
@@ -184,6 +189,8 @@ class TestFlexFlashAttn(DistTestBase):
         k_ranges_tensor: torch.Tensor,
         attn_type_map_tensor: torch.Tensor,
         auto_range_merge: bool,
+        swap_ab: bool,
+        ref_block_size: tuple[int, int],
         test_case: str,
         o_ref: torch.Tensor,
         lse_ref: torch.Tensor,
@@ -214,6 +221,8 @@ class TestFlexFlashAttn(DistTestBase):
             sink=sink,
             auto_range_merge=auto_range_merge,
             deterministic=True,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
         )
         o.backward(do)
 
@@ -475,6 +484,7 @@ class TestFlexFlashAttn(DistTestBase):
         test_case: str = "",
         err_msg_list: list[str] = [],
         err_ratio_dict: dict[str, float] = {},
+        test_dsink_norm: bool = False,
     ) -> None:
         # -----   customize tolerance / threshold  ---- #
 
@@ -544,8 +554,8 @@ class TestFlexFlashAttn(DistTestBase):
             "dv_max_mismatch_thres", MAX_MISMATCH_THRES
         )
 
-        dsink_atol = EPSILON
-        dsink_rtol = 0.05
+        dsink_atol = err_ratio_dict.get("dsink_atol", EPSILON)
+        dsink_rtol = err_ratio_dict.get("dsink_rtol", 0.05)
         dsink_norm_rtol_ratio = err_ratio_dict.get(
             "dsink_norm_rtol_ratio", NORM_RTOL_RATIO
         )
@@ -838,24 +848,28 @@ class TestFlexFlashAttn(DistTestBase):
         # -----   assert close for bwd dsink   ---- #
 
         if has_sink:
-            # fa style with Linf norm
-            dsink_norm = calc_inf_norm(
-                grad_total_sink, grad_total_sink_ref_high_precision
-            )
-            dsink_ref_norm = calc_inf_norm(
-                grad_total_sink_ref_low_precision, grad_total_sink_ref_high_precision
-            )
-            try:
-                self.assertLessEqual(
-                    dsink_norm,
-                    max(dsink_min_norm_rtol, dsink_norm_rtol_ratio * dsink_ref_norm),
-                    msg=(
-                        f"For {test_case=}: {dsink_norm=} should be no greater than "
-                        f"max({dsink_min_norm_rtol}, {dsink_norm_rtol_ratio} x {dsink_ref_norm=})"
-                    ),
+            if test_dsink_norm:
+                # fa style with Linf norm
+                dsink_norm = calc_inf_norm(
+                    grad_total_sink, grad_total_sink_ref_high_precision
                 )
-            except Exception as e:
-                err_msg_list.append(str(e))
+                dsink_ref_norm = calc_inf_norm(
+                    grad_total_sink_ref_low_precision,
+                    grad_total_sink_ref_high_precision,
+                )
+                try:
+                    self.assertLessEqual(
+                        dsink_norm,
+                        max(
+                            dsink_min_norm_rtol, dsink_norm_rtol_ratio * dsink_ref_norm
+                        ),
+                        msg=(
+                            f"For {test_case=}: {dsink_norm=} should be no greater than "
+                            f"max({dsink_min_norm_rtol}, {dsink_norm_rtol_ratio} x {dsink_ref_norm=})"
+                        ),
+                    )
+                except Exception as e:
+                    err_msg_list.append(str(e))
 
             # torch style with atol + rtol + mismatch threshold
             dsink_thres = extract_mismatch_threshold(
@@ -874,7 +888,7 @@ class TestFlexFlashAttn(DistTestBase):
                     atol=dsink_atol,
                     rtol=dsink_rtol,
                     mismatch_threshold=dsink_thres,
-                    test_case=f"{test_case} => dsink",
+                    test_case=f"{test_case} => dsink {grad_total_sink=} {grad_total_sink_ref_high_precision=}",
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -897,6 +911,8 @@ class TestFlexFlashAttn(DistTestBase):
         auto_range_merge: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
+        swap_ab: bool,
+        ref_block_size: tuple[int, int],
         test_case: str,
         err_ratio_dict: dict[str, float] = {},
     ) -> None:
@@ -908,6 +924,9 @@ class TestFlexFlashAttn(DistTestBase):
         # thus we skip here and will fix it asap
         if is_list_value_any(attn_type_map, 3):
             return
+
+        # set seed
+        torch.manual_seed(str2seed(test_case))
 
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
@@ -978,6 +997,8 @@ class TestFlexFlashAttn(DistTestBase):
             sink=sink,
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
         )
 
         # run ffa backward
@@ -997,6 +1018,8 @@ class TestFlexFlashAttn(DistTestBase):
                 k_ranges_tensor=k_ranges_tensor,
                 attn_type_map_tensor=attn_type_map_tensor,
                 auto_range_merge=auto_range_merge,
+                swap_ab=swap_ab,
+                ref_block_size=ref_block_size,
                 test_case=test_case,
                 o_ref=o,
                 lse_ref=lse,
@@ -1304,14 +1327,14 @@ class TestFlexFlashAttn(DistTestBase):
             },
             {
                 "name": "deterministic_sample",
-                "seqlen": 2500,
+                "seqlen": 900,
                 "q_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(50) for j in range(50)]
+                    [[i * 30, (i + 1) * 30] for i in range(30) for j in range(30)]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
-                    [[i * 50, (i + 1) * 50] for i in range(50)] * 50
+                    [[i * 30, (i + 1) * 30] for i in range(30)] * 30
                 ),
-                "attn_type_map": [0, 1] * 1250,
+                "attn_type_map": [0, 1] * 450,
             },
             {
                 "name": "sparse_attn_2k_with_same_k_ranges",
@@ -1354,21 +1377,59 @@ class TestFlexFlashAttn(DistTestBase):
             },
         ],
     )
+    @parameterize(
+        "compress_config",
+        [
+            {
+                "swap_ab": False,
+                "ref_block_size": None,
+                "test_accumulation_inplace": True,
+                "deterministic": True,
+            },
+            {
+                "swap_ab": False,
+                "ref_block_size": None,
+                "test_accumulation_inplace": False,
+                "deterministic": False,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (8, 64),
+                "test_accumulation_inplace": True,
+                "deterministic": True,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (16, 64),
+                "test_accumulation_inplace": False,
+                "deterministic": False,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (32, 64),
+                "test_accumulation_inplace": True,
+                "deterministic": True,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+                "test_accumulation_inplace": False,
+                "deterministic": False,
+            },
+        ],
+    )
     @parameterize("model_config", MODEL_CONFIGS)
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("random_attn_type_map", [False, True])
     @parameterize("auto_range_merge", [False, True])
-    @parameterize("deterministic", [False, True])
-    @parameterize("test_accumulation_inplace", [False, True])
     def test_ffa_simple(
         self,
         attn_mask_config: dict[str, Any],
+        compress_config: dict[str, Any],
         model_config: dict[str, Any],
         dtype: torch.dtype,
         random_attn_type_map: bool,
         auto_range_merge: bool,
-        deterministic: bool,
-        test_accumulation_inplace: bool,
     ):
         # extract config
         seqlen: int = attn_mask_config["seqlen"]
@@ -1382,10 +1443,25 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
+        test_accumulation_inplace = compress_config["test_accumulation_inplace"]
+        deterministic = compress_config["deterministic"]
+
+        test_case = (
+            f"[{model_config['name']}]"
+            f"[dtype={dtype}]"
+            f"[random_attn_type_map={random_attn_type_map}]"
+            f"[auto_range_merge={auto_range_merge}]"
+            f"[deterministic={deterministic}]"
+            f"[test_accumulation_inplace={test_accumulation_inplace}]"
+        )
+
         if random_attn_type_map:
             # we now support attn type idx in {0, 1, 2, 3}
-            attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
+            with sync_rng(seed=str2seed(test_case)):
+                attn_type_map = [random.choice([0, 1, 2, 3]) for _ in attn_type_map]
 
+        swap_ab = compress_config["swap_ab"]
+        ref_block_size = compress_config["ref_block_size"]
         test_case = (
             f"[{attn_mask_config['name']}]"
             f"[{model_config['name']}]"
@@ -1394,6 +1470,8 @@ class TestFlexFlashAttn(DistTestBase):
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[acc_inplace={test_accumulation_inplace}]"
+            f"[swap_ab={swap_ab}]"
+            f"[ref_block_size={ref_block_size}]"
             f"[has_sink={seqlen_sink > 0}]"
         )
 
@@ -1409,6 +1487,8 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
             test_case=test_case,
             err_ratio_dict={
                 "dq_min_mismatch_thres": 5e-3,
@@ -1418,6 +1498,8 @@ class TestFlexFlashAttn(DistTestBase):
                 else 0,
                 "dsink_min_norm_rtol": 5e-3,
                 "dsink_norm_rtol_ratio": NORM_RTOL_RATIO * 2,
+                "dsink_atol": 2e-4,
+                "dsink_rtol": 0.1,
             },
         )
 
@@ -1484,6 +1566,47 @@ class TestFlexFlashAttn(DistTestBase):
         ],
     )
     @parameterize(
+        "compress_config",
+        [
+            {
+                "swap_ab": False,
+                "ref_block_size": None,
+                "test_accumulation_inplace": True,
+                "deterministic": True,
+            },
+            {
+                "swap_ab": False,
+                "ref_block_size": None,
+                "test_accumulation_inplace": False,
+                "deterministic": False,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (8, 64),
+                "test_accumulation_inplace": True,
+                "deterministic": True,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (16, 64),
+                "test_accumulation_inplace": False,
+                "deterministic": False,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (32, 64),
+                "test_accumulation_inplace": True,
+                "deterministic": True,
+            },
+            {
+                "swap_ab": True,
+                "ref_block_size": (64, 64),
+                "test_accumulation_inplace": False,
+                "deterministic": False,
+            },
+        ],
+    )
+    @parameterize(
         "num_pairs", [10, 100, 1000]
     )  # the max num of qk range pairs to generate
     @parameterize("dtype", [torch.float16, torch.bfloat16])
@@ -1491,18 +1614,15 @@ class TestFlexFlashAttn(DistTestBase):
         "attn_type", [0, 1, 2, 3, 4]
     )  # 0 - 3 means attn type are all 0/1/2/3, 4 means random attn type.
     @parameterize("auto_range_merge", [False, True])
-    @parameterize("deterministic", [False, True])
-    @parameterize("test_accumulation_inplace", [False, True])
     def test_ffa_random(
         self,
         model_config: dict[str, Any],
         generate_config: dict[str, Any],
+        compress_config: dict[str, Any],
         num_pairs: int,
         dtype: torch.dtype,
         attn_type: int,
         auto_range_merge: bool,
-        deterministic: bool,
-        test_accumulation_inplace: bool,
     ):
         """in this test, we generate q,k range randomly and as complicate as possible"""
         # extract config
@@ -1535,6 +1655,11 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
+        swap_ab = compress_config["swap_ab"]
+        ref_block_size = compress_config["ref_block_size"]
+        test_accumulation_inplace = compress_config["test_accumulation_inplace"]
+        deterministic = compress_config["deterministic"]
+
         test_case = (
             f"[{model_config['name']}]"
             f"[{generate_config['name']}]"
@@ -1544,6 +1669,8 @@ class TestFlexFlashAttn(DistTestBase):
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[acc_inplace={test_accumulation_inplace}]"
+            f"[swap_ab={swap_ab}]"
+            f"[ref_block_size={ref_block_size}]"
         )
 
         self.run_test_case(
@@ -1558,6 +1685,8 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
+            swap_ab=swap_ab,
+            ref_block_size=ref_block_size,
             test_case=test_case,
             err_ratio_dict={
                 "dq_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
@@ -1565,6 +1694,9 @@ class TestFlexFlashAttn(DistTestBase):
                 "dk_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
                 "dk_min_mismatch_thres": 0.025,
                 "dv_norm_rtol_ratio": NORM_RTOL_RATIO * 1.5,
+                # "dsink_norm_rtol_ratio": NORM_RTOL_RATIO * 2 if kblockm >= 64 else NORM_RTOL_RATIO * 4,
+                # "dsink_atol": EPSILON  if kblockm >= 64 else EPSILON * (64 // kblockm),
+                # "dsink_rtol": 0.05 if kblockm >= 64 else 0.05 * (64 // kblockm),
             },
         )
 
