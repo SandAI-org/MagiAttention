@@ -33,7 +33,7 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 - [2025/9] 📌 We release [MagiAttention-v1.0.4](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.4) to update the API, support compilable and jit-built ffa, optimize the performance for sparse scenarios, reduce the workspace memory usage, and engage some experimental features in progress.
 - [2025/7] 🚀 We release [MagiAttention-v1.0.3](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.3) with improvements including [documentation](https://SandAI-org.github.io/MagiAttention/docs/), support for all four mask types with arbitary overlapping, deterministic mode, API updates, FFA performance enhancements with bug fixes, optimized dispatch solvers, hierarchical-comm support, and example codes to train Llama-3 1B model with MagiAttention + FSDP / Transformers.
-- [2025/6] 📌 We release [MagiAttention-v1.0.2](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.2) to provide the example code to **integrate Megatron with MagiAttention** with several training convergence experiments (*see [here](./example/megatron/README.md) for more details*), with some bug fixes and a simple roadmap.
+- [2025/6] 📌 We release [MagiAttention-v1.0.2](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.2) to provide the example code to **integrate Megatron with MagiAttention** with several training convergence experiments (*see [here](./examples/megatron/README.md) for more details*), with some bug fixes and a simple roadmap.
 - [2025/5] 📌 We release [MagiAttention-v1.0.1](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.1) to support overlapped q_ranges when all mask types are `FULL`, with some code cleanup and bug fixes.
 - [2025/4] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/blog/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
 
@@ -316,12 +316,12 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
 
 ### Example to integrate with FSDP2
 
-We provide an example of how to integrate magi_attention with fsdp2 in `example/torch_native`. You can use `bash run.sh` to run the example.
+We provide an example of how to integrate magi_attention with fsdp2 in `examples/torch_native`. You can use `bash run.sh` to run the example.
 
 In this example, we build a llama-1b model and apply fsdp2 with magi_attention as the parallelism strategy.
 
-- `example/torch_native/modeling_llama.py`: build llama model and integrate with magi_attention.
-- `example/torch_native/main.py`: main training loop.
+- `examples/torch_native/modeling_llama.py`: build llama model and integrate with magi_attention.
+- `examples/torch_native/main.py`: main training loop.
 
 </details>
 
@@ -330,13 +330,13 @@ In this example, we build a llama-1b model and apply fsdp2 with magi_attention a
 
 We create a new repository [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention/tree/magi_attention), forked from [Megatron-LM v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0), to provide an example of training the llama-1B model with Megatron-LM + MagiAttention. Furthermore, we conducted an experiment training llama-3-1B model from scratch to verify the convergence of magiattention.
 
-For more information, you can refer to `example/megatron/README.md`.
+For more information, you can refer to `examples/megatron/README.md`.
 
 ### Example to integrate with transformers
 
-We provide an example of how to integrate magi_attention with transformers in `example/transformers`. Furthermore, we conducted a continue-training experiment on llama-3-1B model to verify the convergence of magiattention.
+We provide an example of how to integrate magi_attention with transformers in `examples/transformers`. Furthermore, we conducted a continue-training experiment on llama-3-1B model to verify the convergence of magiattention.
 
-For more information, you can refer to `example/transformers/README.md`.
+For more information, you can refer to `examples/transformers/README.md`.
 
 
 ## Roadmap ⛏️
