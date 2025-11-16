@@ -26,12 +26,10 @@ external-links:
 
 authors:
   - name: Zewei Tao
-    url: "https://github.com/littsk"
     email: zeweitao@sand.ai
     affiliations:
       name: SandAI
   - name: Yunpeng Huang
-    url: "https://github.com/Strivin0311"
     email: yunpenghuang@sand.ai
     affiliations:
       name: SandAI
@@ -59,6 +57,8 @@ toc:
       - name: Kernel-Level
       - name: Module-Level
   - name: Discussion
+    subsections:
+      - name: Attention Sink
   - name: Future Work
   - name: FAQ
   - name: Acknowledgement
@@ -289,12 +289,12 @@ To adaptively control overlap granularity, we further introduce a tunable hyperp
 To demonstrate FFA kernels' state-of-the-art performance and flexibility in handling ultra-long, heterogeneous mask training, we measure the throughput (in $\texttt{TFLOPs/s}$) on Hopper GPUs for both forward and backward passes of prevalent attention kernels across standard and irregular mask patterns.
 
 | settings              | value                                                                          |
-|-----------------------|-----------------------------------------------------------------------------|
-| batch size (b)        | 1                                                                            |
-| number of heads (nh)  | nhq:nhk:nhv = 64:8:8 (GQA)                                    |
-| head dimension (hd)   | 128                                                                           |
-| dtype                 | torch.bfloat16                                                               |
-| window size           | 1024 (for sliding window masks only)                        |
+|-----------------------|--------------------------------------------------------------------------------|
+| batch size (b)        | 1                                                                              |
+| number of heads (nh)  | nhq:nhk:nhv = 64:8:8 (GQA)                                                     |
+| head dimension (hd)   | 128                                                                            |
+| dtype                 | torch.bfloat16                                                                 |
+| window size           | 1024 (for sliding window masks only)                                           |
 
 Benchmark settings: for each mask pattern, we vary the sequence length $seqlen$ from $4k,8k,16k,...,$ up to $128k$ ($seqlen_q = seqlen_k = seqlen$) while measuring the throughput (in $\texttt{TFLOPs/s}$) for forward and backward passes of different attention kernels. Other configurations are fixed using common training settings (see the table above) to focus on the impact of sequence length and mask pattern. For the varlen packed data, we simply follow the variable sequence length distribution in the open-sourced dataset<d-cite key="xu2024chatqa"></d-cite> illustrated in the following figure, from which we sample to pack and pad to the required $seqlen$.
 
@@ -386,15 +386,23 @@ The results are presented in the following figures.
 
 ## Discussion
 
-comming soon ...
+### Attention Sink
+
+integrate FFA, as well as Flash-Attention, with attention sink ?
+
+TODO ...
 
 ## Future Work
 
-For now, please check [RoadMap](https://github.com/SandAI-org/MagiAttention?tab=readme-ov-file#roadmap-%EF%B8%8F).
+Please check our [Roadmap](https://github.com/SandAI-org/MagiAttention?tab=readme-ov-file#roadmap-%EF%B8%8F).
+
 
 ## FAQ
 
-comming soon ...
+Q: How to start with MagiAttention ?
+A: Please check our [docs](https://sandai-org.github.io/MagiAttention/docs/) for `QuickStart` section.
+
+TODO ...
 
 
 ## Acknowledgement

@@ -3,7 +3,7 @@ layout: distill
 permalink: /ffa_with_sink
 title: FFA with Attention Sink
 description: Integrating Flex-Flash-Attention with Attention Sink
-date: 2025-11-15
+date: 2025-11-17
 featured: true
 pretty_table: true
 tabs: true
@@ -30,7 +30,7 @@ authors:
     affiliations:
       name: SandAI
 
-bibliography: magiattn.bib
+bibliography: ffa_with_sink.bib
 
 # Optionally, you can add a table of contents to your post.
 # NOTES:
@@ -40,6 +40,7 @@ bibliography: magiattn.bib
 #     jekyll-toc plugin (https://github.com/toshimaru/jekyll-toc).
 toc:
   - name: Introduction
+  - name: Overview
   - name: User Interface
     subsections:
       - name: Flex-Flash-Attention
@@ -52,7 +53,7 @@ toc:
   - name: Implementations
     subsections:
       - name: Torch Reference
-      - name: FFA
+      - name: Flex-Flash-Attention
       - name: MagiAttention
   - name: References
   - name: Citation
@@ -78,15 +79,36 @@ _styles: >
 
 ## Introduction
 
+Large-Scaled Models (LMs) assign significant attention to few tokens (<em>such as the intial tokens in the sequence</em>), even if they are not semantically important, which is known as <b>attention sink</b><d-cite key="xiao2024efficientstreaminglanguagemodels,kang2025toldvisualattentionsink"></d-cite>. Researchers attribute this interesting phenomenon to the nature of $softmax$, which requires attention scores of each query token to always sum up to $1$ for all key tokens in the context, even when some query token does not strongly attend to any key token at all<d-cite key="gu2025attentionsinkemergeslanguage"></d-cite>. Therefore, during the training, we can deliberately add some <u><em>learnable sink tokens</em></u> to the key sequence for each query token to collect those unneeded attention scores to relax the <em>"sum-up-to-one"</em> constraint, which can be seen as a learnable version of $\textit{off-by-one}\space softmax$<d-cite key="miller2025attentionmisc"></d-cite>.
+
+However, since sink tokens only affect the $softmax$ operation during the attention forward/backward passes w.r.t. the GPT-OSS implementation<d-cite key="openaiGPT-OSScode-misc"></d-cite>, <b>it is non-trivial to apply learnable attention sink with the (distributed) attention implementations in the style of <u>Flash Attention</u></b><d-cite key="dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention"></d-cite>, particularly our own kernel implemenation of <u>Flex-Flash-Attention</u>, as well as the distributed implementation of <u>MagiAttention</u><d-cite key="magiattention2025"></d-cite>.
+
+
+## Overview
+
+With the release of [MagiAttention-v1.0.5](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5), we have not only <b>supported the learnable attention sink mechanism</b> for our own kernel / distributed implementations of <u>Flex-Flash-Attention</u> / <u>MagiAttention</u> respectively, but also <b>provided the <em>plug-and-play</em> implementations</b> to integrate the original <u>Flash Attention</u> 2/3 interface<d-cite key="daoFlashAttnInterfaceMisc,daoFlashAttnInterfaceHopperMisc"></d-cite> with attention sink, as one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink).
+
+In this blog, we will share our own methods about how to integrate the attention implementations in the Flash-Attention style with the learnable attention sink mechanism, including:
+
+- the [User Interface](#user-interface) update for [Flex-Flash-Attention](#flex-flash-attention), [MagiAttention](#magiattention) and [Flash-Attention Extension](#flash-attention-extension).
+- the [Math Derivation](#math-derivation) of applying the attention sink in both [forward](#ffa-forward) and [backward](#ffa-backward) passes of Flex-Flash-Attention.
+- the [Implementations](#implementations) of the (distributed) learnable attention sink mechanism for [Flex-Flash-Attention](#flex-flash-attention-1) and [MagiAttention](#magiattention-1), as well as the naive [Torch Reference](#torch-reference).
+
+
 
 ## User Interface
 
-### FFA
+Below, we show the minor update of the user interfaces to support learnable attention sink mechanism for original <u>Flex-Flash-Attention</u>, <u>MagiAttention</u>, as well as the <u>Flash-Attention</u> 2/3 as one of the [MagiAttention Extensions](https://github.com/SandAI-org/MagiAttention/tree/main/extensions#flashattention-with-attention-sink).
 
-- Just add an optional tensor sink to the argument list of flex_flash_attn_func
-- And when and only when sink tensor is given, FFA will apply attention sink for forward and compute dsink for backward, otherwise, attention sink is skipped and dsink is also returned as None
-- dtype: float32
-- shape: [seqlen_sink, num_heads_q], where seqlen_sink in [1, 8]
+
+### Flex-Flash-Attention
+
+- Just add an optional tensor `sink` to the argument list of `flex_flash_attn_func`.
+- And when and only when `sink` tensor is given, `flex_flash_attn_func` will apply attention sink during the forward pass, and compute `dsink`  (<em>the gradient of `sink`</em>) during the backward pass. 
+- Otherwise, attention sink is skipped and `dsink` is also returned as `None`.
+- dtype: `float32` only.
+- shape: `[seqlen_sink, num_heads_q]`, where `seqlen_sink` in `[1, 8]`.
+- interface difference with the original `flex_flash_attn_func`:
 
 ```diff
 def flex_flash_attn_func(
@@ -110,13 +132,16 @@ def flex_flash_attn_func(
 ```
 
 
-### MagiAttn
+### MagiAttention
 
-- Just add an optional global replicated tensor sink to the argument list of calc_attn, dist_attn_func
-- And when and only when sink tensor is given, dist_attn_func will apply attention sink for forward once and only once for the same q row and compute local partial dsink and all-reduce across cp ranks, otherwise, attention sink is skipped and dsink is also returned as None
-- dtype: float32
-- shape: [seqlen_sink, num_heads_q], where seqlen_sink in [1, 8]
-- parallel style: Replicate
+- Just add an optional **replicated** tensor `sink` to the argument list of `calc_attn`.
+- And when and only when **replicated** `sink` tensor is given, `calc_attn` will apply attention sink during the forward pass for each **local** query token, and compute **partial** `dsink` during the backward pass.
+- And an `all-reduce` communication might be applied across cp ranks to return the **reduced** `dsink` if required (<em>see the environment variable `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP` in our [docs](https://sandai-org.github.io/MagiAttention/docs/main/env_variables.html#for-correctness)</em>).
+- Otherwise, attention sink is skipped and `dsink` is also returned as `None`.
+- dtype: `float32` only.
+- shape: `[seqlen_sink, num_heads_q]`, where `seqlen_sink` in `[1, 8]`.
+- parallel style: `Replicate`.
+- interface difference with the original `calc_attn`:
 
 ```diff
 def calc_attn(
@@ -132,7 +157,14 @@ def calc_attn(
 ```
 
 
-### Flash Attention
+### Flash Attention Extension
+
+- Just add an optional tensor `sink` to the argument list of `flash_attn_func`, `flash_attn_varlen_func`, etc.
+- And when and only when `sink` tensor is given, flash attention will apply attention sink during the forward pass, and compute `dsink` during the backward pass.
+- Otherwise, attention sink is skipped and `dsink` is also returned as `None`.
+- dtype: `float32` only.
+- shape: `[seqlen_sink, num_heads_q]`, where `seqlen_sink` has no limit.
+- interface difference with the original flash attention:
 
 ```diff
 - def flash_attn_func(
@@ -191,6 +223,28 @@ def calc_attn(
 
 ## Math Derivation
 
+Below, we provide the step-by-step math derivation of the original forward / backward passes for <u>Flex-Flash-Attention</u> (<em>the same as <u>Flash-Attention</u></em>) w/o sink tokens, and then the differences when involving the learnable attention sink mechanism, serving as the guidence for our implementations in the next section.
+
+<b>NOTE: </b>
+
+<b>1. To simplify the derivation, we drop the `batch` dimension and only keep the `num_heads` dimension to the leftmost acting as the implicit `batch` dimension.</b>
+
+<b>2. To focus on the attention sink mechanism, we assume you're already familiar with <u>Flash Attention</u> and will skip over its finer details, like the double-loop tiling strategy and the derivation of online softmax correction based on `log-sum-exp` operations.</b>
+
+<b>3. If you are new to <u>Flash Attention</u> or well-interested in the full original math derivation, we highly recommend this blog post: [Flash Attention 2 Math Derivation](https://github.com/Strivin0311/llms-learning/blob/main/dev/modeling/lm/transformer/attn/fa2_deri.md).</b>
+
+<b>Symbol Notation:</b>
+
+| symbol              | notation                                                                           |
+|-----------------------|----------------------------------------------------------------------------------|
+| $\times$           | matrix multiplication                                                               |
+| $\cdot$            | scalar multiplication                                                               |
+| $\odot$            | element-wise multiplication (Hadamard product)                                      |
+| $sq, sk, s\\_sink$ | the sequence length of query tokens, key tokens, and attention sink tokens          |
+| $nhq, nhk$         | the number of heads of query tokens and key tokens                                  |
+| $hd$               | the head dimension of query, key and value tokens                                   |
+| $X_i$              | the column vector made by the $i$-th row of matrix $X$ along the sequence dimension |
+
 ### FFA Forward
 
 #### FFA forward w/o sink tokens
@@ -239,7 +293,7 @@ $$
 
 #### FFA forward with sink tokens
 
-- step1: (the same)
+- step1: (<em>the same</em>)
 
 - step2:
 
@@ -276,7 +330,7 @@ $$
 \end{aligned}
 $$
 
-- sink correction: (as a post-processing of original ffa forward w/o sink tokens)
+- <b>sink correction</b>: (<em>as a post-processing of original ffa forward w/o sink tokens</em>)
 
 $$
 \begin{aligned}
@@ -298,7 +352,7 @@ $$
 
 #### FFA backward w/o sink tokens
 
-- step1: (as a pre-processing)
+- step1: (<em>as a pre-processing</em>)
 
 $$
 \begin{aligned}
@@ -310,7 +364,7 @@ $$
 \end{aligned}
 $$
 
-- step2:(recomputation)
+- step2:(<em>recomputation</em>)
 
 $$
 \begin{aligned}
@@ -372,7 +426,7 @@ $$
 
 #### FFA backward with sink tokens
 
-- step1: (as a pre-processing)
+- step1: (<em>as a pre-processing as well</em>)
 
 $$
 \begin{aligned}
@@ -391,7 +445,7 @@ $$
 \end{aligned}
 $$
 
-- step2:(recomputation)
+- step2:(<em>recomputation</em>)
 
 $$
 \begin{aligned}
@@ -451,9 +505,9 @@ $$
 \end{aligned}
 $$
 
-- step5: (the same)
+- step5: (<em>the same</em>)
 
-- dsink computation: (as a pre-processing of original ffa backward w/o sink tokens)
+- <b>dsink computation</b>: (<em>as another pre-processing of original ffa backward w/o sink tokens</em>)
 
 $$
 \begin{aligned}
@@ -469,9 +523,16 @@ $$
 
 ## Implementations
 
+Based on the math derivation in the previous section, we can easily find out that the integration of the attention implementations in the <u>Flash Attention</u> style with the learnable attention sink mechanism only requires:
+
+- For forward pass, we have nothing to change about the original implementation, but should apply an additional post-processing to correct the returned `out` and `lse` with `sink` tokens (<em>see the <b>sink correction</b> of the [FFA forward with sink tokens](#ffa-forward-with-sink-tokens)</em>).
+- For backward pass, we have nothing to change about the original implementation, but should apply an additional pre-processing to compute the `dsink`, i.e. the gradient of `sink` (<em>see the <b>dsink computation</b> of the [FFA backward with sink tokens](#ffa-backward-with-sink-tokens)</em>). 
+
+Therefore, ...
+
 ### Torch Reference
 
-- reference implementation w/o sink tokens
+- reference implementation w/o sink tokens:
 
 ```python
 # apply `S = Q x K.T * scale + bias`
@@ -493,7 +554,7 @@ out = p @ v
 return out, lse
 ```
 
-- reference implementation difference with sink tokens
+- reference implementation difference with sink tokens:
 
 ```diff
 # apply `S = Q x K.T * scale + bias`
@@ -524,9 +585,11 @@ out = p @ v
 return out, lse
 ```
 
-### FFA Forward
+### Flex-Flash-Attention
 
-#### Outside
+#### FFA Forward
+
+##### Outside of the FFA kernels
 
 - use sink correction to correct out, lse when ffa forward kernel returns, as a post-processing kernel outside
 
@@ -546,7 +609,8 @@ out *= exp(lse - corrected_lse)
 return out, lse
 ```
 
-#### Inside
+##### Inside the FFA kernels
+
 - Since FFA forward already has a post-processing kernel FastZeroFillKernel to zero-fill up the never-stored rows of O, indicated by "whether the corr. row of lse is still -inf", ...
 
 - We can integrate the sink correction process into FastZeroFillKernel as follows:
@@ -555,9 +619,9 @@ return out, lse
   - As for out correction, if the current row of lse is not -inf, then load the corr. row of O, rescale it and write it back, otherwise, the corr. row of O still needs to be filled up with 0, so nothing to do
 
 
-### FFA Backward
+#### FFA Backward
 
-#### Outside
+##### Outside of the FFA kernels
 
 - use dsink computation to compute dsink before ffa backward kernel launchs, as a pre-processing kernel outside
 
@@ -583,7 +647,7 @@ dsink = reduce(p_sink * -delta, "nhq sq s_sink -> s_sink nhq", "sum")
 return dsink
 ```
 
-#### Inside
+##### Inside the FFA kernels
 
 - Since FFA backward already has a pre-processing kernel FlashAttnBwdPreprocess to compute Delta w.r.t. step1 (in ffa, we name it dPsum), and rescale lse from base e to 2(in ffa, we name it LSE_log2), as follows:
   - The kernel is launched with grid size: (seqlen_q//kBlockM, nhq), and block size: (MaxThreadsPerBlock,), where kBlockM <= MaxThreadsPerBlock
@@ -612,7 +676,9 @@ return dsink
   - To avoid the block-level thread fence for dPsum, each thread can first load its p_sink to shared memory, and then let those threads who write back dPsum to compute partial d_sink and store to the same shared memory as p_sink
 
 
-### MagiAttn Forward
+### MagiAttention
+
+#### MagiAttn Forward
 
 - Since sink is replicated across cp ranks, we can easily apply attention sink by just passing sink into _flex_flash_attn_forward
 - However, the attention sink can be applied once and only once for the same q row, thus we apply it at the host stage, i.e. only for local attention.
@@ -661,7 +727,7 @@ out = torch.zeros_like(
 return out, lse
 ```
 
-### MagiAttn Backward
+#### MagiAttn Backward
 
 - Since sink is replicated while q is sharded across cp ranks, and dsink needs to be reduced along the seqlen_q dim, ...
 
@@ -707,29 +773,6 @@ return out, lse
 
 + return dsink
 ```
-
-
-## References
-
-### Research
-- StreamingLLM:
-  - paper: Efficient Streaming Language Models with Attention Sinks
-  - github: https://github.com/mit-han-lab/streaming-llm
-- Empirical View:
-  - paper: When Attention Sink Emerges in Language Models: An Empirical View
-  - github: https://github.com/sail-sg/Attention-Sink
-- Attention Is Off By One:
-  - blog: https://www.evanmiller.org/attention-is-off-by-one.html
-  - github: https://github.com/kyegomez/AttentionIsOFFByOne
-- Others:
-  - See What You Are Told: Visual Attention Sink in Large Multimodal Models
-  - Softpick: No Attention Sink, No Massive Activations with Rectified Softmax
-
-### Implementation
-- GPT-OSS:
-  - github: https://github.com/openai/gpt-oss/blob/main/gpt_oss/torch/model.py#L153
-- Flash-Attention 4:
-  - github: https://github.com/Dao-AILab/flash-attention/tree/main/flash_attn/cute
 
 
 ## Citation
