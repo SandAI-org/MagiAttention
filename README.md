@@ -456,7 +456,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## Citation 📝
 
-If you use MagiAttention in your research, please cite:
+If you find MagiAttention useful in your research, please cite:
 
 ```bibtex
 @misc{magiattention2025,
