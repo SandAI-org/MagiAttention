@@ -427,7 +427,7 @@ We are grateful to the contributors listed below for their valuable contribution
 
 ## Citation
 
-If you use MagiAttention in your research, please cite:
+If you find MagiAttention useful in your research, please cite:
 
 ```bibtex
 @misc{magiattention2025,
