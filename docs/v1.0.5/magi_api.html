@@ -1,0 +1,1871 @@
+
+<!DOCTYPE html>
+
+
+<html lang="en" data-content_root="./" >
+
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>API Reference &#8212; MagiAttention 1.0.5 documentation</title>
+  
+  
+  
+  <script data-cfasync="false">
+    document.documentElement.dataset.mode = localStorage.getItem("mode") || "";
+    document.documentElement.dataset.theme = localStorage.getItem("theme") || "";
+  </script>
+  <!--
+    this give us a css class that will be invisible only if js is disabled
+  -->
+  <noscript>
+    <style>
+      .pst-js-only { display: none !important; }
+
+    </style>
+  </noscript>
+  
+  <!-- Loaded before other Sphinx assets -->
+  <link href="_static/styles/theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+<link href="_static/styles/pydata-sphinx-theme.css?digest=8878045cc6db502f8baf" rel="stylesheet" />
+
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=3ee1c6c6" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=9d37742d" />
+  
+  <!-- So that users can add custom icons -->
+  <script src="_static/scripts/fontawesome.js?digest=8878045cc6db502f8baf"></script>
+  <!-- Pre-loaded scripts that we'll load fully later -->
+  <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf" />
+<link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf" />
+
+    <script src="_static/documentation_options.js?v=d55fa986"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=fd10adb8"></script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'magi_api';</script>
+    <script>
+        DOCUMENTATION_OPTIONS.theme_version = '0.16.1';
+        DOCUMENTATION_OPTIONS.theme_switcher_json_url = 'https://raw.githubusercontent.com/SandAI-org/MagiAttention/refs/heads/gh-pages/docs/versions.json';
+        DOCUMENTATION_OPTIONS.theme_switcher_version_match = '1.0.5';
+        DOCUMENTATION_OPTIONS.show_version_warning_banner =
+            true;
+        </script>
+    <link rel="canonical" href="https://sandai-org.github.io/MagiAttention/docs/magi_api.html" />
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Environment Variables" href="env_variables.html" />
+    <link rel="prev" title="QuickStart" href="quickstart.html" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="docsearch:language" content="en"/>
+  <meta name="docsearch:version" content="" />
+  </head>
+  
+  
+  <body data-bs-spy="scroll" data-bs-target=".bd-toc-nav" data-offset="180" data-bs-root-margin="0px 0px -60%" data-default-mode="">
+
+  
+  
+  <div id="pst-skip-link" class="skip-link d-print-none"><a href="#main-content">Skip to main content</a></div>
+  
+  <div id="pst-scroll-pixel-helper"></div>
+  
+  <button type="button" class="btn rounded-pill" id="pst-back-to-top">
+    <i class="fa-solid fa-arrow-up"></i>Back to top</button>
+
+  
+  <dialog id="pst-search-dialog">
+    
+<form class="bd-search d-flex align-items-center"
+      action="search.html"
+      method="get">
+  <i class="fa-solid fa-magnifying-glass"></i>
+  <input type="search"
+         class="form-control"
+         name="q"
+         placeholder="Search the docs ..."
+         aria-label="Search the docs ..."
+         autocomplete="off"
+         autocorrect="off"
+         autocapitalize="off"
+         spellcheck="false"/>
+  <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd>K</kbd></span>
+</form>
+  </dialog>
+
+  <div class="pst-async-banner-revealer d-none">
+  <aside id="bd-header-version-warning" class="d-none d-print-none" aria-label="Version warning"></aside>
+</div>
+
+  
+    <header class="bd-header navbar navbar-expand-lg bd-navbar d-print-none">
+<div class="bd-header__inner bd-page-width">
+  <button class="pst-navbar-icon sidebar-toggle primary-toggle" aria-label="Site navigation">
+    <span class="fa-solid fa-bars"></span>
+  </button>
+  
+  
+  <div class="col-lg-3 navbar-header-items__start">
+    
+      <div class="navbar-item">
+
+  
+    
+  
+
+<a class="navbar-brand logo" href="index.html">
+  
+  
+  
+  
+  
+    
+    
+      
+    
+    
+    <img src="_static/magi-black.png" class="logo__image only-light" alt=""/>
+    <img src="_static/magi-black.png" class="logo__image only-dark pst-js-only" alt=""/>
+  
+  
+    <p class="title logo__title">MagiAttention</p>
+  
+</a></div>
+    
+      <div class="navbar-item">
+<div class="version-switcher__container dropdown pst-js-only">
+  <button id="pst-version-switcher-button-2"
+    type="button"
+    class="version-switcher__button btn btn-sm dropdown-toggle"
+    data-bs-toggle="dropdown"
+    aria-haspopup="listbox"
+    aria-controls="pst-version-switcher-list-2"
+    aria-label="Version switcher list"
+  >
+    Choose version  <!-- this text may get changed later by javascript -->
+    <span class="caret"></span>
+  </button>
+  <div id="pst-version-switcher-list-2"
+    class="version-switcher__menu dropdown-menu list-group-flush py-0"
+    role="listbox" aria-labelledby="pst-version-switcher-button-2">
+    <!-- dropdown will be populated by javascript on page load -->
+  </div>
+</div></div>
+    
+  </div>
+  
+  <div class="col-lg-9 navbar-header-items">
+    
+    <div class="me-auto navbar-header-items__center">
+      
+        <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="guide.html">
+    User Guide
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+      
+    </div>
+    
+    
+    <div class="navbar-header-items__end">
+      
+        <div class="navbar-item navbar-persistent--container">
+          
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+        </div>
+      
+      
+        <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+      
+        <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+      
+    </div>
+    
+  </div>
+  
+  
+    <div class="navbar-persistent--mobile">
+
+<button class="btn search-button-field search-button__button pst-js-only" title="Search" aria-label="Search" data-bs-placement="bottom" data-bs-toggle="tooltip">
+ <i class="fa-solid fa-magnifying-glass"></i>
+ <span class="search-button__default-text">Search</span>
+ <span class="search-button__kbd-shortcut"><kbd class="kbd-shortcut__modifier">Ctrl</kbd>+<kbd class="kbd-shortcut__modifier">K</kbd></span>
+</button>
+    </div>
+  
+
+  
+    <button class="pst-navbar-icon sidebar-toggle secondary-toggle" aria-label="On this page">
+      <span class="fa-solid fa-outdent"></span>
+    </button>
+  
+</div>
+
+    </header>
+  
+
+  <div class="bd-container">
+    <div class="bd-container__inner bd-page-width">
+      
+      
+      
+      <dialog id="pst-primary-sidebar-modal"></dialog>
+      <div id="pst-primary-sidebar" class="bd-sidebar-primary bd-sidebar">
+        
+
+  
+  <div class="sidebar-header-items sidebar-primary__section">
+    
+    
+      <div class="sidebar-header-items__center">
+        
+          
+          
+            <div class="navbar-item">
+<nav>
+  <ul class="bd-navbar-elements navbar-nav">
+    
+<li class="nav-item current active">
+  <a class="nav-link nav-internal" href="guide.html">
+    User Guide
+  </a>
+</li>
+
+  </ul>
+</nav></div>
+          
+        
+      </div>
+    
+    
+    
+      <div class="sidebar-header-items__end">
+        
+          <div class="navbar-item">
+
+<button class="btn btn-sm nav-link pst-navbar-icon theme-switch-button pst-js-only" aria-label="Color mode" data-bs-title="Color mode"  data-bs-placement="bottom" data-bs-toggle="tooltip">
+  <i class="theme-switch fa-solid fa-sun                fa-lg" data-mode="light" title="Light"></i>
+  <i class="theme-switch fa-solid fa-moon               fa-lg" data-mode="dark"  title="Dark"></i>
+  <i class="theme-switch fa-solid fa-circle-half-stroke fa-lg" data-mode="auto"  title="System Settings"></i>
+</button></div>
+        
+          <div class="navbar-item"><ul class="navbar-icon-links"
+    aria-label="Icon Links">
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://github.com/SandAI-org/MagiAttention" title="Github" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fa-brands fa-github fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Github</span></a>
+        </li>
+        <li class="nav-item">
+          
+          
+          
+          
+          
+          
+          
+          
+          <a href="https://sandai-org.github.io/MagiAttention/blog/" title="Blog" class="nav-link pst-navbar-icon" rel="noopener" target="_blank" data-bs-toggle="tooltip" data-bs-placement="bottom"><i class="fas fa-book-bookmark fa-lg" aria-hidden="true"></i>
+            <span class="sr-only">Blog</span></a>
+        </li>
+</ul></div>
+        
+      </div>
+    
+  </div>
+  
+    <div class="sidebar-primary-items__start sidebar-primary__section">
+        <div class="sidebar-primary-item">
+<nav class="bd-docs-nav bd-links"
+     aria-label="Section Navigation">
+  <p class="bd-links__title" role="heading" aria-level="1">Section Navigation</p>
+  <div class="bd-toc-item navbar-nav"><p aria-level="2" class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="install.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">QuickStart</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="env_variables.html">Environment Variables</a></li>
+</ul>
+</div>
+</nav></div>
+    </div>
+  
+  
+  <div class="sidebar-primary-items__end sidebar-primary__section">
+      <div class="sidebar-primary-item">
+<div id="ethical-ad-placement"
+      class="flat"
+      data-ea-publisher="readthedocs"
+      data-ea-type="readthedocs-sidebar"
+      data-ea-manual="true">
+</div></div>
+  </div>
+
+
+      </div>
+      
+      <main id="main-content" class="bd-main" role="main">
+        
+        
+          <div class="bd-content">
+            <div class="bd-article-container">
+              
+              <div class="bd-header-article d-print-none">
+<div class="header-article-items header-article__inner">
+  
+    <div class="header-article-items__start">
+      
+        <div class="header-article-item">
+
+<nav aria-label="Breadcrumb" class="d-print-none">
+  <ul class="bd-breadcrumbs">
+    
+    <li class="breadcrumb-item breadcrumb-home">
+      <a href="index.html" class="nav-link" aria-label="Home">
+        <i class="fa-solid fa-home"></i>
+      </a>
+    </li>
+    
+    <li class="breadcrumb-item"><a href="guide.html" class="nav-link">User Guide</a></li>
+    
+    <li class="breadcrumb-item active" aria-current="page"><span class="ellipsis">API Reference</span></li>
+  </ul>
+</nav>
+</div>
+      
+    </div>
+  
+  
+</div>
+</div>
+              
+              
+              
+                
+<div id="searchbox"></div>
+                <article class="bd-article">
+                  
+  <section id="module-magi_attention.api">
+<span id="api-reference"></span><h1>API Reference<a class="headerlink" href="#module-magi_attention.api" title="Link to this heading">#</a></h1>
+<nav class="contents local" id="contents">
+<ul class="simple">
+<li><p><a class="reference internal" href="#flexible-flash-attention" id="id1">Flexible Flash Attention</a></p></li>
+<li><p><a class="reference internal" href="#dispatch" id="id2">Dispatch</a></p>
+<ul>
+<li><p><a class="reference internal" href="#varlen-dispatch" id="id3">Varlen Dispatch</a></p></li>
+<li><p><a class="reference internal" href="#flexible-dispatch" id="id4">Flexible Dispatch</a></p></li>
+<li><p><a class="reference internal" href="#dispatch-function" id="id5">Dispatch Function</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#calculate-attention" id="id6">Calculate Attention</a></p></li>
+<li><p><a class="reference internal" href="#undispatch" id="id7">Undispatch</a></p>
+<ul>
+<li><p><a class="reference internal" href="#undispatch-function" id="id8">Undispatch Function</a></p></li>
+</ul>
+</li>
+<li><p><a class="reference internal" href="#utility-functions" id="id9">Utility Functions</a></p>
+<ul>
+<li><p><a class="reference internal" href="#compute-pad-size-and-padding" id="id10">Compute Pad Size and Padding</a></p></li>
+<li><p><a class="reference internal" href="#get-position-ids" id="id11">Get Position Ids</a></p></li>
+<li><p><a class="reference internal" href="#get-most-recent-key" id="id12">Get Most Recent Key</a></p></li>
+<li><p><a class="reference internal" href="#infer-varlen-masks" id="id13">Infer Varlen Masks</a></p></li>
+<li><p><a class="reference internal" href="#infer-sliding-window-masks" id="id14">Infer Sliding Window Masks</a></p></li>
+</ul>
+</li>
+</ul>
+</nav>
+<section id="flexible-flash-attention">
+<h2><a class="toc-backref" href="#id1" role="doc-backlink">Flexible Flash Attention</a><a class="headerlink" href="#flexible-flash-attention" title="Link to this heading">#</a></h2>
+<p>To support computing irregular-shaped masks, we implemented a <code class="docutils literal notranslate"><span class="pre">flexible_flash_attention</span></code> kernel, which can be invoked through the following interface.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.functional.flex_flash_attn.flex_flash_attn_func">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.functional.flex_flash_attn.</span></span><span class="sig-name descname"><span class="pre">flex_flash_attn_func</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.functional.flex_flash_attn.flex_flash_attn_func" title="Link to this definition">#</a></dt>
+<dd><p>An interface similar to flash attention that doesn’t require distributed environment, dispatch or undispatch.
+Directly call magi_attn_kernel to get attention output and lse. This is faster when you don’t need context parallel.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>q</strong> (<em>torch.Tensor</em>) – Query tensor.</p></li>
+<li><p><strong>k</strong> (<em>torch.Tensor</em>) – Key tensor.</p></li>
+<li><p><strong>v</strong> (<em>torch.Tensor</em>) – Value tensor.</p></li>
+<li><p><strong>q_ranges</strong> (<em>torch.Tensor</em>) – Query ranges tensor to represent the attn mask.</p></li>
+<li><p><strong>k_ranges</strong> (<em>torch.Tensor</em>) – Key ranges tensor to represent the attn mask.</p></li>
+<li><p><strong>attn_type_map</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – <p>Attention type map tensor with dtype=torch.int32,
+Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to apply full attention for all ranges.
+The values specify the attention type for each token:</p>
+<blockquote>
+<div><ul>
+<li><p>0: full attention</p></li>
+<li><p>1: causal attention</p></li>
+<li><p>2: inverse causal attention</p></li>
+<li><p>3: bidirectional causal attention</p></li>
+</ul>
+</div></blockquote>
+<p>More information about the attention type map can be found in the <code class="docutils literal notranslate"><span class="pre">Note</span></code> below.</p>
+</p></li>
+<li><p><strong>sink</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – Learnable sink token tensor.
+Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to not apply attention sink.</p></li>
+<li><p><strong>softmax_scale</strong> (<em>float</em><em>, </em><em>optional</em>) – Softmax scale.
+Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to use: <code class="docutils literal notranslate"><span class="pre">1/sqrt(head_dim)</span></code>.</p></li>
+<li><p><strong>softcap</strong> (<em>float</em><em>, </em><em>optional</em>) – Softcap. Defaults to <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p></li>
+<li><p><strong>deterministic</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to use deterministic attention. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
+<li><p><strong>sm_margin</strong> (<em>int</em><em>, </em><em>optional</em>) – The amount of SMs reserved out,
+useful when considering overlapping with other kernels such as communication kernels.
+Defaults to <code class="docutils literal notranslate"><span class="pre">0</span></code> to use all available SMs.</p></li>
+<li><p><strong>disable_fwd_atomic_reduction</strong> (<em>bool</em><em>, </em><em>optional</em>) – <p>Whether to disable forward atomic reduction. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p>
+<blockquote>
+<div><p>If you can ensure <code class="docutils literal notranslate"><span class="pre">q_ranges</span></code> is non-overlapped,
+you can set this to <code class="docutils literal notranslate"><span class="pre">True</span></code> for better performance.
+The “overlap” term among <code class="docutils literal notranslate"><span class="pre">q_ranges</span></code> is defined as:
+if any two <code class="docutils literal notranslate"><span class="pre">q_range</span></code> in <code class="docutils literal notranslate"><span class="pre">q_ranges</span></code> have non-empty intersection, then it is overlapped.
+For example, <code class="docutils literal notranslate"><span class="pre">q_ranges</span></code> = <code class="docutils literal notranslate"><span class="pre">[[0,</span> <span class="pre">15],</span> <span class="pre">[10,</span> <span class="pre">20],</span> <span class="pre">[20,</span> <span class="pre">30]]</span></code> is overlapped
+since <code class="docutils literal notranslate"><span class="pre">q_range1</span></code> = <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">15]</span></code> and <code class="docutils literal notranslate"><span class="pre">q_range2</span></code> = <code class="docutils literal notranslate"><span class="pre">[10,</span> <span class="pre">20]</span></code> intersect,
+while `` q_ranges`` = <code class="docutils literal notranslate"><span class="pre">[[0,</span> <span class="pre">15],</span> <span class="pre">[15,</span> <span class="pre">20],</span> <span class="pre">[20,</span> <span class="pre">30]]</span></code> then is non-overlapped.</p>
+</div></blockquote>
+</p></li>
+<li><p><strong>auto_range_merge</strong> (<em>bool</em><em>, </em><em>optional</em>) – Whether to automatically merge k_ranges for the same q_range. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.
+<strong>Note:</strong> This flag is useful for sparse attention scenarios but still under development.</p></li>
+<li><p><strong>ref_block_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>] </em><em>| </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><ul class="simple">
+<li><p>out (torch.Tensor): Attention output tensor</p></li>
+<li><p>lse (torch.Tensor): Log-sum-exp values with dtype=torch.float32.</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple[torch.Tensor, torch.Tensor]</p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>Shape:</dt><dd><ul class="simple">
+<li><p>q: (num_tokens_q, num_heads_q, head_dim)</p></li>
+<li><p>k: (num_tokens_kv, num_heads_kv, head_dim)</p></li>
+<li><p>v: (num_tokens_kv, num_heads_kv, head_dim)</p></li>
+<li><p>sink: (num_tokens_sink, num_heads_q)</p></li>
+<li><p>q_ranges: (num_ranges, 2)</p></li>
+<li><p>k_ranges: (num_ranges, 2)</p></li>
+<li><p>attn_type_map: (num_ranges,)</p></li>
+<li><p>out: (num_tokens_q, num_heads_q, head_dim)</p></li>
+<li><p>lse: (num_tokens_q, num_heads_q)</p></li>
+</ul>
+</dd>
+</dl>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">attn_type_map</span></code> explains the semantics of different attention mask types.
+In addition to the descriptions below, see our blog for a visual explanation:
+<a class="reference external" href="https://sandai-org.github.io/MagiAttention/blog/#flex-flash-attn">https://sandai-org.github.io/MagiAttention/blog/#flex-flash-attn</a></p>
+<ol class="arabic">
+<li><dl>
+<dt>Full attention:</dt><dd><p>If seqlen_q = 5 and seqlen_k = 2:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">1</span> <span class="mi">1</span>
+</pre></div>
+</div>
+<p>If seqlen_q = 2 and seqlen_k = 5:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+</pre></div>
+</div>
+<p>If seqlen_q = 5 and seqlen_k = 5:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+</pre></div>
+</div>
+</dd>
+</dl>
+</li>
+<li><dl>
+<dt>Causal attention (bottom-right aligned):</dt><dd><p>If seqlen_q = 5 and seqlen_k = 2:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">1</span> <span class="mi">0</span>
+<span class="mi">1</span> <span class="mi">1</span>
+</pre></div>
+</div>
+<p>If seqlen_q = 2 and seqlen_k = 5:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">0</span>
+<span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+</pre></div>
+</div>
+<p>If seqlen_q = 5 and seqlen_k = 5:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">1</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">1</span> <span class="mi">1</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">0</span>
+<span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+</pre></div>
+</div>
+</dd>
+</dl>
+</li>
+<li><dl>
+<dt>Inverse causal attention (top-left aligned):</dt><dd><p>If seqlen_q = 5 and seqlen_k = 2:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">0</span> <span class="mi">1</span>
+<span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span>
+</pre></div>
+</div>
+<p>If seqlen_q = 2 and seqlen_k = 5:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">0</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+</pre></div>
+</div>
+<p>If seqlen_q = 5 and seqlen_k = 5:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">0</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">0</span> <span class="mi">0</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">1</span> <span class="mi">1</span>
+<span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">1</span>
+</pre></div>
+</div>
+</dd>
+</dl>
+</li>
+<li><dl>
+<dt>Bidirectional causal attention (intersection of causal and inverse causal):</dt><dd><p>This is the element-wise AND of causal and inverse causal masks.</p>
+<p>If seqlen_q = 5 and seqlen_k = 2:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span>
+</pre></div>
+</div>
+<p>If seqlen_q = 2 and seqlen_k = 5:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span> <span class="mi">1</span>
+</pre></div>
+</div>
+<p>If seqlen_q = 5 and seqlen_k = 5:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">1</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">1</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span> <span class="mi">1</span> <span class="mi">0</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">1</span> <span class="mi">0</span>
+<span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">0</span> <span class="mi">1</span>
+</pre></div>
+</div>
+</dd>
+</dl>
+</li>
+</ol>
+</div>
+</dd></dl>
+
+</section>
+<section id="dispatch">
+<h2><a class="toc-backref" href="#id2" role="doc-backlink">Dispatch</a><a class="headerlink" href="#dispatch" title="Link to this heading">#</a></h2>
+<section id="varlen-dispatch">
+<h3><a class="toc-backref" href="#id3" role="doc-backlink">Varlen Dispatch</a><a class="headerlink" href="#varlen-dispatch" title="Link to this heading">#</a></h3>
+<p>If you’re using a mask defined by <code class="docutils literal notranslate"><span class="pre">cu_seqlens</span></code>, such as a varlen full or varlen causal mask, we’ve designed a similar interface inspired by FlashAttention’s API, making it easy for you to get started quickly. In the function named <code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_dispatch</span></code>, you can obtain the dispatched <code class="docutils literal notranslate"><span class="pre">x</span></code> and <code class="docutils literal notranslate"><span class="pre">key</span></code>.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.magi_attn_varlen_dispatch">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">magi_attn_varlen_dispatch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.magi_attn_varlen_dispatch" title="Link to this definition">#</a></dt>
+<dd><p>This is a flash-attn-varlen like interface, to
+generate q_ranges, k_ranges and attn_mask_type from cu_seqlens_q, cu_seqlens_k, causal and window_size,
+further calculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
+finally pad and dispatch the input tensor to local tensor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>x</strong> (<em>torch.Tensor</em>) – input tensor</p></li>
+<li><p><strong>cu_seqlens_q</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for queries.</p></li>
+<li><p><strong>cu_seqlens_k</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for keys.</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by <code class="docutils literal notranslate"><span class="pre">chunk_size</span> <span class="pre">*</span> <span class="pre">cp_size</span></code>.</p></li>
+<li><p><strong>chunk_size</strong> (<em>int</em>) – chunk size to chunk the input tensor x along the seqlen dim for dispatch
+to control the granularity of computation load-balance.</p></li>
+<li><p><strong>cp_group_or_mesh</strong> (<em>dist.ProcessGroup</em><em> | </em><em>DeviceMesh</em>) – process group or device mesh.
+<strong>NOTE</strong>: for process group, we only support nccl backend for now,
+and for device mesh, we only support 1D or 2D mesh for now.</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – if <code class="docutils literal notranslate"><span class="pre">True</span></code>, all mask types are set to <code class="docutils literal notranslate"><span class="pre">CAUSAL</span></code>,
+otherwise, determine the mask types by <code class="docutils literal notranslate"><span class="pre">window_size</span></code>. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
+<li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
+which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
+when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.
+Defaults to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.</p></li>
+<li><p><strong>dist_attn_config</strong> (<em>DistAttnConfig</em>) – dist attn config.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><ul class="simple">
+<li><p>x (torch.Tensor): the input tensor after padding.</p></li>
+<li><p>key (DistAttnRuntimeKey): the key points to the inner DistAttnRuntimeMgr.</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple[torch.Tensor, DistAttnRuntimeKey]</p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">magi_attn_varlen_dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api.functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">compute_pad_size</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<span class="gp">... </span>    <span class="n">DistAttnConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">DispatchConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">OverlapConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">UniformOverlapAlg</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnOverlapMode</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Generate a DistAttnRuntimeKey and dispatch the input for flash-attn-varlen style mask</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_x</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span> <span class="o">=</span> <span class="n">magi_attn_varlen_dispatch</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">x</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="mi">4096</span><span class="p">,</span>  <span class="c1"># seqlen</span>
+<span class="gp">... </span>        <span class="mi">2048</span><span class="p">,</span>  <span class="c1"># hidden_size</span>
+<span class="gp">... </span>        <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cuda&quot;</span><span class="p">,</span>
+<span class="gp">... </span>        <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span><span class="p">,</span>
+<span class="gp">... </span>        <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span>    <span class="n">cu_seqlen_q</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">,</span> <span class="mi">4096</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span>    <span class="n">cu_seqlen_k</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">,</span> <span class="mi">4096</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span>    <span class="n">pad_size</span><span class="o">=</span><span class="n">compute_pad_size</span><span class="p">(</span><span class="mi">4096</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">512</span><span class="p">),</span>  <span class="c1"># seqlen, cp_size, chunk_size</span>
+<span class="gp">... </span>    <span class="n">chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">cp_group_or_mesh</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">)),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">causal</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">window_size</span><span class="o">=</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">dist_attn_config</span><span class="o">=</span><span class="n">DistAttnConfig</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="n">dispatch_config</span><span class="o">=</span><span class="n">DispatchConfig</span><span class="p">(</span><span class="n">alg</span><span class="o">=</span><span class="n">MinHeapDispatchAlg</span><span class="p">()),</span>
+<span class="gp">... </span>        <span class="n">overlap_config</span><span class="o">=</span><span class="n">OverlapConfig</span><span class="p">(</span>
+<span class="gp">... </span>            <span class="n">enable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">mode</span><span class="o">=</span><span class="n">AttnOverlapMode</span><span class="o">.</span><span class="n">STATIC</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">degree</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">min_chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">max_num_chunks</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">alg</span><span class="o">=</span><span class="n">UniformOverlapAlg</span><span class="p">(),</span>
+<span class="gp">... </span>        <span class="p">),</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Apply QKV projection</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span> <span class="o">=</span> <span class="n">q_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">k_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">v_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Calculate local attention</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Gather local attention outputs to total output if needed</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">total_out</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span><span class="n">local_out</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<p>The logic of the <code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_dispatch</span></code> function mainly consists of two parts: it first calls <code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_key</span></code> to compute a key value, and then uses this key to dispatch the input x. The description of <code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_key</span></code> is as follows.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.magi_attn_varlen_key">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">magi_attn_varlen_key</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.magi_attn_varlen_key" title="Link to this definition">#</a></dt>
+<dd><p>This is a flash-attn-varlen like interface,
+to generate q_ranges, k_ranges and attn_mask_type
+from cu_seqlens_q, cu_seqlens_k, causal and window_size,
+calculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>cu_seqlens_q</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for queries.</p></li>
+<li><p><strong>cu_seqlens_k</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for keys.</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by <code class="docutils literal notranslate"><span class="pre">chunk_size</span> <span class="pre">*</span> <span class="pre">cp_size</span></code>.</p></li>
+<li><p><strong>chunk_size</strong> (<em>int</em>) – chunk size to chunk the input tensor x along the seqlen dim for dispatch
+to control the granularity of computation load-balance.</p></li>
+<li><p><strong>cp_group_or_mesh</strong> (<em>dist.ProcessGroup</em><em> | </em><em>DeviceMesh</em>) – process group or device mesh.
+<strong>NOTE</strong>: for process group, we only support nccl backend for now,
+and for device mesh, we only support 1D or 2D mesh for now.</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – if <code class="docutils literal notranslate"><span class="pre">True</span></code>, all mask types are set to <code class="docutils literal notranslate"><span class="pre">CAUSAL</span></code>,
+otherwise, determine the mask types by <code class="docutils literal notranslate"><span class="pre">window_size</span></code>. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
+<li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
+which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
+when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.
+Defaults to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.</p></li>
+<li><p><strong>dist_attn_config</strong> (<em>DistAttnConfig</em>) – dist attn config.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>the key points to the inner DistAttnRuntimeMgr.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>DistAttnRuntimeKey</p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">magi_attn_varlen_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api.functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">compute_pad_size</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<span class="gp">... </span>    <span class="n">DistAttnConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">DispatchConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">OverlapConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">UniformOverlapAlg</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnOverlapMode</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Generate a DistAttnRuntimeKey to dispatch for flash-attn-varlen style mask</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">dist_attn_runtime_key</span> <span class="o">=</span> <span class="n">magi_attn_varlen_key</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">cu_seqlen_q</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">,</span> <span class="mi">4096</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span>    <span class="n">cu_seqlen_k</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">,</span> <span class="mi">4096</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span>    <span class="n">pad_size</span><span class="o">=</span><span class="n">compute_pad_size</span><span class="p">(</span><span class="mi">4096</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">512</span><span class="p">),</span> <span class="c1"># seqlen, cp_size, chunk_size</span>
+<span class="gp">... </span>    <span class="n">chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">cp_group_or_mesh</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">)),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">causal</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">window_size</span><span class="o">=</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">dist_attn_config</span><span class="o">=</span><span class="n">DistAttnConfig</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="n">dispatch_config</span><span class="o">=</span><span class="n">DispatchConfig</span><span class="p">(</span><span class="n">alg</span><span class="o">=</span><span class="n">MinHeapDispatchAlg</span><span class="p">()),</span>
+<span class="gp">... </span>        <span class="n">overlap_config</span><span class="o">=</span><span class="n">OverlapConfig</span><span class="p">(</span>
+<span class="gp">... </span>            <span class="n">enable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">mode</span><span class="o">=</span><span class="n">AttnOverlapMode</span><span class="o">.</span><span class="n">STATIC</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">degree</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">min_chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">max_num_chunks</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">alg</span><span class="o">=</span><span class="n">UniformOverlapAlg</span><span class="p">(),</span>
+<span class="gp">... </span>        <span class="p">),</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Dispatch several tensors with the same key</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_x</span><span class="p">,</span> <span class="n">local_label</span><span class="p">,</span> <span class="n">local_rope</span> <span class="o">=</span> <span class="p">[</span>
+<span class="gp">... </span>    <span class="n">dispatch</span><span class="p">(</span><span class="n">tensor</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="k">for</span> <span class="n">tensor</span> <span class="ow">in</span> <span class="p">[</span><span class="n">total_x</span><span class="p">,</span> <span class="n">total_label</span><span class="p">,</span> <span class="n">total_rope</span><span class="p">]</span>
+<span class="gp">... </span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Apply QKV projection</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span> <span class="o">=</span> <span class="n">q_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">k_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">v_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Calculate local attention</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Gather local attention outputs to total output if needed</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">total_out</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span><span class="n">local_out</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<p>If you want to apply more than one masks within the same training pass, you can use <code class="docutils literal notranslate"><span class="pre">make_varlen_key_for_new_mask_after_dispatch</span></code> to make a new key for the new mask, given the mask arguments specific for varlen mask in flash-attn-varlen style and the existing key used for dispatch.</p>
+<p>Then the new mask will reuse the same dispatch solution as the mask used for dispatch, but with different meta arguments for computation and communication.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">make_varlen_key_for_new_mask_after_dispatch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch" title="Link to this definition">#</a></dt>
+<dd><p>Make a new dist attn runtime key for a new mask after dispatch
+with the given arguments for the new mask in flash-attn-varlen style and the key used for dispatch</p>
+<p>NOTE: this API is useful when you want to apply more than one masks
+within the same training pass, if your model adopts hybrid-attn structure,
+in which case, we can only choose one of the masks to dispatch,
+while the others’re supposed to reuse the same dispatch solution
+with different meta arguments for computation and communication</p>
+<p>WARNING: in such case, we can not guarantee all the masks are load-balanced in computation
+and optimized in communication.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>cu_seqlens_q</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for queries.</p></li>
+<li><p><strong>cu_seqlens_k</strong> (<em>torch.Tensor</em>) – Cumulative sequence lengths for keys.</p></li>
+<li><p><strong>key_for_dispatch</strong> (<em>DistAttnRuntimeKey</em>) – the key used for dispatch</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – whether the varlen attention mask is causal. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
+<li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
+which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
+when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.
+Defaults to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.</p></li>
+<li><p><strong>dist_attn_config</strong> (<em>DistAttnConfig</em><em>, </em><em>optional</em>) – <p>the optional new dist attn config,</p>
+<p>NOTE: if not provided, we will use the same config as the <code class="docutils literal notranslate"><span class="pre">key_for_dispatch</span></code>,
+and if provided, the dispatch config of the new dist attn config won’t be applied to the new mask</p>
+</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><dl class="simple">
+<dt>the new dist attn runtime key</dt><dd><p>for new mask with the same dispatch solution as the <code class="docutils literal notranslate"><span class="pre">key_for_dispatch</span></code></p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>DistAttnRuntimeKey</p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">magi_attn_varlen_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">make_varlen_key_for_new_mask_after_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api.functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">compute_pad_size</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<span class="gp">... </span>    <span class="n">DistAttnConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">DispatchConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">OverlapConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">UniformOverlapAlg</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnOverlapMode</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Generate a DistAttnRuntimeKey to dispatch for flash-attn-varlen style mask</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># in the following case, we use a causal mask as the key for dispatch, thus it will consider</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># computation load-balance, communication optimization and computation-communication overlap</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># according to the causal mask pattern</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">key_for_dispatch</span> <span class="o">=</span> <span class="n">magi_attn_varlen_key</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">cu_seqlen_q</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span>    <span class="n">cu_seqlen_k</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span>    <span class="n">pad_size</span><span class="o">=</span><span class="n">compute_pad_size</span><span class="p">(</span><span class="mi">4096</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">512</span><span class="p">),</span> <span class="c1"># seqlen, cp_size, chunk_size</span>
+<span class="gp">... </span>    <span class="n">chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">cp_group_or_mesh</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">)),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">causal</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">window_size</span><span class="o">=</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">dist_attn_config</span><span class="o">=</span><span class="n">DistAttnConfig</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="n">dispatch_config</span><span class="o">=</span><span class="n">DispatchConfig</span><span class="p">(</span><span class="n">alg</span><span class="o">=</span><span class="n">MinHeapDispatchAlg</span><span class="p">()),</span>
+<span class="gp">... </span>        <span class="n">overlap_config</span><span class="o">=</span><span class="n">OverlapConfig</span><span class="p">(</span>
+<span class="gp">... </span>            <span class="n">enable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">mode</span><span class="o">=</span><span class="n">AttnOverlapMode</span><span class="o">.</span><span class="n">STATIC</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">degree</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">min_chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">max_num_chunks</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">alg</span><span class="o">=</span><span class="n">UniformOverlapAlg</span><span class="p">(),</span>
+<span class="gp">... </span>        <span class="p">),</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Dispatch several tensors with the same key_for_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_x</span><span class="p">,</span> <span class="n">local_label</span><span class="p">,</span> <span class="n">local_rope</span> <span class="o">=</span> <span class="p">[</span>
+<span class="gp">... </span>    <span class="n">dispatch</span><span class="p">(</span><span class="n">tensor</span><span class="p">,</span> <span class="n">key_for_dispatch</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="k">for</span> <span class="n">tensor</span> <span class="ow">in</span> <span class="p">[</span><span class="n">total_x</span><span class="p">,</span> <span class="n">total_label</span><span class="p">,</span> <span class="n">total_rope</span><span class="p">]</span>
+<span class="gp">... </span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Make a new dist attn runtime key from key_for_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># for a new mask, such as a sliding window causal mask below,</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># with the same dispatch solution as the causal mask used for dispatch,</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># i.e. this new key share the same dispatch meta as key_for_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># but it can handle the computation and communication of the new mask</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># and calculate attn correctly as well, though no optimization is applied for now</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">new_key_for_swa_mask</span> <span class="o">=</span> <span class="n">make_varlen_key_for_new_mask_after_dispatch</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">cu_seqlens_q</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">cu_seqlens_k</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">int32</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">causal</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">window_size</span><span class="o">=</span><span class="p">(</span><span class="mi">512</span><span class="p">,</span> <span class="mi">0</span><span class="p">),</span> <span class="c1"># sliding window causal mask</span>
+<span class="gp">... </span>    <span class="n">key_for_dispatch</span><span class="o">=</span><span class="n">key_for_dispatch</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Apply QKV projection</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span> <span class="o">=</span> <span class="n">q_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">k_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">v_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Calculate local attention for the mask used to dispatch with key_for_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_out1</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span><span class="p">,</span> <span class="n">key_for_dispatch</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Calculate local attention for the new swa mask with the new key</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># w/o undispatching back and dispatching again to avoid OOM</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_out2</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span><span class="p">,</span> <span class="n">new_key_for_swa_mask</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Gather local attention outputs to total output if needed</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">total_out1</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span><span class="n">local_out1</span><span class="p">,</span> <span class="n">key_for_dispatch</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">total_out2</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span><span class="n">local_out2</span><span class="p">,</span> <span class="n">new_key_for_swa_mask</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+</section>
+<section id="flexible-dispatch">
+<h3><a class="toc-backref" href="#id4" role="doc-backlink">Flexible Dispatch</a><a class="headerlink" href="#flexible-dispatch" title="Link to this heading">#</a></h3>
+<p>If the masks you’re using are not limited to varlen full or varlen causal, but also include sliding window masks or other more diverse types, we recommend using the following API. By calling <code class="docutils literal notranslate"><span class="pre">magi_attn_flex_dispatch</span></code>, you can obtain the dispatched x and key.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.magi_attn_flex_dispatch">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">magi_attn_flex_dispatch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.magi_attn_flex_dispatch" title="Link to this definition">#</a></dt>
+<dd><p>This is the most flexible interface,
+directly passing in q_ranges, k_ranges and attn_mask_type to
+calculate DistAttnRuntimeKey, generate the corr. inner DistAttnRuntimeMgr,
+finally pad and dispatch the input tensor to local tensor.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>x</strong> (<em>torch.Tensor</em>) – input tensor</p></li>
+<li><p><strong>q_ranges</strong> (<em>AttnRanges</em>) – the global query ranges</p></li>
+<li><p><strong>k_ranges</strong> (<em>AttnRanges</em>) – the global key ranges</p></li>
+<li><p><strong>attn_mask_type</strong> (<em>str</em><em> | </em><em>AttnMaskType</em><em> | </em><em>list</em><em>[</em><em>str</em><em> | </em><em>AttnMaskType</em><em>]</em>) – the global attn mask type (list)
+represented by str or enum <code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code> or their mixed combination</p></li>
+<li><p><strong>total_seqlen_q</strong> (<em>int</em>) – the total seqlen of query</p></li>
+<li><p><strong>total_seqlen_k</strong> (<em>int</em>) – the total seqlen of key</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by <code class="docutils literal notranslate"><span class="pre">chunk_size</span> <span class="pre">*</span> <span class="pre">cp_size</span></code>.</p></li>
+<li><p><strong>chunk_size</strong> (<em>int</em>) – chunk size to chunk the input tensor x along the seqlen dim for dispatch
+to control the granularity of computation load-balance.</p></li>
+<li><p><strong>cp_group_or_mesh</strong> (<em>dist.ProcessGroup</em><em> | </em><em>DeviceMesh</em>) – process group or device mesh.
+<strong>NOTE</strong>: for process group, we only support nccl backend for now,
+and for device mesh, we only support 1D or 2D mesh for now.</p></li>
+<li><p><strong>dist_attn_config</strong> (<em>DistAttnConfig</em>) – dist attn config</p></li>
+<li><p><strong>is_same_source</strong> (<em>bool</em>) – is query tensor and key tensor share the same source</p></li>
+<li><p><strong>is_q_permutable</strong> (<em>bool</em>) – is query tensor permutable</p></li>
+<li><p><strong>is_k_permutable</strong> (<em>bool</em>) – is key tensor permutable</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><ul class="simple">
+<li><p>local_x (torch.Tensor): the local input x after padding.</p></li>
+<li><p>key (DistAttnRuntimeKey): the key points to the inner DistAttnRuntimeMgr.</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple[torch.Tensor, DistAttnRuntimeKey]</p>
+</dd>
+</dl>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ol class="arabic">
+<li><p>For decoder-only transformers (e.g., GPT), it applies ‘self-attn’ as follows:</p>
+<blockquote>
+<div><ol class="loweralpha simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">is_same_source</span></code> is True.</p></li>
+<li><p>Both <code class="docutils literal notranslate"><span class="pre">q</span></code> and <code class="docutils literal notranslate"><span class="pre">k</span></code> are permutable, as long as they are permuted in the same way.</p></li>
+</ol>
+</div></blockquote>
+</li>
+<li><p>For encoder-decoder transformers (e.g., T5), it applies ‘cross-attn’ as follows:</p>
+<blockquote>
+<div><ol class="loweralpha simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">is_same_source</span></code> is False.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">q</span></code> is permutable but <code class="docutils literal notranslate"><span class="pre">k</span></code> is not.</p></li>
+</ol>
+</div></blockquote>
+</li>
+<li><p>For multi-modal transformers with external encoders, it applies ‘cross-attn’ as follows:</p>
+<blockquote>
+<div><ol class="loweralpha simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">is_same_source</span></code> is False.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">q</span></code> is unpermutable due to self-attn, but <code class="docutils literal notranslate"><span class="pre">k</span></code> is permutable even in a different way.</p></li>
+</ol>
+</div></blockquote>
+</li>
+</ol>
+</div>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">magi_attn_flex_dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api.functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">compute_pad_size</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<span class="gp">... </span>    <span class="n">DistAttnConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">DispatchConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">OverlapConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">UniformOverlapAlg</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnOverlapMode</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnRanges</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Generate a DistAttnRuntimeKey and dispatch the input for arbitrary mask represented by attn-slices</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_x</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span> <span class="o">=</span> <span class="n">magi_attn_flex_dispatch</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">x</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="mi">4096</span><span class="p">,</span>   <span class="c1"># seqlen</span>
+<span class="gp">... </span>        <span class="mi">2048</span><span class="p">,</span>   <span class="c1"># hidden_size</span>
+<span class="gp">... </span>        <span class="n">device</span><span class="o">=</span><span class="s2">&quot;cuda&quot;</span><span class="p">,</span>
+<span class="gp">... </span>        <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span><span class="p">,</span>
+<span class="gp">... </span>        <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span>    <span class="n">q_ranges</span><span class="o">=</span><span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">],</span> <span class="p">[</span><span class="mi">2048</span><span class="p">,</span> <span class="mi">4096</span><span class="p">]]),</span>
+<span class="gp">... </span>    <span class="n">k_ranges</span><span class="o">=</span><span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">],</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">]]),</span>
+<span class="gp">... </span>    <span class="n">attn_mask_type</span><span class="o">=</span><span class="s2">&quot;full&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">total_seqlen_q</span><span class="o">=</span><span class="mi">4096</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">total_seqlen_k</span><span class="o">=</span><span class="mi">4096</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">pad_size</span><span class="o">=</span><span class="n">compute_pad_size</span><span class="p">(</span><span class="mi">4096</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">512</span><span class="p">),</span>  <span class="c1"># seqlen, cp_size, chun_size</span>
+<span class="gp">... </span>    <span class="n">chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">cp_group_or_mesh</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">)),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">dist_attn_config</span><span class="o">=</span><span class="n">DistAttnConfig</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="n">dispatch_config</span><span class="o">=</span><span class="n">DispatchConfig</span><span class="p">(</span><span class="n">alg</span><span class="o">=</span><span class="n">MinHeapDispatchAlg</span><span class="p">()),</span>
+<span class="gp">... </span>        <span class="n">overlap_config</span><span class="o">=</span><span class="n">OverlapConfig</span><span class="p">(</span>
+<span class="gp">... </span>            <span class="n">enable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">mode</span><span class="o">=</span><span class="n">AttnOverlapMode</span><span class="o">.</span><span class="n">STATIC</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">degree</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">min_chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">max_num_chunks</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">alg</span><span class="o">=</span><span class="n">UniformOverlapAlg</span><span class="p">(),</span>
+<span class="gp">... </span>        <span class="p">),</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span>    <span class="n">is_same_source</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">is_q_permutable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">is_k_permutable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Apply QKV projection</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span> <span class="o">=</span> <span class="n">q_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">k_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">v_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Calculate local attention</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Gather local attention outputs to total output if needed</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">total_out</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span><span class="n">local_out</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<p>Similar to the logic of <code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_dispatch</span></code>, <code class="docutils literal notranslate"><span class="pre">magi_attn_flex_dispatch</span></code> first calls <code class="docutils literal notranslate"><span class="pre">magi_attn_flex_key</span></code> to obtain a key, and then uses this key to dispatch x. The description of <code class="docutils literal notranslate"><span class="pre">magi_attn_flex_key</span></code> is as follows.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.magi_attn_flex_key">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">magi_attn_flex_key</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.magi_attn_flex_key" title="Link to this definition">#</a></dt>
+<dd><p>This is the most flexible interface,
+directly passing in q_ranges, k_ranges and attn_mask_type to
+calculate DistAttnRuntimeKey and generate the corr. inner DistAttnRuntimeMgr.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>q_ranges</strong> (<em>AttnRanges</em>) – the global query ranges</p></li>
+<li><p><strong>k_ranges</strong> (<em>AttnRanges</em>) – the global key ranges</p></li>
+<li><p><strong>attn_mask_type</strong> (<em>str</em><em> | </em><em>AttnMaskType</em><em> | </em><em>list</em><em>[</em><em>str</em><em> | </em><em>AttnMaskType</em><em>]</em>) – the global attn mask type (list)
+represented by str or enum <code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code> or their mixed combination</p></li>
+<li><p><strong>total_seqlen_q</strong> (<em>int</em>) – the total seqlen of query</p></li>
+<li><p><strong>total_seqlen_k</strong> (<em>int</em>) – the total seqlen of key</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – the size to pad along seq_dim. The seq_len need to be divisable by <code class="docutils literal notranslate"><span class="pre">chunk_size</span> <span class="pre">*</span> <span class="pre">cp_size</span></code>.</p></li>
+<li><p><strong>chunk_size</strong> (<em>int</em>) – chunk size to chunk the input tensor x along the seqlen dim for dispatch
+to control the granularity of computation load-balance.</p></li>
+<li><p><strong>cp_group_or_mesh</strong> (<em>dist.ProcessGroup</em><em> | </em><em>DeviceMesh</em>) – process group or device mesh.
+<strong>NOTE</strong>: for process group, we only support nccl backend for now,
+and for device mesh, we only support 1D or 2D mesh for now.</p></li>
+<li><p><strong>dist_attn_config</strong> (<em>DistAttnConfig</em>) – dist attn config</p></li>
+<li><p><strong>is_same_source</strong> (<em>bool</em>) – is query tensor and key tensor share the same source</p></li>
+<li><p><strong>is_q_permutable</strong> (<em>bool</em>) – is query tensor permutable</p></li>
+<li><p><strong>is_k_permutable</strong> (<em>bool</em>) – is key tensor permutable</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>the key points to the inner DistAttnRuntimeMgr.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>DistAttnRuntimeKey</p>
+</dd>
+</dl>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ol class="arabic">
+<li><p>For decoder-only transformers (e.g., GPT), it applies ‘self-attn’ as follows:</p>
+<blockquote>
+<div><ol class="loweralpha simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">is_same_source</span></code> is True.</p></li>
+<li><p>Both <code class="docutils literal notranslate"><span class="pre">q</span></code> and <code class="docutils literal notranslate"><span class="pre">k</span></code> are permutable, as long as they are permuted in the same way.</p></li>
+</ol>
+</div></blockquote>
+</li>
+<li><p>For encoder-decoder transformers (e.g., T5), it applies ‘cross-attn’ as follows:</p>
+<blockquote>
+<div><ol class="loweralpha simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">is_same_source</span></code> is False.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">q</span></code> is permutable but <code class="docutils literal notranslate"><span class="pre">k</span></code> is not.</p></li>
+</ol>
+</div></blockquote>
+</li>
+<li><p>For multi-modal transformers with external encoders, it applies ‘cross-attn’ as follows:</p>
+<blockquote>
+<div><ol class="loweralpha simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">is_same_source</span></code> is False.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">q</span></code> is unpermutable due to self-attn, but <code class="docutils literal notranslate"><span class="pre">k</span></code> is permutable even in a different way.</p></li>
+</ol>
+</div></blockquote>
+</li>
+</ol>
+</div>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">magi_attn_flex_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api.functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">compute_pad_size</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<span class="gp">... </span>    <span class="n">DistAttnConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">DispatchConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">OverlapConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">UniformOverlapAlg</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnOverlapMode</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnRanges</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Generate a DistAttnRuntimeKey to dispatch for arbitrary mask represented by attn-slices</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">dist_attn_runtime_key</span> <span class="o">=</span> <span class="n">magi_attn_flex_key</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">q_ranges</span><span class="o">=</span><span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">],</span> <span class="p">[</span><span class="mi">2048</span><span class="p">,</span> <span class="mi">4096</span><span class="p">]]),</span>
+<span class="gp">... </span>    <span class="n">k_ranges</span><span class="o">=</span><span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">2048</span><span class="p">],</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">]]),</span>
+<span class="gp">... </span>    <span class="n">attn_mask_type</span><span class="o">=</span><span class="s2">&quot;full&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">total_seqlen_q</span><span class="o">=</span><span class="mi">4096</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">total_seqlen_k</span><span class="o">=</span><span class="mi">4096</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">pad_size</span><span class="o">=</span><span class="n">compute_pad_size</span><span class="p">(</span><span class="mi">4096</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">512</span><span class="p">),</span>  <span class="c1"># seqlen, cp_size, chunk_size</span>
+<span class="gp">... </span>    <span class="n">chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">cp_group_or_mesh</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">)),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">is_same_source</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">is_q_permutable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">is_k_permutable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">dist_attn_config</span><span class="o">=</span><span class="n">DistAttnConfig</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="n">dispatch_config</span><span class="o">=</span><span class="n">DispatchConfig</span><span class="p">(</span><span class="n">alg</span><span class="o">=</span><span class="n">MinHeapDispatchAlg</span><span class="p">()),</span>
+<span class="gp">... </span>        <span class="n">overlap_config</span><span class="o">=</span><span class="n">OverlapConfig</span><span class="p">(</span>
+<span class="gp">... </span>            <span class="n">enable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">mode</span><span class="o">=</span><span class="n">AttnOverlapMode</span><span class="o">.</span><span class="n">STATIC</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">degree</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">min_chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">max_num_chunks</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">alg</span><span class="o">=</span><span class="n">UniformOverlapAlg</span><span class="p">(),</span>
+<span class="gp">... </span>        <span class="p">),</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Dispatch several tensors with the same key</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_x</span><span class="p">,</span> <span class="n">local_label</span><span class="p">,</span> <span class="n">local_rope</span> <span class="o">=</span> <span class="p">[</span>
+<span class="gp">... </span>    <span class="n">dispatch</span><span class="p">(</span><span class="n">tensor</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="k">for</span> <span class="n">tensor</span> <span class="ow">in</span> <span class="p">[</span><span class="n">total_x</span><span class="p">,</span> <span class="n">total_label</span><span class="p">,</span> <span class="n">total_rope</span><span class="p">]</span>
+<span class="gp">... </span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Apply QKV projection</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span> <span class="o">=</span> <span class="n">q_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">k_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">v_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Calculate local attention</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Gather local attention outputs to total output if needed</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">total_out</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span><span class="n">local_out</span><span class="p">,</span> <span class="n">dist_attn_runtime_key</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<p>If you want to apply more than one varlen masks within the same training pass, you can use <code class="docutils literal notranslate"><span class="pre">make_flex_key_for_new_mask_after_dispatch</span></code> to make a new key for the new mask, given the mask arguments and the existing key used for dispatch.</p>
+<p>Then the new mask will reuse the same dispatch solution as the mask used for dispatch, but with different meta arguments for computation and communication.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">make_flex_key_for_new_mask_after_dispatch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch" title="Link to this definition">#</a></dt>
+<dd><p>Make a new dist attn runtime key for a new mask after dispatch
+with the given arguments for the new mask and the key used for dispatch</p>
+<p>NOTE: this API is useful when you want to apply more than one masks
+within the same training pass, if your model adopts hybrid-attn structure,
+in which case, we can only choose one of the masks to dispatch,
+while the others’re supposed to reuse the same dispatch solution
+with different meta arguments for computation and communication</p>
+<p>WARNING: in such case, we can not guarantee all the masks are load-balanced in computation
+and optimized in communication for now. However, we are working on it with the dynamic dist-attn solver
+to optimize the computation and communication for each distinct mask with the same dispatch solution</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>q_ranges</strong> (<em>AttnRanges</em>) – the global query ranges</p></li>
+<li><p><strong>k_ranges</strong> (<em>AttnRanges</em>) – the global key ranges</p></li>
+<li><p><strong>attn_mask_type</strong> (<em>str</em><em> | </em><em>AttnMaskType</em><em> | </em><em>list</em><em>[</em><em>str</em><em> | </em><em>AttnMaskType</em><em>]</em>) – the global attn mask type (list)
+represented by str or enum <code class="docutils literal notranslate"><span class="pre">AttnMaskType</span></code> or their mixed combination</p></li>
+<li><p><strong>key_for_dispatch</strong> (<em>DistAttnRuntimeKey</em>) – the key used for dispatch</p></li>
+<li><p><strong>dist_attn_config</strong> (<em>DistAttnConfig</em><em>, </em><em>optional</em>) – <p>the optional new dist attn config,</p>
+<p>NOTE: if not provided, we will use the same config as the <code class="docutils literal notranslate"><span class="pre">key_for_dispatch</span></code>,
+and if provided, the dispatch config of the new dist attn config won’t be applied to the new mask</p>
+</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><dl class="simple">
+<dt>the new dist attn runtime key</dt><dd><p>for new mask with the same dispatch solution as the <code class="docutils literal notranslate"><span class="pre">key_for_dispatch</span></code></p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>DistAttnRuntimeKey</p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<div class="doctest highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">magi_attn_flex_key</span><span class="p">,</span> <span class="n">dispatch</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="n">calc_attn</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="n">make_flex_key_for_new_mask_after_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api.functools</span><span class="w"> </span><span class="kn">import</span> <span class="n">compute_pad_size</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.config</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<span class="gp">... </span>    <span class="n">DistAttnConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">DispatchConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">OverlapConfig</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">MinHeapDispatchAlg</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">UniformOverlapAlg</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common.enum</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnOverlapMode</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.common</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttnRanges</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Generate a DistAttnRuntimeKey to dispatch for arbitrary mask represented by attn-slices</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># in the following case, we use a causal mask as the key for dispatch, thus it will consider</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># computation load-balance, communication optimization and computation-communication overlap</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># according to the causal mask pattern</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">key_for_dispatch</span> <span class="o">=</span> <span class="n">magi_attn_flex_key</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">q_ranges</span><span class="o">=</span><span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">]]),</span>
+<span class="gp">... </span>    <span class="n">k_ranges</span><span class="o">=</span><span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">]]),</span>
+<span class="gp">... </span>    <span class="n">attn_mask_type</span><span class="o">=</span><span class="s2">&quot;causal&quot;</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">total_seqlen_q</span><span class="o">=</span><span class="mi">4096</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">total_seqlen_k</span><span class="o">=</span><span class="mi">4096</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">pad_size</span><span class="o">=</span><span class="n">compute_pad_size</span><span class="p">(</span><span class="mi">4096</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">512</span><span class="p">),</span>  <span class="c1"># seqlen, cp_size, chunk_size</span>
+<span class="gp">... </span>    <span class="n">chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">cp_group_or_mesh</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">new_group</span><span class="p">(</span><span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">)),</span> <span class="n">backend</span><span class="o">=</span><span class="s2">&quot;nccl&quot;</span><span class="p">),</span>
+<span class="gp">... </span>    <span class="n">is_same_source</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">is_q_permutable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">is_k_permutable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>    <span class="n">dist_attn_config</span><span class="o">=</span><span class="n">DistAttnConfig</span><span class="p">(</span>
+<span class="gp">... </span>        <span class="n">dispatch_config</span><span class="o">=</span><span class="n">DispatchConfig</span><span class="p">(</span><span class="n">alg</span><span class="o">=</span><span class="n">MinHeapDispatchAlg</span><span class="p">()),</span>
+<span class="gp">... </span>        <span class="n">overlap_config</span><span class="o">=</span><span class="n">OverlapConfig</span><span class="p">(</span>
+<span class="gp">... </span>            <span class="n">enable</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">mode</span><span class="o">=</span><span class="n">AttnOverlapMode</span><span class="o">.</span><span class="n">STATIC</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">degree</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">min_chunk_size</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">max_num_chunks</span><span class="o">=</span><span class="mi">64</span><span class="p">,</span>
+<span class="gp">... </span>            <span class="n">alg</span><span class="o">=</span><span class="n">UniformOverlapAlg</span><span class="p">(),</span>
+<span class="gp">... </span>        <span class="p">),</span>
+<span class="gp">... </span>    <span class="p">),</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Dispatch several tensors with the same key_for_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_x</span><span class="p">,</span> <span class="n">local_label</span><span class="p">,</span> <span class="n">local_rope</span> <span class="o">=</span> <span class="p">[</span>
+<span class="gp">... </span>    <span class="n">dispatch</span><span class="p">(</span><span class="n">tensor</span><span class="p">,</span> <span class="n">key_for_dispatch</span><span class="p">)</span>
+<span class="gp">... </span>    <span class="k">for</span> <span class="n">tensor</span> <span class="ow">in</span> <span class="p">[</span><span class="n">total_x</span><span class="p">,</span> <span class="n">total_label</span><span class="p">,</span> <span class="n">total_rope</span><span class="p">]</span>
+<span class="gp">... </span><span class="p">]</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Make a new dist attn runtime key from key_for_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># for a new mask, such as a sliding window causal mask below,</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># with the same dispatch solution as the causal mask used for dispatch,</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># i.e. this new key share the same dispatch meta as key_for_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># but it can handle the computation and communication of the new mask</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># and calculate attn correctly as well, though no optimization is applied for now</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">new_key_for_swa_mask</span> <span class="o">=</span> <span class="n">make_flex_key_for_new_mask_after_dispatch</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">q_ranges</span><span class="o">=</span><span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">512</span><span class="p">],</span> <span class="p">[</span><span class="mi">512</span><span class="p">,</span> <span class="mi">4096</span><span class="p">]]),</span>
+<span class="gp">... </span>    <span class="n">k_ranges</span><span class="o">=</span><span class="n">AttnRanges</span><span class="o">.</span><span class="n">from_ranges</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">512</span><span class="p">],</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">4096</span><span class="p">]]),</span>
+<span class="gp">... </span>    <span class="n">attn_mask_type</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;causal&quot;</span><span class="p">,</span> <span class="s2">&quot;bi_causal&quot;</span><span class="p">],</span> <span class="c1"># sliding window causal mask</span>
+<span class="gp">... </span>    <span class="n">key_for_dispatch</span><span class="o">=</span><span class="n">key_for_dispatch</span><span class="p">,</span>
+<span class="gp">... </span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Apply QKV projection</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span> <span class="o">=</span> <span class="n">q_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">k_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">),</span> <span class="n">v_project</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Calculate local attention for the mask used to dispatch with key_for_dispatch</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_out1</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span><span class="p">,</span> <span class="n">key_for_dispatch</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Calculate local attention for the new swa mask with the new key</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># w/o undispatching back and dispatching again to avoid OOM</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">local_out2</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span><span class="n">local_q</span><span class="p">,</span> <span class="n">local_k</span><span class="p">,</span> <span class="n">local_v</span><span class="p">,</span> <span class="n">new_key_for_swa_mask</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt;</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="c1"># Gather local attention outputs to total output if needed</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">total_out1</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span><span class="n">local_out1</span><span class="p">,</span> <span class="n">key_for_dispatch</span><span class="p">)</span>
+<span class="gp">&gt;&gt;&gt; </span><span class="n">total_out2</span> <span class="o">=</span> <span class="n">undispatch</span><span class="p">(</span><span class="n">local_out2</span><span class="p">,</span> <span class="n">new_key_for_swa_mask</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd></dl>
+
+</section>
+<section id="dispatch-function">
+<h3><a class="toc-backref" href="#id5" role="doc-backlink">Dispatch Function</a><a class="headerlink" href="#dispatch-function" title="Link to this heading">#</a></h3>
+<p>If you already have the key, you can call <code class="docutils literal notranslate"><span class="pre">dispatch</span></code> function to get the padded and dispatched local tensor.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.dispatch">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">dispatch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.dispatch" title="Link to this definition">#</a></dt>
+<dd><p>Pad and dispatch the global input tensor to local tensor on each rank along the seqlen dim.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>x</strong> (<em>torch.Tensor</em>) – global input tensor.</p></li>
+<li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the key that holds some inner meta data,
+as one argument for many other magi_attention APIs,
+which users don’t have to bother with.</p></li>
+<li><p><strong>pad_value</strong> (<em>float</em>) – the specific value to pad to input tensor. Defaults to 0.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>the padded and dispatched local tensor.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>torch.Tensor</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><p><strong>ValueError</strong> – If the provided <code class="docutils literal notranslate"><span class="pre">key</span></code> does not exist in <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict</span></code>.</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+</section>
+<section id="calculate-attention">
+<h2><a class="toc-backref" href="#id6" role="doc-backlink">Calculate Attention</a><a class="headerlink" href="#calculate-attention" title="Link to this heading">#</a></h2>
+<p>After dispatch and projection, you should obtain the query, key, and value needed for computation. Using the key obtained from the dispatch function mentioned above, you can perform the computation by calling <code class="docutils literal notranslate"><span class="pre">calc_attn</span></code>, which returns the results out and lse.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.calc_attn">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">calc_attn</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.calc_attn" title="Link to this definition">#</a></dt>
+<dd><p>Apply attention computation.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>q</strong> (<em>torch.Tensor</em>) – local query tensor.</p></li>
+<li><p><strong>k</strong> (<em>torch.Tensor</em>) – local key tensor.</p></li>
+<li><p><strong>v</strong> (<em>torch.Tensor</em>) – local value tensor.</p></li>
+<li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the object that holds some inner meta data
+as one argument for many other magi_attention APIs,
+which users don’t have to bother with.</p></li>
+<li><p><strong>sink</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – global sink tensor (replicated among cp ranks).
+Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to not apply attention sink.</p></li>
+<li><p><strong>softmax_scale</strong> (<em>float</em><em>, </em><em>optional</em>) – softmax scale.
+Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to use: <code class="docutils literal notranslate"><span class="pre">1/sqrt(head_dim)</span></code>.</p></li>
+<li><p><strong>softcap</strong> (<em>float</em><em>, </em><em>optional</em>) – softcap. Defaults to <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><ul class="simple">
+<li><p>out (torch.Tensor): local output tensor.</p></li>
+<li><p>lse (torch.Tensor): local log-sum-exp tensor.</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple[torch.Tensor, torch.Tensor]</p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>Shapes:</dt><dd><ul class="simple">
+<li><p>q: [num_tokens_q_local, num_heads_q, head_dim]</p></li>
+<li><p>k: [num_tokens_kv_local, num_heads_kv, head_dim]</p></li>
+<li><p>v: [num_tokens_kv_local, num_heads_kv, head_dim]</p></li>
+<li><p>sink: [num_tokens_sink_global, num_heads_q]</p></li>
+<li><p>out: [num_tokens_q_local, num_heads_q, head_dim]</p></li>
+<li><p>lse: [num_tokens_q_local, num_heads_q]</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="field-list simple">
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>ValueError</strong> – If the provided <code class="docutils literal notranslate"><span class="pre">key</span></code> does not exist in <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict</span></code>.</p>
+</dd>
+<dt class="field-even">Parameters<span class="colon">:</span></dt>
+<dd class="field-even"><ul class="simple">
+<li><p><strong>q</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>k</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>v</strong> (<em>Tensor</em>)</p></li>
+<li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>)</p></li>
+<li><p><strong>sink</strong> (<em>Tensor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>softmax_scale</strong> (<em>float</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>softcap</strong> (<em>float</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple[<em>Tensor</em>, <em>Tensor</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="undispatch">
+<h2><a class="toc-backref" href="#id7" role="doc-backlink">Undispatch</a><a class="headerlink" href="#undispatch" title="Link to this heading">#</a></h2>
+<section id="undispatch-function">
+<h3><a class="toc-backref" href="#id8" role="doc-backlink">Undispatch Function</a><a class="headerlink" href="#undispatch-function" title="Link to this heading">#</a></h3>
+<p>When you need to recover the complete global tensor from the local tensor like computing the loss, you can call <code class="docutils literal notranslate"><span class="pre">undispatch</span></code> function to unpad and undispatch the local tensor along the seqlen dim.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.undispatch">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">undispatch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.undispatch" title="Link to this definition">#</a></dt>
+<dd><p>Undispatch and unpad the local tensor to global tensor along the seqlen dim.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>x</strong> (<em>torch.Tensor</em>) – local tensor</p></li>
+<li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the key that holds some inner meta data,
+as one argument for many other magi_attention APIs,
+which users don’t have to bother with.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>the undispatched and unpadded tensor.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>torch.Tensor</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><p><strong>ValueError</strong> – If the provided <code class="docutils literal notranslate"><span class="pre">key</span></code> does not exist in <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict</span></code>.</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+</section>
+<section id="utility-functions">
+<h2><a class="toc-backref" href="#id9" role="doc-backlink">Utility Functions</a><a class="headerlink" href="#utility-functions" title="Link to this heading">#</a></h2>
+<section id="compute-pad-size-and-padding">
+<h3><a class="toc-backref" href="#id10" role="doc-backlink">Compute Pad Size and Padding</a><a class="headerlink" href="#compute-pad-size-and-padding" title="Link to this heading">#</a></h3>
+<p>During the use of MagiAttention, we divide the <code class="docutils literal notranslate"><span class="pre">total_seqlen</span></code> into multiple chunks of size <code class="docutils literal notranslate"><span class="pre">chunk_size</span></code> and evenly distribute them across multiple GPUs. To ensure that <code class="docutils literal notranslate"><span class="pre">total_seqlen</span></code> is divisible by <code class="docutils literal notranslate"><span class="pre">chunk_size</span></code> and that each GPU receives the same number of chunks, we need to pad the original input.</p>
+<p>You can call <code class="docutils literal notranslate"><span class="pre">compute_pad_size</span></code> to calculate the required padding length, and use this value as a parameter in subsequent functions.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.functools.compute_pad_size">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.functools.</span></span><span class="sig-name descname"><span class="pre">compute_pad_size</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.functools.compute_pad_size" title="Link to this definition">#</a></dt>
+<dd><p>Compute the size to pad to the input tensor along the seqlen dim at last.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>total_seqlen_q</strong> (<em>int</em>) – seqlen of q.</p></li>
+<li><p><strong>cp_size</strong> (<em>int</em>) – The size of cp group.</p></li>
+<li><p><strong>chunk_size</strong> (<em>int</em>) – chunk size to chunk the input tensor x along the seqlen dim for dispatch
+to control the granularity of computation load-balance.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>the number of tokens to pad.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>int</p>
+</dd>
+</dl>
+</dd></dl>
+
+<p>After obtaining <code class="docutils literal notranslate"><span class="pre">pad_size</span></code>, you can use <code class="docutils literal notranslate"><span class="pre">pad_at_dim</span></code> and <code class="docutils literal notranslate"><span class="pre">unpad_at_dim</span></code> function to pad and unpad the tensor.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.functools.pad_at_dim">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.functools.</span></span><span class="sig-name descname"><span class="pre">pad_at_dim</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.functools.pad_at_dim" title="Link to this definition">#</a></dt>
+<dd><p>Pads a tensor along a specified dimension with a given value, either on the left or right side.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>x</strong> (<em>torch.Tensor</em>) – Input tensor to be padded.</p></li>
+<li><p><strong>dim</strong> (<em>int</em>) – The dimension along which to apply padding.</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – The number of values to pad.</p></li>
+<li><p><strong>value</strong> (<em>float</em><em>, </em><em>optional</em>) – The padding value. Defaults to <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p></li>
+<li><p><strong>side</strong> (<em>str</em><em>, </em><em>optional</em>) – Side on which to apply the padding, either <code class="docutils literal notranslate"><span class="pre">left</span></code> or <code class="docutils literal notranslate"><span class="pre">right</span></code>.
+Defaults to <code class="docutils literal notranslate"><span class="pre">right</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The padded tensor with the same number of dimensions as the input.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>torch.Tensor</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.functools.unpad_at_dim">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.functools.</span></span><span class="sig-name descname"><span class="pre">unpad_at_dim</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.functools.unpad_at_dim" title="Link to this definition">#</a></dt>
+<dd><p>Removes padding from a tensor along a specified dimension.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>x</strong> (<em>torch.Tensor</em>) – Input tensor from which padding will be removed.</p></li>
+<li><p><strong>dim</strong> (<em>int</em>) – The dimension along which to remove padding.</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – The number of elements to remove from the end of the specified dimension.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The tensor with padding removed along the specified dimension.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>torch.Tensor</p>
+</dd>
+</dl>
+</dd></dl>
+
+<p>Similarly, you can use <code class="docutils literal notranslate"><span class="pre">pad_size</span></code> along with <code class="docutils literal notranslate"><span class="pre">total_seqlen</span></code> and other related information to apply padding to a <code class="docutils literal notranslate"><span class="pre">(q_ranges,</span> <span class="pre">k_ranges,</span> <span class="pre">mask_types)</span></code> tuple using <code class="docutils literal notranslate"><span class="pre">apply_padding</span></code> function.</p>
+<p>This function fills the padding region with invalid slices.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.functools.apply_padding">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.functools.</span></span><span class="sig-name descname"><span class="pre">apply_padding</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.functools.apply_padding" title="Link to this definition">#</a></dt>
+<dd><p>Appends padding to the attention ranges and updates the corresponding mask type.</p>
+<p>This function adds a padding query range at the end of <cite>q_ranges</cite>, a dummy key
+range to <cite>k_ranges</cite>, and appends a <cite>FULL</cite> attention mask type to maintain alignment.
+It is typically used when padding is required for alignment or block-wise processing.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>q_ranges</strong> (<em>AttnRanges</em>) – Query token ranges before padding.</p></li>
+<li><p><strong>k_ranges</strong> (<em>AttnRanges</em>) – Key token ranges before padding.</p></li>
+<li><p><strong>attn_mask_type</strong> (<em>list</em><em>[</em><em>AttnMaskType</em><em>]</em>) – List of attention mask types corresponding to the ranges.</p></li>
+<li><p><strong>total_seqlen</strong> (<em>int</em>) – The total original sequence length (used to place the padding at the end).</p></li>
+<li><p><strong>pad_size</strong> (<em>int</em>) – The size of the padding to append.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><ul class="simple">
+<li><p>Updated query ranges with padding added.</p></li>
+<li><p>Updated key ranges with a dummy range for padding.</p></li>
+<li><p>Updated attention mask type list with a FULL mask for the padding block.</p></li>
+</ul>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple[AttnRanges, AttnRanges, list[AttnMaskType]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="get-position-ids">
+<h3><a class="toc-backref" href="#id11" role="doc-backlink">Get Position Ids</a><a class="headerlink" href="#get-position-ids" title="Link to this heading">#</a></h3>
+<p>Since MagiAttention needs to permute the input tensor along the seqlen dim, some token-aware ops might be affected, such as RoPE.</p>
+<p>Therefore, we provide a function <code class="docutils literal notranslate"><span class="pre">get_position_ids</span></code> to get the position ids of the input tensor similar to Llama.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.get_position_ids">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">get_position_ids</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.get_position_ids" title="Link to this definition">#</a></dt>
+<dd><p>Get the position ids of local tensor to global tensor after dispatching.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the key that holds some inner meta data,
+as one argument for many other magi_attention APIs,
+which users don’t have to bother with.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>postion ids of local tensor w.r.t. global tensor.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>torch.Tensor</p>
+</dd>
+<dt class="field-even">Raises<span class="colon">:</span></dt>
+<dd class="field-even"><p><strong>ValueError</strong> – If the provided <code class="docutils literal notranslate"><span class="pre">key</span></code> does not exist in <code class="docutils literal notranslate"><span class="pre">dist_attn_runtime_dict</span></code>.</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="get-most-recent-key">
+<h3><a class="toc-backref" href="#id12" role="doc-backlink">Get Most Recent Key</a><a class="headerlink" href="#get-most-recent-key" title="Link to this heading">#</a></h3>
+<p>If you have trouble accessing the meta key, and meanwhile you need to get the most recent key, then you can call <code class="docutils literal notranslate"><span class="pre">get_most_recent_key</span></code> to get it.</p>
+<p>However, we strongly recommend you to access the key passed through the arguments, in case of unexpected inconsistency.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.magi_attn_interface.get_most_recent_key">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.magi_attn_interface.</span></span><span class="sig-name descname"><span class="pre">get_most_recent_key</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.magi_attn_interface.get_most_recent_key" title="Link to this definition">#</a></dt>
+<dd><p>Get the most recent inserted key.</p>
+<p>This is useful when you can not access the key through the arguments,
+and meanwhile you only need the most recent inserted key.
+However, we strongly recommend you to access the key passed through the arguments,
+in case of unexpected inconsistency.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>the most recent inserted key.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>DistAttnRuntimeKey</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="infer-varlen-masks">
+<h3><a class="toc-backref" href="#id13" role="doc-backlink">Infer Varlen Masks</a><a class="headerlink" href="#infer-varlen-masks" title="Link to this heading">#</a></h3>
+<p>If you want to use a varlen mask where each segment has the same length, we provide a <code class="docutils literal notranslate"><span class="pre">infer_varlen_mask_from_batch</span></code> function that generates the corresponding cu_seqlens tensors for you.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.functools.infer_varlen_mask_from_batch">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.functools.</span></span><span class="sig-name descname"><span class="pre">infer_varlen_mask_from_batch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.functools.infer_varlen_mask_from_batch" title="Link to this definition">#</a></dt>
+<dd><p>Converts fixed-length full attention into varlen fulll attention format by generating
+cumulative sequence lengths for queries and keys.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>batch_size</strong> (<em>int</em>) – The number of sequences in the batch.</p></li>
+<li><p><strong>seq_len</strong> (<em>int</em>) – The fixed sequence length for each sequence in the batch.</p></li>
+<li><p><strong>device</strong> (<em>str</em><em>, </em><em>optional</em>) – The device to allocate the tensors on. Defaults to <code class="docutils literal notranslate"><span class="pre">&quot;cuda&quot;</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A pair of 1D tensors (cu_seqlens_q, cu_seqlens_k), each of shape <code class="docutils literal notranslate"><span class="pre">[batch_size</span> <span class="pre">+</span> <span class="pre">1,]</span></code>,
+representing the cumulative sequence lengths for the queries and keys respectively.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple[torch.Tensor, torch.Tensor]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<p>During the use of varlen mask, it is often necessary to reshape a tensor of shape <code class="docutils literal notranslate"><span class="pre">[batch_size</span> <span class="pre">×</span> <span class="pre">seq_len,</span> <span class="pre">...]</span></code> into <code class="docutils literal notranslate"><span class="pre">[batch_size</span> <span class="pre">×</span> <span class="pre">seq_len,</span> <span class="pre">...]</span></code>.</p>
+<p>To facilitate the use of the above APIs, we provide the <code class="docutils literal notranslate"><span class="pre">squash_batch_dim</span></code> function to merge the tensor dimensions.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.functools.squash_batch_dim">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.functools.</span></span><span class="sig-name descname"><span class="pre">squash_batch_dim</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.functools.squash_batch_dim" title="Link to this definition">#</a></dt>
+<dd><p>Reshapes a tensor from shape <code class="docutils literal notranslate"><span class="pre">[b,</span> <span class="pre">s,</span> <span class="pre">...]</span></code> to <code class="docutils literal notranslate"><span class="pre">[b</span> <span class="pre">x</span> <span class="pre">s,</span> <span class="pre">...]</span></code>, effectively flattening
+the batch and sequence dimensions into a single leading dimension.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>x</strong> (<em>torch.Tensor</em>) – Input tensor of shape <code class="docutils literal notranslate"><span class="pre">[batch_size,</span> <span class="pre">seq_len,</span> <span class="pre">...]</span></code> to be merged.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Reshaped tensor of shape <code class="docutils literal notranslate"><span class="pre">[batch_size</span> <span class="pre">x</span> <span class="pre">seq_len,</span> <span class="pre">...]</span></code>.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>torch.Tensor</p>
+</dd>
+</dl>
+</dd></dl>
+
+<p>Moreover, if you have already computed the <code class="docutils literal notranslate"><span class="pre">cu_seqlens</span></code> tensor and want to generate a varlen mask based on it, we provide the <code class="docutils literal notranslate"><span class="pre">infer_attn_mask_from_cu_seqlens</span></code> function. This function can create three types of masks—varlen full, varlen causal, and varlen sliding window—according to <code class="docutils literal notranslate"><span class="pre">cu_seqlens</span></code>, <code class="docutils literal notranslate"><span class="pre">causal</span></code>, and <code class="docutils literal notranslate"><span class="pre">window_size</span></code>, and returns the result in the form of a <code class="docutils literal notranslate"><span class="pre">(q_ranges,</span> <span class="pre">k_ranges,</span> <span class="pre">mask_types,</span> <span class="pre">total_seqlen_q,</span> <span class="pre">total_seqlen_k)</span></code>.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.functools.infer_attn_mask_from_cu_seqlens">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.functools.</span></span><span class="sig-name descname"><span class="pre">infer_attn_mask_from_cu_seqlens</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.functools.infer_attn_mask_from_cu_seqlens" title="Link to this definition">#</a></dt>
+<dd><p>Infer query ranges, key ranges and other arguments for flexible attn mask representation
+from cu_seqlens, widely used for varlen masks.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>cu_seqlens_q</strong> (<em>torch.Tensor</em>) – cumulative sequence lengths for queries</p></li>
+<li><p><strong>cu_seqlens_k</strong> (<em>torch.Tensor</em>) – cumulative sequence lengths for keys</p></li>
+<li><p><strong>causal</strong> (<em>bool</em><em>, </em><em>optional</em>) – whether the varlen attention mask is causal. Defaults to <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
+<li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em><em>, </em><em>optional</em>) – window_size of sliding window mask
+which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code>. The parameter is effective only
+when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">False</span></code>; when <code class="docutils literal notranslate"><span class="pre">causal</span></code> is <code class="docutils literal notranslate"><span class="pre">True</span></code>, it is required to be <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.
+Defaults to <code class="docutils literal notranslate"><span class="pre">(-1,</span> <span class="pre">-1)</span></code>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>query ranges, key ranges, attn mask type list,
+total seqlen of q, total seqlen of k</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple[AttnRanges, AttnRanges, list[AttnMaskType], int, int]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="infer-sliding-window-masks">
+<h3><a class="toc-backref" href="#id14" role="doc-backlink">Infer Sliding Window Masks</a><a class="headerlink" href="#infer-sliding-window-masks" title="Link to this heading">#</a></h3>
+<p>In the design of <code class="docutils literal notranslate"><span class="pre">MagiAttention</span></code>, we use a (q_range, k_range, masktype) tuple to represent a slice.</p>
+<p>For sliding window masks, we do not provide a dedicated masktype to represent them directly.</p>
+<p>However, a sliding window mask can be decomposed into a combination of existing masktypes such as <code class="docutils literal notranslate"><span class="pre">full</span></code>, <code class="docutils literal notranslate"><span class="pre">causal</span></code>, <code class="docutils literal notranslate"><span class="pre">inv_causal</span></code>, and <code class="docutils literal notranslate"><span class="pre">bi_causal</span></code>.</p>
+<p>If you’re unsure how to perform this decomposition, we provide <code class="docutils literal notranslate"><span class="pre">infer_attn_mask_from_sliding_window</span></code> function to handle this process for you.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="magi_attention.api.functools.infer_attn_mask_from_sliding_window">
+<span class="sig-prename descclassname"><span class="pre">magi_attention.api.functools.</span></span><span class="sig-name descname"><span class="pre">infer_attn_mask_from_sliding_window</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#magi_attention.api.functools.infer_attn_mask_from_sliding_window" title="Link to this definition">#</a></dt>
+<dd><p>Convert only one sliding window masks into representations using q_range, k_range, and mask type.
+The mask type is specified using window_size.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>q_range</strong> (<em>AttnRange</em>) – q_range of this sliding window mask</p></li>
+<li><p><strong>k_range</strong> (<em>AttnRange</em>) – k_range of this sliding window mask</p></li>
+<li><p><strong>window_size</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>int</em><em>]</em>) – window_size of sliding window mask
+which represents <code class="docutils literal notranslate"><span class="pre">[window_size_left,</span> <span class="pre">window_size_right]</span></code></p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>processed <code class="docutils literal notranslate"><span class="pre">(q_ranges,</span> <span class="pre">k_ranges,</span> <span class="pre">masktypes)</span></code> triple, sliding window mask have been cutted
+into triple representation.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple[AttnRanges, AttnRanges, list[AttnMaskType]]</p>
+</dd>
+</dl>
+<p class="rubric">Example</p>
+<p>Here’s an example of <code class="docutils literal notranslate"><span class="pre">infer_attn_mask_from_sliding_window</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="gp">&gt;&gt;&gt; </span><span class="n">q_ranges</span><span class="p">,</span> <span class="n">k_ranges</span><span class="p">,</span> <span class="n">attn_mask_type</span> <span class="o">=</span> <span class="n">infer_attn_mask_from_sliding_window</span><span class="p">(</span>
+<span class="gp">... </span>    <span class="n">q_range</span><span class="o">=</span><span class="n">AttnRange</span><span class="o">.</span><span class="n">from_range</span><span class="p">([</span><span class="mi">5</span><span class="p">,</span> <span class="mi">15</span><span class="p">]),</span>
+<span class="gp">... </span>    <span class="n">k_range</span><span class="o">=</span><span class="n">AttnRange</span><span class="o">.</span><span class="n">from_range</span><span class="p">([</span><span class="mi">5</span><span class="p">,</span> <span class="mi">15</span><span class="p">]),</span>
+<span class="gp">... </span>    <span class="n">window_size</span><span class="o">=</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">),</span>
+<span class="gp">... </span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The code above represents the sliding window mask within the <code class="docutils literal notranslate"><span class="pre">[5,</span> <span class="pre">15]</span> <span class="pre">x</span> <span class="pre">[5,</span> <span class="pre">15]</span></code> region
+with a window size of <code class="docutils literal notranslate"><span class="pre">(2,</span> <span class="pre">3)</span></code>.</p>
+</dd></dl>
+
+</section>
+</section>
+</section>
+
+
+                </article>
+              
+              
+              
+              
+              
+            </div>
+            
+            
+              
+                <dialog id="pst-secondary-sidebar-modal"></dialog>
+                <div id="pst-secondary-sidebar" class="bd-sidebar-secondary bd-toc"><div class="sidebar-secondary-items sidebar-secondary__inner">
+
+
+  <div class="sidebar-secondary-item">
+<div
+    id="pst-page-navigation-heading-2"
+    class="page-toc tocsection onthispage">
+    <i class="fa-solid fa-list"></i> On this page
+  </div>
+  <nav class="bd-toc-nav page-toc" aria-labelledby="pst-page-navigation-heading-2">
+    <ul class="visible nav section-nav flex-column">
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#flexible-flash-attention">Flexible Flash Attention</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.functional.flex_flash_attn.flex_flash_attn_func"><code class="docutils literal notranslate"><span class="pre">flex_flash_attn_func()</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#dispatch">Dispatch</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#varlen-dispatch">Varlen Dispatch</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.magi_attn_varlen_dispatch"><code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_dispatch()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.magi_attn_varlen_key"><code class="docutils literal notranslate"><span class="pre">magi_attn_varlen_key()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.make_varlen_key_for_new_mask_after_dispatch"><code class="docutils literal notranslate"><span class="pre">make_varlen_key_for_new_mask_after_dispatch()</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#flexible-dispatch">Flexible Dispatch</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.magi_attn_flex_dispatch"><code class="docutils literal notranslate"><span class="pre">magi_attn_flex_dispatch()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.magi_attn_flex_key"><code class="docutils literal notranslate"><span class="pre">magi_attn_flex_key()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.make_flex_key_for_new_mask_after_dispatch"><code class="docutils literal notranslate"><span class="pre">make_flex_key_for_new_mask_after_dispatch()</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#dispatch-function">Dispatch Function</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.dispatch"><code class="docutils literal notranslate"><span class="pre">dispatch()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#calculate-attention">Calculate Attention</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.calc_attn"><code class="docutils literal notranslate"><span class="pre">calc_attn()</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#undispatch">Undispatch</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#undispatch-function">Undispatch Function</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.undispatch"><code class="docutils literal notranslate"><span class="pre">undispatch()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#utility-functions">Utility Functions</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#compute-pad-size-and-padding">Compute Pad Size and Padding</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.compute_pad_size"><code class="docutils literal notranslate"><span class="pre">compute_pad_size()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.pad_at_dim"><code class="docutils literal notranslate"><span class="pre">pad_at_dim()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.unpad_at_dim"><code class="docutils literal notranslate"><span class="pre">unpad_at_dim()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.apply_padding"><code class="docutils literal notranslate"><span class="pre">apply_padding()</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#get-position-ids">Get Position Ids</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.get_position_ids"><code class="docutils literal notranslate"><span class="pre">get_position_ids()</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#get-most-recent-key">Get Most Recent Key</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.magi_attn_interface.get_most_recent_key"><code class="docutils literal notranslate"><span class="pre">get_most_recent_key()</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#infer-varlen-masks">Infer Varlen Masks</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.infer_varlen_mask_from_batch"><code class="docutils literal notranslate"><span class="pre">infer_varlen_mask_from_batch()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.squash_batch_dim"><code class="docutils literal notranslate"><span class="pre">squash_batch_dim()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.infer_attn_mask_from_cu_seqlens"><code class="docutils literal notranslate"><span class="pre">infer_attn_mask_from_cu_seqlens()</span></code></a></li>
+</ul>
+</li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#infer-sliding-window-masks">Infer Sliding Window Masks</a><ul class="visible nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#magi_attention.api.functools.infer_attn_mask_from_sliding_window"><code class="docutils literal notranslate"><span class="pre">infer_attn_mask_from_sliding_window()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+  </nav></div>
+
+</div></div>
+              
+            
+          </div>
+          <footer class="bd-footer-content">
+            
+          </footer>
+        
+      </main>
+    </div>
+  </div>
+  
+  <!-- Scripts loaded after <body> so the DOM is not blocked -->
+  <script defer src="_static/scripts/bootstrap.js?digest=8878045cc6db502f8baf"></script>
+<script defer src="_static/scripts/pydata-sphinx-theme.js?digest=8878045cc6db502f8baf"></script>
+
+  <footer class="bd-footer">
+<div class="bd-footer__inner bd-page-width">
+  
+    <div class="footer-items__start">
+      
+        <div class="footer-item">
+
+  <p class="copyright">
+    
+      © Copyright 2025, Sandai.
+      <br/>
+    
+  </p>
+</div>
+      
+        <div class="footer-item">
+
+  <p class="sphinx-version">
+    Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
+    <br/>
+  </p>
+</div>
+      
+    </div>
+  
+  
+  
+    <div class="footer-items__end">
+      
+        <div class="footer-item">
+<p class="theme-version">
+  <!-- # L10n: Setting the PST URL as an argument as this does not need to be localized -->
+  Built with the <a href="https://pydata-sphinx-theme.readthedocs.io/en/stable/index.html">PyData Sphinx Theme</a> 0.16.1.
+</p></div>
+      
+    </div>
+  
+</div>
+
+  </footer>
+  </body>
+</html>
