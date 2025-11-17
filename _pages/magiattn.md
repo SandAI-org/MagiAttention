@@ -63,6 +63,7 @@ toc:
   - name: FAQ
   - name: Acknowledgement
   - name: Citation
+  - name: References
 
 # Below is an example of injecting additional post-specific styles.
 # If you use this post as a template, delete this _styles block.
@@ -388,9 +389,8 @@ The results are presented in the following figures.
 
 ### Attention Sink
 
-integrate FFA, as well as Flash-Attention, with attention sink ?
+Please check this [blog post](https://sandai-org.github.io/MagiAttention/blog/ffa_with_sink) about how to integrate Flex-Flash-Attention, MagiAttention, as well as Flash-Attention, with the learnable attention sink mechanism.
 
-TODO ...
 
 ## Future Work
 
@@ -400,9 +400,12 @@ Please check our [Roadmap](https://github.com/SandAI-org/MagiAttention?tab=readm
 ## FAQ
 
 Q: How to start with MagiAttention ?
+
 A: Please check our [docs](https://sandai-org.github.io/MagiAttention/docs/) for `QuickStart` section.
 
-TODO ...
+Q: Does MagiAttention support the GPU architectures other than Hopper ?
+
+A: Currently, MagiAttention only supports the Hopper architecture. But we plan to support more GPU architectures in the future.
 
 
 ## Acknowledgement
