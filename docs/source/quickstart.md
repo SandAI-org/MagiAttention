@@ -198,7 +198,7 @@ local_out, local_lse = calc_attn(
     k=local_k,
     v=local_v,
     key=magi_attn_runtime_key,
-    sink=global_sink,
+    sink=global_sink, # Defaults to None to not apply attention sink
 )
 
 # --- Undispatch the output tensor along seqlen dim from multiple ranks and unpad --- #

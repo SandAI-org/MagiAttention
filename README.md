@@ -128,7 +128,7 @@ Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
 
 We provide basic example code below of how to use `flex_flash_attention` (*non-distributed attention function*) and `magi_attention` (*distributed attention mechanism*), respectively.
 
-For more usage instructions, you can refer to `magi_attention/functional/flex_flash_attn.py` and `magi_attention/api/magi_attn_interface.py`, respectively.
+For more usage instructions, you can refer to our [docs](https://SandAI-org.github.io/MagiAttention/docs/).
 
 <details>
 <summary>Basic Usage</summary>
@@ -323,7 +323,7 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
       k=local_k,
       v=local_v,
       key=magi_attn_runtime_key,
-      sink=global_sink,
+      sink=global_sink, # Defaults to None to not apply attention sink
   )
 
   # --- Undispatch the output tensor along seqlen dim from multiple ranks and unpad --- #
@@ -396,8 +396,8 @@ For more information, you can refer to `examples/transformers/README.md`.
 
 ## Roadmap ⛏️
 
-- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*)
-- [ ] **[WIP]** Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*)
+- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*).
+- [ ] **[WIP]** Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*).
 - [ ] **[WIP]** Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
 - [ ] **[WIP]** Support `Dynamic DistAttnSolver` with query/output communication pattern, one for either hybrid attention model or dynamic mask scenarios like sparse attention, the other for reducing communication overhead for many cases when only communicating key/value is not the best choice.
 - [ ] Support other attention patterns including cross-attention, and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
