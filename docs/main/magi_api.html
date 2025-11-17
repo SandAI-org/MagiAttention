@@ -1328,7 +1328,7 @@ and if provided, the dispatch config of the new dist attn config won’t be appl
 <li><p><strong>x</strong> (<em>torch.Tensor</em>) – global input tensor.</p></li>
 <li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the key that holds some inner meta data,
 as one argument for many other magi_attention APIs,
-about which the users may have no bother to care.</p></li>
+which users don’t have to bother with.</p></li>
 <li><p><strong>pad_value</strong> (<em>float</em>) – the specific value to pad to input tensor. Defaults to 0.</p></li>
 </ul>
 </dd>
@@ -1361,7 +1361,7 @@ about which the users may have no bother to care.</p></li>
 <li><p><strong>v</strong> (<em>torch.Tensor</em>) – local value tensor.</p></li>
 <li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the object that holds some inner meta data
 as one argument for many other magi_attention APIs,
-about which the users may have no bother to care.</p></li>
+which users don’t have to bother with.</p></li>
 <li><p><strong>sink</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – global sink tensor (replicated among cp ranks).
 Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to not apply attention sink.</p></li>
 <li><p><strong>softmax_scale</strong> (<em>float</em><em>, </em><em>optional</em>) – softmax scale.
@@ -1428,7 +1428,7 @@ Defaults to <code class="docutils literal notranslate"><span class="pre">None</s
 <li><p><strong>x</strong> (<em>torch.Tensor</em>) – local tensor</p></li>
 <li><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the key that holds some inner meta data,
 as one argument for many other magi_attention APIs,
-about which the users may have no bother to care.</p></li>
+which users don’t have to bother with.</p></li>
 </ul>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
@@ -1565,7 +1565,7 @@ It is typically used when padding is required for alignment or block-wise proces
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>key</strong> (<em>DistAttnRuntimeKey</em>) – the key that holds some inner meta data,
 as one argument for many other magi_attention APIs,
-about which the users may have no bother to care.</p>
+which users don’t have to bother with.</p>
 </dd>
 <dt class="field-even">Returns<span class="colon">:</span></dt>
 <dd class="field-even"><p>postion ids of local tensor w.r.t. global tensor.</p>

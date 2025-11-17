@@ -414,17 +414,24 @@
 <span class="c1"># --- Define attention config --- #</span>
 
 <span class="n">total_seqlen</span> <span class="o">=</span> <span class="mi">2048</span>    <span class="c1"># 2k tokens</span>
+<span class="n">seqlen_sink</span> <span class="o">=</span> <span class="mi">4</span>        <span class="c1"># 4 sink tokens</span>
 <span class="n">num_heads_q</span> <span class="o">=</span> <span class="mi">8</span>        <span class="c1"># number of attention (query) heads</span>
 <span class="n">num_heads_kv</span> <span class="o">=</span> <span class="mi">2</span>       <span class="c1"># number of key/value heads (GQA)</span>
 <span class="n">head_dim</span> <span class="o">=</span> <span class="mi">128</span>         <span class="c1"># dimension of each attention head</span>
 <span class="n">dtype</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span> <span class="c1"># attention activation / computation dtype (while the reduction dtype is always fp32 for ffa right now)</span>
 <span class="n">device</span> <span class="o">=</span> <span class="s2">&quot;cuda&quot;</span>
+<span class="n">has_sink</span> <span class="o">=</span> <span class="kc">True</span>        <span class="c1"># whether to apply attention sink</span>
 
-<span class="c1"># --- Initialize QKV tensor --- #</span>
+<span class="c1"># --- Initialize q,k,v,do tensors --- #</span>
 
-<span class="n">q</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">total_seqlen</span><span class="p">,</span> <span class="n">num_heads_q</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
-<span class="n">k</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">total_seqlen</span><span class="p">,</span> <span class="n">num_heads_kv</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
-<span class="n">v</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">total_seqlen</span><span class="p">,</span> <span class="n">num_heads_kv</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">)</span>
+<span class="n">q</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">total_seqlen</span><span class="p">,</span> <span class="n">num_heads_q</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">k</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">total_seqlen</span><span class="p">,</span> <span class="n">num_heads_kv</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">v</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">total_seqlen</span><span class="p">,</span> <span class="n">num_heads_kv</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">dtype</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">do</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn_like</span><span class="p">(</span><span class="n">q</span><span class="p">)</span>
+
+<span class="c1"># --- Initialize optional sink tensor --- #</span>
+
+<span class="n">sink</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">seqlen_sink</span><span class="p">,</span> <span class="n">num_heads_q</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">,</span> <span class="n">requires_grad</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span> <span class="k">if</span> <span class="n">has_sink</span> <span class="k">else</span> <span class="kc">None</span>
 
 <span class="c1"># --- Initialize FFA meta args for customized attention mask --- #</span>
 
@@ -446,21 +453,35 @@
 
 <span class="c1"># --- Attention computation --- #</span>
 
-<span class="n">out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">flex_flash_attn_func</span><span class="p">(</span> <span class="c1"># the second return value is `lse` (log-sum-exp), known as the online-softmax correction factor</span>
-    <span class="n">q</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span>
+<span class="n">out</span><span class="p">,</span> <span class="n">lse</span> <span class="o">=</span> <span class="n">flex_flash_attn_func</span><span class="p">(</span>
+    <span class="n">q</span><span class="o">=</span><span class="n">q</span><span class="p">,</span>
+    <span class="n">k</span><span class="o">=</span><span class="n">k</span><span class="p">,</span>
+    <span class="n">v</span><span class="o">=</span><span class="n">v</span><span class="p">,</span>
     <span class="n">q_ranges</span><span class="o">=</span><span class="n">q_ranges_tensor</span><span class="p">,</span>
     <span class="n">k_ranges</span><span class="o">=</span><span class="n">k_ranges_tensor</span><span class="p">,</span>
     <span class="n">attn_type_map</span><span class="o">=</span><span class="n">attn_type_map_tensor</span><span class="p">,</span>
-    <span class="n">softmax_scale</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="c1"># defaults to 1/sqrt(head_dim)</span>
+    <span class="n">sink</span><span class="o">=</span><span class="n">sink</span><span class="p">,</span> <span class="c1"># Defaults to None to not apply attention sink</span>
+    <span class="n">softmax_scale</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="c1"># Defaults to 1/sqrt(head_dim)</span>
+    <span class="n">softcap</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="c1"># Defaults to 0</span>
 <span class="p">)</span>
+
+<span class="n">out</span><span class="o">.</span><span class="n">backward</span><span class="p">(</span><span class="n">do</span><span class="p">)</span>
+
+<span class="n">dq</span><span class="p">,</span> <span class="n">dk</span><span class="p">,</span> <span class="n">dv</span> <span class="o">=</span> <span class="n">q</span><span class="o">.</span><span class="n">grad</span><span class="p">,</span> <span class="n">k</span><span class="o">.</span><span class="n">grad</span><span class="p">,</span> <span class="n">v</span><span class="o">.</span><span class="n">grad</span>
+<span class="n">dsink</span> <span class="o">=</span> <span class="n">sink</span><span class="o">.</span><span class="n">grad</span> <span class="k">if</span> <span class="n">has_sink</span> <span class="k">else</span> <span class="kc">None</span>
 </pre></div>
 </div>
 </section>
 <section id="basic-usage-for-magiattention">
 <h2><a class="toc-backref" href="#id2" role="doc-backlink">Basic Usage for MagiAttention</a><a class="headerlink" href="#basic-usage-for-magiattention" title="Link to this heading">#</a></h2>
-<p><strong>NOTE</strong>: You should run the following examples in a distributed environment, e.g. using the common <code class="docutils literal notranslate"><span class="pre">torchrun</span></code> script</p>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<p><strong>NOTE</strong>: You need to run the following examples in a distributed environment, e.g. using the common <code class="docutils literal notranslate"><span class="pre">torchrun</span></code> script</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># run this python script with the command like:</span>
+<span class="c1"># torchrun --standalone --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr=&quot;127.0.0.1&quot; --master_port=1234 ${SCRIPT_PATH}</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
 <span class="kn">import</span><span class="w"> </span><span class="nn">torch.nn</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">nn</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch.distributed</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">dist</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">magi_attention</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">magi_attention.api</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
     <span class="n">magi_attn_flex_dispatch</span><span class="p">,</span> <span class="n">calc_attn</span><span class="p">,</span> <span class="n">undispatch</span><span class="p">,</span> <span class="c1"># interface functions</span>
     <span class="n">compute_pad_size</span><span class="p">,</span> <span class="c1"># helper functions</span>
@@ -476,11 +497,13 @@
 <span class="c1"># --- Define attention config --- #</span>
 
 <span class="n">total_seqlen</span> <span class="o">=</span> <span class="mi">32</span> <span class="o">*</span> <span class="mi">1024</span>   <span class="c1"># 32k tokens, if we dispatch it to 8 GPUs, then each GPU holds 4k tokens</span>
+<span class="n">seqlen_sink</span> <span class="o">=</span> <span class="mi">4</span>            <span class="c1"># 4 sink tokens</span>
 <span class="n">num_heads_q</span> <span class="o">=</span> <span class="mi">48</span>           <span class="c1"># number of attention (query) heads</span>
 <span class="n">num_heads_kv</span> <span class="o">=</span> <span class="mi">8</span>           <span class="c1"># number of key/value heads (GQA)</span>
 <span class="n">head_dim</span> <span class="o">=</span> <span class="mi">128</span>             <span class="c1"># dimension of each attention head</span>
-<span class="n">dtype</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span>     <span class="c1"># attention activation / computation dtype (while the reduction dtype for partial attention outputs is always fp32 for magi_attention right now)</span>
 <span class="n">chunk_size</span> <span class="o">=</span> <span class="mi">512</span>           <span class="c1"># chunk size to chunk the input tensor x along the seqlen dim for dispatch to control the granularity of computation load-balance.</span>
+<span class="n">dtype</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">bfloat16</span>     <span class="c1"># attention activation / computation dtype (while the reduction dtype for partial attention outputs is always fp32 for magi_attention right now)</span>
+<span class="n">has_sink</span> <span class="o">=</span> <span class="kc">True</span>            <span class="c1"># whether to apply attention sink</span>
 
 <span class="c1"># --- Initialize token embedding tensor --- #</span>
 
@@ -540,8 +563,8 @@
 <span class="c1"># 1. the dispatched local token embedding may be shuffled along seqlen dim,</span>
 <span class="c1">#    so it&#39;s safe for token-wise operations such as matmul, layer-norm, etc</span>
 <span class="c1">#    while for sample-wise operations like RoPE, you might need to be more careful</span>
-<span class="c1"># 2. the `magi_runtime_key` holds some inner meta data as one argument for many other magi_attention APIs,</span>
-<span class="c1">#    about which the users may have no bother to care</span>
+<span class="c1"># 2. the `magi_attn_runtime_key` holds some inner meta data as one argument for many other magi_attention APIs,</span>
+<span class="c1">#    which users don’t have to bother with</span>
 <span class="n">local_x</span><span class="p">,</span> <span class="n">magi_attn_runtime_key</span> <span class="o">=</span> <span class="n">magi_attn_flex_dispatch</span><span class="p">(</span>
     <span class="n">x</span><span class="p">,</span>
     <span class="n">q_ranges</span><span class="o">=</span><span class="n">q_ranges</span><span class="p">,</span>
@@ -564,13 +587,18 @@
 <span class="n">local_k</span> <span class="o">=</span> <span class="n">k_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_heads_kv</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">)</span>
 <span class="n">local_v</span> <span class="o">=</span> <span class="n">v_proj</span><span class="p">(</span><span class="n">local_x</span><span class="p">)</span><span class="o">.</span><span class="n">view</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_heads_kv</span><span class="p">,</span> <span class="n">head_dim</span><span class="p">)</span>
 
+<span class="c1"># --- Simulate attention sink parameter --- #</span>
+
+<span class="n">global_sink</span> <span class="o">=</span> <span class="n">nn</span><span class="o">.</span><span class="n">Parameter</span><span class="p">(</span><span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">seqlen_sink</span><span class="p">,</span> <span class="n">num_heads_q</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">float32</span><span class="p">,</span> <span class="n">device</span><span class="o">=</span><span class="n">device</span><span class="p">))</span> <span class="k">if</span> <span class="n">has_sink</span> <span class="k">else</span> <span class="kc">None</span>
+
 <span class="c1"># --- Distributed attention computation --- #</span>
 
-<span class="n">local_out</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span> <span class="c1"># the second return value is `local_lse` (log-sum-exp), known as the online-softmax correction factor</span>
+<span class="n">local_out</span><span class="p">,</span> <span class="n">local_lse</span> <span class="o">=</span> <span class="n">calc_attn</span><span class="p">(</span>
     <span class="n">q</span><span class="o">=</span><span class="n">local_q</span><span class="p">,</span>
     <span class="n">k</span><span class="o">=</span><span class="n">local_k</span><span class="p">,</span>
     <span class="n">v</span><span class="o">=</span><span class="n">local_v</span><span class="p">,</span>
     <span class="n">key</span><span class="o">=</span><span class="n">magi_attn_runtime_key</span><span class="p">,</span>
+    <span class="n">sink</span><span class="o">=</span><span class="n">global_sink</span><span class="p">,</span> <span class="c1"># Defaults to None to not apply attention sink</span>
 <span class="p">)</span>
 
 <span class="c1"># --- Undispatch the output tensor along seqlen dim from multiple ranks and unpad --- #</span>
@@ -581,6 +609,32 @@
     <span class="n">x</span><span class="o">=</span><span class="n">local_out</span><span class="p">,</span>
     <span class="n">key</span><span class="o">=</span><span class="n">magi_attn_runtime_key</span><span class="p">,</span>
 <span class="p">)</span>
+
+<span class="c1"># --- Simulate loss computation --- #</span>
+
+<span class="n">loss</span> <span class="o">=</span> <span class="n">total_out</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span>
+
+<span class="c1"># --- Simulate backward pass --- #</span>
+
+<span class="n">loss</span><span class="o">.</span><span class="n">backward</span><span class="p">()</span>
+
+<span class="n">dx</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">grad</span>
+<span class="n">dq_proj</span><span class="p">,</span> <span class="n">dk_proj</span><span class="p">,</span> <span class="n">dv_proj</span> <span class="o">=</span> <span class="n">q_proj</span><span class="o">.</span><span class="n">weight</span><span class="o">.</span><span class="n">grad</span><span class="p">,</span> <span class="n">k_proj</span><span class="o">.</span><span class="n">weight</span><span class="o">.</span><span class="n">grad</span><span class="p">,</span> <span class="n">v_proj</span><span class="o">.</span><span class="n">weight</span><span class="o">.</span><span class="n">grad</span>
+
+<span class="k">if</span> <span class="n">has_sink</span><span class="p">:</span>
+    <span class="n">dsink</span> <span class="o">=</span> <span class="n">global_sink</span><span class="o">.</span><span class="n">grad</span>
+    <span class="c1"># NOTE: since usually the training framework such as Megatron-LM, FSDP</span>
+    <span class="c1"># will handle the reduction of parameters&#39; gradients across the whole dp x cp group</span>
+    <span class="c1"># so by default, MagiAttention will skip the reduction of sink&#39;s gradients</span>
+    <span class="c1"># unless the users specify the environment variable `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP` (see our docs for more details)</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">op</span><span class="o">:=</span><span class="n">magi_attention</span><span class="o">.</span><span class="n">comm</span><span class="o">.</span><span class="n">dsink_all_reduce_op</span><span class="p">())</span> <span class="o">!=</span> <span class="s2">&quot;none&quot;</span><span class="p">:</span>
+        <span class="k">match</span> <span class="n">op</span><span class="p">:</span>
+            <span class="k">case</span> <span class="s2">&quot;sum&quot;</span><span class="p">:</span>
+                <span class="n">dist</span><span class="o">.</span><span class="n">all_reduce</span><span class="p">(</span><span class="n">dsink</span><span class="p">,</span> <span class="n">op</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">ReduceOp</span><span class="o">.</span><span class="n">SUM</span><span class="p">,</span> <span class="n">group</span><span class="o">=</span><span class="n">world_group</span><span class="p">)</span>
+            <span class="k">case</span> <span class="s2">&quot;avg&quot;</span><span class="p">:</span>
+                <span class="n">dist</span><span class="o">.</span><span class="n">all_reduce</span><span class="p">(</span><span class="n">dsink</span><span class="p">,</span> <span class="n">op</span><span class="o">=</span><span class="n">dist</span><span class="o">.</span><span class="n">ReduceOp</span><span class="o">.</span><span class="n">AVG</span><span class="p">,</span> <span class="n">group</span><span class="o">=</span><span class="n">world_group</span><span class="p">)</span>
+            <span class="k">case</span><span class="w"> </span><span class="k">_</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Unknown all_reduce_op: </span><span class="si">{</span><span class="n">op</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 
 <span class="c1"># --- Clear up distributed environment --- #</span>
 
