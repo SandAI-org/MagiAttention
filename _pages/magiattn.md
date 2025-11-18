@@ -168,6 +168,13 @@ Using this formulation, as shown in the figure below, a wide variety of commonly
 
 Built on Flash-Attention 3 (FA3) kernels<d-cite key="shah2024flashattention3fastaccurateattention"></d-cite>, Flex-Flash-Attention (FFA) leverages Hopper GPUs' TMA feature<d-cite key="nvidia2024accelerating"></d-cite> and introduces slice-level parallelism with atomic operations for correctness as illustrated in the following figure, achieving comparable MFU to FA3 while supporting the flexible $\mathrm{AttnSlice}$ formulation (see [Kernel-Level Experiments](#kernel-level) for FFA performance and flexibility benchmarks compared to other attention kernels).
 
+<div class="l-middle" align="center">
+  <img src="assets/img/magiattn/ffa/ffa_slice_atomic_reduce.png" width="100%">
+  <div class="caption">
+    Illustration of the FFA forward and backward kernels' loading and atomic reduction for slice-level parallelism.
+  </div>
+</div>
+
 However, even though we can express most mask patterns using $\mathrm{AttnSlice}$ with two common mask type $\lbrace\mathrm{FULL}, \mathrm{CAUSAL}\rbrace$, but when comes to the mask patterns such as $\textit{sliding-window}$, they are quite inefficient (*in such case, we have to express each row one by one*). Therefore, we design two new but a little bit bizarre mask types named $\lbrace\text{INV-CAUSAL}, \text{BI-CAUSAL}\rbrace$ to efficiently represent more specific mask patterns, and provide some basic examples about the current $4$ mask types we support in the following figures.
 
 Although $\mathrm{AttnSlice}$ can represent most mask patterns using two common types ($\mathrm{FULL}$ and $\mathrm{CAUSAL}$), it is inefficient for patterns like $\textit{sliding-window}$, which requires row-by-row expression. To address this, we introduce two new mask types, $\mathrm{INV\text{-}CAUSAL}$ and $\mathrm{BI\text{-}CAUSAL}$, to efficiently represent more specific $\textit{sliding-window}$-style patterns. We provide basic examples of these four mask types in the following figures.
