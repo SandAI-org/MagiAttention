@@ -447,6 +447,7 @@ void notify_dispatch(
       get_nvl_clean_meta(hidden_int4, num_scales, num_topk, num_topk, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, true);
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
+  // REVIEW: why limited to INT_MAX ?
   GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
   GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
 
