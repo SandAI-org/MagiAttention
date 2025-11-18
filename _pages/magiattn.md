@@ -177,8 +177,6 @@ Built on Flash-Attention 3 (FA3) kernels<d-cite key="shah2024flashattention3fast
 
 However, even though we can express most mask patterns using $\mathrm{AttnSlice}$ with two common mask type $\lbrace\mathrm{FULL}, \mathrm{CAUSAL}\rbrace$, but when comes to the mask patterns such as $\textit{sliding-window}$, they are quite inefficient (*in such case, we have to express each row one by one*). Therefore, we design two new but a little bit bizarre mask types named $\lbrace\text{INV-CAUSAL}, \text{BI-CAUSAL}\rbrace$ to efficiently represent more specific mask patterns, and provide some basic examples about the current $4$ mask types we support in the following figures.
 
-Although $\mathrm{AttnSlice}$ can represent most mask patterns using two common types ($\mathrm{FULL}$ and $\mathrm{CAUSAL}$), it is inefficient for patterns like $\textit{sliding-window}$, which requires row-by-row expression. To address this, we introduce two new mask types, $\mathrm{INV\text{-}CAUSAL}$ and $\mathrm{BI\text{-}CAUSAL}$, to efficiently represent more specific $\textit{sliding-window}$-style patterns. We provide basic examples of these four mask types in the following figures.
-
 
 <div class="l-middle" align="center">
   <img src="assets/img/magiattn/ffa/attn_slice_mask_type_sq=sk.png" width="80%">
