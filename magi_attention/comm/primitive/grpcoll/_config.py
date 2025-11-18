@@ -47,7 +47,7 @@ class GrpCollConfig:
 
     # for buffer initialization
     # TODO: add minimal buffer size hint
-    num_nvl_bytes: int = int(2e9)  # default 2GB
+    num_nvl_bytes: int = int(2e9)  # default ~2GB
     num_rdma_bytes: int = 0  # FIXME: 0 for now since we don't support RDMA
 
     def __post_init__(self):
@@ -140,6 +140,7 @@ class GrpCollConfig:
         transfer_lse: bool = False,
         num_heads: int | None = None,
         num_groups: int = 1,
+        alignment: int = 128,  # according to `NUM_BUFFER_ALIGNMENT_BYTES`
     ) -> int:
         if transfer_lse:
             assert (
@@ -168,5 +169,7 @@ class GrpCollConfig:
             + num_channels * num_ranks * nvl_buffer_size * num_heads * torch.float32.itemsize
             # max padding bytes to align for vectorized token data buffer (int4)
             + 16 * num_groups
-        )
+            # align up to `alignment`
+            + alignment - 1
+        ) // alignment * alignment
         # fmt: on

@@ -1342,7 +1342,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 flush=True,
             )
 
-    num_nvl_bytes = int(2e9)  # 2GB
+    num_nvl_bytes = int(3e9)  # ~3GB
     num_sms = 24
     num_qps_per_rank = ll_num_experts // num_ranks if test_ll_compatibility else 1
 
@@ -1350,7 +1350,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         print(
             (
                 f"[config]: {num_ranks=} | {num_local_ranks=} | {group.size()=} | "
-                f"{num_nvl_bytes=} ({num_nvl_bytes / 1e9:.2f} GB) | {num_rdma_bytes=} | {num_qps_per_rank=}\n"
+                f"{num_nvl_bytes=} ({num_nvl_bytes / 1024**3:.2f} GB) | {num_rdma_bytes=} | {num_qps_per_rank=}\n"
             ),
             flush=True,
         )

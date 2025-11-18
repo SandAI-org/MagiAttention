@@ -888,8 +888,8 @@ def test_loop(args: argparse.Namespace):
     )
     args.num_topk_groups = num_topk_groups = num_nodes
 
-    num_nvl_bytes = int(2e9)
-    num_rdma_bytes = int(1e9)
+    num_nvl_bytes = int(2e9)  # ~2GB
+    num_rdma_bytes = int(1e9)  # ~1GB
 
     # reset for group-collective
     num_topk = num_ranks
@@ -900,8 +900,8 @@ def test_loop(args: argparse.Namespace):
     if local_rank == 0:
         print(
             (
-                f"[config] {num_nvl_bytes=} ({num_nvl_bytes / 1e9:.2f} GB) | "
-                f"{num_rdma_bytes=} ({num_rdma_bytes / 1e9:.2f} GB) | "
+                f"[config] {num_nvl_bytes=} ({num_nvl_bytes / 1024**3:.2f} GB) | "
+                f"{num_rdma_bytes=} ({num_rdma_bytes / 1024**3:.2f} GB) | "
                 f"{num_nodes=} (num_rdma_ranks) | {num_ranks=} | "
                 f"{num_local_ranks=} | {group.size()=} | "
                 f" {num_sms=} | {num_qps_per_rank=} | "

@@ -47,6 +47,7 @@
 // thus too large number of RDMA peers may cause the number of warps to exceed the limit.
 // See issue: https://github.com/deepseek-ai/DeepEP/issues/237
 #define NUM_MAX_RDMA_PEERS 20
+#define NUM_MAX_PEERS (NUM_MAX_NVL_PEERS * NUM_MAX_RDMA_PEERS)
 #define NUM_WORKSPACE_BYTES (32 * 1024 * 1024)
 #define NUM_MAX_LOCAL_EXPERTS 1024
 #define NUM_BUFFER_ALIGNMENT_BYTES 128
