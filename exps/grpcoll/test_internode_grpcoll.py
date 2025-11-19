@@ -62,7 +62,6 @@ from grpcoll_utils import (
     get_output_split_size_list_and_src_index_list,
     get_random_dst_indices_list,
     get_random_split_size_list,
-    per_token_cast_back,
     per_token_cast_to_fp8,
     perm_idxs2unperm_idxs,
     sim_gemm,
@@ -349,7 +348,6 @@ def test_main(
     assert torch.allclose(ref_is_token_in_rank_device, is_token_in_rank)
 
     # get group_cast layout from buffer as reference
-    assert num_experts == num_ranks
 
     # use host meta
     layout_t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
@@ -410,21 +408,14 @@ def test_main(
     for previous_mode in (True,):  # (False, True)
         for async_mode in (True,):  # (False, True)
             for current_x in (x,):
+                # --------------      test normal group_cast       -------------- #
+
                 if local_rank == 0:
                     print(
-                        "\n# ------    Test Internode Group Cast   ------ #\n",
+                        "\n# ------    Test Normal Internode Group Cast   ------ #\n",
                         flush=True,
                     )
 
-                # prepare group_cast args
-                if local_rank == 0:
-                    print(
-                        f"[testing] Running with "
-                        f'{"FP8" if isinstance(current_x, tuple) else "BF16"}, '
-                        f"(async={async_mode}, previous={previous_mode}) ...",
-                        flush=True,
-                        end="",
-                    )
                 group_cast_args = {
                     "x": current_x,
                     "recv_x": recv_x_gc_buf,
@@ -545,13 +536,6 @@ def test_main(
                     flush=True,
                 )
 
-                # cast back from fp8
-                recv_x = (
-                    per_token_cast_back(*recv_x)
-                    if isinstance(recv_x, tuple)
-                    else recv_x
-                )
-
                 # check
                 assert torch.equal(recv_x, recv_x_gc)
                 assert recv_gbl_rank_prefix_sum[-1].item() == recv_x.size(
@@ -562,6 +546,14 @@ def test_main(
                 ), f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
                 if current_x is not x_pure_rand:
                     check_data(recv_x, recv_gbl_rank_prefix_sum)
+
+                if local_rank == 0:
+                    print(
+                        "\n# ------    Normal Internode Group Cast Passed   ------ #\n",
+                        flush=True,
+                    )
+
+                # --------------      test cached group_cast       -------------- #
 
                 if local_rank == 0:
                     print(
@@ -593,7 +585,15 @@ def test_main(
 
                 if local_rank == 0:
                     print(
-                        "\n# ------    Test Internode Group Reduce   ------ #\n",
+                        "\n# ------    Internode Cached Group Cast Passed   ------ #\n",
+                        flush=True,
+                    )
+
+                # --------------      test normal group_reduce       -------------- #
+
+                if local_rank == 0:
+                    print(
+                        "\n# ------    Test Normal Internode Group Reduce   ------ #\n",
                         flush=True,
                     )
 
@@ -697,6 +697,12 @@ def test_main(
                 diff = calc_diff(check_x, ref_x)
                 assert diff < 5e-6, f"{check_x} != {ref_x} with ({diff=})"
 
+                if local_rank == 0:
+                    print(
+                        "\n# ------    Normal Internode Group Reduce Passed  ------ #\n",
+                        flush=True,
+                    )
+
                 # For later tuning
                 group_cast_bf16_rdma_send_bytes = num_rdma_token_sent * hidden * 2
                 group_cast_bf16_nvl_recv_bytes = recv_x.numel() * 2
@@ -712,19 +718,10 @@ def test_main(
 
     # Tune group_cast performance
     best_group_cast_results = None
-    fp8_factor = (1 + 4 / 128) / 2
     for current_x in (x,):  # (x_e4m3, x):
         best_time, best_results = 1e10, None
-        rdma_send_bytes = (
-            (group_cast_bf16_rdma_send_bytes * fp8_factor)
-            if isinstance(current_x, tuple)
-            else group_cast_bf16_rdma_send_bytes
-        )
-        nvl_recv_bytes = (
-            (group_cast_bf16_nvl_recv_bytes * fp8_factor)
-            if isinstance(current_x, tuple)
-            else group_cast_bf16_nvl_recv_bytes
-        )
+        rdma_send_bytes = group_cast_bf16_rdma_send_bytes
+        nvl_recv_bytes = group_cast_bf16_nvl_recv_bytes
         for nvl_chunk_size in range(4, 45, 4):
             for rdma_chunk_size in range(4, 33, 4):
                 config = GrpCollConfig(
@@ -756,8 +753,7 @@ def test_main(
                     )
         if local_rank == 0:
             print(
-                f"[tuning] Best group_cast "
-                f'({"FP8" if isinstance(current_x, tuple) else "BF16"}): '
+                f"[tuning] Best group_cast: "
                 f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "
                 f"RDMA chunk {best_results[2]}, transmit: {best_time * 1e6:.2f} us, "
                 f"notify: {best_results[3] * 1e6:.2f} us, "
@@ -874,8 +870,8 @@ def test_loop(args: argparse.Namespace):
         num_nodes,
         num_local_ranks,
         group,
-        device,
-        seed,
+        _,  # device
+        _,  # seed
     ) = setup_dist_env(base_seed=0, seed_bias=lambda rank: rank)
 
     # if args.test_ll_compatibility:
