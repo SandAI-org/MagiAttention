@@ -655,7 +655,7 @@ def dispatch(
         x (torch.Tensor): global input tensor.
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
             as one argument for many other magi_attention APIs,
-            about which the users may have no bother to care.
+            which users don’t have to bother with.
         pad_value (float): the specific value to pad to input tensor. Defaults to 0.
 
     Returns:
@@ -685,7 +685,7 @@ def undispatch(
         x (torch.Tensor): local tensor
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
             as one argument for many other magi_attention APIs,
-            about which the users may have no bother to care.
+            which users don’t have to bother with.
 
     Returns:
         torch.Tensor: the undispatched and unpadded tensor.
@@ -722,7 +722,7 @@ def calc_attn(
         v (torch.Tensor): local value tensor.
         key (DistAttnRuntimeKey): the object that holds some inner meta data
             as one argument for many other magi_attention APIs,
-            about which the users may have no bother to care.
+            which users don’t have to bother with.
 
         sink (torch.Tensor, optional): global sink tensor (replicated among cp ranks).
             Defaults to ``None`` to not apply attention sink.
@@ -768,7 +768,7 @@ def get_position_ids(key: DistAttnRuntimeKey) -> torch.Tensor:
     Args:
         key (DistAttnRuntimeKey): the key that holds some inner meta data,
             as one argument for many other magi_attention APIs,
-            about which the users may have no bother to care.
+            which users don’t have to bother with.
 
     Returns:
         torch.Tensor: postion ids of local tensor w.r.t. global tensor.

@@ -148,7 +148,7 @@ def dsink_all_reduce_op() -> str:
     However, since sink tensor is learnable, it will be considered as a regular parameter in the model
     similar to ``bias`` in ``nn.Linear`` layer.
 
-    So under some popular training frameworks, such as Megatron-LM, FSDP,the sum-reduction across cp ranks
+    So under some popular training frameworks, such as Megatron-LM, FSDP, the sum-reduction across cp ranks
     of the partial gradients of sink might be automatically applied within the whole ``dp x cp`` mesh.
 
     To avoid repeated reduction, we provide this environment variable

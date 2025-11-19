@@ -343,5 +343,5 @@ def get_ffa_jit_mod(
     return spec.build_and_load()
 
 
-if no_build_cache:
+if not no_build_cache:
     get_ffa_jit_mod = lru_cache(maxsize=None)(get_ffa_jit_mod)
