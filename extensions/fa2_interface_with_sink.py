@@ -982,7 +982,8 @@ def fa2_qkvpacked_func_with_sink(
 
     Arguments:
         qkv: (batch_size, seqlen, 3, nheads, headdim)
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink: (seqlen_sink, nheads) or (batch_size, seqlen, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1061,7 +1062,8 @@ def fa2_kvpacked_func_with_sink(
     Arguments:
         q: (batch_size, seqlen, nheads, headdim)
         kv: (batch_size, seqlen, 2, nheads_k, headdim)
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink: (seqlen_sink, nheads) or (batch_size, seqlen, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1211,7 +1213,8 @@ def fa2_varlen_qkvpacked_func_with_sink(
         cu_seqlens: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
            of the sequences in the batch, used to index into qkv.
         max_seqlen: int. Maximum sequence length in the batch.
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink: (seqlen_sink, nheads) or (total, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1302,7 +1305,8 @@ def fa2_varlen_kvpacked_func_with_sink(
            of the sequences in the batch, used to index into kv.
         max_seqlen_q: int. Maximum query sequence length in the batch.
         max_seqlen_k: int. Maximum key sequence length in the batch.
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink: (seqlen_sink, nheads) or (total_q, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1397,7 +1401,8 @@ def fa2_varlen_func_with_sink(
            of the sequences in the batch, used to index into kv.
         max_seqlen_q: int. Maximum query sequence length in the batch.
         max_seqlen_k: int. Maximum key sequence length in the batch.
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink: (seqlen_sink, nheads) or (total_q, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).

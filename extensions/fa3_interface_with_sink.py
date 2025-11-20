@@ -324,12 +324,23 @@ class FA3FuncWithSink(torch.autograd.Function):
             # rearrange out, lse
             out = rearrange(out, "b s h d -> (b s) h d")
             lse = rearrange(lse, "b h s -> (b s) h")
+            match sink.ndim:
+                case 2:
+                    sink_layout = "sh"
+                case 3:
+                    sink_layout = "shd"
+                case 4:
+                    sink_layout = "ssh"
+                    sink = rearrange(sink, "b sq s h -> (b sq) s h")
+                case _:
+                    raise ValueError(f"Invalid sink shape {sink.shape}")
 
             # correct out, lse with sink
             out, lse = correct_attn_out_lse_with_sink_compiled(
                 out=out,
                 lse=lse,
                 sink=sink,
+                sink_layout=sink_layout,
                 inplace=True,
             )
 
@@ -347,10 +358,21 @@ class FA3FuncWithSink(torch.autograd.Function):
         sink: torch.Tensor | None,
     ) -> torch.Tensor | None:
         if sink is not None:
+            b = out.shape[0]
             # rearrange out, do, lse
             out = rearrange(out, "b s h d -> (b s) h d")
             dout = rearrange(dout, "b s h d -> (b s) h d")
             lse = rearrange(lse, "b h s -> (b s) h")
+            match sink.ndim:
+                case 2:
+                    sink_layout = "sh"
+                case 3:
+                    sink_layout = "shd"
+                case 4:
+                    sink_layout = "ssh"
+                    sink = rearrange(sink, "b sq s h -> (b sq) s h")
+                case _:
+                    raise ValueError(f"Invalid sink shape {sink.shape}")
 
             # compute dsink
             dsink = sink_bwd_compiled(
@@ -358,7 +380,12 @@ class FA3FuncWithSink(torch.autograd.Function):
                 lse=lse,
                 o=out,
                 do=dout,
+                sink_layout=sink_layout,
             )
+
+            # rearrange dsink back
+            if sink_layout == "ssh":
+                dsink = rearrange(dsink, "(b sq) s h -> b sq s h", b=b)
         else:
             dsink = None
 
@@ -552,12 +579,23 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
         if sink is not None:
             # rearrange lse
             lse = rearrange(lse, "h s -> s h")
+            match sink.ndim:
+                case 2:
+                    sink_layout = "sh"
+                case 3:
+                    if sink.size(0) == lse.size(0):
+                        sink_layout = "ssh"
+                    else:
+                        sink_layout = "shd"
+                case _:
+                    raise ValueError(f"Invalid sink shape {sink.shape}")
 
             # correct out, lse with sink
             out, lse = correct_attn_out_lse_with_sink_compiled(
                 out=out,
                 lse=lse,
                 sink=sink,
+                sink_layout=sink_layout,
                 inplace=True,
             )
 
@@ -576,6 +614,16 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
         if sink is not None:
             # rearrange lse
             lse = rearrange(lse, "h s -> s h")
+            match sink.ndim:
+                case 2:
+                    sink_layout = "sh"
+                case 3:
+                    if sink.size(0) == lse.size(0):
+                        sink_layout = "ssh"
+                    else:
+                        sink_layout = "shd"
+                case _:
+                    raise ValueError(f"Invalid sink shape {sink.shape}")
 
             # compute dsink
             dsink = sink_bwd_compiled(
@@ -583,6 +631,7 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
                 lse=lse,
                 o=out,
                 do=dout,
+                sink_layout=sink_layout,
             )
         else:
             dsink = None
@@ -618,6 +667,8 @@ def fa3_qkvpacked_func_with_sink(
 
     Arguments:
         qkv: (batch_size, seqlen, 3, nheads, headdim)
+        sink: (seqlen_sink, nheads) or (batch_size, seqlen, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -704,7 +755,8 @@ def fa3_func_with_sink(
         q: (batch_size, seqlen, nheads, headdim)
         k: (batch_size, seqlen, nheads_k, headdim)
         v: (batch_size, seqlen, nheads_k, headdim)
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink: (seqlen_sink, nheads) or (batch_size, seqlen, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).

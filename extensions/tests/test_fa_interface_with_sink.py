@@ -157,6 +157,7 @@ class TestFAInterfaceWithSink(TestCase):
                 q_, k_, v_, do_ = [
                     rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
                 ]
+
                 if has_sink and sink_layout == "ssh":
                     sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
                 else:
@@ -384,14 +385,21 @@ class TestFAInterfaceWithSink(TestCase):
                 q_, k_, v_, do_ = [
                     rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
                 ]
+
+                if has_sink and sink_layout == "ssh":
+                    sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
+                else:
+                    sink_ = sink
+
                 fa3_out, fa3_lse = fa3_func_with_sink(
                     q=q_,
                     k=k_,
                     v=v_,
-                    sink=sink,
+                    sink=sink_,
                     causal=causal,
                     return_attn_probs=True,
                 )
+
                 fa3_out.backward(do_)
                 fa3_out = rearrange(fa3_out, "b s h d -> (b s) h d")
                 fa3_lse = rearrange(fa3_lse, "b h s -> (b s) h")
@@ -415,13 +423,20 @@ class TestFAInterfaceWithSink(TestCase):
                     rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
                 ]
                 qkv = torch.cat([q_, k_, v_], dim=-2)  # concat at num_heads dim
+
+                if has_sink and sink_layout == "ssh":
+                    sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
+                else:
+                    sink_ = sink
+
                 fa3_out, fa3_lse = fa3_qkvpacked_func_with_sink(
                     qkv=qkv,
-                    sink=sink,
+                    sink=sink_,
                     causal=causal,
                     num_heads_q=nhq,
                     return_attn_probs=True,
                 )
+
                 fa3_out.backward(do_)
                 fa3_out = rearrange(fa3_out, "b s h d -> (b s) h d")
                 fa3_lse = rearrange(fa3_lse, "b h s -> (b s) h")
