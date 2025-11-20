@@ -14,15 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-export WORLD_SIZE=${WORLD_SIZE:-64}
+export NNODES=${NNODES:-1}
 export GPUS_PER_NODE=8
-export NNODES=${NNODES:-8}
+export WORLD_SIZE=$((GPUS_PER_NODE * NNODES))
 export NODE_RANK=${RANK:-0}
 export MAGI_ATTENTION_HIERARCHICAL_COMM=${MAGI_ATTENTION_HIERARCHICAL_COMM:-1}
-# export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
-# export MASTER_PORT=${MASTER_PORT:-16988}
+
+if [[ $NNODES -eq 1 ]]; then # single-node
+    export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+    export MASTER_PORT=${MASTER_PORT:-16988}
+fi
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+
+export PYTHONPATH=../../
 
 if [ "${MAGI_ATTENTION_HIERARCHICAL_COMM}" == "1" ]; then
     export CUDA_DEVICE_MAX_CONNECTIONS=8

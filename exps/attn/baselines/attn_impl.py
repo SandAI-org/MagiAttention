@@ -18,6 +18,8 @@ from typing import Any, Optional
 import torch
 from flash_attn import flash_attn_func as fa2_func
 from flash_attn import flash_attn_varlen_func as fa2_varlen_func
+from flash_attn.cute.interface import flash_attn_func as fa4_func
+from flash_attn.cute.interface import flash_attn_varlen_func as fa4_varlen_func
 from flash_attn_interface import flash_attn_func as fa3_func
 from flash_attn_interface import flash_attn_varlen_func as fa3_varlen_func
 from packaging import version
@@ -174,10 +176,12 @@ __all__ = [
     "torch_attn_func",
     "fa2_func",
     "fa3_func",
+    "fa4_func",
     "ffa_func",
     "sdpa_func",
     "cudnn_fused_attn_func",
     "flex_attn_func",
     "fa2_varlen_func",
     "fa3_varlen_func",
+    "fa4_varlen_func",
 ]

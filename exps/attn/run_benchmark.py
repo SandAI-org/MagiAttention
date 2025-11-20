@@ -22,6 +22,8 @@ from baselines.attn_impl import (
     fa2_varlen_func,
     fa3_func,
     fa3_varlen_func,
+    fa4_func,
+    fa4_varlen_func,
     ffa_func,
     flex_attn_func,
     sdpa_func,
@@ -58,7 +60,8 @@ from magi_attention.utils._utils import get_attn_mask_from_ffa_args
 # impls = ["fa2", "fa3", "ffa"]  # compare to fa family
 # impls = ["cudnn", "fa3", "ffa"]  # compare to performance top-3 sota
 # impls = ["ffa", "fa3", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
-impls = ["ffa", "fa3"]
+# impls = ["ffa", "fa3"]
+impls = ["ffa", "fa3", "fa4"]
 
 
 mask_types = ["full"]
@@ -86,13 +89,12 @@ varlen_seqlen_distribution = {
 
 
 ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32]]
-# ss = [k * 1024 for k in [4, 96, 128]]
 ds = [128]
 wds = ["fwd", "bwd"]
 
 
 b = 1
-nhq = 48
+nhq = 8
 nhk = 8
 dtype = torch.bfloat16
 
@@ -391,7 +393,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
     # fa style shape:
     #   non-varlen: (b,s,h,d)
     #   varlen: (t,h,d)
-    if attn_impl in ("fa2", "fa3"):
+    if attn_impl in ("fa2", "fa3", "fa4"):
         if "varlen" in mask_type:
             q = q.view(b * sq, nhq, hd)
             k = k.view(b * sk, nhk, hd)
@@ -399,6 +401,11 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
 
         if "block_causal" in mask_type:
             is_attn_impl_support_this_mask = False
+
+        if attn_impl == "fa4":
+            window_size_tuple = tuple(
+                [None if x == -1 else x for x in window_size_tuple]
+            )
 
     # --------- prepare grads --------- #
 
@@ -542,6 +549,48 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                     causal=causal,
                     window_size=window_size_tuple,
                 )
+
+        if wd == "bwd":
+            try:
+                o = fn()
+            except Exception as e:
+                if "CUDA out of memory" not in str(e):
+                    print(
+                        f"Error occured before running {attn_impl} with {mask_type} mask "
+                        f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                    )
+                    raise e
+                already_known_oom_before_run = True
+
+            def fn():
+                o.backward(do, retain_graph=True)
+
+    elif attn_impl == "fa4":
+        if "varlen" in mask_type:
+
+            def fn():
+                return fa4_varlen_func(
+                    q,
+                    k,
+                    v,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    softmax_scale=softmax_scale,
+                    causal=causal,
+                    window_size=window_size_tuple,
+                )[0]
+
+        else:
+
+            def fn():
+                return fa4_func(
+                    q,
+                    k,
+                    v,
+                    softmax_scale=softmax_scale,
+                    causal=causal,
+                    window_size=window_size_tuple,
+                )[0]
 
         if wd == "bwd":
             try:
