@@ -20,6 +20,7 @@ from einops import rearrange, repeat
 from packaging import version
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.functional.utils import safe_softmax, safe_subtract
 from magi_attention.utils import max_fp_dtype, to_higher_fp_dtype
 
@@ -151,6 +152,7 @@ def _attn_pre_process(
     sink: torch.Tensor | None,
     mask: torch.Tensor,
     softmax_scale: float | None = None,
+    sink_layout: AttnSinkLayout = "sh",
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -173,9 +175,19 @@ def _attn_pre_process(
     # prepare sink
     # where sink.shape = [nhq, sq, s_sink]
     if sink is not None:
+        match sink_layout:
+            case "sh":
+                sink = repeat(sink, "s hq -> hq sq s", sq=q.size(0))
+            case "ssh":
+                sink = rearrange(sink, "sq s hq -> hq sq s")
+            case "shd":
+                raise NotImplementedError(
+                    f"sink_layout {sink_layout} is not supported yet"
+                )
+            case _:
+                raise ValueError(f"Invalid sink_layout {sink_layout}")
         sink = to_higher_fp_dtype(
-            repeat(sink, "s hq -> hq sq s", sq=q.size(0)),
-            lowest_precision=max_fp_dtype(q.dtype, torch.float32),
+            sink, lowest_precision=max_fp_dtype(q.dtype, torch.float32)
         )
 
     # prepare q,k,v
@@ -274,6 +286,7 @@ def _ref_attn_torch_impl(
     mask: torch.Tensor,
     softmax_scale: float | None = None,
     return_lse: bool = False,
+    sink_layout: AttnSinkLayout = "sh",
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     (q, k, v, sink, bias, softmax_scale) = _attn_pre_process(
         q=q,
@@ -282,6 +295,7 @@ def _ref_attn_torch_impl(
         sink=sink,
         mask=mask,
         softmax_scale=softmax_scale,
+        sink_layout=sink_layout,
     )
 
     # apply `S = Q x K.T * scale + bias`
@@ -340,6 +354,7 @@ def ref_attn_func(
     backend: str = "sdpa",
     high_precision: bool = False,
     return_lse: bool = False,
+    sink_layout: AttnSinkLayout = "sh",
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     assert layout in ("thd",), f"Unsupported layout: {layout}"
     assert softcap == 0.0, "non-zero softcap is not supported by now"
@@ -373,6 +388,7 @@ def ref_attn_func(
                 mask=mask,
                 softmax_scale=softmax_scale,
                 return_lse=return_lse,
+                sink_layout=sink_layout,
             )
         case _:
             raise NotImplementedError(f"Unsupported backend: {backend}")

@@ -21,6 +21,8 @@ GroupReduceOp: TypeAlias = Literal["sum", "avg", "lse"]
 
 OutMaybeWithLSE: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 
+AttnSinkLayout: TypeAlias = Literal["sh", "shd", "ssh"]
+
 
 class AttnType(Enum):
     """The enum used to specify the type of attention calculation we support"""
