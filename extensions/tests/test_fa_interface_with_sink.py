@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: disable-error-code="union-attr"
 import unittest
 from typing import Any
 from unittest import TestCase
@@ -25,6 +26,7 @@ from magi_attention.api.functools import (
     infer_varlen_mask_from_batch,
 )
 from magi_attention.common import AttnRanges
+from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.testing import parameterize
 from magi_attention.testing.precision import (
     EPSILON,
@@ -77,6 +79,7 @@ class TestFAInterfaceWithSink(TestCase):
             "varlen_kvpacked",
         ],
     )
+    @parameterize("sink_layout", ["sh"])  # ["sh", "ssh", "shd"])
     @parameterize(
         "attn_config",
         [
@@ -105,6 +108,7 @@ class TestFAInterfaceWithSink(TestCase):
     def test_fa2_interface_with_sink(
         self,
         mode: str,
+        sink_layout: AttnSinkLayout,
         attn_config: dict[str, Any],
         dtype: torch.dtype,
         causal: bool,
@@ -134,15 +138,11 @@ class TestFAInterfaceWithSink(TestCase):
             requires_grad=True,
         )
         do = torch.randn_like(q)
-        if has_sink:
-            sink = torch.randn(
-                (s_sink, nhq),
-                dtype=torch.float32,
-                device=self.device,
-                requires_grad=True,
-            )
-        else:
-            sink = None
+        sink = (
+            self.init_sink_tensor(b * sq, s_sink, nhq, hd, sink_layout)
+            if has_sink
+            else None
+        )
 
         # construct mask
         cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(b, sq)
@@ -276,6 +276,7 @@ class TestFAInterfaceWithSink(TestCase):
             grad_total_sink=fa2_dsink,
             grad_total_out=do,
             dtype=dtype,
+            sink_layout=sink_layout,
             test_case=(
                 f"fa2_interface_with_sink_[{mode=}]x"
                 f"[{attn_config=}]x[{dtype=}]x[{causal=}]"
@@ -283,6 +284,7 @@ class TestFAInterfaceWithSink(TestCase):
         )
 
     @parameterize("mode", ["batch", "varlen", "qkvpacked"])
+    @parameterize("sink_layout", ["sh"])  # ["sh", "ssh", "shd"])
     @parameterize(
         "attn_config",
         [
@@ -311,6 +313,7 @@ class TestFAInterfaceWithSink(TestCase):
     def test_fa3_interface_with_sink(
         self,
         mode: str,
+        sink_layout: AttnSinkLayout,
         attn_config: dict[str, Any],
         dtype: torch.dtype,
         causal: bool,
@@ -340,15 +343,13 @@ class TestFAInterfaceWithSink(TestCase):
             requires_grad=True,
         )
         do = torch.randn_like(q)
+        sink = (
+            self.init_sink_tensor(b * sq, s_sink, nhq, hd, sink_layout)
+            if has_sink
+            else None
+        )
         if has_sink:
-            sink = torch.randn(
-                (s_sink, nhq),
-                dtype=torch.float32,
-                device=self.device,
-                requires_grad=True,
-            )
-        else:
-            sink = None
+            assert isinstance(sink, torch.Tensor)
 
         # construct mask
         cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(b, sq)
@@ -433,6 +434,7 @@ class TestFAInterfaceWithSink(TestCase):
             grad_total_sink=fa3_dsink,
             grad_total_out=do,
             dtype=dtype,
+            sink_layout=sink_layout,
             test_case=(
                 f"fa3_interface_with_sink_[{mode=}]x"
                 f"[{attn_config=}]x[{dtype=}]x[{causal=}]"
@@ -458,6 +460,7 @@ class TestFAInterfaceWithSink(TestCase):
         grad_total_sink: torch.Tensor | None,
         grad_total_out: torch.Tensor,
         dtype: torch.dtype,
+        sink_layout: AttnSinkLayout = "sh",
         test_case: str = "",
     ) -> None:
         # -----   customize tolerance / threshold  ---- #
@@ -529,6 +532,7 @@ class TestFAInterfaceWithSink(TestCase):
             high_precision=True,
             backend="torch" if has_sink else "sdpa",
             return_lse=True,
+            sink_layout=sink_layout,
         )
         total_out_ref_high_precision.backward(grad_total_out)
         (
@@ -559,6 +563,7 @@ class TestFAInterfaceWithSink(TestCase):
             backend="torch" if has_sink else "sdpa",
             high_precision=False,
             return_lse=True,
+            sink_layout=sink_layout,
         )
 
         total_out_ref_low_precision.backward(grad_total_out)
@@ -819,6 +824,38 @@ class TestFAInterfaceWithSink(TestCase):
 
         if err_msg_list:
             raise AssertionError("\n\n".join(err_msg_list))
+
+    def init_sink_tensor(
+        self,
+        sq: int,
+        s_sink: int,
+        nhq: int,
+        hd: int,
+        sink_layout: AttnSinkLayout = "sh",
+    ) -> torch.Tensor:
+        match sink_layout:
+            case "sh":
+                sink = torch.randn(
+                    (s_sink, nhq),
+                    dtype=torch.float32,
+                    device=self.device,
+                    requires_grad=True,
+                )
+            case "ssh":
+                sink = torch.randn(
+                    (sq, s_sink, nhq),
+                    dtype=torch.float32,
+                    device=self.device,
+                    requires_grad=True,
+                )
+            case "shd":
+                raise NotImplementedError(
+                    f"sink_layout {sink_layout} is not supported yet"
+                )
+            case _:
+                raise ValueError(f"Invalid sink_layout {sink_layout}")
+
+        return sink
 
 
 if __name__ == "__main__":
