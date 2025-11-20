@@ -21,6 +21,9 @@ basic running command:
 ```bash
 cd exps/attn
 
+# NOTE: since transformer-engine has its own customized way to install flash-attention-3
+# which has conflict with the original repo
+# you need to get into the package directory and manually copy the `flash_attn_interface.py` file into `flash_attn_3/` subdirectory
 bash run_benchmark.sh
 ```
 
