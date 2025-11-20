@@ -168,6 +168,7 @@ class TestFAInterfaceWithSink(TestCase):
                     k=k_,
                     v=v_,
                     sink=sink_,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
@@ -185,6 +186,7 @@ class TestFAInterfaceWithSink(TestCase):
                     max_seqlen_q=sq,
                     max_seqlen_k=sk,
                     sink=sink,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
@@ -209,6 +211,7 @@ class TestFAInterfaceWithSink(TestCase):
                 fa2_out = fa2_qkvpacked_func_with_sink(
                     qkv=qkv,
                     sink=sink_,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
@@ -231,6 +234,7 @@ class TestFAInterfaceWithSink(TestCase):
                     q=q_,
                     kv=kv,
                     sink=sink_,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
@@ -249,6 +253,7 @@ class TestFAInterfaceWithSink(TestCase):
                     cu_seqlens=cu_seqlens_q,
                     max_seqlen=sq,
                     sink=sink,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
@@ -265,6 +270,7 @@ class TestFAInterfaceWithSink(TestCase):
                     max_seqlen_q=sq,
                     max_seqlen_k=sk,
                     sink=sink,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
