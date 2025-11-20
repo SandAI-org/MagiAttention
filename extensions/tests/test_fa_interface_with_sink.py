@@ -79,7 +79,7 @@ class TestFAInterfaceWithSink(TestCase):
             "varlen_kvpacked",
         ],
     )
-    @parameterize("sink_layout", ["sh"])  # ["sh", "ssh", "shd"])
+    @parameterize("sink_layout", ["sh", "ssh"])  # ["sh", "ssh", "shd"])
     @parameterize(
         "attn_config",
         [
@@ -157,15 +157,21 @@ class TestFAInterfaceWithSink(TestCase):
                 q_, k_, v_, do_ = [
                     rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
                 ]
+                if has_sink and sink_layout == "ssh":
+                    sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
+                else:
+                    sink_ = sink
+
                 fa2_out = fa2_func_with_sink(
                     q=q_,
                     k=k_,
                     v=v_,
-                    sink=sink,
+                    sink=sink_,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
                 )
+
                 fa2_out.backward(do_)
                 fa2_out = rearrange(fa2_out, "b s h d -> (b s) h d")
             case "varlen":
@@ -193,13 +199,20 @@ class TestFAInterfaceWithSink(TestCase):
                     repeat(x, "b s h d -> b s (h r) d", r=rep_times) for x in (k_, v_)
                 ]
                 qkv = torch.stack([q_, k_, v_], dim=-3)  # stack before num_heads dim
+
+                if has_sink and sink_layout == "ssh":
+                    sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
+                else:
+                    sink_ = sink
+
                 fa2_out = fa2_qkvpacked_func_with_sink(
                     qkv=qkv,
-                    sink=sink,
+                    sink=sink_,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
                 )
+
                 fa2_out.backward(do_)
                 fa2_out = rearrange(fa2_out, "b s h d -> (b s) h d")
             case "kvpacked":
@@ -207,14 +220,21 @@ class TestFAInterfaceWithSink(TestCase):
                     rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
                 ]
                 kv = torch.stack([k_, v_], dim=-3)  # stack before num_heads dim
+
+                if has_sink and sink_layout == "ssh":
+                    sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
+                else:
+                    sink_ = sink
+
                 fa2_out = fa2_kvpacked_func_with_sink(
                     q=q_,
                     kv=kv,
-                    sink=sink,
+                    sink=sink_,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
                 )
+
                 fa2_out.backward(do_)
                 fa2_out = rearrange(fa2_out, "b s h d -> (b s) h d")
             case "varlen_qkvpacked":
@@ -222,6 +242,7 @@ class TestFAInterfaceWithSink(TestCase):
                 rep_times = nhq // nhk
                 k_, v_ = [repeat(x, "s h d -> s (h r) d", r=rep_times) for x in (k, v)]
                 qkv = torch.stack([q, k_, v_], dim=-3)  # stack before num_heads dim
+
                 fa2_out = fa2_varlen_qkvpacked_func_with_sink(
                     qkv=qkv,
                     cu_seqlens=cu_seqlens_q,
@@ -231,6 +252,7 @@ class TestFAInterfaceWithSink(TestCase):
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
                 )
+
                 fa2_out.backward(do)
             case "varlen_kvpacked":
                 kv = torch.stack([k, v], dim=-3)  # stack before num_heads dim
@@ -284,7 +306,7 @@ class TestFAInterfaceWithSink(TestCase):
         )
 
     @parameterize("mode", ["batch", "varlen", "qkvpacked"])
-    @parameterize("sink_layout", ["sh"])  # ["sh", "ssh", "shd"])
+    @parameterize("sink_layout", ["sh", "ssh"])  # ["sh", "ssh", "shd"])
     @parameterize(
         "attn_config",
         [
@@ -348,8 +370,6 @@ class TestFAInterfaceWithSink(TestCase):
             if has_sink
             else None
         )
-        if has_sink:
-            assert isinstance(sink, torch.Tensor)
 
         # construct mask
         cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(b, sq)
