@@ -402,6 +402,7 @@ class TestFAInterfaceWithSink(TestCase):
                     k=k_,
                     v=v_,
                     sink=sink_,
+                    sink_layout=sink_layout,
                     causal=causal,
                     return_attn_probs=True,
                 )
@@ -419,6 +420,7 @@ class TestFAInterfaceWithSink(TestCase):
                     max_seqlen_q=sq,
                     max_seqlen_k=sk,
                     sink=sink,
+                    sink_layout=sink_layout,
                     causal=causal,
                     return_attn_probs=True,
                 )
@@ -438,6 +440,7 @@ class TestFAInterfaceWithSink(TestCase):
                 fa3_out, fa3_lse = fa3_qkvpacked_func_with_sink(
                     qkv=qkv,
                     sink=sink_,
+                    sink_layout=sink_layout,
                     causal=causal,
                     num_heads_q=nhq,
                     return_attn_probs=True,
