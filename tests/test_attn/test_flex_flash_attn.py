@@ -19,6 +19,7 @@ import torch
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.common import AttnRanges
+from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.functional import flex_flash_attn_func
 from magi_attention.functional.flex_flash_attn import (
     _flex_flash_attn_backward,
@@ -1568,15 +1569,28 @@ class TestFlexFlashAttn(DistTestBase):
             },
         )
 
-    def test_ffa_compiled(self):
+    @parameterize("sink_layout", ["sh"])  # ["sh", "ssh", "shd"])
+    def test_ffa_compiled(self, sink_layout: AttnSinkLayout):
         s, s_sink = 2048, 4
         hq, hk, d = 6, 3, 128
 
-        q = torch.randn(s, hq, d, dtype=torch.bfloat16, device="cuda")
-        k = torch.randn(s, hk, d, dtype=torch.bfloat16, device="cuda")
+        q = torch.randn(s, hq, d, dtype=torch.bfloat16, device=self.device)
+        k = torch.randn(s, hk, d, dtype=torch.bfloat16, device=self.device)
         v = torch.randn_like(k)
         do = torch.randn_like(q)
-        sink = torch.randn(s_sink, hq, dtype=torch.float32, device="cuda")
+        match sink_layout:
+            case "sh":
+                sink = torch.randn(s_sink, hq, dtype=torch.float32, device=self.device)
+            case "ssh":
+                sink = torch.randn(
+                    s, s_sink, hq, dtype=torch.bfloat16, device=self.device
+                )
+            case "shd":
+                raise NotImplementedError(
+                    f"sink_layout {sink_layout} is not supported yet"
+                )
+            case _:
+                raise ValueError(f"Invalid sink_layout {sink_layout}")
 
         [x.requires_grad_(True) for x in (q, k, v, sink)]
 
@@ -1592,8 +1606,11 @@ class TestFlexFlashAttn(DistTestBase):
             v=v,
             q_ranges=q_ranges.to_tensor("cuda"),
             k_ranges=k_ranges.to_tensor("cuda"),
-            attn_type_map=torch.tensor(attn_type_map, dtype=torch.int32, device="cuda"),
+            attn_type_map=torch.tensor(
+                attn_type_map, dtype=torch.int32, device=self.device
+            ),
             sink=sink,
+            sink_layout=sink_layout,
             # FIXME: compiling does not support auto_range_merge
             # due to custom unique_consecutive_pairs kernel with dynamic output shape
             auto_range_merge=False,
