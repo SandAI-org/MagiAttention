@@ -16,6 +16,7 @@
 import torch
 from einops import reduce
 
+from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import get_attn_mask_from_ffa_args, to_higher_fp_dtype
 
@@ -142,6 +143,7 @@ def sdpa_fwd(
     attn_arg: AttnArg,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
+    sink_layout: AttnSinkLayout = "sh",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """SDPA forward function
 
@@ -152,7 +154,10 @@ def sdpa_fwd(
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
         v (torch.Tensor): [num_tokens_kv, num_heads_kv, head_dim]
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
-        sink (torch.Tensor, optional): [num_tokens_sink, num_heads_q]
+        sink (torch.Tensor, optional):
+            - if sink_layout == "sh": [num_tokens_sink, num_heads_q]
+            - if sink_layout == "ssh": [num_tokens_q, num_tokens_sink, num_heads_q]
+
             Defaults to ``None`` to not apply attention sink.
 
         attn_arg (AttnArg): attention arguments for ffa
@@ -160,6 +165,8 @@ def sdpa_fwd(
         softmax_scale (float, optional): softmax scale.
             Defaults to None to use default value: 1/sqrt(head_dim)
         softcap (float, optional): softcap. Defaults to 0.
+
+        sink_layout (AttnSinkLayout, optional): sink layout. Defaults to "sh".
 
     Returns:
         torch.Tensor: out with shape [num_tokens_q, num_heads_q, head_dim]
@@ -203,6 +210,7 @@ def sdpa_fwd(
             out=out,
             lse=lse,
             sink=sink,
+            sink_layout=sink_layout,
             inplace=True,
         )
 
@@ -360,6 +368,7 @@ def sdpa_bwd(
     attn_arg: AttnArg,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
+    sink_layout: AttnSinkLayout = "sh",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """SDPA backward function
 
@@ -372,7 +381,10 @@ def sdpa_bwd(
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
         v (torch.Tensor): [num_tokens_kv, num_heads_kv, head_dim]
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
-        sink (torch.Tensor, optional): [num_tokens_sink, num_heads_q]
+        sink (torch.Tensor, optional):
+            - if sink_layout == "sh": [num_tokens_sink, num_heads_q]
+            - if sink_layout == "ssh": [num_tokens_q, num_tokens_sink, num_heads_q]
+
             Defaults to ``None`` to not calculate dsink.
         o (torch.Tensor): [num_tokens_q, num_heads_q, head_dim]
             or [batch_size, num_heads_q, num_tokens_q, head_dim]
@@ -384,6 +396,8 @@ def sdpa_bwd(
             Defaults to None to use default value: 1/sqrt(head_dim)
         softcap (float, optional): softcap. Defaults to 0.
 
+        sink_layout (AttnSinkLayout, optional): sink layout. Defaults to "sh".
+
     Returns:
         torch.Tensor: dq with shape [num_tokens_q, num_heads_q, head_dim]
             or [batch_size, num_heads_q, num_tokens_q, head_dim]
@@ -394,7 +408,10 @@ def sdpa_bwd(
         torch.Tensor: dv with shape [num_tokens_kv, num_heads_kv, head_dim]
             or [batch_size, num_heads_kv, num_tokens_kv, head_dim]
 
-        torch.Tensor or None: dsink with shape [num_tokens_sink, num_heads_q]
+        torch.Tensor or None: dsink with shape:
+            - if sink_layout == "sh": [num_tokens_sink, num_heads_q]
+            - if sink_layout == "ssh": [num_tokens_q, num_tokens_sink, num_heads_q]
+
             or None if sink is None
     """
     assert softcap == 0.0, "non-zero softcap is not supported by now"
@@ -408,6 +425,7 @@ def sdpa_bwd(
             lse=lse,
             o=o,
             do=do,
+            sink_layout=sink_layout,
         )
     else:
         dsink = None

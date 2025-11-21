@@ -748,6 +748,7 @@ def flex_flash_attn_func(
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor | None = None,
+    *,
     sink: torch.Tensor | None = None,
     sink_layout: AttnSinkLayout = "sh",
     softmax_scale: float | None = None,

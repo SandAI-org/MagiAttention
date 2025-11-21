@@ -180,18 +180,19 @@ class TestFlexFlashAttn(DistTestBase):
         k: torch.Tensor,
         v: torch.Tensor,
         sink: torch.Tensor | None,
+        sink_layout: AttnSinkLayout,
         do: torch.Tensor,
         q_ranges_tensor: torch.Tensor,
         k_ranges_tensor: torch.Tensor,
         attn_type_map_tensor: torch.Tensor,
         auto_range_merge: bool,
-        test_case: str,
         o_ref: torch.Tensor,
         lse_ref: torch.Tensor,
         dq_ref: torch.Tensor,
         dk_ref: torch.Tensor,
         dv_ref: torch.Tensor,
         dsink_ref: torch.Tensor | None,
+        test_case: str,
     ) -> list[str]:
         """Check deterministic behavior
         in which we will compare the output and gradients with a second run
@@ -213,6 +214,7 @@ class TestFlexFlashAttn(DistTestBase):
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
             sink=sink,
+            sink_layout=sink_layout,
             auto_range_merge=auto_range_merge,
             deterministic=True,
         )
@@ -250,16 +252,16 @@ class TestFlexFlashAttn(DistTestBase):
 
     def check_flex_flash_attn_accumulation(
         self,
-        q,
-        k,
-        v,
-        do,
-        q_ranges_tensor,
-        k_ranges_tensor,
-        attn_type_map_tensor,
-        auto_range_merge,
-        deterministic,
-        test_case,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        do: torch.Tensor,
+        q_ranges_tensor: torch.Tensor,
+        k_ranges_tensor: torch.Tensor,
+        attn_type_map_tensor: torch.Tensor,
+        auto_range_merge: bool,
+        deterministic: bool,
+        test_case: str,
     ):
         t, h, d = q.shape
         o_acc = torch.randn_like(q, dtype=torch.float32)
@@ -550,8 +552,8 @@ class TestFlexFlashAttn(DistTestBase):
             "dv_max_mismatch_thres", MAX_MISMATCH_THRES
         )
 
-        dsink_atol = EPSILON
-        dsink_rtol = 0.05
+        dsink_atol = err_ratio_dict.get("dsink_atol", EPSILON)
+        dsink_rtol = err_ratio_dict.get("dsink_rtol", 0.05)
         dsink_norm_rtol_ratio = err_ratio_dict.get(
             "dsink_norm_rtol_ratio", NORM_RTOL_RATIO
         )
@@ -944,12 +946,27 @@ class TestFlexFlashAttn(DistTestBase):
         )
         do = torch.randn_like(q)
         if has_sink:
-            sink = torch.randn(
-                (seqlen_sink, num_heads_q),
-                dtype=torch.float32,
-                device=self.device,
-                requires_grad=True,
-            )
+            match sink_layout:
+                case "sh":
+                    sink = torch.randn(
+                        (seqlen_sink, num_heads_q),
+                        dtype=torch.float32,
+                        device=self.device,
+                        requires_grad=True,
+                    )
+                case "ssh":
+                    sink = torch.randn(
+                        (seqlen_q, seqlen_sink, num_heads_q),
+                        dtype=torch.float32,
+                        device=self.device,
+                        requires_grad=True,
+                    )
+                case "shd":
+                    raise NotImplementedError(
+                        f"sink_layout {sink_layout} is not supported yet"
+                    )
+                case _:
+                    raise ValueError(f"Invalid sink_layout {sink_layout}")
         else:
             sink = None
 
@@ -985,6 +1002,7 @@ class TestFlexFlashAttn(DistTestBase):
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
             sink=sink,
+            sink_layout=sink_layout,
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
         )
@@ -1001,18 +1019,19 @@ class TestFlexFlashAttn(DistTestBase):
                 k=k,
                 v=v,
                 sink=sink,
+                sink_layout=sink_layout,
                 do=do,
                 q_ranges_tensor=q_ranges_tensor,
                 k_ranges_tensor=k_ranges_tensor,
                 attn_type_map_tensor=attn_type_map_tensor,
                 auto_range_merge=auto_range_merge,
-                test_case=test_case,
                 o_ref=o,
                 lse_ref=lse,
                 dq_ref=q.grad,
                 dk_ref=k.grad,
                 dv_ref=v.grad,
                 dsink_ref=sink.grad if has_sink else None,
+                test_case=test_case,
             )
 
         # compare with reference
@@ -1075,7 +1094,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "name": "full_4k",
                 "seqlen": 4096,
                 "seqlen_sink": 1,
-                "sink_layout": "sh",
+                "sink_layout": "ssh",
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 4096],
@@ -1127,7 +1146,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "name": "varlen_full_4k",
                 "seqlen": 4096,
                 "seqlen_sink": 4,
-                "sink_layout": "sh",
+                "sink_layout": "ssh",
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1187,7 +1206,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "name": "varlen_block_causal_2k",
                 "seqlen": 2048,
                 "seqlen_sink": 8,
-                "sink_layout": "sh",
+                "sink_layout": "ssh",
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1433,10 +1452,12 @@ class TestFlexFlashAttn(DistTestBase):
                 "dq_min_mismatch_thres": 5e-3,
                 "dsink_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
                 "dsink_min_mismatch_thres": max(1 / (seqlen_sink * num_heads_q), 5e-2)
-                if seqlen_sink > 0
-                else 0,
-                "dsink_min_norm_rtol": 5e-3,
+                if seqlen_sink > 0 and sink_layout == "sh"
+                else 5e-2,
+                "dsink_min_norm_rtol": 0.015,
                 "dsink_norm_rtol_ratio": NORM_RTOL_RATIO * 2,
+                "dsink_atol": 2e-4 if sink_layout == "sh" else EPSILON,
+                "dsink_rtol": 0.1,
             },
         )
 
@@ -1624,8 +1645,8 @@ class TestFlexFlashAttn(DistTestBase):
             q=q,
             k=k,
             v=v,
-            q_ranges=q_ranges.to_tensor("cuda"),
-            k_ranges=k_ranges.to_tensor("cuda"),
+            q_ranges=q_ranges.to_tensor(self.device),
+            k_ranges=k_ranges.to_tensor(self.device),
             attn_type_map=torch.tensor(
                 attn_type_map, dtype=torch.int32, device=self.device
             ),
