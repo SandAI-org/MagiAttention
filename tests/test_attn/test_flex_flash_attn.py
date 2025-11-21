@@ -477,6 +477,7 @@ class TestFlexFlashAttn(DistTestBase):
         grad_total_sink: torch.Tensor | None,
         grad_total_out: torch.Tensor,
         dtype: torch.dtype,
+        sink_layout: AttnSinkLayout,
         test_case: str = "",
         err_msg_list: list[str] = [],
         err_ratio_dict: dict[str, float] = {},
@@ -590,6 +591,7 @@ class TestFlexFlashAttn(DistTestBase):
             high_precision=True,
             backend="torch" if has_sink else "sdpa",
             return_lse=True,
+            sink_layout=sink_layout,
         )
         total_out_ref_high_precision.backward(grad_total_out)
         (
@@ -620,6 +622,7 @@ class TestFlexFlashAttn(DistTestBase):
             backend="torch" if has_sink else "sdpa",
             high_precision=False,
             return_lse=True,
+            sink_layout=sink_layout,
         )
 
         total_out_ref_low_precision.backward(grad_total_out)
@@ -902,6 +905,7 @@ class TestFlexFlashAttn(DistTestBase):
         auto_range_merge: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
+        sink_layout: AttnSinkLayout,
         test_case: str,
         err_ratio_dict: dict[str, float] = {},
     ) -> None:
@@ -1030,6 +1034,7 @@ class TestFlexFlashAttn(DistTestBase):
             grad_total_sink=sink.grad if has_sink else None,
             grad_total_out=do,
             dtype=dtype,
+            sink_layout=sink_layout,
             test_case=test_case,
             err_msg_list=err_msg_list,
             err_ratio_dict=err_ratio_dict,
@@ -1398,6 +1403,7 @@ class TestFlexFlashAttn(DistTestBase):
             attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
 
         test_case = (
+            "[test_ffa_simple]"
             f"[{attn_mask_config['name']}]"
             f"[{model_config['name']}]"
             f"[dtype={dtype}]"
@@ -1421,6 +1427,7 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
+            sink_layout=sink_layout,
             test_case=test_case,
             err_ratio_dict={
                 "dq_min_mismatch_thres": 5e-3,
@@ -1548,6 +1555,7 @@ class TestFlexFlashAttn(DistTestBase):
         )
 
         test_case = (
+            "[test_ffa_random]"
             f"[{model_config['name']}]"
             f"[{generate_config['name']}]"
             f"[num_pairs={num_pairs}]"
@@ -1571,6 +1579,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             test_case=test_case,
+            sink_layout="sh",
             err_ratio_dict={
                 "dq_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
                 "dq_min_mismatch_thres": 0.025,
@@ -1580,7 +1589,7 @@ class TestFlexFlashAttn(DistTestBase):
             },
         )
 
-    @parameterize("sink_layout", ["sh"])  # ["sh", "ssh", "shd"])
+    @parameterize("sink_layout", ["sh", "ssh"])  # ["sh", "ssh", "shd"])
     def test_ffa_compiled(self, sink_layout: AttnSinkLayout):
         s, s_sink = 2048, 4
         hq, hk, d = 6, 3, 128
@@ -1594,7 +1603,7 @@ class TestFlexFlashAttn(DistTestBase):
                 sink = torch.randn(s_sink, hq, dtype=torch.float32, device=self.device)
             case "ssh":
                 sink = torch.randn(
-                    s, s_sink, hq, dtype=torch.bfloat16, device=self.device
+                    s, s_sink, hq, dtype=torch.float32, device=self.device
                 )
             case "shd":
                 raise NotImplementedError(
@@ -1647,7 +1656,8 @@ class TestFlexFlashAttn(DistTestBase):
             grad_total_sink=dsink,
             grad_total_out=do,
             dtype=torch.bfloat16,
-            test_case="test_ffa_compiled",
+            sink_layout=sink_layout,
+            test_case=("[test_ffa_compiled]" f"[sink_layout={sink_layout}]"),
         )
 
 
