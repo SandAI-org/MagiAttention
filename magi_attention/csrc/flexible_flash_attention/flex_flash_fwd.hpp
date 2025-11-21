@@ -74,7 +74,6 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
   int const head_size = q.size(2);
-  int const total_sink = sink_.has_value() ? sink_->size(0) : 0;
   auto opts = q.options();
 
   // Check q, k, v (dtype, device, layout)
@@ -172,8 +171,9 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
   }
 
-  // Transfer sink_layout
+  // Transfer sink_layout and init total_sink
   flash::SinkLayout sink_layout = flash::str_to_sink_layout(sink_layout_);
+  int const total_sink = sink_.has_value() ? (sink_layout == flash::SinkLayout::SSH ? sink_->size(1) : sink_->size(0)) : 0;
 
   // Init optional sink
   at::Tensor sink;

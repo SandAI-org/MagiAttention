@@ -172,6 +172,10 @@ class FlashAttnFwdPostprocess {
     int32_t const head_dim_o = cute::get<1>(params.shape_O);
     int32_t const seqlen_sink = cute::get<1>(params.shape_sink);
 
+    // Get seqlen info
+    int const remain_valid_seqlen_o = seqlen_o - offset_o;
+    bool const is_valid_row = thread_idx < remain_valid_seqlen_o;
+
     // Initialize global tensors for O, LSE and sink
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh); // [sq, hd]
     Tensor gO = local_tile(mO, TileShapeMK{}, make_coord(block, _0{})); // (M, K)
@@ -200,6 +204,18 @@ class FlashAttnFwdPostprocess {
           shared_lse_sink[0] = calc_lse(shared_sink[0], seqlen_sink);
         __syncthreads();
       } else if constexpr (kSinkLayout == SinkLayout::SSH) { // sink.shape = [M, s_sink]
+#pragma unroll
+        // Load the sink to shared memory
+        // for each row by each thread
+        for (int si = 0; si < seqlen_sink; ++si) {
+          shared_sink[thread_idx][si] = is_valid_row ? gSink(thread_idx, si) : 0.0f;
+        }
+        __syncthreads();
+
+        // Compute the `lse_sink = log(sum(exp(sink)))`
+        // for each row by each thread
+        shared_lse_sink[thread_idx] = is_valid_row ? calc_lse(shared_sink[thread_idx], seqlen_sink) : -INFINITY;
+        __syncthreads();
       }
     }
 
@@ -242,26 +258,31 @@ class FlashAttnFwdPostprocess {
     for (int32_t i = 0; i < size(tLSErLSE); ++i) {
       int32_t row_idx = get<0>(tOcO((_0{}, _0{}), i, _0{}));
       int32_t hd_idx = get<1>(tOcO((_0{}, _0{}), i, _0{}));
-      if (row_idx + offset_o < seqlen_o) {
+      if (row_idx < remain_valid_seqlen_o) {
+        // Load LSE
         tLSErLSE(i) = gLSE(row_idx);
         tOpOm(i) = tLSErLSE(i) == -INFINITY;
+
+        // Correct LSE and compute the rescale weights for O if `Has_sink`
         if constexpr (Has_sink) {
+          // Set tOpOm_sink to true if the LSE is not -INFINITY
+          tOpOm_sink(i) = !tOpOm(i);
+
+          // Rescale LSE by lse_sink
+          float corr_lse;
           if constexpr (kSinkLayout == SinkLayout::SH) { // sink.shape = [1, s_sink]
-            // Set tOpOm_sink to true if the LSE is not -INFINITY
-            tOpOm_sink(i) = !tOpOm(i);
-
-            // Rescale LSE by lse_sink
-            float corr_lse = tOpOm(i) ? shared_lse_sink[0] : correct_lse(tLSErLSE(i), shared_lse_sink[0]);
-
-            // Store the rescale weight into tLSErLSE for later use to rescale O
-            tLSErLSE(i) = tOpOm(i) ? 0 : calc_lse_rescale_weight(tLSErLSE(i), corr_lse);
-
-            // Store rescaled LSE to global memory
-            // by the thread whose hd_idx == 0
-            if (hd_idx == 0)
-              gLSE(row_idx) = corr_lse;
+            corr_lse = tOpOm(i) ? shared_lse_sink[0] : correct_lse(tLSErLSE(i), shared_lse_sink[0]);
           } else if constexpr (kSinkLayout == SinkLayout::SSH) { // sink.shape = [M, s_sink]
+            corr_lse = tOpOm(i) ? shared_lse_sink[row_idx] : correct_lse(tLSErLSE(i), shared_lse_sink[row_idx]);
           }
+
+          // Store the rescale weight into tLSErLSE for later use to rescale O
+          tLSErLSE(i) = tOpOm(i) ? 0 : calc_lse_rescale_weight(tLSErLSE(i), corr_lse);
+
+          // Store rescaled LSE to global memory
+          // by the thread whose hd_idx == 0
+          if (hd_idx == 0)
+            gLSE(row_idx) = corr_lse;
         }
       }
     }
