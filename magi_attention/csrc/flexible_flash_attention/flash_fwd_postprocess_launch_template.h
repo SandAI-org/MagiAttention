@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cute/tensor.hpp>
+#include <stdexcept>
 
 #include <cutlass/arch/arch.h>
 #include <cutlass/cutlass.h>
@@ -31,10 +32,10 @@
 
 using namespace cute;
 
-template <typename T_out, uint32_t kBlockM, uint32_t kHeadDim, bool Has_sink>
+template <typename T_out, uint32_t kBlockM, uint32_t kHeadDim, bool Has_sink, flash::SinkLayout kSinkLayout>
 void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = cutlass::arch::Sm90;
-  using PostprocessKernel = flash::FlashAttnFwdPostprocess<T_out, kBlockM, kHeadDim, Has_sink, ArchTag>;
+  using PostprocessKernel = flash::FlashAttnFwdPostprocess<T_out, kBlockM, kHeadDim, Has_sink, kSinkLayout, ArchTag>;
 
   typename PostprocessKernel::Arguments postprocess_args{
       // O
@@ -46,8 +47,8 @@ void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {
       {params.h_qo, _1{}}, // stride_LSE: [nhq, 1]
       // sink
       static_cast<float*>(params.sink_ptr),
-      {params.total_sink, params.h_qo}, // shape_sink: [s_sink, nhq]
-      {params.h_qo, _1{}} // stride_sink: [nhq, 1]
+      {kSinkLayout == flash::SinkLayout::SH ? 1 : params.total_q, params.total_sink, params.h_qo}, // shape_sink: [1, s_sink, nhq] or [seqlen_q, s_sink, nhq]
+      {params.total_sink * params.h_qo, params.h_qo, _1{}} // stride_sink: [s_sink*nhq, nhq, 1]
   };
 
   typename PostprocessKernel::Params postprocess_params = PostprocessKernel::to_underlying_arguments(postprocess_args);
@@ -69,5 +70,15 @@ template <typename T_out, uint32_t kHeadDim>
 void run_flash_fwd_post_process_(Flash_fwd_params& params, cudaStream_t stream) {
   // TODO: tuning block size
   static constexpr uint32_t kBlockM = 256;
-  BOOL_SWITCH(params.has_sink(), Has_sink, [&] { run_flash_fwd_post_process<T_out, kBlockM, kHeadDim, Has_sink>(params, stream); });
+
+  switch (params.sink_layout) {
+    case flash::SinkLayout::SH:
+      BOOL_SWITCH(params.has_sink(), Has_sink, [&] { run_flash_fwd_post_process<T_out, kBlockM, kHeadDim, Has_sink, flash::SinkLayout::SH>(params, stream); });
+      break;
+    case flash::SinkLayout::SSH:
+      BOOL_SWITCH(params.has_sink(), Has_sink, [&] { run_flash_fwd_post_process<T_out, kBlockM, kHeadDim, Has_sink, flash::SinkLayout::SSH>(params, stream); });
+      break;
+    default:
+      throw std::runtime_error("Unsupported sink layout");
+  }
 }
