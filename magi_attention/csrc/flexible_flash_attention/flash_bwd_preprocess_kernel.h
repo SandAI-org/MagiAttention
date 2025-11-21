@@ -30,6 +30,7 @@
 #include <cutlass/numeric_types.h>
 
 #include "seqlen.h"
+#include "sink_layout.cuh"
 #include "softmax.h"
 #include "utils.h"
 
@@ -37,7 +38,7 @@ namespace flash {
 
 using namespace cute;
 
-template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQ, bool Clear_dK, bool Clear_dV, bool Has_sink>
+template <class TileShape_MK_, class Element, class ElementAccum, class ArchTag_, bool Clear_dQ, bool Clear_dK, bool Clear_dV, bool Has_sink, SinkLayout kSinkLayout>
 class FlashAttnBwdPreprocess {
  public:
   // Type Aliases
@@ -66,6 +67,10 @@ class FlashAttnBwdPreprocess {
   static constexpr int kWarpSize = 32;
   static_assert(!Has_sink || kNumPartialSink % kWarpSize == 0); // NOTE: we would demand the block size to be divisible by the warp size if `Has_sink`
 
+  static_assert(kSinkLayout == SinkLayout::SH or kSinkLayout == SinkLayout::SSH, "Unsupported SinkLayout");
+  using TileShapeMSink = cute::Shape<Int<kBlockM>, Int<kMaxSeqlenSink>>;
+  static constexpr int kBlockMSink = kSinkLayout == SinkLayout::SH ? 1 : kBlockM;
+
   // We want kBlockKGmem to be a power of 2 so that when we do the summing,
   // it's just between threads in the same warp
   static constexpr int kBlockKGmem = kHeadDim % 128 == 0 ? 128 : (kHeadDim % 64 == 0 ? 64 : 32);
@@ -92,8 +97,8 @@ class FlashAttnBwdPreprocess {
   using StridedPsum = cute::Stride<_1, _4, int64_t>;
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (sq, nhq)
   using StrideLSE = cute::Stride<int64_t, _1>;
-  using ShapeSink = cute::Shape<int32_t, int32_t>; // (s_sink, nhq)
-  using StrideSink = cute::Stride<int64_t, _1>;
+  using ShapeSink = cute::Shape<int32_t, int32_t, int32_t>; // (1, s_sink, nhq) or (sq, s_sink, nhq)
+  using StrideSink = cute::Stride<int64_t, int64_t, _1>;
   using ShapedSinkReduceBuf = cute::Shape<int32_t, int32_t, int32_t>; // (num_m_block, s_sink, nhq)
   using StridedSinkReduceBuf = cute::Stride<int64_t, int64_t, _1>;
 
@@ -232,8 +237,10 @@ class FlashAttnBwdPreprocess {
     Tensor gdO = local_tile(cute::domain_offset(make_coord(0, _0{}), mdO), TileShape_MK{}, make_coord(m_block, _0{})); // (M, K)
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh); // [sq,]
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(0), mLSE), Shape<Int<kBlockM>>{}, make_coord(m_block)); // (M,)
-    Tensor mSink = make_tensor(make_gmem_ptr(params.ptr_sink), params.shape_sink, params.stride_sink)(_, bidh); // [s_sink,]
-    Tensor mdSink = make_tensor(make_gmem_ptr(params.ptr_dsink), params.shape_sink, params.stride_sink)(_, bidh); // [s_sink,]
+    Tensor mSink = make_tensor(make_gmem_ptr(params.ptr_sink), params.shape_sink, params.stride_sink)(_, _, bidh); // [1, s_sink] or [sq, s_sink]
+    Tensor gSink = local_tile(mSink, TileShapeMSink{}, make_coord(m_block, _0{})); // (M, MAX_SINK), used only when `kSinkLayout == SSH`
+    Tensor mdSink = make_tensor(make_gmem_ptr(params.ptr_dsink), params.shape_sink, params.stride_sink)(_, _, bidh); // [1, s_sink] or [sq, s_sink]
+    Tensor gdSink = local_tile(mdSink, TileShapeMSink{}, make_coord(m_block, _0{})); // (M, MAX_SINK), used only when `kSinkLayout == SSH`
     Tensor mdSinkReduceBuf =
         make_tensor(make_gmem_ptr(params.ptr_dsink_reduce_buf), params.shape_dsink_reduce_buf, params.stride_dsink_reduce_buf)(_, _, bidh); // [num_m_block, s_sink]
     Tensor mdSinkReduceBufThisBlock = mdSinkReduceBuf(m_block, _); // [s_sink,]
@@ -249,24 +256,27 @@ class FlashAttnBwdPreprocess {
 
     // Load the sink and compute p_sink
     if constexpr (Has_sink) {
-      // Initialize static shared memory for sink
-      __shared__ float shared_sink[kMaxSeqlenSink];
+      if constexpr (kSinkLayout == SinkLayout::SH) { // sink.shape = [1, s_sink]
+        // Initialize static shared memory for sink
+        __shared__ float shared_sink[kMaxSeqlenSink];
 
-      // Load the sink to shared memory by first s_sink threads in the block
-      if (thread_idx < params.total_sink) {
-        shared_sink[thread_idx] = mSink(thread_idx);
-      }
-      __syncthreads();
+        // Load the sink to shared memory by first s_sink threads in the block
+        if (thread_idx < params.total_sink) {
+          shared_sink[thread_idx] = mSink(thread_idx);
+        }
+        __syncthreads();
 
-      // Compute the `p_sink = exp(sink - lse)`
-      // for this row with the corr. lse and store to shared memory
-      // NOTE: the OOB part in shared_pd_sink will be zero since lse = inf,
-      // which is necessary to safely reduce partial dsink later
+        // Compute the `p_sink = exp(sink - lse)`
+        // for this row with the corr. lse and store to shared memory
+        // NOTE: the OOB part in shared_pd_sink will be zero since lse = inf,
+        // which is necessary to safely reduce partial dsink later
 #pragma unroll
-      for (int si = 0; si < params.total_sink; ++si) {
-        shared_pd_sink[si][thread_idx] = safe_softmax(shared_sink[si], lse);
+        for (int si = 0; si < params.total_sink; ++si) {
+          shared_pd_sink[si][thread_idx] = safe_softmax(shared_sink[si], lse);
+        }
+        __syncthreads();
+      } else if constexpr (kSinkLayout == SinkLayout::SSH) { // sink.shape = [M, s_sink]
       }
-      __syncthreads();
     }
 
     // Initialize the tiled copy for O and dO
@@ -345,12 +355,16 @@ class FlashAttnBwdPreprocess {
         float dPsum_mi = row_idx < remain_valid_seqlen_q ? dP_sum(mi) : 0; // NOTE: we make OOB dPsum as 0
         gdPsum(row_idx) = dPsum_mi;
 
-        // Compute partial `dsink = p_sink * -dPsum` for this row
-        // and store to the same shared memory as p_sink
+        // Compute `dsink = p_sink * -dPsum`
         if constexpr (Has_sink) {
+          if constexpr (kSinkLayout == SinkLayout::SH) { // sink.shape = [1, s_sink]
 #pragma unroll
-          for (int si = 0; si < params.total_sink; ++si) {
-            shared_pd_sink[si][row_idx] *= -dPsum_mi;
+            // Compute partial `dsink = p_sink * -dPsum` for this row
+            // and store to the same shared memory as p_sink
+            for (int si = 0; si < params.total_sink; ++si) {
+              shared_pd_sink[si][row_idx] *= -dPsum_mi;
+            }
+          } else if constexpr (kSinkLayout == SinkLayout::SSH) { // sink.shape = [M, s_sink]
           }
         }
       }
@@ -370,9 +384,9 @@ class FlashAttnBwdPreprocess {
     }
 
     // Reduce partial dsink along the seqlen_q dim if `Has_sink`
-    if constexpr (Has_sink) {
+    // if `kSinkLayout == SinkLayout::SH`
+    if constexpr (Has_sink and kSinkLayout == SinkLayout::SH) {
       __syncthreads();
-
       if (params.num_m_block == 1) {
         // Since there is only one m block, just apply block reduction and store to dsink directly
         block_reduce_dsink(params, mdSink, shared_pd_sink, thread_idx);

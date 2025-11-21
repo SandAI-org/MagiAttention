@@ -40,10 +40,21 @@
 
 using namespace cute;
 
-template <typename PreprocessKernel, int kBlockM, typename Element, bool ProfileMode = false>
+template <typename TileShape_MK, typename Element, typename ElementAccum, typename ArchTag, bool Has_sink, flash::SinkLayout kSinkLayout, bool ProfileMode = false>
 void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
   if constexpr (ProfileMode)
     MagiEvents::start("bwd_preprocess");
+
+  using PreprocessKernel = flash::FlashAttnBwdPreprocess<
+      /*TileShape_MK_=*/TileShape_MK,
+      /*Element=*/Element,
+      /*ElementAccum=*/ElementAccum,
+      /*ArchTag_=*/ArchTag,
+      /*Clear_dQ=*/false,
+      /*Clear_dK=*/false,
+      /*Clear_dV=*/false,
+      /*Has_sink=*/Has_sink,
+      /*kSinkLayout=*/kSinkLayout>;
 
   typename PreprocessKernel::Arguments preprocess_args{
       // O
@@ -66,8 +77,8 @@ void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
       {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2: [1, 4, sq_rounded*4]
       // sink
       static_cast<float*>(params.sink_ptr),
-      {params.total_sink, params.h_qo}, // shape_sink: [s_sink, nhq]
-      {params.h_qo, _1{}}, // stride_sink: [nhq, 1]
+      {kSinkLayout == flash::SinkLayout::SH ? 1 : params.total_q, params.total_sink, params.h_qo}, // shape_sink: [1, s_sink, nhq] or [sq, s_sink, nhq]
+      {params.total_sink * params.h_qo, params.h_qo, _1{}}, // stride_sink: [s_sink*nhq, nhq, 1]
       // dsink
       static_cast<float*>(params.dsink_ptr),
       static_cast<float*>(params.dsink_reduce_buf_ptr),
@@ -117,21 +128,20 @@ template <
 void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
   using ElementAccum = float;
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
-
   using TileShape_MK = cute::Shape<Int<kBlockM>, Int<kHeadDim>>;
 
   // Launch the pre-processing kernel of the ffa backward pass
   BOOL_SWITCH(params.has_sink(), Has_sink, [&] {
-    using PreprocessKernel = flash::FlashAttnBwdPreprocess<
-        /*TileShape_MK_=*/TileShape_MK,
-        /*Element=*/Element,
-        /*ElementAccum=*/ElementAccum,
-        /*ArchTag_=*/ArchTag,
-        /*Clear_dQ=*/false,
-        /*Clear_dK=*/false,
-        /*Clear_dV=*/false,
-        /*Has_sink=*/Has_sink>;
-    run_flash_bwd_pre_process<PreprocessKernel, kBlockM, Element, ProfileMode>(params, stream);
+    switch (params.sink_layout) {
+      case flash::SinkLayout::SH:
+        run_flash_bwd_pre_process<TileShape_MK, Element, ElementAccum, ArchTag, Has_sink, flash::SinkLayout::SH, ProfileMode>(params, stream);
+        break;
+      case flash::SinkLayout::SSH:
+        run_flash_bwd_pre_process<TileShape_MK, Element, ElementAccum, ArchTag, Has_sink, flash::SinkLayout::SSH, ProfileMode>(params, stream);
+        break;
+      default:
+        throw std::runtime_error("Unsupported sink layout");
+    }
   });
 
   // Run the main kernel of the ffa backward pass

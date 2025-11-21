@@ -52,7 +52,7 @@ class FlashAttnFwdPostprocess {
   // (seqlen_q, num_heads_qo)
   using ShapeLSE = cute::Shape<int32_t, int32_t>;
   using StrideLSE = cute::Stride<int64_t, _1>;
-  // (seqlen_sink, num_heads_qo)
+  // (1, seqlen_sink, num_heads_qo) or (seqlen_q, seqlen_sink, num_heads_qo)
   using ShapeSink = cute::Shape<int32_t, int32_t, int32_t>;
   using StrideSink = cute::Stride<int64_t, int64_t, _1>;
 
@@ -177,7 +177,7 @@ class FlashAttnFwdPostprocess {
     Tensor gO = local_tile(mO, TileShapeMK{}, make_coord(block, _0{})); // (M, K)
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh); // [sq,]
     Tensor gLSE = local_tile(mLSE, cute::select<0>(TileShapeMK{}), make_coord(block)); // (M,)
-    Tensor mSink = make_tensor(make_gmem_ptr(params.ptr_sink), params.shape_sink, params.stride_sink)(_, _, bidh); // [1, s_sink] or [seqlen_q, s_sink]
+    Tensor mSink = make_tensor(make_gmem_ptr(params.ptr_sink), params.shape_sink, params.stride_sink)(_, _, bidh); // [1, s_sink] or [sq, s_sink]
     Tensor gSink = local_tile(mSink, TileShapeMSink{}, make_coord(block, _0{})); // (M, MAX_SINK), used only when `kSinkLayout == SSH`
 
     // Initialize static shared memory for shared sink and lse_sink

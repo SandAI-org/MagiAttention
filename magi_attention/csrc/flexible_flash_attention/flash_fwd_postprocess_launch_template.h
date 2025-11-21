@@ -16,8 +16,9 @@
 
 #pragma once
 
-#include <cute/tensor.hpp>
 #include <stdexcept>
+
+#include <cute/tensor.hpp>
 
 #include <cutlass/arch/arch.h>
 #include <cutlass/cutlass.h>
@@ -47,7 +48,7 @@ void run_flash_fwd_post_process(Flash_fwd_params& params, cudaStream_t stream) {
       {params.h_qo, _1{}}, // stride_LSE: [nhq, 1]
       // sink
       static_cast<float*>(params.sink_ptr),
-      {kSinkLayout == flash::SinkLayout::SH ? 1 : params.total_q, params.total_sink, params.h_qo}, // shape_sink: [1, s_sink, nhq] or [seqlen_q, s_sink, nhq]
+      {kSinkLayout == flash::SinkLayout::SH ? 1 : params.total_q, params.total_sink, params.h_qo}, // shape_sink: [1, s_sink, nhq] or [sq, s_sink, nhq]
       {params.total_sink * params.h_qo, params.h_qo, _1{}} // stride_sink: [s_sink*nhq, nhq, 1]
   };
 
