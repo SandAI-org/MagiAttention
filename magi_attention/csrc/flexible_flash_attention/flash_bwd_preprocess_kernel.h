@@ -404,8 +404,8 @@ class FlashAttnBwdPreprocess {
       gLSElog2(thread_idx) = lse == -INFINITY ? 0.f : lse * float(M_LOG2E);
     }
 
-    // Reduce partial dsink along the seqlen_q dim if `Has_sink`
-    // if `kSinkLayout == SinkLayout::SH`
+    // Reduce partial dsink along the seqlen_q dim
+    // if `Has_sink` and `kSinkLayout == SinkLayout::SH`
     if constexpr (Has_sink and kSinkLayout == SinkLayout::SH) {
       __syncthreads();
       if (params.num_m_block == 1) {
