@@ -75,6 +75,7 @@ std::vector<at::Tensor> mha_fwd(
     float const softcap,
     bool const disable_fwd_atomic_reduction,
     std::optional<at::ScalarType> out_type_,
+    const std::string& sink_layout_,
     bool const deterministic,
     int const sm_margin) {
   _check_runtime_contract(q, out_type_, softcap, disable_fwd_atomic_reduction);
@@ -86,7 +87,7 @@ std::vector<at::Tensor> mha_fwd(
       q, k, v, sink_, out_, softmax_lse_, q_ranges, k_ranges,
       attn_type_map_, merge_q_ranges_, qk_map_,
       unique_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
-      out_type_, deterministic, sm_margin, kBlockM);
+      out_type_, sink_layout_, deterministic, sm_margin, kBlockM);
   
   if constexpr (kProfileMode)
     MagiEvents::stop("fwd_prepare");

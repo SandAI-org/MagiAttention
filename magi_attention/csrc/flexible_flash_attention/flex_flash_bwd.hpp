@@ -104,6 +104,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<at::ScalarType> dq_type_,
     std::optional<at::ScalarType> dk_type_,
     std::optional<at::ScalarType> dv_type_,
+    const std::string& sink_layout_,
     bool const deterministic,
     int const sm_margin) {
 #ifdef FLASHATTENTION_DISABLE_BACKWARD
@@ -166,19 +167,42 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     CHECK_CONTIGUOUS(attn_type_map);
   }
 
+  // Transfer sink_layout
+  flash::SinkLayout sink_layout = flash::str_to_sink_layout(sink_layout_);
+
   // Init optional sink
   at::Tensor sink;
   if (sink_.has_value()) {
     sink = sink_.value();
   } else {
     // Create a dummy empty sink tensor with zero size
-    sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+    switch (sink_layout) {
+      case flash::SinkLayout::SH:
+        sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+        break;
+      case flash::SinkLayout::SSH:
+        sink = torch::empty({total_q, total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+        break;
+      default:
+        TORCH_CHECK(false, "Unsupported sink layout");
+    }
   }
   TORCH_CHECK(sink.scalar_type() == at::kFloat, "sink must has dtype float");
   CHECK_DEVICE(sink);
-  TORCH_CHECK(sink.dim() == 2, "sink must be 2D");
-  CHECK_SHAPE(sink, total_sink, num_heads_qo);
-  CHECK_CONTIGUOUS(sink);
+  switch (sink_layout) {
+    case flash::SinkLayout::SH:
+      TORCH_CHECK(sink.dim() == 2, "sink must be 2D for SH layout");
+      CHECK_SHAPE(sink, total_sink, num_heads_qo);
+      CHECK_CONTIGUOUS(sink);
+      break;
+    case flash::SinkLayout::SSH:
+      TORCH_CHECK(sink.dim() == 3, "sink must be 3D for SSH layout");
+      CHECK_SHAPE(sink, total_q, total_sink, num_heads_qo);
+      CHECK_CONTIGUOUS(sink);
+      break;
+    default:
+      TORCH_CHECK(false, "Unsupported sink layout");
+  }
 
   // Check merge_k_ranges, bwd_kq_map (dtype, device, layout) if given
   int merge_batch_size = batch_size;
@@ -294,9 +318,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     // Create a dummy empty dsink tensor with zero size
     dsink = torch::empty_like(sink);
   }
-  TORCH_CHECK(dsink.dtype() == sink.dtype(), "dsink must have the same dtype as sink (if given)");
+  TORCH_CHECK(dsink.dtype() == sink.dtype(), "dsink must have the same dtype as sink");
+  TORCH_CHECK(dsink.layout() == sink.layout(), "dsink must have the same layout as sink");
   CHECK_DEVICE(dsink);
-  CHECK_SHAPE(dsink, total_sink, num_heads_qo);
   CHECK_CONTIGUOUS(dsink);
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
@@ -381,6 +405,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*determin_conflict_state=*/determin_conflict_state.data_ptr(),
       /*dq_determin_conflict_state=*/dq_determin_conflict_state.data_ptr(),
       /*dq_determin_range_locks=*/dq_determin_range_locks.data_ptr(),
+      /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
       /*disable_bwd_dkv_atomic_reduction=*/disable_bwd_dkv_atomic_reduction);
 

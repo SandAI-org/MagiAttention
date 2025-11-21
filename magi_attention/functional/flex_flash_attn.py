@@ -250,6 +250,7 @@ def _flex_flash_attn_forward_compilable(
         softcap,
         disable_fwd_atomic_reduction,
         out_type,
+        sink_layout,
         deterministic,
         sm_margin,
     )
@@ -450,6 +451,7 @@ def _flex_flash_attn_backward_compilable(
         dq_type,
         dk_type,
         dv_type,
+        sink_layout,
         deterministic,
         sm_margin,
     )

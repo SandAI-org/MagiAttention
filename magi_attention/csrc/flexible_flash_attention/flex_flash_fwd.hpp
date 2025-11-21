@@ -59,6 +59,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     float const softcap,
     bool const disable_fwd_atomic_reduction,
     std::optional<at::ScalarType> out_type_,
+    const std::string& sink_layout_,
     bool const deterministic,
     int const sm_margin,
     int const kBlockM) {
@@ -171,18 +172,41 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     softmax_lse = torch::full({num_heads_qo, total_q}, -std::numeric_limits<float>::infinity(), opts.dtype(at::kFloat));
   }
 
+  // Transfer sink_layout
+  flash::SinkLayout sink_layout = flash::str_to_sink_layout(sink_layout_);
+
   // Init optional sink
   at::Tensor sink;
   if (sink_.has_value()) {
     sink = sink_.value();
-    TORCH_CHECK(sink.scalar_type() == at::kFloat, "sink must has dtype float");
-    CHECK_DEVICE(sink);
-    TORCH_CHECK(sink.dim() == 2, "sink must be 2D");
-    CHECK_SHAPE(sink, total_sink, num_heads_qo);
-    CHECK_CONTIGUOUS(sink);
   } else {
     // Create a dummy empty sink tensor with zero size
-    sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+    switch (sink_layout) {
+      case flash::SinkLayout::SH:
+        sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+        break;
+      case flash::SinkLayout::SSH:
+        sink = torch::empty({total_q, total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+        break;
+      default:
+        TORCH_CHECK(false, "Unsupported sink layout");
+    }
+  }
+  TORCH_CHECK(sink.scalar_type() == at::kFloat, "sink must has dtype float");
+  CHECK_DEVICE(sink);
+  switch (sink_layout) {
+    case flash::SinkLayout::SH:
+      TORCH_CHECK(sink.dim() == 2, "sink must be 2D for SH layout");
+      CHECK_SHAPE(sink, total_sink, num_heads_qo);
+      CHECK_CONTIGUOUS(sink);
+      break;
+    case flash::SinkLayout::SSH:
+      TORCH_CHECK(sink.dim() == 3, "sink must be 3D for SSH layout");
+      CHECK_SHAPE(sink, total_q, total_sink, num_heads_qo);
+      CHECK_CONTIGUOUS(sink);
+      break;
+    default:
+      TORCH_CHECK(false, "Unsupported sink layout");
   }
 
   // Determine the output type
@@ -199,15 +223,14 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   // If the output tensor 'out' is provided, check its dtype, device, and layout.
   // Otherwise, create a new output tensor with the appropriate dtype and shape.
   at::Tensor out;
-  if (out_.has_value()) {
+  if (out_.has_value())
     out = out_.value();
-    TORCH_CHECK(out.scalar_type() == out_type);
-    CHECK_DEVICE(out);
-    CHECK_SHAPE(out, total_q, num_heads_qo, head_size);
-    TORCH_CHECK(out.stride(-1) == 1);
-  } else {
+  else
     out = torch::empty_like(q, opts.dtype(out_type));
-  }
+  TORCH_CHECK(out.scalar_type() == out_type);
+  CHECK_DEVICE(out);
+  CHECK_SHAPE(out, total_q, num_heads_qo, head_size);
+  TORCH_CHECK(out.stride(-1) == 1);
 
   // Get element size
   // int element_size = (q_type == at::ScalarType::BFloat16) ? sizeof(cutlass::bfloat16_t) : sizeof(cutlass::half_t);
@@ -264,6 +287,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
       /*softmax_scale=*/softmax_scale,
       /*tile_count_semaphore=*/tile_count_semaphore.data_ptr(),
       /*softcap=*/softcap,
+      /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
       /*disable_fwd_atomic_reduction=*/disable_fwd_atomic_reduction);
 
