@@ -303,6 +303,7 @@ class TestFlexFlashAttn(DistTestBase):
             k=k,
             v=v,
             sink=None,
+            sink_layout="sh",
             out=None,
             lse=None,
             q_ranges=fwd_q_ranges,
@@ -331,6 +332,7 @@ class TestFlexFlashAttn(DistTestBase):
             k=k,
             v=v,
             sink=None,
+            sink_layout="sh",
             out=o_acc,
             lse=lse_acc,
             q_ranges=fwd_q_ranges,
@@ -375,6 +377,7 @@ class TestFlexFlashAttn(DistTestBase):
             k,
             v,
             None,  # sink
+            "sh",  # sink_layout
             o_ref.to(q.dtype),
             None,  # dq
             None,  # dk
@@ -407,6 +410,7 @@ class TestFlexFlashAttn(DistTestBase):
             k,
             v,
             None,  # sink
+            "sh",  # sink_layout
             o_ref.to(q.dtype),
             dq_acc,  # dq
             dk_acc,  # dk

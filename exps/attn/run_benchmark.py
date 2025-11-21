@@ -62,7 +62,7 @@ from magi_attention.utils._utils import get_attn_mask_from_ffa_args
 # impls = ["ffa", "fa3", "cudnn", "fa2", "flex", "sdpa"]  # all except torch native
 # impls = ["ffa", "fa3"]
 # impls = ["ffa", "fa3", "fa4"]
-impls = ["cudnn", "fa4"]
+impls = ["ffa", "cudnn", "fa3", "fa4"]
 
 
 mask_types = ["full"]

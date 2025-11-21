@@ -280,6 +280,7 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             flatten_k_ag,
             flatten_v_ag,
             None,  # sink
+            "sh",  # sink_layout
             None,  # out
             None,  # lse
             q_ranges_tensor,
@@ -366,6 +367,7 @@ class FFATopkAGAttnFunc(torch.autograd.Function):
             flatten_k_ag,
             flatten_v_ag,
             None,  # sink
+            "sh",  # sink_layout
             out,
             None,  # dq
             None,  # dk
@@ -457,6 +459,7 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             k_ag,
             v_ag,
             None,  # sink
+            "sh",  # sink_layout
             None,  # out
             None,  # lse
             runtime_meta.q_ranges_tensor,
@@ -506,6 +509,7 @@ class FFAWinAGAttnFunc(torch.autograd.Function):
             k_ag,
             v_ag,
             None,  # sink
+            "sh",  # sink_layout
             out,
             None,  # dq
             None,  # dk
@@ -652,6 +656,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             k_ag_cmp,
             v_ag_cmp,
             None,  # sink
+            "sh",  # sink_layout
             None,  # out
             None,  # lse
             runtime_meta.q_ranges_tensor,
@@ -711,6 +716,7 @@ class FFACmpAGAttnFunc(torch.autograd.Function):
             k_ag_cmp,
             v_ag_cmp,
             None,  # sink
+            "sh",  # sink_layout
             out,
             None,  # dq
             None,  # dk

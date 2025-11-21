@@ -214,6 +214,7 @@ class DistAttnRuntime:
                     # NOTE: sink token needs to be applied only once
                     # thus we only apply it at the host stage if not skipped
                     sink=sink if is_host_stage else None,
+                    sink_layout="sh",
                     out=out_acc,  # directly reduce to out_acc
                     lse=lse_acc,  # directly reduce to lse_acc
                     **attn_arg.to_ffa_args(is_bwd=False),
@@ -517,6 +518,7 @@ class DistAttnRuntime:
                 # NOTE: dsink should be computed only once
                 # thus we only compute it at the host stage if not skipped
                 sink=sink if is_host_stage else None,
+                sink_layout="sh",
                 out=o,
                 lse=lse,
                 dq=dq_acc,  # directly reduce to dq_acc
