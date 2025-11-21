@@ -91,7 +91,7 @@ class FlashAttnFwdPostprocess {
 
   static_assert(kSinkLayout == SinkLayout::SH or kSinkLayout == SinkLayout::SSH, "Unsupported SinkLayout");
   using TileShapeMSink = cute::Shape<Int<kBlockM>, Int<kMaxSeqlenSink>>;
-  static constexpr int kBlockMSink = kSinkLayout == SinkLayout::SH ? 1 : kBlockM;
+  static constexpr int kBlockMSink = kSinkLayout == SinkLayout::SSH ? kBlockM : 1;
 
   struct Arguments {
     // O

@@ -77,7 +77,7 @@ void run_flash_bwd_pre_process(Flash_bwd_params& params, cudaStream_t stream) {
       {_1{}, _4{}, params.total_q_rounded * 4}, // stride_LSE_log2: [1, 4, sq_rounded*4]
       // sink
       static_cast<float*>(params.sink_ptr),
-      {kSinkLayout == flash::SinkLayout::SH ? 1 : params.total_q, params.total_sink, params.h_qo}, // shape_sink: [1, s_sink, nhq] or [sq, s_sink, nhq]
+      {kSinkLayout == flash::SinkLayout::SSH ? params.total_q : 1, params.total_sink, params.h_qo}, // shape_sink: [1, s_sink, nhq] or [sq, s_sink, nhq]
       {params.total_sink * params.h_qo, params.h_qo, _1{}}, // stride_sink: [s_sink*nhq, nhq, 1]
       // dsink
       static_cast<float*>(params.dsink_ptr),

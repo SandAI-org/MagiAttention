@@ -69,7 +69,6 @@ class FlashAttnBwdPreprocess {
 
   static_assert(kSinkLayout == SinkLayout::SH or kSinkLayout == SinkLayout::SSH, "Unsupported SinkLayout");
   using TileShapeMSink = cute::Shape<Int<kBlockM>, Int<kMaxSeqlenSink>>;
-  static constexpr int kBlockMSink = kSinkLayout == SinkLayout::SH ? 1 : kBlockM;
 
   // We want kBlockKGmem to be a power of 2 so that when we do the summing,
   // it's just between threads in the same warp
