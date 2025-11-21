@@ -1070,6 +1070,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "name": "full_4k",
                 "seqlen": 4096,
                 "seqlen_sink": 1,
+                "sink_layout": "sh",
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 4096],
@@ -1086,6 +1087,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "name": "varlen_full_1k",
                 "seqlen": 1024,
                 "seqlen_sink": 2,
+                "sink_layout": "sh",
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 366],
@@ -1120,6 +1122,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "name": "varlen_full_4k",
                 "seqlen": 4096,
                 "seqlen_sink": 4,
+                "sink_layout": "sh",
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1150,6 +1153,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "name": "block_causal_2k",
                 "seqlen": 2048,
                 "seqlen_sink": 6,
+                "sink_layout": "sh",
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1178,6 +1182,7 @@ class TestFlexFlashAttn(DistTestBase):
                 "name": "varlen_block_causal_2k",
                 "seqlen": 2048,
                 "seqlen_sink": 8,
+                "sink_layout": "sh",
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -1378,6 +1383,7 @@ class TestFlexFlashAttn(DistTestBase):
         # extract config
         seqlen: int = attn_mask_config["seqlen"]
         seqlen_sink: int = attn_mask_config.get("seqlen_sink", 0)
+        sink_layout: AttnSinkLayout = attn_mask_config.get("sink_layout", "sh")
         num_heads_q: int = model_config["num_heads_q"]
         q_ranges: AttnRanges = attn_mask_config["q_ranges"]
         k_ranges: AttnRanges = attn_mask_config["k_ranges"]
@@ -1400,6 +1406,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[deterministic={deterministic}]"
             f"[acc_inplace={test_accumulation_inplace}]"
             f"[has_sink={seqlen_sink > 0}]"
+            f"[sink_layout={sink_layout}]"
         )
 
         self.run_test_case(

@@ -330,15 +330,19 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   int const total_q_rounded = round_multiple(total_q + kBlockM - 1, kBlockM);
 
   // Create dsink_reduce_buf, which is a workspace to store the block-reduced dsink results
-  // NOTE: when sink is not provided, dsink_reduce_buf is a dummy empty tensor consuming no memory overhead
+  // NOTE: when sink is not provided or sink_layout is SSH or there's only a single m block,
+  // dsink_reduce_buf is a dummy empty tensor consuming no memory overhead
   int const num_m_block = cute::ceil_div(total_q_rounded, kBlockM);
-  at::Tensor dsink_reduce_buf = torch::empty({num_m_block, total_sink, num_heads_qo}, opts.dtype(torch::kFloat));
+  at::Tensor dsink_reduce_buf =
+      torch::empty({num_m_block * (num_m_block > 1), total_sink * (sink_layout != flash::SinkLayout::SSH), num_heads_qo}, opts.dtype(torch::kFloat));
 
   // Create dsink_reduce_cnt, which is a semaphore to count the number of blocks
   // who's finished block reduction of dsink into dsink_reduce_buf for each head, so as to find the last finished block
   // which will reduce across blocks over dsink_reduce_buf to get the final reduced dsink
-  // NOTE: when sink is not provided, dsink_reduce_cnt is a dummy zero tensor consuming no memory overhead
-  at::Tensor dsink_reduce_cnt = torch::zeros({num_heads_qo * (total_sink > 0)}, opts.dtype(torch::kUInt32));
+  // NOTE: when sink is not provided or sink_layout is SSH or there's only a single m block,
+  // dsink_reduce_cnt is a dummy zero tensor consuming no memory overhead
+  at::Tensor dsink_reduce_cnt =
+      torch::zeros({num_heads_qo * (num_m_block > 1) * (total_sink > 0) * (sink_layout != flash::SinkLayout::SSH)}, opts.dtype(torch::kUInt32));
 
   // NOTE: we add a new dimension (4) for TMA alignment (16 bytes)
   // actually, we only use index 0 of the new dimension (4).

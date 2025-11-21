@@ -241,9 +241,6 @@ class FlashAttnBwdPreprocess {
     Tensor gSink = local_tile(mSink, TileShapeMSink{}, make_coord(m_block, _0{})); // (M, MAX_SINK), used only when `kSinkLayout == SSH`
     Tensor mdSink = make_tensor(make_gmem_ptr(params.ptr_dsink), params.shape_sink, params.stride_sink)(_, _, bidh); // [1, s_sink] or [sq, s_sink]
     Tensor gdSink = local_tile(mdSink, TileShapeMSink{}, make_coord(m_block, _0{})); // (M, MAX_SINK), used only when `kSinkLayout == SSH`
-    Tensor mdSinkReduceBuf =
-        make_tensor(make_gmem_ptr(params.ptr_dsink_reduce_buf), params.shape_dsink_reduce_buf, params.stride_dsink_reduce_buf)(_, _, bidh); // [num_m_block, s_sink]
-    Tensor mdSinkReduceBufThisBlock = mdSinkReduceBuf(m_block, _); // [s_sink,]
 
     // Load the LSE
     // NOTE: we mask the OOB lse as `inf`,
@@ -276,6 +273,23 @@ class FlashAttnBwdPreprocess {
         }
         __syncthreads();
       } else if constexpr (kSinkLayout == SinkLayout::SSH) { // sink.shape = [M, s_sink]
+        float sink_this_row[kMaxSeqlenSink];
+
+#pragma unroll
+        // Load the sink to register for this row by this thread
+        for (int si = 0; si < params.total_sink; ++si) {
+          sink_this_row[si] = is_valid_row ? gSink(thread_idx, si) : 0.0f;
+        }
+
+        // Compute the `p_sink = exp(sink - lse)`
+        // for this row with the corr. lse and store to shared memory
+        // NOTE: the OOB part in shared_pd_sink will be zero since lse = inf,
+        // which is necessary to safely reduce partial dsink later
+#pragma unroll
+        for (int si = 0; si < params.total_sink; ++si) {
+          shared_pd_sink[si][thread_idx] = safe_softmax(sink_this_row[si], lse);
+        }
+        __syncthreads();
       }
     }
 
@@ -353,7 +367,7 @@ class FlashAttnBwdPreprocess {
       for (int mi = 0; mi < size(dP_sum); ++mi) {
         int const row_idx = get<0>(tOcO(_0{}, mi, _0{})); // row_idx
         float dPsum_mi = row_idx < remain_valid_seqlen_q ? dP_sum(mi) : 0; // NOTE: we make OOB dPsum as 0
-        gdPsum(row_idx) = dPsum_mi;
+        gdPsum(row_idx) = dPsum_mi; // NOTE: the OOB part had better be set to 0
 
         // Compute `dsink = p_sink * -dPsum`
         if constexpr (Has_sink) {
@@ -365,6 +379,14 @@ class FlashAttnBwdPreprocess {
               shared_pd_sink[si][row_idx] *= -dPsum_mi;
             }
           } else if constexpr (kSinkLayout == SinkLayout::SSH) { // sink.shape = [M, s_sink]
+            if (row_idx < remain_valid_seqlen_q) {
+#pragma unroll
+              // Compute `dsink = p_sink * -dPsum` for this valid row
+              // and store to the global memory
+              for (int si = 0; si < params.total_sink; ++si) {
+                gdSink(row_idx, si) = shared_pd_sink[si][row_idx] * -dPsum_mi;
+              }
+            }
           }
         }
       }
@@ -391,6 +413,10 @@ class FlashAttnBwdPreprocess {
         // Since there is only one m block, just apply block reduction and store to dsink directly
         block_reduce_dsink(params, mdSink, shared_pd_sink, thread_idx);
       } else {
+        Tensor mdSinkReduceBuf =
+            make_tensor(make_gmem_ptr(params.ptr_dsink_reduce_buf), params.shape_dsink_reduce_buf, params.stride_dsink_reduce_buf)(_, _, bidh); // [num_m_block, s_sink]
+        Tensor mdSinkReduceBufThisBlock = mdSinkReduceBuf(m_block, _); // [s_sink,]
+
         // Apply block-reduced dsink and store to reduce buffer for this block
         block_reduce_dsink(params, mdSinkReduceBufThisBlock, shared_pd_sink, thread_idx);
 
