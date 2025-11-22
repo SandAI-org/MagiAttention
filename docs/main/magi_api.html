@@ -458,6 +458,8 @@ The values specify the attention type for each token:</p>
 </p></li>
 <li><p><strong>sink</strong> (<em>torch.Tensor</em><em>, </em><em>optional</em>) – Learnable sink token tensor.
 Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to not apply attention sink.</p></li>
+<li><p><strong>sink_layout</strong> (<em>AttnSinkLayout</em><em>, </em><em>optional</em>) – the layout of the sink tokens.
+Defaults to “sh”. Available Options: “sh”, “ssh”.</p></li>
 <li><p><strong>softmax_scale</strong> (<em>float</em><em>, </em><em>optional</em>) – Softmax scale.
 Defaults to <code class="docutils literal notranslate"><span class="pre">None</span></code> to use: <code class="docutils literal notranslate"><span class="pre">1/sqrt(head_dim)</span></code>.</p></li>
 <li><p><strong>softcap</strong> (<em>float</em><em>, </em><em>optional</em>) – Softcap. Defaults to <code class="docutils literal notranslate"><span class="pre">0.0</span></code>.</p></li>
@@ -497,7 +499,14 @@ while `` q_ranges`` = <code class="docutils literal notranslate"><span class="pr
 <li><p>q: (num_tokens_q, num_heads_q, head_dim)</p></li>
 <li><p>k: (num_tokens_kv, num_heads_kv, head_dim)</p></li>
 <li><p>v: (num_tokens_kv, num_heads_kv, head_dim)</p></li>
-<li><p>sink: (num_tokens_sink, num_heads_q)</p></li>
+<li><dl class="simple">
+<dt>sink:</dt><dd><ul>
+<li><p>if sink_layout == “sh”: (num_tokens_sink, num_heads_q)</p></li>
+<li><p>if sink_layout == “ssh”: (num_tokens_q, num_tokens_sink, num_heads_q)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
 <li><p>q_ranges: (num_ranges, 2)</p></li>
 <li><p>k_ranges: (num_ranges, 2)</p></li>
 <li><p>attn_type_map: (num_ranges,)</p></li>
