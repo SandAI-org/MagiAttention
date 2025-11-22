@@ -23,18 +23,26 @@ nhq, nhk, hd = 8, 4, 128
 dtype = torch.bfloat16
 device = torch.cuda.current_device()
 causal = True
+sink_layout = "sh" # options: {"sh", "ssh"}
 
 q = torch.randn((b, sq, nhq, hd), dtype=dtype, device=device, requires_grad=True)
 k = torch.randn((b, sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
 v = torch.randn((b, sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
-sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
 do = torch.randn_like(q)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((b, sq, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
 
 out, lse = fa3_func_with_sink(
     q=q,
     k=k,
     v=v,
     sink=sink,
+    sink_layout=sink_layout,
     causal=causal,
     return_attn_probs=True,
 )
@@ -54,12 +62,19 @@ nhq, nhk, hd = 8, 4, 128
 dtype = torch.bfloat16
 device = torch.cuda.current_device()
 causal = True
+sink_layout = "sh" # options: {"sh", "ssh"}
 
 q = torch.randn((sq, nhq, hd), dtype=dtype, device=device, requires_grad=True)
 k = torch.randn((sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
 v = torch.randn((sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
-sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
 do = torch.randn_like(q)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((sq, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
 
 cu_seqlens_q = torch.tensor([0, sq // 2, sq], dtype=torch.int32, device=device)
 cu_seqlens_k = torch.tensor([0, sk // 2, sk], dtype=torch.int32, device=device)
@@ -75,6 +90,7 @@ out, lse = fa3_varlen_func_with_sink(
     max_seqlen_q=max_seqlen_q,
     max_seqlen_k=max_seqlen_k,
     sink=sink,
+    sink_layout=sink_layout,
     causal=causal,
     return_attn_probs=True,
 )
@@ -96,14 +112,22 @@ nhq, nhk, hd = 8, 4, 128
 dtype = torch.bfloat16
 device = torch.cuda.current_device()
 causal = True
+sink_layout = "sh" # options: {"sh", "ssh"}
 
 qkv = torch.randn((b, s, (nhq + nhk*2), hd), dtype=dtype, device=device, requires_grad=True)
-sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
 do = torch.randn((b, s, nhq, hd), dtype=dtype, device=device, requires_grad=True)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((b, s, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
 
 out, lse = fa3_qkvpacked_func_with_sink(
     qkv=qkv,
     sink=sink,
+    sink_layout=sink_layout,
     causal=causal,
     num_heads_q=nhq,
     return_attn_probs=True,
@@ -128,18 +152,26 @@ nhq, nhk, hd = 8, 4, 128
 dtype = torch.bfloat16
 device = torch.cuda.current_device()
 causal = True
+sink_layout = "sh" # options: {"sh", "ssh"}
 
 q = torch.randn((b, sq, nhq, hd), dtype=dtype, device=device, requires_grad=True)
 k = torch.randn((b, sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
 v = torch.randn((b, sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
-sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
 do = torch.randn_like(q)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((b, sq, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
 
 out = fa2_func_with_sink(
     q=q,
     k=k,
     v=v,
     sink=sink,
+    sink_layout=sink_layout,
     causal=causal,
     return_attn_probs=False,
 )
@@ -159,12 +191,19 @@ nhq, nhk, hd = 8, 4, 128
 dtype = torch.bfloat16
 device = torch.cuda.current_device()
 causal = True
+sink_layout = "sh" # options: {"sh", "ssh"}
 
 q = torch.randn((sq, nhq, hd), dtype=dtype, device=device, requires_grad=True)
 k = torch.randn((sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
 v = torch.randn((sk, nhk, hd), dtype=dtype, device=device, requires_grad=True)
-sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
 do = torch.randn_like(q)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((sq, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
 
 cu_seqlens_q = torch.tensor([0, sq // 2, sq], dtype=torch.int32, device=device)
 cu_seqlens_k = torch.tensor([0, sk // 2, sk], dtype=torch.int32, device=device)
@@ -180,6 +219,7 @@ out = fa2_varlen_func_with_sink(
     max_seqlen_q=max_seqlen_q,
     max_seqlen_k=max_seqlen_k,
     sink=sink,
+    sink_layout=sink_layout,
     causal=causal,
     return_attn_probs=False,
 )
@@ -201,14 +241,22 @@ nh, hd = 8, 128
 dtype = torch.bfloat16
 device = torch.cuda.current_device()
 causal = True
+sink_layout = "sh" # options: {"sh", "ssh"}
 
 qkv = torch.randn((b, s, 3, nh, hd), dtype=dtype, device=device, requires_grad=True)
-sink = torch.randn((s_sink, nh), dtype=torch.float32, device=device, requires_grad=True)
 do = torch.randn((b, s, nh, hd), dtype=dtype, device=device, requires_grad=True)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((b, s, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
 
 out = fa2_qkvpacked_func_with_sink(
     qkv=qkv,
     sink=sink,
+    sink_layout=sink_layout,
     causal=causal,
     return_attn_probs=False,
 )
@@ -229,16 +277,24 @@ nhq, nhk, hd = 8, 4, 128
 dtype = torch.bfloat16
 device = torch.cuda.current_device()
 causal = True
+sink_layout = "sh" # options: {"sh", "ssh"}
 
 q = torch.randn((b, sq, nhq, hd), dtype=dtype, device=device, requires_grad=True)
 kv = torch.randn((b, sk, 2, nhk, hd), dtype=dtype, device=device, requires_grad=True)
-sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
 do = torch.randn_like(q)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((b, sq, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
 
 out = fa2_kvpacked_func_with_sink(
     q=q,
     kv=kv,
     sink=sink,
+    sink_layout=sink_layout,
     causal=causal,
     return_attn_probs=False,
 )
@@ -258,10 +314,17 @@ nh, hd = 8, 128
 dtype = torch.bfloat16
 device = torch.cuda.current_device()
 causal = True
+sink_layout = "sh" # options: {"sh", "ssh"}
 
 qkv = torch.randn((s, 3, nh, hd), dtype=dtype, device=device, requires_grad=True)
-sink = torch.randn((s_sink, nh), dtype=torch.float32, device=device, requires_grad=True)
 do = torch.randn((s, nh, hd), dtype=dtype, device=device, requires_grad=True)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((s, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
 
 cu_seqlens = torch.tensor([0, s // 2, s], dtype=torch.int32, device=device)
 max_seqlen = s // 2
@@ -271,6 +334,7 @@ out = fa2_varlen_qkvpacked_func_with_sink(
     cu_seqlens=cu_seqlens,
     max_seqlen=max_seqlen,
     sink=sink,
+    sink_layout=sink_layout,
     causal=causal,
     return_attn_probs=False,
 )
@@ -291,11 +355,18 @@ nhq, nhk, hd = 8, 4, 128
 dtype = torch.bfloat16
 device = torch.cuda.current_device()
 causal = True
+sink_layout = "sh" # options: {"sh", "ssh"}
 
 q = torch.randn((sq, nhq, hd), dtype=dtype, device=device, requires_grad=True)
 kv = torch.randn((sk, 2, nhk, hd), dtype=dtype, device=device, requires_grad=True)
-sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
 do = torch.randn_like(q)
+match sink_layout:
+    case "sh":
+        sink = torch.randn((s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case "ssh":
+        sink = torch.randn((sq, s_sink, nhq), dtype=torch.float32, device=device, requires_grad=True)
+    case _:
+        raise ValueError(f"Invalid sink layout: {sink_layout}")
 
 cu_seqlens_q = torch.tensor([0, sq // 2, sq], dtype=torch.int32, device=device)
 cu_seqlens_k = torch.tensor([0, sk // 2, sk], dtype=torch.int32, device=device)
@@ -311,6 +382,7 @@ out = fa2_varlen_kvpacked_func_with_sink(
     max_seqlen_q=max_seqlen_q,
     max_seqlen_k=max_seqlen_k,
     sink=sink,
+    sink_layout=sink_layout,
     causal=causal,
     return_attn_probs=False,
 )

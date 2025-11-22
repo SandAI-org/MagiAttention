@@ -104,6 +104,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     std::optional<at::ScalarType> dq_type_,
     std::optional<at::ScalarType> dk_type_,
     std::optional<at::ScalarType> dv_type_,
+    const std::string& sink_layout_,
     bool const deterministic,
     int const sm_margin) {
 #ifdef FLASHATTENTION_DISABLE_BACKWARD
@@ -122,7 +123,6 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
   int const head_size = q.size(2);
-  int const total_sink = sink_.has_value() ? sink_->size(0) : 0;
   auto opts = q.options();
 
   // Check q, k, v, out, dout (dtype, device, layout)
@@ -166,19 +166,43 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     CHECK_CONTIGUOUS(attn_type_map);
   }
 
+  // Transfer sink_layout
+  flash::SinkLayout sink_layout = flash::str_to_sink_layout(sink_layout_);
+  int const total_sink = sink_.has_value() ? (sink_layout == flash::SinkLayout::SSH ? sink_->size(1) : sink_->size(0)) : 0;
+
   // Init optional sink
   at::Tensor sink;
   if (sink_.has_value()) {
     sink = sink_.value();
   } else {
     // Create a dummy empty sink tensor with zero size
-    sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+    switch (sink_layout) {
+      case flash::SinkLayout::SH:
+        sink = torch::empty({total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+        break;
+      case flash::SinkLayout::SSH:
+        sink = torch::empty({total_q, total_sink, num_heads_qo}, opts.dtype(at::kFloat));
+        break;
+      default:
+        TORCH_CHECK(false, "Unsupported sink layout");
+    }
   }
   TORCH_CHECK(sink.scalar_type() == at::kFloat, "sink must has dtype float");
   CHECK_DEVICE(sink);
-  TORCH_CHECK(sink.dim() == 2, "sink must be 2D");
-  CHECK_SHAPE(sink, total_sink, num_heads_qo);
-  CHECK_CONTIGUOUS(sink);
+  switch (sink_layout) {
+    case flash::SinkLayout::SH:
+      TORCH_CHECK(sink.dim() == 2, "sink must be 2D for SH layout");
+      CHECK_SHAPE(sink, total_sink, num_heads_qo);
+      CHECK_CONTIGUOUS(sink);
+      break;
+    case flash::SinkLayout::SSH:
+      TORCH_CHECK(sink.dim() == 3, "sink must be 3D for SSH layout");
+      CHECK_SHAPE(sink, total_q, total_sink, num_heads_qo);
+      CHECK_CONTIGUOUS(sink);
+      break;
+    default:
+      TORCH_CHECK(false, "Unsupported sink layout");
+  }
 
   // Check merge_k_ranges, bwd_kq_map (dtype, device, layout) if given
   int merge_batch_size = batch_size;
@@ -294,9 +318,9 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
     // Create a dummy empty dsink tensor with zero size
     dsink = torch::empty_like(sink);
   }
-  TORCH_CHECK(dsink.dtype() == sink.dtype(), "dsink must have the same dtype as sink (if given)");
+  TORCH_CHECK(dsink.dtype() == sink.dtype(), "dsink must have the same dtype as sink");
+  TORCH_CHECK(dsink.layout() == sink.layout(), "dsink must have the same layout as sink");
   CHECK_DEVICE(dsink);
-  CHECK_SHAPE(dsink, total_sink, num_heads_qo);
   CHECK_CONTIGUOUS(dsink);
 
   at::cuda::CUDAGuard device_guard{(char)q.get_device()};
@@ -306,15 +330,19 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
   int const total_q_rounded = round_multiple(total_q + kBlockM - 1, kBlockM);
 
   // Create dsink_reduce_buf, which is a workspace to store the block-reduced dsink results
-  // NOTE: when sink is not provided, dsink_reduce_buf is a dummy empty tensor consuming no memory overhead
+  // NOTE: when sink is not provided or sink_layout is SSH or there's only a single m block,
+  // dsink_reduce_buf is a dummy empty tensor consuming no memory overhead
   int const num_m_block = cute::ceil_div(total_q_rounded, kBlockM);
-  at::Tensor dsink_reduce_buf = torch::empty({num_m_block, total_sink, num_heads_qo}, opts.dtype(torch::kFloat));
+  at::Tensor dsink_reduce_buf =
+      torch::empty({num_m_block * (num_m_block > 1), total_sink * (sink_layout != flash::SinkLayout::SSH), num_heads_qo}, opts.dtype(torch::kFloat));
 
   // Create dsink_reduce_cnt, which is a semaphore to count the number of blocks
   // who's finished block reduction of dsink into dsink_reduce_buf for each head, so as to find the last finished block
   // which will reduce across blocks over dsink_reduce_buf to get the final reduced dsink
-  // NOTE: when sink is not provided, dsink_reduce_cnt is a dummy zero tensor consuming no memory overhead
-  at::Tensor dsink_reduce_cnt = torch::zeros({num_heads_qo * (total_sink > 0)}, opts.dtype(torch::kUInt32));
+  // NOTE: when sink is not provided or sink_layout is SSH or there's only a single m block,
+  // dsink_reduce_cnt is a dummy zero tensor consuming no memory overhead
+  at::Tensor dsink_reduce_cnt =
+      torch::zeros({num_heads_qo * (num_m_block > 1) * (total_sink > 0) * (sink_layout != flash::SinkLayout::SSH)}, opts.dtype(torch::kUInt32));
 
   // NOTE: we add a new dimension (4) for TMA alignment (16 bytes)
   // actually, we only use index 0 of the new dimension (4).
@@ -381,6 +409,7 @@ std::tuple<Flash_bwd_params, at::Tensor, at::Tensor, at::Tensor, at::Tensor> pre
       /*determin_conflict_state=*/determin_conflict_state.data_ptr(),
       /*dq_determin_conflict_state=*/dq_determin_conflict_state.data_ptr(),
       /*dq_determin_range_locks=*/dq_determin_range_locks.data_ptr(),
+      /*sink_layout=*/sink_layout,
       /*sm_margin=*/sm_margin,
       /*disable_bwd_dkv_atomic_reduction=*/disable_bwd_dkv_atomic_reduction);
 

@@ -205,6 +205,7 @@ class DistAttnRuntime:
                     attn_arg=attn_arg,
                     softmax_scale=_softmax_scale,
                     softcap=softcap,
+                    sink_layout="sh",
                 )
             else:
                 partial_out, partial_lse = _flex_flash_attn_forward(
@@ -214,6 +215,7 @@ class DistAttnRuntime:
                     # NOTE: sink token needs to be applied only once
                     # thus we only apply it at the host stage if not skipped
                     sink=sink if is_host_stage else None,
+                    sink_layout="sh",
                     out=out_acc,  # directly reduce to out_acc
                     lse=lse_acc,  # directly reduce to lse_acc
                     **attn_arg.to_ffa_args(is_bwd=False),
@@ -491,6 +493,7 @@ class DistAttnRuntime:
                 attn_arg=attn_arg,
                 softmax_scale=_softmax_scale,
                 softcap=softcap,
+                sink_layout="sh",
             )
             partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=True)
         else:
@@ -517,6 +520,7 @@ class DistAttnRuntime:
                 # NOTE: dsink should be computed only once
                 # thus we only compute it at the host stage if not skipped
                 sink=sink if is_host_stage else None,
+                sink_layout="sh",
                 out=o,
                 lse=lse,
                 dq=dq_acc,  # directly reduce to dq_acc
@@ -1509,7 +1513,8 @@ class DistAttnRuntime:
             # we directly use lse_sink to initialize lse
             lse = calc_lse_sink_compiled(
                 sink=sink,
-                seqlen_lse=q.size(0),
+                seqlen_q=q.size(0),
+                sink_layout="sh",
             )
         else:
             lse = torch.full(
@@ -1560,6 +1565,7 @@ class DistAttnRuntime:
                 lse=lse,
                 o=o,
                 do=do,
+                sink_layout="sh",
             )
         else:
             dsink = None

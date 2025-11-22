@@ -29,13 +29,14 @@
 #include <cutlass/numeric_types.h>
 #include <cutlass/pipeline/pipeline.hpp>
 
+#include "sink_layout.cuh"
 #include "softmax.h"
 #include "utils.h"
 
 namespace flash {
 using namespace cute;
 
-template <typename T_out_, uint32_t kBlockM_, uint32_t kHeadDim_, bool Has_sink, class ArchTag_>
+template <typename T_out_, uint32_t kBlockM_, uint32_t kHeadDim_, bool Has_sink, SinkLayout kSinkLayout, class ArchTag_>
 class FlashAttnFwdPostprocess {
  public:
   using ArchTag = ArchTag_;
@@ -51,9 +52,9 @@ class FlashAttnFwdPostprocess {
   // (seqlen_q, num_heads_qo)
   using ShapeLSE = cute::Shape<int32_t, int32_t>;
   using StrideLSE = cute::Stride<int64_t, _1>;
-  // (seqlen_sink, num_heads_qo)
-  using ShapeSink = cute::Shape<int32_t, int32_t>;
-  using StrideSink = cute::Stride<int64_t, _1>;
+  // (1, seqlen_sink, num_heads_qo) or (seqlen_q, seqlen_sink, num_heads_qo)
+  using ShapeSink = cute::Shape<int32_t, int32_t, int32_t>;
+  using StrideSink = cute::Stride<int64_t, int64_t, _1>;
 
   // These are for storing the output tensor without TMA (e.g., for setting output to zero)
   static constexpr int kGmemElemsPerStore = sizeof(cute::uint128_t) / sizeof(T_out);
@@ -88,6 +89,10 @@ class FlashAttnFwdPostprocess {
   // the first s_sink threads process the sink, thus we need kMaxSeqlenSink <= MaxThreadsPerBlock
   static_assert(kMaxSeqlenSink <= MaxThreadsPerBlock);
 
+  static_assert(kSinkLayout == SinkLayout::SH or kSinkLayout == SinkLayout::SSH, "Unsupported SinkLayout");
+  using TileShapeMSink = cute::Shape<Int<kBlockM>, Int<kMaxSeqlenSink>>;
+  static constexpr int kBlockMSink = kSinkLayout == SinkLayout::SSH ? kBlockM : 1;
+
   struct Arguments {
     // O
     T_out* ptr_O;
@@ -119,7 +124,7 @@ class FlashAttnFwdPostprocess {
 
   static Params to_underlying_arguments(Arguments const& args) {
     // Check seqlen_sink
-    auto const seqlen_sink = get<0>(args.shape_sink);
+    auto const seqlen_sink = get<1>(args.shape_sink);
     if (seqlen_sink > kMaxSeqlenSink) {
       throw std::runtime_error("Invalid seqlen sink: " + std::to_string(seqlen_sink) + ", must be <= kMaxSeqlenSink: " + std::to_string(kMaxSeqlenSink));
     }
@@ -165,33 +170,53 @@ class FlashAttnFwdPostprocess {
     int32_t const offset_o = block * kBlockM;
     int32_t const seqlen_o = cute::get<0>(params.shape_O);
     int32_t const head_dim_o = cute::get<1>(params.shape_O);
-    int32_t const seqlen_sink = cute::get<0>(params.shape_sink);
+    int32_t const seqlen_sink = cute::get<1>(params.shape_sink);
+
+    // Get seqlen info
+    int const remain_valid_seqlen_o = seqlen_o - offset_o;
+    bool const is_valid_row = thread_idx < remain_valid_seqlen_o;
 
     // Initialize global tensors for O, LSE and sink
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh); // [sq, hd]
     Tensor gO = local_tile(mO, TileShapeMK{}, make_coord(block, _0{})); // (M, K)
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh); // [sq,]
     Tensor gLSE = local_tile(mLSE, cute::select<0>(TileShapeMK{}), make_coord(block)); // (M,)
-    Tensor mSink = make_tensor(make_gmem_ptr(params.ptr_sink), params.shape_sink, params.stride_sink)(_, bidh); // [s_sink,]
+    Tensor mSink = make_tensor(make_gmem_ptr(params.ptr_sink), params.shape_sink, params.stride_sink)(_, _, bidh); // [1, s_sink] or [sq, s_sink]
+    Tensor gSink = local_tile(mSink, TileShapeMSink{}, make_coord(block, _0{})); // (M, MAX_SINK), used only when `kSinkLayout == SSH`
 
     // Initialize static shared memory for shared sink and lse_sink
-    __shared__ float shared_sink[kMaxSeqlenSink];
-    __shared__ float shared_lse_sink;
+    __shared__ float shared_sink[kBlockMSink][kMaxSeqlenSink];
+    __shared__ float shared_lse_sink[kBlockMSink];
 
     // Load the sink and compute lse_sink
     if constexpr (Has_sink) {
-      // Load the sink to shared memory
-      // by first s_sink threads in the block
-      if (thread_idx < seqlen_sink) {
-        shared_sink[thread_idx] = mSink(thread_idx);
-      }
-      __syncthreads();
+      if constexpr (kSinkLayout == SinkLayout::SH) { // sink.shape = [1, s_sink]
+        // Load the sink to shared memory
+        // by first s_sink threads in the block
+        if (thread_idx < seqlen_sink) {
+          shared_sink[0][thread_idx] = mSink(thread_idx);
+        }
+        __syncthreads();
 
-      // Compute the `lse_sink = log(sum(exp(sink)))`
-      // by the thread0 in the block
-      if (thread_idx == 0)
-        shared_lse_sink = calc_lse(shared_sink, seqlen_sink);
-      __syncthreads();
+        // Compute the `lse_sink = log(sum(exp(sink)))`
+        // by the thread0 in the block
+        if (thread_idx == 0)
+          shared_lse_sink[0] = calc_lse(shared_sink[0], seqlen_sink);
+        __syncthreads();
+      } else if constexpr (kSinkLayout == SinkLayout::SSH) { // sink.shape = [M, s_sink]
+#pragma unroll
+        // Load the sink to shared memory
+        // for each row by each thread
+        for (int si = 0; si < seqlen_sink; ++si) {
+          shared_sink[thread_idx][si] = is_valid_row ? gSink(thread_idx, si) : 0.0f;
+        }
+        __syncthreads();
+
+        // Compute the `lse_sink = log(sum(exp(sink)))`
+        // for each row by each thread
+        shared_lse_sink[thread_idx] = is_valid_row ? calc_lse(shared_sink[thread_idx], seqlen_sink) : -INFINITY;
+        __syncthreads();
+      }
     }
 
     // Initialize gmem_tiled_copy_O and gmem_thr_copy_O
@@ -233,15 +258,23 @@ class FlashAttnFwdPostprocess {
     for (int32_t i = 0; i < size(tLSErLSE); ++i) {
       int32_t row_idx = get<0>(tOcO((_0{}, _0{}), i, _0{}));
       int32_t hd_idx = get<1>(tOcO((_0{}, _0{}), i, _0{}));
-      if (row_idx + offset_o < seqlen_o) {
+      if (row_idx < remain_valid_seqlen_o) {
+        // Load LSE
         tLSErLSE(i) = gLSE(row_idx);
         tOpOm(i) = tLSErLSE(i) == -INFINITY;
+
+        // Correct LSE and compute the rescale weights for O if `Has_sink`
         if constexpr (Has_sink) {
           // Set tOpOm_sink to true if the LSE is not -INFINITY
           tOpOm_sink(i) = !tOpOm(i);
 
           // Rescale LSE by lse_sink
-          float corr_lse = tOpOm(i) ? shared_lse_sink : correct_lse(tLSErLSE(i), shared_lse_sink);
+          float corr_lse;
+          if constexpr (kSinkLayout == SinkLayout::SH) { // sink.shape = [1, s_sink]
+            corr_lse = tOpOm(i) ? shared_lse_sink[0] : correct_lse(tLSErLSE(i), shared_lse_sink[0]);
+          } else if constexpr (kSinkLayout == SinkLayout::SSH) { // sink.shape = [M, s_sink]
+            corr_lse = tOpOm(i) ? shared_lse_sink[row_idx] : correct_lse(tLSErLSE(i), shared_lse_sink[row_idx]);
+          }
 
           // Store the rescale weight into tLSErLSE for later use to rescale O
           tLSErLSE(i) = tOpOm(i) ? 0 : calc_lse_rescale_weight(tLSErLSE(i), corr_lse);

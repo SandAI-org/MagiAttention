@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: disable-error-code="union-attr"
 import unittest
 from typing import Any
 from unittest import TestCase
@@ -25,6 +26,7 @@ from magi_attention.api.functools import (
     infer_varlen_mask_from_batch,
 )
 from magi_attention.common import AttnRanges
+from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.testing import parameterize
 from magi_attention.testing.precision import (
     EPSILON,
@@ -77,6 +79,7 @@ class TestFAInterfaceWithSink(TestCase):
             "varlen_kvpacked",
         ],
     )
+    @parameterize("sink_layout", ["sh", "ssh"])  # ["sh", "ssh", "shd"])
     @parameterize(
         "attn_config",
         [
@@ -105,6 +108,7 @@ class TestFAInterfaceWithSink(TestCase):
     def test_fa2_interface_with_sink(
         self,
         mode: str,
+        sink_layout: AttnSinkLayout,
         attn_config: dict[str, Any],
         dtype: torch.dtype,
         causal: bool,
@@ -134,15 +138,11 @@ class TestFAInterfaceWithSink(TestCase):
             requires_grad=True,
         )
         do = torch.randn_like(q)
-        if has_sink:
-            sink = torch.randn(
-                (s_sink, nhq),
-                dtype=torch.float32,
-                device=self.device,
-                requires_grad=True,
-            )
-        else:
-            sink = None
+        sink = (
+            self.init_sink_tensor(b * sq, s_sink, nhq, hd, sink_layout)
+            if has_sink
+            else None
+        )
 
         # construct mask
         cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(b, sq)
@@ -157,15 +157,23 @@ class TestFAInterfaceWithSink(TestCase):
                 q_, k_, v_, do_ = [
                     rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
                 ]
+
+                if has_sink and sink_layout == "ssh":
+                    sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
+                else:
+                    sink_ = sink
+
                 fa2_out = fa2_func_with_sink(
                     q=q_,
                     k=k_,
                     v=v_,
-                    sink=sink,
+                    sink=sink_,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
                 )
+
                 fa2_out.backward(do_)
                 fa2_out = rearrange(fa2_out, "b s h d -> (b s) h d")
             case "varlen":
@@ -178,6 +186,7 @@ class TestFAInterfaceWithSink(TestCase):
                     max_seqlen_q=sq,
                     max_seqlen_k=sk,
                     sink=sink,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
@@ -193,13 +202,21 @@ class TestFAInterfaceWithSink(TestCase):
                     repeat(x, "b s h d -> b s (h r) d", r=rep_times) for x in (k_, v_)
                 ]
                 qkv = torch.stack([q_, k_, v_], dim=-3)  # stack before num_heads dim
+
+                if has_sink and sink_layout == "ssh":
+                    sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
+                else:
+                    sink_ = sink
+
                 fa2_out = fa2_qkvpacked_func_with_sink(
                     qkv=qkv,
-                    sink=sink,
+                    sink=sink_,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
                 )
+
                 fa2_out.backward(do_)
                 fa2_out = rearrange(fa2_out, "b s h d -> (b s) h d")
             case "kvpacked":
@@ -207,14 +224,22 @@ class TestFAInterfaceWithSink(TestCase):
                     rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
                 ]
                 kv = torch.stack([k_, v_], dim=-3)  # stack before num_heads dim
+
+                if has_sink and sink_layout == "ssh":
+                    sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
+                else:
+                    sink_ = sink
+
                 fa2_out = fa2_kvpacked_func_with_sink(
                     q=q_,
                     kv=kv,
-                    sink=sink,
+                    sink=sink_,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
                 )
+
                 fa2_out.backward(do_)
                 fa2_out = rearrange(fa2_out, "b s h d -> (b s) h d")
             case "varlen_qkvpacked":
@@ -222,15 +247,18 @@ class TestFAInterfaceWithSink(TestCase):
                 rep_times = nhq // nhk
                 k_, v_ = [repeat(x, "s h d -> s (h r) d", r=rep_times) for x in (k, v)]
                 qkv = torch.stack([q, k_, v_], dim=-3)  # stack before num_heads dim
+
                 fa2_out = fa2_varlen_qkvpacked_func_with_sink(
                     qkv=qkv,
                     cu_seqlens=cu_seqlens_q,
                     max_seqlen=sq,
                     sink=sink,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
                 )
+
                 fa2_out.backward(do)
             case "varlen_kvpacked":
                 kv = torch.stack([k, v], dim=-3)  # stack before num_heads dim
@@ -242,6 +270,7 @@ class TestFAInterfaceWithSink(TestCase):
                     max_seqlen_q=sq,
                     max_seqlen_k=sk,
                     sink=sink,
+                    sink_layout=sink_layout,
                     causal=causal,
                     # NOTE: FA2 only supports returning lse when dropout_p > 0
                     return_attn_probs=False,
@@ -276,6 +305,7 @@ class TestFAInterfaceWithSink(TestCase):
             grad_total_sink=fa2_dsink,
             grad_total_out=do,
             dtype=dtype,
+            sink_layout=sink_layout,
             test_case=(
                 f"fa2_interface_with_sink_[{mode=}]x"
                 f"[{attn_config=}]x[{dtype=}]x[{causal=}]"
@@ -283,6 +313,7 @@ class TestFAInterfaceWithSink(TestCase):
         )
 
     @parameterize("mode", ["batch", "varlen", "qkvpacked"])
+    @parameterize("sink_layout", ["sh", "ssh"])  # ["sh", "ssh", "shd"])
     @parameterize(
         "attn_config",
         [
@@ -311,6 +342,7 @@ class TestFAInterfaceWithSink(TestCase):
     def test_fa3_interface_with_sink(
         self,
         mode: str,
+        sink_layout: AttnSinkLayout,
         attn_config: dict[str, Any],
         dtype: torch.dtype,
         causal: bool,
@@ -340,15 +372,11 @@ class TestFAInterfaceWithSink(TestCase):
             requires_grad=True,
         )
         do = torch.randn_like(q)
-        if has_sink:
-            sink = torch.randn(
-                (s_sink, nhq),
-                dtype=torch.float32,
-                device=self.device,
-                requires_grad=True,
-            )
-        else:
-            sink = None
+        sink = (
+            self.init_sink_tensor(b * sq, s_sink, nhq, hd, sink_layout)
+            if has_sink
+            else None
+        )
 
         # construct mask
         cu_seqlens_q, cu_seqlens_k = infer_varlen_mask_from_batch(b, sq)
@@ -363,14 +391,22 @@ class TestFAInterfaceWithSink(TestCase):
                 q_, k_, v_, do_ = [
                     rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
                 ]
+
+                if has_sink and sink_layout == "ssh":
+                    sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
+                else:
+                    sink_ = sink
+
                 fa3_out, fa3_lse = fa3_func_with_sink(
                     q=q_,
                     k=k_,
                     v=v_,
-                    sink=sink,
+                    sink=sink_,
+                    sink_layout=sink_layout,
                     causal=causal,
                     return_attn_probs=True,
                 )
+
                 fa3_out.backward(do_)
                 fa3_out = rearrange(fa3_out, "b s h d -> (b s) h d")
                 fa3_lse = rearrange(fa3_lse, "b h s -> (b s) h")
@@ -384,6 +420,7 @@ class TestFAInterfaceWithSink(TestCase):
                     max_seqlen_q=sq,
                     max_seqlen_k=sk,
                     sink=sink,
+                    sink_layout=sink_layout,
                     causal=causal,
                     return_attn_probs=True,
                 )
@@ -394,13 +431,21 @@ class TestFAInterfaceWithSink(TestCase):
                     rearrange(x, "(b s) h d -> b s h d", b=b) for x in (q, k, v, do)
                 ]
                 qkv = torch.cat([q_, k_, v_], dim=-2)  # concat at num_heads dim
+
+                if has_sink and sink_layout == "ssh":
+                    sink_ = rearrange(sink, "(b s) h d -> b s h d", b=b)
+                else:
+                    sink_ = sink
+
                 fa3_out, fa3_lse = fa3_qkvpacked_func_with_sink(
                     qkv=qkv,
-                    sink=sink,
+                    sink=sink_,
+                    sink_layout=sink_layout,
                     causal=causal,
                     num_heads_q=nhq,
                     return_attn_probs=True,
                 )
+
                 fa3_out.backward(do_)
                 fa3_out = rearrange(fa3_out, "b s h d -> (b s) h d")
                 fa3_lse = rearrange(fa3_lse, "b h s -> (b s) h")
@@ -433,6 +478,7 @@ class TestFAInterfaceWithSink(TestCase):
             grad_total_sink=fa3_dsink,
             grad_total_out=do,
             dtype=dtype,
+            sink_layout=sink_layout,
             test_case=(
                 f"fa3_interface_with_sink_[{mode=}]x"
                 f"[{attn_config=}]x[{dtype=}]x[{causal=}]"
@@ -458,6 +504,7 @@ class TestFAInterfaceWithSink(TestCase):
         grad_total_sink: torch.Tensor | None,
         grad_total_out: torch.Tensor,
         dtype: torch.dtype,
+        sink_layout: AttnSinkLayout = "sh",
         test_case: str = "",
     ) -> None:
         # -----   customize tolerance / threshold  ---- #
@@ -529,6 +576,7 @@ class TestFAInterfaceWithSink(TestCase):
             high_precision=True,
             backend="torch" if has_sink else "sdpa",
             return_lse=True,
+            sink_layout=sink_layout,
         )
         total_out_ref_high_precision.backward(grad_total_out)
         (
@@ -559,6 +607,7 @@ class TestFAInterfaceWithSink(TestCase):
             backend="torch" if has_sink else "sdpa",
             high_precision=False,
             return_lse=True,
+            sink_layout=sink_layout,
         )
 
         total_out_ref_low_precision.backward(grad_total_out)
@@ -819,6 +868,38 @@ class TestFAInterfaceWithSink(TestCase):
 
         if err_msg_list:
             raise AssertionError("\n\n".join(err_msg_list))
+
+    def init_sink_tensor(
+        self,
+        sq: int,
+        s_sink: int,
+        nhq: int,
+        hd: int,
+        sink_layout: AttnSinkLayout = "sh",
+    ) -> torch.Tensor:
+        match sink_layout:
+            case "sh":
+                sink = torch.randn(
+                    (s_sink, nhq),
+                    dtype=torch.float32,
+                    device=self.device,
+                    requires_grad=True,
+                )
+            case "ssh":
+                sink = torch.randn(
+                    (sq, s_sink, nhq),
+                    dtype=torch.float32,
+                    device=self.device,
+                    requires_grad=True,
+                )
+            case "shd":
+                raise NotImplementedError(
+                    f"sink_layout {sink_layout} is not supported yet"
+                )
+            case _:
+                raise ValueError(f"Invalid sink_layout {sink_layout}")
+
+        return sink
 
 
 if __name__ == "__main__":
