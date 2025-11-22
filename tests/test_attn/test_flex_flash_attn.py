@@ -888,7 +888,7 @@ class TestFlexFlashAttn(DistTestBase):
                     atol=dsink_atol,
                     rtol=dsink_rtol,
                     mismatch_threshold=dsink_thres,
-                    test_case=f"{test_case} => dsink {grad_total_sink=} {grad_total_sink_ref_high_precision=}",
+                    test_case=f"{test_case} => dsink",
                 )
             except Exception as e:
                 err_msg_list.append(str(e))
@@ -1694,9 +1694,6 @@ class TestFlexFlashAttn(DistTestBase):
                 "dk_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
                 "dk_min_mismatch_thres": 0.025,
                 "dv_norm_rtol_ratio": NORM_RTOL_RATIO * 1.5,
-                # "dsink_norm_rtol_ratio": NORM_RTOL_RATIO * 2 if kblockm >= 64 else NORM_RTOL_RATIO * 4,
-                # "dsink_atol": EPSILON  if kblockm >= 64 else EPSILON * (64 // kblockm),
-                # "dsink_rtol": 0.05 if kblockm >= 64 else 0.05 * (64 // kblockm),
             },
         )
 
