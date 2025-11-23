@@ -53,7 +53,8 @@ template <
     bool Has_softcap_,
     bool MmaPV_is_RS_,
     bool IntraWGOverlap_,
-    bool RangeMerge_>
+    bool RangeMerge_,
+    bool PackGQA_>
 struct CollectiveMainloopFwdSm90 {
   static constexpr int kStages = Stages;
   using ClusterShape = ClusterShape_;
@@ -76,6 +77,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr bool MmaPV_is_RS = MmaPV_is_RS_;
   static constexpr bool IntraWGOverlap = IntraWGOverlap_;
   static constexpr bool RangeMerge = RangeMerge_;
+  static constexpr bool PackGQA = PackGQA_;
 
   // By default, we use TMA for Q and KV to get better performance
   static constexpr bool Use_TMA_Q = true;

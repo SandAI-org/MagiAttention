@@ -44,6 +44,7 @@ template <
     class BlockCoordType_,
     int NumEpilogueThreads_,
     bool DisableFwdAtomicReduction_,
+    bool PackGQA_,
     bool Deterministic_ = false>
 struct CollectiveEpilogueFwd {
   // KblockM, Kheaddim, KblockN
@@ -55,6 +56,7 @@ struct CollectiveEpilogueFwd {
   using BlockCoordType = BlockCoordType_;
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool DisableFwdAtomicReduction = DisableFwdAtomicReduction_;
+  static constexpr bool PackGQA = PackGQA_;
   static constexpr bool Deterministic = Deterministic_;
 
   static_assert(ArchTag::kMinComputeCapability >= 90 || CUTE_STATIC_V(size(ClusterShape{})) == 1);

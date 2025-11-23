@@ -55,6 +55,7 @@ class FlashAttnFwdSm90 {
   static constexpr int NumProducerThreads = CollectiveMainloop::NumProducerThreads;
   static constexpr int NumMmaThreadsQK = CollectiveMainloop::NumMmaThreadsQK;
   static constexpr bool Deterministic = CollectiveEpilogue::Deterministic;
+  static constexpr bool PackGQA = CollectiveMainloop::PackGQA;
 
   // Mainloop derived types
   // using BlockMeta = typename CollectiveMainloop::BlockMeta;

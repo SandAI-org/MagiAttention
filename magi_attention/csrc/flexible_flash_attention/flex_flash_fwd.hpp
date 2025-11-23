@@ -55,6 +55,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     std::optional<const at::Tensor>& merge_q_ranges_,
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
+    bool const pack_gqa,
     float const softmax_scale,
     float const softcap,
     bool const disable_fwd_atomic_reduction,
@@ -73,6 +74,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   int const total_k = k.size(0);
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
+  int const qhead_per_khead = num_heads_qo / num_heads_kv;
   int const head_size = q.size(2);
   auto opts = q.options();
 
@@ -143,6 +145,11 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
     CHECK_CONTIGUOUS(unique_count);
   }
   TORCH_CHECK((has_merge_q_ranges == has_qk_map && has_qk_map == has_unique_count), "merge_q_ranges/qk_map/unique_count must be provided together");
+
+  // check pack_gqa, the group_size of gqa should be divisible by kblockm in FFA.
+  if (pack_gqa) {
+    TORCH_CHECK(kBlockM % qhead_per_khead == 0, "the qhead_per_khead must be divisible by kblockm");
+  }
 
   int const max_headdim = get_max_headdim();
   TORCH_CHECK(head_size <= max_headdim);

@@ -51,6 +51,7 @@ template <
     int NumMmaThreads = 2 * cutlass::NumThreadsPerWarpGroup,
     int NumProducerThreads = cutlass::NumThreadsPerWarp,
     bool WarpSpecialized = true,
+    bool PackGQA = false,
     bool Deterministic = false>
 class DynamicPersistentTileScheduler {
   static_assert(WarpSpecialized || NumProducerThreads == NumMmaThreads);
