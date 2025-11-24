@@ -15,15 +15,17 @@
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange, reduce, repeat
 from packaging import version
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.functional.utils import (
-    correct_attn_lse,
-    correct_attn_out,
+    correct_attn_fwd_result,
+    correct_attn_lse_with_sink,
+    safe_lse,
     safe_softmax,
+    sink_bwd,
 )
 from magi_attention.utils import max_fp_dtype, to_higher_fp_dtype
 
@@ -33,6 +35,249 @@ if version.parse(torch.__version__) > version.parse("2.4"):
     # due to the new feature since torch2.5:
     # https://pytorch.org/docs/stable/notes/numerical_accuracy.html#reduced-precision-reduction-for-fp16-and-bf16-in-scaled-dot-product-attention-sdpa
     torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(True)
+
+
+class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        kt: torch.Tensor,
+        v: torch.Tensor,
+        sink: torch.Tensor | None,
+        bias: torch.Tensor,
+        softmax_scale: float,
+        block_q: int = 1024,
+        block_k: int = 1024,
+    ):
+        # fetch meta info
+        # q.shape = [nhq, sq, d]
+        # kt.shape = [nhq, d, sk]
+        # v.shape = [nhq, sk, d]
+        sq, sk, nhq = q.size(-2), kt.size(-1), q.size(0)
+        lse_dtype = max_fp_dtype(q.dtype, torch.float32)
+
+        # init out buffer
+        # out.shape = [nhq, sq, d]
+        out = torch.zeros_like(q)
+
+        # init lse buffer with sink if sink is provided
+        # sink.shape = [nhq, sq, s_sink]
+        # lse.shape = [nhq, sq]
+        lse = RefAttnTorchImplMainProcessOnline.init_lse_with_sink(
+            sq=sq, nhq=nhq, sink=sink, lse_dtype=lse_dtype, device=q.device
+        )
+
+        # outer loop for q,o
+        for q_start in range(0, sq, block_q):
+            q_end = min(q_start + block_q, sq)
+            # bq/bout.shape: [nhq, block_q, hd]
+            # blse.shape: [nhq, block_q]
+            bq, bout, blse = (
+                q[:, q_start:q_end],
+                out[:, q_start:q_end],
+                lse[:, q_start:q_end],
+            )
+
+            # inner loop for k,v
+            for k_start in range(0, sk, block_k):
+                k_end = min(k_start + block_k, sk)
+                # bkt.shape: [nhq, hd, block_k]
+                # bv.shape: [nhq, block_k, hd]
+                # bbias.shape: [nhq, block_q, block_k]
+                bkt, bv, bbias = (
+                    kt[..., k_start:k_end],
+                    v[:, k_start:k_end],
+                    bias[:, q_start:q_end, k_start:k_end],
+                )
+
+                # apply `S = Q x K.T * scale + bias`
+                # where S.shape = [nhq, block_q, block_k]
+                bs = to_higher_fp_dtype(
+                    bq @ bkt * softmax_scale,
+                    lowest_precision=torch.float32,
+                )
+                bs += bbias
+
+                # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
+                # where LSE.shape = [nhq, block_q, 1]
+                blse_ = bs.logsumexp(dim=-1, keepdim=True)
+
+                # apply row-wise softmax `P = softmax(S, dim=-1)`
+                # where P.shape = [nhq, block_q, block_k]
+                # NOTE: pytorch softmax has many limitations and bugs
+                # thus we use our own safe_softmax with lse involved
+                bp = safe_softmax(bs, blse_).to(q.dtype)
+
+                # apply `O = P x V`
+                # where O.shape = [nhq, block_q, hd]
+                bout_ = bp @ bv
+
+                # correct blse
+                blse_ = blse_.squeeze_(-1)
+                correct_attn_fwd_result(
+                    out_list=[bout, bout_],
+                    lse_list=[blse, blse_],
+                    inplace=True,
+                )
+
+        ctx.save_for_backward(q, kt, v, bias, sink, out, lse)
+        ctx.softmax_scale = softmax_scale
+        ctx.block_q = block_q
+        ctx.block_k = block_k
+        ctx.sq, ctx.sk, ctx.nhq = sq, sk, nhq
+        ctx.lse_dtype = lse_dtype
+
+        return out, lse
+
+    @staticmethod
+    def backward(ctx, dout, *args):  # pragma: no cover
+        # fetch saved tensors
+        q, kt, v, bias, sink, out, lse = ctx.saved_tensors
+
+        # # fetch saved meta info
+        # softmax_scale = ctx.softmax_scale
+        # block_q = ctx.block_q
+        # block_k = ctx.block_k
+        # sq, sk, nhq = ctx.sq, ctx.sk, ctx.nhq
+        # lse_dtype = ctx.lse_dtype
+
+        # init dq, dkt, dv buffer
+        # dq.shape = [nhq, sq, d]
+        # dkt.shape = [nhq, d, sk]
+        # dv.shape = [nhq, sk, d]
+        dq = torch.zeros_like(q)
+        dkt = torch.zeros_like(kt)
+        dv = torch.zeros_like(v)
+
+        # compute dpsum and dsink if sink is provided
+        # dpsum.shape = [nhq, sq, 1]
+        # dsink.shape = [nhq, sq, s_sink]
+        dpsum, dsink = RefAttnTorchImplMainProcessOnline.compute_dpsum_dsink(
+            out=out,
+            dout=dout,
+            lse=lse,
+            sink=sink,
+        )
+
+        # outer loop for k,v,dk,dv
+        # for k_start in range(0, sk, block_k):
+        #     k_end = min(k_start + block_k, sk)
+        #     # bkt.shape: [nhq, hd, block_k]
+        #     # bdkt.shape: [nhq, hd, block_k]
+        #     # bv.shape: [nhq, block_k, hd]
+        #     # bdv.shape: [nhq, block_k, hd]
+        #     bkt, bdkt, bv, bdv = (
+        #         kt[..., k_start:k_end],
+        #         dkt[..., k_start:k_end],
+        #         v[:, k_start:k_end],
+        #         dv[:, k_start:k_end],
+        #     )
+
+        #     # inner loop for q,o,do,lse,dq
+        #     for q_start in range(0, sq, block_q):
+        #         q_end = min(q_start + block_q, sq)
+        #         # bq/bout/bdout.shape: [nhq, block_q, hd]
+        #         # blse.shape: [nhq, block_q]
+        #         # bbias.shape: [nhq, block_q, block_k]
+        #         bq, bout, bdout, blse, bbias = (
+        #             q[:, q_start:q_end],
+        #             out[:, q_start:q_end],
+        #             dout[:, q_start:q_end],
+        #             lse[:, q_start:q_end],
+        #             bias[:, q_start:q_end, k_start:k_end],
+        #         )
+
+        #         # recompute bp
+        #         # bp.shape: [nhq, block_q, block_k]
+
+        return (
+            dq,
+            dkt,
+            dv,
+            dsink,
+            None,  # bias
+            None,  # softmax_scale
+            None,  # block_q
+            None,  # block_k
+        )
+
+    @staticmethod
+    def init_lse_with_sink(
+        sq: int,
+        nhq: int,
+        sink: torch.Tensor | None,
+        lse_dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        lse = torch.full((nhq, sq), -float("inf"), dtype=lse_dtype, device=device)
+        if sink is not None:
+            # directly initialize lse with sink
+            # if sink is provided
+            lse = rearrange(
+                correct_attn_lse_with_sink(
+                    lse=rearrange(lse, "nhq sq -> sq nhq"),
+                    sink=rearrange(sink, "nhq sq s_sink -> sq s_sink nhq"),
+                    sink_layout="ssh",
+                    inplace=False,
+                ),
+                "sq nhq -> nhq sq",
+            ).contiguous()
+
+        return lse
+
+    @staticmethod
+    def compute_dpsum_dsink(
+        out: torch.Tensor,
+        dout: torch.Tensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # compute dpsum (i.e. delta)
+        # dpsum.shape = [nhq, sq, 1]
+        dpsum = reduce((out * dout).to(lse.dtype), "nhq sq d -> nhq sq 1", "sum")
+
+        # compute dsink if sink is provided
+        # dsink.shape = [nhq, sq, s_sink]
+        if sink is not None:
+            dsink = rearrange(
+                sink_bwd(
+                    sink=rearrange(sink, "nhq sq s_sink -> sq s_sink nhq"),
+                    lse=rearrange(lse, "nhq sq -> sq nhq"),
+                    o=rearrange(out, "nhq sq d -> sq nhq d"),
+                    do=rearrange(dout, "nhq sq d -> sq nhq d"),
+                    sink_layout="ssh",
+                ),
+                "sq s_sink nhq -> nhq sq s_sink",
+            ).contiguous()
+        else:
+            dsink = None
+
+        return dpsum, dsink
+
+    @staticmethod
+    def bwd_recompute_bp(
+        bq: torch.Tensor,
+        bkt: torch.Tensor,
+        blse: torch.Tensor,
+        bbias: torch.Tensor,
+        softmax_scale: float,
+    ):
+        # apply `S = Q x K.T * scale + bias`
+        # where S.shape = [nhq, block_q, block_k]
+        bs = to_higher_fp_dtype(
+            bq @ bkt * softmax_scale,
+            lowest_precision=torch.float32,
+        )
+        bs += bbias
+
+        # apply row-wise softmax `P = softmax(S, dim=-1)`
+        # where P.shape = [nhq, block_q, block_k]
+        # NOTE: pytorch softmax has many limitations and bugs
+        # thus we use our own safe_softmax with lse involved
+        bp = safe_softmax(bs, blse.unsqueeze(-1)).to(bq.dtype)
+
+        return bp
 
 
 @torch.no_grad
@@ -180,7 +425,12 @@ def _ref_attn_torch_impl_postprocess(
     # prepare lse if required to return
     # where LSE.shape = [sq, nhq]
     if return_lse:
-        lse = rearrange(lse, "nhq sq 1 -> sq nhq")
+        assert lse is not None
+        if lse.ndim == 3:
+            # [nhq, sq, 1] -> [sq, nhq]
+            lse = lse.squeeze(-1)
+        # [nhq, sq] -> [sq, nhq]
+        lse = lse.t().contiguous()
     else:
         lse = None
 
@@ -209,7 +459,7 @@ def _ref_attn_torch_impl_mainprocess_offline(
 
     # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
     # where LSE.shape = [nhq, sq, 1]
-    lse = s.logsumexp(dim=-1, keepdim=True)
+    lse = safe_lse(s, dim=-1, keepdim=True)
 
     # apply row-wise softmax `P = softmax(S, dim=-1)`
     # where P.shape = [nhq, sq, sk + s_sink]
@@ -235,99 +485,12 @@ def _ref_attn_torch_impl_mainprocess_online(
     sink: torch.Tensor | None,
     bias: torch.Tensor,
     softmax_scale: float,
-    block_q: int = 1024,
-    block_k: int = 1024,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # fetch meta info
-    # q.shape = [nhq, sq, d]
-    # kt.shape = [nhq, d, sk]
-    # v.shape = [nhq, sk, d]
-    sq, sk, nhq = q.size(-2), kt.size(-1), q.size(0)
-    lse_dtype = max_fp_dtype(q.dtype, torch.float32)
+    out, lse = RefAttnTorchImplMainProcessOnline.apply(
+        q, kt, v, sink, bias, softmax_scale
+    )
 
-    # init out, lse buffer
-    # out.shape = [nhq, sq, d]
-    # lse.shape = [nhq, sq]
-    out = torch.zeros_like(q)
-    lse = torch.full((nhq, sq), -float("inf"), dtype=lse_dtype, device=q.device)
-    if sink is not None:
-        # directly initialize lse with lse_sink
-        # if sink is provided
-        lse_sink = (
-            # shape: [nhq, sq, s_sink] -> [nhq, sq]
-            torch.logsumexp(sink, dim=-1, keepdim=False)
-        )
-        correct_attn_lse(
-            lse1=lse,
-            lse2=lse_sink,
-            inplace=True,
-        )
-
-    # outer loop of Q,O
-    for q_start in range(0, sq, block_q):
-        q_end = min(q_start + block_q, sq)
-        # bq/bout.shape: [nhq, block_q, hd]
-        # blse.shape: [nhq, block_q]
-        bq, bout, blse = (
-            q[:, q_start:q_end],
-            out[:, q_start:q_end],
-            lse[:, q_start:q_end],
-        )
-
-        # inner loop of K,V
-        for k_start in range(0, sk, block_k):
-            k_end = min(k_start + block_k, sk)
-            # bkt.shape: [nhq, hd, block_k]
-            # bv.shape: [nhq, block_k, hd]
-            # bbias.shape: [nhq, block_q, block_k]
-            bkt, bv, bbias = (
-                kt[..., k_start:k_end],
-                v[:, k_start:k_end],
-                bias[:, q_start:q_end, k_start:k_end],
-            )
-
-            # apply `S = Q x K.T * scale + bias`
-            # where S.shape = [nhq, block_q, block_k]
-            bs = to_higher_fp_dtype(
-                bq @ bkt * softmax_scale,
-                lowest_precision=torch.float32,
-            )
-            bs += bbias
-
-            # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
-            # where LSE.shape = [nhq, block_q, 1]
-            blse_ = bs.logsumexp(dim=-1, keepdim=True)
-
-            # apply row-wise softmax `P = softmax(S, dim=-1)`
-            # where P.shape = [nhq, block_q, block_k]
-            # NOTE: pytorch softmax has many limitations and bugs
-            # thus we use our own safe_softmax with lse involved
-            bp = safe_softmax(bs, blse_).to(q.dtype)
-
-            # apply `O = P x V`
-            # where O.shape = [nhq, block_q, hd]
-            bout_ = bp @ bv
-
-            # correct blse
-            blse_ = blse_.squeeze_(-1)
-            blse_old = blse.clone()
-            correct_attn_lse(
-                lse1=blse,
-                lse2=blse_,
-                inplace=True,
-            )
-
-            # correct bout
-            correct_attn_out(
-                out1=bout,
-                lse1=blse_old,
-                out2=bout_,
-                lse2=blse_,
-                lse=blse,
-                inplace=True,
-            )
-
-    return out, lse.unsqueeze_(-1)
+    return out, lse
 
 
 def _ref_attn_torch_impl(
