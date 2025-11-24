@@ -27,9 +27,9 @@ from magi_attention.common.ranges import AttnRanges
 from magi_attention.functional.dist_attn import DistAttnRuntime, dist_attn_func
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
-from magi_attention.testing import parameterize
+from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_comms
-from magi_attention.testing.precision import EPSILON, assert_close, ref_attn_func
+from magi_attention.testing.precision import EPSILON, assert_close
 from magi_attention.testing.utils import switch_envvar_context, switch_envvars
 
 

@@ -27,7 +27,7 @@ from magi_attention.api.functools import (
 )
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnSinkLayout
-from magi_attention.testing import parameterize
+from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.precision import (
     EPSILON,
     MISMATCH_THRES_RATIO,
@@ -35,7 +35,6 @@ from magi_attention.testing.precision import (
     assert_close,
     calc_inf_norm,
     extract_mismatch_threshold,
-    ref_attn_func,
 )
 from magi_attention.utils import make_attn_mask_from_ffa_args
 

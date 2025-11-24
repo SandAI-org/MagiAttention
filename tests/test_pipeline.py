@@ -37,7 +37,7 @@ from magi_attention.config import (
     UniformOverlapAlg,
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
-from magi_attention.testing import parameterize
+from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import (
     NAME,
     PROFILE_ONLY,
@@ -57,7 +57,6 @@ from magi_attention.testing.precision import (
     assert_close,
     calc_inf_norm,
     extract_mismatch_threshold,
-    ref_attn_func,
 )
 from magi_attention.utils import (
     get_a2a_corr_factor,

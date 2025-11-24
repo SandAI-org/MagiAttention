@@ -20,7 +20,7 @@ import torch
 from flash_attn_interface import flash_attn_func, flash_attn_varlen_func
 
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.testing.precision import ref_attn_func
+from magi_attention.testing import ref_attn_func
 
 
 def fa3_test_func(q, k, v, dout, causal, deterministic, qkv_format="bshd"):

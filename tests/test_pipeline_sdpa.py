@@ -36,7 +36,7 @@ from magi_attention.config import (
     UniformOverlapAlg,
 )
 from magi_attention.dist_attn_runtime_mgr import DistAttnRuntimeMgr
-from magi_attention.testing import parameterize
+from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import (
     NAME,
     SKIP_WORLD_SIZE,
@@ -50,7 +50,6 @@ from magi_attention.testing.precision import (
     H100_NVLINK_BANDWIDTH,
     H100_TFLOPS_16,
     assert_close,
-    ref_attn_func,
 )
 from magi_attention.testing.utils import switch_sdpa_backend_decorator
 from magi_attention.utils import (

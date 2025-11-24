@@ -27,7 +27,7 @@ from magi_attention.functional.flex_flash_attn import (
     merge_ranges,
 )
 from magi_attention.functional.utils import correct_attn_fwd_result
-from magi_attention.testing import parameterize
+from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
 from magi_attention.testing.precision import (
     EPSILON,
@@ -37,7 +37,6 @@ from magi_attention.testing.precision import (
     assert_close,
     calc_inf_norm,
     extract_mismatch_threshold,
-    ref_attn_func,
 )
 from magi_attention.utils import is_list_value_any, make_attn_mask_from_ffa_args
 
