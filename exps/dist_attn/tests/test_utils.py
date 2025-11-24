@@ -255,7 +255,9 @@ def ref_torch_sdpa_func(q, k, v, grad_total_out, mask, high_precision=False):
         v=total_v,
         mask=mask,
         layout="thd",
+        sink_layout="sh",
         high_precision=high_precision,
+        return_lse=False,
     )
     total_out_ref_high_precision.backward(grad_total_out)
     (

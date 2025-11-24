@@ -287,6 +287,7 @@ def _ref_attn_torch_impl(
     softmax_scale: float | None = None,
     return_lse: bool = False,
     sink_layout: AttnSinkLayout = "sh",
+    online_softmax: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     (q, k, v, sink, bias, softmax_scale) = _attn_pre_process(
         q=q,
@@ -347,14 +348,15 @@ def ref_attn_func(
     k: torch.Tensor,
     v: torch.Tensor,
     mask: torch.Tensor,
+    *,
     sink: torch.Tensor | None = None,
     softmax_scale: float | None = None,
     softcap: float = 0.0,
     layout: str = "thd",
+    sink_layout: AttnSinkLayout = "sh",
     backend: str = "sdpa",
     high_precision: bool = False,
     return_lse: bool = False,
-    sink_layout: AttnSinkLayout = "sh",
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     assert layout in ("thd",), f"Unsupported layout: {layout}"
     assert softcap == 0.0, "non-zero softcap is not supported by now"

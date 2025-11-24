@@ -573,10 +573,10 @@ class TestFAInterfaceWithSink(TestCase):
             sink=total_sink,
             mask=mask,
             layout="thd",
+            sink_layout=sink_layout,
             high_precision=True,
             backend="torch" if has_sink else "sdpa",
             return_lse=True,
-            sink_layout=sink_layout,
         )
         total_out_ref_high_precision.backward(grad_total_out)
         (
@@ -604,10 +604,10 @@ class TestFAInterfaceWithSink(TestCase):
             sink=total_sink,
             mask=mask,
             layout="thd",
+            sink_layout=sink_layout,
             backend="torch" if has_sink else "sdpa",
             high_precision=False,
             return_lse=True,
-            sink_layout=sink_layout,
         )
 
         total_out_ref_low_precision.backward(grad_total_out)

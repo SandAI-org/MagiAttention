@@ -898,7 +898,9 @@ class TestDistAttnRuntimeMgr(DistTestBase):
             v=total_v,
             mask=mask,
             layout="thd",
+            sink_layout="sh",
             high_precision=True,
+            return_lse=False,
         )
 
         if run_bwd:

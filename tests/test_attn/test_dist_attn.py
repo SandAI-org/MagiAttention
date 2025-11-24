@@ -256,6 +256,8 @@ class TestDistAttn(DistTestBase):
             v=total_v,
             mask=total_mask,
             sink=total_sink,
+            layout="thd",
+            sink_layout="sh",
             backend="torch" if total_sink is not None else "sdpa",
             high_precision=True,
             return_lse=True,
