@@ -212,7 +212,7 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
 
                 # apply `dS = dS_ * scale`
                 # bds.shape: [nhq, block_q, block_k]
-                bds *= softmax_scale
+                bds = (bds * softmax_scale).to(bdq.dtype)
 
                 # apply `dQ = dS x K`
                 bdq.add_(bds @ bkt.transpose(-1, -2))
