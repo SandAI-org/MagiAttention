@@ -208,11 +208,11 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
 
                 # apply `dS_ = P * (dP - dPsum)`
                 # bds.shape: [nhq, block_q, block_k]
-                bds_ = bp * (bdp - bdpsum)
+                bds = bp * (bdp - bdpsum)
 
-                # apply `dS = dS_ * scale + bias`
-                # bds_.shape: [nhq, block_q, block_k]
-                bds = bds_ * softmax_scale + bbias
+                # apply `dS = dS_ * scale`
+                # bds.shape: [nhq, block_q, block_k]
+                bds *= softmax_scale
 
                 # apply `dQ = dS x K`
                 bdq.add_(bds @ bkt.transpose(-1, -2))

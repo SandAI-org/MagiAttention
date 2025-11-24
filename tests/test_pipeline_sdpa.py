@@ -991,6 +991,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             backend="torch" if total_sink is not None else "sdpa",
             high_precision=True,
             return_lse=True,
+            online_softmax=False,
         )
 
         if run_bwd:
