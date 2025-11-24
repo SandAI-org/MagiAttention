@@ -18,7 +18,7 @@ from einops import reduce
 
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.meta.collection.calc_meta import AttnArg
-from magi_attention.utils import get_attn_mask_from_ffa_args, to_higher_fp_dtype
+from magi_attention.utils import make_attn_mask_from_ffa_args, to_higher_fp_dtype
 
 from .utils import (
     correct_attn_out_lse_with_sink,
@@ -183,7 +183,7 @@ def sdpa_fwd(
         q, k, v = sdpa_fwd_qkv_rearrange(q, k, v)
 
     # construct attn_mask from ranges
-    attn_mask = get_attn_mask_from_ffa_args(
+    attn_mask = make_attn_mask_from_ffa_args(
         q_ranges=attn_arg.q_ranges,
         k_ranges=attn_arg.k_ranges,
         attn_type_map=attn_arg.attn_type_map,
@@ -434,7 +434,7 @@ def sdpa_bwd(
         q, k, v, o, do, lse = sdpa_bwd_qkvodo_lse_rearrange(q, k, v, o, do, lse)
 
     # construct attn_mask from ranges
-    attn_mask = get_attn_mask_from_ffa_args(
+    attn_mask = make_attn_mask_from_ffa_args(
         q_ranges=attn_arg.q_ranges_bwd,
         k_ranges=attn_arg.k_ranges_bwd,
         attn_type_map=attn_arg.attn_type_map_bwd,

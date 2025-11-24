@@ -55,9 +55,9 @@ from magi_attention.testing.precision import (
 from magi_attention.testing.utils import switch_sdpa_backend_decorator
 from magi_attention.utils import (
     get_a2a_corr_factor,
-    get_attn_mask_from_ffa_args,
     get_calc_cost_factor,
     get_comm_cost_factor,
+    make_attn_mask_from_ffa_args,
     str2seed,
     sync_rng,
 )
@@ -964,7 +964,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         # -----   build attn mask   ---- #
 
-        mask = get_attn_mask_from_ffa_args(
+        mask = make_attn_mask_from_ffa_args(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,

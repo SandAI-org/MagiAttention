@@ -39,7 +39,7 @@ from magi_attention.testing.precision import (
     extract_mismatch_threshold,
     ref_attn_func,
 )
-from magi_attention.utils import get_attn_mask_from_ffa_args, is_list_value_any
+from magi_attention.utils import is_list_value_any, make_attn_mask_from_ffa_args
 
 
 class TestFlexFlashAttn(DistTestBase):
@@ -568,7 +568,7 @@ class TestFlexFlashAttn(DistTestBase):
 
         # -----   build attn mask   ---- #
 
-        mask = get_attn_mask_from_ffa_args(
+        mask = make_attn_mask_from_ffa_args(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,

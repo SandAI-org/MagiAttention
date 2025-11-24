@@ -357,7 +357,46 @@ def ref_attn_func(
     backend: str = "sdpa",
     high_precision: bool = False,
     return_lse: bool = False,
+    online_softmax: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Reference Implementation of Attention Autograd Function
+
+    Args:
+        q (torch.Tensor): the query tensor
+        k (torch.Tensor): the key tensor
+        v (torch.Tensor): the value tensor
+        mask (torch.Tensor): the boolean mask tensor,
+            where the entries with ``False`` indicate that the corresponding positions are masked
+        sink (torch.Tensor | None, optional): the sink tensor.
+            Defaults to ``None`` to not apply attention sink.
+        softmax_scale (float | None, optional): the softmax scale factor.
+            Defaults to ``None`` to use the default value of ``1/sqrt(head_dim)``.
+        softcap (float, optional): the softcap value.
+            Defaults to ``0.0``.
+        layout (str, optional): the shape layout of q,k,v,o tensors.
+            Defaults to "thd" like ``[total_seqlen, num_heads, head_dim]``.
+        sink_layout (AttnSinkLayout, optional): the shape layout of the sink tensor.
+            Defaults to "sh" like ``[seqlen_sink, num_heads]``.
+        backend (str, optional): the implementation backend.
+            Defaults to "sdpa".
+        high_precision (bool, optional): whether to use high precision (fp64) for computation.
+            Defaults to ``False``.
+        return_lse (bool, optional): whether to return log-sum-exp tensor.
+            Defaults to ``False`` to return ``None``.
+        online_softmax (bool, optional): whether to use online softmax to reduce memory overhead.
+            Defaults to ``False``.
+
+            NOTE: ``online_softmax`` flag takes no effect on sdpa backend,
+                since it always uses online softmax.
+
+    Raises:
+        NotImplementedError: the specified backend is not supported
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor | None]:
+            the output tensor and the optional log-sum-exp tensor
+            if ``return_lse`` is ``True``, otherwise ``None``
+    """
     assert layout in ("thd",), f"Unsupported layout: {layout}"
     assert softcap == 0.0, "non-zero softcap is not supported by now"
 
@@ -391,6 +430,7 @@ def ref_attn_func(
                 softmax_scale=softmax_scale,
                 return_lse=return_lse,
                 sink_layout=sink_layout,
+                online_softmax=online_softmax,
             )
         case _:
             raise NotImplementedError(f"Unsupported backend: {backend}")

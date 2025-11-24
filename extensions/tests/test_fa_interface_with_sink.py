@@ -37,7 +37,7 @@ from magi_attention.testing.precision import (
     extract_mismatch_threshold,
     ref_attn_func,
 )
-from magi_attention.utils import get_attn_mask_from_ffa_args
+from magi_attention.utils import make_attn_mask_from_ffa_args
 
 # isort: split
 from extensions.fa2_interface_with_sink import (
@@ -550,7 +550,7 @@ class TestFAInterfaceWithSink(TestCase):
 
         # -----   build attn mask   ---- #
 
-        mask = get_attn_mask_from_ffa_args(
+        mask = make_attn_mask_from_ffa_args(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,

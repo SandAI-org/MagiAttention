@@ -41,7 +41,7 @@ from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import EPSILON, ref_attn_func
 from magi_attention.testing.utils import switch_sdpa_backend_decorator
-from magi_attention.utils import get_attn_mask_from_ffa_args
+from magi_attention.utils import make_attn_mask_from_ffa_args
 
 
 class TestDistAttnRuntimeMgr(DistTestBase):
@@ -879,7 +879,7 @@ class TestDistAttnRuntimeMgr(DistTestBase):
 
         # -----   build attn mask   ---- #
 
-        mask = get_attn_mask_from_ffa_args(
+        mask = make_attn_mask_from_ffa_args(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
