@@ -92,7 +92,7 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
                 )
 
                 # apply `S = Q x K.T * scale + bias`
-                # where S.shape = [nhq, block_q, block_k]
+                # where bs.shape = [nhq, block_q, block_k]
                 bs = to_higher_fp_dtype(
                     bq @ bkt * softmax_scale,
                     lowest_precision=torch.float32,
@@ -100,11 +100,11 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
                 bs += bbias
 
                 # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
-                # where LSE.shape = [nhq, block_q, 1]
+                # where blse.shape = [nhq, block_q, 1]
                 blse_ = bs.logsumexp(dim=-1, keepdim=True)
 
                 # apply row-wise softmax `P = softmax(S, dim=-1)`
-                # where P.shape = [nhq, block_q, block_k]
+                # where bp.shape = [nhq, block_q, block_k]
                 # NOTE: pytorch softmax has many limitations and bugs
                 # thus we use our own safe_softmax with lse involved
                 bp = safe_softmax(bs, blse_).to(q.dtype)
@@ -125,8 +125,7 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.block_q = block_q
         ctx.block_k = block_k
-        ctx.sq, ctx.sk, ctx.nhq = sq, sk, nhq
-        ctx.lse_dtype = lse_dtype
+        ctx.sq, ctx.sk = sq, sk
 
         return out, lse
 
@@ -135,12 +134,11 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
         # fetch saved tensors
         q, kt, v, bias, sink, out, lse = ctx.saved_tensors
 
-        # # fetch saved meta info
-        # softmax_scale = ctx.softmax_scale
-        # block_q = ctx.block_q
-        # block_k = ctx.block_k
-        # sq, sk, nhq = ctx.sq, ctx.sk, ctx.nhq
-        # lse_dtype = ctx.lse_dtype
+        # fetch saved meta info
+        softmax_scale = ctx.softmax_scale
+        block_q = ctx.block_q
+        block_k = ctx.block_k
+        sq, sk = ctx.sq, ctx.sk
 
         # init dq, dkt, dv buffer
         # dq.shape = [nhq, sq, d]
@@ -160,36 +158,67 @@ class RefAttnTorchImplMainProcessOnline(torch.autograd.Function):
             sink=sink,
         )
 
-        # outer loop for k,v,dk,dv
-        # for k_start in range(0, sk, block_k):
-        #     k_end = min(k_start + block_k, sk)
-        #     # bkt.shape: [nhq, hd, block_k]
-        #     # bdkt.shape: [nhq, hd, block_k]
-        #     # bv.shape: [nhq, block_k, hd]
-        #     # bdv.shape: [nhq, block_k, hd]
-        #     bkt, bdkt, bv, bdv = (
-        #         kt[..., k_start:k_end],
-        #         dkt[..., k_start:k_end],
-        #         v[:, k_start:k_end],
-        #         dv[:, k_start:k_end],
-        #     )
+        # outer loop for k,dk,v,dv
+        for k_start in range(0, sk, block_k):
+            k_end = min(k_start + block_k, sk)
+            # bkt.shape: [nhq, hd, block_k]
+            # bdkt.shape: [nhq, hd, block_k]
+            # bv.shape: [nhq, block_k, hd]
+            # bdv.shape: [nhq, block_k, hd]
+            bkt, bdkt, bv, bdv = (
+                kt[..., k_start:k_end],
+                dkt[..., k_start:k_end],
+                v[:, k_start:k_end],
+                dv[:, k_start:k_end],
+            )
 
-        #     # inner loop for q,o,do,lse,dq
-        #     for q_start in range(0, sq, block_q):
-        #         q_end = min(q_start + block_q, sq)
-        #         # bq/bout/bdout.shape: [nhq, block_q, hd]
-        #         # blse.shape: [nhq, block_q]
-        #         # bbias.shape: [nhq, block_q, block_k]
-        #         bq, bout, bdout, blse, bbias = (
-        #             q[:, q_start:q_end],
-        #             out[:, q_start:q_end],
-        #             dout[:, q_start:q_end],
-        #             lse[:, q_start:q_end],
-        #             bias[:, q_start:q_end, k_start:k_end],
-        #         )
+            # inner loop for q,dq,do,lse
+            for q_start in range(0, sq, block_q):
+                q_end = min(q_start + block_q, sq)
+                # bq/bdq/bdout.shape: [nhq, block_q, hd]
+                # blse.shape: [nhq, block_q]
+                # bbias.shape: [nhq, block_q, block_k]
+                # bdpsum.shape: [nhq, block_q, 1]
+                bq, bdq, bdout, blse, bbias, bdpsum = (
+                    q[:, q_start:q_end],
+                    dq[:, q_start:q_end],
+                    dout[:, q_start:q_end],
+                    lse[:, q_start:q_end],
+                    bias[:, q_start:q_end, k_start:k_end],
+                    dpsum[:, q_start:q_end],
+                )
 
-        #         # recompute bp
-        #         # bp.shape: [nhq, block_q, block_k]
+                # recompute bp
+                # bp.shape: [nhq, block_q, block_k]
+                bp = RefAttnTorchImplMainProcessOnline.bwd_recompute_bp(
+                    bq=bq,
+                    bkt=bkt,
+                    blse=blse,
+                    bbias=bbias,
+                    softmax_scale=softmax_scale,
+                )
+
+                # apply `dV = P.T x dO` and reduce
+                # bdv.shape: [nhq, block_k, hd]
+                bdv.add_(bp.transpose(-1, -2) @ bdout)
+
+                # apply `dP = dO x V.T`
+                # bdp.shape: [nhq, block_q, block_k]
+                bdp = bdout @ bv.transpose(-1, -2)
+
+                # apply `dS_ = P * (dP - dPsum)`
+                # bds.shape: [nhq, block_q, block_k]
+                bds_ = bp * (bdp - bdpsum)
+
+                # apply `dS = dS_ * scale + bias`
+                # bds_.shape: [nhq, block_q, block_k]
+                bds = bds_ * softmax_scale + bbias
+
+                # apply `dQ = dS x K`
+                bdq.add_(bds @ bkt.transpose(-1, -2))
+
+                # apply `dK.T = Q.T x dS`
+                bdkt.add_(bq.transpose(-1, -2) @ bds)
 
         return (
             dq,
