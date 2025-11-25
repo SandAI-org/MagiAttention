@@ -412,7 +412,7 @@ $$
 
 $$
 \begin{aligned}
-&\hat{dS} = dS \cdot scale + bias \notag \\ 
+&\hat{dS} = dS \cdot scale \notag \\ 
 
 &dQ = \hat{dS} \times K \notag \\ 
 
