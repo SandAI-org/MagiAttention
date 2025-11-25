@@ -25,7 +25,7 @@ import magi_attention
 from magi_attention import init_dist_attn_runtime_mgr
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
-from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
+from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
@@ -57,6 +57,7 @@ from magi_attention.utils import (
     get_calc_cost_factor,
     get_comm_cost_factor,
     make_attn_mask_from_ffa_args,
+    max_fp_dtype,
     str2seed,
     sync_rng,
 )
@@ -144,6 +145,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 1,
+                "sink_layout": "sh",
                 "chunk_size": 32,
             },
             # varlen full attn with total seqlen 1050
@@ -210,6 +212,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 2,
+                "sink_layout": "sh",
                 "chunk_size": 128,
             },
             # varlen block causal with total seqlen 960
@@ -273,6 +276,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 840,
                 "total_seqlen_k": 840,
                 "total_seqlen_sink": 3,
+                "sink_layout": "sh",
                 "chunk_size": 4,
             },
             # varlen block causal with total seqlen 1k
@@ -342,6 +346,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 4,
+                "sink_layout": "sh",
                 "chunk_size": 128,
             },
             # block sliding-window full with total seqlen 1k
@@ -409,6 +414,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 5,
+                "sink_layout": "sh",
                 "chunk_size": 128,
             },
             # block sliding-window causal with total seqlen 1k
@@ -469,6 +475,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 6,
+                "sink_layout": "sh",
                 "chunk_size": 128,
             },
             # varlen block causal with total seqlen 1k + overlapped q ranges
@@ -542,6 +549,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1024,
                 "total_seqlen_k": 1024,
                 "total_seqlen_sink": 7,
+                "sink_layout": "sh",
                 "chunk_size": 128,
             },
             # varlen block causal with total seqlen 840 + overlapped q ranges
@@ -604,6 +612,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                 "total_seqlen_q": 1050,
                 "total_seqlen_k": 1050,
                 "total_seqlen_sink": 8,
+                "sink_layout": "sh",
                 "chunk_size": 5,
             },
         ],
@@ -757,6 +766,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             None if test_case_seed % 2 == 0 else (1 / head_dim)
         )
         softcap = 0.0  # not supported for test
+        sink_layout: AttnSinkLayout = attn_config.get("sink_layout", "sh")
 
         dist_attn_config = DistAttnConfig(
             dispatch_config=DispatchConfig(
@@ -837,22 +847,48 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             dtype=dtype,
             requires_grad=run_bwd,
         )
-        total_sink = (
-            torch.randn(
-                total_seqlen_sink,
-                num_heads_q,
-                device=self.device,
-                dtype=dtype,
-                requires_grad=run_bwd,
-            )
-            if total_seqlen_sink > 0
-            else None
-        )
         dist.all_reduce(total_q.data, group=self.nccl_group)
         dist.all_reduce(total_k.data, group=self.nccl_group)
         dist.all_reduce(total_v.data, group=self.nccl_group)
-        if total_sink is not None:
+
+        if total_seqlen_sink > 0:
+            match sink_layout:
+                case "sh":
+                    total_sink = torch.randn(
+                        total_seqlen_sink,
+                        num_heads_q,
+                        device=self.device,
+                        dtype=max_fp_dtype(
+                            dtype,
+                            torch.float32,
+                        ),
+                        requires_grad=run_bwd,
+                    )
+                case "ssh":
+                    total_sink = torch.randn(
+                        total_seqlen_q,
+                        total_seqlen_sink,
+                        num_heads_q,
+                        device=self.device,
+                        dtype=max_fp_dtype(
+                            dtype,
+                            torch.float32,
+                        ),
+                        requires_grad=run_bwd,
+                    )
+                case "shd":
+                    raise NotImplementedError(
+                        f"sink_layout {sink_layout} is not supported yet"
+                    )
+                case _:
+                    raise ValueError(f"Invalid sink_layout {sink_layout}")
+            # TODO: support other sink layouts for distributed attention sink
+            assert (
+                sink_layout == "sh"
+            ), "Only support `sh` layout for distributed attention sink by now"
             dist.all_reduce(total_sink.data, group=self.nccl_group)
+        else:
+            total_sink = None
 
         # -----   dispatch global qkv to local qkv   ---- #
 

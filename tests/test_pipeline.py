@@ -26,7 +26,7 @@ import magi_attention
 from magi_attention import init_dist_attn_runtime_mgr
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._mgr import grpcoll_mgr
-from magi_attention.common.enum import AttnMaskType, AttnOverlapMode
+from magi_attention.common.enum import AttnMaskType, AttnOverlapMode, AttnSinkLayout
 from magi_attention.common.ranges import AttnRanges
 from magi_attention.config import (
     DispatchConfig,
@@ -160,6 +160,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0],
                 "total_seqlen_q": 14336,
                 "total_seqlen_k": 14336,
+                "total_seqlen_sink": 1,
+                "sink_layout": "sh",
                 "chunk_size": 512,
             },
             # varlen full attn with total seqlen 12k
@@ -191,7 +193,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 12288,
                 "chunk_size": 512,
             },
-            # # varlen block causal with total seqlen 15k
+            # varlen block causal with total seqlen 15k
             {
                 NAME: "varlen_block_causal_15k",
                 SKIP_WORLD_SIZE: [4, 7, 8],
@@ -220,6 +222,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [0] * 7,
                 "total_seqlen_q": 15360,
                 "total_seqlen_k": 15360,
+                "total_seqlen_sink": 4,
+                "sink_layout": "sh",
                 "chunk_size": 512,
             },
             # varlen block causal with total seqlen 12k + overlapped q ranges
@@ -282,6 +286,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "attn_type_mapping": [3] * 8,
                 "total_seqlen_q": 12288,
                 "total_seqlen_k": 12288,
+                "total_seqlen_sink": 8,
+                "sink_layout": "sh",
                 "chunk_size": 512,
             },
             # merging causal and inv_causal to bi_causal with total seqlen 10k
@@ -326,9 +332,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "total_seqlen_k": 10240,
                 "chunk_size": 512,
             },
-            # full_mask_assembled_from_samll_pieces
+            # full_mask_assembled_from_small_pieces
             {
-                NAME: "full_mask_assembled_from_samll_pieces_with_8k",
+                NAME: "full_mask_assembled_from_small_pieces_with_8k",
                 SKIP_WORLD_SIZE: [3, 5, 6, 7],
                 "q_ranges": AttnRanges.from_ranges(
                     [[i * 512, (i + 1) * 512] for i in range(16) for _ in range(8)]
@@ -471,8 +477,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
     @parameterize(
         "num_heads",
         [
-            (6, 6),  # mha
-            (6, 2),  # gqa
+            (8, 8),  # mha
+            (8, 2),  # gqa
         ],
     )
     @parameterize(
@@ -499,8 +505,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         dtype: torch.dtype,
         random_type_mapping: bool,
         random_flags_mode: bool = False,  # TODO: implement random flags mode
-        test_lse: bool = True,
-        test_sink: bool = False,
         run_bwd: bool = True,
     ):
         # -----    switch mode   ---- #
@@ -579,15 +583,14 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         total_seqlen_q: int = attn_config["total_seqlen_q"]
         total_seqlen_k: int = attn_config["total_seqlen_k"]
-        total_seqlen_sink: int = (
-            attn_config.get("total_seqlen_sink", 0) if test_sink else 0
-        )
+        total_seqlen_sink: int = attn_config.get("total_seqlen_sink", 0)
         chunk_size: int = attn_config["chunk_size"]
         num_heads_q, num_heads_kv = num_heads
         softmax_scale = (  # choose softmax_scale by rule
             None if test_case_seed % 2 == 0 else (1 / head_dim)
         )
         softcap = 0.0  # not supported for test
+        sink_layout: AttnSinkLayout = attn_config.get("sink_layout", "sh")
 
         dist_attn_config = DistAttnConfig(
             dispatch_config=DispatchConfig(
@@ -688,22 +691,42 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 dtype=dtype,
                 requires_grad=run_bwd,
             )
-            total_sink = (
-                torch.randn(
-                    total_seqlen_sink,
-                    num_heads_q,
-                    device=self.device,
-                    dtype=dtype,
-                    requires_grad=run_bwd,
-                )
-                if total_seqlen_sink > 0
-                else None
-            )
             dist.all_reduce(total_q.data, group=self.nccl_group)
             dist.all_reduce(total_k.data, group=self.nccl_group)
             dist.all_reduce(total_v.data, group=self.nccl_group)
-            if total_sink is not None:
+
+            if total_seqlen_sink > 0:
+                match sink_layout:
+                    case "sh":
+                        total_sink = torch.randn(
+                            total_seqlen_sink,
+                            num_heads_q,
+                            device=self.device,
+                            dtype=torch.float32,
+                            requires_grad=run_bwd,
+                        )
+                    case "ssh":
+                        total_sink = torch.randn(
+                            total_seqlen_q,
+                            total_seqlen_sink,
+                            num_heads_q,
+                            device=self.device,
+                            dtype=torch.float32,
+                            requires_grad=run_bwd,
+                        )
+                    case "shd":
+                        raise NotImplementedError(
+                            f"sink_layout {sink_layout} is not supported yet"
+                        )
+                    case _:
+                        raise ValueError(f"Invalid sink_layout {sink_layout}")
+                # TODO: support other sink layouts for distributed attention sink
+                assert (
+                    sink_layout == "sh"
+                ), "Only support `sh` layout for distributed attention sink by now"
                 dist.all_reduce(total_sink.data, group=self.nccl_group)
+            else:
+                total_sink = None
 
             # -----   dispatch global qkv to local qkv   ---- #
 
@@ -730,9 +753,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # -----   undispatch local out to global out   ---- #
 
             total_out = dist_attn_runtime_mgr.undispatch_qo(local_out)
-            total_lse = (
-                dist_attn_runtime_mgr.undispatch_qo(local_lse) if test_lse else None
-            )
+            total_lse = dist_attn_runtime_mgr.undispatch_qo(local_lse)
 
             # -----   run backward   ---- #
 
@@ -784,6 +805,18 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     dtype=dtype,
                     run_bwd=run_bwd,
                     test_case=test_case,
+                    err_ratio_dict={
+                        "dsink_mismatch_thres_ratio": MISMATCH_THRES_RATIO * 1.5,
+                        "dsink_min_mismatch_thres": max(
+                            2 / (total_seqlen_sink * num_heads_q), 5e-2
+                        )
+                        if total_seqlen_sink > 0 and sink_layout == "sh"
+                        else 5e-2,
+                        "dsink_min_norm_rtol": 0.15,
+                        "dsink_norm_rtol_ratio": NORM_RTOL_RATIO * 2,
+                        "dsink_atol": 2e-4 if sink_layout == "sh" else EPSILON,
+                        "dsink_rtol": 0.15,
+                    },
                 )
 
     def _assert_close_to_torch_ref(
@@ -873,8 +906,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             "dv_max_mismatch_thres", MAX_MISMATCH_THRES
         )
 
-        dsink_atol = EPSILON
-        dsink_rtol = 0.05
+        dsink_atol = err_ratio_dict.get("dsink_atol", EPSILON)
+        dsink_rtol = err_ratio_dict.get("dsink_rtol", 0.05)
         dsink_norm_rtol_ratio = err_ratio_dict.get(
             "dsink_norm_rtol_ratio", NORM_RTOL_RATIO
         )
@@ -909,6 +942,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             k=total_k,
             v=total_v,
             mask=mask,
+            sink=total_sink,
             softmax_scale=softmax_scale,
             softcap=softcap,
             layout="thd",
@@ -945,6 +979,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             k=total_k,
             v=total_v,
             mask=mask,
+            sink=total_sink,
             softmax_scale=softmax_scale,
             softcap=softcap,
             layout="thd",
@@ -1188,7 +1223,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if total_sink is not None:
                 # fa style with Linf norm
                 dsink_norm = calc_inf_norm(
-                    grad_total_sink, grad_total_sink_ref_high_precision
+                    grad_total_sink,
+                    grad_total_sink_ref_high_precision,
                 )
                 dsink_ref_norm = calc_inf_norm(
                     grad_total_sink_ref_low_precision,
