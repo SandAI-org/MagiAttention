@@ -23,10 +23,20 @@ module ExternalPosts
     end
 
     def fetch_from_rss(site, src)
-      xml = HTTParty.get(src['rss_url']).body
+      if src['rss_url'] == "https://medium.com/@al-folio/feed"
+        local_file = "al_folio_feed.xml"
+        if File.exist?(local_file)
+          xml = File.read(local_file)
+          puts "[DEBUG] Loaded local RSS file: #{local_file}"
+        else
+          puts "[DEBUG] Local RSS file not found, falling back to network"
+          xml = HTTParty.get(src['rss_url'], headers: { "User-Agent" => "Mozilla/5.0" }).body
+        end
+      else
+        xml = HTTParty.get(src['rss_url'], headers: { "User-Agent" => "Mozilla/5.0" }).body
+      end
+
       return if xml.nil?
-      puts "[DEBUG] First 200 chars of RSS from:"
-      puts xml[0..200]
       feed = Feedjira.parse(xml)
       process_entries(site, src, feed.entries)
     end
