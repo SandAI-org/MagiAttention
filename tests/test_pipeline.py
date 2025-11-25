@@ -499,10 +499,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         dtype: torch.dtype,
         random_type_mapping: bool,
         random_flags_mode: bool = False,  # TODO: implement random flags mode
-        # FIXME: for now, either lse calculation or applying attn sink
-        # requires torch impl of ref_attn_func
-        # which causes OOM for this test, thus skipped for now
-        test_lse: bool = False,
+        test_lse: bool = True,
         test_sink: bool = False,
         run_bwd: bool = True,
     ):
@@ -916,9 +913,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             softcap=softcap,
             layout="thd",
             sink_layout="sh",
-            backend="torch" if total_sink is not None else "sdpa",
+            backend="torch",
             high_precision=True,
             return_lse=total_lse is not None,
+            online_softmax=True,
         )
 
         if run_bwd:
@@ -951,9 +949,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             softcap=softcap,
             layout="thd",
             sink_layout="sh",
-            backend="torch" if total_sink is not None else "sdpa",
+            backend="torch",
             high_precision=False,
             return_lse=total_lse is not None,
+            online_softmax=True,
         )
 
         if run_bwd:
