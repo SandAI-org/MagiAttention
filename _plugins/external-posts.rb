@@ -25,6 +25,8 @@ module ExternalPosts
     def fetch_from_rss(site, src)
       xml = HTTParty.get(src['rss_url']).body
       return if xml.nil?
+      puts "[DEBUG] First 200 chars of RSS from:"
+      puts xml[0..200]
       feed = Feedjira.parse(xml)
       process_entries(site, src, feed.entries)
     end
