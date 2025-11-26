@@ -21,13 +21,18 @@ from magi_attention.utils import wrap_to_list
 
 
 @contextmanager
-def switch_envvar_context(envvar_name: str | list[str], enable: bool = True):
+def switch_envvar_context(
+    envvar_name: str | list[str],
+    enable: bool = True,
+    enable_value: str = "1",
+    disable_value: str = "0",
+):
     envvar_name_list = wrap_to_list(envvar_name)
     old_value_list = []
 
     for envvar_name in envvar_name_list:
         old_value = os.environ.get(envvar_name, None)
-        os.environ[envvar_name] = "1" if enable else "0"
+        os.environ[envvar_name] = enable_value if enable else disable_value
         old_value_list.append(old_value)
 
     yield
@@ -40,16 +45,37 @@ def switch_envvar_context(envvar_name: str | list[str], enable: bool = True):
 
 
 def switch_envvar_decorator(
-    envvar_name: str | list[str] | None = None, enable: bool = True
+    envvar_name: str | list[str] | None = None,
+    enable: bool = True,
+    enable_value: str = "1",
+    disable_value: str = "0",
 ):
-    def decorator(func=None, *, envvar_name=envvar_name, enable=enable):
+    def decorator(
+        func=None,
+        *,
+        envvar_name=envvar_name,
+        enable=enable,
+        enable_value=enable_value,
+        disable_value=disable_value,
+    ):
         if func is None:
-            return partial(decorator, envvar_name=envvar_name, enable=enable)
+            return partial(
+                decorator,
+                envvar_name=envvar_name,
+                enable=enable,
+                enable_value=enable_value,
+                disable_value=disable_value,
+            )
         assert envvar_name is not None
 
         @wraps(func)
         def wrapper(*args, **kwargs):
-            with switch_envvar_context(envvar_name=envvar_name, enable=enable):
+            with switch_envvar_context(
+                envvar_name=envvar_name,
+                enable=enable,
+                enable_value=enable_value,
+                disable_value=disable_value,
+            ):
                 return func(*args, **kwargs)
 
         return wrapper
@@ -83,7 +109,10 @@ switch_ffa_verbose_jit_build_decorator = switch_envvar_decorator(
 
 
 def switch_envvars(
-    envvar_name_list: list[str], enable_list: list[bool]
+    envvar_name_list: list[str],
+    enable_dict: dict[str, bool] = {},
+    enable_value_dict: dict[str, str] = {},
+    disable_value_dict: dict[str, str] = {},
 ) -> Callable[[], None]:
     """Switch the given list of environment variables
     to the corr. given value indicated by the list of `enable`,
@@ -94,20 +123,40 @@ def switch_envvars(
     can become unwieldy and lead to excessive indentation.
 
     Args:
-        enable_list (bool, optional): ``enable_list[i]`` indicates whether to
-            enable the ith environment variable in the ``envvar_name_list``.
+        envvar_name_list (list[str]): the list of environment variables to switch.
+        enable_dict (dict[str, bool], optional): the value to set the
+            environment variable to when it is enabled.
+            If not found, we use the default value ``True``. Defaults to ``{}``.
+        enable_value_dict (dict[str, str], optional): the value to set the
+            environment variable to when it is enabled.
+            If not found, we use the default value "1". Defaults to ``{}``.
+        disable_value_dict (dict[str, str], optional): the value to set the
+            environment variable to when it is disabled. Defaults to ``{}``.
 
     Returns:
         Callable[[], None]: the call back function to switch the environment variables back
     """
-    assert len(envvar_name_list) == len(enable_list), (
-        "envvar_name_list and enable_list should have the same length, "
-        f"but got {len(envvar_name_list)=} and {len(enable_list)=}."
-    )
+
+    enable_list = [
+        enable_dict.get(envvar_name, True) for envvar_name in envvar_name_list
+    ]
+    enable_value_list = [
+        enable_value_dict.get(envvar_name, "1") for envvar_name in envvar_name_list
+    ]
+    disable_value_list = [
+        disable_value_dict.get(envvar_name, "0") for envvar_name in envvar_name_list
+    ]
 
     ctx_mgr_lis = []
-    for envvar_name, enable in zip(envvar_name_list, enable_list):
-        ctx_mgr = switch_envvar_context(envvar_name=envvar_name, enable=enable)
+    for envvar_name, enable, enable_value, disable_value in zip(
+        envvar_name_list, enable_list, enable_value_list, disable_value_list
+    ):
+        ctx_mgr = switch_envvar_context(
+            envvar_name=envvar_name,
+            enable=enable,
+            enable_value=enable_value,
+            disable_value=disable_value,
+        )
         ctx_mgr.__enter__()
         ctx_mgr_lis.append(ctx_mgr)
 

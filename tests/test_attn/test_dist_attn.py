@@ -143,7 +143,11 @@ class TestDistAttn(DistTestBase):
                 self.hier_comm_envvar,
                 self.native_grpcoll_envvar,
             ],
-            enable_list=[use_sdpa_backend, use_hier_comm, use_native_grpcoll],
+            enable_dict={
+                self.sdpa_backend_envvar: use_sdpa_backend,
+                self.hier_comm_envvar: use_hier_comm,
+                self.native_grpcoll_envvar: use_native_grpcoll,
+            },
         )
 
         # prepare meta and runtime
