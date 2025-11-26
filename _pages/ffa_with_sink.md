@@ -282,7 +282,7 @@ $$
 
 $$
 \begin{aligned}
-&O = P \times V, \;\mathrm{LSE}_i = L_i + M_i, \; i \in [1, sq]\notag \\ 
+&O = P \times V, \;\mathrm{LSE}_i = \log(L_i) + M_i, \; i \in [1, sq]\notag \\ 
 
 &where\; P \in \mathbb{R}^{nhq\times sq\times sk}, \; V \in \mathbb{R}^{nhk\times sk\times hd}, \notag \\
 
@@ -317,7 +317,7 @@ $$
 
 $$
 \begin{aligned}
-&\tilde{O} = \tilde{P}^{qk} \times V, \;\tilde{\mathrm{LSE}}_i = \tilde{L}_i + M_i, \; i \in [1, sq]\notag \\ 
+&\tilde{O} = \tilde{P}^{qk} \times V, \;\tilde{\mathrm{LSE}}_i = \log(\tilde{L}_i) + M_i, \; i \in [1, sq]\notag \\ 
 
 & \tilde{L}_i = L_i + \sum\limits_{j=1}^{s\_sink}\mathrm{exp}(sink_j), \; i \in [1, sq]\notag \\ 
 
