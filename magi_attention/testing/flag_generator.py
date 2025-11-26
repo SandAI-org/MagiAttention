@@ -17,7 +17,7 @@ import math
 import random
 from typing import Any, Generator, Literal, TypeAlias
 
-FlagCombStrategy: TypeAlias = Literal["random", "sequential", "heuristic"]
+FlagCombStrategy: TypeAlias = Literal["constant", "sequential", "random", "heuristic"]
 
 
 class FlagCombGenerator:
@@ -38,8 +38,8 @@ class FlagCombGenerator:
         defaults: dict[str, Any] = {},
         groups: list[tuple[str, ...]] = [],
         strategy: FlagCombStrategy = "heuristic",
-        seed: int = 42,
         cycle_times: int = -1,
+        seed: int = 42,
     ):
         """
 
@@ -57,19 +57,20 @@ class FlagCombGenerator:
                 the group of flags, where the inter-group flags are semantically independent,
                 and the intra-group flags are semantically related and require more combinations to be tested.
                 Defaults to ``[]`` to see each flag as an independent flag.
-
                 NOTE: it might not affect some strategies, such as ``"sequential"`` and ``"random"``.
             strategy (FlagCombStrategy, optional):
-                the strategy to generate flag combinations.
-                Defaults to ``"heuristic"`` to use some heuristics to generate flag combinations,
-                to cover all the valuable combinations as quickly as possible.
+                the strategy to generate flag combinations. Defaults to ``"heuristic"``.
+                - ``"constant"``: generate only one default flag combination, indicated by ``defaults``.
+                - ``"sequential"``: generate all flag combinations in a sequential order like 000, 001, 010, ..., 111.
+                - ``"random"``: generate flag combinations randomly with replacement.
+                - ``"heuristic"``: generate flag combinations based on some heuristics
+                    to cover all the "valuable" combinations as quickly as possible.
+            cycle_times (int, optional):
+                the number of times to cycle through the whole flag combinations.
+                Defaults to ``-1`` to cycle indefinitely.
             seed (int, optional):
                 the seed for the random number generator. Defaults to ``42``.
-
                 NOTE: it might not affect some strategies, such as ``"sequential"``.
-            cycle_times (int, optional):
-                the number of times to cycle through the flag combinations.
-                Defaults to ``-1`` to cycle indefinitely.
         """
         # an ordered and deterministic version for `list(set(...))`
         self.flags = list(dict.fromkeys(flags).keys())
@@ -131,12 +132,19 @@ class FlagCombGenerator:
     def _iter(self, reverse: bool = False) -> Generator[dict[str, Any], None, None]:
         self.comb_set = set()  # reset the comb set
         match self.strategy:
+            case "constant":
+                yield from self._iter_constant(reverse=reverse)
             case "sequential":
                 yield from self._iter_sequential(reverse=reverse)
             case "random":
                 yield from self._iter_random(reverse=reverse)
             case "heuristic":
                 yield from self._iter_heuristic(reverse=reverse)
+
+    def _iter_constant(
+        self, reverse: bool = False
+    ) -> Generator[dict[str, Any], None, None]:
+        yield from self._yield(tuple(self.defaults.values()))
 
     def _iter_sequential(
         self, reverse: bool = False
@@ -146,36 +154,86 @@ class FlagCombGenerator:
             for comb in reversed(list(all_combs)):
                 if comb in self.comb_set:
                     continue
-                self.comb_set.add(comb)
                 yield from self._yield(comb)
         else:
             for comb in all_combs:
                 if comb in self.comb_set:
                     continue
-                self.comb_set.add(comb)
                 yield from self._yield(comb)
 
     def _iter_random(
-        self, reverse: bool = False
+        self,
+        reverse: bool = False,
+        fixed_values: dict[str, Any] = {},
+        max_iter_times: int = -1,
     ) -> Generator[dict[str, Any], None, None]:
         random.seed(self.seed)
 
         option_lists = list(self.options.values())
         total_num_combs = self.num_combs
 
+        iter_cnt = 0
         while len(self.comb_set) < total_num_combs:
             comb = tuple([random.choice(option_list) for option_list in option_lists])
+            comb = tuple(
+                [fixed_values.get(flag, value) for flag, value in zip(self.flags, comb)]
+            )
 
-            if comb in self.comb_set:
-                continue
-
-            self.comb_set.add(comb)
             yield from self._yield(comb)
+
+            iter_cnt += 1
+            if max_iter_times > 0 and iter_cnt >= max_iter_times:
+                break
 
     def _iter_heuristic(
         self, reverse: bool = False
     ) -> Generator[dict[str, Any], None, None]:
-        raise NotImplementedError
+        # step1. the combination of all default values
+        default_comb = tuple(self.defaults.values())
+        yield from self._yield(default_comb)
+
+        # step2. the combination of all non-default values
+        non_default_comb = tuple(
+            [option_list[-1] for option_list in self.options.values()]
+        )
+        if non_default_comb not in self.comb_set:
+            yield from self._yield(non_default_comb)
+
+        # step3. the combination of all one-hot non-default values
+        for flag_idx, option_list in enumerate(self.options.values()):
+            for option in option_list:
+                if option == default_comb[flag_idx]:
+                    continue
+                one_hot_comb = (
+                    default_comb[:flag_idx] + (option,) + default_comb[flag_idx + 1 :]
+                )
+                if one_hot_comb not in self.comb_set:
+                    yield from self._yield(one_hot_comb)
+
+        # step4. sequential combinations for all critical groups if given
+        # and random for the rest
+        all_combs_per_group = [
+            itertools.product(*[self.options[flag] for flag in group])
+            for group in self.groups
+        ]
+        for group_values_tuple in itertools.zip_longest(*all_combs_per_group):
+            fixed_values = {}
+            for group_flags, group_values in zip(self.groups, group_values_tuple):
+                if group_values is None:
+                    continue
+                fixed_values.update(
+                    {flag: value for flag, value in zip(group_flags, group_values)}
+                )
+
+            yield from self._iter_random(
+                reverse=reverse,
+                fixed_values=fixed_values,
+                max_iter_times=1,
+            )
+
+        # step5. the random combinations
+        yield from self._iter_random(reverse=reverse)
 
     def _yield(self, comb: tuple[Any, ...]) -> Generator[dict[str, Any], None, None]:
+        self.comb_set.add(comb)
         yield dict(zip(self.flags, comb))
