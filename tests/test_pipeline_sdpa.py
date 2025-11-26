@@ -721,7 +721,8 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         assert magi_attention.is_sanity_check_enable()
         assert magi_attention.is_sdpa_backend_enable()
 
-        # switch the env flags
+        # -----    switch env flags   ---- #
+
         flag_comb = next(self.flag_iterator)
         flag_comb = FlagCombGenerator.sync_group(flag_comb, self.nccl_group)
         flag_comb_test_case = FlagCombGenerator.to_test_case(flag_comb)

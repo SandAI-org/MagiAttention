@@ -45,6 +45,7 @@ from magi_attention.testing.dist_common import (
     DistTestBase,
     with_comms,
 )
+from magi_attention.testing.flag_generator import FlagCombGenerator
 from magi_attention.testing.precision import (
     EPSILON,
     H100_MATMUL_MFU,
@@ -58,6 +59,7 @@ from magi_attention.testing.precision import (
     calc_inf_norm,
     extract_mismatch_threshold,
 )
+from magi_attention.testing.utils import switch_envvars
 from magi_attention.utils import (
     get_a2a_corr_factor,
     get_calc_cost_factor,
@@ -71,6 +73,39 @@ from magi_attention.utils import (
 class TestPipelineBaseWithWorldSize1(DistTestBase):
     def init_pg(self) -> None:
         super().init_pg()
+
+        self.flag_to_envvar = {
+            "device_max_connections": "CUDA_DEVICE_MAX_CONNECTIONS",
+            "deterministic_mode": "MAGI_ATTENTION_DETERMINISTIC_MODE",
+            "enable_hier_comm": "MAGI_ATTENTION_HIERARCHICAL_COMM",
+            "enable_qo_comm": "MAGI_ATTENTION_QO_COMM",
+            "enable_native_grpcoll": "MAGI_ATTENTION_NATIVE_GRPCOLL",
+            "fwd_hp_reduce": "MAGI_ATTENTION_FORWARD_HIGH_PRECISION_REDUCE",
+            "bwd_hp_reduce": "MAGI_ATTENTION_BACKWARD_HIGH_PRECISION_REDUCE",
+        }
+
+        # init flag generator and its iterator
+        self.flag_generator = FlagCombGenerator(
+            flags=list(self.flag_to_envvar.keys()),
+            options={
+                "device_max_connections": [1, 8],
+            },
+            defaults={
+                "device_max_connections": 8,
+            },
+            groups=[
+                # comm group
+                ("enable_hier_comm", "enable_qo_comm", "enable_native_grpcoll"),
+            ],
+            strategy="heuristic",
+        )
+        self.flag_iterator = iter(self.flag_generator)
+
+        # init several pgs with all ranks
+        self.nccl_groups = [
+            dist.new_group(list(range(self.world_size)), backend=self.backend)
+            for _ in range(2)
+        ]
 
         self.profile_mode = (
             os.environ.get("MAGI_ATTENTION_UNITEST_PROFILE_MODE", "0") == "1"
@@ -88,46 +123,39 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
 
         # -----    set up for hier comm   ---- #
 
-        if magi_attention.comm.is_hierarchical_comm_enable():
-            world_size_inter_node, world_size_intra_node = {
-                1: (1, 1),
-                2: (1, 2),
-                3: (3, 1),
-                4: (2, 2),
-                5: (1, 5),
-                6: (3, 2),
-                7: (1, 7),
-                8: (2, 4),
-            }[self.world_size]
-            self.device_mesh = init_device_mesh(
-                device_type="cuda",
-                mesh_shape=(world_size_inter_node, world_size_intra_node),
-                mesh_dim_names=("inter", "intra"),
-            )
-        else:
-            self.device_mesh = None
+        world_size_inter_node, world_size_intra_node = {
+            1: (1, 1),
+            2: (1, 2),
+            3: (3, 1),
+            4: (2, 2),
+            5: (1, 5),
+            6: (3, 2),
+            7: (1, 7),
+            8: (2, 4),
+        }[self.world_size]
+        self.device_mesh = init_device_mesh(
+            device_type="cuda",
+            mesh_shape=(world_size_inter_node, world_size_intra_node),
+            mesh_dim_names=("inter", "intra"),
+        )
 
         # -----    set up for native grpcoll   ---- #
 
-        if magi_attention.comm.is_native_grpcoll_enable():
-            for nccl_group in self.nccl_groups:
-                grpcoll_mgr.register_buffer(
-                    group=nccl_group,
-                    config=GrpCollConfig(
-                        num_nvl_bytes=int(2e9)
-                        * self.world_size
-                        // 8,  # 2GB for 8 ranks
-                    ),
-                )
-                grpcoll_mgr.check_registered(group=nccl_group)
+        for nccl_group in self.nccl_groups:
+            grpcoll_mgr.register_buffer(
+                group=nccl_group,
+                config=GrpCollConfig(
+                    num_nvl_bytes=int(2e9) * self.world_size // 8,  # 2GB for 8 ranks
+                ),
+            )
+            grpcoll_mgr.check_registered(group=nccl_group)
 
     def destroy_pg(self):
         # -----    clean up for native grpcoll   ---- #
 
-        if magi_attention.comm.is_native_grpcoll_enable():
-            for nccl_group in self.nccl_groups:
-                grpcoll_mgr.release_buffer(group=nccl_group)
-                grpcoll_mgr.check_released(group=nccl_group)
+        for nccl_group in self.nccl_groups:
+            grpcoll_mgr.release_buffer(group=nccl_group)
+            grpcoll_mgr.check_released(group=nccl_group)
 
         super().destroy_pg()
 
@@ -504,7 +532,6 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         head_dim: int,
         dtype: torch.dtype,
         random_type_mapping: bool,
-        random_flags_mode: bool = False,  # TODO: implement random flags mode
         run_bwd: bool = True,
     ):
         # -----    switch mode   ---- #
@@ -521,6 +548,27 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         if self.profile_mode ^ overlap_config.get(PROFILE_ONLY, False):
             return
 
+        # -----    switch env flags   ---- #
+
+        if not self.profile_mode:
+            flag_comb = next(self.flag_iterator)
+            flag_comb = FlagCombGenerator.sync_group(flag_comb, self.nccl_group)
+            flag_comb_test_case = FlagCombGenerator.to_test_case(flag_comb)
+            switch_back = switch_envvars(
+                envvar_name_list=list(self.flag_to_envvar.values()),
+                enable_dict={
+                    envvar: (
+                        flag_comb[flag] if isinstance(flag_comb[flag], bool) else True
+                    )
+                    for flag, envvar in self.flag_to_envvar.items()
+                },
+                enable_value_dict={
+                    envvar: str(flag_comb[flag])
+                    for flag, envvar in self.flag_to_envvar.items()
+                    if not isinstance(flag_comb[flag], bool)
+                },
+            )
+
         # -----    skip for world size   ---- #
 
         if (
@@ -536,9 +584,17 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             if overlap_config[NAME] != "disable_mso":
                 return
 
+            # TODO: support hierarchical comm for qo comm
+            if magi_attention.comm.is_hierarchical_comm_enable():
+                return
+
         # -----    skip for native grpcoll   ---- #
 
         if magi_attention.comm.is_native_grpcoll_enable():
+            # TODO: support hierarchical comm with native grpcoll
+            if magi_attention.comm.is_hierarchical_comm_enable():
+                return
+
             hidden_size_kv = num_heads[1] * head_dim
             if hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(dtype) != 0:
                 return
@@ -554,7 +610,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}] x "
-            f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}]"
+            f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}] x "
+            + flag_comb_test_case
         )
         test_case_seed = str2seed(test_case)
 
@@ -782,6 +839,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             # -----   assert close if not using profile mode   ---- #
 
             if not self.profile_mode:
+                # switch the env flags back
+                switch_back()
+
                 # -----   assert close to torch ref   ---- #
 
                 self._assert_close_to_torch_ref(
