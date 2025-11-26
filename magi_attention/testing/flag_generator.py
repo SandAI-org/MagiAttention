@@ -17,6 +17,8 @@ import math
 import random
 from typing import Any, Generator, Literal, TypeAlias
 
+import torch.distributed as dist
+
 FlagCombStrategy: TypeAlias = Literal["constant", "sequential", "random", "heuristic"]
 
 
@@ -39,7 +41,6 @@ class FlagCombGenerator:
         groups: list[tuple[str, ...]] = [],
         strategy: FlagCombStrategy = "heuristic",
         cycle_times: int = -1,
-        seed: int = 42,
     ):
         """
 
@@ -63,14 +64,12 @@ class FlagCombGenerator:
                 - ``"constant"``: generate only one default flag combination, indicated by ``defaults``.
                 - ``"sequential"``: generate all flag combinations in a sequential order like 000, 001, 010, ..., 111.
                 - ``"random"``: generate flag combinations randomly with replacement.
+                    NOTE: if you needs to control the randomness, you should set seed first by your own.
                 - ``"heuristic"``: generate flag combinations based on some heuristics
                     to cover all the "valuable" combinations as quickly as possible.
             cycle_times (int, optional):
                 the number of times to cycle through the whole flag combinations.
                 Defaults to ``-1`` to cycle indefinitely.
-            seed (int, optional):
-                the seed for the random number generator. Defaults to ``42``.
-                NOTE: it might not affect some strategies, such as ``"sequential"``.
         """
         # an ordered and deterministic version for `list(set(...))`
         self.flags = list(dict.fromkeys(flags).keys())
@@ -95,7 +94,6 @@ class FlagCombGenerator:
 
         self.groups = groups
         self.strategy = strategy
-        self.seed = seed
 
         assert (
             cycle_times > 0 or cycle_times == -1
@@ -114,6 +112,32 @@ class FlagCombGenerator:
 
     def is_comb_covered(self, comb: tuple[Any, ...]) -> bool:
         return comb in self.comb_set
+
+    @classmethod
+    def to_test_case(
+        cls,
+        flag_comb: dict[str, Any],
+    ) -> str:
+        return " x ".join([f"{flag}=[{value}]" for flag, value in flag_comb.items()])
+
+    @classmethod
+    def sync_group(
+        cls,
+        flag_comb: dict[str, Any],
+        group: dist.ProcessGroup,
+    ) -> dict[str, Any]:
+        if dist.get_rank(group) == 0:
+            obj_list = [flag_comb]
+        else:
+            obj_list = [None]  # type: ignore[list-item]
+
+        dist.broadcast_object_list(
+            object_list=obj_list,
+            group=group,
+            group_src=0,
+        )
+
+        return obj_list[0]
 
     def __iter__(self) -> Generator[dict[str, Any], None, None]:
         return self.iter()
@@ -167,8 +191,6 @@ class FlagCombGenerator:
         fixed_values: dict[str, Any] = {},
         max_iter_times: int = -1,
     ) -> Generator[dict[str, Any], None, None]:
-        random.seed(self.seed)
-
         option_lists = list(self.options.values())
         total_num_combs = self.num_combs
 

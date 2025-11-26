@@ -12,28 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import random
-import unittest
 from typing import Any
-from unittest import TestCase
 
 import pytest
 import torch
+import torch.distributed as dist
+from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
+from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.testing import parameterize
+from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.flag_generator import FlagCombGenerator, FlagCombStrategy
 
 
-class TestFlagGenerator(TestCase):
-    def setUp(self):
-        super().setUp()
-
-        random.seed(self.seed)
+class TestFlagGenerator(DistTestBase):
+    @property
+    def process_group(self):
+        return dist.distributed_c10d._get_default_group()
 
     @property
-    def seed(self) -> int:
-        return 42
+    def world_size(self) -> int:
+        return 4
 
+    @property
+    def device(self) -> int:
+        return torch.cuda.current_device()
+
+    @skip_if_lt_x_gpu(4)
+    @with_comms
     @parameterize(
         "flag_config",
         [
@@ -225,22 +231,38 @@ class TestFlagGenerator(TestCase):
                 last_comb = next(reversed(generator))
                 assert last_comb == flag_config["sequential_last_comb"]
             case "random":
-                pass
+                first_comb = next(iter(generator))
+                first_comb = FlagCombGenerator.sync_group(
+                    first_comb,
+                    group=self.process_group,
+                )
+
+                first_comb_list = [None] * self.world_size
+                dist.all_gather_object(
+                    first_comb_list,
+                    first_comb,
+                    group=self.process_group,
+                )
+
+                first_comb0 = first_comb_list[0]
+                for comb in first_comb_list:
+                    assert comb == first_comb0
             case "heuristic":
                 iterator = iter(generator)
                 for comb in flag_config["heuristic_first_combs"]:
                     assert next(iterator) == comb
 
-        # just print the attributes and combinations from the generator for check
-        print(
-            f"For {name}: {generator.flags=} | {generator.num_flags=} | {generator.num_combs=}"
-        )
-        print(f"For {name}: {generator.options=}")
-        print(f"For {name}: {generator.defaults=}")
-        print(f"For {name}: {generator.groups=}")
-        for idx, flag_comb in enumerate(generator):
-            print(f"For [{name}]: Comb {idx} => {flag_comb}")
+        if self.rank == 0:
+            # just print the attributes and combinations from the generator for check
+            print(
+                f"For {name}: {generator.flags=} | {generator.num_flags=} | {generator.num_combs=}"
+            )
+            print(f"For {name}: {generator.options=}")
+            print(f"For {name}: {generator.defaults=}")
+            print(f"For {name}: {generator.groups=}")
+            for idx, flag_comb in enumerate(generator):
+                print(f"For [{name}]: Comb {idx} => {flag_comb}")
 
 
 if __name__ == "__main__":
-    unittest.main()
+    run_tests()
