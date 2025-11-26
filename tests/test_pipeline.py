@@ -553,7 +553,8 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             f"world_size=[{self.world_size}] x "
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
             f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
-            f"random_causal_mapping=[{random_type_mapping}]"
+            f"random_causal_mapping=[{random_type_mapping}] x "
+            f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}]"
         )
         test_case_seed = str2seed(test_case)
 

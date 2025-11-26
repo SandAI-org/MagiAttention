@@ -345,6 +345,15 @@ def init_dist_attn_runtime_key(
     cp_mesh: DeviceMesh | None,
     dist_attn_config: DistAttnConfig,
 ) -> DistAttnRuntimeKey:
+    if magi_attention.comm.is_hierarchical_comm_enable():
+        assert (
+            not magi_attention.comm.is_qo_comm_enable()
+        ), "Hierarchical comm is not compatible with qo comm for now"
+
+        assert (
+            not magi_attention.comm.is_native_grpcoll_enable()
+        ), "Hierarchical comm is not compatible with native grpcoll for now"
+
     return DistAttnRuntimeKey(
         q_ranges=q_ranges,
         k_ranges=k_ranges,
