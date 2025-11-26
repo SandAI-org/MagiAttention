@@ -898,7 +898,9 @@ class TestFlexFlashAttn(DistTestBase):
         seqlen_q: int,
         seqlen_kv: int,
         seqlen_sink: int,
-        model_config: dict[str, Any],
+        num_heads_q: int,
+        num_heads_kv: int,
+        head_dim: int,
         dtype: torch.dtype,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
@@ -918,11 +920,6 @@ class TestFlexFlashAttn(DistTestBase):
         # thus we skip here and will fix it asap
         if is_list_value_any(attn_type_map, 3):
             return
-
-        num_heads_q = model_config["num_heads_q"]
-        num_heads_kv = model_config["num_heads_kv"]
-        head_dim = model_config["head_dim"]
-        has_sink = seqlen_sink > 0
 
         # construct data
         q = torch.randn(
@@ -944,6 +941,7 @@ class TestFlexFlashAttn(DistTestBase):
             requires_grad=True,
         )
         do = torch.randn_like(q)
+        has_sink = seqlen_sink > 0
         if has_sink:
             match sink_layout:
                 case "sh":
@@ -1411,6 +1409,9 @@ class TestFlexFlashAttn(DistTestBase):
         q_ranges: AttnRanges = attn_mask_config["q_ranges"]
         k_ranges: AttnRanges = attn_mask_config["k_ranges"]
         attn_type_map: list[int] = attn_mask_config["attn_type_map"]
+        num_heads_q = model_config["num_heads_q"]
+        num_heads_kv = model_config["num_heads_kv"]
+        head_dim = model_config["head_dim"]
         assert len(q_ranges) == len(k_ranges) == len(attn_type_map), (
             "q_ranges, k_ranges and attn_type_map should have the same length"
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
@@ -1437,7 +1438,9 @@ class TestFlexFlashAttn(DistTestBase):
             seqlen_q=seqlen,
             seqlen_kv=seqlen,
             seqlen_sink=seqlen_sink,
-            model_config=model_config,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             dtype=dtype,
             q_ranges=q_ranges,
             k_ranges=k_ranges,
@@ -1564,11 +1567,12 @@ class TestFlexFlashAttn(DistTestBase):
         )
         q_ranges: AttnRanges = AttnRanges.from_ranges(q_list)
         k_ranges: AttnRanges = AttnRanges.from_ranges(k_list)
-
         attn_type_map = [attn_type] * q_ranges.size
         if attn_type == 4:
             attn_type_map = torch.randint(0, 4, (len(attn_type_map),)).tolist()
-
+        num_heads_q = model_config["num_heads_q"]
+        num_heads_kv = model_config["num_heads_kv"]
+        head_dim = model_config["head_dim"]
         assert len(q_ranges) == len(k_ranges) == len(attn_type_map), (
             "q_ranges, k_ranges and attn_type_map should have the same length"
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
@@ -1590,7 +1594,9 @@ class TestFlexFlashAttn(DistTestBase):
             seqlen_q=total_seqlen_q,
             seqlen_kv=total_seqlen_k,
             seqlen_sink=0,  # pass testing attn sink for now
-            model_config=model_config,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
+            head_dim=head_dim,
             dtype=dtype,
             q_ranges=q_ranges,
             k_ranges=k_ranges,

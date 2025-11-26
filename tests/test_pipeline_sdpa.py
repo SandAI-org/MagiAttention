@@ -130,6 +130,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
     def world_size(self) -> int:
         return 1
 
+    @property
+    def dtype(self) -> torch.dtype:
+        return torch.float64
+
     @switch_sdpa_backend_decorator
     @with_comms
     @parameterize(
@@ -679,10 +683,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         [64],
     )
     @parameterize(
-        "dtype",
-        [torch.float64],
-    )
-    @parameterize(
         "random_type_mapping",
         [False, True],
     )
@@ -692,7 +692,6 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         overlap_config: dict[str, Any],
         num_heads: tuple[int, int],  # (nhq, nhkv)
         head_dim: int,
-        dtype: torch.dtype,
         random_type_mapping: bool,
         random_flags_mode: bool = False,  # TODO: implement random flags mode
         run_bwd: bool = True,
@@ -721,7 +720,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
 
         if magi_attention.comm.is_native_grpcoll_enable():
             hidden_size_kv = num_heads[1] * head_dim
-            if hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(dtype) != 0:
+            if (
+                hidden_size_kv % GrpCollBuffer.get_hidden_size_alignment(self.dtype)
+                != 0
+            ):
                 return
 
             # TODO: for now, native grpcoll only supports fp32 lse comm
@@ -738,7 +740,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         test_case = (
             f"world_size=[{self.world_size}] x "
             f"attn_config=[{attn_config[NAME]}] x overlap_config=[{overlap_config[NAME]}] x "
-            f"dtype=[{dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
+            f"dtype=[{self.dtype}] x (nh,hd)=[({num_heads},{head_dim})] x "
             f"random_causal_mapping=[{random_type_mapping}] x "
             f"has_sink=[{attn_config.get('total_seqlen_sink', 0) > 0}"
         )
@@ -828,7 +830,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             num_heads_q,
             head_dim,
             device=self.device,
-            dtype=dtype,
+            dtype=self.dtype,
             requires_grad=run_bwd,
         )
         total_k = torch.randn(
@@ -836,7 +838,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             num_heads_kv,
             head_dim,
             device=self.device,
-            dtype=dtype,
+            dtype=self.dtype,
             requires_grad=run_bwd,
         )
         total_v = torch.randn(
@@ -844,7 +846,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             num_heads_kv,
             head_dim,
             device=self.device,
-            dtype=dtype,
+            dtype=self.dtype,
             requires_grad=run_bwd,
         )
         dist.all_reduce(total_q.data, group=self.nccl_group)
@@ -859,7 +861,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         num_heads_q,
                         device=self.device,
                         dtype=max_fp_dtype(
-                            dtype,
+                            self.dtype,
                             torch.float32,
                         ),
                         requires_grad=run_bwd,
@@ -871,7 +873,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
                         num_heads_q,
                         device=self.device,
                         dtype=max_fp_dtype(
-                            dtype,
+                            self.dtype,
                             torch.float32,
                         ),
                         requires_grad=run_bwd,
