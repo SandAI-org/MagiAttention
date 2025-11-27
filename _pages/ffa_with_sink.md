@@ -319,7 +319,7 @@ $$
 \begin{aligned}
 &\tilde{O} = \tilde{P}^{qk} \times V, \;\tilde{\mathrm{LSE}}_i = \log(\tilde{L}_i) + M_i, \; i \in [1, sq]\notag \\ 
 
-& \tilde{L}_i = L_i + \sum\limits_{j=1}^{s\_sink}\mathrm{exp}(sink_j), \; i \in [1, sq]\notag \\ 
+& \tilde{L}_i = L_i + \sum\limits_{j=1}^{s\_sink}\mathrm{exp}(sink_j - M_i), \; i \in [1, sq]\notag \\
 
 & \tilde{P}^{qk}_i = P^{qk}_i \times \cfrac{L_i}{\tilde{L}_i}, \; i \in [1, sq]\notag \\
 
