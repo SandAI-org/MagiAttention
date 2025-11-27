@@ -52,6 +52,10 @@ namespace magi_attn_comm::grpcoll {
 
 namespace internode {
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Helpers
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 extern nvshmem_team_t cpu_rdma_team;
 
 struct SourceMeta {
@@ -76,6 +80,11 @@ struct SourceMeta {
 };
 
 GRPCOLL_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
+
+// At most 8 RDMA ranks to be sent
+constexpr int get_num_topk_rdma_ranks(int num_rdma_ranks) {
+  return num_rdma_ranks < 8 ? num_rdma_ranks : 8;
+}
 
 int get_source_meta_bytes() {
   return sizeof(SourceMeta);
@@ -130,7 +139,29 @@ DEVICE_INLINE void nvshmem_sync_with_same_gpu_idx(const nvshmem_team_t& rdma_tea
   kLowLatencyMode ? void(nvshmem_sync(rdma_team)) : nvshmem_sync_all();
 }
 
-template <bool kLowLatencyMode, int kNumRDMARanks>
+template <bool kLowLatencyMode>
+DEVICE_INLINE void wait_all_inflight_wrs_finished(const int num_threads, const int thread_id, const int num_rdma_ranks, const int rdma_rank, const int nvl_rank) {
+  const auto qps_per_rdma_rank = ibgda_get_qps_per_rank();
+  for (int i = thread_id; i < qps_per_rdma_rank * (num_rdma_ranks - 1); i += num_threads) {
+    auto dst_rdma_rank = (i / qps_per_rdma_rank + rdma_rank + 1) % num_rdma_ranks;
+    auto qp_id = i % qps_per_rdma_rank;
+    nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), qp_id);
+  }
+  __syncthreads();
+}
+
+template <bool kLowLatencyMode, bool kSyncOnly = false>
+DEVICE_INLINE void barrier_all(const int thread_id, const nvshmem_team_t rdma_team, int** barrier_signal_ptrs, const int nvl_rank) {
+  if (thread_id == WARP_SIZE)
+    nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
+  barrier_block<NUM_MAX_NVL_PEERS, kSyncOnly>(barrier_signal_ptrs, nvl_rank);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Notify Group Cast
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+template <bool kLowLatencyMode, int kNumThreads, int kNumRDMARanks>
 __global__ void notify_dispatch(
     const int* num_tokens_per_rank,
     int* grpcoll_recv_counter_mapped,
@@ -156,32 +187,24 @@ __global__ void notify_dispatch(
     int** barrier_signal_ptrs,
     int rank,
     const nvshmem_team_t rdma_team) {
-  auto sm_id = static_cast<int>(blockIdx.x);
-  auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
-  auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / WARP_SIZE;
+  const auto sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
+  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
+  constexpr int kNumWarps = kNumThreads / WARP_SIZE;
+  const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
+  const auto num_rdma_experts = num_experts / kNumRDMARanks, num_nvl_experts = num_rdma_experts / NUM_MAX_NVL_PEERS;
+  GRPCOLL_STATIC_ASSERT(kNumWarps > 1, "Too few warps");
+  GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= kNumThreads, "Invalid number of RDMA peers");
+  GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= kNumThreads, "Invalid number of NVL peers");
+  GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
 
-  auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
-  auto num_rdma_experts = num_experts / kNumRDMARanks, num_nvl_experts = num_rdma_experts / NUM_MAX_NVL_PEERS;
-
-  if (sm_id == 0) {
-    // Communication with others
+  if (sm_id == 0) { // the first SM is responsible to wait all previous inflight WRs finished and then clean the RDMA/NVL buffer
     // Global barrier: the first warp does intra-node sync, the second warp does internode sync
-    GRPCOLL_DEVICE_ASSERT(num_warps > 1);
-    GRPCOLL_DEVICE_ASSERT(kNumRDMARanks <= num_threads);
 
-    // waiting for all previous inflight wrs to complete,
-    // in case of rewriting cleared rdma_buffer
-    auto qps_per_rdma_rank = ibgda_get_state()->num_rc_per_pe * ibgda_get_state()->num_devices_initialized;
-    for (int i = thread_id; i < qps_per_rdma_rank * (kNumRDMARanks - 1); i += num_threads) {
-      auto dst_rdma_rank = (i / qps_per_rdma_rank + rdma_rank + 1) % kNumRDMARanks;
-      auto qp_id = i % qps_per_rdma_rank;
-      nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), qp_id);
-    }
-    __syncthreads();
+    // Wait until all previous inflight WRs for each QP of each RDMA peer rank are finished
+    wait_all_inflight_wrs_finished<kLowLatencyMode>(kNumThreads, thread_id, kNumRDMARanks, rdma_rank, nvl_rank);
 
-    if (thread_id == WARP_SIZE)
-      nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-    barrier_block<NUM_MAX_NVL_PEERS, true>(barrier_signal_ptrs, nvl_rank);
+    // Barrier all first
+    barrier_all<kLowLatencyMode, true>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
 
     // Send numbers of tokens per rank/expert to RDMA ranks
     auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
@@ -190,15 +213,15 @@ __global__ void notify_dispatch(
     // Clean up for later data dispatch
     GRPCOLL_DEVICE_ASSERT(rdma_recv_num_tokens_mixed.total_bytes <= rdma_clean_offset * sizeof(int));
 #pragma unroll
-    for (int i = thread_id; i < rdma_num_int_clean; i += num_threads)
+    for (int i = thread_id; i < rdma_num_int_clean; i += kNumThreads)
       rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
 
 // Copy to send buffer
 #pragma unroll
-    for (int i = thread_id; i < num_ranks; i += num_threads)
+    for (int i = thread_id; i < num_ranks; i += kNumThreads)
       rdma_recv_num_tokens_mixed.send_buffer(i / NUM_MAX_NVL_PEERS)[i % NUM_MAX_NVL_PEERS] = num_tokens_per_rank[i];
 #pragma unroll
-    for (int i = thread_id; i < num_experts; i += num_threads)
+    for (int i = thread_id; i < num_experts; i += kNumThreads)
       rdma_recv_num_tokens_mixed.send_buffer(i / num_rdma_experts)[NUM_MAX_NVL_PEERS + i % num_rdma_experts] = num_tokens_per_expert[i];
     if (thread_id < kNumRDMARanks)
       rdma_recv_num_tokens_mixed.send_buffer(thread_id)[NUM_MAX_NVL_PEERS + num_rdma_experts] = num_tokens_per_rdma_rank[thread_id];
@@ -207,7 +230,7 @@ __global__ void notify_dispatch(
     // Issue send
     // TODO: more light fence or barrier or signaling
     // TODO: overlap EP barrier and NVL cleaning
-    for (int i = warp_id; i < kNumRDMARanks; i += num_warps) {
+    for (int i = warp_id; i < kNumRDMARanks; i += kNumWarps) {
       if (i != rdma_rank) {
         nvshmemi_ibgda_put_nbi_warp<true>(
             reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank)),
@@ -255,12 +278,11 @@ __global__ void notify_dispatch(
         nvl_reduced_num_tokens_per_expert.total_bytes + nvl_send_num_tokens_per_rank.total_bytes + nvl_send_num_tokens_per_expert.total_bytes <=
         nvl_clean_offset * sizeof(int));
 #pragma unroll
-    for (int i = thread_id; i < nvl_num_int_clean; i += num_threads)
+    for (int i = thread_id; i < nvl_num_int_clean; i += kNumThreads)
       nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
 
     // Reduce number of tokens per expert into the NVL send buffer
     // TODO: may use NVSHMEM reduction
-    GRPCOLL_DEVICE_ASSERT(num_rdma_experts <= num_threads);
     if (thread_id < num_rdma_experts) {
       int sum = 0;
 #pragma unroll
@@ -284,7 +306,6 @@ __global__ void notify_dispatch(
     }
 
     // Send numbers of tokens per rank/expert to NVL ranks
-    GRPCOLL_DEVICE_ASSERT(NUM_MAX_NVL_PEERS <= num_threads);
     if (thread_id < NUM_MAX_NVL_PEERS) {
 #pragma unroll
       for (int i = 0; i < kNumRDMARanks; ++i)
@@ -296,7 +317,6 @@ __global__ void notify_dispatch(
     barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
 
     // Reduce the number of tokens per rank/expert
-    GRPCOLL_DEVICE_ASSERT(num_nvl_experts <= num_threads);
     if (thread_id == 0) {
       int sum = 0;
 #pragma unroll
@@ -319,21 +339,18 @@ __global__ void notify_dispatch(
       moe_recv_expert_counter_mapped[thread_id] = sum;
     }
 
-    // Finally barrier
-    if (thread_id == WARP_SIZE)
-      nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-    barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
+    // Barrier all finally
+    barrier_all<kLowLatencyMode, false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
   } else {
     // Calculate meta data
     int dst_rdma_rank = sm_id - 1;
-    for (int channel_id = warp_id; channel_id < num_channels; channel_id += num_warps) {
+    for (int channel_id = warp_id; channel_id < num_channels; channel_id += kNumWarps) {
       int token_start_idx, token_end_idx;
       get_channel_task_range(num_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
       // Iterate over tokens
       int total_count = 0, per_nvl_rank_count[NUM_MAX_NVL_PEERS] = {0};
       for (int64_t i = token_start_idx + lane_id; i < token_end_idx; i += WARP_SIZE) {
-        GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
         auto is_token_in_rank_uint64 = *reinterpret_cast<const uint64_t*>(is_token_in_rank + i * num_ranks + dst_rdma_rank * NUM_MAX_NVL_PEERS);
         auto is_token_in_rank_values = reinterpret_cast<const bool*>(&is_token_in_rank_uint64);
 #pragma unroll
@@ -405,41 +422,42 @@ void notify_dispatch(
     int64_t num_rdma_bytes,
     int64_t num_nvl_bytes,
     bool low_latency_mode) {
-#define NOTIFY_DISPATCH_LAUNCH_CASE(num_rdma_ranks)                                                                                \
-  {                                                                                                                                \
-    auto notify_dispatch_func = low_latency_mode ? notify_dispatch<true, num_rdma_ranks> : notify_dispatch<false, num_rdma_ranks>; \
-    LAUNCH_KERNEL(                                                                                                                 \
-        &cfg,                                                                                                                      \
-        notify_dispatch_func,                                                                                                      \
-        num_tokens_per_rank,                                                                                                       \
-        grpcoll_recv_counter_mapped,                                                                                               \
-        num_ranks,                                                                                                                 \
-        num_tokens_per_rdma_rank,                                                                                                  \
-        moe_recv_rdma_counter_mapped,                                                                                              \
-        num_tokens_per_expert,                                                                                                     \
-        moe_recv_expert_counter_mapped,                                                                                            \
-        num_experts,                                                                                                               \
-        is_token_in_rank,                                                                                                          \
-        num_tokens,                                                                                                                \
-        num_channels,                                                                                                              \
-        rdma_clean_meta.first,                                                                                                     \
-        rdma_clean_meta.second,                                                                                                    \
-        nvl_clean_meta.first,                                                                                                      \
-        nvl_clean_meta.second,                                                                                                     \
-        rdma_channel_prefix_matrix,                                                                                                \
-        recv_rdma_rank_prefix_sum,                                                                                                 \
-        gbl_channel_prefix_matrix,                                                                                                 \
-        recv_gbl_rank_prefix_sum,                                                                                                  \
-        rdma_buffer_ptr,                                                                                                           \
-        buffer_ptrs,                                                                                                               \
-        barrier_signal_ptrs,                                                                                                       \
-        rank,                                                                                                                      \
-        cpu_rdma_team);                                                                                                            \
-  }                                                                                                                                \
-  break
-
   constexpr int kNumThreads = 512;
   const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
+  const auto num_rdma_experts = num_experts / num_rdma_ranks, num_nvl_experts = num_rdma_experts / NUM_MAX_NVL_PEERS;
+
+#define NOTIFY_DISPATCH_LAUNCH_CASE(num_rdma_ranks)                                                                                                          \
+  {                                                                                                                                                          \
+    auto notify_dispatch_func = low_latency_mode ? notify_dispatch<true, kNumThreads, num_rdma_ranks> : notify_dispatch<false, kNumThreads, num_rdma_ranks>; \
+    LAUNCH_KERNEL(                                                                                                                                           \
+        &cfg,                                                                                                                                                \
+        notify_dispatch_func,                                                                                                                                \
+        num_tokens_per_rank,                                                                                                                                 \
+        grpcoll_recv_counter_mapped,                                                                                                                         \
+        num_ranks,                                                                                                                                           \
+        num_tokens_per_rdma_rank,                                                                                                                            \
+        moe_recv_rdma_counter_mapped,                                                                                                                        \
+        num_tokens_per_expert,                                                                                                                               \
+        moe_recv_expert_counter_mapped,                                                                                                                      \
+        num_experts,                                                                                                                                         \
+        is_token_in_rank,                                                                                                                                    \
+        num_tokens,                                                                                                                                          \
+        num_channels,                                                                                                                                        \
+        rdma_clean_meta.first,                                                                                                                               \
+        rdma_clean_meta.second,                                                                                                                              \
+        nvl_clean_meta.first,                                                                                                                                \
+        nvl_clean_meta.second,                                                                                                                               \
+        rdma_channel_prefix_matrix,                                                                                                                          \
+        recv_rdma_rank_prefix_sum,                                                                                                                           \
+        gbl_channel_prefix_matrix,                                                                                                                           \
+        recv_gbl_rank_prefix_sum,                                                                                                                            \
+        rdma_buffer_ptr,                                                                                                                                     \
+        buffer_ptrs,                                                                                                                                         \
+        barrier_signal_ptrs,                                                                                                                                 \
+        rank,                                                                                                                                                \
+        cpu_rdma_team);                                                                                                                                      \
+  }                                                                                                                                                          \
+  break
 
   // Get clean meta
   auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_scales, num_topk, num_topk, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
@@ -450,17 +468,19 @@ void notify_dispatch(
   // REVIEW: why limited to INT_MAX ?
   GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
   GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
+  GRPCOLL_HOST_ASSERT(num_rdma_experts <= kNumThreads);
+  GRPCOLL_HOST_ASSERT(num_nvl_experts <= kNumThreads);
 
   // Launch kernel
   SETUP_LAUNCH_CONFIG(1 + num_rdma_ranks, kNumThreads, stream);
   SWITCH_RDMA_RANKS(NOTIFY_DISPATCH_LAUNCH_CASE);
+
 #undef NOTIFY_DISPATCH_LAUNCH_CASE
 }
 
-// At most 8 RDMA ranks to be sent
-constexpr int get_num_topk_rdma_ranks(int num_rdma_ranks) {
-  return num_rdma_ranks < 8 ? num_rdma_ranks : 8;
-}
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Cast
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
     bool kLowLatencyMode,
@@ -1283,6 +1303,10 @@ void dispatch(
 #undef DISPATCH_LAUNCH_CASE
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Cached Notify Group Cast / Reduce
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <bool kLowLatencyMode, int kNumTMABytesPerWarp>
 __global__ void cached_notify(
     const int rdma_clean_offset,
@@ -1302,34 +1326,16 @@ __global__ void cached_notify(
     int num_ranks,
     bool is_cached_dispatch,
     const nvshmem_team_t rdma_team) {
-  const auto sm_id = static_cast<int>(blockIdx.x);
-  const auto thread_id = static_cast<int>(threadIdx.x);
-  const auto num_threads = static_cast<int>(blockDim.x);
-  const auto num_warps = num_threads / WARP_SIZE;
-  const auto warp_id = thread_id / WARP_SIZE;
-  const auto lane_id = get_lane_id();
+  const auto sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x), num_threads = static_cast<int>(blockDim.x);
+  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
+  const auto nvl_rank = rank % NUM_MAX_NVL_PEERS, num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS, rdma_rank = rank / NUM_MAX_NVL_PEERS;
 
-  const auto nvl_rank = rank % NUM_MAX_NVL_PEERS;
-  const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-  const auto rdma_rank = rank / NUM_MAX_NVL_PEERS;
+  if (sm_id == 0) { // the first SM is responsible to wait all previous inflight WRs finished and then clean the RDMA/NVL buffer
+    // Wait until all previous inflight WRs for each QP of each RDMA peer rank are finished
+    wait_all_inflight_wrs_finished<kLowLatencyMode>(num_threads, thread_id, num_rdma_ranks, rdma_rank, nvl_rank);
 
-  if (sm_id == 0) { // the first SM is responsible to wait all QPs finished and clean the RDMA/NVL buffer
-    // Wait until all previous WQEs for each QP of each RDMA peer rank are finished
-    const auto qps_per_rdma_rank = ibgda_get_qps_per_rank();
-    for (int i = thread_id; i < qps_per_rdma_rank * (num_rdma_ranks - 1); i += num_threads) {
-      auto dst_rdma_rank = (i / qps_per_rdma_rank + rdma_rank + 1) % num_rdma_ranks;
-      auto qp_id = i % qps_per_rdma_rank;
-      nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), qp_id);
-    }
-
-    __syncthreads();
-
-    // Barrier for RDMA group
-    if (thread_id == WARP_SIZE)
-      nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-
-    // Barrier for NVL group
-    barrier_block<NUM_MAX_NVL_PEERS, true>(barrier_signal_ptrs, nvl_rank);
+    // Barrier all first
+    barrier_all<kLowLatencyMode, true>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
 
     // Clean RDMA buffer of this RDMA rank
     auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
@@ -1345,12 +1351,8 @@ __global__ void cached_notify(
 
     __syncthreads();
 
-    // Barrier again for RDMA group
-    if (thread_id == WARP_SIZE)
-      nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
-
-    // Barrier again for NVL group
-    barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
+    // Barrier all finally
+    barrier_all<kLowLatencyMode, false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
   } else if (sm_id == 1) { // the second SM is responsible to reset the rdma head before combine
     // If this is a cached dispatch,
     // no need to reset the rdma head, just return
@@ -1477,9 +1479,10 @@ void cached_notify(
       hidden_int4, num_scales, num_topk_idx, num_topk_weights, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, is_cached_dispatch);
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
-  GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX); // REVIEW: why < INT_MAX ?
-  GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX); // REVIEW: why < INT_MAX ?
-  GRPCOLL_HOST_ASSERT(num_sms > 3); // REVIEW: why > 3 ?
+  // REVIEW: why limited to INT_MAX ?
+  GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
+  GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
+  GRPCOLL_HOST_ASSERT(num_sms > 3); // REVIEW: why num_sms > 3 ?
   if (!is_cached_dispatch) {
     // for rdma head reset before combine
     GRPCOLL_HOST_ASSERT(num_warps >= num_channels);
@@ -1515,6 +1518,10 @@ void cached_notify(
       is_cached_dispatch,
       cpu_rdma_team);
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Cast
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
     int kNumRanks,
