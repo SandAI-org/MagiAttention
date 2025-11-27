@@ -198,8 +198,8 @@ class USP(AttnBaselineInterface):
         v_layer = _varlen_all2all_before_attn(v, self.pg_a2a)
 
         batch_p2p_comm = False
-        with torch.cuda.device(q.device):
-            cp_stream = torch.cuda.Stream()
+        # with torch.cuda.device(q.device):
+        #     cp_stream = torch.cuda.Stream()
 
         # ring attention p2p
         shard_q_meta = self.shard_meta["q"]
@@ -225,7 +225,7 @@ class USP(AttnBaselineInterface):
                 "thd",
                 self.pg_p2p,
                 attn_mask,
-                cp_stream,
+                # cp_stream,
                 deterministic,
                 batch_p2p_comm,
             )
@@ -246,7 +246,7 @@ class USP(AttnBaselineInterface):
                 dropout_p,
                 softmax_scale,
                 self.pg_p2p,
-                cp_stream,
+                # cp_stream,
                 deterministic,
                 batch_p2p_comm,
             )
