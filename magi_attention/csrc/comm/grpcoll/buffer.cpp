@@ -923,9 +923,6 @@ std::tuple<
 Buffer::internode_group_cast(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& recv_x_buf,
-    const std::optional<torch::Tensor>& x_scales,
-    const std::optional<torch::Tensor>& topk_idx,
-    const std::optional<torch::Tensor>& topk_weights,
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
     const torch::Tensor& is_token_in_rank,
@@ -936,6 +933,7 @@ Buffer::internode_group_cast(
     const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
     const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix,
     const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
+    const std::optional<torch::Tensor>& post_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
     bool async_op,
@@ -946,9 +944,10 @@ Buffer::internode_group_cast(
   // unless we release GIL here.
   py::gil_scoped_release release;
 
+  // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
   const int num_channels = config.num_sms / 2;
   GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
-  GRPCOLL_HOST_ASSERT(0 < get_num_rdma_ranks() and get_num_rdma_ranks() <= NUM_MAX_RDMA_PEERS);
+  GRPCOLL_HOST_ASSERT(get_num_rdma_ranks() > 0 and get_num_rdma_ranks() <= NUM_MAX_RDMA_PEERS);
 
   bool cached_mode = cached_rdma_channel_prefix_matrix.has_value();
   if (cached_mode) {
@@ -1003,33 +1002,10 @@ Buffer::internode_group_cast(
   int num_topk = 0;
   int64_t* topk_idx_ptr = nullptr;
   float* topk_weights_ptr = nullptr;
-  GRPCOLL_HOST_ASSERT(topk_idx.has_value() == topk_weights.has_value());
-  if (topk_idx.has_value()) {
-    GRPCOLL_HOST_ASSERT(num_experts > 0);
-    GRPCOLL_HOST_ASSERT(topk_idx->dim() == 2 and topk_idx->is_contiguous());
-    GRPCOLL_HOST_ASSERT(topk_weights->dim() == 2 and topk_weights->is_contiguous());
-    GRPCOLL_HOST_ASSERT(topk_idx->size(0) == num_tokens and topk_weights->size(0) == num_tokens);
-    GRPCOLL_HOST_ASSERT(topk_idx->size(1) == topk_weights->size(1));
-    GRPCOLL_HOST_ASSERT(topk_idx->scalar_type() == torch::kInt64);
-    GRPCOLL_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
-
-    num_topk = static_cast<int>(topk_idx->size(1));
-    topk_idx_ptr = topk_idx->data_ptr<int64_t>();
-    topk_weights_ptr = topk_weights->data_ptr<float>();
-  }
 
   // FP8 scales checks
   float* x_scales_ptr = nullptr;
   int num_scales = 0, scale_token_stride = 0, scale_hidden_stride = 0;
-  if (x_scales.has_value()) {
-    GRPCOLL_HOST_ASSERT(x_scales->dim() == 2 && x_scales->is_contiguous());
-    GRPCOLL_HOST_ASSERT(x_scales->scalar_type() == torch::kFloat32);
-    GRPCOLL_HOST_ASSERT(x_scales->size(0) == num_tokens);
-    num_scales = x_scales->dim() == 1 ? 1 : static_cast<int>(x_scales->size(1));
-    x_scales_ptr = static_cast<float*>(x_scales->data_ptr());
-    scale_token_stride = static_cast<int>(x_scales->stride(0));
-    scale_hidden_stride = static_cast<int>(x_scales->stride(1));
-  }
 
   // Set current stream to comm stream if needed
   // NOTES: do not allocate tensors upfront!
@@ -1164,7 +1140,6 @@ Buffer::internode_group_cast(
   }
 
   // Allocate new tensors
-  auto recv_topk_idx = std::optional<torch::Tensor>(), recv_topk_weights = std::optional<torch::Tensor>(), recv_x_scales = std::optional<torch::Tensor>();
   auto recv_src_meta = std::optional<torch::Tensor>();
   auto recv_rdma_channel_prefix_matrix = std::optional<torch::Tensor>();
   auto recv_gbl_channel_prefix_matrix = std::optional<torch::Tensor>();
@@ -1182,16 +1157,6 @@ Buffer::internode_group_cast(
   int64_t* recv_topk_idx_ptr = nullptr;
   float* recv_topk_weights_ptr = nullptr;
   float* recv_x_scales_ptr = nullptr;
-  if (topk_idx.has_value()) {
-    recv_topk_idx = torch::empty({num_recv_tokens, num_topk}, topk_idx->options());
-    recv_topk_weights = torch::empty({num_recv_tokens, num_topk}, topk_weights->options());
-    recv_topk_idx_ptr = recv_topk_idx->data_ptr<int64_t>();
-    recv_topk_weights_ptr = recv_topk_weights->data_ptr<float>();
-  }
-  if (x_scales.has_value()) {
-    recv_x_scales = x_scales->dim() == 1 ? torch::empty({num_recv_tokens}, x_scales->options()) : torch::empty({num_recv_tokens, num_scales}, x_scales->options());
-    recv_x_scales_ptr = static_cast<float*>(recv_x_scales->data_ptr());
-  }
 
   // Launch data dispatch
   // NOTES: the buffer size checks are moved into the `.cu` file
@@ -1246,16 +1211,14 @@ Buffer::internode_group_cast(
     }
     // record optional tensors
     for (auto& to :
-         {x_scales,
-          topk_idx,
-          topk_weights,
-          num_tokens_per_rank,
+         {num_tokens_per_rank,
           num_tokens_per_rdma_rank,
           num_tokens_per_expert,
           cached_rdma_channel_prefix_matrix,
           cached_recv_rdma_rank_prefix_sum,
           cached_gbl_channel_prefix_matrix,
           cached_recv_gbl_rank_prefix_sum,
+          post_perm_idx,
           recv_rdma_channel_prefix_matrix,
           recv_gbl_channel_prefix_matrix,
           send_rdma_head,
@@ -1295,9 +1258,6 @@ Buffer::internode_group_cast(
 std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_reduce(
     const torch::Tensor& x,
     std::optional<torch::Tensor>& combined_x_buf,
-    const std::optional<torch::Tensor>& topk_weights,
-    const std::optional<torch::Tensor>& bias_0,
-    const std::optional<torch::Tensor>& bias_1,
     const torch::Tensor& src_meta,
     const torch::Tensor& is_combined_token_in_rank,
     const torch::Tensor& rdma_channel_prefix_matrix,
@@ -1305,6 +1265,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     const torch::Tensor& gbl_channel_prefix_matrix,
     const torch::Tensor& combined_rdma_head,
     const torch::Tensor& combined_nvl_head,
+    const std::optional<torch::Tensor>& pre_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
     bool async_op,
@@ -1363,18 +1324,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
 
   // Top-k checks
   int num_topk = 0;
-  auto combined_topk_weights = std::optional<torch::Tensor>();
   float* topk_weights_ptr = nullptr;
   float* combined_topk_weights_ptr = nullptr;
-  if (topk_weights.has_value()) {
-    GRPCOLL_HOST_ASSERT(topk_weights->dim() == 2 and topk_weights->is_contiguous());
-    GRPCOLL_HOST_ASSERT(topk_weights->scalar_type() == torch::kFloat32);
-    GRPCOLL_HOST_ASSERT(topk_weights->size(0) == num_tokens);
-    num_topk = static_cast<int>(topk_weights->size(1));
-    topk_weights_ptr = topk_weights->data_ptr<float>();
-    combined_topk_weights = torch::empty({num_combined_tokens, num_topk}, topk_weights->options());
-    combined_topk_weights_ptr = combined_topk_weights->data_ptr<float>();
-  }
 
   // Extra check for avoid-dead-lock design
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
@@ -1406,16 +1357,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       low_latency_mode);
 
   // Assign bias ptrs
-  auto bias_opts = std::vector<std::optional<torch::Tensor>>({bias_0, bias_1});
   void* bias_ptrs[2] = {nullptr, nullptr};
-  for (int i = 0; i < 2; ++i)
-    if (bias_opts[i].has_value()) {
-      auto bias = bias_opts[i].value();
-      GRPCOLL_HOST_ASSERT(bias.dim() == 2 and bias.is_contiguous());
-      GRPCOLL_HOST_ASSERT(bias.scalar_type() == x.scalar_type());
-      GRPCOLL_HOST_ASSERT(bias.size(0) == num_combined_tokens and bias.size(1) == hidden);
-      bias_ptrs[i] = bias.data_ptr();
-    }
 
   // Allocate combined_x buffer
   auto combined_x = torch::Tensor();
@@ -1488,7 +1430,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
         t.record_stream(compute_stream);
     }
     // record optional tensors
-    for (auto& to : {topk_weights, bias_0, bias_1}) {
+    for (auto& to : {pre_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();

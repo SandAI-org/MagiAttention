@@ -941,9 +941,6 @@ class GrpCollBuffer:
         ) = self.runtime.internode_group_cast(
             x_1st,
             recv_x_1st,
-            None,  # x_scales
-            None,  # topk_idx
-            None,  # topk_weights
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
             is_token_in_rank,
@@ -954,6 +951,7 @@ class GrpCollBuffer:
             recv_rdma_rank_prefix_sum,
             gbl_channel_prefix_matrix,
             recv_gbl_rank_prefix_sum,
+            post_perm_idx,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_op,
@@ -1041,9 +1039,6 @@ class GrpCollBuffer:
         ) = self.runtime.internode_group_reduce(
             x_1st,
             reduced_x_1st,
-            None,  # topk_weights
-            None,  # bias_0
-            None,  # bias_1
             handle.recv_src_meta,  # src_meta
             handle.is_token_in_rank,  # is_reduced_token_in_rank
             handle.recv_rdma_channel_prefix_matrix,  # rdma_channel_prefix_matrix
@@ -1051,6 +1046,7 @@ class GrpCollBuffer:
             handle.recv_gbl_channel_prefix_matrix,  # gbl_channel_prefix_matrix
             handle.send_rdma_head,  # send_rdma_head
             handle.send_nvl_head,  # send_nvl_head
+            pre_perm_idx,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_op,
