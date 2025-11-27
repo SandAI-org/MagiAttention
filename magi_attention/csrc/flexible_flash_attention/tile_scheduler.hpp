@@ -34,7 +34,8 @@ namespace flash {
 
 // Host side kernel arguments
 struct TileSchedulerArguments {
-  int const num_heads;
+  int const num_heads_q;
+  int const num_heads_kv;
   int const num_batches;
   int* const tile_count_semaphore = nullptr;
   int2* const ranges = nullptr;
@@ -68,6 +69,7 @@ class DynamicPersistentTileScheduler {
   // Device side kernel params
   struct Params {
     int num_heads;
+    int qhead_per_kvhead;
     int num_batches;
     int* const tile_count_semaphore;
     int2* const ranges;
@@ -78,10 +80,21 @@ class DynamicPersistentTileScheduler {
   };
 
   static Params to_underlying_arguments(TileSchedulerArguments const& args) {
+    int qhead_per_kvhead = !PackGQA ? 1 : (args.num_heads_q / args.num_heads_kv);
+    int num_heads = !PackGQA ? args.num_heads_q : args.num_heads_kv;
     assert(args.tile_count_semaphore != nullptr);
     assert(args.num_heads < (1 << 16));
     int2* const ranges = args.merge_ranges ? args.merge_ranges : args.ranges;
-    return {args.num_heads, args.num_batches, args.tile_count_semaphore, ranges, args.merge_ranges, args.range_map, args.determin_conflict_state, args.unique_count};
+    return {
+        num_heads,
+        qhead_per_kvhead,
+        args.num_batches,
+        args.tile_count_semaphore,
+        ranges,
+        args.merge_ranges,
+        args.range_map,
+        args.determin_conflict_state,
+        args.unique_count};
   }
 
   static dim3 get_grid_shape(Params const& params, int num_sm) {
@@ -131,7 +144,7 @@ class DynamicPersistentTileScheduler {
       int batch_idx = lane + bidb_start;
       int2 range = params.ranges[batch_idx];
       int seqlen = batch_idx < actual_num_batches ? range.y - range.x : 0;
-      return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen, kBlock) : 0;
+      return batch_idx < actual_num_batches && lane < cutlass::NumThreadsPerWarp - 1 ? cute::ceil_div(seqlen * params.qhead_per_kvhead, kBlock) : 0;
     };
 
     int num_m_blocks = get_num_m_blocks(current_work.bidb); // Different for each lane

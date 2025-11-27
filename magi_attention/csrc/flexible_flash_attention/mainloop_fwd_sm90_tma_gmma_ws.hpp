@@ -61,8 +61,11 @@ struct CollectiveMainloopFwdSm90 {
 
   // kBlockM, kBlockN, kHeadDim
   using TileShape_MNK = TileShape_MNK_;
-
-  // TileShapeMNK for mma qv: kBlockM, kBlockN, kHeadDim
+  using TileShape_MNKH = decltype(make_shape(
+      get<0>(TileShape_MNK{}) / _4{},
+      _4{},
+      get<1>(TileShape_MNK{}),
+      get<2>(TileShape_MNK{}))); // TileShapeMNK for mma qv: kBlockM, kBlockN, kHeadDim
   // (kBlockM, kHeadDim) @ (kHeadDim, kBlockN) -> (kBlockM, kBlockN)
   using TileShape_MNK_QV = Shape<decltype(get<0>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{})), decltype(get<2>(TileShape_MNK{}))>;
 
@@ -138,6 +141,17 @@ struct CollectiveMainloopFwdSm90 {
   using SmemLayoutAtomQ = decltype(cutlass::gemm::collective::detail::
                                        ss_smem_selector<GMMA::Major::K, Element, decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<2>(TileShape_MNK{}))>());
   using SmemLayoutQ = decltype(tile_to_shape(SmemLayoutAtomQ{}, select<0, 2>(TileShape_MNK{}))); // kBlockM, kHeadim
+  using SmemLayoutQPacked = decltype(tile_to_shape(SmemLayoutAtomQ{}, select<0, 3, 1>(TileShape_MNKH{}))); // kBlockM, Khead, kHeadim
+
+  using SmemLayout3D = decltype(make_layout(
+      make_shape(get<0>(TileShape_MNK{}) / _4{}, _4{}, get<2>(TileShape_MNK{})), // (M / 4, 4, K)
+      make_stride(get<2>(TileShape_MNK{}) * _4{}, get<2>(TileShape_MNK{}), Int<1>{}) // (k * 4, k, 1)
+      ));
+
+  // using SmemLayoutQ_3D = decltype(make_layout(
+  //   make_shape(get<0>(SmemLayoutQ{}.shape()), get<1>(SmemLayoutQ{}.shape()), _1{}), // (M, K, 1)
+  //   make_stride(get<0>(SmemLayoutQ{}.stride()), get<1>(SmemLayoutQ{}.stride()), _0{})
+  //));
 
   // Get the smem layout for K
   using SmemLayoutAtomK = decltype(cutlass::gemm::collective::detail::
@@ -173,14 +187,49 @@ struct CollectiveMainloopFwdSm90 {
 
   // Set the shape and stride for Q and KV
   using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen, head_dim, num_heads)
+  using ShapeQPacked = std::conditional_t<!PackGQA, ShapeQKV, cute::Shape<int32_t, int32_t, int32_t, int32_t>>;
   using StrideQK = cute::Stride<int64_t, _1, int64_t>;
   using StrideV = StrideQK;
+  using StrideQPacked = std::conditional_t<!PackGQA, StrideQK, cute::Shape<int64_t, _1, int64_t, int64_t>>;
+
+  // using TileShape_mNK = make_shape(cute::get<0>(TileShape_MNK{}) / ())
 
   using TMA_Q = decltype(make_tma_copy_A_sm90(
       GmemTiledCopyQ{},
       make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, StrideQK{}),
       SmemLayoutQ{},
       TileShape_MNK{},
+      ClusterShape{}));
+  /*
+  using TMA_Q_Packed = decltype(make_tma_copy_A_sm90(
+      GmemTiledCopyQ{},
+      make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQPacked{}, StrideQPacked{}),
+      SmemLayoutQ{},
+      // TileShape_MNK{},
+      make_shape(get<0>(TileShape_MNK{}), get<1>(TileShape_MNK{}), _4{}, get<2>(TileShape_MNK{})),
+      ClusterShape{})); */
+
+  /*
+  using TMA_Q_Packed = decltype(make_tma_copy(
+    GmemTiledCopyQ{},
+    make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQPacked{}, StrideQPacked{}),
+    SmemLayoutQPacked{},
+    // TileShape_MNK{},
+    select<0, 3, 1>(TileShape_MNKH{}),
+    ClusterShape{})); */
+
+  using shapeQ_Packed_ = decltype(make_tensor(
+      make_gmem_ptr(static_cast<Element const*>(nullptr)),
+      make_layout(
+          make_shape(get<0>(ShapeQPacked{}), cute::get<3>(ShapeQPacked{}), get<1>(ShapeQPacked{}), get<2>(ShapeQPacked{})),
+          make_stride(cute::get<0>(StrideQPacked{}), cute::get<3>(StrideQPacked{}), cute::get<1>(StrideQPacked{}), cute::get<2>(StrideQPacked{})))));
+
+  using TMA_Q_Packed = decltype(make_tma_copy(
+      GmemTiledCopyQ{},
+      shapeQ_Packed_{},
+      SmemLayout3D{},
+      // TileShape_MNK{},
+      select<0, 1, 3>(TileShape_MNKH{}),
       ClusterShape{}));
 
   using TMA_K = decltype(make_tma_copy_B_sm90(
@@ -192,9 +241,9 @@ struct CollectiveMainloopFwdSm90 {
 
   using TMA_V = decltype(make_tma_copy(
       GmemTiledCopyKV{},
-      make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, select<1, 0, 2>(StrideV{})),
-      take<0, 2>(SmemLayoutVt{}),
-      select<1, 2>(TileShape_MNK_PV{}),
+      make_tensor(make_gmem_ptr(static_cast<Element const*>(nullptr)), ShapeQKV{}, select<1, 0, 2>(StrideV{})), // headdim, seqlen, numhead;
+      take<0, 2>(SmemLayoutVt{}), // headdim, kstages
+      select<1, 2>(TileShape_MNK_PV{}), // k, N
       size<0>(ClusterShape{}))); // mcast along M mode for this N load, if any
 
   // Set the bytes transferred in this TMA transaction (may involve multiple issues)
@@ -269,7 +318,9 @@ struct CollectiveMainloopFwdSm90 {
   struct Params {
     Element const* const ptr_Q;
     ShapeQKV const shape_Q;
+    ShapeQPacked const shape_Q_Packed;
     StrideQK const stride_Q;
+    StrideQPacked const stride_Q_Packed;
     Element* const ptr_K;
     ShapeQKV const shape_K;
     StrideQK const stride_K;
@@ -278,6 +329,7 @@ struct CollectiveMainloopFwdSm90 {
     StrideV const stride_V;
     cutlass::FastDivmod qhead_per_khead_divmod;
     TMA_Q tma_load_Q;
+    TMA_Q_Packed tma_load_Q_Packed;
     TMA_K tma_load_K;
     TMA_V tma_load_V;
     float const softmax_scale_log2;
@@ -365,12 +417,38 @@ struct CollectiveMainloopFwdSm90 {
   static Params to_underlying_arguments(Arguments const& args) {
     Tensor mQ = make_tensor(make_gmem_ptr(args.ptr_Q), args.shape_Q, args.stride_Q);
     TMA_Q tma_load_Q = make_tma_copy_A_sm90(GmemTiledCopyQ{}, mQ, SmemLayoutQ{}, TileShape_MNK{}, ClusterShape{}); // no mcast for Q
+
     Tensor mK = make_tensor(make_gmem_ptr(args.ptr_K), args.shape_K, args.stride_K);
     TMA_K tma_load_K =
         make_tma_copy_B_sm90(GmemTiledCopyKV{}, mK, take<0, 2>(SmemLayoutK{}), TileShape_MNK{}, ClusterShape{}); // mcast along M mode for this N load, if any
     Tensor mV = make_tensor(make_gmem_ptr(args.ptr_V), make_shape(args.headdim, get<0>(args.shape_K), get<2>(args.shape_K)), select<1, 0, 2>(args.stride_V));
     TMA_V tma_load_V = make_tma_copy(
         GmemTiledCopyKV{}, mV, take<0, 2>(SmemLayoutVt{}), select<1, 2>(TileShape_MNK_PV{}), size<0>(ClusterShape{})); // mcast along M mode for this N load, if any
+
+    int const qhead_per_khead = !PackGQA ? 1 : cute::ceil_div(get<2>(args.shape_Q), get<2>(args.shape_K));
+    auto const shape_Q_Packed = cute::conditional_return<!PackGQA>(               // (seqlen, head_dim, num_kvhead, qhead_per_khead)
+      args.shape_Q,
+      make_shape(get<0>(args.shape_Q), get<1>(args.shape_Q), get<2>(args.shape_K), qhead_per_khead)
+    );
+
+    auto const stride_Q_Packed = cute::conditional_return<!PackGQA>(
+        args.stride_Q, make_stride(get<0>(args.stride_Q), get<1>(args.stride_Q), get<2>(args.stride_Q) * qhead_per_khead, get<2>(args.stride_Q)));
+
+    Tensor mQPacked = make_tensor(make_gmem_ptr(args.ptr_Q), shape_Q_Packed, stride_Q_Packed);
+    // TMA_Q_Packed tma_load_Q_Packed = make_tma_copy_A_sm90(GmemTiledCopyQ{}, mQPacked, SmemLayoutQ{}, TileShape_MNK{}, ClusterShape{});
+    // auto TileShape_PackedQ = make_shape(get<0>(TileShape_MNK{}) / Int<4>{}, get<1>(TileShape_MNK{}), Int<4>{}, get<2>(TileShape_MNK{}));
+    // TMA_Q_Packed tma_load_Q_Packed = make_tma_copy(GmemTiledCopyQ{}, mQPacked, SmemLayoutQPacked{}, select<0, 3, 1>(TileShape_MNKH{}), ClusterShape{});
+    auto mQ_Packed_ = make_tensor(
+        mQPacked.data(),
+        make_layout(
+            make_shape(get<0>(shape_Q_Packed), cute::get<3>(shape_Q_Packed), get<1>(shape_Q_Packed), get<2>(shape_Q_Packed)),
+            make_stride(cute::get<0>(stride_Q_Packed), cute::get<3>(stride_Q_Packed), cute::get<1>(stride_Q_Packed), cute::get<2>(stride_Q_Packed))));
+
+    TMA_Q_Packed tma_load_Q_Packed = make_tma_copy(GmemTiledCopyQ{}, mQ_Packed_, SmemLayout3D{}, select<0, 1, 3>(TileShape_MNKH{}), ClusterShape{});
+    // print("tma_load_Q:\n");
+    print(tma_load_Q);
+    // print("tma_load_Q_Packed:\n")
+    print(tma_load_Q_Packed);
     // If there's tanh softcapping, we do tanh(scores * softmax_scale / softcap_val) * softcap_val.
     // Right after this, we multiply by log2(e) before applying exp2.
     // To reduce the number of instructions, we instead pre-multiply softmax_scale / softcap_val
@@ -379,7 +457,9 @@ struct CollectiveMainloopFwdSm90 {
     return {
         args.ptr_Q,
         args.shape_Q,
+        shape_Q_Packed,
         args.stride_Q,
+        stride_Q_Packed,
         args.ptr_K,
         args.shape_K,
         args.stride_K,
@@ -388,6 +468,7 @@ struct CollectiveMainloopFwdSm90 {
         args.stride_V,
         cutlass::FastDivmod(cute::ceil_div(get<2>(args.shape_Q), get<2>(args.shape_K))), // qhead_per_khead_divmod
         tma_load_Q,
+        tma_load_Q_Packed,
         tma_load_K,
         tma_load_V,
         !Has_softcap ? float(args.softmax_scale * M_LOG2E) : float(args.softcap_val * M_LOG2E),
@@ -458,28 +539,121 @@ struct CollectiveMainloopFwdSm90 {
 
     // Define utility lambdas to load Q and KV
     auto load_Q = [&]() {
+      // printf("bidh: %d blockm: %d\n", block_meta.bidh, block_meta.m_block);
       auto block_tma_Q = params.tma_load_Q.get_slice(_0{});
+      auto block_tma_Q_Packed = params.tma_load_Q_Packed.get_slice(_0{});
       Tensor mQ = params.tma_load_Q.get_tma_tensor(params.shape_Q)(_, _, block_meta.bidh);
+
+      // auto shape_q_packed_ = make_shape(get<0>(params.shape_Q_Packed), get<3>(params.shape_Q_Packed), get<1>(params.shape_Q_Packed), get<2>(params.shape_Q_Packed));
+
+      Tensor mQ_Packed = [&]() {
+        if constexpr (PackGQA) {
+          return params.tma_load_Q_Packed.get_tma_tensor(params.shape_Q_Packed)(_, _, block_meta.bidh, _);
+        } else {
+          return mQ;
+        }
+      }();
+      /*
+      Tensor mQ_Packed = [&]() {
+        if constexpr (PackGQA) {
+            return params.tma_load_Q_Packed.get_tma_tensor(shape_q_packed_)(_, _, _, block_meta.bidh);
+        } else {
+            return mQ;
+        }
+      }(); */
+
+      // Tensor mQ_Packed = !PackGQA ? mQ : params.tma_load_Q.get_tma_tensor(params.shape_Q_Packed)(_, _, block_meta.bidh, _); // (seqlen, headdim, qhead)
       Tensor gQ = local_tile(
           domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}), mQ), select<0, 2>(TileShape_MNK{}), make_coord(block_meta.m_block, _0{})); // (M, K)
-      Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
-      Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
-      Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ)); // (TMA)
+      // Tensor gQ_Packed = !PackGQA ? gQ : local_tile(
+      //   domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}, _0{}), mQ), make_shape(params.qhead_per_khead_divmod.divide(get<0>(TileShape_MNK{})),
+      //   get<2>(TileShape_MNK{}), params.qhead_per_khead_divmod.divide(params.qhead)), make_coord(block_meta.m_block, _0{}, _0{})); // (M / qhead_per_khead, K, qhead)
+      Tensor gQ_Packed = [&]() {
+        if constexpr (PackGQA) {
+          return local_tile(
+              domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}, _0{}), mQ_Packed),
+              make_shape(params.qhead_per_khead_divmod.divide(get<0>(TileShape_MNK{})), get<2>(TileShape_MNK{}), get<3>(params.shape_Q_Packed)),
+              make_coord(block_meta.m_block, _0{}, _0{})); // (M / qhead_per_khead, K, qhead_per_khead)
+        } else {
+          return gQ;
+        }
+      }();
+      /*
+      Tensor gQ_Packed = [&]() {
+        if constexpr (PackGQA) {
+          return local_tile(
+            domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}, _0{}), mQ_Packed), make_shape(select<0, 1, 3>(TileShape_MNKH{})),
+      make_coord(block_meta.m_block, _0{}, _0{})); // (M / qhead_per_khead, qhead_per_khead, K) } else { return gQ;
+        }
+      }(); */
 
+      Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
+      Tensor tQgQ_Packed = [&]() {
+        if constexpr (PackGQA) {
+          return group_modes<0, 4>(block_tma_Q_Packed.partition_S(gQ_Packed));
+        } else {
+          return tQgQ;
+        }
+      }();
+      /*
+      if constexpr (PackGQA) {
+        if (block_meta.bidh == 0 && threadIdx.x == 0 && block_meta.m_block == 0) {
+          auto raw_ptr_Q = make_gmem_ptr(params.ptr_Q);
+
+          Tensor mQ_Data = [&]() {
+            if constexpr (PackGQA) {
+                return make_tensor(raw_ptr_Q, params.shape_Q_Packed, params.stride_Q_Packed)(_, _, block_meta.bidh, _);
+            }
+          }();
+
+          Tensor gQ_Data_Tile = [&]() {
+            if constexpr (PackGQA) {
+              return local_tile(
+                domain_offset(make_coord(block_meta.seqlen_info.offset_q, _0{}, _0{}), mQ_Data),
+                make_shape(params.qhead_per_khead_divmod.divide(get<0>(TileShape_MNK{})), get<2>(TileShape_MNK{}), get<3>(params.shape_Q_Packed)),
+                make_coord(block_meta.m_block, _0{}, _0{}));
+              }
+          }();
+
+          printf("\n[DEBUG] Actual Values in Global Memory for current tile:\n");
+          print_tensor(gQ_Data_Tile(_, 0, _));
+          printf("\n");
+      }
+      } */
+
+      // Tensor tQgQ_Packed = !PackGQA ? tQgQ : group_modes<0, 4>(block_tma_Q.partition_S(gQ_Packed)); // (TMA)
+      Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
+      // Tensor sQ_Packed = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQPacked{});
+      Tensor sQ_Packed = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayout3D{});
+
+      Tensor tQsQ = group_modes<0, 3>(block_tma_Q.partition_D(sQ)); // (TMA)
+      Tensor tQsQ_Packed = group_modes<0, 4>(block_tma_Q_Packed.partition_D(sQ_Packed));
       if constexpr (Use_TMA_Q) {
         // Wait for the MMA warpgroups to signal that smem_q is ready
         if (SingleProducerWarp || warp_idx_in_warpgroup == 0) {
           cutlass::arch::NamedBarrier::sync(NumMmaThreadsQK + cutlass::NumThreadsPerWarp, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);
         }
+
         if (is_tma_issue_thread()) {
           shared_storage.pipelines.barrier_Q.arrive_and_expect_tx(TmaTransactionBytesQ);
-          copy(
-              params.tma_load_Q.with(
-                  reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Q),
-                  0 /*mcast_mask*/,
-                  TMA::CacheHintSm90::EVICT_FIRST),
-              tQgQ,
-              tQsQ);
+
+          if constexpr (PackGQA) {
+            auto tma_desc = params.tma_load_Q_Packed.with(
+                reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Q),
+                0 /*mcast_mask*/,
+                TMA::CacheHintSm90::EVICT_FIRST);
+            // if (block_meta.bidh == 0 && block_meta.m_block == 0 && threadIdx.x == 0) {
+            //   print("PackGQA TMA desc     : "); print(tma_desc); print("\n");
+            // }
+
+            copy(tma_desc, tQgQ_Packed, tQsQ_Packed);
+          } else {
+            auto tma_desc = params.tma_load_Q.with(
+                reinterpret_cast<typename cutlass::arch::ClusterTransactionBarrier::ValueType&>(shared_storage.pipelines.barrier_Q),
+                0 /*mcast_mask*/,
+                TMA::CacheHintSm90::EVICT_FIRST);
+            copy(tma_desc, tQgQ, tQsQ);
+          }
         }
       }
     };
@@ -681,6 +855,22 @@ struct CollectiveMainloopFwdSm90 {
     static constexpr int kBlockN = get<1>(TileShape_MNK{});
 
     Tensor sQ = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayoutQ{});
+    auto flat_layout = make_layout(
+        make_shape(_128{}, _128{}), // 32 * 4 = 128
+        make_stride(_128{}, _1{}));
+    /*
+    auto flat_layout = make_layout(
+      make_shape(size<0>(grouped_layout), size<1>(grouped_layout)),
+      make_stride(stride<0, 1>(grouped_layout), stride<1>(grouped_layout))
+    ); */
+    Tensor sQPacked = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), SmemLayout3D{});
+    // auto sQ_grouped = group_modes<0, 2>(sQPacked);
+    /*auto sQ_grouped = make_layout(
+      make_shape(_128{}, _128{}),  // 32 * 4 = 128
+      make_stride(_128{}, _1{})
+    );*/
+    auto sQ_flattened = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_q.data()), flat_layout);
+    // sQ = sQ_flattened;
     Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
     Tensor sV = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVtMma{});
     Tensor sP = [&] {
@@ -833,6 +1023,14 @@ struct CollectiveMainloopFwdSm90 {
     barrier_Q.wait(work_idx % 2);
     // Wait for first block of k to be loaded
     consumer_wait(pipeline_k, smem_pipe_read_k);
+    // printf("test!\n");
+    // printf("%d\n", threadIdx.x);
+
+    if (threadIdx.x == 128 && block_meta.bidh == 0 && block_meta.m_block == 0) {
+      // printf("m_block: %d\n", block_meta.m_block);
+      print_tensor(sQ);
+      print_tensor(sQ_flattened);
+    }
 
     // launch Q @ K of n_block and wait for it to finish
     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
