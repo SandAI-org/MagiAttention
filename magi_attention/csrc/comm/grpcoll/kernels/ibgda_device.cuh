@@ -53,6 +53,11 @@
 
 namespace magi_attn_comm::grpcoll {
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Helper Transform Functions
+// from Little-Endian Host Byte Order to Big-Endian Byte Order
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 GRPCOLL_STATIC_ASSERT(NVSHMEMI_IBGDA_MIN_QP_DEPTH >= 64, "Invalid QP minimum depth");
 
 DEVICE_INLINE static uint64_t HtoBE64(uint64_t x) {
@@ -101,6 +106,10 @@ DEVICE_INLINE static uint16_t HtoBE16(uint16_t x) {
   return static_cast<uint16_t>(d);
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Helper IBGDA Functions
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 typedef struct mlx5_wqe_ctrl_seg __attribute__((__aligned__(8))) ibgda_ctrl_seg_t;
 
 typedef struct {
@@ -113,10 +122,14 @@ DEVICE_INLINE static nvshmemi_ibgda_device_state_t* ibgda_get_state() {
   return &nvshmemi_ibgda_device_state_d;
 }
 
+DEVICE_INLINE static nvshmemi_ibgda_device_state_t* ibgda_get_qps_per_rank() {
+  return ibgda_get_state()->num_rc_per_pe * ibgda_get_state()->num_devices_initialized;
+}
+
 DEVICE_INLINE static nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
   auto state = ibgda_get_state();
-  const auto num_rc_per_pe = ibgda_get_state()->num_rc_per_pe;
-  return &state->globalmem.rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
+  const auto qps_per_rank = bgda_get_qps_per_rank();
+  return &state->globalmem.rcs[pe * qps_per_rank + id % qps_per_rank];
 }
 
 DEVICE_INLINE static void ibgda_lock_acquire(int* lock) {
@@ -503,26 +516,37 @@ DEVICE_INLINE uint64_t nvshmemi_get_p2p_ptr(const uint64_t& ptr, const int& rank
 DEVICE_INLINE static void ibgda_poll_cq(nvshmemi_ibgda_device_cq_t* cq, uint64_t idx) {
   const auto cqe64 = static_cast<mlx5_cqe64*>(cq->cqe);
   const uint32_t ncqes = cq->ncqes;
+
+  // Prevent reordering of the function below and previous instructions
   memory_fence_cta();
 
-  // NOTES: this while loop is part of do-while below.
-  // `wqe_counter` is the HW consumer index. However, we always maintain `index + 1`.
-  // To be able to compare with the index, we need to use `wqe_counter + 1`.
-  // Because `wqe_counter` is `uint16_t`, it may be overflow. Still, we know for
-  // sure that if `idx - wqe_counter - 1 < ncqes`, `wqe_counter + 1 is less than
-  // idx, and thus we need to wait. We don't need to wait when `idx == wqe_counter + 1`
-  // That's why we use `- 2` here to make this case overflow.
+  /** NOTE:
+   * 1. `wqe_counter` is the consumer idx while `idx` is the producer idx. However, we always maintain `idx + 1`.
+   *    To be able to compare with the idx, we need to use `wqe_counter + 1`,
+   *    i.e. when `wqe_counter + 1 == idx`, the work queue is all done.
+   *
+   * 2. However, since `wqe_counter` is `uint16_t`, it might be overflow.
+   *    To deal with it, we can use `idx - wqe_counter - 1 == 0` instead of `wqe_counter + 1 == idx`.
+   *
+   * 3. And we also know that when `idx - wqe_counter - 1 < ncqes`,
+   *    the work queue is not all done, thus we need to wait.
+   *    Therefore, we finally use `idx - wqe_counter - 2 < ncqes` below:
+   *      case1: if `wqe_counter + 1 < idx`, `idx - wqe_counter - 2` is larger than `0` but less than `ncqes`
+   *              to continue the while loop.
+   *      case2: if `wqe_counter + 1 == idx`, `idx - wqe_counter - 2` will overflow to `-1` to be larger than `ncqes`,
+   *              to break the while loop.
+   */
   uint16_t wqe_counter;
   do {
     wqe_counter = HtoBE16(ld_na_relaxed(&cqe64->wqe_counter));
   } while ((static_cast<uint16_t>(static_cast<uint16_t>(idx) - wqe_counter - static_cast<uint16_t>(2)) < ncqes));
   *cq->cons_idx = idx;
 
-  // Prevent reordering of this function and later instructions
+  // Prevent reordering of the function above and later instructions
   memory_fence_cta();
 }
 
-// Wait until wqe `idx - 1` is completed.
+// Poll CQ to wait until WQE `idx - 1` for the given QP of the destination PE is completed.
 DEVICE_INLINE static void nvshmemi_ibgda_quiet(int dst_pe, int qp_id) {
   auto qp = ibgda_get_rc(dst_pe, qp_id);
   auto state = ibgda_get_state();
