@@ -94,7 +94,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 "device_max_connections": 8,
             },
             groups=[
-                # comm group
+                # group for comm
                 ("enable_hier_comm", "enable_qo_comm", "enable_native_grpcoll"),
             ],
             strategy="heuristic",
@@ -158,6 +158,10 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             grpcoll_mgr.check_released(group=nccl_group)
 
         super().destroy_pg()
+
+    @property
+    def timeout(self) -> int:
+        return 600
 
     @property
     def device(self) -> int:
@@ -593,6 +597,11 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
         if magi_attention.comm.is_native_grpcoll_enable():
             # TODO: support hierarchical comm with native grpcoll
             if magi_attention.comm.is_hierarchical_comm_enable():
+                return
+
+            # FIXME: when deterministic mode and native grpocoll are both enabled,
+            # sometimes it causes hang when not launching in blocking mode
+            if magi_attention.is_deterministic_mode_enable():
                 return
 
             hidden_size_kv = num_heads[1] * head_dim

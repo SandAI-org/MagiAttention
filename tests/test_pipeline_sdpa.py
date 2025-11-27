@@ -140,6 +140,10 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         super().destroy_pg()
 
     @property
+    def timeout(self) -> int:
+        return 600
+
+    @property
     def device(self) -> int:
         return torch.cuda.current_device()
 

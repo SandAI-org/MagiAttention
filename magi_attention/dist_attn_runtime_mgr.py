@@ -333,6 +333,24 @@ class DistAttnRuntimeDict(OrderedDict):
         return next(reversed(self.keys()))
 
 
+def check_flag_comb() -> None:
+    """Check some invalid flag combinations"""
+
+    if magi_attention.comm.is_hierarchical_comm_enable():
+        assert (  # TODO
+            not magi_attention.comm.is_qo_comm_enable()
+        ), "Hierarchical comm is not compatible with qo comm for now"
+
+        assert (  # TODO
+            not magi_attention.comm.is_native_grpcoll_enable()
+        ), "Hierarchical comm is not compatible with native grpcoll for now"
+
+    if magi_attention.comm.is_native_grpcoll_enable():
+        assert (  # FIXME
+            not magi_attention.is_deterministic_mode_enable()
+        ), "Native grpcoll is not compatible with deterministic mode for now"
+
+
 def init_dist_attn_runtime_key(
     q_ranges: AttnRanges,
     k_ranges: AttnRanges,
@@ -345,14 +363,7 @@ def init_dist_attn_runtime_key(
     cp_mesh: DeviceMesh | None,
     dist_attn_config: DistAttnConfig,
 ) -> DistAttnRuntimeKey:
-    if magi_attention.comm.is_hierarchical_comm_enable():
-        assert (
-            not magi_attention.comm.is_qo_comm_enable()
-        ), "Hierarchical comm is not compatible with qo comm for now"
-
-        assert (
-            not magi_attention.comm.is_native_grpcoll_enable()
-        ), "Hierarchical comm is not compatible with native grpcoll for now"
+    check_flag_comb()
 
     return DistAttnRuntimeKey(
         q_ranges=q_ranges,
