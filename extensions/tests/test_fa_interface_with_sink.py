@@ -40,7 +40,7 @@ from magi_attention.testing.precision import (
 from magi_attention.utils import get_attn_mask_from_ffa_args
 
 # isort: split
-from extensions.fa2_interface_with_sink import (
+from magi_attn_extensions.fa2_interface_with_sink import (
     fa2_func_with_sink,
     fa2_kvpacked_func_with_sink,
     fa2_qkvpacked_func_with_sink,
@@ -48,7 +48,7 @@ from extensions.fa2_interface_with_sink import (
     fa2_varlen_kvpacked_func_with_sink,
     fa2_varlen_qkvpacked_func_with_sink,
 )
-from extensions.fa3_interface_with_sink import (
+from magi_attn_extensions.fa3_interface_with_sink import (
     fa3_func_with_sink,
     fa3_qkvpacked_func_with_sink,
     fa3_varlen_func_with_sink,

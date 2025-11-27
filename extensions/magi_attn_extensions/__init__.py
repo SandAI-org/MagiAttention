@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .fa2_interface_with_sink import (
+    fa2_func_with_sink,
+    fa2_kvpacked_func_with_sink,
+    fa2_qkvpacked_func_with_sink,
+    fa2_varlen_func_with_sink,
+    fa2_varlen_kvpacked_func_with_sink,
+    fa2_varlen_qkvpacked_func_with_sink,
+)
 from .fa3_interface_with_sink import (
     fa3_func_with_sink,
     fa3_qkvpacked_func_with_sink,
@@ -19,7 +27,15 @@ from .fa3_interface_with_sink import (
 )
 
 __all__ = [
+    "fa2_func_with_sink",
+    "fa2_qkvpacked_func_with_sink",
+    "fa2_kvpacked_func_with_sink",
+    "fa2_varlen_func_with_sink",
+    "fa2_varlen_qkvpacked_func_with_sink",
+    "fa2_varlen_kvpacked_func_with_sink",
     "fa3_func_with_sink",
     "fa3_varlen_func_with_sink",
     "fa3_qkvpacked_func_with_sink",
 ]
+
+__version__ = "1.0.0"
