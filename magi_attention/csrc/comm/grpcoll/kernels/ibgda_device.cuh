@@ -122,13 +122,13 @@ DEVICE_INLINE static nvshmemi_ibgda_device_state_t* ibgda_get_state() {
   return &nvshmemi_ibgda_device_state_d;
 }
 
-DEVICE_INLINE static nvshmemi_ibgda_device_state_t* ibgda_get_qps_per_rank() {
+DEVICE_INLINE static int ibgda_get_qps_per_rank() {
   return ibgda_get_state()->num_rc_per_pe * ibgda_get_state()->num_devices_initialized;
 }
 
 DEVICE_INLINE static nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
   auto state = ibgda_get_state();
-  const auto qps_per_rank = bgda_get_qps_per_rank();
+  const auto qps_per_rank = ibgda_get_qps_per_rank();
   return &state->globalmem.rcs[pe * qps_per_rank + id % qps_per_rank];
 }
 
