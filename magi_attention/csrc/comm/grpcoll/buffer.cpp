@@ -442,7 +442,7 @@ Buffer::intranode_group_cast(
   auto rank_prefix_matrix = torch::Tensor();
   auto channel_prefix_matrix = torch::Tensor();
 
-  // Barrier or send sizes
+  // Notify
   int num_memset_int = num_channels * num_ranks * 4; // clean channel start/end offset, head and tail
   if (cached_mode) {
     num_recv_tokens = cached_num_recv_tokens;
@@ -462,12 +462,11 @@ Buffer::intranode_group_cast(
     rank_prefix_matrix = torch::empty({num_ranks, num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
     channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
 
-    // Send sizes
-    // Meta information:
-    //  - Size prefix by ranks, shaped as `[num_ranks, num_ranks]`
-    // NOTES: no more token dropping in this version
+    // Reset the pinned counter to `-1`
     *grpcoll_recv_counter = -1;
-    // TODO: make notify_group_cast an individual buffer API
+
+    // Notify to clean the buffer, switch meta data and calculate meta tensors
+    // TODO: make `notify_group_cast` an individual buffer API
     // to allow notifying in advance to enable cache mode amap
     intranode::notify_group_cast(
         /*num_tokens_per_rank=*/num_tokens_per_rank->data_ptr<int>(),
@@ -1029,7 +1028,7 @@ Buffer::internode_group_cast(
   auto gbl_channel_prefix_matrix = torch::Tensor();
   auto recv_gbl_rank_prefix_sum = torch::Tensor();
 
-  // Barrier or send sizes
+  // Notify
   if (cached_mode) {
     num_recv_tokens = cached_num_recv_tokens;
     num_rdma_recv_tokens = cached_num_rdma_recv_tokens;
@@ -1073,7 +1072,8 @@ Buffer::internode_group_cast(
     for (int i = 0; i < num_local_experts; ++i)
       moe_recv_expert_counter[i] = -1;
 
-    // Notify to switch some meta data prepared for group cast
+    // Notify to clean RDMA/NVL buffers, switch meta data and calculate meta tensors for group cast
+    // as well as set the pinned counters
     internode::notify_dispatch(
         /*num_tokens_per_rank=*/num_tokens_per_rank->data_ptr<int>(),
         /*grpcoll_recv_counter_mapped=*/grpcoll_recv_counter_mapped,
@@ -1104,8 +1104,11 @@ Buffer::internode_group_cast(
         /*num_nvl_bytes=*/num_nvl_bytes,
         /*low_latency_mode=*/low_latency_mode);
 
-    // TODO: provide the args to let user provide num_recv_tokens and num_rdma_recv_tokens to avoid CPU sync here
     // Synchronize total received tokens and tokens per expert
+    // by let CPU wait for the pinned counters to be set
+    // TODO: when `recv_x_buf` is provided, we can use its dim0 for `num_recv_tokens`
+    // however, we still don't know `num_rdma_recv_tokens` to avoid CPU sync
+    // one possible solution is to let user provide it, but had better find a better way
     auto start_time = std::chrono::high_resolution_clock::now();
     while (true) {
       // Read total count
