@@ -702,7 +702,7 @@ struct ReduceMin {
   }
 };
 
-// Unified reduction function
+// Unified warp reduce function for the given op and given dtype
 template <uint32_t kNumLanes, typename T, typename Op>
 DEVICE_INLINE T warp_reduce(T value, Op op) {
   GRPCOLL_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or kNumLanes == 4 or kNumLanes == 2 or kNumLanes == 1, "Invalid number of lanes");
@@ -840,6 +840,13 @@ DEVICE_INLINE vec_dtype_t vec_downcast(vec_dtype_t* vec_ptr) {
   }
 
   return downcast_val_vec;
+}
+
+template <typename dtype_t>
+DEVICE_INLINE void make_prefix_sum(dtype_t* ptr, int n) {
+#pragma unroll
+  for (int i = 1; i < n; ++i)
+    ptr[i] += ptr[i - 1];
 }
 
 constexpr float kFP8Margin = 1e-4;

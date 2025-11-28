@@ -152,7 +152,7 @@ DEVICE_INLINE void wait_all_inflight_wrs_finished(const int num_threads, const i
 
 template <bool kLowLatencyMode, bool kSyncOnly = false>
 DEVICE_INLINE void barrier_all(const int thread_id, const nvshmem_team_t rdma_team, int** barrier_signal_ptrs, const int nvl_rank) {
-  if (thread_id == WARP_SIZE)
+  if (thread_id == WARP_SIZE) // NOTES: we need at least 2 warps
     nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
   barrier_block<NUM_MAX_NVL_PEERS, kSyncOnly>(barrier_signal_ptrs, nvl_rank);
 }
@@ -192,10 +192,20 @@ __global__ void notify_dispatch(
   constexpr int kNumWarps = kNumThreads / WARP_SIZE;
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const auto num_rdma_experts = num_experts / kNumRDMARanks, num_nvl_experts = num_rdma_experts / NUM_MAX_NVL_PEERS;
-  GRPCOLL_STATIC_ASSERT(kNumWarps > 1, "Too few warps");
-  GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
+  GRPCOLL_STATIC_ASSERT(kNumWarps > 1, "Too few warps"); // for `barrier_all`
+  GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= kNumThreads, "Invalid number of NVL peers");
 
-  if (sm_id == 0) { // the first SM is responsible to wait all previous inflight WRs finished, clean the RDMA/NVL buffer and switch meta data with other RDMA/NVL peers
+  /** NOTE:
+   * The first SM is responsible to:
+   *  1. wait all previous inflight WRs finished,
+   *  2. clean the RDMA/NVL buffer,
+   *  3. and switch meta data with other RDMA/NVL peers
+   *  4. calculate meta tensors `recv_rdma_rank_prefix_sum` and `recv_gbl_rank_prefix_sum`
+   *
+   * The other SMs each are responsible for one RDMA peer to:
+   *  1. calculate meta tensors `rdma_channel_prefix_matrix` and `gbl_channel_prefix_matrix`
+   */
+  if (sm_id == 0) {
     // Wait until all previous inflight WRs for each QP of each RDMA peer are finished
     wait_all_inflight_wrs_finished<kLowLatencyMode>(kNumThreads, thread_id, kNumRDMARanks, rdma_rank, nvl_rank);
 
@@ -282,7 +292,6 @@ __global__ void notify_dispatch(
     //      `nvl_recv_num_tokens_per_rank[p][r]`: the number of tokens received from RDMA rank `r` via NVL rank `p` to this NVL rank
     //  `nvl_recv_num_tokens_per_expert`: shape=(NUM_MAX_NVL_PEERS, num_nvl_experts), dtype=int
     //      `nvl_recv_num_tokens_per_expert[p][e]`: the number of tokens received from all via NVL rank `p` to local expert `e` in this NVL rank
-    GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= kNumThreads, "Invalid number of NVL peers");
     auto nvl_recv_buffer = buffer_ptrs[nvl_rank], nvl_send_buffer = thread_id < NUM_MAX_NVL_PEERS ? buffer_ptrs[thread_id] : nullptr;
     auto nvl_reduced_num_tokens_per_expert = Buffer<int>(nvl_recv_buffer, /*num_elems=*/num_rdma_experts).advance_also(nvl_send_buffer);
     auto nvl_send_num_tokens_per_rank = AsymBuffer<int>(nvl_send_buffer, /*num_elems=*/kNumRDMARanks, /*num_ranks=*/NUM_MAX_NVL_PEERS);
@@ -372,53 +381,56 @@ __global__ void notify_dispatch(
     // Barrier all finally
     barrier_all<kLowLatencyMode, /*kSyncOnly=*/false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
   } else {
-    // Calculate meta data
-    int dst_rdma_rank = sm_id - 1;
-    for (int channel_id = warp_id; channel_id < num_channels; channel_id += kNumWarps) {
+    const int dst_rdma_rank = sm_id - 1;
+
+    // Iterate over channels to calculate number of send tokens for each channel of dst RDMA peer
+    // and initialize `gbl_channel_prefix_matrix` and `rdma_channel_prefix_matrix`
+    GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
+    for (int channel_id = warp_id; channel_id < num_channels; channel_id += kNumWarps) { // each warp for one channel
       int token_start_idx, token_end_idx;
       get_channel_task_range(num_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
-      // Iterate over tokens
-      int total_count = 0, per_nvl_rank_count[NUM_MAX_NVL_PEERS] = {0};
-      for (int64_t i = token_start_idx + lane_id; i < token_end_idx; i += WARP_SIZE) {
+      // Iterate over tokens for this channel
+      // each lane gets partial number of tokens sent to each NVL rank in the dst RDMA node to `count_per_nvl_rank`
+      // as well as the total number to `count_all_nvl_ranks` for part of tokens in this channel
+      int count_all_nvl_ranks = 0, count_per_nvl_rank[NUM_MAX_NVL_PEERS] = {0};
+      for (int64_t i = token_start_idx + lane_id; i < token_end_idx; i += WARP_SIZE) { // each lane for one token
         auto is_token_in_rank_uint64 = *reinterpret_cast<const uint64_t*>(is_token_in_rank + i * num_ranks + dst_rdma_rank * NUM_MAX_NVL_PEERS);
         auto is_token_in_rank_values = reinterpret_cast<const bool*>(&is_token_in_rank_uint64);
 #pragma unroll
         for (int j = 0; j < NUM_MAX_NVL_PEERS; ++j)
-          per_nvl_rank_count[j] += is_token_in_rank_values[j];
-        total_count += (is_token_in_rank_uint64 != 0);
+          count_per_nvl_rank[j] += is_token_in_rank_values[j];
+        count_all_nvl_ranks += (is_token_in_rank_uint64 != 0); // NOTES: one `uint64_t` is 8 bytes to cover 8 bools for 8 NVL peers
       }
 
-      // Warp reduce
-      total_count = warp_reduce_sum(total_count);
+      // Warp reduce `count_per_nvl_rank` and `count_all_nvl_ranks` for this channel
+      count_all_nvl_ranks = warp_reduce_sum(count_all_nvl_ranks);
 #pragma unroll
-      for (int i = 0; i < NUM_MAX_NVL_PEERS; ++i)
-        per_nvl_rank_count[i] = warp_reduce_sum(per_nvl_rank_count[i]);
+      for (int r = 0; r < NUM_MAX_NVL_PEERS; ++r)
+        count_per_nvl_rank[r] = warp_reduce_sum(count_per_nvl_rank[r]);
 
-      // Write into channel matrix
+      // Write `count_per_nvl_rank` and `count_all_nvl_ranks` into channel matrix by lane0
+      //  `gbl_channel_prefix_matrix`: shape=(kNumRanks, kNumChannels), dtype=int
+      //  `rdma_channel_prefix_matrix`: shape=(kNumRDMARanks, kNumChannels), dtype=int
       if (lane_id == 0) {
 #pragma unroll
-        for (int i = 0; i < NUM_MAX_NVL_PEERS; ++i)
-          gbl_channel_prefix_matrix[(dst_rdma_rank * NUM_MAX_NVL_PEERS + i) * num_channels + channel_id] = per_nvl_rank_count[i];
-        rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id] = total_count;
+        for (int r = 0; r < NUM_MAX_NVL_PEERS; ++r)
+          gbl_channel_prefix_matrix[(dst_rdma_rank * NUM_MAX_NVL_PEERS + r) * num_channels + channel_id] = count_per_nvl_rank[r];
+        rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id] = count_all_nvl_ranks;
       }
     }
-
-    // Calculate prefix sum
     __syncthreads();
+
+    // Make `rdma_channel_prefix_matrix` prefix-summed
     if (thread_id == 0) {
       auto prefix_row = rdma_channel_prefix_matrix + dst_rdma_rank * num_channels;
-#pragma unroll
-      for (int i = 1; i < num_channels; ++i)
-        prefix_row[i] += prefix_row[i - 1];
+      make_prefix_sum(prefix_row, num_channels);
     }
 
-    GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= WARP_SIZE, "Invalid number of NVL peers");
+    // Make `gbl_channel_prefix_matrix` prefix-summed
     if (thread_id < NUM_MAX_NVL_PEERS) {
       auto prefix_row = gbl_channel_prefix_matrix + (dst_rdma_rank * NUM_MAX_NVL_PEERS + thread_id) * num_channels;
-#pragma unroll
-      for (int i = 1; i < num_channels; ++i)
-        prefix_row[i] += prefix_row[i - 1];
+      make_prefix_sum(prefix_row, num_channels);
     }
   }
 }
@@ -1512,6 +1524,7 @@ void cached_notify(
   GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
   GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
   GRPCOLL_HOST_ASSERT(num_sms > 3); // REVIEW: why num_sms > 3 ?
+  GRPCOLL_HOST_ASSERT(num_warps > 1); // for `barrier_all`
   if (!is_cached_dispatch) {
     // for rdma head reset before combine
     GRPCOLL_HOST_ASSERT(num_warps >= num_channels);
