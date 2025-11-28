@@ -610,6 +610,13 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
 
                 if sparse_load:
+                    is_all_full_mask = attn_type_map is None or (
+                        (attn_type_map == 0).any().item()
+                    )
+                    if not is_all_full_mask:
+                        raise NotImplementedError(
+                            "Sparse load only supports full attention for each Q/K range!"
+                        )
                     tile_size = 128  # tile size (number of tokens) for sparse load K/V from gmem to smem
                     # calculate the sum of K ranges of unique Q range，ceil_div(tile_size) to get the loop count of sparse load
                     # shape = (unique_count, )
@@ -620,7 +627,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     if ref_block_size is not None:
                         ref_block_size = (ref_block_size[0], tile_size)
                     else:
-                        ref_block_size = (64, tile_size)
+                        ref_block_size = (128, tile_size)
                 else:
                     sparse_load_loop_count = None
         else:

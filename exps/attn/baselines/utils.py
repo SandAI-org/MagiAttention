@@ -47,6 +47,13 @@ def block_sparse_available(
     """
     Check availability of different block sparse attention implementations.
     """
+    if attn_impl == "flashinfer":
+        # flashinfer doesn't support backward
+        return wd == "fwd"
+
+    if attn_impl == "ffa" or attn_impl == "flex":
+        return True
+
     if q_block_size == k_block_size:  # equal block size
         if attn_impl == "vsa" or attn_impl == "vsa_triton":
             # currently vsa only supports block size == 64
@@ -56,13 +63,6 @@ def block_sparse_available(
             return (
                 wd == "fwd" and q_block_size == 128
             )  # only support forward and 128 block size
-
-    if attn_impl == "flashinfer":
-        # flashinfer doesn't support backward
-        return wd == "fwd"
-
-    if attn_impl == "ffa" or attn_impl == "flex":
-        return True
 
     return False
 
