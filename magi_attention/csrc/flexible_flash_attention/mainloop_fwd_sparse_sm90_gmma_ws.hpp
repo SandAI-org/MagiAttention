@@ -433,7 +433,7 @@ struct CollectiveMainloopSparseFwdSm90 {
             break;
           } else {
             cur_k_range_indices[0] += 1;
-            cnt += (seqlen_k - cur_k_range_indices[0]);
+            cnt += (seqlen_k - cur_k_range_inner_indices[0]);
             cur_k_range_inner_indices[0] = 0;
             // k_range out-of-bounds
             if (bidb + cur_k_range_indices[0] >= end_batches) {
@@ -1016,6 +1016,13 @@ struct CollectiveMainloopSparseFwdSm90 {
     // launch Q @ K of n_block and wait for it to finish
     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
     warpgroup_wait<0>();
+    // if (block_meta.bidb == 0 && block_meta.m_block == 0 && thread_idx == 0) {
+    //     printf("============================================ tSrS m_block: %d ==============================\n", block_meta.m_block);
+    //     print_tensor(tSrS);
+    //     printf("============================================ tSrS m_block: %d ==============================\n", block_meta.m_block);
+    // }
+
+    // TODO: boundary_mask
 
     // The first block of k has been consumed, notify producer that this buffer can be reused
     consumer_release(pipeline_k, smem_pipe_read_k);
