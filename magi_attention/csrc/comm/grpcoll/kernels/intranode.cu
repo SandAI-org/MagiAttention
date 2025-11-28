@@ -373,7 +373,7 @@ void group_cast_kernel(
       while (lane_id == 0) { // the lane0 in this warp
         // Load channel head idx stored by the receiver
         // NOTES: the head idxs received by each warp for the responsible rank might not be the same
-        int num_used_slots = cached_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile
+        int num_used_slots = cached_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile load
 
         // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
         if (num_used_slots <= max_num_used_slots_in_queue)
@@ -501,9 +501,9 @@ void group_cast_kernel(
 
     // Load non-empty channel start/end offset stored by the sender by lane0 in each warp
     int total_offset, num_tokens_to_recv;
-    while (lane_id == 0 and (total_offset = ld_volatile_global(channel_start_offset.buffer())) == 0) // volatile
+    while (lane_id == 0 and (total_offset = ld_volatile_global(channel_start_offset.buffer())) == 0) // volatile load
       ;
-    while (lane_id == 0 and (num_tokens_to_recv = ld_volatile_global(channel_end_offset.buffer())) == 0) // volatile
+    while (lane_id == 0 and (num_tokens_to_recv = ld_volatile_global(channel_end_offset.buffer())) == 0) // volatile load
       ;
     if (lane_id == 0) {
       // Recover the real channel start/end offset from the code by `-code - 1`
@@ -1118,7 +1118,7 @@ void group_reduce_kernel(
       while (lane_id == 0) { // the lane0 in this warp
         // Load channel head idx stored by the receiver
         // NOTES: the head idxs received by each warp for the responsible rank might not be the same
-        int num_used_slots = current_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile
+        int num_used_slots = current_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile load
 
         // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
         if (num_used_slots <= max_num_used_slots_in_queue)

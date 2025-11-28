@@ -35,11 +35,11 @@ class GrpCollIntraHandle(GrpCollHandle):
 
     rank_prefix_matrix: shape=[num_ranks, num_ranks]:
         rank_prefix_matrix[:, r]: the prefix sum of number of tokens (i.e. end idxs)
-        sent by each rank to rank r calculated in notify_dispatch
+        sent by each rank to rank r calculated in notify stage
 
     channel_prefix_matrix: shape=[num_ranks, num_channels]:
         channel_prefix_matrix[r, :]: the prefix sum of send token end idxs
-        sent by each send-channel to rank r calculated in notify_dispatch
+        sent by each send-channel to rank r calculated in notify stage
 
     recv_channel_prefix_matrix: shape=[num_ranks, num_channels]:
         recv_channel_prefix_matrix[r, :]: the prefix sum of recv token start idxs
@@ -84,18 +84,18 @@ class GrpCollInterHandle(GrpCollHandle):
 
     rdma_channel_prefix_matrix: shape=[num_rdma_ranks, num_channels]:
         rdma_channel_prefix_matrix[r, :]: the prefix sum of send token end idxs sent by
-        each send-channel to rdma rank r calculated in notify_dispatch
+        each send-channel to rdma rank r calculated in notify stage
 
     gbl_channel_prefix_matrix: shape=[num_ranks, num_channels]:
         gbl_channel_prefix_matrix[r, :]: the prefix sum of send token end idxs sent by
-        each send-channel to rank r calculated in notify_dispatch
+        each send-channel to rank r calculated in notify stage
 
     recv_rdma_channel_prefix_matrix: shape=[num_rdma_ranks, num_channels]:
         recv_rdma_channel_prefix_matrix[r, :]: the prefix sum of recv token end idxs recv by
         each recv-channel from rdma rank r
 
     recv_rdma_rank_prefix_sum: shape=[num_rdma_ranks,]:
-        the prefix sum of the number of tokens to recv from each rdma rank calculated in notify_dispatch
+        the prefix sum of the number of tokens to recv from each rdma rank calculated in notify stage
 
     recv_gbl_channel_prefix_matrix: shape=[num_ranks, num_channels]:
         recv_gbl_channel_prefix_matrix[r, :]: the prefix sum of recv token start idxs recv by
@@ -105,7 +105,7 @@ class GrpCollInterHandle(GrpCollHandle):
 
     recv_gbl_rank_prefix_sum: shape=[num_ranks,]:
         the prefix sum of the number of tokens to recv from each global rank,
-        thus recv_gbl_rank_prefix_sum[-1] == num_recv_tokens calculated in notify_dispatch
+        thus recv_gbl_rank_prefix_sum[-1] == num_recv_tokens calculated in notify stage
 
     recv_src_meta: shape=[num_recv_tokens, sizeof(internode::SourceMeta)=8]:
         the source meta for each recv token,

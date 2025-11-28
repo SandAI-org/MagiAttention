@@ -130,7 +130,7 @@ HOST_DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
 }
 
 template <bool kLowLatencyMode>
-DEVICE_INLINE int translate_dst_rdma_rank(const int dst_rdma_rank, const int nvl_rank) {
+DEVICE_INLINE int get_dst_rdma_rank(const int dst_rdma_rank, const int nvl_rank) {
   return kLowLatencyMode ? (dst_rdma_rank * NUM_MAX_NVL_PEERS + nvl_rank) : dst_rdma_rank;
 }
 
@@ -145,7 +145,7 @@ DEVICE_INLINE void wait_all_inflight_wrs_finished(const int num_threads, const i
   for (int i = thread_id; i < qps_per_rdma_rank * (num_rdma_ranks - 1); i += num_threads) {
     auto dst_rdma_rank = (i / qps_per_rdma_rank + rdma_rank + 1) % num_rdma_ranks;
     auto qp_id = i % qps_per_rdma_rank;
-    nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), qp_id);
+    nvshmemi_ibgda_quiet(get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), qp_id);
   }
   __syncthreads();
 }
@@ -193,86 +193,104 @@ __global__ void notify_dispatch(
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const auto num_rdma_experts = num_experts / kNumRDMARanks, num_nvl_experts = num_rdma_experts / NUM_MAX_NVL_PEERS;
   GRPCOLL_STATIC_ASSERT(kNumWarps > 1, "Too few warps");
-  GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= kNumThreads, "Invalid number of RDMA peers");
-  GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= kNumThreads, "Invalid number of NVL peers");
   GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
 
-  if (sm_id == 0) { // the first SM is responsible to wait all previous inflight WRs finished and then clean the RDMA/NVL buffer
-    // Global barrier: the first warp does intra-node sync, the second warp does internode sync
-
-    // Wait until all previous inflight WRs for each QP of each RDMA peer rank are finished
+  if (sm_id == 0) { // the first SM is responsible to wait all previous inflight WRs finished, clean the RDMA/NVL buffer and switch meta data with other RDMA/NVL peers
+    // Wait until all previous inflight WRs for each QP of each RDMA peer are finished
     wait_all_inflight_wrs_finished<kLowLatencyMode>(kNumThreads, thread_id, kNumRDMARanks, rdma_rank, nvl_rank);
 
     // Barrier all first
-    barrier_all<kLowLatencyMode, true>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
+    barrier_all<kLowLatencyMode, /*kSyncOnly=*/true>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
 
-    // Send numbers of tokens per rank/expert to RDMA ranks
+    // Get RDMA symmetric buffer
+    // `meta_elems_per_rdma_rank_int`:
+    //  1. first `NUM_MAX_NVL_PEERS` elems: number of send/recv tokens for each NVL rank in this node
+    //  2. next `num_rdma_experts` elems: number of send/recv tokens for each expert in this node
+    //  3. last `1` elem: total number of send/recv tokens for this node
     auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
-    auto rdma_recv_num_tokens_mixed = SymBuffer<int>(rdma_buffer_ptr, NUM_MAX_NVL_PEERS + num_rdma_experts + 1, kNumRDMARanks);
+    const int meta_elems_per_rdma_rank_int = NUM_MAX_NVL_PEERS + num_rdma_experts + 1;
+    auto rdma_recv_num_tokens_mixed = SymBuffer<int, true>(rdma_buffer_ptr, /*num_elems=*/meta_elems_per_rdma_rank_int, /*num_ranks=*/kNumRDMARanks);
 
-    // Clean up for later data dispatch
+    // Clean up RDMA buffer of this rank for later meta data switch
     GRPCOLL_DEVICE_ASSERT(rdma_recv_num_tokens_mixed.total_bytes <= rdma_clean_offset * sizeof(int));
 #pragma unroll
     for (int i = thread_id; i < rdma_num_int_clean; i += kNumThreads)
       rdma_buffer_ptr_int[rdma_clean_offset + i] = 0;
 
-// Copy to send buffer
+    // Copy send meta data of this RDMA rank to its local send buffer
+    //  `num_tokens_per_rank`: shape=(num_ranks,), dtype=int
+    //  `num_tokens_per_expert`: shape=(num_experts,), dtype=int
+    //  `num_tokens_per_rdma_rank`: shape=(kNumRDMARanks,), dtype=int
+    //  `rdma_recv_num_tokens_mixed.send_buffer/recv_buffer`: shape=(kNumRDMARanks, meta_elems_per_rdma_rank_int), dtype=int
+    GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= kNumThreads, "Invalid number of RDMA peers");
 #pragma unroll
-    for (int i = thread_id; i < num_ranks; i += kNumThreads)
-      rdma_recv_num_tokens_mixed.send_buffer(i / NUM_MAX_NVL_PEERS)[i % NUM_MAX_NVL_PEERS] = num_tokens_per_rank[i];
+    for (int r = thread_id; r < num_ranks; r += kNumThreads)
+      rdma_recv_num_tokens_mixed.send_buffer(r / NUM_MAX_NVL_PEERS)[r % NUM_MAX_NVL_PEERS] = num_tokens_per_rank[r];
 #pragma unroll
-    for (int i = thread_id; i < num_experts; i += kNumThreads)
-      rdma_recv_num_tokens_mixed.send_buffer(i / num_rdma_experts)[NUM_MAX_NVL_PEERS + i % num_rdma_experts] = num_tokens_per_expert[i];
+    for (int e = thread_id; e < num_experts; e += kNumThreads)
+      rdma_recv_num_tokens_mixed.send_buffer(e / num_rdma_experts)[NUM_MAX_NVL_PEERS + e % num_rdma_experts] = num_tokens_per_expert[e];
     if (thread_id < kNumRDMARanks)
       rdma_recv_num_tokens_mixed.send_buffer(thread_id)[NUM_MAX_NVL_PEERS + num_rdma_experts] = num_tokens_per_rdma_rank[thread_id];
     __syncthreads();
 
-    // Issue send
-    // TODO: more light fence or barrier or signaling
-    // TODO: overlap EP barrier and NVL cleaning
-    for (int i = warp_id; i < kNumRDMARanks; i += kNumWarps) {
-      if (i != rdma_rank) {
-        nvshmemi_ibgda_put_nbi_warp<true>(
-            reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank)),
-            reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.send_buffer(i)),
-            (NUM_MAX_NVL_PEERS + num_rdma_experts + 1) * sizeof(int),
-            translate_dst_rdma_rank<kLowLatencyMode>(i, nvl_rank),
-            0,
-            lane_id,
-            0);
-      } else {
+    // Copy send meta data of this RDMA rank from its local send buffer
+    // to the remote recv buffer of each RDMA peer
+    for (int r = warp_id; r < kNumRDMARanks; r += kNumWarps) {
+      if (r != rdma_rank) { // r is RDMA peer, then copy through nvshmem
+        nvshmemi_ibgda_put_nbi_warp</*kAlwaysDoPostSend=*/true>(
+            /*req_rptr=*/reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank)),
+            /*req_lptr=*/reinterpret_cast<uint64_t>(rdma_recv_num_tokens_mixed.send_buffer(r)),
+            /*bytes=*/meta_elems_per_rdma_rank_int * sizeof(int),
+            /*dst_pe=*/get_dst_rdma_rank<kLowLatencyMode>(r, nvl_rank),
+            /*qp_id=*/0,
+            /*lane_id=*/lane_id,
+            /*message_idx=*/0);
+      } else { // r is this RDMA rank, then copy through p2p
         UNROLLED_WARP_COPY(
-            1,
-            lane_id,
-            NUM_MAX_NVL_PEERS + num_rdma_experts + 1,
-            rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank),
-            rdma_recv_num_tokens_mixed.send_buffer(i),
-            ld_volatile_global,
-            st_na_global);
+            /*UNROLL_FACTOR=*/1,
+            /*LANE_ID=*/lane_id,
+            /*N=*/meta_elems_per_rdma_rank_int,
+            /*DST=*/rdma_recv_num_tokens_mixed.recv_buffer(rdma_rank),
+            /*SRC=*/rdma_recv_num_tokens_mixed.send_buffer(r),
+            /*LD_FUNC=*/ld_volatile_global, // volatile load
+            /*ST_FUNC=*/st_na_global // non-cached store
+        );
       }
     }
     __syncthreads();
 
-    // Wait previous operations to be finished
+    // Wait all previous RDMA copies finished
+    // TODO: more light fence or barrier or signaling
     if (thread_id < kNumRDMARanks and thread_id != rdma_rank)
-      nvshmemi_ibgda_quiet(translate_dst_rdma_rank<kLowLatencyMode>(thread_id, nvl_rank), 0);
+      nvshmemi_ibgda_quiet(/*dst_pe=*/get_dst_rdma_rank<kLowLatencyMode>(thread_id, nvl_rank), /*qp_id=*/0);
     __syncthreads();
 
-    // Barrier
+    // Barrier RDMA team
+    // TODO: overlap RDMA barrier and NVL cleaning
     if (thread_id == 0)
       nvshmem_sync_with_same_gpu_idx<kLowLatencyMode>(rdma_team);
     __syncthreads();
 
-    // NVL buffers
-    auto nvl_send_buffer = thread_id < NUM_MAX_NVL_PEERS ? buffer_ptrs[thread_id] : nullptr;
-    auto nvl_recv_buffer = buffer_ptrs[nvl_rank];
-    auto nvl_reduced_num_tokens_per_expert = Buffer<int>(nvl_recv_buffer, num_rdma_experts).advance_also(nvl_send_buffer);
-    auto nvl_send_num_tokens_per_rank = AsymBuffer<int>(nvl_send_buffer, kNumRDMARanks, NUM_MAX_NVL_PEERS);
-    auto nvl_send_num_tokens_per_expert = AsymBuffer<int>(nvl_send_buffer, num_nvl_experts, NUM_MAX_NVL_PEERS);
-    auto nvl_recv_num_tokens_per_rank = AsymBuffer<int>(nvl_recv_buffer, kNumRDMARanks, NUM_MAX_NVL_PEERS);
-    auto nvl_recv_num_tokens_per_expert = AsymBuffer<int>(nvl_recv_buffer, num_nvl_experts, NUM_MAX_NVL_PEERS);
+    // Get NVL buffers, sending buffer for dst NVL peer, and receiving buffer for this NVL rank
+    //  `nvl_reduced_num_tokens_per_expert`: shape=(num_rdma_experts,), dtype=int
+    //      `nvl_reduced_num_tokens_per_expert[e]`: the number of tokens received from all to expert `e` in this node
+    //  `nvl_send_num_tokens_per_rank`: shape=(NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
+    //      `nvl_send_num_tokens_per_rank[nvl_rank][r]`: the number of tokens sent from RDMA rank `r` via this NVL rank
+    //  `nvl_send_num_tokens_per_expert`: shape=(NUM_MAX_NVL_PEERS, num_nvl_experts), dtype=int
+    //      `nvl_send_num_tokens_per_expert[nvl_rank][e]`: the number of tokens sent from all to local expert `e` via this NVL rank
+    //  `nvl_recv_num_tokens_per_rank`: shape=(NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
+    //      `nvl_recv_num_tokens_per_rank[p][r]`: the number of tokens received from RDMA rank `r` via NVL rank `p` to this NVL rank
+    //  `nvl_recv_num_tokens_per_expert`: shape=(NUM_MAX_NVL_PEERS, num_nvl_experts), dtype=int
+    //      `nvl_recv_num_tokens_per_expert[p][e]`: the number of tokens received from all via NVL rank `p` to local expert `e` in this NVL rank
+    GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= kNumThreads, "Invalid number of NVL peers");
+    auto nvl_recv_buffer = buffer_ptrs[nvl_rank], nvl_send_buffer = thread_id < NUM_MAX_NVL_PEERS ? buffer_ptrs[thread_id] : nullptr;
+    auto nvl_reduced_num_tokens_per_expert = Buffer<int>(nvl_recv_buffer, /*num_elems=*/num_rdma_experts).advance_also(nvl_send_buffer);
+    auto nvl_send_num_tokens_per_rank = AsymBuffer<int>(nvl_send_buffer, /*num_elems=*/kNumRDMARanks, /*num_ranks=*/NUM_MAX_NVL_PEERS);
+    auto nvl_send_num_tokens_per_expert = AsymBuffer<int>(nvl_send_buffer, /*num_elems=*/num_nvl_experts, /*num_ranks=*/NUM_MAX_NVL_PEERS);
+    auto nvl_recv_num_tokens_per_rank = AsymBuffer<int>(nvl_recv_buffer, /*num_elems=*/kNumRDMARanks, /*num_ranks=*/NUM_MAX_NVL_PEERS);
+    auto nvl_recv_num_tokens_per_expert = AsymBuffer<int>(nvl_recv_buffer, /*num_elems=*/num_nvl_experts, /*num_ranks=*/NUM_MAX_NVL_PEERS);
 
-    // Clean up for later data dispatch
+    // Clean up NVL buffer of this NVL rank for later meta data switch
     auto nvl_buffer_ptr_int = static_cast<int*>(buffer_ptrs[nvl_rank]);
     GRPCOLL_DEVICE_ASSERT(
         nvl_reduced_num_tokens_per_expert.total_bytes + nvl_send_num_tokens_per_rank.total_bytes + nvl_send_num_tokens_per_expert.total_bytes <=
@@ -281,66 +299,78 @@ __global__ void notify_dispatch(
     for (int i = thread_id; i < nvl_num_int_clean; i += kNumThreads)
       nvl_buffer_ptr_int[nvl_clean_offset + i] = 0;
 
-    // Reduce number of tokens per expert into the NVL send buffer
-    // TODO: may use NVSHMEM reduction
-    if (thread_id < num_rdma_experts) {
+    // Reduce number of received tokens per expert in this node from all
+    // and copy into `nvl_reduced_num_tokens_per_expert`
+    // TODO: maybe use NVSHMEM reduction
+    if (thread_id < num_rdma_experts) { // NOTES: we check `num_rdma_experts <= kNumThreads` in host
       int sum = 0;
 #pragma unroll
-      for (int i = 0; i < kNumRDMARanks; ++i)
-        sum += rdma_recv_num_tokens_mixed.recv_buffer(i)[NUM_MAX_NVL_PEERS + thread_id];
+      for (int r = 0; r < kNumRDMARanks; ++r)
+        sum += rdma_recv_num_tokens_mixed.recv_buffer(r)[NUM_MAX_NVL_PEERS + thread_id];
       nvl_reduced_num_tokens_per_expert[thread_id] = sum;
     }
     __syncthreads();
 
-    // Reduce RDMA received tokens
+    // Reduce (prefix-summed) number of received tokens from each RDMA peer to this RDMA rank
+    // and copy into `recv_rdma_rank_prefix_sum`: shape=(kNumRDMARanks,), dtype=int
+    // as well as the total received number to the pinned `moe_recv_rdma_counter` to notify the host
     if (thread_id == 0) {
       int sum = 0;
 #pragma unroll
-      for (int i = 0; i < kNumRDMARanks; ++i) {
-        sum += rdma_recv_num_tokens_mixed.recv_buffer(i)[NUM_MAX_NVL_PEERS + num_rdma_experts];
-        recv_rdma_rank_prefix_sum[i] = sum;
+      for (int r = 0; r < kNumRDMARanks; ++r) {
+        sum += rdma_recv_num_tokens_mixed.recv_buffer(r)[NUM_MAX_NVL_PEERS + num_rdma_experts];
+        recv_rdma_rank_prefix_sum[r] = sum;
       }
-      while (ld_volatile_global(moe_recv_rdma_counter_mapped) != -1)
+      while (ld_volatile_global(moe_recv_rdma_counter_mapped) != -1) // self-rotated wait for the counter reset by the host
         ;
       *moe_recv_rdma_counter_mapped = sum;
     }
 
-    // Send numbers of tokens per rank/expert to NVL ranks
+    // P2P-copy to remote `nvl_send_num_tokens_per_rank` and `nvl_send_num_tokens_per_expert`
+    // in NVL peer indicated by `thread_id`,
+    // which hold the number of tokens sent from each RDMA rank / local expert resp. via this NVL rank
     if (thread_id < NUM_MAX_NVL_PEERS) {
 #pragma unroll
-      for (int i = 0; i < kNumRDMARanks; ++i)
-        nvl_send_num_tokens_per_rank.buffer(nvl_rank)[i] = rdma_recv_num_tokens_mixed.recv_buffer(i)[thread_id];
+      for (int r = 0; r < kNumRDMARanks; ++r)
+        nvl_send_num_tokens_per_rank.buffer(nvl_rank)[r] = rdma_recv_num_tokens_mixed.recv_buffer(r)[thread_id];
 #pragma unroll
-      for (int i = 0; i < num_nvl_experts; ++i)
-        nvl_send_num_tokens_per_expert.buffer(nvl_rank)[i] = nvl_reduced_num_tokens_per_expert[thread_id * num_nvl_experts + i];
+      for (int e = 0; e < num_nvl_experts; ++e)
+        nvl_send_num_tokens_per_expert.buffer(nvl_rank)[e] = nvl_reduced_num_tokens_per_expert[thread_id * num_nvl_experts + e];
     }
-    barrier_block<NUM_MAX_NVL_PEERS>(barrier_signal_ptrs, nvl_rank);
 
-    // Reduce the number of tokens per rank/expert
+    // Barrier for NVL team and wait for all NVL meta data switch finished
+    barrier_block<NUM_MAX_NVL_PEERS, /*kSyncOnly=*/false>(barrier_signal_ptrs, nvl_rank);
+
+    // Reduce (prefix-summed) number of received tokens from each global rank to this rank
+    // and copy into `recv_gbl_rank_prefix_sum`: shape=(kNumRanks,), dtype=int
+    // as well as the total received number to the pinned `grpcoll_recv_counter` to notify the host
     if (thread_id == 0) {
       int sum = 0;
 #pragma unroll
-      for (int i = 0; i < num_ranks; ++i) {
-        int src_rdma_rank = i / NUM_MAX_NVL_PEERS, src_nvl_rank = i % NUM_MAX_NVL_PEERS;
+      for (int r = 0; r < num_ranks; ++r) {
+        int src_rdma_rank = r / NUM_MAX_NVL_PEERS, src_nvl_rank = r % NUM_MAX_NVL_PEERS;
         sum += nvl_recv_num_tokens_per_rank.buffer(src_nvl_rank)[src_rdma_rank];
-        recv_gbl_rank_prefix_sum[i] = sum;
+        recv_gbl_rank_prefix_sum[r] = sum;
       }
-      while (ld_volatile_global(grpcoll_recv_counter_mapped) != -1)
+      while (ld_volatile_global(grpcoll_recv_counter_mapped) != -1) // self-rotated wait for the counter reset by the host
         ;
       *grpcoll_recv_counter_mapped = sum;
     }
-    if (thread_id < num_nvl_experts) {
+
+    // Reduce number of received tokens for each local expert from all NVL ranks to this NVL rank
+    // and copy the total received number to the pinned `moe_recv_expert_counter` to notify the host
+    if (thread_id < num_nvl_experts) { // NOTES: we check `num_nvl_experts <= kNumThreads` in host
       int sum = 0;
 #pragma unroll
-      for (int i = 0; i < NUM_MAX_NVL_PEERS; ++i)
-        sum += nvl_recv_num_tokens_per_expert.buffer(i)[thread_id];
-      while (ld_volatile_global(moe_recv_expert_counter_mapped + thread_id) != -1)
+      for (int r = 0; r < NUM_MAX_NVL_PEERS; ++r)
+        sum += nvl_recv_num_tokens_per_expert.buffer(r)[thread_id];
+      while (ld_volatile_global(moe_recv_expert_counter_mapped + thread_id) != -1) // self-rotated wait for the counter reset by the host
         ;
       moe_recv_expert_counter_mapped[thread_id] = sum;
     }
 
     // Barrier all finally
-    barrier_all<kLowLatencyMode, false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
+    barrier_all<kLowLatencyMode, /*kSyncOnly=*/false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
   } else {
     // Calculate meta data
     int dst_rdma_rank = sm_id - 1;
@@ -640,7 +670,7 @@ void dispatch(
             reinterpret_cast<uint64_t>(rdma_channel_meta.recv_buffer(rdma_rank)),
             reinterpret_cast<uint64_t>(rdma_channel_meta.send_buffer(dst_rdma_rank)),
             sizeof(int) * (NUM_MAX_NVL_PEERS * 2 + 2),
-            translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
+            get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
             channel_id,
             lane_id,
             0);
@@ -840,8 +870,7 @@ void dispatch(
           const size_t num_bytes_per_msg = num_bytes_per_token * num_tokens_to_issue;
           const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * num_bytes_per_token);
           const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token);
-          nvshmemi_ibgda_put_nbi_warp<true>(
-              dst_ptr, src_ptr, num_bytes_per_msg, translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), channel_id, lane_id, 0);
+          nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr, src_ptr, num_bytes_per_msg, get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), channel_id, lane_id, 0);
         } else {
           // Lighter fence for local RDMA rank
           memory_fence();
@@ -855,7 +884,7 @@ void dispatch(
           nvshmemi_ibgda_amo_nonfetch_add(
               rdma_channel_tail.buffer(rdma_rank),
               num_tokens_to_issue,
-              translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
+              get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
               channel_id,
               dst_rdma_rank == rdma_rank);
         }
@@ -1063,7 +1092,7 @@ void dispatch(
         nvshmemi_ibgda_amo_nonfetch_add(
             rdma_channel_head.buffer(rdma_rank),
             min_head - last_head,
-            translate_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank),
+            get_dst_rdma_rank<kLowLatencyMode>(lane_id, nvl_rank),
             channel_id + num_channels,
             lane_id == rdma_rank);
         last_head = min_head;
@@ -1331,11 +1360,11 @@ __global__ void cached_notify(
   const auto nvl_rank = rank % NUM_MAX_NVL_PEERS, num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS, rdma_rank = rank / NUM_MAX_NVL_PEERS;
 
   if (sm_id == 0) { // the first SM is responsible to wait all previous inflight WRs finished and then clean the RDMA/NVL buffer
-    // Wait until all previous inflight WRs for each QP of each RDMA peer rank are finished
+    // Wait until all previous inflight WRs for each QP of each RDMA peer are finished
     wait_all_inflight_wrs_finished<kLowLatencyMode>(num_threads, thread_id, num_rdma_ranks, rdma_rank, nvl_rank);
 
     // Barrier all first
-    barrier_all<kLowLatencyMode, true>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
+    barrier_all<kLowLatencyMode, /*kSyncOnly=*/true>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
 
     // Clean RDMA buffer of this RDMA rank
     auto rdma_buffer_ptr_int = static_cast<int*>(rdma_buffer_ptr);
@@ -1352,7 +1381,7 @@ __global__ void cached_notify(
     __syncthreads();
 
     // Barrier all finally
-    barrier_all<kLowLatencyMode, false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
+    barrier_all<kLowLatencyMode, /*kSyncOnly=*/false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
   } else if (sm_id == 1) { // the second SM is responsible to reset the rdma head before combine
     // If this is a cached dispatch,
     // no need to reset the rdma head, just return
@@ -2080,8 +2109,7 @@ void combine(
             const size_t num_bytes_per_msg = num_chunked_tokens * num_bytes_per_token;
             const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + rdma_slot_idx * num_bytes_per_token);
             const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + rdma_slot_idx * num_bytes_per_token);
-            nvshmemi_ibgda_put_nbi_warp<true>(
-                dst_ptr, src_ptr, num_bytes_per_msg, translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), channel_id, lane_id, 0);
+            nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr, src_ptr, num_bytes_per_msg, get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank), channel_id, lane_id, 0);
           } else {
             memory_fence();
           }
@@ -2092,7 +2120,7 @@ void combine(
             nvshmemi_ibgda_amo_nonfetch_add(
                 rdma_channel_tail.buffer(rdma_rank),
                 num_chunked_tokens,
-                translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
+                get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
                 channel_id,
                 dst_rdma_rank == rdma_rank);
           }
@@ -2207,7 +2235,7 @@ void combine(
             nvshmemi_ibgda_amo_nonfetch_add(
                 rdma_channel_head.buffer(rdma_rank),
                 min_head - last_rdma_head,
-                translate_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
+                get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
                 channel_id + num_channels,
                 dst_rdma_rank == rdma_rank);
             last_rdma_head = min_head;

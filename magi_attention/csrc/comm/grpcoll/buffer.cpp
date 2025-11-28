@@ -499,7 +499,7 @@ Buffer::intranode_group_cast(
 
         // Timeout check
         if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS)
-          throw std::runtime_error("grpcoll error: CPU recv timeout");
+          throw std::runtime_error("grpcoll error: CPU recv timeout for intranode group cast");
       }
     }
   }
@@ -1068,10 +1068,12 @@ Buffer::internode_group_cast(
     gbl_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
     recv_gbl_rank_prefix_sum = torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
-    // Send sizes
+    // Reset all the pinned counters to `-1`
     *grpcoll_recv_counter = -1, *moe_recv_rdma_counter = -1;
     for (int i = 0; i < num_local_experts; ++i)
       moe_recv_expert_counter[i] = -1;
+
+    // Notify to switch some meta data prepared for group cast
     internode::notify_dispatch(
         /*num_tokens_per_rank=*/num_tokens_per_rank->data_ptr<int>(),
         /*grpcoll_recv_counter_mapped=*/grpcoll_recv_counter_mapped,
@@ -1123,7 +1125,7 @@ Buffer::internode_group_cast(
         printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
         for (int i = 0; i < num_local_experts; ++i)
           printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
-        throw std::runtime_error("grpcoll error: timeout (dispatch CPU)");
+        throw std::runtime_error("grpcoll error: CPU recv timeout for internode group cast");
       }
     }
   }
