@@ -145,7 +145,7 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             grpcoll_mgr.register_buffer(
                 group=nccl_group,
                 config=GrpCollConfig(
-                    num_nvl_bytes=int(2e9) * self.world_size // 8,  # 2GB for 8 ranks
+                    num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
                 ),
             )
             grpcoll_mgr.check_registered(group=nccl_group)
