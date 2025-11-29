@@ -162,11 +162,13 @@ struct SymBuffer {
  public:
   int total_bytes;
 
+  // TODO: fix the parameter names
   DEVICE_INLINE SymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1) {
     num_bytes = num_elems * sizeof(dtype_t);
-    int per_channel_bytes = num_bytes * num_ranks;
-    total_bytes = per_channel_bytes * num_sms * (static_cast<int>(kDecoupled) + 1);
 
+    const int per_channel_bytes = num_bytes * num_ranks;
+
+    total_bytes = per_channel_bytes * num_sms * (static_cast<int>(kDecoupled) + 1);
     send_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * sm_id;
     recv_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + per_channel_bytes * (sm_id + num_sms);
     gbl_ptr = reinterpret_cast<uint8_t*>(gbl_ptr) + total_bytes;
