@@ -82,8 +82,16 @@ struct SourceMeta {
 GRPCOLL_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
 
 // At most 8 RDMA ranks to be sent
-constexpr int get_num_topk_rdma_ranks(int num_rdma_ranks) {
+constexpr int get_num_topk_rdma_ranks(const int num_rdma_ranks) {
   return num_rdma_ranks < 8 ? num_rdma_ranks : 8;
+}
+
+constexpr int get_num_threads_dispatch(const int num_dispatch_rdma_sender_warps) {
+  return (num_dispatch_rdma_sender_warps + 1 + NUM_MAX_NVL_PEERS) * WARP_SIZE;
+}
+
+constexpr int get_num_threads_combine(const int num_combine_forwarder_warps) {
+  return (num_combine_forwarder_warps + 1) * WARP_SIZE;
 }
 
 int get_source_meta_bytes() {
@@ -531,7 +539,7 @@ template <
     int kNumTMABytesPerWarp,
     int kNumDispatchRDMASenderWarps,
     int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks)>
-GLOBAL_LAUNCH_BOUNDS(((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS) * WARP_SIZE), 1)
+GLOBAL_LAUNCH_BOUNDS(get_num_threads_dispatch(kNumDispatchRDMASenderWarps), 1)
 void dispatch(
     int4* recv_x,
     float* recv_x_scales,
@@ -1286,6 +1294,7 @@ void dispatch(
   constexpr int kNumDispatchRDMASenderWarps = 7;
   constexpr int kNumTMABytesPerWarp = 16384;
   constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS;
+  constexpr int kNumThreads = get_num_threads_dispatch(kNumDispatchRDMASenderWarps);
 
   // Make sure never OOB
   GRPCOLL_HOST_ASSERT(static_cast<int64_t>(num_scales) * scale_hidden_stride < INT_MAX);
@@ -1339,7 +1348,11 @@ void dispatch(
   GRPCOLL_HOST_ASSERT((topk_idx == nullptr) == (topk_weights == nullptr));
   GRPCOLL_HOST_ASSERT((recv_topk_idx == nullptr) == (recv_topk_weights == nullptr));
 
-  SETUP_LAUNCH_CONFIG(num_channels * 2, (kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS) * WARP_SIZE, stream);
+  // Even-numbered SMs for sending, odd-numbered SMs for receiving
+  const int num_sms = num_channels * 2;
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+
+  SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   SWITCH_RDMA_RANKS(DISPATCH_LAUNCH_CASE);
 #undef DISPATCH_LAUNCH_CASE
 }
@@ -1740,7 +1753,7 @@ template <
     int kNumWarpsPerForwarder = (kNumCombineForwarderWarps / kNumRDMARanks > 0) ? kNumCombineForwarderWarps / kNumRDMARanks : 1,
     int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder,
     int kNumRDMAReceivers = kNumForwarders - NUM_MAX_NVL_PEERS>
-GLOBAL_LAUNCH_BOUNDS((kNumForwarders + 1) * WARP_SIZE, 1)
+GLOBAL_LAUNCH_BOUNDS(get_num_threads_combine(kNumForwarders), 1)
 void combine(
     int4* combined_x,
     float* combined_topk_weights,
@@ -2346,9 +2359,10 @@ void combine(
   }                                                                                                                                        \
   break
 
-  int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-  auto num_warps_per_forwarder = std::max(kNumCombineForwarderWarps / num_rdma_ranks, 1);
-  int num_forwarder_warps = num_rdma_ranks * num_warps_per_forwarder;
+  const int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
+  const auto num_warps_per_forwarder = std::max(kNumCombineForwarderWarps / num_rdma_ranks, 1);
+  const int num_forwarder_warps = num_rdma_ranks * num_warps_per_forwarder;
+  const int num_threads = get_num_threads_combine(num_forwarder_warps);
   GRPCOLL_HOST_ASSERT(num_rdma_ranks <= kNumCombineForwarderWarps);
   GRPCOLL_HOST_ASSERT(num_forwarder_warps > NUM_MAX_NVL_PEERS and num_forwarder_warps % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
@@ -2356,7 +2370,11 @@ void combine(
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= num_warps_per_forwarder);
   GRPCOLL_HOST_ASSERT(type == CUDA_R_16BF);
 
-  SETUP_LAUNCH_CONFIG(num_channels * 2, (num_forwarder_warps + 1) * WARP_SIZE, stream);
+  // Even-numbered SMs for sending, odd-numbered SMs for receiving
+  const int num_sms = num_channels * 2;
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+
+  SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
   SWITCH_RDMA_RANKS(COMBINE_LAUNCH_CASE);
 #undef COMBINE_LAUNCH_CASE
 }
