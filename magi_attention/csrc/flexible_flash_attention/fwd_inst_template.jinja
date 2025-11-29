@@ -73,6 +73,7 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<const at::Tensor>& qk_map_,
     std::optional<const at::Tensor>& unique_count_,
     std::optional<const at::Tensor>& sparse_load_loop_count_,
+    std::optional<const at::Tensor>& sparse_load_invalid_count_,
     float const softmax_scale,
     float const softcap,
     bool const disable_fwd_atomic_reduction,
@@ -88,7 +89,7 @@ std::vector<at::Tensor> mha_fwd(
   auto [params, out, softmax_lse] = prepare_mha_fwd(
       q, k, v, sink_, out_, softmax_lse_, q_ranges, k_ranges,
       attn_type_map_, merge_q_ranges_, qk_map_,
-      unique_count_, sparse_load_loop_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
+      unique_count_, sparse_load_loop_count_, sparse_load_invalid_count_, softmax_scale, softcap, disable_fwd_atomic_reduction,
       out_type_, sink_layout_, deterministic, sm_margin, kBlockM);
   
   if constexpr (kProfileMode)

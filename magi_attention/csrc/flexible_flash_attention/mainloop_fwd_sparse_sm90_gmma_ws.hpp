@@ -255,6 +255,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     int const* const attn_type_map;
     int const* const cu_batches;
     int const* const sparse_load_loop_count;
+    int const* const sparse_load_invalid_count;
   };
 
   // Device side kernel params
@@ -277,6 +278,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     int const* const attn_type_map;
     int const* const cu_batches;
     int const* const sparse_load_loop_count;
+    int const* const sparse_load_invalid_count;
   };
 
   template <bool IsProducer>
@@ -290,7 +292,9 @@ struct CollectiveMainloopSparseFwdSm90 {
     flash::AttnType attn_type;
 
     // TODO: enable is_kv_valid
-    bool is_kv_valid[2]; // for intra-wg overlap, 0 for current index, 1 for previous index
+    // bool is_kv_valid[2]; // for intra-wg overlap, 0 for current index, 1 for previous index
+    // number of invalid tokens of the current group, control the token pointer of each group
+    int num_invalid_token;
     int cur_k_range_indices[NUM_ROWS_PER_GROUP];
     int cur_k_range_inner_indices[NUM_ROWS_PER_GROUP];
     int token_indices[NUM_ROWS_PER_GROUP];
@@ -303,6 +307,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const sparse_load_loop_count;
+    int const* const sparse_load_invalid_count;
 
     template <typename SharedStorage>
     CUTLASS_DEVICE SparseBlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage, int thread_idx)
@@ -313,6 +318,7 @@ struct CollectiveMainloopSparseFwdSm90 {
           k_ranges(params.k_ranges),
           attn_type_map(params.attn_type_map),
           sparse_load_loop_count(params.sparse_load_loop_count),
+          sparse_load_invalid_count(params.sparse_load_invalid_count),
           stride_kv_s_kv(get<0>(params.stride_K)) {
       bidb = [&]() {
         if constexpr (RangeMerge) {
@@ -330,13 +336,16 @@ struct CollectiveMainloopSparseFwdSm90 {
       }();
       cur_loop = 0;
       loop_count = sparse_load_loop_count ? sparse_load_loop_count[get<2>(block_coord)] : 0;
+      num_invalid_token = sparse_load_invalid_count ? sparse_load_invalid_count[get<2>(block_coord)] : 0;
 
-      is_kv_valid[0] = true;
-      is_kv_valid[1] = false;
+      // is_kv_valid[0] = true;
+      // is_kv_valid[1] = false;
 
-      cur_k_range_indices[0] = 0;
-      cur_k_range_inner_indices[0] = 0;
-      prev_token_indices[0] = -1;
+      int last_idx = NUM_ROWS_PER_GROUP - 1;
+      // initialize to the last valid token index
+      cur_k_range_indices[last_idx] = end_batches - 1;
+      cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
+      prev_token_indices[last_idx] = -1;
 
       int idx_in_warpgroup = thread_idx % 128;
       int idx_in_group = idx_in_warpgroup % GROUP_SIZE;
@@ -349,47 +358,75 @@ struct CollectiveMainloopSparseFwdSm90 {
         // metadata init
         // 1. search for the first token in the group
         int cnt = 0;
-        int num_steps = group_idx * NUM_ROWS_PER_GROUP;
+        // move to the last token index of each group
+        int num_steps = (NUM_GROUPS - group_idx - 1) * NUM_ROWS_PER_GROUP;
+        if (num_invalid_token) {
+          if (num_steps >= num_invalid_token) {
+            num_steps -= num_invalid_token;
+            num_invalid_token = 0;
+          } else {
+            num_steps = 0;
+            num_invalid_token -= num_steps;
+          }
+        }
         while (cnt < num_steps) {
-          int2 cur_k_range = k_ranges[bidb + cur_k_range_indices[0]];
-          int seqlen_k = cur_k_range.y - cur_k_range.x;
+          // int2 cur_k_range = k_ranges[cur_k_range_indices[last_idx]];
+          // int seqlen_k = cur_k_range.y - cur_k_range.x;
           int rest = num_steps - cnt;
-          // k_range size larger, move inner pointer
-          if (seqlen_k > rest) {
-            cur_k_range_inner_indices[0] += rest;
+          // Old: k_range size larger, move inner pointer
+          // New: extra inner pointer to move
+          if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
+            cur_k_range_inner_indices[last_idx] -= rest;
             break;
           } else {
-            cur_k_range_indices[0] += 1;
-            cnt += (seqlen_k - cur_k_range_inner_indices[0]);
-            cur_k_range_inner_indices[0] = 0;
+            cur_k_range_indices[last_idx] -= 1;
+            cnt += (cur_k_range_inner_indices[last_idx] + 1);
+            // load previous K range, since we iterate from rightmost to leftmost
+            int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
+            cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
             // k_range out-of-bounds
-            if (bidb + cur_k_range_indices[0] >= end_batches) {
-              is_kv_valid[0] = false;
-              break;
-            }
-            // read the current K range lazily
-            // cur_k_range = __ldg(k_ranges + bidb + cur_k_range_indices[0]);
+            // if (bidb + cur_k_range_indices[last_idx] >= end_batches) {
+            //   is_kv_valid[0] = false;
+            //   break;
+            // }
           }
         }
 
         // 2. search for next NUM_ROWS_PER_GROUP tokens and compute token indices
         // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
-        token_indices[0] = (k_ranges[bidb + cur_k_range_indices[0]].x + cur_k_range_inner_indices[0]) * stride_kv_s_kv;
-        for (int i = 1; i < NUM_ROWS_PER_GROUP; ++i) {
-          int2 cur_k_range = k_ranges[bidb + cur_k_range_indices[i - 1]];
-          int seqlen_k = cur_k_range.y - cur_k_range.x;
-          if (cur_k_range_inner_indices[i - 1] < seqlen_k - 1) {
+        token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_kv_s_kv;
+
+        for (int i = last_idx - 1; i >= 0; --i) {
+          // int2 cur_k_range = k_ranges[cur_k_range_indices[i + 1]];
+          // int seqlen_k = cur_k_range.y - cur_k_range.x;
+          if (cur_k_range_inner_indices[i + 1] > 0) {
             // only move inner pointer
-            cur_k_range_indices[i] = cur_k_range_indices[i - 1];
-            cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i - 1] + 1;
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1];
+            cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
           } else {
-            // move to next krange
-            cur_k_range_indices[i] = cur_k_range_indices[i - 1] + 1;
-            cur_k_range_inner_indices[i] = 0;
+            // move to previous krange
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
+            int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
+            cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
             // TODO: check kv valid
           }
-          token_indices[i] = (k_ranges[bidb + cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_kv_s_kv;
+          token_indices[i] = (k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_kv_s_kv;
         }
+        // for (int i = 1; i < NUM_ROWS_PER_GROUP; ++i) {
+        //   int2 cur_k_range = k_ranges[bidb + cur_k_range_indices[i - 1]];
+        //   int seqlen_k = cur_k_range.y - cur_k_range.x;
+        //   if (cur_k_range_inner_indices[i - 1] < seqlen_k - 1) {
+        //     // only move inner pointer
+        //     cur_k_range_indices[i] = cur_k_range_indices[i - 1];
+        //     cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i - 1] + 1;
+        //   } else {
+        //     // move to next krange
+        //     cur_k_range_indices[i] = cur_k_range_indices[i - 1] + 1;
+        //     cur_k_range_inner_indices[i] = 0;
+        //     // TODO: check kv valid
+        //   }
+        //   token_indices[i] = (k_ranges[bidb + cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_kv_s_kv;
+        // }
 
         // ======DEBUG=======
         // if (m_block == 0) {
@@ -411,61 +448,70 @@ struct CollectiveMainloopSparseFwdSm90 {
       for (int i = 0; i < NUM_ROWS_PER_GROUP; ++i) {
         prev_token_indices[i] = token_indices[i];
       }
-      is_kv_valid[1] = is_kv_valid[0];
-      is_kv_valid[0] = true;
+      // is_kv_valid[1] = is_kv_valid[0];
+      // is_kv_valid[0] = true;
       // update token index for each thread
       if (!is_finish()) {
         int num_threads = NumProducerThreads;
         int num_steps = num_threads; // move pointer to the next token, for each thread
         int cnt = 0;
+        int last_idx = NUM_ROWS_PER_GROUP - 1;
         int idx_in_warpgroup = threadIdx.x % 128;
         int idx_in_group = idx_in_warpgroup % GROUP_SIZE;
         int group_idx = idx_in_warpgroup / GROUP_SIZE;
 
-        // 1. search for the first token in the group
+        if (num_invalid_token) {
+          if (num_steps >= num_invalid_token) {
+            num_steps -= num_invalid_token;
+            num_invalid_token = 0;
+          } else {
+            num_invalid_token -= num_steps;
+            num_steps = 0;
+          }
+        }
+
         while (cnt < num_steps) {
-          int2 cur_k_range = k_ranges[bidb + cur_k_range_indices[0]];
-          int seqlen_k = cur_k_range.y - cur_k_range.x;
+          // int2 cur_k_range = k_ranges[cur_k_range_indices[last_idx]];
+          // int seqlen_k = cur_k_range.y - cur_k_range.x;
           int rest = num_steps - cnt;
-          // k_range size larger, move inner pointer
-          if (seqlen_k > rest) {
-            cur_k_range_inner_indices[0] += rest;
+          // Old: k_range size larger, move inner pointer
+          // New: extra inner pointer to move
+          if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
+            cur_k_range_inner_indices[last_idx] -= rest;
             break;
           } else {
-            cur_k_range_indices[0] += 1;
-            cnt += (seqlen_k - cur_k_range_inner_indices[0]);
-            cur_k_range_inner_indices[0] = 0;
+            cur_k_range_indices[last_idx] -= 1;
+            cnt += (cur_k_range_inner_indices[last_idx] + 1);
+            // load previous K range, since we iterate from rightmost to leftmost
+            int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
+            cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
             // k_range out-of-bounds
-            if (bidb + cur_k_range_indices[0] >= end_batches) {
-              is_kv_valid[0] = false;
-              break;
-            }
-            // read the current K range lazily
-            // cur_k_range = __ldg(k_ranges + bidb + cur_k_range_idx);
+            // if (bidb + cur_k_range_indices[last_idx] >= end_batches) {
+            //   is_kv_valid[0] = false;
+            //   break;
+            // }
           }
         }
 
         // 2. search for next NUM_ROWS_PER_GROUP tokens and compute token indices
         // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
-        token_indices[0] = (k_ranges[bidb + cur_k_range_indices[0]].x + cur_k_range_inner_indices[0]) * stride_kv_s_kv;
-        for (int i = 1; i < NUM_ROWS_PER_GROUP; ++i) {
-          int2 cur_k_range = k_ranges[bidb + cur_k_range_indices[i - 1]];
-          int seqlen_k = cur_k_range.y - cur_k_range.x;
-          if (cur_k_range_inner_indices[i - 1] < seqlen_k - 1) {
+        token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_kv_s_kv;
+
+        for (int i = last_idx - 1; i >= 0; --i) {
+          // int2 cur_k_range = k_ranges[cur_k_range_indices[i + 1]];
+          // int seqlen_k = cur_k_range.y - cur_k_range.x;
+          if (cur_k_range_inner_indices[i + 1] > 0) {
             // only move inner pointer
-            cur_k_range_indices[i] = cur_k_range_indices[i - 1];
-            cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i - 1] + 1;
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1];
+            cur_k_range_inner_indices[i] = cur_k_range_inner_indices[i + 1] - 1;
           } else {
-            // move to next krange
-            cur_k_range_indices[i] = cur_k_range_indices[i - 1] + 1;
-            cur_k_range_inner_indices[i] = 0;
+            // move to previous krange
+            cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
+            int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
+            cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
             // TODO: check kv valid
-            // if (bidb + cur_k_range_indices[i] >= end_batches) {
-            //   is_kv_valid[i] = false;
-            //   break;
-            // }
           }
-          token_indices[i] = (k_ranges[bidb + cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_kv_s_kv;
+          token_indices[i] = (k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_kv_s_kv;
         }
 
         // ======DEBUG=======
@@ -508,11 +554,13 @@ struct CollectiveMainloopSparseFwdSm90 {
 
     int cur_loop;
     int loop_count;
+    int num_invalid_token;
 
     int2 const* const q_ranges;
     int2 const* const k_ranges;
     int const* const attn_type_map;
     int const* const sparse_load_loop_count;
+    int const* const sparse_load_invalid_count;
 
     template <typename SharedStorage>
     CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
@@ -522,7 +570,8 @@ struct CollectiveMainloopSparseFwdSm90 {
           q_ranges(params.q_ranges),
           k_ranges(params.k_ranges),
           attn_type_map(params.attn_type_map),
-          sparse_load_loop_count(params.sparse_load_loop_count) {
+          sparse_load_loop_count(params.sparse_load_loop_count),
+          sparse_load_invalid_count(params.sparse_load_invalid_count) {
       bidb = [&]() {
         if constexpr (RangeMerge) {
           return params.cu_batches[get<2>(block_coord)];
@@ -539,6 +588,7 @@ struct CollectiveMainloopSparseFwdSm90 {
       }();
       cur_loop = 0;
       loop_count = sparse_load_loop_count ? sparse_load_loop_count[get<2>(block_coord)] : 0;
+      num_invalid_token = sparse_load_invalid_count ? sparse_load_invalid_count[get<2>(block_coord)] : 0;
       if (!is_finish()) {
         seqlen_info = SeqlenInfo_t{bidb, q_ranges, k_ranges};
         attn_type = static_cast<flash::AttnType>(attn_type_map ? attn_type_map[bidb] : 0);
@@ -582,7 +632,8 @@ struct CollectiveMainloopSparseFwdSm90 {
         args.k_ranges,
         args.attn_type_map,
         args.cu_batches,
-        args.sparse_load_loop_count};
+        args.sparse_load_loop_count,
+        args.sparse_load_invalid_count};
   }
 
   /// Issue Tma Descriptor Prefetch -- ideally from a single thread for best performance

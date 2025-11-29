@@ -114,7 +114,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
           params.k_ranges,
           params.attn_type_map,
           params.qk_map,
-          params.sparse_load_loop_count // loop count for each unique Q range when sparse load
+          params.sparse_load_loop_count, // loop count for each unique Q range when sparse load
+          params.sparse_load_invalid_count // invalid token count for each unique Q range when sparse load
       };
     } else {
       return typename CollectiveMainloop::Arguments{

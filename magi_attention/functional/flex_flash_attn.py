@@ -209,6 +209,7 @@ def _flex_flash_attn_forward_compilable(
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
     sparse_load_loop_count: torch.Tensor | None,
+    sparse_load_invalid_count: torch.Tensor | None,
     kblock_m: int | None,
     kblock_n: int | None,
     softmax_scale: float,
@@ -250,6 +251,7 @@ def _flex_flash_attn_forward_compilable(
         qk_map,
         fwd_unique_count,
         sparse_load_loop_count,
+        sparse_load_invalid_count,
         softmax_scale,
         softcap,
         disable_fwd_atomic_reduction,
@@ -303,6 +305,7 @@ def _flex_flash_attn_forward(
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
     sparse_load_loop_count: torch.Tensor | None,
+    sparse_load_invalid_count: torch.Tensor | None,
     ref_block_size: tuple[int, int] | None,
     softmax_scale: float,
     softcap: float,
@@ -364,6 +367,7 @@ def _flex_flash_attn_forward(
         qk_map=qk_map,
         fwd_unique_count=fwd_unique_count,
         sparse_load_loop_count=sparse_load_loop_count,
+        sparse_load_invalid_count=sparse_load_invalid_count,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
         softmax_scale=softmax_scale,
@@ -633,7 +637,10 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     tile_size = 128  # tile size (number of tokens) for sparse load K/V from gmem to smem
                     # calculate the sum of K ranges of unique Q range，ceil_div(tile_size) to get the loop count of sparse load
                     # shape = (unique_count, )
-                    sparse_load_loop_count = ffa_utils.compute_sparse_load_loop_count(
+                    (
+                        sparse_load_loop_count,
+                        sparse_load_invalid_count,
+                    ) = ffa_utils.compute_sparse_load_metadata(
                         fwd_k_ranges, fwd_qk_map, fwd_unique_count, tile_size
                     )
                     # TODO: arbitrary Q range size
@@ -643,6 +650,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                         ref_block_size = (128, tile_size)
                 else:
                     sparse_load_loop_count = None
+                    sparse_load_invalid_count = None
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -651,6 +659,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_qk_map = None
             fwd_unique_count = None
             sparse_load_loop_count = None
+            sparse_load_invalid_count = None
 
         out, lse = _flex_flash_attn_forward(
             q=q,
@@ -667,6 +676,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
             sparse_load_loop_count=sparse_load_loop_count,
+            sparse_load_invalid_count=sparse_load_invalid_count,
             ref_block_size=ref_block_size,
             softmax_scale=softmax_scale,
             softcap=softcap,
