@@ -209,6 +209,40 @@ DEVICE_INLINE int fast_log2_ceil(float x) {
   return exp_x - 127 + (man_bits != 0);
 }
 
+template <typename dtype_t, typename lp_dtype_t, typename vec_dtype_t>
+DEVICE_INLINE vec_dtype_t vec_downcast(vec_dtype_t* vec_ptr) {
+  constexpr int kDtypePerVec = sizeof(vec_dtype_t) / sizeof(dtype_t);
+  constexpr int kLowPrecisionDtypePerDtype = sizeof(dtype_t) / sizeof(lp_dtype_t);
+
+  vec_dtype_t downcast_val_vec;
+  lp_dtype_t* downcast_val_ptr_lp = reinterpret_cast<lp_dtype_t*>(&downcast_val_vec);
+
+#pragma unroll
+  for (int i = 0; i < kLowPrecisionDtypePerDtype; ++i) {
+    dtype_t* ith_dtype_ptr = reinterpret_cast<dtype_t*>(vec_ptr + i);
+#pragma unroll
+    for (int j = 0; j < kDtypePerVec; ++j)
+      downcast_val_ptr_lp[i * kDtypePerVec + j] = static_cast<lp_dtype_t>(ith_dtype_ptr[j]);
+  }
+
+  return downcast_val_vec;
+}
+
+template <typename dtype_t>
+DEVICE_INLINE void make_prefix_sum(dtype_t* ptr, int n) {
+#pragma unroll
+  for (int i = 1; i < n; ++i)
+    ptr[i] += ptr[i - 1];
+}
+
+DEVICE_INLINE int encode(int value) {
+  return -value - 1;
+}
+
+DEVICE_INLINE int decode(int value) {
+  return -value - 1;
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Vectiorized Integer Dtype
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -821,32 +855,6 @@ DEVICE_INLINE void unpack2(const dtype_b_t& packed, dtype_a_t& x, dtype_a_t& y) 
   GRPCOLL_STATIC_ASSERT(sizeof(dtype_a_t) * 2 == sizeof(dtype_b_t), "Invalid dtypes");
   auto unpacked_ptr = reinterpret_cast<const dtype_a_t*>(&packed);
   x = unpacked_ptr[0], y = unpacked_ptr[1];
-}
-
-template <typename dtype_t, typename lp_dtype_t, typename vec_dtype_t>
-DEVICE_INLINE vec_dtype_t vec_downcast(vec_dtype_t* vec_ptr) {
-  constexpr int kDtypePerVec = sizeof(vec_dtype_t) / sizeof(dtype_t);
-  constexpr int kLowPrecisionDtypePerDtype = sizeof(dtype_t) / sizeof(lp_dtype_t);
-
-  vec_dtype_t downcast_val_vec;
-  lp_dtype_t* downcast_val_ptr_lp = reinterpret_cast<lp_dtype_t*>(&downcast_val_vec);
-
-#pragma unroll
-  for (int i = 0; i < kLowPrecisionDtypePerDtype; ++i) {
-    dtype_t* ith_dtype_ptr = reinterpret_cast<dtype_t*>(vec_ptr + i);
-#pragma unroll
-    for (int j = 0; j < kDtypePerVec; ++j)
-      downcast_val_ptr_lp[i * kDtypePerVec + j] = static_cast<lp_dtype_t>(ith_dtype_ptr[j]);
-  }
-
-  return downcast_val_vec;
-}
-
-template <typename dtype_t>
-DEVICE_INLINE void make_prefix_sum(dtype_t* ptr, int n) {
-#pragma unroll
-  for (int i = 1; i < n; ++i)
-    ptr[i] += ptr[i - 1];
 }
 
 constexpr float kFP8Margin = 1e-4;
