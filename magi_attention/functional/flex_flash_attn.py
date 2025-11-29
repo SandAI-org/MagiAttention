@@ -18,6 +18,7 @@ from contextlib import contextmanager
 import torch
 from packaging import version
 
+from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.utils import nvtx
 
 from ._flex_flash_attn_jit import get_ffa_jit_mod
@@ -198,6 +199,7 @@ def _flex_flash_attn_forward_compilable(
     k: torch.Tensor,
     v: torch.Tensor,
     sink: torch.Tensor | None,
+    sink_layout: str,
     out_: torch.Tensor,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
@@ -252,6 +254,7 @@ def _flex_flash_attn_forward_compilable(
         softcap,
         disable_fwd_atomic_reduction,
         out_type,
+        sink_layout,
         deterministic,
         sm_margin,
     )
@@ -263,6 +266,7 @@ def _flex_flash_attn_forward_compilable_fake(
     k: torch.Tensor,
     v: torch.Tensor,
     sink: torch.Tensor | None,
+    sink_layout: str,
     out_: torch.Tensor,
     lse: torch.Tensor,
     q_ranges: torch.Tensor,
@@ -289,6 +293,7 @@ def _flex_flash_attn_forward(
     k: torch.Tensor,
     v: torch.Tensor,
     sink: torch.Tensor | None,
+    sink_layout: AttnSinkLayout,
     out: torch.Tensor | None,
     lse: torch.Tensor | None,
     q_ranges: torch.Tensor,
@@ -341,6 +346,7 @@ def _flex_flash_attn_forward(
     else:
         kblock_m = None
         kblock_n = None
+
     # NOTE: we can not directly compile `_flex_flash_attn_forward`
     # since torch.compile does not allow returning the mutated args (out, lse)
     _flex_flash_attn_forward_compilable(
@@ -348,6 +354,7 @@ def _flex_flash_attn_forward(
         k=k,
         v=v,
         sink=sink,
+        sink_layout=sink_layout,
         out_=out,
         lse=lse,
         q_ranges=q_ranges,
@@ -385,6 +392,7 @@ def _flex_flash_attn_backward_compilable(
     k: torch.Tensor,
     v: torch.Tensor,
     sink: torch.Tensor | None,
+    sink_layout: str,
     out_: torch.Tensor,
     dq: torch.Tensor,
     dk: torch.Tensor,
@@ -451,6 +459,7 @@ def _flex_flash_attn_backward_compilable(
         dq_type,
         dk_type,
         dv_type,
+        sink_layout,
         deterministic,
         sm_margin,
     )
@@ -463,6 +472,7 @@ def _flex_flash_attn_backward_compilable_fake(
     k: torch.Tensor,
     v: torch.Tensor,
     sink: torch.Tensor | None,
+    sink_layout: str,
     out_: torch.Tensor,
     dq: torch.Tensor,
     dk: torch.Tensor,
@@ -494,6 +504,7 @@ def _flex_flash_attn_backward(
     k: torch.Tensor,
     v: torch.Tensor,
     sink: torch.Tensor | None,
+    sink_layout: AttnSinkLayout,
     out: torch.Tensor,
     dq: torch.Tensor | None,
     dk: torch.Tensor | None,
@@ -543,6 +554,7 @@ def _flex_flash_attn_backward(
         k=k,
         v=v,
         sink=sink,
+        sink_layout=sink_layout,
         out_=out,
         dq=dq,
         dk=dk,
@@ -579,6 +591,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         k: torch.Tensor,
         v: torch.Tensor,
         sink: torch.Tensor | None,
+        sink_layout: AttnSinkLayout,
         q_ranges: torch.Tensor,
         k_ranges: torch.Tensor,
         attn_type_map: torch.Tensor | None,
@@ -644,6 +657,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             k=k,
             v=v,
             sink=sink,
+            sink_layout=sink_layout,
             out=None,
             lse=None,
             q_ranges=fwd_q_ranges,
@@ -673,6 +687,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             q, k, v, sink, out, lse, q_ranges, k_ranges, attn_type_map
         )
 
+        ctx.sink_layout = sink_layout
         ctx.softmax_scale = softmax_scale
         ctx.softcap = softcap
         ctx.deterministic = deterministic
@@ -709,6 +724,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             k=k,
             v=v,
             sink=sink,
+            sink_layout=ctx.sink_layout,
             out=out,
             dq=None,
             dk=None,
@@ -745,6 +761,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             dk,  # k
             dv,  # v
             dsink,  # sink
+            None,  # sink_layout
             None,  # q_ranges
             None,  # k_ranges
             None,  # attn_type_map
@@ -769,7 +786,9 @@ def flex_flash_attn_func(
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
     attn_type_map: torch.Tensor | None = None,
+    *,
     sink: torch.Tensor | None = None,
+    sink_layout: AttnSinkLayout = "sh",
     softmax_scale: float | None = None,
     softcap: float = 0.0,
     deterministic: bool = False,
@@ -803,6 +822,8 @@ def flex_flash_attn_func(
 
         sink (torch.Tensor, optional): Learnable sink token tensor.
             Defaults to ``None`` to not apply attention sink.
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh". Available Options: "sh", "ssh".
 
         softmax_scale (float, optional): Softmax scale.
             Defaults to ``None`` to use: ``1/sqrt(head_dim)``.
@@ -838,7 +859,9 @@ def flex_flash_attn_func(
         - q: (num_tokens_q, num_heads_q, head_dim)
         - k: (num_tokens_kv, num_heads_kv, head_dim)
         - v: (num_tokens_kv, num_heads_kv, head_dim)
-        - sink: (num_tokens_sink, num_heads_q)
+        - sink:
+            - if sink_layout == "sh": (num_tokens_sink, num_heads_q)
+            - if sink_layout == "ssh": (num_tokens_q, num_tokens_sink, num_heads_q)
         - q_ranges: (num_ranges, 2)
         - k_ranges: (num_ranges, 2)
         - attn_type_map: (num_ranges,)
@@ -951,6 +974,7 @@ def flex_flash_attn_func(
         k,
         v,
         sink,
+        sink_layout,
         q_ranges,
         k_ranges,
         attn_type_map,

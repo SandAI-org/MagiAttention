@@ -26,6 +26,7 @@
 
 #include "cuda_check.h"
 #include "flash.h"
+#include "sink_layout.cuh"
 #include "static_switch.h"
 #include "tile_size.h"
 
@@ -69,6 +70,7 @@ void set_params_fprop(
     float softmax_scale,
     void* tile_count_semaphore_d,
     float const softcap = 0.f,
+    flash::SinkLayout const sink_layout = flash::SinkLayout::SH,
     int const sm_margin = 0,
     bool const disable_fwd_atomic_reduction = false);
 
@@ -114,5 +116,6 @@ void set_params_dgrad(
     void* determin_conflict_state_d = nullptr,
     void* dq_determin_conflict_state_d = nullptr,
     void* dq_determin_range_locks_d = nullptr,
+    flash::SinkLayout const sink_layout = flash::SinkLayout::SH,
     int const sm_margin = 0,
     bool const disable_bwd_dkv_atomic_reduction = false);

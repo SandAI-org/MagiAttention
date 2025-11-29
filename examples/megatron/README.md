@@ -2,7 +2,7 @@
 
 We create a new repository [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention/tree/magi_attention), forked from [Megatron-LM v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0), to provide an example of training the LLaMA-3-1B model with Megatron-LM + MagiAttention.
 
-For more details on data preparation, checkpoint setup, integration, and experiments, please refer to [README](https://github.com/SandAI-org/Megatron-LM-MagiAttention/blob/magi_attention/magiattention_example/README.md), and this [PR](https://github.com/SandAI-org/Megatron-LM-MagiAttention/pull/1) for code modification.
+For more details on data preparation, checkpoint setup, integration, and experiments, please refer to [README](https://github.com/SandAI-org/Megatron-LM-MagiAttention/blob/magi_attention/magiattention_examples/README.md), and this [PR](https://github.com/SandAI-org/Megatron-LM-MagiAttention/pull/1) for code modification.
 
 
 ## Convergence Experiments

@@ -25,6 +25,8 @@
 
 #include <torch/extension.h>
 
+#include "sink_layout.cuh"
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Qkv_params {
@@ -74,6 +76,7 @@ struct Flash_fwd_params : public Qkv_params {
   // The scaling factors for the kernel.
   float scale_softmax;
   float softcap;
+  flash::SinkLayout sink_layout;
 
   // Ranges params (The triplet determines the specific computation)
   int2* __restrict__ q_ranges;

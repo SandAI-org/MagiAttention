@@ -31,18 +31,19 @@ A Distributed Attention Towards Linear Scalability for Ultra-Long Context, Heter
 
 ## Latest News 🔥
 
-- [2025/9] 📌 We release [MagiAttention-v1.0.4](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.4) to update the API, support compilable and jit-built ffa, optimize the performance for sparse scenarios, reduce the workspace memory usage, and engage some experimental features in progress.
-- [2025/7] 🚀 We release [MagiAttention-v1.0.3](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.3) with improvements including [documentation](https://SandAI-org.github.io/MagiAttention/docs/), support for all four mask types with arbitary overlapping, deterministic mode, API updates, FFA performance enhancements with bug fixes, optimized dispatch solvers, hierarchical-comm support, and example codes to train Llama-3 1B model with MagiAttention + FSDP / Transformers.
-- [2025/6] 📌 We release [MagiAttention-v1.0.2](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.2) to provide the example code to **integrate Megatron with MagiAttention** with several training convergence experiments (*see [here](./example/megatron/README.md) for more details*), with some bug fixes and a simple roadmap.
-- [2025/5] 📌 We release [MagiAttention-v1.0.1](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.1) to support overlapped q_ranges when all mask types are `FULL`, with some code cleanup and bug fixes.
-- [2025/4] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/blog/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
+- [2025/11] 🚀 We release [MagiAttention-v1.0.5](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.5) with native support for **(distributed) learnable attention sink** mechanism in both Flex-Flash-Attention and MagiAttention, plus a drop-in integration for Flash-Attention via our [Extensions](https://github.com/SandAI-org/MagiAttention/tree/v1.0.5/extensions#flashattention-with-attention-sink), alongside which we provide a [blog post](https://sandai-org.github.io/MagiAttention/blog/ffa_with_sink) that shares our design insights and implementation details. Furthermore, we support **native group collective kernels for intranode communication** based on [DeepEP](https://github.com/deepseek-ai/DeepEP) as an experimental feature.
+- [2025/09] 📌 We release [MagiAttention-v1.0.4](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.4) to update the API, **support compilable and jit-built FFA**, optimize the performance for sparse scenarios, reduce the workspace memory usage, and engage some experimental features in progress.
+- [2025/07] 🚀 We release [MagiAttention-v1.0.3](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.3) with improvements including [documentation](https://SandAI-org.github.io/MagiAttention/docs/), **support for all four mask types with arbitary overlapping**, deterministic mode, API updates, FFA performance enhancements with bug fixes, optimized dispatch solvers, hierarchical-comm support, and example codes to train Llama-3 1B model with MagiAttention + FSDP / Transformers.
+- [2025/06] 📌 We release [MagiAttention-v1.0.2](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.2) to provide the example code to **integrate Megatron-LM with MagiAttention** with several training convergence experiments (*see [here](./examples/megatron/README.md) for more details*), with some bug fixes and a roadmap added.
+- [2025/05] 📌 We release [MagiAttention-v1.0.1](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.1) to support overlapped q_ranges when all mask types are `FULL`, with some code cleanup and bug fixes.
+- [2025/04] 🎉 We release [MagiAttention-v1.0.0](https://github.com/SandAI-org/MagiAttention/releases/tag/v1.0.0) with its [blog](https://SandAI-org.github.io/MagiAttention/blog/): a distributed attention towards linear scalability for ultra-long context, heterogeneous mask training.
 
 
 # About
 
 MagiAttention is a distributed attention mechanism, or context-parallel (CP) strategy, which aims to support a wide variety of attention mask types with **kernel-level flexibility**, while achieving **linear scalability** with respect to context-parallel (CP) size across a broad range of scenarios, particularly suitable for training tasks involving <u><em>ultra-long, heterogeneous mask</em></u> training like video-generation for [Magi-1](https://github.com/SandAI-org/MAGI-1).
 
-Additionally, it can be easily integrated into prevalent training frameworks such as [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), Pytorch's native [FSDP](https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html) and [transformers](https://github.com/huggingface/transformers), as illustrated in [QuickStart](#quick-start-).
+Additionally, it can be easily integrated into prevalent training frameworks such as [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), Pytorch's native [FSDP](https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html) and [transformers](https://github.com/huggingface/transformers), as illustrated in [QuickStart](#quick-start).
 
 We are committed to continually improving the performance and generality of MagiAttention for the broader research community. Stay tuned for exciting enhancements and new features on the horizon!
 
@@ -115,7 +116,6 @@ Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
   ```
 
 
-
 ## Quick Start 🚀
 
 > [!WARNING]
@@ -127,7 +127,7 @@ Please check [here](https://SandAI-org.github.io/MagiAttention/docs/).
 
 We provide basic example code below of how to use `flex_flash_attention` (*non-distributed attention function*) and `magi_attention` (*distributed attention mechanism*), respectively.
 
-For more usage instructions, you can refer to `magi_attention/functional/flex_flash_attn.py` and `magi_attention/api/magi_attn_interface.py`, respectively.
+For more usage instructions, you can refer to our [docs](https://SandAI-org.github.io/MagiAttention/docs/).
 
 <details>
 <summary>Basic Usage</summary>
@@ -140,17 +140,24 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
   # --- Define attention config --- #
 
   total_seqlen = 2048    # 2k tokens
+  seqlen_sink = 4        # 4 sink tokens
   num_heads_q = 8        # number of attention (query) heads
   num_heads_kv = 2       # number of key/value heads (GQA)
   head_dim = 128         # dimension of each attention head
   dtype = torch.bfloat16 # attention activation / computation dtype (while the reduction dtype is always fp32 for ffa right now)
   device = "cuda"
+  has_sink = True        # whether to apply attention sink
 
-  # --- Initialize QKV tensor --- #
+  # --- Initialize q,k,v,do tensors --- #
 
-  q = torch.randn(total_seqlen, num_heads_q, head_dim, dtype=dtype, device=device)
-  k = torch.randn(total_seqlen, num_heads_kv, head_dim, dtype=dtype, device=device)
-  v = torch.randn(total_seqlen, num_heads_kv, head_dim, dtype=dtype, device=device)
+  q = torch.randn(total_seqlen, num_heads_q, head_dim, dtype=dtype, device=device, requires_grad=True)
+  k = torch.randn(total_seqlen, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+  v = torch.randn(total_seqlen, num_heads_kv, head_dim, dtype=dtype, device=device, requires_grad=True)
+  do = torch.randn_like(q)
+
+  # --- Initialize optional sink tensor --- #
+
+  sink = torch.randn(seqlen_sink, num_heads_q, dtype=torch.float32, device=device, requires_grad=True) if has_sink else None
 
   # --- Initialize FFA meta args for customized attention mask --- #
 
@@ -172,19 +179,33 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
 
   # --- Attention computation --- #
 
-  out, _ = flex_flash_attn_func( # the second return value is `lse` (log-sum-exp), known as the online-softmax correction factor
-      q, k, v,
+  out, lse = flex_flash_attn_func(
+      q=q,
+      k=k,
+      v=v,
       q_ranges=q_ranges_tensor,
       k_ranges=k_ranges_tensor,
       attn_type_map=attn_type_map_tensor,
-      softmax_scale=None, # defaults to 1/sqrt(head_dim)
+      sink=sink, # Defaults to None to not apply attention sink
+      softmax_scale=None, # Defaults to 1/sqrt(head_dim)
+      softcap=0, # Defaults to 0
   )
+
+  out.backward(do)
+
+  dq, dk, dv = q.grad, k.grad, v.grad
+  dsink = sink.grad if has_sink else None
   ```
 
-- **magi_attention**: (*NOTE: You should run the following examples in a distributed environment, e.g. using the common `torchrun` script*)
+- **magi_attention**: (*NOTE: You need to run the following examples in a distributed environment, e.g. using the common `torchrun` script*)
   ```python
+  # run this python script with the command like:
+  # torchrun --standalone --nproc_per_node=8 --nnodes=1 --node_rank=0 --master_addr="127.0.0.1" --master_port=1234 ${SCRIPT_PATH}
   import torch
   import torch.nn as nn
+  import torch.distributed as dist
+
+  import magi_attention
   from magi_attention.api import (
       magi_attn_flex_dispatch, calc_attn, undispatch, # interface functions
       compute_pad_size, # helper functions
@@ -200,11 +221,13 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
   # --- Define attention config --- #
 
   total_seqlen = 32 * 1024   # 32k tokens, if we dispatch it to 8 GPUs, then each GPU holds 4k tokens
+  seqlen_sink = 4            # 4 sink tokens
   num_heads_q = 48           # number of attention (query) heads
   num_heads_kv = 8           # number of key/value heads (GQA)
   head_dim = 128             # dimension of each attention head
-  dtype = torch.bfloat16     # attention activation / computation dtype (while the reduction dtype for partial attention outputs is always fp32 for magi_attention right now)
   chunk_size = 512           # chunk size to chunk the input tensor x along the seqlen dim for dispatch to control the granularity of computation load-balance.
+  dtype = torch.bfloat16     # attention activation / computation dtype (while the reduction dtype for partial attention outputs is always fp32 for magi_attention right now)
+  has_sink = True            # whether to apply attention sink
 
   # --- Initialize token embedding tensor --- #
 
@@ -264,8 +287,8 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
   # 1. the dispatched local token embedding may be shuffled along seqlen dim,
   #    so it's safe for token-wise operations such as matmul, layer-norm, etc
   #    while for sample-wise operations like RoPE, you might need to be more careful
-  # 2. the `magi_runtime_key` holds some inner meta data as one argument for many other magi_attention APIs,
-  #    about which the users may have no bother to care
+  # 2. the `magi_attn_runtime_key` holds some inner meta data as one argument for many other magi_attention APIs,
+  #    which users don’t have to bother with
   local_x, magi_attn_runtime_key = magi_attn_flex_dispatch(
       x,
       q_ranges=q_ranges,
@@ -288,13 +311,18 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
   local_k = k_proj(local_x).view(-1, num_heads_kv, head_dim)
   local_v = v_proj(local_x).view(-1, num_heads_kv, head_dim)
 
+  # --- Simulate attention sink parameter --- #
+
+  global_sink = nn.Parameter(torch.randn(seqlen_sink, num_heads_q, dtype=torch.float32, device=device)) if has_sink else None
+
   # --- Distributed attention computation --- #
 
-  local_out, _ = calc_attn( # the second return value is `local_lse` (log-sum-exp), known as the online-softmax correction factor
+  local_out, local_lse = calc_attn(
       q=local_q,
       k=local_k,
       v=local_v,
       key=magi_attn_runtime_key,
+      sink=global_sink, # Defaults to None to not apply attention sink
   )
 
   # --- Undispatch the output tensor along seqlen dim from multiple ranks and unpad --- #
@@ -306,6 +334,32 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
       key=magi_attn_runtime_key,
   )
 
+  # --- Simulate loss computation --- #
+
+  loss = total_out.sum()
+
+  # --- Simulate backward pass --- #
+
+  loss.backward()
+
+  dx = x.grad
+  dq_proj, dk_proj, dv_proj = q_proj.weight.grad, k_proj.weight.grad, v_proj.weight.grad
+
+  if has_sink:
+      dsink = global_sink.grad
+      # NOTE: since usually the training framework such as Megatron-LM, FSDP
+      # will handle the reduction of parameters' gradients across the whole dp x cp group
+      # so by default, MagiAttention will skip the reduction of sink's gradients
+      # unless the users specify the environment variable `MAGI_ATTENTION_DSINK_ALL_REDUCE_OP` (see our docs for more details)
+      if (op:=magi_attention.comm.dsink_all_reduce_op()) != "none":
+          match op:
+              case "sum":
+                  dist.all_reduce(dsink, op=dist.ReduceOp.SUM, group=world_group)
+              case "avg":
+                  dist.all_reduce(dsink, op=dist.ReduceOp.AVG, group=world_group)
+              case _:
+                  raise ValueError(f"Unknown all_reduce_op: {op}")
+
   # --- Clear up distributed environment --- #
 
   clearup_dist_env()
@@ -316,12 +370,12 @@ For more usage instructions, you can refer to `magi_attention/functional/flex_fl
 
 ### Example to integrate with FSDP2
 
-We provide an example of how to integrate magi_attention with fsdp2 in `example/torch_native`. You can use `bash run.sh` to run the example.
+We provide an example of how to integrate magi_attention with fsdp2 in `examples/torch_native`. You can use `bash run.sh` to run the example.
 
 In this example, we build a llama-1b model and apply fsdp2 with magi_attention as the parallelism strategy.
 
-- `example/torch_native/modeling_llama.py`: build llama model and integrate with magi_attention.
-- `example/torch_native/main.py`: main training loop.
+- `examples/torch_native/modeling_llama.py`: build llama model and integrate with magi_attention.
+- `examples/torch_native/main.py`: main training loop.
 
 </details>
 
@@ -330,19 +384,24 @@ In this example, we build a llama-1b model and apply fsdp2 with magi_attention a
 
 We create a new repository [Megatron-LM-MagiAttention](https://github.com/SandAI-org/Megatron-LM-MagiAttention/tree/magi_attention), forked from [Megatron-LM v0.11.0](https://github.com/NVIDIA/Megatron-LM/tree/v0.11.0), to provide an example of training the llama-1B model with Megatron-LM + MagiAttention. Furthermore, we conducted an experiment training llama-3-1B model from scratch to verify the convergence of magiattention.
 
-For more information, you can refer to `example/megatron/README.md`.
+For more information, you can refer to `examples/megatron/README.md`.
 
 ### Example to integrate with transformers
 
-We provide an example of how to integrate magi_attention with transformers in `example/transformers`. Furthermore, we conducted a continue-training experiment on llama-3-1B model to verify the convergence of magiattention.
+We provide an example of how to integrate magi_attention with transformers in `examples/transformers`. Furthermore, we conducted a continue-training experiment on llama-3-1B model to verify the convergence of magiattention.
 
-For more information, you can refer to `example/transformers/README.md`.
+For more information, you can refer to `examples/transformers/README.md`.
+
+
+## Extensions 💡
+
+We provide additional [magi_attn_extensions](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/README.md) to offer supplementary utilities based on `magi_attention`, such as [FlashAttention with Attention Sink](https://github.com/SandAI-org/MagiAttention/blob/main/extensions/README.md#flashattention-with-attention-sink).
 
 
 ## Roadmap ⛏️
 
-- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*)
-- [ ] **[WIP]** Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*)
+- [ ] **[WIP]** Optimize `Flex-Flash-Attention` kernels to improve performance and better support sparse attention (*such as [NSA](https://arxiv.org/pdf/2502.11089)*).
+- [ ] **[WIP]** Support native `GroupCast` and `GroupReduce` kernels and hierarchical communication optimization (*similar to [DeepEP](https://github.com/deepseek-ai/DeepEP)*).
 - [ ] **[WIP]** Optimize `DistAttnSolver` to reduce CPU overhead for meta info calculation and support better comp-/comm- overlapping.
 - [ ] **[WIP]** Support `Dynamic DistAttnSolver` with query/output communication pattern, one for either hybrid attention model or dynamic mask scenarios like sparse attention, the other for reducing communication overhead for many cases when only communicating key/value is not the best choice.
 - [ ] Support other attention patterns including cross-attention, and inference scenarios involving KV cache (*w.r.t. [Paged Attention](https://arxiv.org/abs/2309.06180)*).
@@ -357,8 +416,7 @@ For more information, you can refer to `example/transformers/README.md`.
 - [x] Provide `Documentation` including `Installation`, `QuickStart` and `API reference`.
 
 
-## Performance Benchmarks 📊
-
+## Benchmarks 📊
 
 ### Kernel-Level Performance and Flexibility
 
@@ -456,7 +514,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## Citation 📝
 
-If you use MagiAttention in your research, please cite:
+If you find MagiAttention useful in your research, please cite:
 
 ```bibtex
 @misc{magiattention2025,
@@ -467,7 +525,7 @@ If you use MagiAttention in your research, please cite:
 }
 ```
 
-## Acknowledgement
+## Acknowledgement ❤️
 
 We are grateful to the contributors listed below for their valuable contributions during the early stages of MagiAttention.
 
@@ -487,7 +545,7 @@ We are grateful to the contributors listed below for their valuable contribution
 | Jingwei Xu    | Nanjing University          | <jingweix@nju.edu.cn>           | paragonlight   |
 
 
-## Star History
+## Star History ⭐
 
 <div align="center">
   <a href="https://star-history.com/#SandAI-org/MagiAttention&Date">

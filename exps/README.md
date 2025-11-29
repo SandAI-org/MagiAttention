@@ -6,7 +6,7 @@
 
 ### Baseline Tests for Correctness
 
-basic running command:
+basic command:
 
 ```bash
 pytest exps/attn/tests
@@ -16,12 +16,23 @@ pytest exps/attn/tests
 
 TODO ... (add more instructions to reproduce the experiments)
 
-basic running command:
+basic command:
 
 ```bash
 cd exps/attn
 
+# NOTE: since transformer-engine has its own customized way to install flash-attention-3
+# which has conflict with the original repo
+# you need to get into the package directory and manually copy the `flash_attn_interface.py` file into `flash_attn_3/` subdirectory
 bash run_benchmark.sh
+```
+
+the command to draw from existed csv files:
+
+```bash
+cd exps/dist_attn
+
+python draw_benchmark.py
 ```
 
 ### Block Sparse Attention Performance and Flexibility
@@ -66,7 +77,7 @@ Use case: Traditional block sparse patterns like 64x64 or 128x128 block sizes.
 
 ### Baseline Tests for Correctness
 
-basic running command:
+basic command:
 
 ```bash
 pytest exps/dist_attn/tests
@@ -76,7 +87,7 @@ pytest exps/dist_attn/tests
 
 TODO ... (add more instructions to reproduce the experiments)
 
-basic running command:
+basic command:
 
 ```bash
 cd exps/dist_attn
@@ -89,7 +100,7 @@ bash run_benchmark.sh
 
 ### Native Group Collective Integration Tests and Performance Tuning
 
-basic running command:
+basic command:
 
 ```bash
 cd exps/grpcoll
@@ -111,7 +122,7 @@ bash run_grpcoll_test.sh
 
 TODO ... (add more instructions to reproduce the experiments)
 
-basic running command:
+basic command:
 
 ```bash
 cd exps/device_a2av

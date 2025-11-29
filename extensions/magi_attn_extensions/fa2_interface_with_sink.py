@@ -23,6 +23,7 @@ from flash_attn.flash_attn_interface import (
     _wrapped_flash_attn_varlen_forward,
 )
 
+from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.functional.utils import (
     correct_attn_out_lse_with_sink_compiled,
     sink_bwd_compiled,
@@ -35,6 +36,7 @@ class FA2QKVPackedFuncWithSink(torch.autograd.Function):
         ctx,
         qkv,
         sink,
+        sink_layout,
         dropout_p,
         softmax_scale,
         causal,
@@ -74,10 +76,12 @@ class FA2QKVPackedFuncWithSink(torch.autograd.Function):
             out=out_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=sink_layout,
         )
 
         if is_grad:
             ctx.save_for_backward(q, k, v, sink, out_padded, softmax_lse, rng_state)
+            ctx.sink_layout = sink_layout
             ctx.dropout_p = dropout_p
             ctx.softmax_scale = softmax_scale
             ctx.causal = causal
@@ -106,6 +110,7 @@ class FA2QKVPackedFuncWithSink(torch.autograd.Function):
             dout=dout_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=ctx.sink_layout,
         )
 
         _wrapped_flash_attn_backward(
@@ -131,7 +136,7 @@ class FA2QKVPackedFuncWithSink(torch.autograd.Function):
 
         dqkv = dqkv[..., : dout.shape[-1]]  # We could have padded the head dimension
 
-        return dqkv, dsink, None, None, None, None, None, None, None, None, None
+        return dqkv, dsink, None, None, None, None, None, None, None, None, None, None
 
 
 class FA2VarlenQKVPackedFuncWithSink(torch.autograd.Function):
@@ -140,6 +145,7 @@ class FA2VarlenQKVPackedFuncWithSink(torch.autograd.Function):
         ctx,
         qkv,
         sink,
+        sink_layout,
         cu_seqlens,
         max_seqlen,
         dropout_p,
@@ -190,12 +196,14 @@ class FA2VarlenQKVPackedFuncWithSink(torch.autograd.Function):
             out=out_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=sink_layout,
         )
 
         if is_grad:
             ctx.save_for_backward(
                 q, k, v, sink, out_padded, softmax_lse, cu_seqlens, rng_state
             )
+            ctx.sink_layout = sink_layout
             ctx.dropout_p = dropout_p
             ctx.max_seqlen = max_seqlen
             ctx.softmax_scale = softmax_scale
@@ -225,6 +233,7 @@ class FA2VarlenQKVPackedFuncWithSink(torch.autograd.Function):
             dout=dout_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=ctx.sink_layout,
         )
 
         _wrapped_flash_attn_varlen_backward(
@@ -268,6 +277,7 @@ class FA2VarlenQKVPackedFuncWithSink(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -278,6 +288,7 @@ class FA2KVPackedFuncWithSink(torch.autograd.Function):
         q,
         kv,
         sink,
+        sink_layout,
         dropout_p,
         softmax_scale,
         causal,
@@ -316,10 +327,12 @@ class FA2KVPackedFuncWithSink(torch.autograd.Function):
             out=out_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=sink_layout,
         )
 
         if is_grad:
             ctx.save_for_backward(q, k, v, sink, out_padded, softmax_lse, rng_state)
+            ctx.sink_layout = sink_layout
             ctx.dropout_p = dropout_p
             ctx.softmax_scale = softmax_scale
             ctx.causal = causal
@@ -348,6 +361,7 @@ class FA2KVPackedFuncWithSink(torch.autograd.Function):
             dout=dout_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=ctx.sink_layout,
         )
 
         _wrapped_flash_attn_backward(
@@ -374,7 +388,21 @@ class FA2KVPackedFuncWithSink(torch.autograd.Function):
         dq = dq[..., : dout.shape[-1]]  # We could have padded the head dimension
         dkv = dkv[..., : dout.shape[-1]]
 
-        return dq, dkv, dsink, None, None, None, None, None, None, None, None, None
+        return (
+            dq,
+            dkv,
+            dsink,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 class FA2VarlenKVPackedFuncWithSink(torch.autograd.Function):
@@ -384,6 +412,7 @@ class FA2VarlenKVPackedFuncWithSink(torch.autograd.Function):
         q,
         kv,
         sink,
+        sink_layout,
         cu_seqlens_q,
         cu_seqlens_k,
         max_seqlen_q,
@@ -436,6 +465,7 @@ class FA2VarlenKVPackedFuncWithSink(torch.autograd.Function):
             out=out_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=sink_layout,
         )
 
         if is_grad:
@@ -450,6 +480,7 @@ class FA2VarlenKVPackedFuncWithSink(torch.autograd.Function):
                 cu_seqlens_k,
                 rng_state,
             )
+            ctx.sink_layout = sink_layout
             ctx.dropout_p = dropout_p
             ctx.max_seqlen_q = max_seqlen_q
             ctx.max_seqlen_k = max_seqlen_k
@@ -490,6 +521,7 @@ class FA2VarlenKVPackedFuncWithSink(torch.autograd.Function):
             dout=dout_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=ctx.sink_layout,
         )
 
         _wrapped_flash_attn_varlen_backward(
@@ -537,6 +569,7 @@ class FA2VarlenKVPackedFuncWithSink(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -548,6 +581,7 @@ class FA2FuncWithSink(torch.autograd.Function):
         k,
         v,
         sink,
+        sink_layout,
         dropout_p,
         softmax_scale,
         causal,
@@ -585,10 +619,12 @@ class FA2FuncWithSink(torch.autograd.Function):
             out=out_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=sink_layout,
         )
 
         if is_grad:
             ctx.save_for_backward(q, k, v, sink, out_padded, softmax_lse, rng_state)
+            ctx.sink_layout = sink_layout
             ctx.dropout_p = dropout_p
             ctx.softmax_scale = softmax_scale
             ctx.causal = causal
@@ -616,6 +652,7 @@ class FA2FuncWithSink(torch.autograd.Function):
             dout=dout_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=ctx.sink_layout,
         )
 
         _wrapped_flash_attn_backward(
@@ -643,25 +680,49 @@ class FA2FuncWithSink(torch.autograd.Function):
         dk = dk[..., : dout.shape[-1]]
         dv = dv[..., : dout.shape[-1]]
 
-        return dq, dk, dv, dsink, None, None, None, None, None, None, None, None, None
+        return (
+            dq,
+            dk,
+            dv,
+            dsink,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
     @staticmethod
     def correct_out_lse_with_sink(
         out: torch.Tensor,
         lse: torch.Tensor,
         sink: torch.Tensor | None,
+        sink_layout: AttnSinkLayout,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if sink is not None:
+            FA2FuncWithSink._check_sink_layout(sink, sink_layout)
             b = out.shape[0]
+
             # rearrange out, lse
             out = rearrange(out, "b s h d -> (b s) h d")
             lse = rearrange(lse, "b h s -> (b s) h")
+            sink = (
+                rearrange(sink, "b sq s h -> (b sq) s h")
+                if sink_layout == "ssh"
+                else sink
+            )
 
             # correct out, lse with sink
             out, lse = correct_attn_out_lse_with_sink_compiled(
                 out=out,
                 lse=lse,
                 sink=sink,
+                sink_layout=sink_layout,
                 inplace=True,
             )
 
@@ -677,12 +738,20 @@ class FA2FuncWithSink(torch.autograd.Function):
         dout: torch.Tensor,
         lse: torch.Tensor,
         sink: torch.Tensor | None,
+        sink_layout: AttnSinkLayout,
     ) -> torch.Tensor | None:
         if sink is not None:
+            b = out.shape[0]
+
             # rearrange out, do, lse
             out = rearrange(out, "b s h d -> (b s) h d")
             dout = rearrange(dout, "b s h d -> (b s) h d")
             lse = rearrange(lse, "b h s -> (b s) h")
+            sink = (
+                rearrange(sink, "b sq s h -> (b sq) s h")
+                if sink_layout == "ssh"
+                else sink
+            )
 
             # compute dsink
             dsink = sink_bwd_compiled(
@@ -690,11 +759,34 @@ class FA2FuncWithSink(torch.autograd.Function):
                 lse=lse,
                 o=out,
                 do=dout,
+                sink_layout=sink_layout,
+            )
+
+            # rearrange dsink back
+            dsink = (
+                rearrange(dsink, "(b sq) s h -> b sq s h", b=b)
+                if sink_layout == "ssh"
+                else dsink
             )
         else:
             dsink = None
 
         return dsink
+
+    @staticmethod
+    def _check_sink_layout(
+        sink: torch.Tensor,
+        sink_layout: AttnSinkLayout,
+    ) -> None:
+        match sink.ndim:
+            case 2:
+                assert sink_layout == "sh"
+            case 3:
+                assert sink_layout == "shd"
+            case 4:
+                assert sink_layout == "ssh"
+            case _:
+                raise ValueError(f"Invalid sink shape {sink.shape}")
 
 
 class FA2VarlenFuncWithSink(torch.autograd.Function):
@@ -705,6 +797,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
         k,
         v,
         sink,
+        sink_layout,
         cu_seqlens_q,
         cu_seqlens_k,
         max_seqlen_q,
@@ -757,6 +850,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
             out=out_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=sink_layout,
         )
 
         if is_grad:
@@ -771,6 +865,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
                 cu_seqlens_k,
                 rng_state,
             )
+            ctx.sink_layout = sink_layout
             ctx.dropout_p = dropout_p
             ctx.max_seqlen_q = max_seqlen_q
             ctx.max_seqlen_k = max_seqlen_k
@@ -810,6 +905,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
             dout=dout_padded,
             lse=softmax_lse,
             sink=sink,
+            sink_layout=ctx.sink_layout,
         )
 
         _wrapped_flash_attn_varlen_backward(
@@ -860,6 +956,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
     @staticmethod
@@ -867,8 +964,11 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
         out: torch.Tensor,
         lse: torch.Tensor,
         sink: torch.Tensor | None,
+        sink_layout: AttnSinkLayout,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if sink is not None:
+            FA2VarlenFuncWithSink._check_sink_layout(lse, sink, sink_layout)
+
             # rearrange lse
             lse = rearrange(lse, "h s -> s h")
 
@@ -877,6 +977,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
                 out=out,
                 lse=lse,
                 sink=sink,
+                sink_layout=sink_layout,
                 inplace=True,
             )
 
@@ -891,6 +992,7 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
         dout: torch.Tensor,
         lse: torch.Tensor,
         sink: torch.Tensor | None,
+        sink_layout: AttnSinkLayout,
     ) -> torch.Tensor | None:
         if sink is not None:
             # rearrange lse
@@ -902,16 +1004,35 @@ class FA2VarlenFuncWithSink(torch.autograd.Function):
                 lse=lse,
                 o=out,
                 do=dout,
+                sink_layout=sink_layout,
             )
         else:
             dsink = None
 
         return dsink
 
+    @staticmethod
+    def _check_sink_layout(
+        lse: torch.Tensor,
+        sink: torch.Tensor,
+        sink_layout: AttnSinkLayout,
+    ) -> None:
+        match sink.ndim:
+            case 2:
+                assert sink_layout == "sh"
+            case 3:
+                if sink.size(0) == lse.size(1):  # lse.shape = [nhq, sq]
+                    assert sink_layout == "ssh"
+                else:
+                    assert sink_layout == "shd"
+            case _:
+                raise ValueError(f"Invalid sink shape {sink.shape}")
+
 
 def fa2_qkvpacked_func_with_sink(
     qkv,
     sink=None,
+    sink_layout: AttnSinkLayout = "sh",
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -933,7 +1054,12 @@ def fa2_qkvpacked_func_with_sink(
 
     Arguments:
         qkv: (batch_size, seqlen, 3, nheads, headdim)
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink:
+            if sink_layout == "sh": (seqlen_sink, nheads)
+            if sink_layout == "ssh": (batch_size, seqlen, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -959,6 +1085,7 @@ def fa2_qkvpacked_func_with_sink(
     return FA2QKVPackedFuncWithSink.apply(
         qkv,
         sink,
+        sink_layout,
         dropout_p,
         softmax_scale,
         causal,
@@ -975,6 +1102,7 @@ def fa2_kvpacked_func_with_sink(
     q,
     kv,
     sink=None,
+    sink_layout: AttnSinkLayout = "sh",
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -1012,7 +1140,12 @@ def fa2_kvpacked_func_with_sink(
     Arguments:
         q: (batch_size, seqlen, nheads, headdim)
         kv: (batch_size, seqlen, 2, nheads_k, headdim)
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink:
+            if sink_layout == "sh": (seqlen_sink, nheads)
+            if sink_layout == "ssh": (batch_size, seqlen, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1040,6 +1173,7 @@ def fa2_kvpacked_func_with_sink(
         q,
         kv,
         sink,
+        sink_layout,
         dropout_p,
         softmax_scale,
         causal,
@@ -1057,6 +1191,7 @@ def fa2_func_with_sink(
     k,
     v,
     sink=None,
+    sink_layout: AttnSinkLayout = "sh",
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -1092,7 +1227,12 @@ def fa2_func_with_sink(
         q: (batch_size, seqlen, nheads, headdim)
         k: (batch_size, seqlen, nheads_k, headdim)
         v: (batch_size, seqlen, nheads_k, headdim)
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink:
+            if sink_layout == "sh": (seqlen_sink, nheads)
+            if sink_layout == "ssh": (batch_size, seqlen, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1120,6 +1260,7 @@ def fa2_func_with_sink(
         k,
         v,
         sink,
+        sink_layout,
         dropout_p,
         softmax_scale,
         causal,
@@ -1137,6 +1278,7 @@ def fa2_varlen_qkvpacked_func_with_sink(
     cu_seqlens,
     max_seqlen,
     sink=None,
+    sink_layout: AttnSinkLayout = "sh",
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -1161,7 +1303,12 @@ def fa2_varlen_qkvpacked_func_with_sink(
         cu_seqlens: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
            of the sequences in the batch, used to index into qkv.
         max_seqlen: int. Maximum sequence length in the batch.
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink:
+            if sink_layout == "sh": (seqlen_sink, nheads)
+            if sink_layout == "ssh": (total_q, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1187,6 +1334,7 @@ def fa2_varlen_qkvpacked_func_with_sink(
     return FA2VarlenQKVPackedFuncWithSink.apply(
         qkv,
         sink,
+        sink_layout,
         cu_seqlens,
         max_seqlen,
         dropout_p,
@@ -1209,6 +1357,7 @@ def fa2_varlen_kvpacked_func_with_sink(
     max_seqlen_q,
     max_seqlen_k,
     sink=None,
+    sink_layout: AttnSinkLayout = "sh",
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -1252,7 +1401,12 @@ def fa2_varlen_kvpacked_func_with_sink(
            of the sequences in the batch, used to index into kv.
         max_seqlen_q: int. Maximum query sequence length in the batch.
         max_seqlen_k: int. Maximum key sequence length in the batch.
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink:
+            if sink_layout == "sh": (seqlen_sink, nheads)
+            if sink_layout == "ssh": (total_q, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1280,6 +1434,7 @@ def fa2_varlen_kvpacked_func_with_sink(
         q,
         kv,
         sink,
+        sink_layout,
         cu_seqlens_q,
         cu_seqlens_k,
         max_seqlen_q,
@@ -1305,6 +1460,7 @@ def fa2_varlen_func_with_sink(
     max_seqlen_q,
     max_seqlen_k,
     sink=None,
+    sink_layout: AttnSinkLayout = "sh",
     dropout_p=0.0,
     softmax_scale=None,
     causal=False,
@@ -1347,7 +1503,12 @@ def fa2_varlen_func_with_sink(
            of the sequences in the batch, used to index into kv.
         max_seqlen_q: int. Maximum query sequence length in the batch.
         max_seqlen_k: int. Maximum key sequence length in the batch.
-        sink: (seqlen_sink, nheads). Default to None to not apply attention sink.
+        sink:
+            if sink_layout == "sh": (seqlen_sink, nheads)
+            if sink_layout == "ssh": (total_q, seqlen_sink, nheads).
+            Default to None to not apply attention sink.
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
         dropout_p: float. Dropout probability.
         softmax_scale: float. The scaling of QK^T before applying softmax.
             Default to 1 / sqrt(headdim).
@@ -1376,6 +1537,7 @@ def fa2_varlen_func_with_sink(
         k,
         v,
         sink,
+        sink_layout,
         cu_seqlens_q,
         cu_seqlens_k,
         max_seqlen_q,

@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, reduce, repeat
 
+from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.utils import to_higher_fp_dtype
 
 
@@ -116,11 +117,44 @@ def sink_bwd(
     lse: torch.Tensor,
     o: torch.Tensor,
     do: torch.Tensor,
+    sink_layout: AttnSinkLayout = "sh",
     dsink: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Apply the backward pass for the gradient of sink tokens
+
+    Args:
+        sink (torch.Tensor): the sink tokens with shape specified by sink_layout:
+            sh: [seqlen_sink, num_heads_q]
+            shd: [seqlen_sink, num_heads_q, head_dim]
+            ssh: [seqlen_q, seqlen_sink, num_heads_q]
+        lse (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
+        o (torch.Tensor): output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
+        do (torch.Tensor): the gradient of output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
+        dsink (torch.Tensor | None, optional): the output buffer for the gradient of sink. Defaults to None.
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
+
+    Returns:
+        torch.Tensor: the gradient of sink with shape specified by sink_layout:
+            sh: [seqlen_sink, num_heads_q]
+            shd: [seqlen_sink, num_heads_q, head_dim]
+            ssh: [seqlen_q, seqlen_sink, num_heads_q]
+    """
+
     # prepare sink, lse
     sink_dtype = sink.dtype
-    sink = repeat(sink, "s_sink hq -> hq sq s_sink", sq=lse.size(0)).to(lse.dtype)
+    match sink_layout:
+        case "sh":
+            assert sink.ndim == 2
+            sink = repeat(sink, "s_sink hq -> hq sq s_sink", sq=lse.size(0))
+        case "ssh":
+            assert sink.ndim == 3 and sink.size(0) == lse.size(0)
+            sink = rearrange(sink, "sq s_sink hq -> hq sq s_sink")
+        case "shd":
+            raise NotImplementedError(f"sink_layout {sink_layout} is not supported yet")
+        case _:
+            raise ValueError(f"Invalid sink_layout {sink_layout}")
+    sink = sink.to(lse.dtype)
     lse = rearrange(lse, "sq hq -> hq sq 1")
 
     # calculate delta = (o * do).sum(dim=-1)
@@ -135,12 +169,25 @@ def sink_bwd(
     #       p_sink.shape = [nhq, sq, s_sink]
     p_sink = safe_softmax(sink, lse)
 
-    # calculate dsink = p_sink.T x -delta
-    # where p_sink.shape = [nhq, sq, s_sink]
-    #       delta.shape = [[nhq, sq, 1]
-    #       dsink.shape = [s_sink, nhq]
-    dsink_ = reduce(p_sink * -delta, "nhq sq s_sink -> s_sink nhq", "sum")
+    match sink_layout:
+        case "sh":
+            # calculate dsink = p_sink.T x -delta
+            # where p_sink.shape = [nhq, sq, s_sink]
+            #       delta.shape = [[nhq, sq, 1]
+            #       dsink.shape = [s_sink, nhq]
+            dsink_ = reduce(p_sink * -delta, "nhq sq s_sink -> s_sink nhq", "sum")
+        case "ssh":
+            # calculate dsink = p_sink * -delta
+            # where p_sink.shape = [nhq, sq, s_sink]
+            #       delta.shape = [[nhq, sq, 1]
+            #       dsink.shape = [nhq, sq, s_sink] -> [sq, s_sink, nhq]
+            dsink_ = rearrange(p_sink * -delta, "nhq sq s_sink -> sq s_sink nhq")
+        case "shd":
+            raise NotImplementedError(f"sink_layout {sink_layout} is not supported yet")
+        case _:
+            raise ValueError(f"Invalid sink_layout {sink_layout}")
 
+    # Copy to the output buffer if given
     if dsink is None:
         dsink = dsink_.to(sink_dtype)
     else:
@@ -177,28 +224,49 @@ def calc_lse_rescale_weight(
 
 def calc_lse_sink(
     sink: torch.Tensor,
-    seqlen_lse: int,
+    seqlen_q: int,
+    sink_layout: AttnSinkLayout = "sh",
 ) -> torch.Tensor:
     """Calculate the log-sum-exp of the sink tokens
-    and repeat it to the given seqlen_lse
+    and repeat it to the given seqlen_q
 
     Args:
-        sink (torch.Tensor): the sink tokens with shape: [seqlen_sink, num_heads_q]
-        seqlen_lse (int): the seqlen of the lse_sink
+        sink (torch.Tensor): the sink tokens with shape specified by sink_layout:
+            sh: [seqlen_sink, num_heads_q]
+            shd: [seqlen_sink, num_heads_q, head_dim]
+            ssh: [seqlen_q, seqlen_sink, num_heads_q]
+        seqlen_q (int): the seqlen of the lse_sink
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
 
     Returns:
-        torch.Tensor: the log-sum-exp of the sink tokens with shape: [seqlen_lse, num_heads_q]
+        torch.Tensor: the log-sum-exp of the sink tokens with shape: [seqlen_q, num_heads_q]
     """
-    # calculate lse_sink and repeat to seqlen_lse
-    lse_sink = (
-        # shape: [s_sink, nhq] -> [1, nhq]
-        torch.logsumexp(sink, dim=0, keepdim=True)
-        # shape: [1, nhq] -> [sq, nhq]
-        # NOTE: we had better not use `expand` here
-        # to avoid view conflict when involving in-place operations
-        # .expand_as(seqlen_lse, -1)
-        .repeat(seqlen_lse, 1)
-    )
+
+    match sink_layout:
+        case "sh":
+            assert sink.ndim == 2
+            # calculate lse_sink and repeat to seqlen_q
+            lse_sink = (
+                # shape: [s_sink, nhq] -> [1, nhq]
+                safe_lse(sink, dim=0, keepdim=True)
+                # shape: [1, nhq] -> [sq, nhq]
+                # NOTE: we had better not use `expand` here
+                # to avoid view conflict when involving in-place operations
+                # .expand_as(seqlen_q, -1)
+                .repeat(seqlen_q, 1)
+            )
+        case "ssh":
+            assert sink.ndim == 3 and sink.size(0) == seqlen_q
+            # calculate lse_sink and repeat to seqlen_q
+            lse_sink = (
+                # shape: [seqlen_q, s_sink, nhq] -> [seqlen_q, nhq]
+                safe_lse(sink, dim=1, keepdim=False)
+            )
+        case "shd":
+            raise NotImplementedError(f"{sink_layout} is not supported yet")
+        case _:
+            raise ValueError(f"Invalid sink_layout: {sink_layout}")
 
     return lse_sink
 
@@ -329,6 +397,7 @@ def correct_attn_fwd_result(
 def correct_attn_lse_with_sink(
     lse: torch.Tensor,
     sink: torch.Tensor,
+    sink_layout: AttnSinkLayout = "sh",
     inplace: bool = False,
 ) -> torch.Tensor:
     """
@@ -336,13 +405,23 @@ def correct_attn_lse_with_sink(
 
     Args:
         lse (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
-        sink (torch.Tensor): log-sum-exp tensor, with shape: [seqlen_sink, num_heads_q]
+        sink (torch.Tensor): the sink tokens with shape specified by sink_layout:
+            sh: [seqlen_sink, num_heads_q]
+            shd: [seqlen_sink, num_heads_q, head_dim]
+            ssh: [seqlen_q, seqlen_sink, num_heads_q]
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
         inplace (bool, optional): whether to correct ``lse`` inplace. Defaults to ``False``.
+
 
     Returns:
         torch.Tensor: corrected log-sum-exp tensor, with shape: [seqlen_q, num_heads_q]
     """
-    lse_sink = calc_lse_sink(sink, lse.size(0))
+    lse_sink = calc_lse_sink(
+        sink=sink,
+        seqlen_q=lse.size(0),
+        sink_layout=sink_layout,
+    )
 
     return correct_attn_lse(lse, lse_sink, inplace=inplace)
 
@@ -351,6 +430,7 @@ def correct_attn_out_with_sink(
     out: torch.Tensor,
     lse: torch.Tensor,
     sink: torch.Tensor,
+    sink_layout: AttnSinkLayout = "sh",
     inplace: bool = False,
 ) -> torch.Tensor:
     """
@@ -359,13 +439,22 @@ def correct_attn_out_with_sink(
     Args:
         out (torch.Tensor): output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
         lse (torch.Tensor): lse tensor, with shape: [seqlen_q, num_heads_q]
-        sink (torch.Tensor): local lse for out2, with shape: [seqlen_sink, num_heads_q]
+        sink (torch.Tensor): the sink tokens with shape specified by sink_layout:
+            sh: [seqlen_sink, num_heads_q]
+            shd: [seqlen_sink, num_heads_q, head_dim]
+            ssh: [seqlen_q, seqlen_sink, num_heads_q]
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
         inplace (bool, optional): whether to correct ``out`` inplace. Defaults to ``False``.
 
     Returns:
         torch.Tensor: corrected output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
     """
-    lse_sink = calc_lse_sink(sink, lse.size(0))
+    lse_sink = calc_lse_sink(
+        sink=sink,
+        seqlen_q=lse.size(0),
+        sink_layout=sink_layout,
+    )
 
     # calculate the rescale weight with shape: [sq, nhq, 1]
     # formula derivation:
@@ -382,6 +471,7 @@ def correct_attn_out_lse_with_sink(
     out: torch.Tensor,
     lse: torch.Tensor,
     sink: torch.Tensor,
+    sink_layout: AttnSinkLayout = "sh",
     inplace: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -390,7 +480,12 @@ def correct_attn_out_lse_with_sink(
     Args:
         out (torch.Tensor): output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
         lse (torch.Tensor): lse tensor, with shape: [seqlen_q, num_heads_q]
-        sink (torch.Tensor): local lse for out2, with shape: [seqlen_sink, num_heads_q]
+        sink (torch.Tensor): the sink tokens with shape specified by sink_layout:
+            sh: [seqlen_sink, num_heads_q]
+            shd: [seqlen_sink, num_heads_q, head_dim]
+            ssh: [seqlen_q, seqlen_sink, num_heads_q]
+        sink_layout (AttnSinkLayout, optional): the layout of the sink tokens.
+            Defaults to "sh".
         inplace (bool, optional): whether to correct ``out`` inplace. Defaults to ``False``.
 
     Returns:
@@ -398,7 +493,12 @@ def correct_attn_out_lse_with_sink(
             - out: corrected output tensor, with shape: [seqlen_q, num_heads_q, head_dim]
             - lse: corrected lse tensor, with shape: [seqlen_q, num_heads_q]
     """
-    lse_sink = calc_lse_sink(sink, lse.size(0))
+    lse_sink = calc_lse_sink(
+        sink=sink,
+        seqlen_q=lse.size(0),
+        sink_layout=sink_layout,
+    )
+
     corr_lse = correct_attn_lse(lse, lse_sink, inplace=False)
     w = calc_lse_rescale_weight(lse, corr_lse)
 

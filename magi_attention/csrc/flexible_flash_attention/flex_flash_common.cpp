@@ -47,6 +47,7 @@ void set_params_fprop(
     float const softmax_scale,
     void* tile_count_semaphore_d,
     float const softcap,
+    flash::SinkLayout const sink_layout,
     int const sm_margin,
     bool const disable_fwd_atomic_reduction) {
   // Reset the parameters
@@ -70,11 +71,12 @@ void set_params_fprop(
 
   params.disable_fwd_atomic_reduction = disable_fwd_atomic_reduction;
 
-  // Set the pointers of Q, K, V
+  // Set the pointers of Q, K, V, sink
   params.q_ptr = q.data_ptr();
   params.k_ptr = k.data_ptr();
   params.v_ptr = v.data_ptr();
   params.sink_ptr = sink.data_ptr();
+
   // Set the strides of Q, K, V
   // All stride are in elements, not bytes.
   params.q_row_stride = q.stride(-3);
@@ -86,6 +88,7 @@ void set_params_fprop(
 
   // Set the pointer of O
   params.o_ptr = kernel_out.data_ptr();
+
   // Set the strides of O
   // All stride are in elements, not bytes.
   params.o_row_stride = kernel_out.stride(-3);
@@ -116,6 +119,7 @@ void set_params_fprop(
   params.softmax_lse_ptr = softmax_lse_d;
   params.scale_softmax = softmax_scale;
   params.softcap = softcap;
+  params.sink_layout = sink_layout;
 
   // Set the architecture and number of SMs to used in the kernel.
   params.arch = at::cuda::getCurrentDeviceProperties()->major * 10 + at::cuda::getCurrentDeviceProperties()->minor;
@@ -164,6 +168,7 @@ void set_params_dgrad(
     void* determin_conflict_state_d,
     void* dq_determin_conflict_state_d,
     void* dq_determin_range_locks_d,
+    flash::SinkLayout const sink_layout,
     int const sm_margin,
     bool const disable_bwd_dkv_atomic_reduction) {
   set_params_fprop(
@@ -181,24 +186,25 @@ void set_params_dgrad(
       v,
       sink,
       out,
-      /*q_ranges_d*/ q_ranges_d,
-      /*k_ranges_d*/ k_ranges_d,
-      /*range_locks_d*/ nullptr,
-      /*deterministic*/ deterministic,
-      /*determin_range_locks_d*/ determin_range_locks_d,
-      /*determin_conflict_state_d*/ determin_conflict_state_d,
-      /*attn_type_map_d*/ attn_type_map_d,
-      /*merge_batch_size*/ merge_batch_size,
-      /*merge_q_ranges_d*/ nullptr,
-      /*qk_map_d*/ nullptr,
-      /*unique_count_d*/ nullptr,
+      /*q_ranges_d=*/q_ranges_d,
+      /*k_ranges_d=*/k_ranges_d,
+      /*range_locks_d=*/nullptr,
+      /*deterministic=*/deterministic,
+      /*determin_range_locks_d=*/determin_range_locks_d,
+      /*determin_conflict_state_d=*/determin_conflict_state_d,
+      /*attn_type_map_d=*/attn_type_map_d,
+      /*merge_batch_size=*/merge_batch_size,
+      /*merge_q_ranges_d=*/nullptr,
+      /*qk_map_d=*/nullptr,
+      /*unique_count_d=*/nullptr,
       /*sparse_load_loop_count_d*/ nullptr,
-      /*softmax_lse_d*/ softmax_lse_d,
-      /*softmax_scale*/ softmax_scale,
-      /*tile_count_semaphore_d*/ tile_count_semaphore_d,
-      /*softcap*/ softcap,
-      /*sm_margin*/ sm_margin,
-      /*disable_fwd_atomic_reduction*/ false);
+      /*softmax_lse_d=*/softmax_lse_d,
+      /*softmax_scale=*/softmax_scale,
+      /*tile_count_semaphore_d=*/tile_count_semaphore_d,
+      /*softcap=*/softcap,
+      /*sink_layout=*/sink_layout,
+      /*sm_margin=*/sm_margin,
+      /*disable_fwd_atomic_reduction=*/false);
 
   // Set backward-specific dimensions
   params.total_q_rounded = total_q_rounded;

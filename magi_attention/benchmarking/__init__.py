@@ -12,12 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .bench import Benchmark, do_bench, do_bench_flops, do_bench_mem, perf_report
+from .bench import (
+    Benchmark,
+    Mark,
+    do_bench,
+    do_bench_flops,
+    do_bench_mem,
+    perf_report,
+    report_all_from_perf,
+)
 from .image_grid import make_img_grid
 
 __all__ = [
     "Benchmark",
+    "Mark",
     "perf_report",
+    "report_all_from_perf",
     "do_bench_flops",
     "do_bench_mem",
     "do_bench",

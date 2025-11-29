@@ -20,7 +20,7 @@ import torch
 from flash_attn_interface import flash_attn_func, flash_attn_varlen_func
 
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.testing.precision import ref_attn_func
+from magi_attention.testing import ref_attn_func
 
 
 def fa3_test_func(q, k, v, dout, causal, deterministic, qkv_format="bshd"):
@@ -255,7 +255,9 @@ def ref_torch_sdpa_func(q, k, v, grad_total_out, mask, high_precision=False):
         v=total_v,
         mask=mask,
         layout="thd",
+        sink_layout="sh",
         high_precision=high_precision,
+        return_lse=False,
     )
     total_out_ref_high_precision.backward(grad_total_out)
     (

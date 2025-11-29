@@ -107,7 +107,6 @@ def do_bench(
     """
     assert return_mode in ["min", "max", "mean", "median"]
     assert return_flops or return_mem
-    import torch
 
     def _get_ret(flops, mem):
         return (
@@ -274,25 +273,57 @@ class Benchmark:
         self.styles = styles
 
         # plot info
-        self.xlabel = xlabel
+        self.xlabel = xlabel or x_names[0]
         self.ylabel = ylabel
         self.plot_name = plot_name
         self.args = args
 
+    @staticmethod
+    def from_csv(
+        csv_path: str,
+        plot_name: str,
+        line_arg: str,
+        ylabel: str | dict[str, str] = "",
+        x_int: bool = False,
+        x_log: bool = False,
+    ) -> "Benchmark":
+        df = pd.read_csv(csv_path)
+
+        x_names = [df.columns[0]]
+        x_vals = df[x_names[0]].unique().tolist()
+        if x_int:
+            x_vals = [int(x) for x in x_vals]
+        line_vals = line_names = df.columns[1:].tolist()
+
+        return Benchmark(
+            x_names=x_names,
+            x_vals=x_vals,
+            line_arg=line_arg,
+            line_vals=line_vals,
+            line_names=line_names,
+            plot_name=plot_name,
+            args={},
+            x_log=x_log,
+            ylabel=ylabel,
+        )
+
 
 # copied and modified from triton.testing.Mark to add flops report with peak memory report
 # see https://github.com/openai/triton/blob/ccc25eb0d6261587a61b8ce8cff6ff1ad1d579fd/python/triton/testing.py#L258
-class Mark(object):
+class Mark:
     def __init__(self, fn, benchmarks):
         self.fn = fn
         self.benchmarks = benchmarks
 
     def _call(self, bench: Benchmark, **kwargs):
-        y_mean = bench.line_names
-        y_min = [f"{x}-min" for x in bench.line_names]
-        y_max = [f"{x}-max" for x in bench.line_names]
         x_names = list(bench.x_names)
-        df_init = pd.DataFrame(columns=x_names + y_mean + y_min + y_max)
+        y_mean = bench.line_names
+
+        # y_min = [f"{x}-min" for x in bench.line_names]
+        # y_max = [f"{x}-max" for x in bench.line_names]
+
+        df_init = pd.DataFrame(columns=x_names + y_mean)
+        # df_init = pd.DataFrame(columns=x_names + y_mean + y_min + y_max)
 
         dfs = {}
         for x in bench.x_vals:
@@ -305,41 +336,42 @@ class Mark(object):
             x_args = dict(zip(x_names, x))
 
             row_mean: dict[str, list] = {}
-            row_min: dict[str, list] = {}
-            row_max: dict[str, list] = {}
+            # row_min: dict[str, list] = {}
+            # row_max: dict[str, list] = {}
             for y in bench.line_vals:
                 ret_dict = self.fn(
                     **x_args, **{bench.line_arg: y}, **bench.args, **kwargs
                 )
                 for k, v in ret_dict.items():
                     try:
-                        y_mean, y_min, y_max = v
+                        y_mean, _, _ = v
+                        # y_mean, y_min, y_max = v
                     except TypeError:
-                        y_mean, y_min, y_max = v, None, None  # type: ignore
+                        y_mean = v
+                        # y_mean, y_min, y_max = v, None, None  # type: ignore
                     row_mean.setdefault(k, []).append(y_mean)
-                    row_min.setdefault(k, []).append(y_min)
-                    row_max.setdefault(k, []).append(y_max)
+                    # row_min.setdefault(k, []).append(y_min)
+                    # row_max.setdefault(k, []).append(y_max)
             for k in row_mean:
                 if k not in dfs:
                     dfs[k] = deepcopy(df_init)
-                dfs[k].loc[len(dfs[k])] = (
-                    list(x) + row_mean[k] + row_min[k] + row_max[k]
-                )
+                dfs[k].loc[len(dfs[k])] = list(x) + row_mean[k]
+                # dfs[k].loc[len(dfs[k])] = (
+                #     list(x) + row_mean[k] + row_min[k] + row_max[k]
+                # )
 
         return dfs, x_names
 
-    def _run(
-        self,
+    @classmethod
+    def draw_plot(
+        cls,
+        dfs: dict[str, pd.DataFrame],
         bench: Benchmark,
         save_path: str,
-        show_plots: bool,
-        print_data: bool,
         print_value_on_bar: bool,
-        **kwargs,
+        show_plots: bool,
+        save_csv: bool = True,
     ):
-        # run the benchmark functions
-        dfs, x_names = self._call(bench, **kwargs)
-
         plt.style.use("seaborn-v0_8")
         sns.set_theme(
             style="whitegrid",
@@ -356,10 +388,7 @@ class Mark(object):
         )
         COLOR_PALETTE = sns.color_palette("viridis", n_colors=len(bench.line_names))
 
-        if not bench.plot_name:
-            return
-
-        for k in dfs:
+        for perf_key in dfs:
             plt.figure(figsize=(14, 8), dpi=100)
             ax = plt.gca()
 
@@ -367,10 +396,10 @@ class Mark(object):
             labels = bench.line_names
             xvars = bench.x_vals
             x_indices = np.arange(len(xvars))
-            bar_width = 0.25 if len(labels) < 4 else 0.15
+            bar_width = 0.25 if len(labels) < 4 else (0.15 if len(labels) < 6 else 0.12)
 
             for provider in bench.line_names:
-                data = dfs[k][provider].dropna().values
+                data = dfs[perf_key][provider].dropna().values
                 all_data.append(data)
 
             # draw bar plots
@@ -474,20 +503,22 @@ class Mark(object):
 
             # set xlabel and ylabel
             ax.set_xlabel(
-                bench.xlabel or x_names[0],
+                bench.xlabel,
                 fontsize=15,
                 labelpad=12,
                 fontweight="semibold",
             )
             ax.set_ylabel(
-                bench.ylabel[k] if isinstance(bench.ylabel, dict) else bench.ylabel,
+                bench.ylabel[perf_key]
+                if isinstance(bench.ylabel, dict)
+                else bench.ylabel,
                 fontsize=15,
                 labelpad=12,
                 fontweight="semibold",
             )
 
             ax.set_title(
-                f"The benchmark of {k}\n{bench.plot_name}",
+                f"The benchmark of {perf_key}\n{bench.plot_name}",
                 fontsize=19,
                 pad=18,
                 fontweight="bold",
@@ -511,14 +542,14 @@ class Mark(object):
             plt.tight_layout()
             if save_path:
                 plt.savefig(
-                    os.path.join(save_path, f"{k}_report.pdf"),
+                    os.path.join(save_path, f"{perf_key}_report.pdf"),
                     dpi=100,
                     bbox_inches="tight",
                     transparent=False,
                     facecolor="white",
                 )
                 plt.savefig(
-                    os.path.join(save_path, f"{k}_report.png"),
+                    os.path.join(save_path, f"{perf_key}_report.png"),
                     dpi=100,
                     bbox_inches="tight",
                     transparent=False,
@@ -528,13 +559,36 @@ class Mark(object):
                 plt.show()
             plt.close()
 
-        if save_path:
+        if save_path and save_csv:
             for name, df in dfs.items():
                 df.to_csv(os.path.join(save_path, f"{name}.csv"), index=False)
 
+    def _run(
+        self,
+        bench: Benchmark,
+        save_path: str,
+        show_plots: bool,
+        print_data: bool,
+        print_value_on_bar: bool,
+        **kwargs,
+    ):
+        # run the benchmark functions
+        dfs, _ = self._call(bench, **kwargs)
+
         if print_data:
             for name, df in dfs.items():
-                print(df)
+                print(f"{name}: \n{df}\n")
+
+        if not bench.plot_name:
+            return
+
+        self.draw_plot(
+            dfs=dfs,
+            bench=bench,
+            save_path=save_path,
+            show_plots=show_plots,
+            print_value_on_bar=print_value_on_bar,
+        )
 
         return dfs
 
@@ -584,10 +638,9 @@ class Mark(object):
             html.write("</body></html>\n")
             html.close()
 
-            make_img_grid(
-                img_dir=save_path,
-                save_path=os.path.join(save_path, f"{report_all_name}.png"),
-                ignore_patterns=[report_all_name],
+            report_all_from_perf(
+                save_root=save_path,
+                report_all_name=report_all_name,
             )
 
         if return_df:
@@ -597,6 +650,41 @@ class Mark(object):
                 return result_dfs
 
         return None
+
+    @classmethod
+    def draw_from_csv(
+        cls,
+        csv_path: str,
+        perf_key: str,
+        plot_name: str,
+        line_arg: str,
+        save_path: str,
+        print_value_on_bar: bool = False,
+        show_plots: bool = True,
+        ylabel: str | dict[str, str] = "",
+        x_int: bool = False,
+        x_log: bool = False,
+    ):
+        benchmark = Benchmark.from_csv(
+            csv_path=csv_path,
+            plot_name=plot_name,
+            line_arg=line_arg,
+            ylabel=ylabel,
+            x_int=x_int,
+            x_log=x_log,
+        )
+
+        dfs: dict[str, pd.DataFrame] = {}
+        dfs[perf_key] = pd.read_csv(csv_path)
+
+        cls.draw_plot(
+            dfs=dfs,
+            bench=benchmark,
+            save_path=save_path,
+            show_plots=show_plots,
+            print_value_on_bar=print_value_on_bar,
+            save_csv=False,
+        )
 
 
 # copied from triton.testing.perf_report
@@ -613,3 +701,14 @@ def perf_report(benchmarks):
         return Mark(fn, benchmarks)
 
     return wrapper
+
+
+def report_all_from_perf(
+    save_root: str,
+    report_all_name: str = "perf_report_all",
+):
+    make_img_grid(
+        img_dir=save_root,
+        save_path=os.path.join(save_root, f"{report_all_name}.png"),
+        ignore_patterns=[report_all_name],
+    )

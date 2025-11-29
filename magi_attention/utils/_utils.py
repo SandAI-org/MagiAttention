@@ -565,12 +565,27 @@ def vis_attn_mask(
     )
 
 
-def make_ffa_causal_mask(
+def make_slice_mask_from_ffa_attn_type(
     seqlen_q: int,
     seqlen_k: int,
     attn_type_idx: int = 0,
     device: str | int = "cuda",
 ) -> torch.Tensor:
+    """Make the boolean mask tensor of certain AttnSlice from the given attn type index
+
+    Args:
+        seqlen_q (int): the seqlen of query in the AttnSlice
+        seqlen_k (int): the seqlen of key in the AttnSlice
+        attn_type_idx (int, optional): the attn type index. Defaults to ``0``.
+        device (str | int, optional): the device. Defaults to "cuda".
+
+    Raises:
+        ValueError: the attn type index is invalid
+
+    Returns:
+        torch.Tensor: the boolean mask tensor of certain AttnSlice
+            where the entries with ``False`` indicate that the corresponding positions are masked
+    """
     max_seqlen = max(seqlen_q, seqlen_k)
     latend_square_full_mask = torch.ones(
         (max_seqlen, max_seqlen),
@@ -596,7 +611,7 @@ def make_ffa_causal_mask(
     return mask
 
 
-def get_attn_mask_from_ffa_args(
+def make_attn_mask_from_ffa_args(
     q_ranges: "AttnRanges",
     k_ranges: "AttnRanges",
     attn_type_map: list[int],
@@ -604,6 +619,21 @@ def get_attn_mask_from_ffa_args(
     total_seqlen_k: int,
     device: str | int = "cuda",
 ) -> torch.Tensor:
+    """Make the complete latent boolean mask tensor from the FFA arguments
+
+    Args:
+        q_ranges (AttnRanges): the query ranges
+        k_ranges (AttnRanges): the key ranges
+        attn_type_map (list[int]): the mask type list
+        total_seqlen_q (int): the total seqlen of query
+        total_seqlen_k (int): the total seqlen of key
+        device (str | int, optional): the device of the mask tensor.
+            Defaults to "cuda".
+
+    Returns:
+        torch.Tensor: the boolean mask tensor on the given device
+            where the entries with ``False`` indicate that the corresponding positions are masked
+    """
     mask = torch.zeros(
         (total_seqlen_q, total_seqlen_k),
         dtype=torch.bool,
@@ -611,7 +641,7 @@ def get_attn_mask_from_ffa_args(
     )
 
     for q_range, k_range, attn_type_idx in zip(q_ranges, k_ranges, attn_type_map):
-        slice_mask = make_ffa_causal_mask(
+        slice_mask = make_slice_mask_from_ffa_attn_type(
             seqlen_q=q_range.seqlen,
             seqlen_k=k_range.seqlen,
             attn_type_idx=attn_type_idx,

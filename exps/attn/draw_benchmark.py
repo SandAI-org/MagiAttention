@@ -11,3 +11,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from magi_attention.benchmarking import Mark, report_all_from_perf
+
+perf_key = "flops"
+mask_type = "full"
+wds = ["fwd", "bwd"]
+root = "outs/test"
+
+for wd in wds:
+    path = f"{root}/{wd}"
+
+    Mark.draw_from_csv(
+        csv_path=f"{path}/{perf_key}.csv",
+        perf_key=perf_key,
+        plot_name=f"attn-{wd} with {mask_type} mask",
+        line_arg="attn_impl",
+        save_path=path,
+        ylabel="Throughout (TFLOPs/s)",
+        x_int=True,
+        x_log=False,
+    )
+
+report_all_from_perf(
+    save_root=root,
+)

@@ -562,6 +562,8 @@ setup(
             "tools",
             "assets",
             "scripts",
+            "extensions",
+            "examples",
         )
     ),
     # package data is defined in pyproject.toml
