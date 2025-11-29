@@ -584,10 +584,11 @@ void dispatch(
     int rank,
     int num_ranks) {
   const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x);
-  const auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / WARP_SIZE;
-  const auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
-  const auto num_channels = num_sms / 2, channel_id = sm_id / 2, is_forwarder = sm_id % 2 == 0;
+  const auto num_threads = static_cast<int>(blockDim.x), thread_id = static_cast<int>(threadIdx.x);
+  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
+  const auto num_channels = num_sms / 2, channel_id = sm_id / 2;
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
+  const bool is_forwarder = sm_id % 2 == 0;
 
   GRPCOLL_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe == num_channels or ibgda_get_state()->num_rc_per_pe >= num_sms);
 
@@ -619,7 +620,8 @@ void dispatch(
       }
     }
   }();
-  const auto warp_role = role_meta.first, target_rank = role_meta.second;
+  const auto warp_role = role_meta.first;
+  const auto target_rank = role_meta.second;
 
   // Get RDMA symmetric buffer
   //  `rdma_channel_data`: shape=(num_channels, kNumRDMARanks, num_max_rdma_chunked_recv_tokens, num_bytes_per_token), dtype=uint8_t
@@ -705,7 +707,7 @@ void dispatch(
   auto sync_forwarder_smem = []() { sync_warp_group(/*group_flag=*/1, /*group_size=*/(NUM_MAX_NVL_PEERS + 1) * WARP_SIZE); };
 
   if (warp_role == WarpRole::kRDMASender) {
-    // Get tasks
+    // Get tasks of this channel to send tokens ranging in [token_start_idx, token_end_idx)
     int token_start_idx, token_end_idx;
     get_channel_task_range(num_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
@@ -1563,8 +1565,7 @@ void cached_notify(
     int64_t num_nvl_bytes,
     bool is_cached_dispatch,
     bool low_latency_mode) {
-  const int num_threads = std::max(128, WARP_SIZE * num_channels);
-  const int num_warps = num_threads / WARP_SIZE;
+  const int num_threads = std::max(128, WARP_SIZE * num_channels), num_warps = num_threads / WARP_SIZE;
   const auto num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
   const int kNumTMABytesPerWarp = 8192;
   const int smem_size = kNumTMABytesPerWarp * num_warps;
