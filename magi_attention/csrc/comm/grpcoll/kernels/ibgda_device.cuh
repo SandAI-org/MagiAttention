@@ -492,7 +492,7 @@ DEVICE_INLINE void nvshmemi_ibgda_amo_nonfetch_add(void* rptr, const int& value,
 
     ibgda_write_amo_add_wqe(qp, value, reinterpret_cast<uint64_t>(qp->ibuf.buf), qp->ibuf.lkey, raddr, rkey, my_wqe_idx, &wqe_ptrs);
 
-    ibgda_submit_requests<true>(qp, my_wqe_idx, 1);
+    ibgda_submit_requests</*kAlwaysDoPostSend=*/true>(qp, my_wqe_idx, 1);
   }
 }
 
