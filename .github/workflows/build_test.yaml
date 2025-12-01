@@ -87,8 +87,7 @@ jobs:
           submodules: 'recursive'
       - name: install requirements
         run: |
-          pip install -r requirements.txt
-          pip install -r requirements_dev.txt
+          bash -x .github/scripts/install_requirements.sh
       - name: install MagiAttention
         run: |
           pip install -e . --no-build-isolation -vvv
