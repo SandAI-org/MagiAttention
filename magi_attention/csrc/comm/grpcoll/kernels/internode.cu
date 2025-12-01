@@ -583,8 +583,7 @@ void dispatch(
     int num_max_nvl_chunked_recv_tokens,
     int rank,
     int num_ranks) {
-  const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x);
-  const auto num_threads = static_cast<int>(blockDim.x), thread_id = static_cast<int>(threadIdx.x);
+  const auto num_sms = static_cast<int>(gridDim.x), sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
   const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
   const auto num_channels = num_sms / 2, channel_id = sm_id / 2;
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
@@ -2008,8 +2007,8 @@ void combine(
     int num_max_nvl_chunked_recv_tokens,
     int rank,
     int num_ranks) {
-  const auto sm_id = static_cast<int>(blockIdx.x), num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / WARP_SIZE;
-  const auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
+  const auto sm_id = static_cast<int>(blockIdx.x), thread_id = static_cast<int>(threadIdx.x);
+  const auto warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
   const auto num_channels = static_cast<int>(gridDim.x) / 2, channel_id = sm_id / 2;
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const bool is_forwarder = sm_id % 2 == 1;
@@ -2093,7 +2092,7 @@ void combine(
     int current_rdma_idx = channel_id % kNumRDMARanks;
     while (true) {
       // Exit if possible
-      if (__all_sync(0xffffffff, token_start_idx >= token_end_idx))
+      if (all_in_warp(token_start_idx >= token_end_idx))
         break;
 
       // Decide the next RDMA buffer to send
@@ -2103,7 +2102,7 @@ void combine(
         int num_used_slots = cached_channel_tail_idx - cached_channel_head_idx;
         is_lane_ready = lane_id < kNumRDMARanks and token_start_idx < token_end_idx and
             num_max_nvl_chunked_recv_tokens_per_rdma - num_used_slots >= num_max_nvl_chunked_send_tokens;
-        if (__any_sync(0xffffffff, is_lane_ready))
+        if (any_in_warp(is_lane_ready))
           break;
 
         // Retry
@@ -2113,7 +2112,7 @@ void combine(
         // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < kNumRDMARanks) {
           printf(
-              "grpcoll combine NVL sender timeout, channel: %d, RDMA: %d, nvl: %d, dst NVL: %d, RDMA lane: %d, head: %d, tail: %d, start: %d, end: %d\n",
+              "grpcoll combine NVL sender timeout, channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, RDMA lane: %d, head: %d, tail: %d, start: %d, end: %d\n",
               channel_id,
               rdma_rank,
               nvl_rank,
@@ -2277,7 +2276,7 @@ void combine(
           // Timeout check
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
             printf(
-                "grpcoll combine forwarder (RDMA check) timeout, channel: %d, RDMA: %d, nvl: %d, dst RDMA: %d, head: %ld, tail: %d, chunked: %d\n",
+                "grpcoll combine forwarder (RDMA check) timeout, channel: %d, RDMA: %d, NVL: %d, dst RDMA rank: %d, head: %ld, tail: %d, chunked: %d\n",
                 channel_id,
                 rdma_rank,
                 nvl_rank,
@@ -2306,7 +2305,7 @@ void combine(
             // Timeout check
             if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < NUM_MAX_NVL_PEERS) {
               printf(
-                  "grpcoll combine forwarder (NVL check) timeout, channel: %d, RDMA: %d, nvl: %d, src NVL: %d, dst RDMA: %d, tail: %d, waiting: %d, total: %d, sub: %d, large: %d, expected: %d\n",
+                  "grpcoll combine forwarder (NVL check) timeout, channel: %d, RDMA: %d, NVL: %d, src NVL rank: %d, dst RDMA rank: %d, tail: %d, waiting: %d, total: %d, sub: %d, large: %d, expected: %d\n",
                   channel_id,
                   rdma_rank,
                   nvl_rank,
@@ -2415,7 +2414,7 @@ void combine(
           // Timeout check
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
             printf(
-                "grpcoll combine RDMA receiver timeout, channel: %d, RDMA: %d, nvl: %d, src RDMA: %d, tail: %d, waiting: %ld, expect: %d\n",
+                "grpcoll combine RDMA receiver timeout, channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, tail: %d, waiting: %ld, expect: %d\n",
                 channel_id,
                 rdma_rank,
                 nvl_rank,
@@ -2546,7 +2545,7 @@ void combine(
     bool low_latency_mode) {
   constexpr int kNumCombineForwarderWarps = 24;
   constexpr int kNumTMABytesPerSenderWarp = 16384;
-  constexpr int kNumTMABytesPerForwarderWarp = 9248;
+  constexpr int kNumTMABytesPerForwarderWarp = 9248; // REVIEW: why this unusual number ?
   constexpr int smem_size = std::max(kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, kNumTMABytesPerForwarderWarp * kNumCombineForwarderWarps);
 
 #define COMBINE_LAUNCH_CASE(num_rdma_ranks)                                                                                                \
@@ -2596,9 +2595,9 @@ void combine(
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / num_rdma_ranks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= num_warps_per_forwarder);
-  GRPCOLL_HOST_ASSERT(type == CUDA_R_16BF);
   GRPCOLL_HOST_ASSERT(num_topk <= WARP_SIZE);
-  GRPCOLL_HOST_ASSERT(hidden_size % (sizeof(int4) / sizeof(dtype_t)) == 0);
+  GRPCOLL_HOST_ASSERT(type == CUDA_R_16BF);
+  GRPCOLL_HOST_ASSERT(hidden_size % (sizeof(int4) / sizeof(nv_bfloat16)) == 0);
 
   // Even-numbered SMs for NVL senders and RDMA receivers, odd-numbered SMs for forwarders
   const int num_sms = num_channels * 2;
