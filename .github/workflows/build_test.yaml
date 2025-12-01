@@ -90,14 +90,10 @@ jobs:
           bash -x .github/scripts/install_requirements.sh
       - name: install MagiAttention
         run: |
-          MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD=1 MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD=1 MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=1 pip install -e . --no-build-isolation -vvv
-      # - name: test MagiAttention
-      #   id: run_test
-      #   run: |
-      #     pytest -q -s --skip-slow --import-mode=append ./tests/test_attn/test_flex_flash_attn.py
+          pip install -e . --no-build-isolation -vvv
       - name: Test and Generate coverage report
         run: |
-          coverage run --source magi_attention --parallel-mode -m pytest -sv ./tests/test_common
+          coverage run --source magi_attention -m pytest -qsv ./tests
           coverage combine
           coverage xml -i
         env:
