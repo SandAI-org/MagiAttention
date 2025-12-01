@@ -1577,7 +1577,7 @@ void dispatch(
   // NOTES: in case of splitting, the issued put at the end of the buffer
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0);
 
-  // Even-numbered SMs for sending, odd-numbered SMs for receiving
+  // Even-numbered SMs for forwarders, odd-numbered SMs for RDMA senders and NVL receivers
   const int num_sms = num_channels * 2;
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
 
@@ -2008,29 +2008,31 @@ void combine(
     int num_max_nvl_chunked_recv_tokens,
     int rank,
     int num_ranks) {
-  enum class WarpRole { kNVLSender, kNVLAndRDMAForwarder, kRDMAReceiver, kCoordinator };
-
-  const auto sm_id = static_cast<int>(blockIdx.x);
-  const auto num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / WARP_SIZE;
-  const auto thread_id = static_cast<int>(threadIdx.x), lane_id = get_lane_id();
+  const auto sm_id = static_cast<int>(blockIdx.x), num_threads = static_cast<int>(blockDim.x), num_warps = num_threads / WARP_SIZE;
+  const auto thread_id = static_cast<int>(threadIdx.x), warp_id = thread_id / WARP_SIZE, lane_id = get_lane_id();
   const auto num_channels = static_cast<int>(gridDim.x) / 2, channel_id = sm_id / 2;
-  const bool is_forwarder_sm = sm_id % 2 == 1;
-
-  GRPCOLL_DEVICE_ASSERT(num_topk <= WARP_SIZE);
-  GRPCOLL_DEVICE_ASSERT(hidden_size % (sizeof(int4) / sizeof(dtype_t)) == 0);
-  const auto hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t));
-  const auto hidden_bytes = hidden_int4 * sizeof(int4);
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, 0, 0, num_topk);
-
-  // NOTES: we decouple a channel into 2 SMs
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
+  const bool is_forwarder = sm_id % 2 == 1;
+
+  const auto hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t)), hidden_bytes = hidden_int4 * sizeof(int4);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, /*num_scales=*/0, /*num_topk_idx=*/0, num_topk);
+  const auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks;
+
+  /** NOTE: Determine warp role and its target warp id
+   * For Forwarder (Odd SMs):
+   *  1. the first `kNumForwarders` warps are `kNVLAndRDMAForwarder`, ...
+   *  2. the rest warp is `kCoordinator`, ...
+   *
+   * For Sender/Receiver (Even SMs):
+   *  1. the first `NUM_MAX_NVL_PEERS` warps are `kNVLSender`, ...
+   *  2. the next `kNumRDMAReceivers` warps are `kRDMAReceiver`, ...
+   *  3. the rest warp is `kCoordinator`, ...
+   */
+  enum class WarpRole { kNVLSender, kNVLAndRDMAForwarder, kRDMAReceiver, kCoordinator };
   auto role_meta = [=]() -> std::pair<WarpRole, int> {
-    auto warp_id = thread_id / WARP_SIZE;
-    if (not is_forwarder_sm) {
+    if (!is_forwarder) {
       if (warp_id < NUM_MAX_NVL_PEERS) {
-        auto shuffled_warp_id = warp_id;
-        shuffled_warp_id = (shuffled_warp_id + channel_id) % NUM_MAX_NVL_PEERS;
-        return {WarpRole::kNVLSender, shuffled_warp_id};
+        return {WarpRole::kNVLSender, (warp_id + channel_id) % NUM_MAX_NVL_PEERS};
       } else if (warp_id < kNumForwarders) {
         return {WarpRole::kRDMAReceiver, warp_id - NUM_MAX_NVL_PEERS};
       } else {
@@ -2038,22 +2040,19 @@ void combine(
       }
     } else {
       if (warp_id < kNumForwarders) {
-        auto shuffled_warp_id = (warp_id + channel_id) % kNumForwarders;
-        return {WarpRole::kNVLAndRDMAForwarder, shuffled_warp_id};
+        return {WarpRole::kNVLAndRDMAForwarder, (warp_id + channel_id) % kNumForwarders};
       } else {
         return {WarpRole::kCoordinator, 0};
       }
     }
   }();
-  auto warp_role = role_meta.first;
-  auto warp_id = role_meta.second;
+  const auto warp_role = role_meta.first;
+  const auto target_warp_id = role_meta.second;
 
-  GRPCOLL_DEVICE_ASSERT(num_warps == kNumForwarders + 1);
-  auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks;
-
+  // Warp-specialized working
   if (warp_role == WarpRole::kNVLSender) {
     // NVL producers
-    const auto dst_nvl_rank = warp_id;
+    const auto dst_nvl_rank = target_warp_id;
 
     // NVL layouts
     // NOTES: to avoid deadlocks, we use separate NVL buffers for different RDMA sources
@@ -2183,7 +2182,7 @@ void combine(
       if (lane_id < kNumRDMARanks and is_lane_ready)
         st_release_sys_global(nvl_channel_tail.buffer() + lane_id, cached_channel_tail_idx);
     }
-  } else {
+  } else { // warp_role == WarpRole::kNVLAndRDMAForwarder | warp_role == WarpRole::kRDMAReceiver | warp_role == WarpRole::kCoordinator
     // Combiners and coordinators
     // RDMA symmetric layout
     auto rdma_channel_data = SymBuffer<int8_t>(rdma_buffer_ptr, num_max_rdma_chunked_recv_tokens * num_bytes_per_token, kNumRDMARanks, channel_id, num_channels);
@@ -2207,14 +2206,13 @@ void combine(
     __shared__ volatile bool forwarder_retired[kNumForwarders];
     __shared__ volatile int rdma_receiver_rdma_head[kNumRDMAReceivers][kNumRDMARanks];
     __shared__ volatile bool rdma_receiver_retired[kNumRDMAReceivers];
-    auto sync_forwarder_smem = [=]() { asm volatile("bar.sync 0, %0;" ::"r"((kNumForwarders + 1) * WARP_SIZE)); };
-    auto sync_rdma_receiver_smem = [=]() { asm volatile("bar.sync 1, %0;" ::"r"((kNumRDMAReceivers + 1) * WARP_SIZE)); };
+    auto sync_forwarder_smem = [=]() { sync_warp_group(/*group_flag=*/0, /*group_size=*/(kNumForwarders + 1) * WARP_SIZE); };
+    auto sync_rdma_receiver_smem = [=]() { sync_warp_group(/*group_flag=*/1, /*group_size=*/(kNumRDMAReceivers + 1) * WARP_SIZE); };
 
     if (warp_role == WarpRole::kNVLAndRDMAForwarder) {
       // Receive from NVL ranks and forward to RDMA ranks
       // NOTES: this part is using "large warps" for each RDMA ranks
-      const auto dst_rdma_rank = warp_id / kNumWarpsPerForwarder;
-      const auto sub_warp_id = warp_id % kNumWarpsPerForwarder;
+      const auto dst_rdma_rank = target_warp_id / kNumWarpsPerForwarder, sub_warp_id = target_warp_id % kNumWarpsPerForwarder;
       auto send_buffer = dst_rdma_rank == rdma_rank ? rdma_channel_data.recv_buffer(dst_rdma_rank) : rdma_channel_data.send_buffer(dst_rdma_rank);
       auto sync_large_warp = [=]() {
         if (kNumWarpsPerForwarder == 1) {
@@ -2232,7 +2230,7 @@ void combine(
       GRPCOLL_STATIC_ASSERT(kNumTMABufferBytesPerStage * kNumStages <= kNumTMABytesPerForwarderWarp, "TMA buffer is not larger enough");
 
       extern __shared__ __align__(1024) uint8_t smem_buffer[];
-      auto smem_ptr = smem_buffer + warp_id * kNumStages * kNumTMABufferBytesPerStage;
+      auto smem_ptr = smem_buffer + target_warp_id * kNumStages * kNumTMABufferBytesPerStage;
       auto tma_mbarrier = [=](const int& i) {
         return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage + kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1));
       };
@@ -2251,8 +2249,8 @@ void combine(
 
       // Clean shared memory and sync
       GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= WARP_SIZE, "Invalid number of NVL peers");
-      lane_id < NUM_MAX_NVL_PEERS ? (forwarder_nvl_head[warp_id][lane_id] = 0) : 0;
-      lane_id == 0 ? (forwarder_retired[warp_id] = false) : false;
+      lane_id < NUM_MAX_NVL_PEERS ? (forwarder_nvl_head[target_warp_id][lane_id] = 0) : 0;
+      lane_id == 0 ? (forwarder_retired[target_warp_id] = false) : false;
       sync_forwarder_smem();
 
       // Get count and cached head
@@ -2352,7 +2350,7 @@ void combine(
 
           // Update head
           if (lane_id < NUM_MAX_NVL_PEERS)
-            expected_head < 0 ? (forwarder_nvl_head[warp_id][lane_id] = -expected_head - 1) : (forwarder_nvl_head[warp_id][lane_id] = expected_head + 1);
+            expected_head < 0 ? (forwarder_nvl_head[target_warp_id][lane_id] = -expected_head - 1) : (forwarder_nvl_head[target_warp_id][lane_id] = expected_head + 1);
         }
         sync_large_warp();
 
@@ -2384,13 +2382,13 @@ void combine(
       // Retired
       __syncwarp();
       if (lane_id == 0)
-        forwarder_retired[warp_id] = true;
+        forwarder_retired[target_warp_id] = true;
     } else if (warp_role == WarpRole::kRDMAReceiver) {
       // Receive from RDMA ranks and write to the output tensor
       // Clean shared memory and sync
       GRPCOLL_DEVICE_ASSERT(kNumRDMARanks <= WARP_SIZE);
-      lane_id < kNumRDMARanks ? (rdma_receiver_rdma_head[warp_id][lane_id] = 0) : 0;
-      lane_id == 0 ? (rdma_receiver_retired[warp_id] = false) : 0;
+      lane_id < kNumRDMARanks ? (rdma_receiver_rdma_head[target_warp_id][lane_id] = 0) : 0;
+      lane_id == 0 ? (rdma_receiver_retired[target_warp_id] = false) : 0;
       sync_rdma_receiver_smem();
 
       // The same tokens as the dispatch process
@@ -2399,13 +2397,14 @@ void combine(
 
       // Iterate over all tokens and combine
       int cached_channel_tail_idx = 0;
-      for (int64_t token_idx = token_start_idx + warp_id; token_idx < token_end_idx; token_idx += kNumRDMAReceivers) {
+      for (int64_t token_idx = token_start_idx + target_warp_id; token_idx < token_end_idx; token_idx += kNumRDMAReceivers) {
         // Read expected head
         GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
         int expected_head = -1;
         if (lane_id < kNumRDMARanks) {
           expected_head = ld_nc_global(combined_rdma_head + token_idx * kNumRDMARanks + lane_id);
-          (expected_head < 0) ? (rdma_receiver_rdma_head[warp_id][lane_id] = -expected_head - 1) : (rdma_receiver_rdma_head[warp_id][lane_id] = expected_head);
+          (expected_head < 0) ? (rdma_receiver_rdma_head[target_warp_id][lane_id] = -expected_head - 1)
+                              : (rdma_receiver_rdma_head[target_warp_id][lane_id] = expected_head);
         }
 
         // Wait lanes to be ready
@@ -2459,11 +2458,11 @@ void combine(
       // Retired
       __syncwarp();
       if (lane_id == 0)
-        rdma_receiver_retired[warp_id] = true;
+        rdma_receiver_retired[target_warp_id] = true;
     } else {
       // Coordinator
       // Sync shared memory status
-      is_forwarder_sm ? sync_forwarder_smem() : sync_rdma_receiver_smem();
+      is_forwarder ? sync_forwarder_smem() : sync_rdma_receiver_smem();
       const auto num_warps_per_rdma_rank = kNumForwarders / kNumRDMARanks;
 
       int last_rdma_head = 0;
@@ -2473,13 +2472,13 @@ void combine(
       GRPCOLL_STATIC_ASSERT(kNumCombineForwarderWarps <= WARP_SIZE, "Invalid number of forwarder warps");
       while (true) {
         // Retired
-        if (not is_forwarder_sm and __all_sync(0xffffffff, lane_id >= kNumRDMAReceivers or rdma_receiver_retired[lane_id]))
+        if (not is_forwarder and all_in_warp(lane_id >= kNumRDMAReceivers or rdma_receiver_retired[lane_id]))
           break;
-        if (is_forwarder_sm and __all_sync(0xffffffff, lane_id >= kNumForwarders or forwarder_retired[lane_id]))
+        if (is_forwarder and all_in_warp(lane_id >= kNumForwarders or forwarder_retired[lane_id]))
           break;
 
         // Find minimum head for RDMA ranks
-        if (not is_forwarder_sm) {
+        if (!is_forwarder) {
           int min_head = INT_MAX;
 #pragma unroll
           for (int i = 0; i < kNumRDMAReceivers; ++i)
@@ -2590,15 +2589,18 @@ void combine(
   const int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
   const auto num_warps_per_forwarder = std::max(kNumCombineForwarderWarps / num_rdma_ranks, 1);
   const int num_forwarder_warps = num_rdma_ranks * num_warps_per_forwarder;
-  const int num_threads = get_num_threads_combine(num_forwarder_warps);
+  const int num_threads = get_num_threads_combine(num_forwarder_warps), num_warps = num_threads / WARP_SIZE;
   GRPCOLL_HOST_ASSERT(num_rdma_ranks <= kNumCombineForwarderWarps);
   GRPCOLL_HOST_ASSERT(num_forwarder_warps > NUM_MAX_NVL_PEERS and num_forwarder_warps % num_rdma_ranks == 0);
+  GRPCOLL_HOST_ASSERT(num_warps == num_forwarder_warps + 1);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / num_rdma_ranks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= num_warps_per_forwarder);
   GRPCOLL_HOST_ASSERT(type == CUDA_R_16BF);
+  GRPCOLL_HOST_ASSERT(num_topk <= WARP_SIZE);
+  GRPCOLL_HOST_ASSERT(hidden_size % (sizeof(int4) / sizeof(dtype_t)) == 0);
 
-  // Even-numbered SMs for sending, odd-numbered SMs for receiving
+  // Even-numbered SMs for NVL senders and RDMA receivers, odd-numbered SMs for forwarders
   const int num_sms = num_channels * 2;
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
 
