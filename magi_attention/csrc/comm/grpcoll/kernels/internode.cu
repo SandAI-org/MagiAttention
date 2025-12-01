@@ -963,7 +963,7 @@ void dispatch(
       // Timeout check
       if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < kNumRDMARanks) {
         printf(
-            "grpcoll RDMA sender coordinator timeout, channel: %d, RDMA: %d, NVL %d, dst RDMA: %d, tail: %d, remaining: %d\n",
+            "grpcoll dispatch RDMA sender coordinator timeout, channel: %d, RDMA: %d, NVL %d, dst RDMA: %d, tail: %d, remaining: %d\n",
             channel_id,
             rdma_rank,
             nvl_rank,
@@ -1075,7 +1075,7 @@ void dispatch(
         // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
           printf(
-              "grpcoll RDMA and NVL forwarder timeout for RDMA channel meta, channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, dst NVL rank: %d, encoded meta: %d, %d, %d, %d\n",
+              "grpcoll dispatch RDMA and NVL forwarder timeout for RDMA channel meta, channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, dst NVL rank: %d, encoded meta: %d, %d, %d, %d\n",
               channel_id,
               rdma_rank,
               nvl_rank,
@@ -1113,13 +1113,15 @@ void dispatch(
         const int num_used_slots = cached_nvl_channel_tail - cached_nvl_channel_head;
         if (num_max_nvl_chunked_recv_tokens - num_used_slots >= num_max_nvl_chunked_send_tokens)
           break;
+
+        // Read the NVL head updated by `kNVLReceivers`
         // REVIEW: here all lanes repeatly read the same `nvl_channel_head` ?
         cached_nvl_channel_head = broadcast_in_warp(/*val=*/ld_volatile_global(nvl_channel_head.buffer())); // volatile load
 
         // Timeout check
         if (lane_id == 0 and clock64() - start_time > NUM_TIMEOUT_CYCLES) {
           printf(
-              "grpcoll RDMA and NVL forwarder timeout (NVL head check), channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, head: %d, tail: %d\n",
+              "grpcoll dispatch RDMA and NVL forwarder timeout (NVL head check), channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, head: %d, tail: %d\n",
               channel_id,
               rdma_rank,
               nvl_rank,
@@ -1145,7 +1147,7 @@ void dispatch(
         // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < kNumRDMARanks) {
           printf(
-              "grpcoll RDMA and NVL forwarder timeout (RDMA check), channel: %d, RDMA: %d, nvl: %d, dst NVL: %d, src RDMA lane: %d, head: %d, tail: %d, expected: %d\n",
+              "grpcoll dispatch RDMA and NVL forwarder timeout (RDMA check), channel: %d, RDMA: %d, nvl: %d, dst NVL: %d, src RDMA lane: %d, head: %d, tail: %d, expected: %d\n",
               channel_id,
               rdma_rank,
               nvl_rank,
@@ -1296,23 +1298,26 @@ void dispatch(
       __nanosleep(NUM_WAIT_NANOSECONDS);
     }
   } else { // WarpRole::kNVLReceivers
-    // NVL consumers
     // Retrieve rank offset from barrier results (each lane's register stores an RDMA rank)
-    int src_nvl_rank = target_rank, total_offset = 0;
+    const int src_nvl_rank = target_rank;
     const int local_expert_begin = rank * (num_experts / num_ranks);
     const int local_expert_end = local_expert_begin + (num_experts / num_ranks);
 
+    // Load global rank offset for the src NVL rank in the RDMA peer indicated by `lane_id`
+    //  `recv_gbl_rank_prefix_sum`: shape=(kNumRanks,), dtype=int
+    int total_offset = 0;
     if (lane_id < kNumRDMARanks and lane_id * NUM_MAX_NVL_PEERS + src_nvl_rank > 0)
       total_offset = recv_gbl_rank_prefix_sum[lane_id * NUM_MAX_NVL_PEERS + src_nvl_rank - 1];
 
-    // Receive channel offsets
+    // Read channel offsets for the src NVL rank in the RDMA peer indicated by `lane_id`
+    // and update total offset by the prefix start
     int start_offset = 0, end_offset = 0, num_tokens_to_recv;
     auto start_time = clock64();
     while (lane_id < kNumRDMARanks) {
-      start_offset = ld_volatile_global(nvl_channel_prefix_start.buffer() + lane_id);
-      end_offset = ld_volatile_global(nvl_channel_prefix_end.buffer() + lane_id);
-      if (start_offset < 0 and end_offset < 0) {
-        start_offset = -start_offset - 1, end_offset = -end_offset - 1;
+      start_offset = ld_volatile_global(nvl_channel_prefix_start.buffer() + lane_id); // volatile load
+      end_offset = ld_volatile_global(nvl_channel_prefix_end.buffer() + lane_id); // volatile load
+      if (start_offset < 0 and end_offset < 0) { // all valid encoded offsets
+        start_offset = decoded(start_offset), end_offset = decode(end_offset);
         total_offset += start_offset;
         break;
       }
@@ -1320,7 +1325,7 @@ void dispatch(
       // Timeout check
       if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
         printf(
-            "grpcoll dispatch NVL receiver timeout, channel: %d, RDMA: %d, nvl: %d, src RDMA: %d, src nvl: %d, start: %d, end: %d\n",
+            "grpcoll dispatch NVL receiver timeout, channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, src NVL rank: %d, start: %d, end: %d\n",
             channel_id,
             rdma_rank,
             nvl_rank,
@@ -1331,27 +1336,33 @@ void dispatch(
         trap();
       }
     }
+
+    // Warp-reduce across all RDMA peers for the src NVL rank
     num_tokens_to_recv = warp_reduce_sum(end_offset - start_offset);
 
-    // Save for combine usage
+    // Store `recv_gbl_channel_prefix_matrix` for combine stage
+    //  `recv_gbl_channel_prefix_matrix`: shape=(kNumRanks, num_channels), dtype=int
     if (lane_id < kNumRDMARanks and not kCachedMode)
       recv_gbl_channel_prefix_matrix[(lane_id * NUM_MAX_NVL_PEERS + src_nvl_rank) * num_channels + channel_id] = total_offset;
     __syncwarp();
 
     int cached_channel_head_idx = 0, cached_channel_tail_idx = 0;
     while (num_tokens_to_recv > 0) {
-      // Check channel status by lane 0
+      // Wait for NVL recv queue to be non-empty
       start_time = clock64();
       while (true) {
         // Ready to copy
         if (cached_channel_head_idx != cached_channel_tail_idx)
           break;
-        cached_channel_tail_idx = broadcast_in_warp(ld_acquire_sys_global(nvl_channel_tail.buffer()));
+
+        // Read the NVL tail updated by `kRDMAAndNVLForwarder`
+        // REVIEW: here all lanes repeatedly load the same `nvl_channel_tail` ?
+        cached_channel_tail_idx = broadcast_in_warp(/*val=*/ld_acquire_sys_global(nvl_channel_tail.buffer())); // system scope, acquire order
 
         // Timeout check
         if (lane_id == 0 and clock64() - start_time > NUM_TIMEOUT_CYCLES) {
           printf(
-              "grpcoll dispatch NVL receiver timeout, channel: %d, RDMA: %d, nvl: %d, src NVL: %d, head: %d, tail: %d\n",
+              "grpcoll dispatch NVL receiver timeout, channel: %d, RDMA: %d, NVL: %d, src NVL rank: %d, head: %d, tail: %d\n",
               channel_id,
               rdma_rank,
               nvl_rank,
@@ -1362,66 +1373,106 @@ void dispatch(
         }
       }
 
-      // Copy data
+      // Iterate over the tokens in the NVL recv queue of this NVL rank
+      // from `cached_channel_head_idx` to `cached_channel_tail_idx`
+      // and copy into `recv_x`, as well as other data
       int num_recv_tokens = cached_channel_tail_idx - cached_channel_head_idx;
       for (int chunk_idx = 0; chunk_idx < num_recv_tokens; ++chunk_idx, --num_tokens_to_recv) {
-        int token_idx_in_buffer = (cached_channel_head_idx++) % num_max_nvl_chunked_recv_tokens;
-        auto shifted = nvl_channel_x.buffer() + token_idx_in_buffer * num_bytes_per_token;
-        auto meta = ld_nc_global(reinterpret_cast<SourceMeta*>(shifted + hidden_bytes + scale_bytes));
-        int64_t recv_token_idx = broadcast_in_warp(/*val=*/total_offset, /*src_lane=*/meta.src_rdma_rank);
-        (lane_id == meta.src_rdma_rank) ? (total_offset += 1) : 0;
+        // Get slot idx in queue
+        // and update `cached_channel_head_idx` for next token
+        int slot_idx_in_queue = (cached_channel_head_idx++) % num_max_nvl_chunked_recv_tokens;
 
+        // Get token ptr in the NVL recv buffer of this NVL rank
+        auto token_ptr_in_buffer = nvl_channel_x.buffer() + slot_idx_in_queue * num_bytes_per_token;
+
+        // Load src meta to get the `src_rdma_rank` for this token
+        auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(token_ptr_in_buffer + hidden_bytes + scale_bytes));
+
+        // Get recv token idx in the `recv_x`
+        int64_t token_idx_in_recv_x = broadcast_in_warp(/*val=*/total_offset, /*src_lane=*/src_meta.src_rdma_rank);
+
+        // Increment `total_offset` of next token for `src_rdma_rank`
+        (lane_id == src_meta.src_rdma_rank) ? (++total_offset) : 0;
+
+        // Get TMA load bytes, including hidden states and scales
         bool scale_aligned = (scale_bytes % 16 == 0);
         auto tma_load_bytes = hidden_bytes + (scale_aligned ? scale_bytes : 0);
 
-        // Copy data
-        if (lane_id == 0) {
-          tma_load_1d(tma_buffer, shifted, tma_mbarrier, tma_load_bytes);
+        // TMA-copy token from NVL recv buffer to TMA buffer in shared memory
+        // including hidden states and scales
+        if (lane_id == 0) { // issued by lane0
+          tma_load_1d(
+              /*smem_ptr=*/tma_buffer,
+              /*gmem_ptr=*/token_ptr_in_buffer,
+              /*mbar_ptr=*/tma_mbarrier,
+              /*num_bytes=*/tma_load_bytes,
+              /*evict_first=*/true);
           mbarrier_arrive_and_expect_tx(tma_mbarrier, tma_load_bytes);
         }
         __syncwarp();
+
+        // Wait TMA load to be finished
+        // and flip the `tma_phase` in-place
         mbarrier_wait(tma_mbarrier, tma_phase);
-        if (lane_id == 0)
-          tma_store_1d(tma_buffer, recv_x + recv_token_idx * hidden_int4, hidden_bytes, false);
+
+        // TMA-copy hidden states of the token from TMA buffer in shared memory to `recv_x`
+        if (lane_id == 0) { // issued by lane0
+          tma_store_1d(
+              /*smem_ptr=*/tma_buffer,
+              /*gmem_ptr=*/recv_x + token_idx_in_recv_x * hidden_int4,
+              /*num_bytes=*/hidden_bytes,
+              /*evict_first=*/false);
+        }
         __syncwarp();
-        shifted += hidden_bytes;
 
-        // Copy scales
+        // Copy scales of the token from TMA buffer in shared memory to `recv_x_scales`
         // TODO: make it as templated
-        if (scale_aligned) {
-          tma_store_1d(tma_buffer + hidden_bytes, recv_x_scales + recv_token_idx * num_scales, scale_bytes, false);
-        } else {
-          UNROLLED_WARP_COPY(1, lane_id, num_scales, recv_x_scales + recv_token_idx * num_scales, reinterpret_cast<float*>(shifted), ld_nc_global, st_na_global);
+        token_ptr_in_buffer += hidden_bytes;
+        if (scale_aligned) { // if aligned to 16 bytes, use TMA copy
+          tma_store_1d(
+              /*smem_ptr=*/tma_buffer + hidden_bytes,
+              /*gmem_ptr=*/recv_x_scales + token_idx_in_recv_x * num_scales,
+              /*num_bytes=*/scale_bytes,
+              /*evict_first=*/false);
+        } else { // if not aligned, use warp copy
+          UNROLLED_WARP_COPY(
+              /*UNROLL_FACTOR=*/1,
+              /*LANE_ID=*/lane_id,
+              /*N=*/num_scales,
+              /*DST=*/recv_x_scales + token_idx_in_recv_x * num_scales,
+              /*SRC=*/reinterpret_cast<float*>(token_ptr_in_buffer),
+              /*LD_FUNC=*/ld_nc_global,
+              /*ST_FUNC=*/st_na_global);
         }
-        shifted += scale_bytes;
 
-        // Copy source meta
+        // Copy src meta to `recv_src_meta` for combine stage
+        token_ptr_in_buffer += scale_bytes;
         if (lane_id == 0 and not kCachedMode)
-          st_na_global(recv_src_meta + recv_token_idx, meta);
-        shifted += sizeof(SourceMeta);
+          st_na_global(recv_src_meta + token_idx_in_recv_x, src_meta); // non-cached store
 
-        // Copy `topk_idx` and `topk_weights`
+        // Copy `topk_idx` and `topk_weights` to `recv_topk_idx` and `recv_topk_weights`
+        token_ptr_in_buffer += sizeof(SourceMeta);
         if (lane_id < num_topk) {
-          // Read
-          auto idx_value = static_cast<int64_t>(ld_nc_global(reinterpret_cast<int*>(shifted) + lane_id));
-          auto weight_value = ld_nc_global(reinterpret_cast<float*>(shifted + sizeof(int) * num_topk) + lane_id);
-          auto recv_idx = recv_token_idx * num_topk + lane_id;
+          // Read topk idx/weight from recv buffer
+          auto topk_idx_value = static_cast<int64_t>(ld_nc_global(reinterpret_cast<int*>(token_ptr_in_buffer) + lane_id));
+          auto topk_weight_value = ld_nc_global(reinterpret_cast<float*>(token_ptr_in_buffer + sizeof(int) * num_topk) + lane_id);
+          auto idx_in_recv_topk = token_idx_in_recv_x * num_topk + lane_id;
 
-          // Transform and write
-          idx_value = (idx_value >= local_expert_begin and idx_value < local_expert_end) ? idx_value - local_expert_begin : -1;
-          weight_value = idx_value >= 0 ? weight_value : 0.0f;
-          st_na_global(recv_topk_idx + recv_idx, idx_value);
-          st_na_global(recv_topk_weights + recv_idx, weight_value);
+          // Transform and write to recv topk idx/weight
+          topk_idx_value = (topk_idx_value >= local_expert_begin and topk_idx_value < local_expert_end) ? topk_idx_value - local_expert_begin : -1;
+          topk_weight_value = topk_idx_value >= 0 ? topk_weight_value : 0.0f;
+          st_na_global(recv_topk_idx + idx_in_recv_topk, topk_idx_value);
+          st_na_global(recv_topk_weights + idx_in_recv_topk, topk_weight_value);
         }
 
-        // Wait TMA to be finished
+        // Wait TMA store to be finished
         tma_store_wait();
         __syncwarp();
       }
 
-      // Move queue
+      // Update NVL queue head
       if (lane_id == 0)
-        st_relaxed_sys_global(nvl_channel_head.buffer(), cached_channel_head_idx);
+        st_relaxed_sys_global(nvl_channel_head.buffer(), cached_channel_head_idx); // system scope, relaxed order
     }
   }
 }
