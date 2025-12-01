@@ -53,7 +53,7 @@ from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.range import AttnRange
 from magi_attention.common.ranges import AttnRanges
-from magi_attention.utils._utils import get_attn_mask_from_ffa_args
+from magi_attention.utils._utils import make_attn_mask_from_ffa_args
 
 # impls = ["sdpa", "fa2", "fa3", "ffa", "torch"]
 # impls = ["sdpa", "fa2", "fa3", "ffa"]  # ignore torch native to avoid OOM
@@ -370,7 +370,7 @@ def attn_benchmark(seqlen, hd, wd, mask_type, attn_impl):
                 attn_type_mapping = [
                     1 if mapping else 0 for mapping in is_causal_mapping_
                 ]
-                sdpa_mask = get_attn_mask_from_ffa_args(
+                sdpa_mask = make_attn_mask_from_ffa_args(
                     q_ranges=q_ranges_,
                     k_ranges=k_ranges_,
                     attn_type_map=attn_type_mapping,

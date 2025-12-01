@@ -249,7 +249,7 @@ def calc_lse_sink(
             # calculate lse_sink and repeat to seqlen_q
             lse_sink = (
                 # shape: [s_sink, nhq] -> [1, nhq]
-                torch.logsumexp(sink, dim=0, keepdim=True)
+                safe_lse(sink, dim=0, keepdim=True)
                 # shape: [1, nhq] -> [sq, nhq]
                 # NOTE: we had better not use `expand` here
                 # to avoid view conflict when involving in-place operations
@@ -261,7 +261,7 @@ def calc_lse_sink(
             # calculate lse_sink and repeat to seqlen_q
             lse_sink = (
                 # shape: [seqlen_q, s_sink, nhq] -> [seqlen_q, nhq]
-                torch.logsumexp(sink, dim=1, keepdim=False)
+                safe_lse(sink, dim=1, keepdim=False)
             )
         case "shd":
             raise NotImplementedError(f"{sink_layout} is not supported yet")
