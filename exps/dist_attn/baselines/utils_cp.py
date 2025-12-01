@@ -25,11 +25,6 @@ from einops import rearrange
 
 # fa3
 from flash_attn_interface import _flash_attn_backward, _flash_attn_forward
-
-# from flashattn_hopper.flash_attn_interface import (
-#     _flash_attn_backward,
-#     _flash_attn_forward,
-# )
 from torch.distributed._functional_collectives import all_to_all_single_autograd
 
 from magi_attention.common.ranges import AttnRanges
@@ -177,7 +172,6 @@ def fa_varlen_thd_pad(input: torch.Tensor, indices: torch.Tensor, shape):
 # seq_dim = -1
 @nvtx.instrument_nvtx
 def fa_varlen_lse_pad(input: torch.Tensor, indices: torch.Tensor, shape):
-    # pad_input = torch.zeros(*shape, device=input.device, dtype=input.dtype)
     pad_input = torch.full(shape, float("-inf"), device=input.device, dtype=input.dtype)
     pad_input.scatter_(-1, indices[None, :].expand(input.shape[0], -1), input)
     return pad_input
@@ -493,8 +487,6 @@ def _fa3_varlen_backward(
 
 
 # NOTE: for pad token, lse is set to -INF, however, this func meets issues when dealing with -INF in log1p
-
-
 @jit_fuser
 def flash_attn_fwd_softmax_lse_correction(
     softmax_lse: torch.Tensor,
@@ -505,18 +497,6 @@ def flash_attn_fwd_softmax_lse_correction(
     min_scale = torch.min(softmax_lse, softmax_lse_per_step)
     new_scale = max_scale + torch.log1p(torch.exp(min_scale - max_scale))
     softmax_lse.copy_(new_scale)
-
-
-# def flash_attn_fwd_softmax_lse_correction(
-#     softmax_lse: torch.Tensor,
-#     softmax_lse_per_step: torch.Tensor,
-# ):
-#     max_scale = torch.max(softmax_lse, softmax_lse_per_step)
-#     min_scale = torch.min(softmax_lse, softmax_lse_per_step)
-#     both_inf = torch.isneginf(max_scale) & torch.isneginf(min_scale)
-#     new_scale = max_scale + torch.log1p(torch.exp(min_scale - max_scale))
-#     new_scale = torch.where(both_inf, torch.full_like(new_scale, float('-inf')), new_scale)
-#     softmax_lse.copy_(new_scale)
 
 
 def bwd_dq_update(
@@ -546,60 +526,6 @@ def bwd_dkv_update(dkv, dkv_, cu_seqlens_kv_padded, first_op, second_op):
 
 
 # -----    comm    ---- #
-
-
-# p2p comm
-# def attn_p2p_communicate(
-#     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
-# ):
-#     """Point-to-point communications of KV and dKV in Attention with context parallelism"""
-#     send_recv_ops = []
-
-#     send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
-#     recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
-#     send_recv_ops.append(send_op)
-#     send_recv_ops.append(recv_op)
-#     send_recv_reqs = send_recv_ops
-
-#     return send_recv_reqs
-
-
-# if batch_p2p_comm:
-#     if rank % 2 == 0:
-#         send_op = torch.distributed.P2POp(
-#             torch.distributed.isend, send_tensor, send_dst, cp_group
-#         )
-#         recv_op = torch.distributed.P2POp(
-#             torch.distributed.irecv, recv_tensor, recv_src, cp_group
-#         )
-#         send_recv_ops.append(send_op)
-#         send_recv_ops.append(recv_op)
-#     else:
-#         recv_op = torch.distributed.P2POp(
-#             torch.distributed.irecv, recv_tensor, recv_src, cp_group
-#         )
-#         send_op = torch.distributed.P2POp(
-#             torch.distributed.isend, send_tensor, send_dst, cp_group
-#         )
-#         send_recv_ops.append(recv_op)
-#         send_recv_ops.append(send_op)
-#     send_recv_reqs = torch.distributed.batch_isend_irecv(send_recv_ops)
-# else:
-#     if rank % 2 == 0:
-#         send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
-#         recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
-#         send_recv_ops.append(send_op)
-#         send_recv_ops.append(recv_op)
-#     else:
-#         recv_op = torch.distributed.irecv(recv_tensor, recv_src, cp_group)
-#         send_op = torch.distributed.isend(send_tensor, send_dst, cp_group)
-#         send_recv_ops.append(recv_op)
-#         send_recv_ops.append(send_op)
-#     send_recv_reqs = send_recv_ops
-
-# return send_recv_reqs
-
-
 @nvtx.instrument_nvtx
 def attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm

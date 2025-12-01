@@ -325,6 +325,7 @@ class Ulysess(AttnBaselineInterface):
 
     # to call after q,k,v dispatch
     def pre_compute_attn_runtime_meta(self, device):
+        self.runtime_meta_per_step.clear()
         if self.backend == AttnBackend.FA3:
             shard_q_meta = self.shard_meta["q"]
             shard_kv_meta = self.shard_meta["k"]

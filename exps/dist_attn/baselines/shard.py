@@ -46,9 +46,7 @@ class ShardMeta:
     cu_seqlens_padded: torch.Tensor
     host_cu_seqlens: List[int]
     host_cu_seqlens_padded: List[int]
-    # restore_shape: torch.Size
     origin_shape: torch.Size
-    # max_seqlen: int
     max_seqlen_padded: int
 
 
@@ -60,42 +58,6 @@ def set_seed(seed):
 
 # init distribute environment
 # create DeviceMesh for all pg
-# def init_distributed(world_size, pg_meta={}):
-#     print(f"world_size: {world_size}, meta info: {pg_meta}")
-#     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-#     torch.cuda.set_device(local_rank)
-#     pg_sizes = tuple(pg_meta.values())
-#     pg_names = tuple(pg_meta.keys())
-#     assert world_size == reduce(
-#         operator.mul, pg_sizes
-#     ), "world size does not match pg sizes"
-#     rank = int(os.environ.get("RANK", 0))
-#     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-
-#     # init dist env
-#     dist.init_process_group(
-#         backend="nccl",
-#         init_method=None,
-#         world_size=world_size,
-#         rank=rank,
-#         timeout=timedelta(minutes=30),
-#         store=None,
-#     )
-
-#     # init device
-#     # device_count = torch.cuda.device_count()
-#     # device = dist.get_rank() % device_count
-#     # assert local_rank == device, "local rank does not match device"
-#     # torch.cuda.set_device(device)
-#     # device = torch.cuda.current_device()
-
-#     # init process group
-#     mesh = torch.arange(0, world_size).reshape(pg_sizes)
-#     deivce_mesh = DeviceMesh("cuda", mesh=mesh, mesh_dim_names=pg_names)
-
-#     return deivce_mesh
-
-
 def init_distributed(world_size, pg_meta={}):
     print(f"world_size: {world_size}, meta info: {pg_meta}")
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -145,51 +107,6 @@ def get_usp_pg(device_mesh):
     return {ParallelMode.ULYSESS: a2a_pg, ParallelMode.RING: p2p_pg}
 
 
-# non-orthogonal group
-# def get_loongtrain_pg(device_mesh, window_num, rank):
-#     p2p_pg = device_mesh.get_group(mesh_dim=ParallelMode.RING)
-#     a2a_pg = device_mesh.get_group(mesh_dim=ParallelMode.ULYSESS)
-#     cp_pg = {ParallelMode.ULYSESS: a2a_pg, ParallelMode.RING: p2p_pg}
-
-#     cp_size = dist.get_world_size(p2p_pg)
-#     context_ranks = []
-#     for i in range(cp_size):
-#         context_ranks.append(dist.get_global_rank(p2p_pg, i))
-#     assert cp_size % window_num == 0, "cp_size must be divisible by window_num"
-#     window_size = cp_size // window_num
-
-#     print(f"{context_ranks=}")
-
-#     # create the intra_window process group when using sliding window
-#     for j in range(window_num):
-#         intra_window_ranks = context_ranks[j * window_size : (j + 1) * window_size]
-#         # intra_window
-#         intra_window_group = dist.new_group(intra_window_ranks)
-#         if rank in intra_window_ranks:
-#             cp_pg[ParallelMode.INTRA_WINDOW] = intra_window_group
-#         # dkv_intra_window
-#         dkv_intra_window_group = dist.new_group(intra_window_ranks)
-#         if rank in intra_window_ranks:
-#             cp_pg[ParallelMode.DKV_INTRA_WINDOW] = dkv_intra_window_group
-
-#     # inter_window
-#     for j in range(window_size):
-#         inter_window_ranks = []
-#         for t in range(window_num):
-#             inter_window_ranks.append(context_ranks[t * window_size + j])
-#         # inter_window
-#         inter_window_group = dist.new_group(inter_window_ranks)
-#         if rank in inter_window_ranks:
-#             print(f"{rank=},{inter_window_ranks=}")
-#             cp_pg[ParallelMode.INTER_WINDOW] = inter_window_group
-#         # dkv_inter_window
-#         dkv_inter_window_group = dist.new_group(inter_window_ranks)
-#         if rank in inter_window_ranks:
-#             cp_pg[ParallelMode.DKV_INTER_WINDOW] = dkv_inter_window_group
-
-#     return cp_pg
-
-
 def get_loongtrain_pg(cp_pg_meta, window_num, rank):
     keys = list(cp_pg_meta.keys())
     cp_size_a2a = cp_pg_meta[ParallelMode.ULYSESS]
@@ -211,7 +128,6 @@ def get_loongtrain_pg(cp_pg_meta, window_num, rank):
         # create the intra_window process group when using sliding window
         for j in range(window_num):
             intra_window_ranks = context_ranks[j * window_size : (j + 1) * window_size]
-            # print(f"{rank=},{intra_window_ranks=}")
 
             # intra_window
             intra_window_group = dist.new_group(intra_window_ranks)
@@ -228,8 +144,6 @@ def get_loongtrain_pg(cp_pg_meta, window_num, rank):
             inter_window_ranks = []
             for t in range(window_num):
                 inter_window_ranks.append(context_ranks[t * window_size + j])
-
-            # print(f"{rank=},{inter_window_ranks=}")
 
             # inter_window
             inter_window_group = dist.new_group(inter_window_ranks)
@@ -248,8 +162,6 @@ def get_loongtrain_pg(cp_pg_meta, window_num, rank):
             ulysess_pg = dist.new_group(ulysess_ranks)
             if rank in ulysess_ranks:
                 groups[ParallelMode.ULYSESS] = ulysess_pg
-            # print(f"{rank=},{ulysess_ranks=}")
-
         # RING
         for i in range(num_pgs_p2p):
             ring_ranks = list(range(i, cp_world_size, cp_size_a2a))
@@ -257,7 +169,6 @@ def get_loongtrain_pg(cp_pg_meta, window_num, rank):
             if rank in ring_ranks:
                 groups[ParallelMode.RING] = ring_pg
             get_sliding_window_pg(window_num, ring_ranks)
-            # print(f"{rank=},{ring_ranks=}")
     else:
         # RING
         for i in range(num_pgs_p2p):
@@ -266,7 +177,6 @@ def get_loongtrain_pg(cp_pg_meta, window_num, rank):
             if rank in ring_ranks:
                 groups[ParallelMode.RING] = ring_pg
             get_sliding_window_pg(window_num, ring_ranks)
-            # print(f"{rank=},{ring_ranks=}")
 
         # ULYSESS
         for i in range(num_pgs_a2a):
@@ -274,8 +184,6 @@ def get_loongtrain_pg(cp_pg_meta, window_num, rank):
             ulysess_pg = dist.new_group(ulysess_ranks)
             if rank in ulysess_ranks:
                 groups[ParallelMode.ULYSESS] = ulysess_pg
-
-            # print(f"{rank=},{ulysess_ranks=}")
 
     return groups
 
@@ -289,8 +197,6 @@ def get_loongtrain_pg(cp_pg_meta, window_num, rank):
 # bshd, sbhd
 def zigzag_dispatch(
     x_global: torch.Tensor,
-    # cu_seqlens: torch.Tensor,
-    # cu_seqlens_padded: torch.Tensor,
     host_cu_seqlens: List[int],  # python list
     host_cu_seqlens_padded: List[int],  # python list
     qkv_format,
@@ -334,12 +240,9 @@ def zigzag_dispatch(
 
 def zigzag_undispatch(
     x_local: torch.Tensor,
-    # cu_seqlens: torch.Tensor,
-    # cu_seqlens_padded: torch.Tensor,
     host_cu_seqlens: List[int],  # python list
     host_cu_seqlens_padded: List[int],  # python list
     qkv_format,
-    # restore_shape,
     cp_group_p2p=None,  # ring pg
     cp_group_a2a=None,  # ulysess pg
 ):
@@ -357,7 +260,6 @@ def zigzag_undispatch(
         x_shard = x_local
 
     if cp_rank_p2p != -1:
-        # cu_seqlens_padded_shard = cu_seqlens_padded // cp_size_p2p
         x_global = _zigzag_undispatch_varlen(
             x_shard,
             host_cu_seqlens,
@@ -404,7 +306,6 @@ def _zigzag_dispatch_varlen(
         shard_indices_base,
         cp_size_p2p,
         cp_rank_p2p,
-        # device,
     )
     zigzag_indices = torch.from_numpy(zigzag_indices_np).to(
         device=device, dtype=torch.int64
@@ -567,7 +468,6 @@ def generate_zigzag_dispatch_indices(
     shard_indices_base: List[int],  # indices offset of each seq in shard tensor
     cp_size: int,
     rank: int,
-    # device,
 ):
     batch_size = len(host_cu_seqlens_padded) - 1
     host_cu_seqlens_np = np.array(host_cu_seqlens, dtype=np.int32)
@@ -602,9 +502,6 @@ def generate_zigzag_dispatch_indices(
     if shard_indices_base is not None:
         shard_indices_np = np.concatenate(shard_indices_list)
 
-    # zigzag_indices = torch.from_numpy(zigzag_indices_np).to(device=device)
-    # shard_indices = torch.from_numpy(shard_indices_np).to(device=device)
-
     return zigzag_indices_np, shard_indices_np
 
 
@@ -612,7 +509,6 @@ def generate_zigzag_dispatch_indices(
 def generate_zigzag_undispatch_indices(
     host_cu_seqlens_padded: List[int],
     cp_size: int,
-    # device,
     host_cu_seqlens=None,
 ):
     batch_size = len(host_cu_seqlens_padded) - 1
@@ -647,7 +543,6 @@ def generate_zigzag_undispatch_indices(
 
     total_indices_np = np.concatenate(indices_lst, axis=0)
     return total_indices_np
-    # return torch.from_numpy(total_indices).to(device=device, dtype=torch.int64)
 
 
 # contiguous load balance dispatch indices

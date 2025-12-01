@@ -252,7 +252,7 @@ class TERingAGAttnFunc(torch.autograd.Function):
         out = torch.empty_like(q)
 
         qkv_dtype = q.dtype
-        fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+        fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
         fused_attn_meta_args = (qkv_dtype, fused_attn_backend)
         fused_attn_meta_kwargs = {
             "attn_scale": softmax_scale,
@@ -306,6 +306,7 @@ class TERingAGAttnFunc(torch.autograd.Function):
             lse_per_step = softmax_lse_per_step[i].narrow(
                 dim=0, start=0, length=softmax_lse.shape[0] // 2
             )
+            lse_per_step = lse_per_step.clone()
             lse_th = lse_per_step.shape[:2]
             lse_per_step = lse_per_step.expand(*lse_th, 16)
             _collect_result_varlen(
@@ -384,7 +385,7 @@ class TERingAGAttnFunc(torch.autograd.Function):
             ctx.qkv_dtype,
             TE_DType[dout.dtype],
             None,
-            FusedAttnBackend["F16_arbitrary_seqlen"],
+            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
         ]
         fused_attn_meta_kwargs = {
             "attn_scale": ctx.softmax_scale,
@@ -394,14 +395,14 @@ class TERingAGAttnFunc(torch.autograd.Function):
             "attn_bias_type": "no_bias",
             "deterministic": ctx.deterministic,
         }
-
         for i in range(local_seq_num):
             out_part = out_per_step[i]
             q_part = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, i)
             dout_part = tex.thd_read_half_tensor(dout, cu_seqlens_q_padded, i)
-            # q_part, dout_part = q_part.contiguous(), dout_part.contiguous()
+            q_part, dout_part = q_part.contiguous(), dout_part.contiguous()
             aux_ctx_tensors = [softmax_lse_per_step[i], rng_states[i]]
             fused_attn_meta_args[2] = aux_ctx_tensors
+
             dq_per_step[i], dk_per_step[i], dv_per_step[i], _, _ = fused_attn_bwd(
                 ctx.max_seqlen_q // 2,
                 ctx.max_seqlen_kv,
@@ -572,7 +573,6 @@ class FA3RingAGAttnFunc(torch.autograd.Function):
             out_part = out_per_step[i]
             q_part = tex.thd_read_half_tensor(q, cu_seqlens_q_padded, i)
             dout_part = tex.thd_read_half_tensor(dout, cu_seqlens_q_padded, i)
-            # q_part, dout_part = q_part.contiguous(), dout_part.contiguous()
 
             window_size = (-1, 0) if ctx.causal else (-1, -1)
             (
@@ -769,7 +769,6 @@ class TERingAttnFunc(torch.autograd.Function):
                     **{},
                 )
             softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
-            # softmax_lse_per_step[i] = softmax_lse_per_step[i].narrow(0, 0, q_inputs[i % 2].shape[0])
             # [b, np, sq, 1] -> [b, np, sq]
             # or [t, np, 1] -> [t, np]
             softmax_lse_per_step[i].squeeze_(-1)  # type: ignore[attr-defined]
@@ -1345,8 +1344,6 @@ class FA3RingAttnFunc(torch.autograd.Function):
                 kv_ = kv
             k_part, v_part = kv_[0], kv_[1]
 
-            # if ctx.pad_between_seqs and ctx.qkv_format != "thd":
-            #     q_, k_part, v_part = q_.contiguous(), k_part.contiguous(), v_part.contiguous()
             rumtime_meta_per_step = ctx.runtime_meta[cp_size - i - 1]
             window_size = (-1, 0) if is_causal else (-1, -1)
             dq_, dk_, dv_ = _fa3_varlen_backward(
@@ -1419,9 +1416,6 @@ class FA3RingAttnFunc(torch.autograd.Function):
                     first_op = second_op = "add"
             dkv = bwd_dkv_update(dkv, dkv_, cu_seqlens_kv_padded, first_op, second_op)
 
-        # if ctx.qkv_format == "thd":
-        #     dq[cu_seqlens_q_padded[-1] :].fill_(0)
-        #     dkv[:, cu_seqlens_kv_padded[-1] :].fill_(0)
         dk, dv = dkv[0], dkv[1]
 
         return (
@@ -1453,9 +1447,6 @@ class RingAttnAllGather(AttnBaselineInterface):
         self.pad_factor_p2p, self.pad_factor_a2a = get_pad_factor(
             cp_group_p2p=self.pg_p2p, cp_group_a2a=None
         )
-        # NOTE: te padding_causal_bottom_right need max_seqlen_q % 64 == 0 and max_seqlen_kv % 64 == 0
-        # if backend == AttnBackend.TE:
-        #     self.pad_factor_p2p *= 64
         self.backend = backend
         self.qkv_format = qkv_format
         self.shard_meta = {}  # type: ignore
@@ -1465,6 +1456,7 @@ class RingAttnAllGather(AttnBaselineInterface):
 
     # to call after q,k,v dispatch
     def pre_compute_attn_runtime_meta(self, attn_mask_type: AttnMaskType, device):
+        self.runtime_meta_per_step.clear()
         causal = attn_mask_type == AttnMaskType.CAUSAL
         shard_q_meta = self.shard_meta["q"]
         shard_kv_meta = self.shard_meta["k"]
@@ -1491,7 +1483,6 @@ class RingAttnAllGather(AttnBaselineInterface):
                     )
                 else:
                     cu_seqlens_kv_per_step = shard_kv_meta.cu_seqlens
-                # TODO:
                 host_cu_seqlens_q_per_step = cu_seqlens_q_per_step.tolist()
                 host_cu_seqlens_kv_per_step = cu_seqlens_kv_per_step.tolist()
                 rumtime_meta = generate_runtime_meta_per_step(
@@ -1515,10 +1506,10 @@ class RingAttnAllGather(AttnBaselineInterface):
         self.gather_indices = torch.from_numpy(gather_indices_np).to(
             device=device, dtype=torch.int64
         )
-        self.scatter_indices_np = generate_scattar_reorder_indices(
+        scatter_indices_np = generate_scattar_reorder_indices(
             shard_kv_meta.host_cu_seqlens_padded, cp_size
         )
-        self.scatter_indices = torch.from_numpy(self.scatter_indices_np).to(
+        self.scatter_indices = torch.from_numpy(scatter_indices_np).to(
             device=device, dtype=torch.int64
         )
 
@@ -1665,6 +1656,7 @@ class RingAttnP2P(AttnBaselineInterface):
 
     # to call after q,k,v dispatch
     def pre_compute_attn_runtime_meta(self, attn_mask_type: AttnMaskType, device):
+        self.runtime_meta_per_step.clear()
         if self.backend == AttnBackend.FA3:
             causal = attn_mask_type == AttnMaskType.CAUSAL
             shard_q_meta = self.shard_meta["q"]

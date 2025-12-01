@@ -60,487 +60,6 @@ from exps.dist_attn.baselines.utils_cp import (
 from magi_attention.common.enum import AttnMaskType
 from magi_attention.common.ranges import AttnRanges
 
-# class FA3DoubleRingAttnFunc(torch.autograd.Function):
-#     @staticmethod
-#     def forward(
-#         ctx,
-#         q,
-#         k,
-#         v,
-#         cu_seqlens_q_padded,
-#         cu_seqlens_kv_padded,
-#         runtime_meta,
-#         causal,
-#         dropout_p,
-#         softmax_scale,
-#         cp_groups,
-#         deterministic,
-#         batch_p2p_comm=False,
-#     ):
-#         if softmax_scale is None:
-#             softmax_scale = q.shape[-1] ** (-0.5)
-
-#         inter_p2p_pg = cp_groups[ParallelMode.INTER_WINDOW]
-#         intra_p2p_pg = cp_groups[ParallelMode.INTRA_WINDOW]
-#         inter_cp_size = torch.distributed.get_world_size(group=inter_p2p_pg)
-#         intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-#         inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-#         intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
-
-#         inter_send_dst, inter_recv_src = get_p2p_send_recv_rank(
-#             inter_cp_rank, inter_cp_size, inter_p2p_pg
-#         )
-#         intra_send_dst, intra_recv_src = get_p2p_send_recv_rank(
-#             intra_cp_rank, intra_cp_size, intra_p2p_pg
-#         )
-
-#         cp_size = torch.distributed.get_world_size(group=cp_groups[ParallelMode.RING])
-#         window_num = cp_size // intra_cp_size
-
-#         qkv_dtype = q.dtype
-#         q_f16, k_f16, v_f16 = q, k, v
-#         assert (
-#             q.shape[-1] % 8 == 0
-#         ), "hidden size per attention head should be multiple of 8"
-
-#         softmax_lse_in_packed_format = True
-#         q_inputs = [None, None]
-#         intra_kv_inputs = [None, None]
-#         inter_kv_inputs = [None, None]
-
-#         # Flash Attn outputs
-#         out_per_step = [None for _ in range(cp_size)]
-#         softmax_lse_per_step = [None for _ in range(cp_size)]
-#         is_half_q_per_step = [None for _ in range(cp_size)]
-
-#         local_kv = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
-#         intra_p2p_comm_buffers = [None for _ in range(intra_cp_size)]
-#         for i in range(intra_cp_size):
-#             intra_p2p_comm_buffers[i] = torch.empty_like(local_kv)
-#         inter_kv_inputs[0] = local_kv
-#         inter_kv_inputs[1] = torch.empty_like(local_kv)
-#         intra_send_recv_reqs = [[], []]  # type: ignore
-#         inter_send_recv_reqs = []  # type: ignore
-
-#         second_half_lse_seqlen = None
-#         out = None
-#         fa_forward_kwargs = {"window_size": (-1, -1)}
-
-#         # outer ring loop
-#         for window_idx in range(window_num):
-#             if window_idx > 0:
-#                 for req in inter_send_recv_reqs:
-#                     req.wait()
-
-#             if window_idx + 1 < window_num:
-
-#                 inter_send_recv_reqs = attn_p2p_communicate(
-#                     inter_cp_rank,
-#                     inter_kv_inputs[window_idx % 2],
-#                     inter_send_dst,
-#                     inter_kv_inputs[(window_idx + 1) % 2],
-#                     inter_recv_src,
-#                     inter_p2p_pg,
-#                     batch_p2p_comm,
-#                 )
-#             local_kv = inter_kv_inputs[window_idx % 2]
-#             window_offset = ((inter_cp_rank - window_idx) % window_num) * intra_cp_size
-
-#             # inner ring loop
-#             intra_p2p_comm_buffers[0].copy_(local_kv)
-#             intra_send_recv_reqs = [[], []]
-#             for i in range(intra_cp_size):
-#                 # wait until KV is received
-#                 for req in intra_send_recv_reqs[(i + 1) % 2]:
-#                     req.wait()
-
-#                 if i < (intra_cp_size - 1):
-#                     intra_send_recv_reqs[i % 2] = attn_p2p_communicate(
-#                         intra_cp_rank,
-#                         intra_p2p_comm_buffers[i],
-#                         intra_send_dst,
-#                         intra_p2p_comm_buffers[i + 1],
-#                         intra_recv_src,
-#                         intra_p2p_pg,
-#                         batch_p2p_comm,
-#                     )
-#                 # contiguous tensor
-#                 intra_kv_inputs[i % 2] = intra_p2p_comm_buffers[i]
-#                 is_half_q, is_half_kv, is_causal = False, False, False
-#                 if causal:
-#                     if i == 0 and window_idx == 0:  # q, k, v
-#                         is_causal = True
-#                     elif (window_idx == 0 and i <= intra_cp_rank) or (
-#                         0 < window_idx <= inter_cp_rank
-#                     ):  # q, k0, v0
-#                         is_half_kv = True
-#                     else:
-#                         is_half_q = True
-#                 else:
-#                     pass
-
-#                 rumtime_meta_per_step = runtime_meta[window_offset + i]
-#                 if is_half_q:
-#                     q_inputs[i % 2] = tex.thd_read_half_tensor(
-#                         q, cu_seqlens_q_padded, 1
-#                     )
-#                 else:
-#                     q_inputs[i % 2] = q
-#                 if is_half_kv:
-#                     intra_kv_inputs[i % 2] = tex.thd_read_half_tensor(
-#                         intra_kv_inputs[i % 2], cu_seqlens_kv_padded, 0
-#                     )
-
-#                 is_half_q_per_step[window_offset + i] = is_half_q
-
-#                 (
-#                     out_per_step[window_offset + i],
-#                     softmax_lse_per_step[window_offset + i],
-#                 ) = _fa3_varlen_forward(
-#                     q_inputs[i % 2],
-#                     intra_kv_inputs[i % 2][0],
-#                     intra_kv_inputs[i % 2][1],
-#                     softmax_scale,
-#                     is_causal,
-#                     rumtime_meta_per_step,
-#                     fa_forward_kwargs,
-#                 )
-
-#                 if is_half_q:
-#                     second_half_lse_seqlen = softmax_lse_per_step[
-#                         window_offset + i
-#                     ].shape[-1]
-#                 if window_idx == 0 and i == 0:
-#                     out = torch.zeros_like(q)
-#                     softmax_lse = torch.clone(
-#                         softmax_lse_per_step[window_offset]
-#                     )
-#                 elif (
-#                     (window_idx == 0 and i <= intra_cp_rank)
-#                     or (0 < window_idx <= inter_cp_rank)
-#                     or not causal
-#                 ):  # q, k0, v0
-#                     flash_attn_fwd_softmax_lse_correction(
-#                         softmax_lse, softmax_lse_per_step[window_offset + i]
-#                     )
-#                 else:
-#                     tex.thd_second_half_lse_correction(
-#                         softmax_lse,
-#                         softmax_lse_per_step[window_offset + i],
-#                         cu_seqlens_q_padded,
-#                         softmax_lse_in_packed_format,
-#                     )
-
-#         for i in range(cp_size):
-#             is_half = is_half_q_per_step[i]
-#             tex.thd_out_correction(
-#                 out,
-#                 out_per_step[i],
-#                 softmax_lse,
-#                 softmax_lse_per_step[i],
-#                 cu_seqlens_q_padded,
-#                 is_half,
-#                 softmax_lse_in_packed_format,
-#             )
-
-#         out_f16 = out.to(qkv_dtype)  # type: ignore[union-attr]
-#         out_ret = out_f16
-#         q_save, k_save, v_save, out_save = q_f16, k_f16, v_f16, out_f16
-
-#         tensors_to_save, tensor_objects = prepare_for_saving(
-#             q_save,
-#             k_save,
-#             v_save,
-#             out_save,
-#             softmax_lse,
-#             cu_seqlens_q_padded,
-#             cu_seqlens_kv_padded,
-#         )
-
-#         ctx.save_for_backward(*tensors_to_save)
-#         ctx.tensor_objects = tensor_objects
-#         ctx.qkv_dtype = qkv_dtype
-#         ctx.cp_groups = cp_groups
-#         ctx.causal = causal
-#         ctx.dropout_p = dropout_p
-#         ctx.softmax_scale = softmax_scale
-#         ctx.softmax_lse_in_packed_format = softmax_lse_in_packed_format
-#         ctx.second_half_lse_seqlen = second_half_lse_seqlen
-#         ctx.batch_p2p_comm = batch_p2p_comm
-#         ctx.deterministic = deterministic
-#         ctx.runtime_meta = runtime_meta
-
-#         return out_ret, softmax_lse
-
-#     @staticmethod
-#     def backward(ctx, dout, *args):
-#         inter_p2p_pg = ctx.cp_groups[ParallelMode.INTER_WINDOW]
-#         intra_p2p_pg = ctx.cp_groups[ParallelMode.INTRA_WINDOW]
-#         inter_dkv_p2p_pg = ctx.cp_groups[ParallelMode.DKV_INTER_WINDOW]
-#         intra_dkv_p2p_pg = ctx.cp_groups[ParallelMode.DKV_INTRA_WINDOW]
-#         inter_cp_size = torch.distributed.get_world_size(group=inter_p2p_pg)
-#         intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-#         inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-#         intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
-
-#         inter_send_dst, inter_recv_src = get_p2p_send_recv_rank(
-#             inter_cp_rank, inter_cp_size, inter_p2p_pg
-#         )
-#         intra_send_dst, intra_recv_src = get_p2p_send_recv_rank(
-#             intra_cp_rank, intra_cp_size, intra_p2p_pg
-#         )
-#         cp_size = torch.distributed.get_world_size(
-#             group=ctx.cp_groups[ParallelMode.RING]
-#         )
-
-#         window_num = cp_size // intra_cp_size
-#         batch_p2p_comm = ctx.batch_p2p_comm
-
-#         (
-#             q,
-#             k,
-#             v,
-#             out,
-#             softmax_lse,
-#             cu_seqlens_q_padded,
-#             cu_seqlens_kv_padded,
-#             *other_tensors,
-#         ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
-
-#         causal = ctx.causal
-#         softmax_lse_ = None
-#         if ctx.second_half_lse_seqlen is not None:
-#             softmax_lse_ = tex.thd_read_second_half_lse(
-#                 softmax_lse,
-#                 cu_seqlens_q_padded,
-#                 ctx.softmax_lse_in_packed_format,
-#                 ctx.second_half_lse_seqlen,
-#             )
-
-#         dq = torch.empty_like(q)
-#         kv = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
-#         p2p_comm_buffers = [
-#             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
-#             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
-#         ]
-
-#         out = out.view(*q.shape)
-#         dout = dout.view(*q.shape)
-#         intra_send_recv_reqs = []
-#         intra_dkv_send_recv_reqs = []
-#         inter_kv_send_recv_reqs = []
-#         inter_dkv_send_recv_reqs = []
-#         inter_kv_inputs = [None, None]
-#         inter_dkv_inputs = [
-#             torch.empty(*kv.shape, dtype=kv.dtype, device=kv.device),
-#             torch.empty(*kv.shape, dtype=kv.dtype, device=kv.device),
-#         ]
-
-#         inter_kv_inputs[0] = kv
-#         inter_kv_inputs[1] = torch.empty_like(kv)
-#         # outer ring
-#         for window_idx in range(window_num):
-#             if window_idx > 0:
-#                 for req in inter_kv_send_recv_reqs:
-#                     req.wait()
-#             # kv
-#             if window_idx + 1 < window_num:
-#                 inter_kv_send_recv_reqs = attn_p2p_communicate(
-#                     inter_cp_rank,
-#                     inter_kv_inputs[window_idx % 2],
-#                     inter_send_dst,
-#                     inter_kv_inputs[(window_idx + 1) % 2],
-#                     inter_recv_src,
-#                     inter_p2p_pg,
-#                     batch_p2p_comm,
-#                 )
-#             local_kv = inter_kv_inputs[window_idx % 2]
-#             window_offset = ((inter_cp_rank - window_idx) % window_num) * intra_cp_size
-#             # inner ring
-#             p2p_comm_buffers[0][0].copy_(local_kv)
-#             for i in range(intra_cp_size):
-#                 # wait until KV is received
-#                 for req in intra_send_recv_reqs:
-#                     req.wait()
-
-#                 send_tensor = p2p_comm_buffers[i % 2][0]
-#                 recv_tensor = p2p_comm_buffers[(i + 1) % 2][0]
-#                 dkv_send_tensor = p2p_comm_buffers[i % 2][1]
-#                 dkv_recv_tensor = p2p_comm_buffers[(i + 1) % 2][1]
-
-#                 if i < (intra_cp_size - 1):
-#                     intra_send_recv_reqs = attn_p2p_communicate(
-#                         intra_cp_rank,
-#                         send_tensor,
-#                         intra_send_dst,
-#                         recv_tensor,
-#                         intra_recv_src,
-#                         intra_p2p_pg,
-#                         batch_p2p_comm,
-#                     )
-
-#                 kv = send_tensor
-#                 q_, kv_, out_, dout_ = None, None, None, None
-#                 dq_, dk_, dv_ = None, None, None
-#                 is_half_q, is_half_kv, is_causal = False, False, False
-#                 lse = softmax_lse
-
-#                 if causal:
-#                     if i == 0 and window_idx == 0:  # q, k, v
-#                         is_causal = True
-#                     elif (window_idx == 0 and i <= intra_cp_rank) or (
-#                         0 < window_idx <= inter_cp_rank
-#                     ):  # q, k0, v0
-#                         is_half_kv = True
-#                     else:
-#                         is_half_q = True
-#                         lse = softmax_lse_
-#                 else:
-#                     pass
-
-#                 chunk_idx_q = 1 if is_half_q else -1
-#                 q_, out_, dout_ = prepare_input_bwd(
-#                     [q, out, dout], chunk_idx_q, cu_seqlens_q_padded
-#                 )
-#                 if is_half_kv:
-#                     kv_ = tex.thd_read_half_tensor(kv, cu_seqlens_kv_padded, 0)
-#                 else:
-#                     kv_ = kv
-#                 k_part, v_part = kv_[0], kv_[1]
-
-#                 rumtime_meta_per_step = ctx.runtime_meta[window_offset + i]
-#                 window_size = (-1, 0) if is_causal else (-1, -1)
-#                 dq_, dk_, dv_ = _fa3_varlen_backward(
-#                     q_,
-#                     k_part,
-#                     v_part,
-#                     out_,
-#                     dout_,
-#                     lse,
-#                     ctx.softmax_scale,
-#                     is_causal,
-#                     window_size,
-#                     ctx.deterministic,
-#                     rumtime_meta_per_step,
-#                 )
-
-#                 # update dq
-#                 first_op, second_op = "none", "none"
-#                 if causal:
-#                     if i == 0 and window_idx == 0:
-#                         first_op = second_op = "copy"
-#                     elif (window_idx == 0 and i <= intra_cp_rank) or (
-#                         0 < window_idx <= inter_cp_rank
-#                     ):  # q, k0, v0
-#                         first_op = second_op = "add"
-#                     else:  # q1, k, v
-#                         second_op = "add"
-#                 else:
-#                     if i == 0 and window_idx == 0:
-#                         first_op = second_op = "copy"
-#                     else:
-#                         first_op = second_op = "add"
-
-#                 dq = bwd_dq_update(dq, dq_, cu_seqlens_q_padded, first_op, second_op)
-#                 # wait until dKV is received
-#                 if window_idx == 0:
-#                     for req in intra_dkv_send_recv_reqs:
-#                         req.wait()
-#                     dkv = dkv_send_tensor
-#                 else:
-#                     if i == 0:  # other window
-#                         for req in inter_dkv_send_recv_reqs:
-#                             req.wait()
-#                         dkv = inter_dkv_inputs[window_idx % 2]
-#                         dkv_send_tensor = dkv
-#                     else:
-#                         for req in intra_dkv_send_recv_reqs:
-#                             req.wait()
-#                         dkv = dkv_send_tensor
-
-#                 dkv_ = torch.cat(
-#                     (dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0
-#                 )  # pylint: disable=used-before-assignment
-#                 # update dkv
-#                 first_op, second_op = "none", "none"
-#                 if causal:
-#                     if i == 0 and window_idx == 0:
-#                         first_op = second_op = "copy"
-#                     elif (window_idx == 0 and i <= intra_cp_rank) or (
-#                         0 < window_idx <= inter_cp_rank
-#                     ):  # q, k0, v0
-#                         first_op = "add"
-#                     else:  # q1, k, v
-#                         first_op = second_op = "add"
-#                 else:
-#                     if i == 0 and window_idx == 0:
-#                         first_op = second_op = "copy"
-#                     else:
-#                         first_op = second_op = "add"
-#                 dkv = bwd_dkv_update(
-#                     dkv, dkv_, cu_seqlens_kv_padded, first_op, second_op
-#                 )
-
-#                 # intra dkv
-#                 if intra_cp_size > 1:
-#                     intra_dkv_send_recv_reqs = attn_p2p_communicate(
-#                         intra_cp_rank,
-#                         dkv_send_tensor,
-#                         intra_send_dst,
-#                         dkv_recv_tensor,
-#                         intra_recv_src,
-#                         intra_dkv_p2p_pg,
-#                         batch_p2p_comm,
-#                     )
-#                 else:
-#                     intra_dkv_send_recv_reqs = []
-#                     dkv_recv_tensor.copy_(dkv_send_tensor)
-
-#             for req in intra_dkv_send_recv_reqs:
-#                 req.wait()
-#             # inter dkv
-#             inter_dkv_inputs[window_idx % 2].copy_(
-#                 p2p_comm_buffers[intra_cp_size % 2][1]
-#             )
-#             if inter_cp_size > 1:
-#                 inter_dkv_send_recv_reqs = attn_p2p_communicate(
-#                     inter_cp_rank,
-#                     inter_dkv_inputs[window_idx % 2],
-#                     inter_send_dst,
-#                     inter_dkv_inputs[(window_idx + 1) % 2],
-#                     inter_recv_src,
-#                     inter_dkv_p2p_pg,
-#                     batch_p2p_comm,
-#                 )
-#             else:
-#                 inter_dkv_inputs[(window_idx + 1) % 2].copy_(
-#                     inter_dkv_inputs[window_idx % 2]
-#                 )
-#                 inter_dkv_send_recv_reqs = []
-
-#         for req in inter_dkv_send_recv_reqs:
-#             req.wait()
-
-#         dkv = inter_dkv_inputs[window_num % 2]
-#         # dkv = inter_dkv_inputs[0]
-#         dk, dv = dkv[0], dkv[1]
-
-#         return (
-#             dq,
-#             dk,
-#             dv,
-#             None,
-#             None,
-#             None,
-#             None,
-#             None,
-#             None,
-#             None,
-#             None,
-#             None,
-#             None,
-#         )
-
 
 class FA3DoubleRingAttnFunc(torch.autograd.Function):
     @staticmethod
@@ -564,10 +83,10 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
 
         inter_p2p_pg = cp_groups[ParallelMode.INTER_WINDOW]
         intra_p2p_pg = cp_groups[ParallelMode.INTRA_WINDOW]
-        inter_cp_size = torch.distributed.get_world_size(group=inter_p2p_pg)
-        intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-        inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-        intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
+        inter_cp_size = dist.get_world_size(group=inter_p2p_pg)
+        intra_cp_size = dist.get_world_size(group=intra_p2p_pg)
+        inter_cp_rank = dist.get_rank(group=inter_p2p_pg)
+        intra_cp_rank = dist.get_rank(group=intra_p2p_pg)
 
         inter_send_dst, inter_recv_src = get_p2p_send_recv_rank(
             inter_cp_rank, inter_cp_size, inter_p2p_pg
@@ -576,7 +95,7 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
             intra_cp_rank, intra_cp_size, intra_p2p_pg
         )
 
-        cp_size = torch.distributed.get_world_size(group=cp_groups[ParallelMode.RING])
+        cp_size = dist.get_world_size(group=cp_groups[ParallelMode.RING])
         window_num = cp_size // intra_cp_size
 
         qkv_dtype = q.dtype
@@ -757,10 +276,10 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
         intra_p2p_pg = ctx.cp_groups[ParallelMode.INTRA_WINDOW]
         inter_dkv_p2p_pg = ctx.cp_groups[ParallelMode.DKV_INTER_WINDOW]
         intra_dkv_p2p_pg = ctx.cp_groups[ParallelMode.DKV_INTRA_WINDOW]
-        inter_cp_size = torch.distributed.get_world_size(group=inter_p2p_pg)
-        intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-        inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-        intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
+        inter_cp_size = dist.get_world_size(group=inter_p2p_pg)
+        intra_cp_size = dist.get_world_size(group=intra_p2p_pg)
+        inter_cp_rank = dist.get_rank(group=inter_p2p_pg)
+        intra_cp_rank = dist.get_rank(group=intra_p2p_pg)
 
         inter_send_dst, inter_recv_src = get_p2p_send_recv_rank(
             inter_cp_rank, inter_cp_size, inter_p2p_pg
@@ -768,9 +287,7 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
         intra_send_dst, intra_recv_src = get_p2p_send_recv_rank(
             intra_cp_rank, intra_cp_size, intra_p2p_pg
         )
-        cp_size = torch.distributed.get_world_size(
-            group=ctx.cp_groups[ParallelMode.RING]
-        )
+        cp_size = dist.get_world_size(group=ctx.cp_groups[ParallelMode.RING])
 
         window_num = cp_size // intra_cp_size
         batch_p2p_comm = ctx.batch_p2p_comm
@@ -1001,7 +518,6 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
             req.wait()
 
         dkv = inter_dkv_inputs[window_num % 2]
-        # dkv = inter_dkv_inputs[0]
         dk, dv = dkv[0], dkv[1]
 
         return (
@@ -1052,10 +568,10 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
 
         inter_p2p_pg = cp_groups[ParallelMode.INTER_WINDOW]
         intra_p2p_pg = cp_groups[ParallelMode.INTRA_WINDOW]
-        inter_cp_size = torch.distributed.get_world_size(group=inter_p2p_pg)
-        intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-        inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-        intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
+        inter_cp_size = dist.get_world_size(group=inter_p2p_pg)
+        intra_cp_size = dist.get_world_size(group=intra_p2p_pg)
+        inter_cp_rank = dist.get_rank(group=inter_p2p_pg)
+        intra_cp_rank = dist.get_rank(group=intra_p2p_pg)
 
         inter_send_dst, inter_recv_src = get_p2p_send_recv_rank(
             inter_cp_rank, inter_cp_size, inter_p2p_pg
@@ -1065,9 +581,9 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
         )
 
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
-        cp_size = torch.distributed.get_world_size(group=cp_groups[ParallelMode.RING])
+        cp_size = dist.get_world_size(group=cp_groups[ParallelMode.RING])
+        cp_rank = dist.get_rank(group=cp_groups[ParallelMode.RING])
         window_num = cp_size // intra_cp_size
-        # print(f"{window_num=},{cp_size=},{intra_cp_size=}")
 
         qkv_dtype = q.dtype
         q_f16, k_f16, v_f16 = q, k, v
@@ -1191,8 +707,8 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
                     chunk_idx_q,
                     cu_seqlens_q,
                     cu_seqlens_q_padded,
-                    intra_cp_size,
-                    window_offset + intra_cp_rank,
+                    cp_size,
+                    cp_rank,
                 )
 
                 chunk_idx_kv = 0 if is_half_kv else -1
@@ -1204,7 +720,7 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
                     chunk_idx_kv,
                     cu_seqlens_kv,
                     cu_seqlens_kv_padded,
-                    intra_cp_size,
+                    cp_size,
                     window_offset + (intra_cp_rank - i) % intra_cp_size,
                 )
                 (
@@ -1320,10 +836,10 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
         intra_p2p_pg = ctx.cp_groups[ParallelMode.INTRA_WINDOW]
         inter_dkv_p2p_pg = ctx.cp_groups[ParallelMode.DKV_INTER_WINDOW]
         intra_dkv_p2p_pg = ctx.cp_groups[ParallelMode.DKV_INTRA_WINDOW]
-        inter_cp_size = torch.distributed.get_world_size(group=inter_p2p_pg)
-        intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-        inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-        intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
+        inter_cp_size = dist.get_world_size(group=inter_p2p_pg)
+        intra_cp_size = dist.get_world_size(group=intra_p2p_pg)
+        inter_cp_rank = dist.get_rank(group=inter_p2p_pg)
+        intra_cp_rank = dist.get_rank(group=intra_p2p_pg)
 
         inter_send_dst, inter_recv_src = get_p2p_send_recv_rank(
             inter_cp_rank, inter_cp_size, inter_p2p_pg
@@ -1331,9 +847,7 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
         intra_send_dst, intra_recv_src = get_p2p_send_recv_rank(
             intra_cp_rank, intra_cp_size, intra_p2p_pg
         )
-        cp_size = torch.distributed.get_world_size(
-            group=ctx.cp_groups[ParallelMode.RING]
-        )
+        cp_size = dist.get_world_size(group=ctx.cp_groups[ParallelMode.RING])
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
 
         window_num = cp_size // intra_cp_size
@@ -1376,7 +890,6 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
 
         dout_dtype = dout.dtype
         dq = torch.empty_like(q)
-        # dq = torch.empty_like(q)
         kv = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
         p2p_comm_buffers = [
             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
@@ -1577,7 +1090,6 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
                 dkv = bwd_dkv_update(
                     dkv, dkv_, cu_seqlens_kv_padded, first_op, second_op
                 )
-                # assert torch.equal(dkv,dkv_send_tensor)
                 # intra dkv
                 if intra_cp_size > 1:
                     intra_dkv_send_recv_reqs = attn_p2p_communicate(
@@ -1662,6 +1174,7 @@ class LoongTrain(AttnBaselineInterface):
 
     # to call after q,k,v dispatch
     def pre_compute_attn_runtime_meta(self, attn_mask_type: AttnMaskType, device):
+        self.runtime_meta_per_step.clear()
         if self.backend == AttnBackend.FA3:
             causal = attn_mask_type == AttnMaskType.CAUSAL
             shard_q_meta = self.shard_meta["q"]
@@ -1670,12 +1183,11 @@ class LoongTrain(AttnBaselineInterface):
             cp_groups = self.cp_process_group
             inter_p2p_pg = cp_groups[ParallelMode.INTER_WINDOW]
             intra_p2p_pg = cp_groups[ParallelMode.INTRA_WINDOW]
-            intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-            inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-            intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
-            cp_size = torch.distributed.get_world_size(
-                group=cp_groups[ParallelMode.RING]
-            )
+            intra_cp_size = dist.get_world_size(group=intra_p2p_pg)
+            inter_cp_rank = dist.get_rank(group=inter_p2p_pg)
+            intra_cp_rank = dist.get_rank(group=intra_p2p_pg)
+            cp_size = dist.get_world_size(group=cp_groups[ParallelMode.RING])
+            cp_rank = dist.get_rank(group=cp_groups[ParallelMode.RING])
             self.runtime_meta_per_step = [None for i in range(cp_size)]
             window_num = cp_size // intra_cp_size
 
@@ -1708,16 +1220,16 @@ class LoongTrain(AttnBaselineInterface):
                     cu_seqlens_q_per_step = get_cu_seqlens_on_cp_rank(
                         shard_q_meta.cu_seqlens,
                         shard_q_meta.cu_seqlens_padded // cp_size,
-                        intra_cp_size,
-                        window_offset + intra_cp_rank,
+                        cp_size,
+                        cp_rank,
                         first_idx_q,
                         second_idx_q,
                     )
                     cu_seqlens_kv_per_step = get_cu_seqlens_on_cp_rank(
                         shard_kv_meta.cu_seqlens,
                         shard_kv_meta.cu_seqlens_padded // cp_size,
-                        intra_cp_size,
-                        window_offset + (intra_cp_rank - i) % intra_cp_size,
+                        cp_size,
+                        window_offset + ((intra_cp_rank - i) % intra_cp_size),
                         first_idx_kv,
                         second_idx_kv,
                     )
@@ -1735,6 +1247,8 @@ class LoongTrain(AttnBaselineInterface):
                         device,
                     )
                     self.runtime_meta_per_step[window_offset + i] = rumtime_meta
+
+        print(f"{self.runtime_meta_per_step=}")
 
     def dispatch(
         self,

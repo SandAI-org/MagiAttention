@@ -61,6 +61,7 @@ class USP(AttnBaselineInterface):
 
     # to call after q,k,v dispatch
     def pre_compute_attn_runtime_meta(self, attn_mask_type: AttnMaskType, device):
+        self.runtime_meta_per_step.clear()
         if self.backend == AttnBackend.FA3:
             causal = attn_mask_type == AttnMaskType.CAUSAL
             shard_q_meta = self.shard_meta["q"]
@@ -198,8 +199,6 @@ class USP(AttnBaselineInterface):
         v_layer = _varlen_all2all_before_attn(v, self.pg_a2a)
 
         batch_p2p_comm = False
-        # with torch.cuda.device(q.device):
-        #     cp_stream = torch.cuda.Stream()
 
         # ring attention p2p
         shard_q_meta = self.shard_meta["q"]
@@ -225,7 +224,6 @@ class USP(AttnBaselineInterface):
                 "thd",
                 self.pg_p2p,
                 attn_mask,
-                # cp_stream,
                 deterministic,
                 batch_p2p_comm,
             )
@@ -246,7 +244,6 @@ class USP(AttnBaselineInterface):
                 dropout_p,
                 softmax_scale,
                 self.pg_p2p,
-                # cp_stream,
                 deterministic,
                 batch_p2p_comm,
             )
