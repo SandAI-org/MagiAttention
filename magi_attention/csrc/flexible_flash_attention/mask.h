@@ -161,7 +161,6 @@ struct Mask {
     auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
     auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
 
-    static constexpr int Row = !SwapAB ? 0 : 1;
     static constexpr int Col = !SwapAB ? 1 : 0;
 
     // Create identity tensor for block shape

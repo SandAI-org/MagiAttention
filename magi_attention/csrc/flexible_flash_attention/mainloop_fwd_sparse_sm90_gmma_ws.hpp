@@ -413,53 +413,53 @@ struct CollectiveMainloopSparseFwdSm90 {
 
         // 3. corner case for boundary mask: move the valid token index ahead
         int offset = num_invalid_token % NUM_ROWS_PER_GROUP;
-        if (offset > 0) {
-          switch (offset) {
-            case 1:
-              token_indices[0] = token_indices[last_idx];
-              break;
-            case 2:
-              token_indices[1] = token_indices[last_idx];
-              token_indices[0] = token_indices[last_idx - 1];
-              break;
-            case 3:
-              token_indices[2] = token_indices[last_idx];
-              token_indices[1] = token_indices[last_idx - 1];
-              token_indices[0] = token_indices[last_idx - 2];
-              break;
-            case 4:
-              token_indices[3] = token_indices[last_idx];
-              token_indices[2] = token_indices[last_idx - 1];
-              token_indices[1] = token_indices[last_idx - 2];
-              token_indices[0] = token_indices[last_idx - 3];
-              break;
-            case 5:
-              token_indices[4] = token_indices[last_idx];
-              token_indices[3] = token_indices[last_idx - 1];
-              token_indices[2] = token_indices[last_idx - 2];
-              token_indices[1] = token_indices[last_idx - 3];
-              token_indices[0] = token_indices[last_idx - 4];
-              break;
-            case 6:
-              token_indices[5] = token_indices[last_idx];
-              token_indices[4] = token_indices[last_idx - 1];
-              token_indices[3] = token_indices[last_idx - 2];
-              token_indices[2] = token_indices[last_idx - 3];
-              token_indices[1] = token_indices[last_idx - 4];
-              token_indices[0] = token_indices[last_idx - 5];
-              break;
-            case 7:
-              token_indices[6] = token_indices[last_idx];
-              token_indices[5] = token_indices[last_idx - 1];
-              token_indices[4] = token_indices[last_idx - 2];
-              token_indices[3] = token_indices[last_idx - 3];
-              token_indices[2] = token_indices[last_idx - 4];
-              token_indices[1] = token_indices[last_idx - 5];
-              token_indices[0] = token_indices[last_idx - 6];
-              break;
-            default:
-              break;
-          }
+        switch (offset) {
+          case 0:
+            break;
+          case 1:
+            token_indices[0] = token_indices[last_idx];
+            break;
+          case 2:
+            token_indices[1] = token_indices[last_idx];
+            token_indices[0] = token_indices[last_idx - 1];
+            break;
+          case 3:
+            token_indices[2] = token_indices[last_idx];
+            token_indices[1] = token_indices[last_idx - 1];
+            token_indices[0] = token_indices[last_idx - 2];
+            break;
+          case 4:
+            token_indices[3] = token_indices[last_idx];
+            token_indices[2] = token_indices[last_idx - 1];
+            token_indices[1] = token_indices[last_idx - 2];
+            token_indices[0] = token_indices[last_idx - 3];
+            break;
+          case 5:
+            token_indices[4] = token_indices[last_idx];
+            token_indices[3] = token_indices[last_idx - 1];
+            token_indices[2] = token_indices[last_idx - 2];
+            token_indices[1] = token_indices[last_idx - 3];
+            token_indices[0] = token_indices[last_idx - 4];
+            break;
+          case 6:
+            token_indices[5] = token_indices[last_idx];
+            token_indices[4] = token_indices[last_idx - 1];
+            token_indices[3] = token_indices[last_idx - 2];
+            token_indices[2] = token_indices[last_idx - 3];
+            token_indices[1] = token_indices[last_idx - 4];
+            token_indices[0] = token_indices[last_idx - 5];
+            break;
+          case 7:
+            token_indices[6] = token_indices[last_idx];
+            token_indices[5] = token_indices[last_idx - 1];
+            token_indices[4] = token_indices[last_idx - 2];
+            token_indices[3] = token_indices[last_idx - 3];
+            token_indices[2] = token_indices[last_idx - 4];
+            token_indices[1] = token_indices[last_idx - 5];
+            token_indices[0] = token_indices[last_idx - 6];
+            break;
+          default:
+            break;
         }
         // NOTE: significant register spill due to dynamic indexing!
         // if (offset > 0) {
@@ -498,7 +498,6 @@ struct CollectiveMainloopSparseFwdSm90 {
         int num_steps = num_threads; // move pointer to the next token, for each thread
         int cnt = 0;
         int last_idx = NUM_ROWS_PER_GROUP - 1;
-        int idx_in_warpgroup = threadIdx.x % 128;
 
         if (num_invalid_token) {
           if (num_steps >= num_invalid_token) {
