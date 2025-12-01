@@ -1317,7 +1317,7 @@ void dispatch(
       start_offset = ld_volatile_global(nvl_channel_prefix_start.buffer() + lane_id); // volatile load
       end_offset = ld_volatile_global(nvl_channel_prefix_end.buffer() + lane_id); // volatile load
       if (start_offset < 0 and end_offset < 0) { // all valid encoded offsets
-        start_offset = decoded(start_offset), end_offset = decode(end_offset);
+        start_offset = decode(start_offset), end_offset = decode(end_offset);
         total_offset += start_offset;
         break;
       }
@@ -1803,7 +1803,7 @@ void cached_notify(
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-// Group Cast
+// Group Reduce
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
