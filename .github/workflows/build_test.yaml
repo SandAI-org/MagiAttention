@@ -97,7 +97,7 @@ jobs:
       #     pytest -q -s --skip-slow --import-mode=append ./tests/test_attn/test_flex_flash_attn.py
       - name: Test and Generate coverage report
         run: |
-          coverage run --source magi_attention --parallel-mode -m pytest
+          coverage run --source magi_attention --parallel-mode -m pytest ./tests
           coverage combine
           coverage xml -i
         env:
