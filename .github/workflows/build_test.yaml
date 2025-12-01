@@ -1,4 +1,4 @@
-name: MagiAttention Unit Tests
+name: MagiAttention Build and Test
 
 on:
   push:
