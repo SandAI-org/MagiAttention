@@ -690,17 +690,9 @@ DEVICE_INLINE int broadcast_in_warp(int val, int src_lane = 0) {
   return __shfl_sync(0xffffffff, val, src_lane);
 }
 
-DEVICE_INLINE int any_in_warp(int pred) {
-  return __any_sync(0xffffffff, pred);
-}
-
-DEVICE_INLINE int all_in_warp(int pred) {
-  return __all_sync(0xffffffff, pred);
-}
-
 template <typename dtype_t>
 DEVICE_INLINE dtype_t broadcast_ptr_in_warp(dtype_t& ptr, int src_lane = 0) {
-  GRPCOLL_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "");
+  GRPCOLL_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "Invalid dtype_t");
 
   auto send_int_vals = reinterpret_cast<int*>(&ptr);
   int recv_int_vals[sizeof(dtype_t) / sizeof(int)];
@@ -710,6 +702,14 @@ DEVICE_INLINE dtype_t broadcast_ptr_in_warp(dtype_t& ptr, int src_lane = 0) {
     recv_int_vals[i] = broadcast_in_warp(send_int_vals[i], src_lane);
 
   return *reinterpret_cast<dtype_t*>(recv_int_vals);
+}
+
+DEVICE_INLINE int any_in_warp(int pred) {
+  return __any_sync(0xffffffff, pred);
+}
+
+DEVICE_INLINE int all_in_warp(int pred) {
+  return __all_sync(0xffffffff, pred);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
