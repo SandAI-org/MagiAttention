@@ -90,7 +90,7 @@ jobs:
           bash -x .github/scripts/install_requirements.sh
       - name: install MagiAttention
         run: |
-          pip install -e . --no-build-isolation -vvv
+          MAGI_ATTENTION_SKIP_FFA_UTILS_BUILD=1 MAGI_ATTENTION_SKIP_MAGI_ATTN_EXT_BUILD=1 MAGI_ATTENTION_SKIP_MAGI_ATTN_COMM_BUILD=1 pip install -e . --no-build-isolation -vvv
       # - name: test MagiAttention
       #   id: run_test
       #   run: |
@@ -102,9 +102,8 @@ jobs:
           coverage xml -i
         env:
           COVERAGE_RUN: True
-      - name: Upload report to Codecov
-        uses: codecov/codecov-action@v4.0.1
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          slug: SandAI-org/magi_attention
-          file: ./coverage.xml
+          files: coverage.xml
