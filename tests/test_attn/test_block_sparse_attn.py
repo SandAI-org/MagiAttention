@@ -58,7 +58,7 @@ class TestBlockSparseAttn(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 600  # Increase timeout for JIT compilation
+        return 1800  # Increase timeout for JIT compilation
 
     def check_deterministic(
         self,

@@ -502,6 +502,11 @@ struct CollectiveMainloopFwdSm90 {
             tKsK_TMA(_, smem_pipe_write.index()));
         ++smem_pipe_write;
       }
+      // =======DEBUG========
+      // if (block_meta.m_block == 0 && threadIdx.x == 0 && block_meta.bidb == 0) {
+      //   printf("shared memory sK: \n");
+      //   cute::print_tensor(sK);
+      // }
     };
 
     auto load_V = [&](int const n_block_idx, auto& smem_pipe_write, int offset_k) {
@@ -836,6 +841,11 @@ struct CollectiveMainloopFwdSm90 {
     // launch Q @ K of n_block and wait for it to finish
     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
     warpgroup_wait<0>();
+    // if (block_meta.bidb == 0 && block_meta.m_block == 0 && thread_idx == 0) {
+    //     printf("============================================ tSrS m_block: %d ==============================\n", block_meta.m_block);
+    //     print_tensor(tSrS);
+    //     printf("============================================ tSrS m_block: %d ==============================\n", block_meta.m_block);
+    // }
 
     // The first block of k has been consumed, notify producer that this buffer can be reused
     consumer_release(pipeline_k, smem_pipe_read_k);
@@ -854,10 +864,10 @@ struct CollectiveMainloopFwdSm90 {
     boundary_mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
 
     /** DEBUG **/
-    // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
-    //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
-    //     print_tensor(tSrS);
-    //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
+    // if (block_meta.bidb == 0 && block_meta.bidb == 0 && block_meta.m_block == 0 && thread_idx == 0) {
+    //     printf("============================================ tSrS after mask m_block: %d, thread_idx: %d ==============================\n", block_meta.m_block,
+    //     thread_idx); print_tensor(tSrS); printf("============================================ tSrS after mask m_block: %d, thread_idx: %d
+    //     ==============================\n", block_meta.m_block, thread_idx);
     // }
 
     // Get row-max and row-sum of tSrS

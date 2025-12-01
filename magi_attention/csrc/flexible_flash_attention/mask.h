@@ -154,5 +154,37 @@ struct Mask {
       }
     }
   };
+
+  template <typename Engine, typename Layout>
+  CUTLASS_DEVICE void apply_sparse_load(Tensor<Engine, Layout>& tSrS, int num_invalid_token, int thread_idx) {
+    static_assert(Layout::rank == 3, "Only support 3D Tensor");
+    auto thread_mma = TiledMma{}.get_thread_slice(thread_idx);
+    auto thread0_mma = TiledMma{}.get_thread_slice(_0{});
+
+    static constexpr int Row = !SwapAB ? 0 : 1;
+    static constexpr int Col = !SwapAB ? 1 : 0;
+
+    // Create identity tensor for block shape
+    Tensor cS = cute::make_identity_tensor(Shape<Int<!SwapAB ? kBlockM : kBlockN>, Int<!SwapAB ? kBlockN : kBlockM>>{});
+    Tensor tScS = thread_mma.partition_C(cS);
+    Tensor tSrS_rowcol = make_tensor(tSrS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tSrS.layout()));
+    Tensor tScS_rowcol = make_tensor(tScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(tScS.layout()));
+    Tensor t0ScS = thread0_mma.partition_C(cS);
+    Tensor t0ScS_rowcol = make_tensor(t0ScS.data(), flash::convert_layout_acc_rowcol</*Transposed=*/SwapAB>(t0ScS.layout()));
+
+    // Use the column indices of thread0 for comparison, known at compile time
+    int const thread_col_offset = get<Col>(tScS_rowcol(_0{}, _0{}));
+    int const seqlenk_col_limit = kBlockN - num_invalid_token - thread_col_offset;
+
+#pragma unroll
+    for (int n = 0; n < size<1>(tSrS_rowcol); ++n) {
+      if (int(get<Col>(t0ScS_rowcol(_0{}, n))) >= seqlenk_col_limit) {
+#pragma unroll
+        for (int m = 0; m < size<0>(tSrS_rowcol); ++m) {
+          tSrS_rowcol(m, n) = -INFINITY;
+        }
+      }
+    }
+  }
 };
 } // namespace flash
