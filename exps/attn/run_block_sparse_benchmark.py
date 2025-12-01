@@ -49,8 +49,8 @@ attn_modes = ["GQA"]  # MHA, GQA
 nhqs = [16]
 num_groups = [4]
 # small K block
-q_block_sizes = [64, 64, 64, 64, 64]
-k_block_sizes = [64, 32, 16, 8, 1]
+q_block_sizes = [128, 128, 128, 128, 128, 128]
+k_block_sizes = [128, 64, 32, 16, 8, 1]
 # small Q block
 # q_block_sizes = [64, 32, 16, 8]
 # k_block_sizes = [64, 64, 64, 64]

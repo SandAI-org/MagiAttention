@@ -587,7 +587,7 @@ def choose_ref_block(
     if swap_ab:
         raise NotImplementedError("SwapAB Attention is not supported yet.")
     elif sparse_load:
-        return (64, 128)  # only support (64, 128) block size
+        return (128, 128)  # only support (128, 128) block size currently
     else:
         # Tile_M must be a multiple of 64
         if q_block_size >= 64:
