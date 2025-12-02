@@ -2015,7 +2015,8 @@ void combine(
 
   const auto hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t)), hidden_bytes = hidden_int4 * sizeof(int4);
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, /*num_scales=*/0, /*num_topk_idx=*/0, num_topk);
-  const auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks;
+  const auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks; // split NVL queue for each RDMA peer
+  GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
 
   /** NOTE: Determine warp role and its target warp id
    * For Forwarder (Odd SMs):
@@ -2023,7 +2024,9 @@ void combine(
    *  2. the rest warp is `kCoordinator`, ...
    *
    * For Sender/Receiver (Even SMs):
-   *  1. the first `NUM_MAX_NVL_PEERS` warps are `kNVLSender`, ...
+   *  1. the first `NUM_MAX_NVL_PEERS` warps are `kNVLSender`,
+   *    copying the corr. channel of tokens to NVL buffer of each NVL peer in this node
+   *    each warp for one NVL peer and each lane for one RDMA peer
    *  2. the next `kNumRDMAReceivers` warps are `kRDMAReceiver`, ...
    *  3. the rest warp is `kCoordinator`, ...
    */
@@ -2050,20 +2053,33 @@ void combine(
 
   // Warp-specialized working
   if (warp_role == WarpRole::kNVLSender) {
-    // NVL producers
     const auto dst_nvl_rank = target_warp_id;
 
-    // NVL layouts
+    // Get NVL buffers
+    //  `nvl_channel_x`: shape=(num_channels, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_bytes_per_token), dtype=uint8_t
+    //  `nvl_channel_head`: shape=(num_channels, NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
+    //  `nvl_channel_tail`: shape=(num_channels, NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
     // NOTES: to avoid deadlocks, we use separate NVL buffers for different RDMA sources
     auto dst_buffer_ptr = buffer_ptrs[dst_nvl_rank], local_buffer_ptr = buffer_ptrs[nvl_rank];
-    auto nvl_channel_x =
-        AsymBuffer<uint8_t>(dst_buffer_ptr, num_max_nvl_chunked_recv_tokens * num_bytes_per_token, NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank)
+    auto nvl_channel_x = AsymBuffer<uint8_t>(
+                             dst_buffer_ptr,
+                             /*num_elems=*/num_max_nvl_chunked_recv_tokens * num_bytes_per_token,
+                             /*num_ranks=*/NUM_MAX_NVL_PEERS,
+                             /*sm_id=*/channel_id,
+                             /*num_sms=*/num_channels,
+                             /*offset=*/nvl_rank)
+                             .advance_also(local_buffer_ptr);
+    auto nvl_channel_head =
+        AsymBuffer<int>(
+            local_buffer_ptr, /*num_elems=*/kNumRDMARanks, /*num_ranks=*/NUM_MAX_NVL_PEERS, /*sm_id=*/channel_id, /*num_sms=*/num_channels, /*offset=*/dst_nvl_rank)
+            .advance_also(dst_buffer_ptr);
+    auto nvl_channel_tail =
+        AsymBuffer<int>(
+            dst_buffer_ptr, /*num_elems=*/kNumRDMARanks, /*num_ranks=*/NUM_MAX_NVL_PEERS, /*sm_id=*/channel_id, /*num_sms=*/num_channels, /*offset=*/nvl_rank)
             .advance_also(local_buffer_ptr);
-    auto nvl_channel_head = AsymBuffer<int>(local_buffer_ptr, kNumRDMARanks, NUM_MAX_NVL_PEERS, channel_id, num_channels, dst_nvl_rank).advance_also(dst_buffer_ptr);
-    auto nvl_channel_tail = AsymBuffer<int>(dst_buffer_ptr, kNumRDMARanks, NUM_MAX_NVL_PEERS, channel_id, num_channels, nvl_rank).advance_also(local_buffer_ptr);
 
-    // TMA stuffs
-    extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
+    // Prepare TMA buffers and init mbarrier
+    extern __shared__ __align__(1024) uint8_t smem_tma_buffer[]; // REVIEW: why aligned to 1024 bytes ?
     auto tma_buffer = smem_tma_buffer + dst_nvl_rank * kNumTMABytesPerSenderWarp;
     auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes);
     uint32_t tma_phase = 0;
@@ -2071,43 +2087,43 @@ void combine(
       mbarrier_init(tma_mbarrier, 1);
       fence_view_async_shared();
       fence_barrier_init();
-      GRPCOLL_DEVICE_ASSERT(hidden_bytes + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
     }
     __syncwarp();
 
-    // Get tasks for each RDMA lane
-    int token_start_idx = 0, token_end_idx = 0;
+    // Get tasks for each RDMA peer indicated by `lane_id`,
+    // i.e. the [token_start_idx, token_end_idx] in `x` for each RDMA peer w.r.t. dst_nvl_rank
+    // `gbl_channel_prefix_matrix`: shape=(kNumRanks, kNumChannels), dtype=int
+    int token_start_idx = 0, token_end_idx = 0; // NOTES: `token_start_idx` will be updated in the loop
     if (lane_id < kNumRDMARanks) {
       int prefix_idx = (lane_id * NUM_MAX_NVL_PEERS + dst_nvl_rank) * num_channels + channel_id;
       token_start_idx = gbl_channel_prefix_matrix[prefix_idx];
       token_end_idx = (prefix_idx == num_channels * num_ranks - 1) ? num_tokens : gbl_channel_prefix_matrix[prefix_idx + 1];
     }
+    auto is_task_valid = [=]() { return token_start_idx < token_end_idx; };
     __syncwarp();
 
+    // Iterate over all tokens and send by chunks
     // NOTES: here the cached value of each lane is only responsible for a single RDMA buffer
     int cached_channel_head_idx = 0, cached_channel_tail_idx = 0;
-    GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
-
-    // Iterate over all tokens and send by chunks
     int current_rdma_idx = channel_id % kNumRDMARanks;
     while (true) {
-      // Exit if possible
-      if (all_in_warp(token_start_idx >= token_end_idx))
+      // Exit if all lanes' tasks are invalid
+      if (all_in_warp(!is_task_valid()))
         break;
 
       // Decide the next RDMA buffer to send
       bool is_lane_ready = false;
       auto start_time = clock64();
       while (true) {
+        // Check if any NVL buffer for any RDMA peer indicated by `lane_id` is empty enough to send a chunk
         int num_used_slots = cached_channel_tail_idx - cached_channel_head_idx;
-        is_lane_ready = lane_id < kNumRDMARanks and token_start_idx < token_end_idx and
-            num_max_nvl_chunked_recv_tokens_per_rdma - num_used_slots >= num_max_nvl_chunked_send_tokens;
+        is_lane_ready = lane_id < kNumRDMARanks and is_task_valid() and num_max_nvl_chunked_recv_tokens_per_rdma - num_used_slots >= num_max_nvl_chunked_send_tokens;
         if (any_in_warp(is_lane_ready))
           break;
 
-        // Retry
-        if (lane_id < kNumRDMARanks and token_start_idx < token_end_idx)
-          cached_channel_head_idx = ld_volatile_global(nvl_channel_head.buffer() + lane_id);
+        // Read NVL head and retry later
+        if (lane_id < kNumRDMARanks and is_task_valid())
+          cached_channel_head_idx = ld_volatile_global(nvl_channel_head.buffer() + lane_id); // volatile load
 
         // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < kNumRDMARanks) {
@@ -2126,19 +2142,22 @@ void combine(
         }
       }
 
-      // Sync token start index and count
-      for (int i = 0; i < kNumRDMARanks; ++i) {
+      // Iterate over each RDMA peer and send in round-robin way
+      for (int r = 0; r < kNumRDMARanks; ++r) {
         current_rdma_idx = (current_rdma_idx + 1) % kNumRDMARanks;
-        if (broadcast_in_warp(/*val=*/(token_start_idx >= token_end_idx) or (not is_lane_ready), /*src_lane=*/current_rdma_idx))
+
+        // If the task for current RDMA peer is not valid or is not ready to send, skip for next round
+        if (broadcast_in_warp(/*val=*/(!is_task_valid()) or (!is_lane_ready), /*src_lane=*/current_rdma_idx))
           continue;
 
-        // Sync token start index
+        // If not skipped, get and sync token start idx and chunk size for this round
         auto token_idx = static_cast<int64_t>(broadcast_in_warp(/*val=*/token_start_idx, /*src_lane=*/current_rdma_idx));
         int num_tokens_in_chunk = broadcast_in_warp(/*val=*/min(num_max_nvl_chunked_send_tokens, token_end_idx - token_start_idx), /*src_lane=*/current_rdma_idx);
 
         // Send by chunk
         for (int chunk_idx = 0; chunk_idx < num_tokens_in_chunk; ++chunk_idx, ++token_idx) {
-          // Get an empty slot
+          // Get and sync an empty slot in NVL queue
+          // as well as increment `cached_channel_tail_idx`
           int dst_slot_idx = 0;
           if (lane_id == current_rdma_idx) {
             dst_slot_idx = (cached_channel_tail_idx++) % num_max_nvl_chunked_recv_tokens_per_rdma;
@@ -2146,40 +2165,68 @@ void combine(
           }
           dst_slot_idx = broadcast_in_warp(/*val=*/dst_slot_idx, /*src_lane=*/current_rdma_idx);
 
-          // Load data
-          auto shifted_x_buffers = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
-          auto shifted_x = x + token_idx * hidden_int4;
-          if (lane_id == 0) {
+          // Get token ptr in `x` as well as the one in NVL buffer of dst NVL peer
+          auto token_ptr_in_x = x + token_idx * hidden_int4;
+          auto token_ptr_in_buffer = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
+
+          // TMA-copy token from `x` to TMA buffer in shared memory
+          if (lane_id == 0) { // issued by lane0
+            // Wait for all previous TMA stores to be finished
+            // REVIEW: can we use multiple buffers for multiple stages ?
             tma_store_wait();
-            tma_load_1d(tma_buffer, shifted_x, tma_mbarrier, hidden_bytes);
+
+            tma_load_1d(
+                /*smem_ptr=*/tma_buffer,
+                /*gmem_ptr=*/token_ptr_in_x,
+                /*mbar_ptr=*/tma_mbarrier,
+                /*num_bytes=*/hidden_bytes,
+                /*evict_first=*/true);
             mbarrier_arrive_and_expect_tx(tma_mbarrier, hidden_bytes);
           }
           __syncwarp();
-          mbarrier_wait(tma_mbarrier, tma_phase);
 
-          // Load source meta
-          if (lane_id == num_topk)
-            *reinterpret_cast<SourceMeta*>(tma_buffer + hidden_bytes) = ld_nc_global(src_meta + token_idx);
+          // Wait TMA load to be finished
+          // and flip the `tma_phase` in-place
+          mbarrier_wait(tma_mbarrier, /*stage=*/tma_phase);
 
-          // Load `topk_weights`
-          if (lane_id < num_topk)
+          // Copy source meta to shared memory
+          if (lane_id == num_topk) {
+            *reinterpret_cast<SourceMeta*>(tma_buffer + hidden_bytes) = ld_nc_global(src_meta + token_idx); // non-cached load
+          }
+
+          // Copy `topk_weights` to shared memory
+          if (lane_id < num_topk) {
             *reinterpret_cast<float*>(tma_buffer + hidden_bytes + sizeof(SourceMeta) + lane_id * sizeof(float)) =
-                ld_nc_global(topk_weights + token_idx * num_topk + lane_id);
+                ld_nc_global(topk_weights + token_idx * num_topk + lane_id); // non-cached load
+          }
 
-          // Issue TMA store
+          // Fence TMA store to wait the TMA buffer for each lane to be ready
+          // before issuing the next TMA store by lane0
+          // NOTES: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
           tma_store_fence();
           __syncwarp();
-          if (lane_id == 0)
-            tma_store_1d(tma_buffer, shifted_x_buffers, num_bytes_per_token, false);
+
+          // TMA-copy token from TMA buffer in shared memory to NVL buffer
+          if (lane_id == 0) {
+            tma_store_1d(
+                /*smem_ptr=*/tma_buffer,
+                /*gmem_ptr=*/token_ptr_in_buffer,
+                /*num_bytes=*/num_bytes_per_token,
+                /*evict_first=*/false);
+          }
         }
+
+        // Update token start idx for next round
         lane_id == current_rdma_idx ? (token_start_idx = static_cast<int>(token_idx)) : 0;
       }
 
-      // Move queue tail
+      // Wait for all previous TMA stores to be finished
       tma_store_wait();
       __syncwarp();
+
+      // Update NVL tail in the dst NVL peer
       if (lane_id < kNumRDMARanks and is_lane_ready)
-        st_release_sys_global(nvl_channel_tail.buffer() + lane_id, cached_channel_tail_idx);
+        st_release_sys_global(nvl_channel_tail.buffer() + lane_id, cached_channel_tail_idx); // system scope, release order
     }
   } else { // warp_role == WarpRole::kNVLAndRDMAForwarder | warp_role == WarpRole::kRDMAReceiver | warp_role == WarpRole::kCoordinator
     // Combiners and coordinators
@@ -2292,7 +2339,6 @@ void combine(
         // Combine and write to the RDMA buffer
         for (int token_idx = token_start_idx + sub_warp_id; token_idx < token_end_idx; token_idx += kNumWarpsPerForwarder) {
           // Read expected head
-          GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
           int expected_head = -1;
           if (lane_id < NUM_MAX_NVL_PEERS)
             expected_head = ld_nc_global(combined_nvl_head + token_idx * NUM_MAX_NVL_PEERS + lane_id);
@@ -2398,7 +2444,6 @@ void combine(
       int cached_channel_tail_idx = 0;
       for (int64_t token_idx = token_start_idx + target_warp_id; token_idx < token_end_idx; token_idx += kNumRDMAReceivers) {
         // Read expected head
-        GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
         int expected_head = -1;
         if (lane_id < kNumRDMARanks) {
           expected_head = ld_nc_global(combined_rdma_head + token_idx * kNumRDMARanks + lane_id);
@@ -2598,6 +2643,7 @@ void combine(
   GRPCOLL_HOST_ASSERT(num_topk <= WARP_SIZE);
   GRPCOLL_HOST_ASSERT(type == CUDA_R_16BF);
   GRPCOLL_HOST_ASSERT(hidden_size % (sizeof(int4) / sizeof(nv_bfloat16)) == 0);
+  GRPCOLL_HOST_ASSERT(hidden_size * sizeof(nv_bfloat16) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
 
   // Even-numbered SMs for NVL senders and RDMA receivers, odd-numbered SMs for forwarders
   const int num_sms = num_channels * 2;
