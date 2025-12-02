@@ -104,6 +104,6 @@ def dist_attn_runtime_dict_size() -> int:
     Set the value of this env variable to control
     the size of ``dist_attn_runtime_dict``
 
-    Default value is ``100``
+    Default value is ``1000``
     """
-    return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "100"))
+    return int(os.environ.get("MAGI_ATTENTION_DIST_ATTN_RUNTIME_DICT_SIZE", "1000"))
