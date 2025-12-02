@@ -117,16 +117,16 @@ struct AsymBuffer {
 
     int per_channel_bytes = num_bytes * num_ranks;
     total_bytes = per_channel_bytes * num_sms;
-    for (int i = 0; i < kNumRanks; ++i) {
-      ptrs[i] = reinterpret_cast<uint8_t*>(gbl_ptrs[i]) + per_channel_bytes * sm_id + num_bytes * offset;
-      gbl_ptrs[i] = reinterpret_cast<uint8_t*>(gbl_ptrs[i]) + total_bytes;
+    for (int r = 0; r < kNumRanks; ++r) {
+      ptrs[r] = reinterpret_cast<uint8_t*>(gbl_ptrs[r]) + per_channel_bytes * sm_id + num_bytes * offset;
+      gbl_ptrs[r] = reinterpret_cast<uint8_t*>(gbl_ptrs[r]) + total_bytes;
     }
   }
 
   DEVICE_INLINE void advance(int shift) {
 #pragma unroll
-    for (int i = 0; i < kNumRanks; ++i)
-      ptrs[i] = ptrs[i] + shift * sizeof(dtype_t);
+    for (int r = 0; r < kNumRanks; ++r)
+      ptrs[r] = ptrs[r] + shift * sizeof(dtype_t);
   }
 
   DEVICE_INLINE AsymBuffer advance_also(void*& gbl_ptr) {
@@ -136,8 +136,8 @@ struct AsymBuffer {
 
   template <int kNumAlsoRanks>
   DEVICE_INLINE AsymBuffer advance_also(void** gbl_ptrs) {
-    for (int i = 0; i < kNumAlsoRanks; ++i)
-      gbl_ptrs[i] = reinterpret_cast<uint8_t*>(gbl_ptrs[i]) + total_bytes;
+    for (int r = 0; r < kNumAlsoRanks; ++r)
+      gbl_ptrs[r] = reinterpret_cast<uint8_t*>(gbl_ptrs[r]) + total_bytes;
     return *this;
   }
 

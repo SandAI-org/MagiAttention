@@ -920,7 +920,7 @@ __global__ void cached_notify_group_reduce(
         const int head = broadcast_in_warp(/*val=*/current_head, /*src_lane=*/i);
         if (head < 0) {
           if (lane_id == i)
-            expected_head = -last_head - 1;
+            expected_head = encode(last_head);
         } else {
           last_head = head;
         }
@@ -1577,7 +1577,7 @@ void group_reduce_kernel(
          * and we can decode the correct next expect head by `-expected_head - 1`
          */
         if (responsible_rank < kNumRanks)
-          shared_warp_channel_head_idx[reduce_warp_id][responsible_rank] = (expected_head < 0) ? -expected_head - 1 : expected_head + 1;
+          shared_warp_channel_head_idx[reduce_warp_id][responsible_rank] = expected_head < 0 ? decode(expected_head) : expected_head + 1;
       }
 
       // Retired this warp by toggling the retire flag
