@@ -29,6 +29,7 @@ from magi_attention.functional.flex_flash_attn import (
 from magi_attention.functional.utils import correct_attn_fwd_result
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.dist_common import DistTestBase, with_run_in_mp
+from magi_attention.testing.flag_generator import FlagCombGenerator
 from magi_attention.testing.precision import (
     EPSILON,
     MAX_MISMATCH_THRES,
@@ -42,6 +43,24 @@ from magi_attention.utils import is_list_value_any, make_attn_mask_from_ffa_args
 
 
 class TestFlexFlashAttn(DistTestBase):
+    def init_pg(self) -> None:
+        super().init_pg()
+
+        # init flag generator and its iterator
+        self.flag_generator = FlagCombGenerator(
+            flags=[
+                "test_accumulation_inplace",
+                "deterministic",
+                "auto_range_merge",
+                "random_attn_type_map",
+            ],
+            options={},
+            defaults={},
+            groups=[],
+            strategy="heuristic",
+        )
+        self.flag_iterator = iter(self.flag_generator)
+
     @property
     def seed(self):
         return 42
@@ -1401,54 +1420,42 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "swap_ab": False,
                 "ref_block_size": None,
-                "test_accumulation_inplace": True,
-                "deterministic": True,
             },
             {
                 "swap_ab": False,
                 "ref_block_size": None,
-                "test_accumulation_inplace": False,
-                "deterministic": False,
             },
             {
                 "swap_ab": True,
                 "ref_block_size": (8, 64),
-                "test_accumulation_inplace": True,
-                "deterministic": False,
             },
             {
                 "swap_ab": True,
                 "ref_block_size": (16, 64),
-                "test_accumulation_inplace": False,
-                "deterministic": True,
             },
             {
                 "swap_ab": True,
                 "ref_block_size": (32, 64),
-                "test_accumulation_inplace": True,
-                "deterministic": True,
             },
             {
                 "swap_ab": True,
                 "ref_block_size": (64, 64),
-                "test_accumulation_inplace": False,
-                "deterministic": False,
             },
         ],
     )
     @parameterize("model_config", MODEL_CONFIGS)
     @parameterize("dtype", [torch.float16, torch.bfloat16])
-    @parameterize("random_attn_type_map", [False, True])
-    @parameterize("auto_range_merge", [False, True])
     def test_ffa_simple(
         self,
         attn_mask_config: dict[str, Any],
         compress_config: dict[str, Any],
         model_config: dict[str, Any],
         dtype: torch.dtype,
-        random_attn_type_map: bool,
-        auto_range_merge: bool,
     ):
+        # -----    switch env flags by FlagCombGenerator   ---- #
+        flag_comb = next(self.flag_iterator)
+        flag_comb_test_case = FlagCombGenerator.to_test_case(flag_comb)
+
         # extract config
         seqlen: int = attn_mask_config["seqlen"]
         seqlen_sink: int = attn_mask_config.get("seqlen_sink", 0)
@@ -1465,8 +1472,12 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
-        test_accumulation_inplace = compress_config["test_accumulation_inplace"]
-        deterministic = compress_config["deterministic"]
+        test_accumulation_inplace = bool(
+            flag_comb.get("test_accumulation_inplace", False)
+        )
+        deterministic = bool(flag_comb.get("deterministic", False))
+        auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
+        random_attn_type_map = bool(flag_comb.get("random_attn_type_map", False))
         swap_ab = compress_config["swap_ab"]
         ref_block_size = compress_config["ref_block_size"]
 
@@ -1479,14 +1490,11 @@ class TestFlexFlashAttn(DistTestBase):
             f"[{attn_mask_config['name']}]"
             f"[{model_config['name']}]"
             f"[dtype={dtype}]"
-            f"[random_attn_type_map={random_attn_type_map}]"
-            f"[auto_range_merge={auto_range_merge}]"
-            f"[deterministic={deterministic}]"
-            f"[acc_inplace={test_accumulation_inplace}]"
             f"[swap_ab={swap_ab}]"
             f"[ref_block_size={ref_block_size}]"
             f"[has_sink={seqlen_sink > 0}]"
-            f"[sink_layout={sink_layout}]"
+            f"[sink_layout={sink_layout}] x "
+            f"{flag_comb_test_case}"
         )
 
         self.run_test_case(
@@ -1588,38 +1596,26 @@ class TestFlexFlashAttn(DistTestBase):
             {
                 "swap_ab": False,
                 "ref_block_size": None,
-                "test_accumulation_inplace": True,
-                "deterministic": True,
             },
             {
                 "swap_ab": False,
                 "ref_block_size": None,
-                "test_accumulation_inplace": False,
-                "deterministic": False,
             },
             {
                 "swap_ab": True,
                 "ref_block_size": (8, 64),
-                "test_accumulation_inplace": True,
-                "deterministic": True,
             },
             {
                 "swap_ab": True,
                 "ref_block_size": (16, 64),
-                "test_accumulation_inplace": False,
-                "deterministic": False,
             },
             {
                 "swap_ab": True,
                 "ref_block_size": (32, 64),
-                "test_accumulation_inplace": True,
-                "deterministic": True,
             },
             {
                 "swap_ab": True,
                 "ref_block_size": (64, 64),
-                "test_accumulation_inplace": False,
-                "deterministic": False,
             },
         ],
     )
@@ -1630,7 +1626,6 @@ class TestFlexFlashAttn(DistTestBase):
     @parameterize(
         "attn_type", [0, 1, 2, 3, 4]
     )  # 0 - 3 means attn type are all 0/1/2/3, 4 means random attn type.
-    @parameterize("auto_range_merge", [False, True])
     def test_ffa_random(
         self,
         model_config: dict[str, Any],
@@ -1639,9 +1634,12 @@ class TestFlexFlashAttn(DistTestBase):
         num_pairs: int,
         dtype: torch.dtype,
         attn_type: int,
-        auto_range_merge: bool,
     ):
         """in this test, we generate q,k range randomly and as complicate as possible"""
+        # -----    switch env flags by FlagCombGenerator   ---- #
+        flag_comb = next(self.flag_iterator)
+        flag_comb_test_case = FlagCombGenerator.to_test_case(flag_comb)
+
         # extract config
         total_seqlen_q: int = generate_config["total_seqlen_q"]
         total_seqlen_k: int = generate_config["total_seqlen_k"]
@@ -1675,8 +1673,11 @@ class TestFlexFlashAttn(DistTestBase):
 
         swap_ab = compress_config["swap_ab"]
         ref_block_size = compress_config["ref_block_size"]
-        test_accumulation_inplace = compress_config["test_accumulation_inplace"]
-        deterministic = compress_config["deterministic"]
+        test_accumulation_inplace = bool(
+            flag_comb.get("test_accumulation_inplace", False)
+        )
+        deterministic = bool(flag_comb.get("deterministic", False))
+        auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
 
         test_case = (
             "[test_ffa_random]"
@@ -1685,11 +1686,9 @@ class TestFlexFlashAttn(DistTestBase):
             f"[num_pairs={num_pairs}]"
             f"[dtype={dtype}]"
             f"[attn_type_map=[{attn_type}] x {q_ranges.size}]"
-            f"[auto_range_merge={auto_range_merge}]"
-            f"[deterministic={deterministic}]"
-            f"[acc_inplace={test_accumulation_inplace}]"
             f"[swap_ab={swap_ab}]"
-            f"[ref_block_size={ref_block_size}]"
+            f"[ref_block_size={ref_block_size}] x "
+            f"{flag_comb_test_case}"
         )
 
         self.run_test_case(
