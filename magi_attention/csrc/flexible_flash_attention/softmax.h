@@ -55,7 +55,7 @@ CUTLASS_DEVICE void thread_reduce_(Tensor<Engine0, Layout0> const& tensor, Tenso
 }
 
 template <typename Engine0, typename Layout0, typename Operator>
-__device__ __forceinline__ void warp_reduce_column_(Tensor<Engine0, Layout0>& tensor, Operator& op) {
+CUTLASS_DEVICE void warp_reduce_column_(Tensor<Engine0, Layout0>& tensor, Operator& op) {
 // reduce column registers of mma accumulator layout in a warp
 // after reduce, each thread has same result
 #pragma unroll
@@ -68,7 +68,7 @@ __device__ __forceinline__ void warp_reduce_column_(Tensor<Engine0, Layout0>& te
 }
 
 template <int NumMmaWarpGroups, int kNRows, typename Engine0, typename Layout0, typename Operator>
-__device__ __forceinline__ void warp_group_reduce_column_(Tensor<Engine0, Layout0>& tensor, Operator& op) {
+CUTLASS_DEVICE void warp_group_reduce_column_(Tensor<Engine0, Layout0>& tensor, Operator& op) {
   // reduce column registers of mma accumulator layout in a warp group
   // each thread have kNRows column, each row have 4 thread
   __shared__ float shared_result[NumMmaWarpGroups][4][kNRows * 4];

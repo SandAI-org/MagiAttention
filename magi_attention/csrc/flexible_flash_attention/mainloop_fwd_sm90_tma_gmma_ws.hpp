@@ -222,7 +222,7 @@ struct CollectiveMainloopFwdSm90 {
       decltype(cutlass::gemm::collective::detail::
                    ss_smem_selector<GMMA::Major::MN, Element, decltype(cute::get<0>(TileShape_MNK{})), decltype(cute::get<1>(TileShape_MNK{}))>())>;
   using SmemLayoutP = decltype(tile_to_shape(SmemLayoutAtomP{}, select<0, 1>(TileShape_MNK{})));
-  // use SM90_U32x1_STSM_N when TileSize_kBlockM == 8
+  // use SM90_U32x2_STSM_N when TileSize_kBlockM == 8
   // because P matrix's TiledCopy needs enough vals for selected CopyAtom
   // TiledNumVal{} % AtomNumVal{} == 0
   using SmemCopyAtomP = std::conditional_t<TileSize_kBlockM == 8, Copy_Atom<cute::SM90_U32x2_STSM_N, Element>, Copy_Atom<cute::SM90_U32x4_STSM_N, Element>>;
