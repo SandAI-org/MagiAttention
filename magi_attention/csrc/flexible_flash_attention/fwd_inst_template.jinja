@@ -18,6 +18,7 @@ static constexpr bool kDisableAtomic = {{ disable_atomic }};
 static constexpr bool kDeterministic = {{ deterministic }};
 static constexpr bool kProfileMode = {{ profile_mode }};
 static constexpr bool kPackGQA = {{ pack_gqa}};
+static constexpr int kQheadPerKhead = {{qhead_per_khead}};
 
 // Allow Python side to render tile sizes; otherwise infer at compile time from head_dim
 {% if kblock_m and kblock_n %}
@@ -100,7 +101,7 @@ std::vector<at::Tensor> mha_fwd(
   if constexpr (kProfileMode) 
     MagiEvents::start("fwd_run");
   
-  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kDeterministic, kProfileMode>(params, stream);
+  run_mha_fwd_<kArch, kBlockM, kBlockN, TCompute, TOut, kHeadDim, kHasSoftcap, kDisableAtomic, kPackGQA, kQheadPerKhead, kDeterministic, kProfileMode>(params, stream);
   
   if constexpr (kProfileMode) 
     MagiEvents::stop("fwd_run");

@@ -54,18 +54,14 @@ template <
     bool MmaPV_is_RS_,
     bool IntraWGOverlap_,
     bool RangeMerge_,
-    bool PackGQA_>
+    bool PackGQA_,
+    int Qhead_per_khead_>
 struct CollectiveMainloopFwdSm90 {
   static constexpr int kStages = Stages;
   using ClusterShape = ClusterShape_;
 
   // kBlockM, kBlockN, kHeadDim
   using TileShape_MNK = TileShape_MNK_;
-  using TileShape_MNKH = decltype(make_shape(
-      get<0>(TileShape_MNK{}) / _4{},
-      _4{},
-      get<1>(TileShape_MNK{}),
-      get<2>(TileShape_MNK{}))); // TileShapeMNK for mma qv: kBlockM, kBlockN, kHeadDim
   // (kBlockM, kHeadDim) @ (kHeadDim, kBlockN) -> (kBlockM, kBlockN)
   using TileShape_MNK_QV = Shape<decltype(get<0>(TileShape_MNK{})), decltype(get<1>(TileShape_MNK{})), decltype(get<2>(TileShape_MNK{}))>;
 
@@ -81,6 +77,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr bool IntraWGOverlap = IntraWGOverlap_;
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool PackGQA = PackGQA_;
+  static constexpr int qhead_per_khead = Qhead_per_khead_;
 
   // By default, we use TMA for Q and KV to get better performance
   static constexpr bool Use_TMA_Q = true;
@@ -178,7 +175,7 @@ struct CollectiveMainloopFwdSm90 {
   using ShapeQKV = cute::Shape<int32_t, int32_t, int32_t>; // (seqlen, head_dim, num_heads)
   // using ShapeQPacked = std::conditional_t<!PackGQA, ShapeQKV, cute::Shape<int32_t, int32_t, int32_t, int32_t>>;
   // using ShapeQPacked = make_shape(make_shape(_4{}, int32_t{}), int32_t{}, int32_t{});
-  using ShapeQPacked = std::conditional_t<!PackGQA, ShapeQKV, cute::Shape<int32_t, int32_t, int32_t, _4>>; // (seqlen, headdim, khead, qhead_per_khead)
+  using ShapeQPacked = std::conditional_t<!PackGQA, ShapeQKV, cute::Shape<int32_t, int32_t, int32_t, int32_t>>; // (seqlen, headdim, khead, qhead_per_khead)
   /*using ShapeQPackedTMA = std::conditional_t<
     !PackGQA,
     ShapeQKV,
@@ -188,7 +185,7 @@ struct CollectiveMainloopFwdSm90 {
   using ShapeQPackedTMA = std::conditional_t<
       !PackGQA,
       ShapeQKV,
-      cute::Shape<cute::Shape<_4, int32_t>, int32_t, int32_t> // ((qhead_per_khead, seqlen), headdim, khead)
+      cute::Shape<cute::Shape<cute::Int<qhead_per_khead>, int32_t>, int32_t, int32_t> // ((qhead_per_khead, seqlen), headdim, khead)
       >;
   using StrideQK = cute::Stride<int64_t, _1, int64_t>;
   using StrideV = StrideQK;
@@ -424,11 +421,11 @@ struct CollectiveMainloopFwdSm90 {
     TMA_V tma_load_V = make_tma_copy(
         GmemTiledCopyKV{}, mV, take<0, 2>(SmemLayoutVt{}), select<1, 2>(TileShape_MNK_PV{}), size<0>(ClusterShape{})); // mcast along M mode for this N load, if any
 
-    int const qhead_per_khead = !PackGQA ? 1 : cute::ceil_div(get<2>(args.shape_Q), get<2>(args.shape_K));
+    // int const qhead_per_khead = !PackGQA ? 1 : cute::ceil_div(get<2>(args.shape_Q), get<2>(args.shape_K));
     auto const shape_Q_packed = cute::conditional_return<!PackGQA>(
         args.shape_Q,
         make_shape(
-            make_shape(_4{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+            make_shape(cute::Int<qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
             get<1>(args.shape_Q), // headdim
             get<2>(args.shape_K) // numhead_k
             ));
@@ -448,7 +445,7 @@ struct CollectiveMainloopFwdSm90 {
             make_gmem_ptr(args.ptr_Q),
             make_layout(
                 make_shape(
-                    make_shape(_4{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+                    make_shape(cute::Int<qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
                     get<1>(args.shape_Q), // headdim
                     get<2>(args.shape_K) // numhead_k
                     ),
@@ -458,8 +455,7 @@ struct CollectiveMainloopFwdSm90 {
 
     TMA_Q_Packed tma_load_Q_packed = make_tma_copy(GmemTiledCopyQ{}, mQPacked, SmemLayoutQ{}, select<0, 2>(TileShape_MNK{}), ClusterShape{});
 
-    // TMA_Q_Packed_2D tma_load_Q_Packed_2d = make_tma_copy(GmemTiledCopyQ{}, mQPacked_2d, SmemLayoutQ{}, select<0, 2>(TileShape_MNK{}), ClusterShape{});
-    // TMA_Q_Packed_2D tma_load_Q_Packed_2d = make_tma_copy(GmemTiledCopyQ{}, mQPacked_2d, SmemLayoutQ{}, select<0, 2>(TileShape_MNK{}), ClusterShape{});
+    // print(tma_load_Q_packed);
     // If there's tanh softcapping, we do tanh(scores * softmax_scale / softcap_val) * softcap_val.
     // Right after this, we multiply by log2(e) before applying exp2.
     // To reduce the number of instructions, we instead pre-multiply softmax_scale / softcap_val
@@ -494,7 +490,10 @@ struct CollectiveMainloopFwdSm90 {
   CUTLASS_DEVICE
   static void prefetch_tma_descriptors(Params const& params) {
     if constexpr (Use_TMA_Q) {
-      cute::prefetch_tma_descriptor(params.tma_load_Q.get_tma_descriptor());
+      if constexpr (!PackGQA)
+        cute::prefetch_tma_descriptor(params.tma_load_Q.get_tma_descriptor());
+      else
+        cute::prefetch_tma_descriptor(params.tma_load_Q_packed.get_tma_descriptor());
     }
     if constexpr (Use_TMA_KV) {
       cute::prefetch_tma_descriptor(params.tma_load_K.get_tma_descriptor());
@@ -569,9 +568,9 @@ struct CollectiveMainloopFwdSm90 {
       Tensor gQ_Packed = [&]() {
         if constexpr (PackGQA) {
           return local_tile(
-              domain_offset(make_coord(block_meta.seqlen_info.offset_q * 4, _0{}), mQ_Packed), // we need multiple qhead_per_khead for offset of seqlen;
+              domain_offset(make_coord(block_meta.seqlen_info.offset_q * qhead_per_khead, _0{}), mQ_Packed), // we need multiple qhead_per_khead for offset of seqlen;
               select<0, 2>(TileShape_MNK{}),
-              make_coord(block_meta.m_block, _0{})); // (M / qhead_per_khead, K, qhead_per_khead)
+              make_coord(block_meta.m_block, _0{})); // (M // qhead_per_khead, K, qhead_per_khead)
         } else {
           return gQ;
         }

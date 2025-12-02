@@ -51,6 +51,7 @@ template <
     bool Deterministic,
     bool MergeRange,
     bool PackGQA,
+    int Qhead_per_khead,
     bool ProfileMode = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
@@ -78,7 +79,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       MmaPV_is_RS,
       IntraWGOverlap,
       MergeRange,
-      PackGQA>;
+      PackGQA,
+      Qhead_per_khead>;
   using Scheduler = flash::DynamicPersistentTileScheduler<
       kBlockM,
       CollectiveMainloop::NumMmaThreads,
@@ -182,6 +184,7 @@ template <
     bool Has_softcap,
     bool DisableFwdAtomicReduction,
     bool PackGQA,
+    int Qhead_per_khead,
     bool Deterministic,
     bool kProfileMode>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
@@ -204,6 +207,7 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
           /*Deterministic=*/Deterministic,
           /*MergeRange=*/MergeRange,
           /*PackGQA=*/PackGQA,
+          /*Qhead_per_khead=*/Qhead_per_khead,
           /*ProfileMode=*/kProfileMode>(params, stream);
     });
   });

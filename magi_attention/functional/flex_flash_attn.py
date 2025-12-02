@@ -218,6 +218,8 @@ def _flex_flash_attn_forward_compilable(
     deterministic: bool,
     sm_margin: int,
 ) -> None:
+    qhead_per_khead = q.size(1) // k.size(1)
+    print(f"{qhead_per_khead=}")
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     mod = get_ffa_jit_mod(
         direction="fwd",
@@ -230,6 +232,7 @@ def _flex_flash_attn_forward_compilable(
         deterministic=deterministic,
         profile_mode=profile_mode,
         pack_gqa=pack_gqa,
+        qhead_per_khead=qhead_per_khead,
         ref_block_size=(kblock_m, kblock_n)
         if kblock_m is not None and kblock_n is not None
         else None,
@@ -412,6 +415,7 @@ def _flex_flash_attn_backward_compilable(
     deterministic: bool,
     sm_margin: int,
 ) -> None:
+    qhead_per_khead = q.size(1) / k.size(1)
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
         direction="bwd",
@@ -422,6 +426,7 @@ def _flex_flash_attn_backward_compilable(
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
         pack_gqa=False,
+        qhead_per_khead=qhead_per_khead,
         deterministic=deterministic,
         profile_mode=profile_mode,
     )
