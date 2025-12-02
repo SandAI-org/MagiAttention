@@ -61,7 +61,7 @@ jobs:
       needs.detect_changes.outputs.MagiAttention == 'true'
     runs-on: [self-hosted]
     container:
-      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.05.4
+      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.1
       options: --gpus all --ipc host
       credentials:
         username: ${{ secrets.DOCKER_USER_NAME }}
