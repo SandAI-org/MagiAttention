@@ -17,48 +17,62 @@ jobs:
       pull-requests: read
       contents: read
     outputs:
-      MagiAttention: ${{ steps.filter.outputs.MagiAttention }}
+      magi_attention: ${{ steps.filter.outputs.magi_attention }}
+      changes: ${{ steps.filter.outputs.changes }}
     steps:
-      # ==========================================================
-      # Check if PR title starts with some specific prefixes
-      # and fail the job if it does.
-      # ==========================================================
       - name: Fail if PR title is [WIP] or [DO NOT MERGE]
-        # Ensure this check only runs for 'pull_request' events
         if: github.event_name == 'pull_request'
         run: |
-          # Get the PR title
           PR_TITLE="${{ github.event.pull_request.title }}"
-
-          # Check if the title starts with "[WIP]" OR "[DO NOT MERGE]" (case-sensitive)
           if [[ "$PR_TITLE" == "[WIP]"* ]] || [[ "$PR_TITLE" == "[DO NOT MERGE]"* ]]; then
-            # Use ::error:: to provide clear feedback
-            echo "::error::Pull Request title starts with [WIP] or [DO NOT MERGE]. Please remove the tag to run the workflow."
-            exit 1  # Fail the job immediately
+            echo "::error::Pull Request title starts with [WIP] or [DO NOT MERGE]."
+            exit 1
           else
             echo "PR title is clean: $PR_TITLE"
           fi
-      # ==========================================================
-      # End of check
-      # ==========================================================
+
       - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+
       - uses: dorny/paths-filter@v2
         id: filter
         with:
           filters: |
-            MagiAttention:
+            api:
+              - 'magi_attention/api/**'
+            utils:
+              - 'magi_attention/utils/**'
+            comm:
+              - 'magi_attention/comm/**'
+              - 'magi_attention/csrc/comm/**'
+            common:
+              - 'magi_attention/common/**'
+            ffa:
+              - 'magi_attention/functional/flexible_flash_attn.py'
+              - 'magi_attention/functional/_flex_flash_attn_jit.py'
+              - 'magi_attention/csrc/common/**'
+              - 'magi_attention/csrc/extensions/**'
+              - 'magi_attention/csrc/flexible_flash_attention/**'
+              - 'magi_attention/csrc/utils/**'
+            dffa:
+              - 'magi_attention/functional/**'
+              - '!magi_attention/functional/flexible_flash_attn.py'
+              - '!magi_attention/functional/_flex_flash_attn_jit.py'
+              - 'magi_attention/meta/**'
+            magi_attention:
               - 'magi_attention/**'
+
       - name: print filter results
         run: |
-          echo "is MagiAttention modified: ${{ steps.filter.outputs.MagiAttention }}"
+          echo "Changes detected: ${{ steps.filter.outputs.changes }}"
+          echo "Is MagiAttention modified: ${{ steps.filter.outputs.magi_attention }}"
 
   test_MagiAttention:
     needs: [detect_changes]
     if: |
       always() &&
-      needs.detect_changes.outputs.MagiAttention == 'true'
+      needs.detect_changes.outputs.magi_attention == 'true'
     runs-on: [self-hosted]
     container:
       image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.05.4
@@ -77,29 +91,93 @@ jobs:
         run: |
           echo "http_proxy: $http_proxy"
           echo "https_proxy: $https_proxy"
-          echo "secret.HTTP_PROXY: ${{ secrets.HTTP_PROXY }}"
-          echo "secret.HTTPS_PROXY: ${{ secrets.HTTP_PROXY }}"
+
       - name: curl google
         run: |
           curl www.google.com
+
       - uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+
       - name: install requirements
         run: |
           bash -x .github/scripts/install_requirements.sh
+
       - name: install MagiAttention
         run: |
           pip install -e . --no-build-isolation -vvv
-      - name: Test and Generate coverage report
+
+      - name: Determine Test Targets and Run
+        id: run_tests
+        env:
+          CHANGES: ${{ needs.detect_changes.outputs.changes }}
+          EVENT_NAME: ${{ github.event_name }}
+          COVERAGE_RUN: True
         run: |
-          coverage run --source magi_attention -m pytest -qsv ./tests
+          TEST_TARGETS=""
+
+          echo "Event Name: $EVENT_NAME"
+          echo "Detected Changes: $CHANGES"
+
+
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            echo "Push event detected (Merge). Running ALL tests."
+            TEST_TARGETS="./tests"
+
+          else
+            echo "Pull Request detected. Selecting tests based on filters..."
+
+            # (1) api -> tests/test_api
+            if [[ "$CHANGES" == *"api"* ]]; then
+              TEST_TARGETS="$TEST_TARGETS ./tests/test_api"
+            fi
+
+            # (2) utils -> tests/test_utils
+            if [[ "$CHANGES" == *"utils"* ]]; then
+              TEST_TARGETS="$TEST_TARGETS ./tests/test_utils"
+            fi
+
+            # (3) comm -> tests/test_comm
+            if [[ "$CHANGES" == *"comm"* ]]; then
+              TEST_TARGETS="$TEST_TARGETS ./tests/test_comm"
+            fi
+
+            # (4) common -> tests/test_common
+            if [[ "$CHANGES" == *"common"* ]]; then
+              TEST_TARGETS="$TEST_TARGETS ./tests/test_common"
+            fi
+
+            # (5) ffa -> tests/test_attn
+            if [[ "$CHANGES" == *"ffa"* ]]; then
+              TEST_TARGETS="$TEST_TARGETS ./tests/test_attn"
+            fi
+
+            # (6) dffa -> pipeline tests + solver + dispatch + dist_runtime
+            if [[ "$CHANGES" == *"dffa"* ]]; then
+              TEST_TARGETS="$TEST_TARGETS ./tests/test_pipeline_sdpa.py ./tests/test_pipeline.py ./tests/test_attn_solver ./tests/test_dispatch ./tests/test_dist_runtime_mgr"
+            fi
+          fi
+
+          TEST_TARGETS=$(echo $TEST_TARGETS | xargs)
+
+          if [[ -z "$TEST_TARGETS" ]]; then
+             echo "::warning::No specific test filters matched and not a merge event. Skipping tests."
+             exit 0
+          fi
+
+          echo "========================================"
+          echo "Running pytest on: $TEST_TARGETS"
+          echo "========================================"
+
+          coverage run --source magi_attention -m pytest -qsv $TEST_TARGETS
+
           coverage combine
           coverage xml -i
-        env:
-          COVERAGE_RUN: True
+
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
+        if: success() && hashFiles('coverage.xml') != ''
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: SandAI-org/MagiAttention
