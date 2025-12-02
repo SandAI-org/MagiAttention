@@ -1068,6 +1068,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     // auto boundary_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
     //   mask.template apply<true /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     // };
+    auto boundary_mask_fn = [&](auto& tSrS, int num_invalid_token) { mask.template apply_sparse_load(tSrS, num_invalid_token, thread_idx); };
     // no_mask_fn: no mask, for full attention block in a tile job
     auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
       if constexpr (RangeMerge) {
@@ -1092,10 +1093,6 @@ struct CollectiveMainloopSparseFwdSm90 {
     //     mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     //   }
     // };
-
-    auto boundary_mask_fn = [&](auto& tSrS, int num_invalid_token) { mask.template apply_sparse_load(tSrS, num_invalid_token, thread_idx); };
-
-    // TODO: boundary mask for sparse load
 
     /* ================================================= Prologue ================================================= */
     // Wait for the Q to be loaded
@@ -1126,7 +1123,6 @@ struct CollectiveMainloopSparseFwdSm90 {
     // }
 
     // Apply mask
-    // TODO: add mask_fn
     boundary_mask_fn(tSrS, block_meta.num_invalid_token);
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
