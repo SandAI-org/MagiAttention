@@ -185,6 +185,7 @@ class TestFlexFlashAttn(DistTestBase):
         k_ranges_tensor: torch.Tensor,
         attn_type_map_tensor: torch.Tensor,
         auto_range_merge: bool,
+        sparse_load: bool,
         o_ref: torch.Tensor,
         lse_ref: torch.Tensor,
         dq_ref: torch.Tensor,
@@ -216,6 +217,7 @@ class TestFlexFlashAttn(DistTestBase):
             sink_layout=sink_layout,
             auto_range_merge=auto_range_merge,
             deterministic=True,
+            sparse_load=sparse_load,
         )
         o.backward(do)
 
@@ -313,6 +315,8 @@ class TestFlexFlashAttn(DistTestBase):
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
+            sparse_load_loop_count=None,
+            sparse_load_invalid_count=None,
             ref_block_size=None,
             softmax_scale=softmax_scale,
             softcap=0.0,
@@ -320,6 +324,7 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=torch.float32,
             deterministic=deterministic,
             sm_margin=0,
+            sparse_load=False,
         )
 
         o_ref, lse_ref = correct_attn_fwd_result(
@@ -342,6 +347,8 @@ class TestFlexFlashAttn(DistTestBase):
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
+            sparse_load_loop_count=None,
+            sparse_load_invalid_count=None,
             ref_block_size=None,
             softmax_scale=softmax_scale,
             softcap=0.0,
@@ -349,6 +356,7 @@ class TestFlexFlashAttn(DistTestBase):
             out_type=None,
             deterministic=deterministic,
             sm_margin=0,
+            sparse_load=False,
         )
 
         assert_close(
@@ -908,12 +916,19 @@ class TestFlexFlashAttn(DistTestBase):
         auto_range_merge: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
+        sparse_load: bool,
         sink_layout: AttnSinkLayout,
         test_case: str,
         err_ratio_dict: dict[str, float] = {},
     ) -> None:
         if auto_range_merge and deterministic:
             return
+        if sparse_load:  # sparse load supports only auto_range_merge and full attn_type
+            if not auto_range_merge or test_accumulation_inplace:
+                return
+            for attn_type in attn_type_map:
+                if attn_type != 0:
+                    return
 
         # FIXME: for square bi-causal mask, i.e. when only the main diagonal is valid
         # ffa bwd kernel encounters with some precision issue with dq/dk,
@@ -1002,6 +1017,7 @@ class TestFlexFlashAttn(DistTestBase):
             sink_layout=sink_layout,
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
+            sparse_load=sparse_load,
         )
 
         # run ffa backward
@@ -1022,6 +1038,7 @@ class TestFlexFlashAttn(DistTestBase):
                 k_ranges_tensor=k_ranges_tensor,
                 attn_type_map_tensor=attn_type_map_tensor,
                 auto_range_merge=auto_range_merge,
+                sparse_load=sparse_load,
                 o_ref=o,
                 lse_ref=lse,
                 dq_ref=q.grad,
@@ -1391,6 +1408,7 @@ class TestFlexFlashAttn(DistTestBase):
     @parameterize("auto_range_merge", [False, True])
     @parameterize("deterministic", [False, True])
     @parameterize("test_accumulation_inplace", [False, True])
+    @parameterize("sparse_load", [False, True])
     def test_ffa_simple(
         self,
         attn_mask_config: dict[str, Any],
@@ -1400,6 +1418,7 @@ class TestFlexFlashAttn(DistTestBase):
         auto_range_merge: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
+        sparse_load: bool,
     ):
         # extract config
         seqlen: int = attn_mask_config["seqlen"]
@@ -1430,6 +1449,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[acc_inplace={test_accumulation_inplace}]"
+            f"[sparse_load={sparse_load}]"
             f"[has_sink={seqlen_sink > 0}]"
             f"[sink_layout={sink_layout}]"
         )
@@ -1448,6 +1468,7 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
+            sparse_load=sparse_load,
             sink_layout=sink_layout,
             test_case=test_case,
             err_ratio_dict={
@@ -1535,6 +1556,7 @@ class TestFlexFlashAttn(DistTestBase):
     @parameterize("auto_range_merge", [False, True])
     @parameterize("deterministic", [False, True])
     @parameterize("test_accumulation_inplace", [False, True])
+    @parameterize("sparse_load", [False, True])
     def test_ffa_random(
         self,
         model_config: dict[str, Any],
@@ -1545,6 +1567,7 @@ class TestFlexFlashAttn(DistTestBase):
         auto_range_merge: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
+        sparse_load: bool,
     ):
         """in this test, we generate q,k range randomly and as complicate as possible"""
         # extract config
@@ -1588,6 +1611,7 @@ class TestFlexFlashAttn(DistTestBase):
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[acc_inplace={test_accumulation_inplace}]"
+            f"[sparse_load={sparse_load}]"
         )
 
         self.run_test_case(
@@ -1604,6 +1628,7 @@ class TestFlexFlashAttn(DistTestBase):
             auto_range_merge=auto_range_merge,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
+            sparse_load=sparse_load,
             test_case=test_case,
             sink_layout="sh",
             err_ratio_dict={
@@ -1660,6 +1685,7 @@ class TestFlexFlashAttn(DistTestBase):
             # FIXME: compiling does not support auto_range_merge
             # due to custom unique_consecutive_pairs kernel with dynamic output shape
             auto_range_merge=False,
+            sparse_load=False,
         )
         o.backward(do)
         dq, dk, dv, dsink = q.grad, k.grad, v.grad, sink.grad
