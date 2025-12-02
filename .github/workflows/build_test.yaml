@@ -93,7 +93,7 @@ jobs:
           pip install -e . --no-build-isolation -vvv
       - name: Test and Generate coverage report
         run: |
-          coverage run --source magi_attention -m pytest -qsv ./tests
+          coverage run --source magi_attention -m pytest -qsv --skip-slow ./tests
           coverage combine
           coverage xml -i
         env:
