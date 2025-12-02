@@ -1549,6 +1549,7 @@ void group_reduce_kernel(
               tma_ptr_int4_cur_stage[lane_id * kCommDtypePerDtype + l] = reduced_hidval_int4[l];
 
             // Fence TMA store to wait the TMA buffer for each lane to be ready
+            // before issuing the next TMA store by lane0
             // NOTES: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
             tma_store_fence();
             __syncwarp();
