@@ -2230,12 +2230,12 @@ void combine(
     }
   } else { // warp_role == WarpRole::kNVLAndRDMAForwarder | warp_role == WarpRole::kRDMAReceiver | warp_role == WarpRole::kCoordinator
     // Get RDMA buffers
-    //  `rdma_channel_data`: shape=(num_channels, kNumRDMARanks, num_max_nvl_chunked_recv_tokens, num_bytes_per_token), dtype=int8_t
+    //  `rdma_channel_data`: shape=(num_channels, kNumRDMARanks, num_max_rdma_chunked_recv_tokens, num_bytes_per_token), dtype=int8_t
     //  `rdma_channel_head`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
     //  `rdma_channel_tail`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
     auto rdma_channel_data = SymBuffer<int8_t, /*kDecoupled=*/true>(
         rdma_buffer_ptr,
-        /*num_elems=*/num_max_nvl_chunked_recv_tokens * num_bytes_per_token,
+        /*num_elems=*/num_max_rdma_chunked_recv_tokens * num_bytes_per_token,
         /*num_ranks=*/kNumRDMARanks,
         /*sm_id=*/channel_id,
         /*num_sms=*/num_channels);
