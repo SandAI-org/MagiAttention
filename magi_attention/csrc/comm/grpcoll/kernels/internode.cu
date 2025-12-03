@@ -1817,7 +1817,7 @@ template <
     int kNumTMALoadBytes = 0,
     typename GetAddrFn,
     typename ReceiveTWFn>
-__device__ int combine_token(
+__device__ void combine_token(
     bool is_token_in_rank,
     int head_idx,
     int lane_id,
@@ -1833,25 +1833,27 @@ __device__ int combine_token(
     uint8_t* smem_ptr,
     uint32_t (&tma_phase)[kNumStages]) {
   constexpr auto kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
-
-  // Broadcast current heads
-  // Lane `i` holds the head of rank `i` and `is_token_in_rank`
-  GRPCOLL_STATIC_ASSERT(kMaxNumRanks <= WARP_SIZE, "Too many ranks");
-  int num_topk_ranks = 0, topk_ranks[kMaxNumRanks], slot_indices[kMaxNumRanks];
-#pragma unroll
-  for (int i = 0; i < kNumRanks; ++i)
-    if (broadcast_in_warp(/*val=*/is_token_in_rank, /*src_lane=*/i)) {
-      slot_indices[num_topk_ranks] = broadcast_in_warp(/*val=*/head_idx, /*src_lane=*/i) % num_max_recv_tokens;
-      topk_ranks[num_topk_ranks++] = i;
-    }
-  GRPCOLL_DEVICE_ASSERT(num_topk_ranks <= kMaxNumRanks);
   GRPCOLL_STATIC_ASSERT(not(kUseTMA and kMaybeWithBias), "TMA cannot be used by receiver warps");
   GRPCOLL_STATIC_ASSERT(kNumStages == 2, "Only support 2 stages now");
 
-  // Reduce data
+  // Count and collect topk slots and corr. src ranks from all heads within the warp
+  // NOTES: lane `r` holds the `head_idx` and `is_token_in_rank` of rank `r`
+  GRPCOLL_STATIC_ASSERT(kMaxNumRanks <= WARP_SIZE, "Too many ranks");
+  int num_topk_ranks = 0, topk_ranks[kMaxNumRanks], slot_indices[kMaxNumRanks];
+#pragma unroll
+  for (int r = 0; r < kNumRanks; ++r) {
+    if (broadcast_in_warp(/*val=*/is_token_in_rank, /*src_lane=*/r)) {
+      slot_indices[num_topk_ranks] = broadcast_in_warp(/*val=*/head_idx, /*src_lane=*/r) % num_max_recv_tokens;
+      topk_ranks[num_topk_ranks++] = r;
+    }
+  }
+  GRPCOLL_DEVICE_ASSERT(num_topk_ranks <= kMaxNumRanks);
+
+  // Reduce token from topk src ranks
   if constexpr (kUseTMA) {
     constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + 16;
 
+    // Define functions to access TMA load/store buffers and mbarriers
     auto tma_load_buffer = [=](const int& i, const int& j) -> int4* {
       return reinterpret_cast<int4*>(smem_ptr + i * kNumTMABufferBytesPerStage + j * kNumTMALoadBytes);
     };
@@ -1862,72 +1864,99 @@ __device__ int combine_token(
       return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage + (NUM_MAX_NVL_PEERS + 1) * kNumTMALoadBytes);
     };
 
-    // Prefetch
-    if (lane_id < num_topk_ranks)
-      tma_load_1d(tma_load_buffer(0, lane_id), get_addr_fn(topk_ranks[lane_id], slot_indices[lane_id], 0), tma_mbarrier(0), kNumTMALoadBytes);
+    // Prefetch the hidden states of topk tokens for stage0 with TMA-load
+    // each lane for one token
+    if (lane_id < num_topk_ranks) {
+      tma_load_1d(
+          /*smem_ptr=*/tma_load_buffer(0, lane_id),
+          /*gmem_ptr=*/get_addr_fn(topk_ranks[lane_id], slot_indices[lane_id], 0),
+          /*mbar_ptr=*/tma_mbarrier(0),
+          /*num_bytes=*/kNumTMALoadBytes,
+          /*evict_first=*/true);
+    }
     mbarrier_arrive_and_expect_tx(tma_mbarrier(0), lane_id < num_topk_ranks ? kNumTMALoadBytes : 0);
     __syncwarp();
 
-    for (int shifted = 0, iter = 0; shifted < hidden_int4; shifted += WARP_SIZE, iter += 1) {
+    // Loop over the whole hidden size in int4 and combine
+    // NOTES: hidden_int4 should be a multiple of WARP_SIZE
+    // since we need to sync the whole warp in each loop
+    for (int shifted = 0, iter = 0; shifted < hidden_int4; shifted += WARP_SIZE, iter += 1) { // warp-strided loop
       const int stage_idx = iter % kNumStages;
       const int next_stage_idx = (iter + 1) % kNumStages;
 
-      // Prefetch next stage
+      // Prefetch the hidden states of topk tokens for next stage with TMA-load
+      // each lane for one token
       if (shifted + WARP_SIZE < hidden_int4) {
-        if (lane_id < num_topk_ranks)
+        if (lane_id < num_topk_ranks) {
           tma_load_1d(
-              tma_load_buffer(next_stage_idx, lane_id),
-              get_addr_fn(topk_ranks[lane_id], slot_indices[lane_id], shifted + WARP_SIZE),
-              tma_mbarrier(next_stage_idx),
-              kNumTMALoadBytes);
+              /*smem_ptr=*/tma_load_buffer(next_stage_idx, lane_id),
+              /*gmem_ptr=*/get_addr_fn(topk_ranks[lane_id], slot_indices[lane_id], shifted + WARP_SIZE),
+              /*mbar_ptr=*/tma_mbarrier(next_stage_idx),
+              /*num_bytes=*/kNumTMALoadBytes,
+              /*evict_first=*/true);
+        }
         mbarrier_arrive_and_expect_tx(tma_mbarrier(next_stage_idx), lane_id < num_topk_ranks ? kNumTMALoadBytes : 0);
         __syncwarp();
       }
 
+      // Wait for the TMA load of current stage to be finished
+      // for current hidden states of topk tokens
       mbarrier_wait(tma_mbarrier(stage_idx), tma_phase[stage_idx]);
+
+      // Reduce current hidden values of topk tokens in high precision
+      // from TMA buffer in shared memory into registers
       float values[kDtypePerInt4] = {0};
 #pragma unroll
       for (int j = 0; j < num_topk_ranks; ++j) {
         auto recv_value_dtypes = reinterpret_cast<const dtype_t*>(tma_load_buffer(stage_idx, j) + lane_id);
-#pragma unroll
-        for (int k = 0; k < kDtypePerInt4; ++k)
-          values[k] += static_cast<float>(recv_value_dtypes[k]);
+        foreach_reduce_add<float, dtype_t, kDtypePerInt4>(values, recv_value_dtypes);
       }
 
+      // Wait for the TMA store in previous round with `stage_idx` to be finished
+      // allowing previous `kNumStages - 1` stages to be inflight
       tma_store_wait<kNumStages - 1>();
+
+      // Cast and store the reduced values of topk tokens
+      // from registers to TMA buffer in shared memory
       auto out_dtypes = reinterpret_cast<dtype_t*>(tma_store_buffer(stage_idx) + lane_id);
-#pragma unroll
-      for (int j = 0; j < kDtypePerInt4; ++j)
-        out_dtypes[j] = static_cast<dtype_t>(values[j]);
+      foreach_assign<dtype_t, float, kDtypePerInt4>(out_dtypes, values);
+
+      // Fence all lanes to make sure their access to TMA buffer
+      // in shared memory are visible to each other
       tma_store_fence();
       __syncwarp();
 
-      if (lane_id == 0)
-        tma_store_1d(tma_store_buffer(stage_idx), combined_row + shifted + lane_id, kNumTMALoadBytes);
+      // Issue TMA store for current hidden states of topk tokens
+      if (lane_id == 0) { // issued by lane0 for all WARP_SIZE of reduced values
+        tma_store_1d(
+            /*smem_ptr=*/tma_store_buffer(stage_idx),
+            /*gmem_ptr=*/combined_row + shifted,
+            /*num_bytes=*/kNumTMALoadBytes,
+            /*evict_first=*/true);
+      }
       __syncwarp();
     }
 
-    // Flush all writes
+    // Wait all TMA stores to be finished
     tma_store_wait();
   } else {
 #pragma unroll
-    for (int i = lane_id; i < hidden_int4; i += WARP_SIZE) {
+    for (int i = lane_id; i < hidden_int4; i += WARP_SIZE) { // warp-strided loop
       // Read bias
       // TODO: make it as a finer-grained template
       int4 bias_0_value_int4, bias_1_value_int4;
       if constexpr (kMaybeWithBias) {
-        bias_0_value_int4 = bias_0_int4 != nullptr ? ld_nc_global(bias_0_int4 + i) : make_int4(0, 0, 0, 0);
-        bias_1_value_int4 = bias_1_int4 != nullptr ? ld_nc_global(bias_1_int4 + i) : make_int4(0, 0, 0, 0);
+        bias_0_value_int4 = bias_0_int4 != nullptr ? ld_nc_global(bias_0_int4 + i) : make_int4(0, 0, 0, 0); // non-cached load
+        bias_1_value_int4 = bias_1_int4 != nullptr ? ld_nc_global(bias_1_int4 + i) : make_int4(0, 0, 0, 0); // non-cached load
       }
 
-      // Read buffers
+      // Read hidden states of topk tokens
       // TODO: maybe too many registers here
       int4 recv_value_int4[kMaxNumRanks];
 #pragma unroll
       for (int j = 0; j < num_topk_ranks; ++j)
         recv_value_int4[j] = ld_nc_global(get_addr_fn(topk_ranks[j], slot_indices[j], i));
 
-      // Clean
       // Reduce bias
       float values[kDtypePerInt4] = {0};
       if constexpr (kMaybeWithBias) {
@@ -1938,36 +1967,31 @@ __device__ int combine_token(
           values[j] = static_cast<float>(bias_0_values[j]) + static_cast<float>(bias_1_values[j]);
       }
 
-// Reduce all-to-all results
 #pragma unroll
+      // Reduce hidden states from topk tokens in high precision
       for (int j = 0; j < num_topk_ranks; ++j) {
         auto recv_value_dtypes = reinterpret_cast<const dtype_t*>(&recv_value_int4[j]);
-#pragma unroll
-        for (int k = 0; k < kDtypePerInt4; ++k)
-          values[k] += static_cast<float>(recv_value_dtypes[k]);
+        foreach_reduce_add<float, dtype_t, kDtypePerInt4>(values, recv_value_dtypes);
       }
 
-      // Cast back to `dtype_t` and write
+      // Cast reduced values back to `dtype_t`
       int4 out_int4;
       auto out_dtypes = reinterpret_cast<dtype_t*>(&out_int4);
-#pragma unroll
-      for (int j = 0; j < kDtypePerInt4; ++j)
-        out_dtypes[j] = static_cast<dtype_t>(values[j]);
-      st_na_global(combined_row + i, out_int4);
+      foreach_assign<dtype_t, float, kDtypePerInt4>(out_dtypes, values);
+
+      // Store reduced values to output buffer
+      st_na_global(combined_row + i, out_int4); // non-cached store
     }
   }
 
-  // Reduce `topk_weights`
+  // Reduce topk weights from topk src ranks
   if (lane_id < num_topk) {
     float value = 0;
 #pragma unroll
     for (int i = 0; i < num_topk_ranks; ++i)
       value += recv_tw_fn(topk_ranks[i], slot_indices[i], lane_id);
-    st_na_global(combined_topk_weights + lane_id, value);
+    st_na_global(combined_topk_weights + lane_id, value); // non-cached store
   }
-
-  // Return the minimum top-k rank
-  return topk_ranks[0];
 }
 
 // FIXME: the register usage is highly spilled for both load/store
@@ -2385,8 +2409,9 @@ void combine(
           // Read expected NVL head
           // each lane for one NVL peer
           int expected_head = -1;
-          if (lane_id < NUM_MAX_NVL_PEERS)
+          if (lane_id < NUM_MAX_NVL_PEERS) {
             expected_head = ld_nc_global(combined_nvl_head + token_idx * NUM_MAX_NVL_PEERS + lane_id); // non-cached load
+          }
 
           // Wait all NVL tails for each src NVL peer to be ready
           // which are updated by `kNVLSender`
@@ -2429,6 +2454,12 @@ void combine(
           };
 
           // Combine this token
+          //  `head_idx`: the head idx of the token in NVL buffer
+          //  `combined_row`: the token ptr in output buffer to store the combined token
+          //  `combined_topk_weights`: the top-k weights ptr in output buffer to store the combined top-k weights
+          //  `num_max_recv_tokens`: the queue size of NVL buffer
+          //  `get_addr_fn`: get address of the token in NVL buffer
+          //  `recv_tw_fn`: get top-k weights of the token in NVL buffer
           combine_token</*kNumRanks=*/NUM_MAX_NVL_PEERS,
                         /*kMaybeWithBias=*/false,
                         /*dtype_t=*/dtype_t,
@@ -2561,6 +2592,12 @@ void combine(
         };
 
         // Combine this token
+        //  `head_idx`: the head idx of the token in RDMA buffer
+        //  `combined_row`: the token ptr in output buffer to store the combined token
+        //  `combined_topk_weights`: the top-k weights ptr in output buffer to store the combined top-k weights
+        //  `num_max_recv_tokens`: the queue size of RDMA buffer
+        //  `get_addr_fn`: get address of the token in RDMA buffer
+        //  `recv_tw_fn`: get top-k weights of the token in RDMA buffer
         uint32_t dummy_tma_phases[2];
         combine_token</*kNumRanks=*/kNumRDMARanks,
                       /*kMaybeWithBias=*/true,
@@ -2740,7 +2777,7 @@ void combine(
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= num_warps_per_forwarder);
   GRPCOLL_HOST_ASSERT(num_topk <= WARP_SIZE);
   GRPCOLL_HOST_ASSERT(type == CUDA_R_16BF);
-  GRPCOLL_HOST_ASSERT(hidden_size % (sizeof(int4) / sizeof(nv_bfloat16)) == 0);
+  GRPCOLL_HOST_ASSERT(hidden_size % (sizeof(int4) / sizeof(nv_bfloat16) * WARP_SIZE) == 0); // hidden_int4 must be a multiple of WARP_SIZE
   GRPCOLL_HOST_ASSERT(hidden_size * sizeof(nv_bfloat16) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
 
   // Even-numbered SMs for NVL senders and RDMA receivers, odd-numbered SMs for forwarders
