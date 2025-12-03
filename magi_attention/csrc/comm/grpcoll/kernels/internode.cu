@@ -2570,9 +2570,9 @@ void combine(
       __syncwarp();
       if (lane_id == 0)
         rdma_receiver_retired[target_warp_id] = true;
-    } else { // WarpRole::kCoordinator
-      // Coordinator
-      // Sync shared memory status
+    } else { // WarpRole::kCoordinator, for both forwarder and sender/receiver, only one warp
+      // Sync with either `kNVLAndRDMAForwarder` or `kRDMAReceiver` warps
+      // to wait all shared memory cleaned before accessing
       is_forwarder ? sync_forwarder_smem() : sync_rdma_receiver_smem();
       const auto num_warps_per_rdma_rank = kNumForwarders / kNumRDMARanks;
 
@@ -2582,43 +2582,54 @@ void combine(
       int dst_nvl_rank = lane_id < NUM_MAX_NVL_PEERS ? lane_id : 0;
       GRPCOLL_STATIC_ASSERT(kNumCombineForwarderWarps <= WARP_SIZE, "Invalid number of forwarder warps");
       while (true) {
-        // Retired
-        if (not is_forwarder and all_in_warp(lane_id >= kNumRDMAReceivers or rdma_receiver_retired[lane_id]))
-          break;
-        if (is_forwarder and all_in_warp(lane_id >= kNumForwarders or forwarder_retired[lane_id]))
-          break;
+        // Check if all warps of either `kNVLAndRDMAForwarder` or `kRDMAReceiver` are retired
+        if (is_forwarder) { // `kNVLAndRDMAForwarder`
+          if (all_in_warp(lane_id >= kNumForwarders or forwarder_retired[lane_id]))
+            break;
+        } else { // `kRDMAReceiver`
+          if (all_in_warp(lane_id >= kNumRDMAReceivers or rdma_receiver_retired[lane_id]))
+            break;
+        }
 
-        // Find minimum head for RDMA ranks
-        if (!is_forwarder) {
+        // Update minimum head for either RDMA or NVL ranks
+        if (!is_forwarder) { // `kRDMAReceiver`
+          // Find minimum RDMA head
           int min_head = INT_MAX;
 #pragma unroll
-          for (int i = 0; i < kNumRDMAReceivers; ++i)
-            if (not rdma_receiver_retired[i])
+          for (int i = 0; i < kNumRDMAReceivers; ++i) {
+            if (!rdma_receiver_retired[i])
               min_head = min(min_head, rdma_receiver_rdma_head[i][dst_rdma_rank]);
-          if (min_head != INT_MAX and min_head >= last_rdma_head + num_max_rdma_chunked_send_tokens and lane_id < kNumRDMARanks) {
+          }
+
+          // Update RDMA head by atomic add
+          // REVIEW: why need to check `min_head >= last_rdma_head + num_max_rdma_chunked_send_tokens` ?
+          if (lane_id < kNumRDMARanks and min_head != INT_MAX and min_head >= last_rdma_head + num_max_rdma_chunked_send_tokens) {
             nvshmemi_ibgda_amo_nonfetch_add(
-                rdma_channel_head.buffer(rdma_rank),
-                min_head - last_rdma_head,
-                get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
-                channel_id + num_channels,
-                dst_rdma_rank == rdma_rank);
+                /*rptr=*/rdma_channel_head.buffer(rdma_rank),
+                /*value=*/min_head - last_rdma_head,
+                /*pe=*/get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
+                /*qp_id=*/channel_id + num_channels,
+                /*is_local_copy=*/dst_rdma_rank == rdma_rank);
             last_rdma_head = min_head;
           }
-        } else {
-// Find minimum head for NVL ranks
+        } else { // `kNVLAndRDMAForwarder`
 #pragma unroll
           for (int i = 0; i < kNumRDMARanks; ++i) {
+            // Find minimum NVL head
             int min_head = INT_MAX;
 #pragma unroll
-            for (int j = 0; j < num_warps_per_rdma_rank; ++j)
-              if (not forwarder_retired[i * num_warps_per_rdma_rank + j])
+            for (int j = 0; j < num_warps_per_rdma_rank; ++j) {
+              if (!forwarder_retired[i * num_warps_per_rdma_rank + j])
                 min_head = min(min_head, forwarder_nvl_head[i * num_warps_per_rdma_rank + j][dst_nvl_rank]);
-            if (min_head != INT_MAX and min_head > last_nvl_head[i] and lane_id < NUM_MAX_NVL_PEERS)
-              st_relaxed_sys_global(nvl_channel_head.buffer_by(dst_nvl_rank) + i, last_nvl_head[i] = min_head);
+            }
+
+            // Update NVL head
+            if (lane_id < NUM_MAX_NVL_PEERS and min_head != INT_MAX and min_head > last_nvl_head[i])
+              st_relaxed_sys_global(nvl_channel_head.buffer_by(dst_nvl_rank) + i, last_nvl_head[i] = min_head); // system scope, relaxed order
           }
         }
 
-        // Nanosleep and let other warps work
+        // Nanosleep and let either `kNVLAndRDMAForwarder` or `kRDMAReceiver` warps work
         __nanosleep(NUM_WAIT_NANOSECONDS);
       }
     }
