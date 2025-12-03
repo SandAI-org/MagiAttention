@@ -13,24 +13,14 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from enum import Enum
 
 import torch
 
+from exps.dist_attn.baselines.interface import AttnImpl
 from exps.dist_attn.baselines.utils_cp import AttnBackend
 from exps.dist_attn.benchmark.enums import FlashMaskType
 from magi_attention.common.enum import AttnOverlapMode
 from magi_attention.meta.solver.dispatch_solver import MinHeapDispatchAlg
-
-
-class AttnImpl(Enum):
-    ULYSSESS = "ulysses"
-    RING_P2P = "ring_p2p"
-    RING_ALLGATHER = "ring_allgather"
-    USP = "usp"
-    LOONGTRAIN = "loongtrain"
-    MAGI_ATTENTION = "magi_attn"
-
 
 SEED = 42
 
@@ -65,8 +55,8 @@ class BENCH_CONFIG:
     bench_flops = True
     bench_mem = False
     bench_mode = "mean"
-    iteration = 1
-    warmup = 1
+    iteration = 25
+    warmup = 5
     output_path = "./outputs"
     mask_pattern = [
         FlashMaskType.FULL,
@@ -75,7 +65,7 @@ class BENCH_CONFIG:
         FlashMaskType.CAUSAL_DOCUMENT,
     ]
     dist_attn_impl = [
-        AttnImpl.ULYSSESS,
+        AttnImpl.ULYSSES,
         AttnImpl.RING_P2P,
         AttnImpl.RING_ALLGATHER,
         AttnImpl.USP,
@@ -103,7 +93,7 @@ class SAMPLE_CONFIG:
     """
 
     dataset_path = "./benchmark/datasets/default/doc_length_distribution.csv"
-    pack_num = 5
+    pack_num = 20
     chunk_ratio = 0.25
     is_binned = True
     to_attn_ranges = True

@@ -14,13 +14,13 @@
 
 import os
 from datetime import timedelta
-from enum import Enum
 
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
 import magi_attention
+from exps.dist_attn.baselines.interface import AttnImpl
 from exps.dist_attn.baselines.loongtrain import LoongTrain
 from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
 from exps.dist_attn.baselines.shard import (
@@ -51,16 +51,6 @@ from magi_attention.meta.solver.dispatch_solver import (
     MinHeapDispatchAlg,
 )
 from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOverlapAlg
-
-
-class AttnImpl(Enum):
-    ULYSSESS = 1
-    RING_P2P = 2
-    RING_ALLGATHER = 3
-    USP = 4
-    LOONGTRAIN = 5
-    MAGI_ATTENTION = 6
-
 
 # attention params
 SEED = 42
@@ -102,49 +92,21 @@ def init_dist_environment(
 
     # -----    test ring or all-gather   ---- #
     if attn_impl == AttnImpl.RING_ALLGATHER or attn_impl == AttnImpl.RING_P2P:
-        # cp_pg_meta = {
-        #     ParallelMode.RING: 4,
-        # }
-        # world_size = 4
         device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
         cp_group = get_ring_pg(device_shard)
 
     # -----    test ulysess   ---- #
-    elif attn_impl == AttnImpl.ULYSSESS:
-        # cp_pg_meta = {
-        #     ParallelMode.ULYSESS: 4,
-        # }
-        # world_size = 4
+    elif attn_impl == AttnImpl.ULYSSES:
         device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
         cp_group = get_ulysess_pg(device_shard)
 
     # -----    test usp   ---- #
     elif attn_impl == AttnImpl.USP:
-        # cp_pg_meta = {
-        #     ParallelMode.ULYSESS: 2,
-        #     ParallelMode.RING: 2,
-        # }
-        # ulysess [0,1] or ring [0,1]
-        # cp_pg_meta = {
-        #     ParallelMode.RING: 2,
-        #     ParallelMode.ULYSESS: 2,
-        # }
-        # world_size = 4
         device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
         cp_group = get_usp_pg(device_shard)
     elif attn_impl == AttnImpl.LOONGTRAIN:
-        # cp_pg_meta = {
-        #     ParallelMode.ULYSESS: 1,
-        #     ParallelMode.RING: 4,
-        # }
-        # cp_pg_meta = {
-        #     ParallelMode.RING: 4,
-        #     ParallelMode.ULYSESS: 1,
-        # }
-        # world_size = 4
         # NOTE: param for loongtrain double ring-attention
         window_num = 2
-        # assert world_size % window_num == 0
         device_shard = init_distributed(world_size=world_size, pg_meta=None)
         cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
     elif attn_impl == AttnImpl.MAGI_ATTENTION:
@@ -190,7 +152,6 @@ def init_hierarchical_mesh(world_size: int):
 
 
 def run_dist_attn(
-    seed: int,
     total_seqlen: int,
     embed_dim: int,
     q_heads: int,
@@ -202,9 +163,7 @@ def run_dist_attn(
     dropout: float,
     softmax_scale: float,
     deterministic: bool,
-    world_size: int,
     attn_mask_type: AttnMaskType,
-    cp_pg_meta,
     attn_impl: AttnImpl,
     attn_backend: AttnBackend,
     cp_group,
@@ -225,7 +184,7 @@ def run_dist_attn(
             cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
         )
         cal_runtime_args = [attn_mask_type, device]
-    elif attn_impl == AttnImpl.ULYSSESS:
+    elif attn_impl == AttnImpl.ULYSSES:
         attn = Ulysess(  # type: ignore[assignment]
             cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
         )
@@ -256,19 +215,12 @@ def run_dist_attn(
         embed_dim, q_heads * hidden_size, dtype=dtype, device=device
     )
 
-    x.requires_grad_(True)
-
     # -----    dispatch   ---- #
 
-    # HACK dispatch only support (t, h, d)
-    # assert embed_dim % 2 == 0, "only support (t, h, d) in dispatch, so embed_dim must divided 2 in zero"
+    # NOTE: dispatch only support (t, h, d)
     x = x.view(total_seqlen, 1, embed_dim)
-
-    x_local = attn.dispatch(x, q_ranges, total_seqlen, "q")
-    _ = attn.dispatch(x, k_ranges, total_seqlen, "k")
-    _ = attn.dispatch(x, k_ranges, total_seqlen, "v")
-    _ = attn.dispatch(x, q_ranges, total_seqlen, "dout")
-
+    x_local = attn.dispatch(x, q_ranges, total_seqlen, ["q", "dout"])
+    _ = attn.dispatch(x, k_ranges, total_seqlen, ["k", "v"])
     x_local = x_local.view(-1, embed_dim)
 
     # -----   projection ----- #
@@ -277,6 +229,9 @@ def run_dist_attn(
     k_local = k_proj(x_local).view(-1, kv_heads, hidden_size)
     v_local = v_proj(x_local).view(-1, kv_heads, hidden_size)
     dout_local = dout_proj(x_local).view(-1, q_heads, hidden_size)
+    q_local.requires_grad_(True)
+    k_local.requires_grad_(True)
+    v_local.requires_grad_(True)
 
     # -----   pre_compute ---- #
 
@@ -450,7 +405,6 @@ def run_benchmark(
     for q_ranges, k_ranges, attn_mask_type, _ in mask_iterator:
         if ATTN_IMPL != AttnImpl.MAGI_ATTENTION:
             run_dist_attn(
-                seed=SEED,
                 total_seqlen=TOTAL_SEQLEN,
                 embed_dim=EMBED_DIM,
                 q_heads=Q_HEADS,
@@ -462,9 +416,7 @@ def run_benchmark(
                 dropout=DROPOUT,
                 softmax_scale=SOFTMAX_SCALE,  # type: ignore
                 deterministic=DETERMINISTIC,
-                world_size=WORLD_SIZE,
                 attn_mask_type=attn_mask_type[0],
-                cp_pg_meta=CP_PG_META,
                 attn_impl=ATTN_IMPL,
                 attn_backend=ATTN_BACKEND,
                 cp_group=cp_group,

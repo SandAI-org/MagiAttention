@@ -27,6 +27,15 @@ class AttnBackend(Enum):
     FA3 = "fa3"
 
 
+class AttnImpl(Enum):
+    ULYSSES = "ulysses"
+    RING_P2P = "ring_p2p"
+    RING_ALLGATHER = "ring_allgather"
+    USP = "usp"
+    LOONGTRAIN = "loongtrain"
+    MAGI_ATTENTION = "magi_attn"
+
+
 class AttnBaselineInterface(ABC):
     def __init__(
         self,

@@ -23,6 +23,7 @@ from torch.distributed.device_mesh import init_device_mesh
 
 import magi_attention
 from exps.attn.baselines.utils import calculate_attn_flops
+from exps.dist_attn.baselines.interface import AttnImpl
 from exps.dist_attn.baselines.loongtrain import LoongTrain
 from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
 from exps.dist_attn.baselines.shard import (
@@ -45,7 +46,6 @@ from exps.dist_attn.benchmark_conf import (
     DATA_CONFIG,
     SAMPLE_CONFIG,
     SEED,
-    AttnImpl,
 )
 from magi_attention.api import calc_attn, compute_pad_size, magi_attn_flex_dispatch
 from magi_attention.benchmarking.bench import Benchmark, do_bench, perf_report
@@ -61,7 +61,7 @@ TOTAL_SEQLEN = DATA_CONFIG.seqlen_per_rank * WORLD_SIZE
 OUTLIER = int(-1e10)
 
 CP_GROUP_META = {
-    AttnImpl.ULYSSESS: {
+    AttnImpl.ULYSSES: {
         ParallelMode.ULYSESS: WORLD_SIZE,
     },
     AttnImpl.RING_P2P: {
@@ -92,7 +92,7 @@ CP_GROUP_META = {
 
 
 CP_GROUP = {  # type: ignore[var-annotated]
-    AttnImpl.ULYSSESS: {},
+    AttnImpl.ULYSSES: {},
     AttnImpl.RING_P2P: {},
     AttnImpl.RING_ALLGATHER: {},
     AttnImpl.USP: {},
@@ -118,7 +118,7 @@ def init_dist_environment(
         cp_group = get_ring_pg(device_shard)
 
     # -----    init ulysess   ---- #
-    elif attn_impl == AttnImpl.ULYSSESS:
+    elif attn_impl == AttnImpl.ULYSSES:
         device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
         cp_group = get_ulysess_pg(device_shard)
 
@@ -206,7 +206,7 @@ def run_dist_attn(
             cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
         )
         cal_runtime_args = [attn_mask_type, device]
-    elif attn_impl == AttnImpl.ULYSSESS:
+    elif attn_impl == AttnImpl.ULYSSES:
         attn = Ulysess(  # type: ignore[assignment]
             cp_process_group=cp_group, qkv_format="thd", backend=attn_backend
         )
@@ -255,7 +255,7 @@ def run_dist_attn(
     k_local.requires_grad_(True)
     v_local.requires_grad_(True)
 
-    if attn_impl == AttnImpl.ULYSSESS:
+    if attn_impl == AttnImpl.ULYSSES:
         assert world_size % kv_heads == 0 or kv_heads % world_size == 0
         H = world_size // kv_heads
         if H > 1:
@@ -428,14 +428,16 @@ def run_magi_attn(
     return fn
 
 
+x_vals = [dist_attn for dist_attn in BENCH_CONFIG.dist_attn_impl]
+x_names = ["attn_impl" for _ in x_vals]
 dist_attn_benchmarks = [
     Benchmark(
-        x_names=["seqlen"],  # Argument names to use as an x-axis for the plot.
-        x_vals=[TOTAL_SEQLEN],  # Different possible values for `x_name`.
-        x_log=False,  # x axis is logarithmic.
-        line_arg="attn_impl",  # Argument name whose value corresponds to a different line in the plot.
-        line_vals=[dist_attn],  # Possible values for `line_arg`.
-        line_names=[dist_attn.name],  # Label name for the lines.
+        x_names=x_names,
+        x_vals=x_vals,
+        x_log=False,
+        line_arg="seqlen",
+        line_vals=[TOTAL_SEQLEN],
+        line_names=[str(TOTAL_SEQLEN)],
         styles=[  # Line styles.
             ("green", "--"),
             ("orange", "--"),
@@ -447,17 +449,15 @@ dist_attn_benchmarks = [
             "mem": "Peak Memory (GB)",
         },
         # Name for the plot. Used also as a file name for saving the plot.
-        plot_name=f"dist {dist_attn.value} {wd} with {mask.value}",
+        plot_name=f"Total seqlen of {TOTAL_SEQLEN} {wd} with {mask.value}",
         args={  # Values for function arguments not in `x_names` and `y_name`.
             "mask_nums": SAMPLE_CONFIG.pack_num,
             "mask_type": mask,
             "seed": SEED,
-            "cp_pg_meta": CP_GROUP_META[dist_attn],
             "wd": wd,
         },
     )
     for mask in BENCH_CONFIG.mask_pattern
-    for dist_attn in BENCH_CONFIG.dist_attn_impl
     for wd in BENCH_CONFIG.workload
 ]
 
@@ -491,7 +491,6 @@ def run_benchmark(
     seed: int = 42,
     seqlen: int = 0,
     attn_impl: AttnImpl = AttnImpl.RING_P2P,
-    cp_pg_meta: dict = {},
     wd: str = "fwd",
 ):
     set_seed(seed)
@@ -509,6 +508,7 @@ def run_benchmark(
     )
 
     # -----    init dist environment   ---- #
+    cp_pg_meta = CP_GROUP_META[attn_impl]
     cp_group = init_dist_environment(
         attn_impl=attn_impl,
         world_size=WORLD_SIZE,
@@ -692,14 +692,22 @@ if __name__ == "__main__":
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
 
     os.makedirs(BENCH_CONFIG.output_path, exist_ok=True)
-    run_benchmark.run(print_data=True, print_value_on_bar=False)
+    run_benchmark.run(
+        print_data=True, print_value_on_bar=False, save_path=BENCH_CONFIG.output_path
+    )
 
     # destroy cp comm group
     for cp_groups in CP_GROUP.values():
         for cp_group in cp_groups.values():
             if isinstance(cp_group, dist.ProcessGroup):
-                dist.destroy_process_group(cp_group)
+                try:
+                    dist.destroy_process_group(cp_group)
+                except Exception:
+                    pass
             elif isinstance(cp_group, dict):
                 for pg in cp_group.values():
                     if isinstance(pg, dist.ProcessGroup):
-                        dist.destroy_process_group(pg)
+                        try:
+                            dist.destroy_process_group(pg)
+                        except Exception:
+                            pass

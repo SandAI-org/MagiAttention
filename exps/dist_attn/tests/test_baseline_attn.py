@@ -14,7 +14,6 @@
 
 import json
 import unittest
-from enum import Enum
 from typing import Any
 
 import numpy as np
@@ -23,6 +22,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention.testing
+from exps.dist_attn.baselines.interface import AttnImpl
 from exps.dist_attn.baselines.loongtrain import LoongTrain
 from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
 from exps.dist_attn.baselines.shard import (
@@ -46,15 +46,6 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import calc_inf_norm, extract_mismatch_info
-
-
-class AttnImpl(Enum):
-    ULYSSESS = 1
-    RING_P2P = 2
-    RING_ALLGATHER = 3
-    USP = 4
-    LOONGTRAIN = 5
-
 
 global_pg_groups = {}  # type: ignore
 global_loongtrain_pg_groups = {}  # type: ignore
@@ -279,7 +270,7 @@ class TestBaselineAttn(DistTestBase):
         "impl_config",
         [
             {
-                "name": AttnImpl.ULYSSESS,
+                "name": AttnImpl.ULYSSES,
                 "cp_pg_meta": {
                     ParallelMode.ULYSESS: 8,
                 },
@@ -455,7 +446,7 @@ class TestBaselineAttn(DistTestBase):
                 global_pg_groups[key] = cp_group
 
         # -----    test ulysess   ---- #
-        elif TO_TEST == AttnImpl.ULYSSESS:
+        elif TO_TEST == AttnImpl.ULYSSES:
             cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
             if cp_group is None:
                 device_shard = get_device_mesh(cp_pg_meta, world_size)
@@ -493,7 +484,7 @@ class TestBaselineAttn(DistTestBase):
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
-        if TO_TEST in [AttnImpl.ULYSSESS, AttnImpl.USP, AttnImpl.LOONGTRAIN]:
+        if TO_TEST in [AttnImpl.ULYSSES, AttnImpl.USP, AttnImpl.LOONGTRAIN]:
             a2a_size = cp_pg_meta[ParallelMode.ULYSESS]
             if (
                 num_heads_q < a2a_size
@@ -551,7 +542,7 @@ class TestBaselineAttn(DistTestBase):
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )  # type: ignore
             cal_runtime_args = [attn_mask_type, device]
-        elif TO_TEST == AttnImpl.ULYSSESS:
+        elif TO_TEST == AttnImpl.ULYSSES:
             attn = Ulysess(
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )  # type: ignore
@@ -621,7 +612,7 @@ class TestBaselineAttn(DistTestBase):
         "impl_config",
         [
             {
-                "name": AttnImpl.ULYSSESS,
+                "name": AttnImpl.ULYSSES,
                 "cp_pg_meta": {
                     ParallelMode.ULYSESS: 8,
                 },
@@ -688,7 +679,7 @@ class TestBaselineAttn(DistTestBase):
                 global_pg_groups[key] = cp_group
 
         # -----    test ulysess   ---- #
-        elif TO_TEST == AttnImpl.ULYSSESS:
+        elif TO_TEST == AttnImpl.ULYSSES:
             cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
             if cp_group is None:
                 device_shard = get_device_mesh(cp_pg_meta, world_size)
@@ -771,7 +762,7 @@ class TestBaselineAttn(DistTestBase):
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )  # type: ignore
             cal_runtime_args = [attn_mask_type, device]
-        elif TO_TEST == AttnImpl.ULYSSESS:
+        elif TO_TEST == AttnImpl.ULYSSES:
             attn = Ulysess(
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )  # type: ignore
