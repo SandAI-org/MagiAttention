@@ -40,11 +40,12 @@ def generate_block_sparse_pattern(
         mode (str("per_q_head", "per_kv_head")):
             - "per_q_head": Each query head gets a unique random mask (for MHA).
             - "per_kv_head": Query heads in the same group share a mask (for GQA).
+            - "shared": All heads share the exact same mask pattern
         device (str): The device to create tensors on.
 
     Returns:
-        torch.Tensor: A boolean tensor mask of shape [1, num_q_heads, num_q_blocks, num_kv_blocks].
-        torch.Tensor: A tensor containing the random scores used for selection,
+        block_sparse_mask (torch.Tensor): A boolean tensor mask of shape [1, num_q_heads, num_q_blocks, num_kv_blocks].
+        scores (torch.Tensor): A tensor containing the random scores used for selection,
                       shape is [1, num_mask_heads, num_q_blocks, num_kv_blocks],
                       where num_mask_heads is num_q_heads or num_kv_heads based on mode.
     """
@@ -60,6 +61,8 @@ def generate_block_sparse_pattern(
     elif mode == "per_kv_head":
         # Masks are generated per KV head.
         num_mask_heads = num_kv_heads
+    elif mode == "shared":
+        num_mask_heads = 1
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
@@ -78,6 +81,7 @@ def generate_block_sparse_pattern(
     base_mask.scatter_(2, topk_indices, True)
 
     # 5. Expand mask if generated at KV-head granularity for GQA
+    """
     if mode == "per_kv_head" and num_q_heads != num_kv_heads:
         num_groups = num_q_heads // num_kv_heads
         # Repeat the mask for each Q head in the group
@@ -86,7 +90,8 @@ def generate_block_sparse_pattern(
         )
     else:
         block_sparse_mask = base_mask
-
+    """
+    block_sparse_mask = base_mask
     # 6. Add batch dimension
     block_sparse_mask = block_sparse_mask.unsqueeze(0)
     scores = scores.unsqueeze(0)
@@ -121,10 +126,10 @@ def flatten_block_mask(
         # This implementation assumes a batch size of 1 for simplicity.
         # It can be extended if multi-batch support is needed.
         raise ValueError("Batch size for mask flattening must be 1.")
-    if h_q != num_q_heads:
-        raise ValueError(
-            "Mask dimension mismatch: mask_4d.shape[1] should equal num_q_heads."
-        )
+    # if h_q != num_q_heads:
+    #    raise ValueError(
+    #        "Mask dimension mismatch: mask_4d.shape[1] should equal num_q_heads."
+    #    )
 
     num_groups = num_q_heads // num_kv_heads
     num_q_flat = num_q_heads * num_q

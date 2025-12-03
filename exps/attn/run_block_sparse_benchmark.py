@@ -28,7 +28,9 @@ from einops import rearrange
 
 from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
 from magi_attention.utils.sparse_utils import (
-    choose_ref_block,
+    choose_ref_block,  # TODO: refactor choose ref_block
+)
+from magi_attention.utils.sparse_utils import (
     flatten_block_mask,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
@@ -46,14 +48,14 @@ sparsity_ratio = [0.05, 0.1, 0.2, 0.5]
 ds = [128]
 wds = ["fwd"]
 attn_modes = ["GQA"]  # MHA, GQA
-nhqs = [8]
-num_groups = [1]
+nhqs = [64]
+num_groups = [8]
 # small K block
 # q_block_sizes = [64, 64, 64, 64, 64]
 # k_block_sizes = [64, 32, 16, 8, 1]
 # small Q block
-q_block_sizes = [64, 32, 16, 8]
-k_block_sizes = [64, 64, 64, 64]
+q_block_sizes = [64, 16]
+k_block_sizes = [64, 64]
 # large Q block and K block
 # q_block_sizes = [64, 128]
 # k_block_sizes = [64, 128]
@@ -191,17 +193,22 @@ def sparse_attn_benchmark(
 
     # ffa style shape: (t,h,d)
     if attn_impl in ("ffa"):
-        q = rearrange(q, "b s h d -> (b h s) 1 d")
+        # q = rearrange(q, "b s h d -> (b h s) 1 d")
         # repeats = nhq // nhk
         # k = torch.repeat_interleave(
         #    k, repeats=repeats, dim=2
         # )  # we need to flatten k, v along head dimension for GQA setting.
         # v = torch.repeat_interleave(v, repeats=repeats, dim=2)
-        k = rearrange(k, "b s h d -> (b h s) 1 d")
-        v = rearrange(v, "b s h d -> (b h s) 1 d")
+        # k = rearrange(k, "b s h d -> (b h s) 1 d")
+        # v = rearrange(v, "b s h d -> (b h s) 1 d")
         # q = q.view(b * orig_seq_len_q * nhq, 1, hd)
         # k = k.view(b * orig_seq_len_k * nhk, 1, hd)
         # v = v.view(b * orig_seq_len_k * nhk, 1, hd)
+        h1 = nhk
+        # h2 = nhq // nhk
+        q = rearrange(q, "b s (h1 h2) d -> (b s h1) h2 d", h1=h1)
+        k = rearrange(k, "b s h d -> (b s h) 1 d")
+        v = rearrange(v, "b s h d -> (b s h) 1 d")
 
     if attn_impl in ("sdpa", "vsa", "vsa_triton", "flashinfer", "flex"):
         q = rearrange(q, "b s h d -> b h s d")
@@ -232,6 +239,7 @@ def sparse_attn_benchmark(
 
             # TODO: SwapAB will change this constraint
             ref_block_size = choose_ref_block((q_block_size, k_block_size))
+            # ref_block_size = (128, 128)
 
             def fn():
                 return ffa_func(
@@ -243,6 +251,7 @@ def sparse_attn_benchmark(
                     attn_type_map=attn_type_map,
                     auto_range_merge=True,  # we should enable auto_range_merge for block sparse mask.
                     ref_block_size=ref_block_size,
+                    pack_gqa=False,
                 )
 
             if wd == "bwd":
