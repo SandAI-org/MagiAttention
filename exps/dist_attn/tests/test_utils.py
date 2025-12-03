@@ -217,7 +217,6 @@ def get_attn_mask_from_cu_seqlens(
         device=torch.cuda.current_device(),
     )
     batch_size = cu_seqlens_q.shape[0] - 1
-    # for q_range, k_range, is_causal in zip(q_ranges, k_ranges, is_causal_mapping):
     for i in range(batch_size):
         st_q = cu_seqlens_q[i].item()
         ed_q = cu_seqlens_q[i + 1].item()
@@ -293,11 +292,6 @@ def gen_init_data(shape, device, dtype, test_bwd):
 def generate_test_data(
     batch_size, total_seqlen, heads_num, hidden_dim, dtype, qkv_format, device
 ):
-    # chunk_seq = total_seqlen if qkv_format == "thd" else total_seqlen // batch_size
-    # random_cu_seqlens_list, max_seqlen = generate_random_samples(
-    #     total_seqlen, batch_size
-    # )
-
     random_cu_seqlens_list = [0, 512, 1024]
     max_seqlen = 512
     if qkv_format == "thd":

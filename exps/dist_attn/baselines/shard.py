@@ -60,8 +60,17 @@ def set_seed(seed):
 # create DeviceMesh for all pg
 def init_distributed(world_size, pg_meta={}):
     print(f"world_size: {world_size}, meta info: {pg_meta}")
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank)
+    if not dist.is_initialized():
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+        rank = int(os.environ.get("RANK", 0))
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=world_size,
+            rank=rank,
+            timeout=timedelta(minutes=30),
+        )
 
     if pg_meta is not None:
         pg_sizes = tuple(pg_meta.values())
@@ -69,17 +78,6 @@ def init_distributed(world_size, pg_meta={}):
         assert world_size == reduce(
             operator.mul, pg_sizes
         ), "world size does not match pg sizes"
-    rank = int(os.environ.get("RANK", 0))
-
-    dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-        world_size=world_size,
-        rank=rank,
-        timeout=timedelta(minutes=30),
-    )
-
-    if pg_meta is not None:
         mesh = torch.arange(0, world_size).reshape(pg_sizes)
         deivce_mesh = DeviceMesh("cuda", mesh=mesh, mesh_dim_names=pg_names)
     else:

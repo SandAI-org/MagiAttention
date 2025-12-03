@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import Dict, List
 
 import numpy as np
@@ -379,6 +380,13 @@ class TERingAGAttnFunc(torch.autograd.Function):
         v_ag = gather_with_reorder_before_attn(
             v, ctx.total_gather_indices, ctx.cp_group
         )
+        heads_q, heads_kv = q.shape[1], k_ag.shape[1]
+        kv_shape = k_ag.shape
+        nrep = heads_q // heads_kv
+        # NOTE: Due to some unexpected issues arising from multiple calls to fused_attn_bwd in varlen GQA scenarios,
+        # we switch to computing it using MHA instead under ngc2510.
+        k_ag = k_ag.repeat_interleave(repeats=nrep, dim=1)
+        v_ag = v_ag.repeat_interleave(repeats=nrep, dim=1)
 
         local_seq_num = 2
         fused_attn_meta_args = [
@@ -417,6 +425,14 @@ class TERingAGAttnFunc(torch.autograd.Function):
                 cu_seqlens_q_padded=cu_seqlens_q_padded // 2,
                 cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 **fused_attn_meta_kwargs,
+            )
+            # NOTE: Due to some unexpected issues arising from multiple calls to fused_attn_bwd in varlen GQA scenarios,
+            # we switch to computing it using MHA instead  under ngc2510.
+            dk_per_step[i] = (
+                dk_per_step[i].view(kv_shape[0], heads_kv, nrep, kv_shape[-1]).sum(2)
+            )
+            dv_per_step[i] = (
+                dv_per_step[i].view(kv_shape[0], heads_kv, nrep, kv_shape[-1]).sum(2)
             )
 
             _collect_result_varlen(dq, dq_per_step[i], cu_seqlens_q_padded, i)
@@ -919,6 +935,8 @@ class TERingAttnFunc(torch.autograd.Function):
             "attn_bias_type": "no_bias",
             "deterministic": ctx.deterministic,
         }
+        heads_q, heads_kv = q.shape[1], kv[0].shape[1]
+        nrep = heads_q // heads_kv
 
         for i in range(cp_size):
             # wait until KV is received
@@ -993,15 +1011,18 @@ class TERingAttnFunc(torch.autograd.Function):
             else:
                 kv_ = kv
             k_part, v_part = kv_[0], kv_[1]
-
+            # NOTE: Due to some unexpected issues arising from multiple calls to fused_attn_bwd in varlen GQA scenarios,
+            # we switch to computing it using MHA instead  under ngc2510.
+            k_part_rep = k_part.repeat_interleave(repeats=nrep, dim=1)
+            v_part_rep = v_part.repeat_interleave(repeats=nrep, dim=1)
             dq_, dk_, dv_, _, _ = fused_attn_bwd(
                 _max_seqlen_q,
                 _max_seqlen_kv,
                 cu_seqlens_q_per_step[cp_size - i - 1],
                 cu_seqlens_kv_per_step[cp_size - i - 1],
                 q_part,
-                k_part,
-                v_part,
+                k_part_rep,
+                v_part_rep,
                 out_part,
                 dout_part,
                 *fused_attn_meta_args,
@@ -1010,6 +1031,10 @@ class TERingAttnFunc(torch.autograd.Function):
                 **fused_attn_meta_kwargs,
                 **{},
             )
+            # NOTE: Due to some unexpected issues arising from multiple calls to fused_attn_bwd in varlen GQA scenarios,
+            # we switch to computing it using MHA instead  under ngc2510.
+            dk_ = dk_.view(k_part.shape[0], heads_kv, nrep, k_part.shape[-1]).sum(2)
+            dv_ = dv_.view(v_part.shape[0], heads_kv, nrep, v_part.shape[-1]).sum(2)
 
             # update dq
             first_op, second_op = "none", "none"
@@ -1518,7 +1543,7 @@ class RingAttnAllGather(AttnBaselineInterface):
         x_global: torch.Tensor,
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
-        name: str,  # key name for shard_meta
+        name: str | List[str],  # key names for shard_meta
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -1543,7 +1568,10 @@ class RingAttnAllGather(AttnBaselineInterface):
         )
 
         max_seqlen_padded = get_max_seqlen(host_cu_seqlens_padded)
-        self.shard_meta[name] = ShardMeta(
+        dispatch_keys = name
+        if isinstance(name, str):
+            dispatch_keys = [name]
+        shard_meta = ShardMeta(
             cu_seqlens=cu_seqlens,
             cu_seqlens_padded=cu_seqlens_padded,
             host_cu_seqlens=host_cu_seqlens,
@@ -1551,6 +1579,8 @@ class RingAttnAllGather(AttnBaselineInterface):
             origin_shape=origin_shape,
             max_seqlen_padded=max_seqlen_padded,
         )
+        for key in dispatch_keys:
+            self.shard_meta[key] = copy.deepcopy(shard_meta)
         return x_local
 
     def undispatch(
@@ -1722,7 +1752,7 @@ class RingAttnP2P(AttnBaselineInterface):
         x_global: torch.Tensor,
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
-        name: str,  # key name for shard_meta
+        name: str | List[str],  # key names for shard_meta
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -1747,7 +1777,10 @@ class RingAttnP2P(AttnBaselineInterface):
         )
 
         max_seqlen_padded = get_max_seqlen(host_cu_seqlens_padded)
-        self.shard_meta[name] = ShardMeta(
+        dispatch_keys = name
+        if isinstance(name, str):
+            dispatch_keys = [name]
+        shard_meta = ShardMeta(
             cu_seqlens=cu_seqlens,
             cu_seqlens_padded=cu_seqlens_padded,
             host_cu_seqlens=host_cu_seqlens,
@@ -1755,6 +1788,8 @@ class RingAttnP2P(AttnBaselineInterface):
             origin_shape=origin_shape,
             max_seqlen_padded=max_seqlen_padded,
         )
+        for key in dispatch_keys:
+            self.shard_meta[key] = copy.deepcopy(shard_meta)
         return x_local
 
     def undispatch(

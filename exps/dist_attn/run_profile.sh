@@ -47,5 +47,11 @@ DISTRIBUTED_ARGS="
 
 echo $DISTRIBUTED_ARGS
 
-TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
+# TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
+CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
+TORCHRUN_CMD="nsys profile \
+    --force-overwrite true \
+    -o magi.nsys-rep \
+    --capture-range=cudaProfilerApi \
+    $CMD"
 $TORCHRUN_CMD

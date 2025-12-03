@@ -26,6 +26,10 @@ class FlashMaskType(Enum):
     PREFIX_LM_CAUSAL = "prefix_lm_causal"
     QK_SPARSE = "qk_sparse"
     HASH_SPARSE = "hash_sparse"
+    SLIDING_WINDOW = "sliding_window"
+    SLIDING_WINDOW_CAUSAL = "sliding_window_causal"
+    GLOBAL_SLIDING_WINDOW = "global_sliding_window"
+    BLOCK_CAUSAL_DOCUMENT = "block_causal_document"
 
 
 class MetricsType(Enum):
@@ -37,5 +41,3 @@ class MetricsType(Enum):
     AREA_GINI_IMPURITY = "area_gini_impurity"
     RANGES_GIMI_IMPURITY = "ranges_gimi_impurity"
     COST_MODEL = "cost_model"
-    COMPUTATION_AMOUNT = "computation_amount"
-    COMM_BYTES = "comm_bytes"
