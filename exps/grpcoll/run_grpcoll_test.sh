@@ -75,6 +75,12 @@ export NNODES=2 # in deepep internode kernels, it will check num_ranks > NUM_MAX
 export NPROC_PER_NODE=8
 export RANK=$1
 
+echo "MASTER_ADDR=$MASTER_ADDR, MASTER_PORT=$MASTER_PORT, NNODES=$NNODES, NPROC_PER_NODE=$NPROC_PER_NODE, RANK=$RANK"
+
+# set nccl env vars
+# export NCCL_DEBUG=INFO
+export NCCL_SOCKET_IFNAME=bond1
+
 if [[ $RANK -ge $NNODES ]]; then
     echo "Error: RANK=$RANK, but NNODES=$NNODES"
     exit 1
