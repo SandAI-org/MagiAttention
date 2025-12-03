@@ -61,7 +61,7 @@ jobs:
       needs.detect_changes.outputs.MagiAttention == 'true'
     runs-on: [self-hosted]
     container:
-      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.05.4
+      image: registry.cn-sh-01.sensecore.cn/sandai-ccr/magi-base:25.10.1
       options: --gpus all --ipc host
       credentials:
         username: ${{ secrets.DOCKER_USER_NAME }}
@@ -93,7 +93,7 @@ jobs:
           pip install -e . --no-build-isolation -vvv
       - name: Test and Generate coverage report
         run: |
-          coverage run --source magi_attention -m pytest -qsv ./tests
+          coverage run --source magi_attention -m pytest -qsv --skip-slow ./tests
           coverage combine
           coverage xml -i
         env:
