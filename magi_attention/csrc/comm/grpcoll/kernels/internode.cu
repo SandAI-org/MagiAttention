@@ -2093,13 +2093,15 @@ void combine(
     // Get tasks for each RDMA peer indicated by `lane_id`,
     // i.e. the [token_start_idx, token_end_idx] in `x` for each RDMA peer w.r.t. dst_nvl_rank
     // `gbl_channel_prefix_matrix`: shape=(kNumRanks, kNumChannels), dtype=int
-    int token_start_idx = 0, token_end_idx = 0; // NOTES: `token_start_idx` will be updated in the loop
+    int token_start_idx = 0, token_end_idx = 0;
+    // NOTES: since `token_start_idx` will be updated in the loop,
+    // we need to use `[&]` to capture reference instead of `[=]`
+    auto is_task_valid = [&]() { return token_start_idx < token_end_idx; };
     if (lane_id < kNumRDMARanks) {
       int prefix_idx = (lane_id * NUM_MAX_NVL_PEERS + dst_nvl_rank) * num_channels + channel_id;
       token_start_idx = gbl_channel_prefix_matrix[prefix_idx];
       token_end_idx = (prefix_idx == num_channels * num_ranks - 1) ? num_tokens : gbl_channel_prefix_matrix[prefix_idx + 1];
     }
-    auto is_task_valid = [=]() { return token_start_idx < token_end_idx; };
     __syncwarp();
 
     // Iterate over all tokens and send by chunks
