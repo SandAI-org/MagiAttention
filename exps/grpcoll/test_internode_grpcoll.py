@@ -57,7 +57,6 @@ from magi_attention.utils import pad_and_pack_tensors, setup_dist_env
 # isort: split
 from grpcoll_utils import (
     bench,
-    bench_kineto,
     calc_diff,
     get_output_split_size_list_and_src_index_list,
     get_random_dst_indices_list,
@@ -732,9 +731,10 @@ def test_main(
                     rdma_buffer_size=rdma_buffer_size,
                 )
                 tune_args = {"x": current_x, "handle": handle, "config": config}
-                t, notify_t = bench_kineto(
-                    lambda: buffer.group_cast(**tune_args), ("dispatch", "notify")
-                )
+                # FIXME: `bench_kineto` has bug with internode grpcoll, causing unspecified launch failure randomly
+                # see issue: https://github.com/deepseek-ai/DeepEP/issues/328
+                t = bench(lambda: buffer.group_cast(**tune_args))[0]
+                notify_t = 0
                 if t < best_time:
                     best_time, best_results = t, (
                         num_sms,
@@ -823,9 +823,10 @@ def test_main(
                 "reduce_op": "sum",
                 "acc_reduce": acc_reduce_out_buffer,
             }
-            t, notify_t = bench_kineto(
-                lambda: buffer.group_reduce(**tune_args), ("combine", "notify")
-            )
+            # FIXME: `bench_kineto` has bug with internode grpcoll, causing unspecified launch failure randomly
+            # see issue: https://github.com/deepseek-ai/DeepEP/issues/328
+            t = bench(lambda: buffer.group_reduce(**tune_args))[0]
+            notify_t = 0
             if local_rank == 0:
                 print(
                     f"[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size}, "
