@@ -1415,7 +1415,7 @@ class TestFlexFlashAttn(DistTestBase):
         ],
     )
     @parameterize(
-        "compress_config",
+        "ref_block_config",
         [
             {
                 "swap_ab": False,
@@ -1423,7 +1423,7 @@ class TestFlexFlashAttn(DistTestBase):
             },
             {
                 "swap_ab": False,
-                "ref_block_size": None,
+                "ref_block_size": (64, 64),
             },
             {
                 "swap_ab": True,
@@ -1448,7 +1448,7 @@ class TestFlexFlashAttn(DistTestBase):
     def test_ffa_simple(
         self,
         attn_mask_config: dict[str, Any],
-        compress_config: dict[str, Any],
+        ref_block_config: dict[str, Any],
         model_config: dict[str, Any],
         dtype: torch.dtype,
     ):
@@ -1478,8 +1478,8 @@ class TestFlexFlashAttn(DistTestBase):
         deterministic = bool(flag_comb.get("deterministic", False))
         auto_range_merge = bool(flag_comb.get("auto_range_merge", False))
         random_attn_type_map = bool(flag_comb.get("random_attn_type_map", False))
-        swap_ab = compress_config["swap_ab"]
-        ref_block_size = compress_config["ref_block_size"]
+        swap_ab = ref_block_config["swap_ab"]
+        ref_block_size = ref_block_config["ref_block_size"]
 
         if random_attn_type_map:
             # we now support attn type idx in {0, 1, 2, 3}
@@ -1591,7 +1591,7 @@ class TestFlexFlashAttn(DistTestBase):
         ],
     )
     @parameterize(
-        "compress_config",
+        "ref_block_config",
         [
             {
                 "swap_ab": False,
@@ -1599,7 +1599,7 @@ class TestFlexFlashAttn(DistTestBase):
             },
             {
                 "swap_ab": False,
-                "ref_block_size": None,
+                "ref_block_size": (64, 64),
             },
             {
                 "swap_ab": True,
@@ -1630,7 +1630,7 @@ class TestFlexFlashAttn(DistTestBase):
         self,
         model_config: dict[str, Any],
         generate_config: dict[str, Any],
-        compress_config: dict[str, Any],
+        ref_block_config: dict[str, Any],
         num_pairs: int,
         dtype: torch.dtype,
         attn_type: int,
@@ -1671,8 +1671,8 @@ class TestFlexFlashAttn(DistTestBase):
             f", but got {len(q_ranges)=}, {len(k_ranges)=}, {len(attn_type_map)=}"
         )
 
-        swap_ab = compress_config["swap_ab"]
-        ref_block_size = compress_config["ref_block_size"]
+        swap_ab = ref_block_config["swap_ab"]
+        ref_block_size = ref_block_config["ref_block_size"]
         test_accumulation_inplace = bool(
             flag_comb.get("test_accumulation_inplace", False)
         )
