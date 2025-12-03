@@ -603,12 +603,14 @@ void dispatch(
    *
    * For Sender/Receiver (Odd SMs):
    *  1. the first `kNumDispatchRDMASenderWarps` warps are `kRDMASender`,
-   *    copying the corr. channel of tokens to RDMA send buffer of this RDMA rank for each RDMA peer,
+   *    copying the corr. channel of tokens to RDMA send buffer of this RDMA rank for each RDMA peer (as RDMA producers),
    *    each warp for one token in round-robin way
    *  2. the next warp is `kRDMASenderCoordinator`, issuing RDMA copy for tokens
    *    copied to the RDMA send buffer of this RDMA rank by `kRDMASender`
    *    to the RDMA recv buffer of each RDMA peer
-   *  3. the rest `NUM_MAX_NVL_PEERS` warps are `kNVLReceivers`, each warp for one NVL peer
+   *  3. the rest `NUM_MAX_NVL_PEERS` warps are `kNVLReceivers`,
+   *    copying the received tokens from all NVL peers to output buffer (as NVL consumers),
+   *    each warp for one NVL peer
    */
   enum class WarpRole { kRDMASender, kRDMASenderCoordinator, kRDMAAndNVLForwarder, kForwarderCoordinator, kNVLReceivers };
   const auto role_meta = [=]() -> std::pair<WarpRole, int> {
@@ -1245,7 +1247,7 @@ void dispatch(
     }
     __syncwarp();
 
-    // Retired this warp by toggling the `forward_channel_retired` in shared memory
+    // Mark this warp as retired
     if (lane_id == 0)
       forward_channel_retired[dst_nvl_rank] = true;
   } else if (warp_role == WarpRole::kForwarderCoordinator) {
@@ -2020,15 +2022,20 @@ void combine(
 
   /** NOTE: Determine warp role and its target warp id
    * For Forwarder (Odd SMs):
-   *  1. the first `kNumForwarders` warps are `kNVLAndRDMAForwarder`, ...
-   *  2. the rest warp is `kCoordinator`, ...
+   *  1. the first `kNumForwarders` warps are `kNVLAndRDMAForwarder`,
+   *    combining the received tokens from all NVL peers in this node (as NVL consumers),
+   *    and then forwarding them to target RDMA peer (as RDMA producers),
+   *    each warp for one token in round-robin way
+   *  2. the rest warp is `kCoordinator`, to update the minimum NVL head for `kNVLAndRDMAForwarder`
    *
    * For Sender/Receiver (Even SMs):
    *  1. the first `NUM_MAX_NVL_PEERS` warps are `kNVLSender`,
-   *    copying the corr. channel of tokens to NVL buffer of each NVL peer in this node
+   *    copying the corr. channel of tokens to NVL buffer of each NVL peer in this node (as NVL producers),
    *    each warp for one NVL peer and each lane for one RDMA peer
-   *  2. the next `kNumRDMAReceivers` warps are `kRDMAReceiver`, ...
-   *  3. the rest warp is `kCoordinator`, ...
+   *  2. the next `kNumRDMAReceivers` warps are `kRDMAReceiver`,
+   *    combining the received tokens from all RDMA peers and copy to output buffer (as RDMA consumers),
+   *    each warp for one token in round-robin way
+   *  3. the rest warp is `kCoordinator`, to update the minimum RDMA head for `kRDMAReceiver`
    */
   enum class WarpRole { kNVLSender, kNVLAndRDMAForwarder, kRDMAReceiver, kCoordinator };
   auto role_meta = [=]() -> std::pair<WarpRole, int> {
@@ -2491,37 +2498,41 @@ void combine(
       }
       __syncwarp();
 
-      // Retired this warp
+      // Mark this warp as retired
       if (lane_id == 0) {
         forwarder_retired[target_warp_id] = true;
       }
     } else if (warp_role == WarpRole::kRDMAReceiver) {
-      // Receive from RDMA ranks and write to the output tensor
-      // Clean shared memory and sync
-      GRPCOLL_DEVICE_ASSERT(kNumRDMARanks <= WARP_SIZE);
+      // Clean shared memory and sync with the `kCoordinator` warp
       lane_id < kNumRDMARanks ? (rdma_receiver_rdma_head[target_warp_id][lane_id] = 0) : 0;
       lane_id == 0 ? (rdma_receiver_retired[target_warp_id] = false) : 0;
       sync_rdma_receiver_smem();
 
-      // The same tokens as the dispatch process
+      // The same task as the `kRDMASender` in the dispatch stage
       int token_start_idx, token_end_idx;
       get_channel_task_range(num_combined_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
-      // Iterate over all tokens and combine
+      // Iterate over all tokens, and combine + write to `combined_x`
+      // each warp for one token
       int cached_channel_tail_idx = 0;
       for (int64_t token_idx = token_start_idx + target_warp_id; token_idx < token_end_idx; token_idx += kNumRDMAReceivers) {
-        // Read expected head
+        // Read expected head from each RDMA peer
+        //  `combined_rdma_head`: shape=[num_combined_tokens, kNumRDMARanks]
         int expected_head = -1;
         if (lane_id < kNumRDMARanks) {
-          expected_head = ld_nc_global(combined_rdma_head + token_idx * kNumRDMARanks + lane_id);
-          (expected_head < 0) ? (rdma_receiver_rdma_head[target_warp_id][lane_id] = -expected_head - 1)
-                              : (rdma_receiver_rdma_head[target_warp_id][lane_id] = expected_head);
+          expected_head = ld_nc_global(combined_rdma_head + token_idx * kNumRDMARanks + lane_id); // non-cached load
+
+          // Record RDMA head into shared memory
+          // to let `kCoordinator` update the minimum one across all RDMA ranks
+          // REVIEW: why not `expected_head + 1` like others when valid ?
+          rdma_receiver_rdma_head[target_warp_id][lane_id] = expected_head < 0 ? decode(expected_head) : expected_head;
         }
 
-        // Wait lanes to be ready
+        // Wait the queue non-empty for each RDMA peer
         auto start_time = clock64();
         while (cached_channel_tail_idx <= expected_head) {
-          cached_channel_tail_idx = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(lane_id)));
+          // Read RDMA tail updated by `kNVLAndRDMAForwarder`
+          cached_channel_tail_idx = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(lane_id))); // system scope, acquire order
 
           // Timeout check
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
@@ -2539,7 +2550,7 @@ void combine(
         }
         __syncwarp();
 
-        // Combine current token
+        // Define `get_addr_fn` and `recv_tw_fn`
         auto get_addr_fn = [&](int src_rdma_rank, int slot_idx, int hidden_int4_idx) -> int4* {
           return reinterpret_cast<int4*>(rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * num_bytes_per_token) + hidden_int4_idx;
         };
@@ -2548,26 +2559,33 @@ void combine(
               reinterpret_cast<const float*>(rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * num_bytes_per_token + hidden_bytes + sizeof(SourceMeta)) +
               topk_idx);
         };
-        uint32_t dummy_tma_phases[2];
-        combine_token<kNumRDMARanks, true, dtype_t, kNumTopkRDMARanks, false, 2>(
-            expected_head >= 0,
-            expected_head,
-            lane_id,
-            hidden_int4,
-            num_topk,
-            combined_x + token_idx * hidden_int4,
-            combined_topk_weights + token_idx * num_topk,
-            bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
-            bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
-            num_max_rdma_chunked_recv_tokens,
-            get_addr_fn,
-            recv_tw_fn,
-            nullptr,
-            dummy_tma_phases);
-      }
 
-      // Retired
+        // Combine this token
+        uint32_t dummy_tma_phases[2];
+        combine_token</*kNumRanks=*/kNumRDMARanks,
+                      /*kMaybeWithBias=*/true,
+                      /*dtype_t=*/dtype_t,
+                      /*kMaxNumRanks=*/kNumTopkRDMARanks,
+                      /*kUseTMA=*/false,
+                      /*kNumStages=*/2>(
+            /*is_token_in_rank=*/expected_head >= 0,
+            /*head_idx=*/expected_head,
+            /*lane_id=*/lane_id,
+            /*hidden_int4=*/hidden_int4,
+            /*num_topk=*/num_topk,
+            /*combined_row=*/combined_x + token_idx * hidden_int4,
+            /*combined_topk_weights=*/combined_topk_weights + token_idx * num_topk,
+            /*bias_0_int4=*/bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
+            /*bias_1_int4=*/bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
+            /*num_max_recv_tokens=*/num_max_rdma_chunked_recv_tokens,
+            /*get_addr_fn=*/get_addr_fn,
+            /*recv_tw_fn=*/recv_tw_fn,
+            /*smem_ptr=*/nullptr,
+            /*tma_phases=*/dummy_tma_phases);
+      }
       __syncwarp();
+
+      // Mark this warp as retired
       if (lane_id == 0)
         rdma_receiver_retired[target_warp_id] = true;
     } else { // WarpRole::kCoordinator, for both forwarder and sender/receiver, only one warp
@@ -2576,6 +2594,8 @@ void combine(
       is_forwarder ? sync_forwarder_smem() : sync_rdma_receiver_smem();
       const auto num_warps_per_rdma_rank = kNumForwarders / kNumRDMARanks;
 
+      // Check retirement and update minimum head
+      // for either `kNVLAndRDMAForwarder` or `kRDMAReceiver`
       int last_rdma_head = 0;
       int last_nvl_head[kNumRDMARanks] = {0};
       int dst_rdma_rank = lane_id < kNumRDMARanks ? lane_id : 0;
