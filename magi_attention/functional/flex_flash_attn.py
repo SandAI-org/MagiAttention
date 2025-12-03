@@ -277,6 +277,8 @@ def _flex_flash_attn_forward_compilable_fake(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
+    sparse_load_loop_count: torch.Tensor | None,
+    sparse_load_invalid_count: torch.Tensor | None,
     kblock_m: int | None,
     kblock_n: int | None,
     softmax_scale: float,
@@ -285,6 +287,7 @@ def _flex_flash_attn_forward_compilable_fake(
     out_type: torch.dtype | None,
     deterministic: bool,
     sm_margin: int,
+    sparse_load: bool,
 ) -> None:
     pass
 
