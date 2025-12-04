@@ -119,11 +119,10 @@ struct Buffer {
   // Device-side expert-level mapped counter for num_recv_tokens_per_local_expert_this_rank
   int* moe_recv_expert_counter_mapped = nullptr;
 
-  // TODO: rename this counter
   // Host-side RDMA-level counter for num_recv_tokens_this_node
-  volatile int* moe_recv_rdma_counter = nullptr;
+  volatile int* grpcoll_recv_rdma_counter = nullptr;
   // Device-side RDMA-level mapped counter for num_recv_tokens_this_node
-  int* moe_recv_rdma_counter_mapped = nullptr;
+  int* grpcoll_recv_rdma_counter_mapped = nullptr;
 
  public:
   Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);

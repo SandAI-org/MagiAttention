@@ -198,7 +198,7 @@ void notify_dispatch(
     int* grpcoll_recv_counter_mapped,
     int num_ranks,
     const int* num_tokens_per_rdma_rank,
-    int* moe_recv_rdma_counter_mapped,
+    int* grpcoll_recv_rdma_counter_mapped,
     const int* num_tokens_per_expert,
     int* moe_recv_expert_counter_mapped,
     int num_experts,
