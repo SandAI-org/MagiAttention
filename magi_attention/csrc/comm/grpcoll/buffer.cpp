@@ -148,9 +148,9 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
 
   // Initialize `num_recv_tokens_this_node` counter (pinned host memory with its device ptr)
   if (num_rdma_ranks > 0) {
-    CUDA_CHECK(cudaMallocHost(&moe_recv_rdma_counter, sizeof(int), cudaHostAllocMapped));
-    CUDA_CHECK(cudaHostGetDevicePointer(&moe_recv_rdma_counter_mapped, const_cast<int*>(moe_recv_rdma_counter), 0));
-    *moe_recv_rdma_counter = -1;
+    CUDA_CHECK(cudaMallocHost(&grpcoll_recv_rdma_counter, sizeof(int), cudaHostAllocMapped));
+    CUDA_CHECK(cudaHostGetDevicePointer(&grpcoll_recv_rdma_counter_mapped, const_cast<int*>(grpcoll_recv_rdma_counter), 0));
+    *grpcoll_recv_rdma_counter = -1;
   }
 }
 
@@ -1060,7 +1060,7 @@ Buffer::internode_group_cast(
     recv_gbl_rank_prefix_sum = torch::empty({num_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
 
     // Reset all the pinned counters to `-1`
-    *grpcoll_recv_counter = -1, *moe_recv_rdma_counter = -1;
+    *grpcoll_recv_counter = -1, *grpcoll_recv_rdma_counter = -1;
     for (int i = 0; i < num_local_experts; ++i)
       moe_recv_expert_counter[i] = -1;
 
@@ -1071,7 +1071,7 @@ Buffer::internode_group_cast(
         /*grpcoll_recv_counter_mapped=*/grpcoll_recv_counter_mapped,
         /*num_ranks=*/num_ranks,
         /*num_tokens_per_rdma_rank=*/num_tokens_per_rdma_rank->data_ptr<int>(),
-        /*moe_recv_rdma_counter_mapped=*/moe_recv_rdma_counter_mapped,
+        /*grpcoll_recv_rdma_counter_mapped=*/grpcoll_recv_rdma_counter_mapped,
         /*num_tokens_per_expert=*/num_tokens_per_expert->data_ptr<int>(),
         /*moe_recv_expert_counter_mapped=*/moe_recv_expert_counter_mapped,
         /*num_experts=*/num_experts,
@@ -1103,7 +1103,7 @@ Buffer::internode_group_cast(
     while (true) {
       // Read total count
       num_recv_tokens = static_cast<int>(*grpcoll_recv_counter);
-      num_rdma_recv_tokens = static_cast<int>(*moe_recv_rdma_counter);
+      num_rdma_recv_tokens = static_cast<int>(*grpcoll_recv_rdma_counter);
 
       // Read per-expert count
       bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);

@@ -170,7 +170,7 @@ __global__ void notify_dispatch(
     int* grpcoll_recv_counter_mapped,
     int num_ranks,
     const int* num_tokens_per_rdma_rank,
-    int* moe_recv_rdma_counter_mapped,
+    int* grpcoll_recv_rdma_counter_mapped,
     const int* num_tokens_per_expert,
     int* moe_recv_expert_counter_mapped,
     int num_experts,
@@ -325,7 +325,7 @@ __global__ void notify_dispatch(
 
     // Reduce (prefix-summed) number of received tokens from each RDMA peer to this RDMA rank
     // and copy into `recv_rdma_rank_prefix_sum`: shape=(kNumRDMARanks,), dtype=int
-    // as well as the total received number to the pinned `moe_recv_rdma_counter` to notify the host
+    // as well as the total received number to the pinned `grpcoll_recv_rdma_counter` to notify the host
     if (thread_id == 0) {
       int sum = 0;
 #pragma unroll
@@ -333,9 +333,9 @@ __global__ void notify_dispatch(
         sum += rdma_recv_num_tokens_mixed.recv_buffer(r)[NUM_MAX_NVL_PEERS + num_rdma_experts];
         recv_rdma_rank_prefix_sum[r] = sum;
       }
-      while (ld_volatile_global(moe_recv_rdma_counter_mapped) != -1) // self-rotated wait for the counter reset by the host
+      while (ld_volatile_global(grpcoll_recv_rdma_counter_mapped) != -1) // self-rotated wait for the counter reset by the host
         ;
-      *moe_recv_rdma_counter_mapped = sum;
+      *grpcoll_recv_rdma_counter_mapped = sum;
     }
 
     // P2P-copy to remote `nvl_send_num_tokens_per_rank` and `nvl_send_num_tokens_per_expert`
@@ -443,7 +443,7 @@ void notify_dispatch(
     int* grpcoll_recv_counter_mapped,
     int num_ranks,
     const int* num_tokens_per_rdma_rank,
-    int* moe_recv_rdma_counter_mapped,
+    int* grpcoll_recv_rdma_counter_mapped,
     const int* num_tokens_per_expert,
     int* moe_recv_expert_counter_mapped,
     int num_experts,
@@ -479,7 +479,7 @@ void notify_dispatch(
         grpcoll_recv_counter_mapped,                                                                                                                         \
         num_ranks,                                                                                                                                           \
         num_tokens_per_rdma_rank,                                                                                                                            \
-        moe_recv_rdma_counter_mapped,                                                                                                                        \
+        grpcoll_recv_rdma_counter_mapped,                                                                                                                    \
         num_tokens_per_expert,                                                                                                                               \
         moe_recv_expert_counter_mapped,                                                                                                                      \
         num_experts,                                                                                                                                         \
