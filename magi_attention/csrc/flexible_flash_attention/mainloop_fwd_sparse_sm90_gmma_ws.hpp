@@ -395,6 +395,7 @@ struct CollectiveMainloopSparseFwdSm90 {
         // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
         token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_kv_s_kv;
 
+        CUTE_UNROLL
         for (int i = last_idx - 1; i >= 0; --i) {
           // int2 cur_k_range = k_ranges[cur_k_range_indices[i + 1]];
           // int seqlen_k = cur_k_range.y - cur_k_range.x;
@@ -536,6 +537,7 @@ struct CollectiveMainloopSparseFwdSm90 {
         // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
         token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_kv_s_kv;
 
+        CUTE_UNROLL
         for (int i = last_idx - 1; i >= 0; --i) {
           // int2 cur_k_range = k_ranges[cur_k_range_indices[i + 1]];
           // int seqlen_k = cur_k_range.y - cur_k_range.x;
@@ -750,9 +752,11 @@ struct CollectiveMainloopSparseFwdSm90 {
       Tensor sK = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_k.data()), SmemLayoutK{});
 
       // loop over token indices
+      CUTE_UNROLL
       for (int local_row = 0; local_row < NUM_ROWS_PER_GROUP; ++local_row) {
         int token_idx = block_meta.token_indices[local_row];
         // loop over number of tiles to load one token
+        CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
           Element* dst_ptr = &sK(group_idx * NUM_ROWS_PER_GROUP + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write.index());
           cp_async_cacheglobal_l2_prefetch_256B(
@@ -797,9 +801,11 @@ struct CollectiveMainloopSparseFwdSm90 {
       Tensor sVt = make_tensor(make_smem_ptr(shared_storage.tensors.mainloop.smem_v.data()), SmemLayoutVt{});
 
       // loop over token indices
+      CUTE_UNROLL
       for (int local_row = 0; local_row < NUM_ROWS_PER_GROUP; ++local_row) {
         int token_idx = block_meta.prev_token_indices[local_row];
         // loop over number of tiles to load one token
+        CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
           Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NUM_ROWS_PER_GROUP + local_row, smem_pipe_write.index());
           cp_async_cacheglobal_l2_prefetch_256B(
@@ -1068,7 +1074,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     // auto boundary_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
     //   mask.template apply<true /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     // };
-    auto boundary_mask_fn = [&](auto& tSrS, int num_invalid_token) { mask.template apply_sparse_load(tSrS, num_invalid_token, thread_idx); };
+    // auto boundary_mask_fn = [&](auto& tSrS, int num_invalid_token) { mask.template apply_sparse_load(tSrS, num_invalid_token, thread_idx); };
     // no_mask_fn: no mask, for full attention block in a tile job
     auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
       if constexpr (RangeMerge) {
@@ -1123,7 +1129,8 @@ struct CollectiveMainloopSparseFwdSm90 {
     // }
 
     // Apply mask
-    boundary_mask_fn(tSrS, block_meta.num_invalid_token);
+    // boundary_mask_fn(tSrS, block_meta.num_invalid_token);
+    mask.template apply_sparse_load(tSrS, block_meta.num_invalid_token, thread_idx);
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
     //     print_tensor(tSrS);
