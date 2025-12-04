@@ -1766,16 +1766,7 @@ void cached_notify(
 // Group Reduce
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <
-    int kNumRanks,
-    bool kMaybeWithBias,
-    typename dtype_t,
-    int kMaxNumRanks,
-    bool kUseTMA,
-    int kNumStages,
-    int kNumTMALoadBytes = 0,
-    typename GetAddrFn,
-    typename ReceiveTWFn>
+template <int kNumRanks, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStages, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
 __device__ void combine_token(
     bool is_token_in_rank,
     int head_idx,
@@ -1784,16 +1775,19 @@ __device__ void combine_token(
     int num_topk,
     int4* combined_row,
     float* combined_topk_weights,
-    const int4* bias_0_int4,
-    const int4* bias_1_int4,
     int num_max_recv_tokens,
     const GetAddrFn& get_addr_fn,
     const ReceiveTWFn& recv_tw_fn,
     uint8_t* smem_ptr,
     uint32_t (&tma_phase)[kNumStages]) {
   constexpr auto kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
-  GRPCOLL_STATIC_ASSERT(not(kUseTMA and kMaybeWithBias), "TMA cannot be used by receiver warps");
   GRPCOLL_STATIC_ASSERT(kNumStages == 2, "Only support 2 stages now");
+
+  // FIXME: remain some unused dummy variables
+  // used to be args here to keep the related code for a while
+  // which should be removed in the future as long as the code is not used any more
+  const int4 *bias_0_int4 = nullptr, *bias_1_int4 = nullptr;
+  constexpr bool kMaybeWithBias = false;
 
   // Count and collect topk slots and corr. src ranks from all heads within the warp
   // NOTES: lane `r` holds the `head_idx` and `is_token_in_rank` of rank `r`
@@ -1970,8 +1964,6 @@ void combine(
     int4* combined_x,
     const bool* is_combined_token_in_rank,
     const int4* x,
-    const int4* bias_0,
-    const int4* bias_1,
     const int* combined_rdma_head,
     const int* combined_nvl_head,
     const SourceMeta* src_meta,
@@ -2424,7 +2416,6 @@ void combine(
           //  `get_addr_fn`: get address of the token in NVL buffer
           //  `recv_tw_fn`: get top-k weights of the token in NVL buffer
           combine_token</*kNumRanks=*/NUM_MAX_NVL_PEERS,
-                        /*kMaybeWithBias=*/false,
                         /*dtype_t=*/dtype_t,
                         /*kMaxNumRanks=*/NUM_MAX_NVL_PEERS,
                         /*kUseTMA=*/true,
@@ -2437,8 +2428,6 @@ void combine(
               /*num_topk=*/num_topk,
               /*combined_row=*/static_cast<int4*>(token_ptr_in_rdma_buffer),
               /*combined_topk_weights=*/reinterpret_cast<float*>(static_cast<int8_t*>(token_ptr_in_rdma_buffer) + hidden_bytes + sizeof(SourceMeta)),
-              /*bias_0_int4=*/nullptr,
-              /*bias_1_int4=*/nullptr,
               /*num_max_recv_tokens=*/num_max_nvl_chunked_recv_tokens_per_rdma,
               /*get_addr_fn=*/get_addr_fn,
               /*recv_tw_fn=*/recv_tw_fn,
@@ -2563,7 +2552,6 @@ void combine(
         //  `recv_tw_fn`: get top-k weights of the token in RDMA buffer
         uint32_t dummy_tma_phases[2];
         combine_token</*kNumRanks=*/kNumRDMARanks,
-                      /*kMaybeWithBias=*/true,
                       /*dtype_t=*/dtype_t,
                       /*kMaxNumRanks=*/kNumTopkRDMARanks,
                       /*kUseTMA=*/false,
@@ -2575,8 +2563,6 @@ void combine(
             /*num_topk=*/num_topk,
             /*combined_row=*/combined_x + token_idx * hidden_int4,
             /*combined_topk_weights=*/combined_topk_weights + token_idx * num_topk,
-            /*bias_0_int4=*/bias_0 == nullptr ? nullptr : bias_0 + token_idx * hidden_int4,
-            /*bias_1_int4=*/bias_1 == nullptr ? nullptr : bias_1 + token_idx * hidden_int4,
             /*num_max_recv_tokens=*/num_max_rdma_chunked_recv_tokens,
             /*get_addr_fn=*/get_addr_fn,
             /*recv_tw_fn=*/recv_tw_fn,
@@ -2661,8 +2647,6 @@ void combine(
     void* combined_x,
     const bool* is_combined_token_in_rank,
     const void* x,
-    const void* bias_0,
-    const void* bias_1,
     const int* combined_rdma_head,
     const int* combined_nvl_head,
     const void* src_meta,
@@ -2700,8 +2684,6 @@ void combine(
         reinterpret_cast<int4*>(combined_x),                                                                                               \
         is_combined_token_in_rank,                                                                                                         \
         reinterpret_cast<const int4*>(x),                                                                                                  \
-        reinterpret_cast<const int4*>(bias_0),                                                                                             \
-        reinterpret_cast<const int4*>(bias_1),                                                                                             \
         combined_rdma_head,                                                                                                                \
         combined_nvl_head,                                                                                                                 \
         reinterpret_cast<const SourceMeta*>(src_meta),                                                                                     \

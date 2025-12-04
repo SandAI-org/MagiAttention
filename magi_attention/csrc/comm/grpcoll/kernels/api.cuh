@@ -276,8 +276,6 @@ void combine(
     void* combined_x,
     const bool* is_combined_token_in_rank,
     const void* x,
-    const void* bias_0,
-    const void* bias_1,
     const int* combined_rdma_head,
     const int* combined_nvl_head,
     const void* src_meta,
