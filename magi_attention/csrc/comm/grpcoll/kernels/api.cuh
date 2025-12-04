@@ -250,11 +250,11 @@ void cached_notify(
     int hidden_int4,
     int num_ranks,
     int num_channels,
-    int num_combined_tokens,
-    int* combined_rdma_head,
+    int num_reduced_tokens,
+    int* reduced_rdma_head,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
-    int* combined_nvl_head,
+    int* reduced_nvl_head,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_recv_tokens,
     void** buffer_ptrs,
@@ -267,19 +267,19 @@ void cached_notify(
     bool is_cached_group_cast,
     bool low_latency_mode);
 
-void combine(
+void group_reduce(
     cudaDataType_t type,
-    void* combined_x,
-    const bool* is_combined_token_in_rank,
+    void* reduced_x,
+    const bool* is_reduced_token_in_rank,
     const void* x,
-    const int* combined_rdma_head,
-    const int* combined_nvl_head,
+    const int* reduced_rdma_head,
+    const int* reduced_nvl_head,
     const void* src_meta,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
     int num_tokens,
-    int num_combined_tokens,
+    int num_reduced_tokens,
     int hidden_size,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
@@ -330,7 +330,7 @@ void dispatch(
     int phases);
 
 void combine(
-    void* combined_x,
+    void* reduced_x,
     void* rdma_recv_x,
     int* rdma_recv_flag,
     void* rdma_send_x,
@@ -341,7 +341,7 @@ void combine(
     const int64_t* layout_range,
     int* next_clean,
     int num_next_clean_int,
-    int num_combined_tokens,
+    int num_reduced_tokens,
     int hidden_size,
     int num_max_dispatch_tokens_per_rank,
     int num_topk,

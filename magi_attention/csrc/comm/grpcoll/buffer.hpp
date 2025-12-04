@@ -261,14 +261,14 @@ struct Buffer {
 
   std::tuple<torch::Tensor, std::optional<EventHandle>> internode_group_reduce(
       const torch::Tensor& x,
-      std::optional<torch::Tensor>& combined_x_buf,
+      std::optional<torch::Tensor>& reduced_x_buf,
       const torch::Tensor& src_meta,
-      const torch::Tensor& is_combined_token_in_rank,
+      const torch::Tensor& is_reduced_token_in_rank,
       const torch::Tensor& rdma_channel_prefix_matrix,
       const torch::Tensor& rdma_rank_prefix_sum,
       const torch::Tensor& gbl_channel_prefix_matrix,
-      const torch::Tensor& combined_rdma_head,
-      const torch::Tensor& combined_nvl_head,
+      const torch::Tensor& reduced_rdma_head,
+      const torch::Tensor& reduced_nvl_head,
       const std::optional<torch::Tensor>& pre_perm_idx,
       const Config& config,
       std::optional<EventHandle>& previous_event,
