@@ -1559,10 +1559,12 @@ def get_a2av_perm_idxs_from_group_cast_meta(
 class NativeGrpcollMetaCalculator:
     def __init__(
         self,
-        input_shape_per_rank: list[torch.Shape],
+        input_seqlen_per_rank: list[int],
         input_split_sizes_per_rank: list[list[int]],
         dst_indices_per_rank: list[list[list[int]]],
         src_index_per_rank: list[list[int]],
+        hidden_size: int,
+        dtype: torch.dtype,
         num_ranks: int = 0,
         group: dist.ProcessGroup | None = None,
         cast_lse: bool = False,
