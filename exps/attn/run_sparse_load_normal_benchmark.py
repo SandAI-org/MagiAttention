@@ -1,0 +1,319 @@
+# Copyright (c) 2025 SandAI. All Rights Reserved.
+# ... (License headers kept same)
+
+import os
+from datetime import datetime
+
+import torch
+from baselines.attn_impl import ffa_func
+from baselines.utils import (
+    calculate_attn_flops,
+    generate_ranges_from_seqlens,
+    generate_seqlens,
+    seqlens2curanges,
+)
+
+from magi_attention.benchmarking import Benchmark, do_bench_flops, perf_report
+from magi_attention.common.enum import AttnMaskType
+from magi_attention.common.range import AttnRange
+from magi_attention.common.ranges import AttnRanges
+
+# Configuration for sparse_load comparison
+sparse_load_options = [False, True]
+
+mask_types = ["full"]
+# mask_types = ["causal"]
+# mask_types = ["varlen_full"]
+# mask_types = ["varlen_causal"]
+# mask_types = ["sliding_window_causal"]
+# mask_types = ["varlen_block_causal"]
+
+
+varlen_seqlen_distribution = {
+    (0, 2 * 1024): 0.16,
+    (2 * 1024, 4 * 1024): 0.05,
+    (4 * 1024, 8 * 1024): 0.04,
+    (8 * 1024, 16 * 1024): 0.06,
+    (16 * 1024, 32 * 1024): 0.08,
+    (32 * 1024, 64 * 1024): 0.21,
+    (64 * 1024, 128 * 1024): 0.4,
+    (128 * 1024, 256 * 1024): 0.2,
+    (256 * 1024, 512 * 1024): 0.05,
+    (512 * 1024, 1024 * 1024): 0.04,
+    (1024 * 1024, 2048 * 1024): 0.01,
+    (2048 * 1024, 4096 * 1024): 0.01,
+}
+
+
+ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32]]
+ds = [128]
+wds = ["fwd"]
+
+
+b = 1
+nhq = 64
+nhk = 4
+dtype = torch.bfloat16
+
+window_size = 1024
+block_size = 2048
+num_varlen_samples = 16
+
+bias = None
+softmax_scale = None
+dropout_p = 0.0
+return_attn_probs = False
+
+quantiles = [0.5, 0.2, 0.8]
+
+
+attn_flops_configs = [
+    Benchmark(
+        x_names=["seqlen"],  # Argument names to use as an x-axis for the plot.
+        x_vals=ss,  # Different possible values for `x_name`.
+        x_log=False,  # x axis is logarithmic.
+        line_arg="sparse_load",  # Changed from attn_impl to sparse_load
+        line_vals=sparse_load_options,  # True/False
+        line_names=[
+            f"SparseLoad={str(opt)}" for opt in sparse_load_options
+        ],  # Label name for the lines.
+        styles=[  # Line styles.
+            ("green", "--"),
+            ("red", "-"),
+        ],
+        ylabel={  # Label name for the y-axis.
+            "flops": "Throughout (TFLOPs/s)",
+            "mem": "Peak Memory (GB)",
+        },
+        plot_name=f"ffa-sparseload-{wd}-{mask_type}",  # Name for the plot.
+        args={  # Values for function arguments not in `x_names` and `y_name`.
+            "hd": hd,
+            "wd": wd,
+            "mask_type": mask_type,
+        },
+    )
+    for hd in ds
+    for wd in wds
+    for mask_type in mask_types
+]
+
+
+@perf_report(attn_flops_configs)
+def attn_benchmark(seqlen, hd, wd, mask_type, sparse_load):
+    assert b == 1, "for now, we only supports b=1 for ffa"
+
+    # --------- prepare arguments --------- #
+
+    device = torch.cuda.current_device()
+    sq = sk = seqlen  # fi square mask where sq == sk
+    causal = "causal" in mask_type and "block_causal" not in mask_type
+
+    # calculate attn flops
+    if mask_type == "sliding_window_causal":
+        q_ranges_ = AttnRanges.from_ranges([[0, window_size]])
+        k_ranges_ = AttnRanges.from_ranges([[0, window_size]])
+        is_causal_mapping_ = [True]
+
+        for start in range(window_size, seqlen):
+            q_ranges_.append(AttnRange(start, start + 1))
+            k_ranges_.append(AttnRange(start - window_size + 1, start + 1))
+            is_causal_mapping_.append(False)
+
+        attn_flops_dict = calculate_attn_flops(
+            q_ranges=q_ranges_,
+            k_ranges=k_ranges_,
+            attn_mask_type=[
+                AttnMaskType.CAUSAL if c else AttnMaskType.FULL
+                for c in is_causal_mapping_
+            ],
+            total_seqlen_q=sq,
+            num_heads_q=nhq,
+            head_dim=hd,
+        )
+
+        q_ranges = torch.tensor(
+            [[0, window_size], [window_size, seqlen]], dtype=torch.int32, device=device
+        )
+        k_ranges = torch.tensor(
+            [[0, window_size], [0, seqlen]], dtype=torch.int32, device=device
+        )
+        attn_type_map = torch.tensor([1, 3], dtype=torch.int32, device=device)
+
+    elif "varlen" in mask_type:
+        if "block_causal" in mask_type:
+            assert not causal
+
+            seqlens = generate_seqlens(varlen_seqlen_distribution, seqlen)
+            q_ranges_, k_ranges_ = generate_ranges_from_seqlens(seqlens, block_size)
+
+            cu_ranges = seqlens2curanges(seqlens)
+
+            attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges_,
+                k_ranges=k_ranges_,
+                attn_mask_type=[AttnMaskType.FULL] * len(q_ranges_),
+                total_seqlen_q=sq,
+                num_heads_q=nhq,
+                head_dim=hd,
+            )
+
+            q_ranges = torch.tensor(
+                q_ranges_.to_naive_ranges(), dtype=torch.int32, device=device
+            )
+            k_ranges = torch.tensor(
+                k_ranges_.to_naive_ranges(), dtype=torch.int32, device=device
+            )
+            attn_type_map = torch.zeros(len(q_ranges), dtype=torch.int32, device=device)
+
+        else:
+            seqlens = generate_seqlens(varlen_seqlen_distribution, seqlen)
+            cu_ranges = seqlens2curanges(seqlens)
+
+            q_ranges_ = AttnRanges.from_ranges(cu_ranges)
+            k_ranges_ = AttnRanges.from_ranges(cu_ranges)
+
+            attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges_,
+                k_ranges=k_ranges_,
+                attn_mask_type=[AttnMaskType.CAUSAL if causal else AttnMaskType.FULL]
+                * len(cu_ranges),
+                total_seqlen_q=sq,
+                num_heads_q=nhq,
+                head_dim=hd,
+            )
+
+            q_ranges = torch.tensor(cu_ranges, dtype=torch.int32, device=device)
+            k_ranges = torch.tensor(cu_ranges, dtype=torch.int32, device=device)
+
+            attn_type_map = (
+                torch.ones(len(cu_ranges), dtype=torch.int32, device=device)
+                if causal
+                else torch.zeros(len(cu_ranges), dtype=torch.int32, device=device)
+            )
+    else:
+        attn_flops_dict = calculate_attn_flops(
+            q_ranges=AttnRanges.from_ranges([[0, sq]]),
+            k_ranges=AttnRanges.from_ranges([[0, sk]]),
+            attn_mask_type=[AttnMaskType.CAUSAL if causal else AttnMaskType.FULL],
+            total_seqlen_q=sq,
+            num_heads_q=nhq,
+            head_dim=hd,
+        )
+
+        q_ranges = torch.tensor([[0, sq]], dtype=torch.int32, device=device)
+        k_ranges = torch.tensor([[0, sk]], dtype=torch.int32, device=device)
+
+        attn_type_map = torch.tensor(
+            [1 if causal else 0], dtype=torch.int32, device=device
+        )
+
+    attn_flops = attn_flops_dict[wd]
+
+    # --------- prepare data --------- #
+
+    # flash style shape: (b,s,h,d)
+    q = torch.randn(b, sq, nhq, hd, device=device, dtype=dtype, requires_grad=False)
+    k = torch.randn(b, sk, nhk, hd, device=device, dtype=dtype, requires_grad=False)
+    v = torch.randn(b, sk, nhk, hd, device=device, dtype=dtype, requires_grad=False)
+
+    # ffa style shape: (t,h,d)
+    # Perform this reshape unconditionally for FFA
+    q = q.view(b * sq, nhq, hd)
+    k = k.view(b * sk, nhk, hd)
+    v = v.view(b * sk, nhk, hd)
+
+    # --------- prepare grads --------- #
+
+    if wd == "bwd":
+        do = torch.randn_like(q)
+        # require grads
+        [x.requires_grad_(True) for x in [q, k, v, do]]
+
+    # --------- prepare func --------- #
+
+    # Only defining FFA function
+    def fn():
+        return ffa_func(
+            q,
+            k,
+            v,
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
+            attn_type_map=attn_type_map,
+            auto_range_merge=True,
+            sparse_load=sparse_load,  # Pass the benchmark parameter here
+        )
+
+    if wd == "bwd":
+        try:
+            o, *rest = fn()
+        except Exception as e:
+            if "CUDA out of memory" not in str(e):
+                print(
+                    f"Error occured before running ffa (sparse_load={sparse_load}) with {mask_type} mask "
+                    f"when {seqlen=}, {hd=} during {wd}: {e=}"
+                )
+                raise e
+            # Handle OOM in wrapper usually, but here we prep for backward
+            return {
+                "flops": [-1, -1, -1],
+            }
+
+        def fn_bwd():
+            o.backward(do, retain_graph=True)
+
+        bench_fn = fn_bwd
+    else:
+        bench_fn = fn
+
+    # --------- try do the bench --------- #
+
+    try:
+        # disable mem test to only test flops for now
+        perf_dict = do_bench_flops(
+            bench_fn,
+            quantiles=quantiles,
+            mem_record_mode="peak",
+        )
+
+        # --------- process report --------- #
+
+        # post process the perf_dict
+        def ms_to_tflops(ms: float) -> float:
+            return attn_flops / ms * 1e-9
+
+        perf_dict["flops"] = list(map(ms_to_tflops, perf_dict["flops"]))
+
+        # disable mem test
+        # def gb(m):
+        #     return m / 1024**3
+
+        # perf_dict["mem"] = list(map(gb, perf_dict["mem"]))
+    except Exception as e:
+        if "CUDA out of memory" not in str(e):
+            print(
+                f"Error occured when running ffa (sparse_load={sparse_load}) with {mask_type} mask "
+                f"when {seqlen=}, {hd=} during {wd}: {e=}"
+            )
+            raise e
+        # -1 indicates oom
+        perf_dict = {
+            "flops": [-1, -1, -1],
+            # "mem": [-1, -1, -1],
+        }
+        print(
+            f"OOM error occured when running for ffa (sparse_load={sparse_load}) with {mask_type} mask "
+            f"when {seqlen=}, {hd=} during {wd}: {e=}"
+        )
+
+    return perf_dict
+
+
+if __name__ == "__main__":
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
+    out_root = os.path.join(
+        script_dir, os.path.join("outs", f"bench_attn_ffa_sparseload_{current_time}")
+    )
+
+    attn_benchmark.run(print_data=True, print_value_on_bar=False, save_path=out_root)
