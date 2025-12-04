@@ -1012,6 +1012,164 @@ def test_func(
     )
 
 
+def tune_func(
+    buffer: GrpCollBuffer,
+    group: dist.ProcessGroup,
+    test_kwargs: dict[str, Any],
+    test_out: dict[str, Any],
+    num_ranks: int,
+    local_rank: int,
+    num_sms: int,
+    nvl_buffer_size: int,
+    pass_out_buffer: bool,
+    acc_reduce_out_buffer: bool,
+) -> None:
+    # fetch some constant test kwargs for later usage
+    x = test_kwargs["x"]
+    num_tokens_per_rank = test_kwargs["num_tokens_per_rank"]
+    is_token_in_rank = test_kwargs["is_token_in_rank"]
+
+    # fetch some constant test out for later usage
+    handle = test_out["handle"]
+    group_cast_nvl_recv_bytes = test_out["group_cast_nvl_recv_bytes"]
+    group_reduce_nvl_send_bytes = test_out["group_reduce_nvl_send_bytes"]
+
+    # --------------      tune group_cast       -------------- #
+
+    # sync before tuning
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    if local_rank == 0:
+        print(
+            "\n# ------    Tune Intranode Group Cast   ------ #\n",
+            flush=True,
+        )
+
+    best_group_cast_results = None
+    best_time, best_results = 1e10, None
+    nvl_recv_bytes = group_cast_nvl_recv_bytes
+    for nvl_chunk_size in tuple(range(4, 33, 2)) + (0,):
+        if nvl_chunk_size > 0:
+            config = GrpCollConfig(
+                num_sms=num_sms,
+                nvl_chunk_size=nvl_chunk_size,
+                nvl_buffer_size=nvl_buffer_size,
+            )
+        else:  # Test default config as well
+            config = GrpCollConfig.get_default_group_cast_config(num_ranks)
+        tune_args = {
+            "x": x,
+            "handle": handle,
+            "config": config,
+        }  # TODO: add other flags to tune args
+        t = bench(lambda: buffer.group_cast(**tune_args))[0]
+        if t < best_time and nvl_chunk_size > 0:
+            best_time, best_results = t, (num_sms, nvl_chunk_size)
+        if local_rank == 0:
+            print(
+                f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
+                f"{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us",
+                flush=True,
+            )
+
+    if local_rank == 0:
+        print(
+            f"[tuning] Best group_cast "
+            f'({"FP8" if isinstance(x, tuple) else "BF16"}): '
+            f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "
+            f"{nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), "
+            f"t: {best_time * 1e6:.2f} us",
+            flush=True,
+        )
+        print("", flush=True)
+
+    # Gather the best config from rank 0 and the first test setting
+    if best_group_cast_results is None:
+        best_group_cast_results = torch.tensor(
+            [best_results[0], best_results[1]],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        all_best_results_list = [
+            torch.zeros_like(best_group_cast_results)
+            for _ in range(torch.distributed.get_world_size())
+        ]
+        dist.all_gather(all_best_results_list, best_group_cast_results, group=group)
+        best_group_cast_results = all_best_results_list[0].tolist()
+
+    # apply group_cast to get handle before group_reduce
+    group_cast_config = GrpCollConfig(
+        num_sms=best_group_cast_results[0],
+        nvl_chunk_size=best_group_cast_results[1],
+        nvl_buffer_size=nvl_buffer_size,
+    )
+    group_cast_args = {
+        "x": x,
+        "num_tokens_per_rank": num_tokens_per_rank,
+        "is_token_in_rank": is_token_in_rank,
+        "config": group_cast_config if group_cast_config is not None else config,
+    }
+    (
+        recv_x,
+        _,  # recv_lse
+        handle,
+        _,  # event
+    ) = buffer.group_cast(**group_cast_args)
+    recv_x = recv_x[0]
+
+    # --------------      tune group_reduce       -------------- #
+
+    # sync before tuning
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    if local_rank == 0:
+        print(
+            "\n# ------    Tune Intranode Group Reduce   ------ #\n",
+            flush=True,
+        )
+
+    best_time, best_results = 1e10, None
+    reduced_x_buf = torch.zeros_like(x) if pass_out_buffer else None
+    for nvl_chunk_size in tuple(range(1, 17, 1)) + (0,):
+        if nvl_chunk_size > 0:
+            config = GrpCollConfig(
+                num_sms=num_sms,
+                nvl_chunk_size=nvl_chunk_size,
+                nvl_buffer_size=nvl_buffer_size,
+            )
+        else:  # Test default config as well
+            config = GrpCollConfig.get_default_group_reduce_config(num_ranks)
+        tune_args = {
+            "x": recv_x,
+            "reduced_x": reduced_x_buf,
+            "handle": handle,
+            "config": config,
+            "reduce_op": "sum",
+            "acc_reduce": acc_reduce_out_buffer,
+        }
+        t = bench(lambda: buffer.group_reduce(**tune_args))[0]
+        if local_rank == 0:
+            print(
+                f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
+                f"{group_reduce_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us",
+                flush=True,
+            )
+            if t < best_time and nvl_chunk_size > 0:
+                best_time, best_results = t, (num_sms, nvl_chunk_size)
+
+    if local_rank == 0:
+        print(
+            f"[tuning] Best group_reduce: SMs {best_results[0]}, "
+            f"NVL chunk {best_results[1]}: "
+            f"{group_reduce_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL), "
+            f"t: {best_time * 1e6:.2f} us",
+            flush=True,
+        )
+        print("", flush=True)
+
+
 def test_main(
     args: argparse.Namespace,
     num_sms: int,
@@ -1174,150 +1332,19 @@ def test_main(
         **test_kwargs,
     )
 
-    # fetch some constant test kwargs for later usage
-    x = test_kwargs["x"]
-    num_tokens_per_rank = test_kwargs["num_tokens_per_rank"]
-    is_token_in_rank = test_kwargs["is_token_in_rank"]
-
-    # fetch some constant test out for later usage
-    handle = test_out["handle"]
-    group_cast_nvl_recv_bytes = test_out["group_cast_nvl_recv_bytes"]
-    group_reduce_nvl_send_bytes = test_out["group_reduce_nvl_send_bytes"]
-
-    # --------------      tune group_cast       -------------- #
-
-    # sync before tuning
-    torch.cuda.synchronize()
-    dist.barrier()
-
-    if local_rank == 0:
-        print(
-            "\n# ------    Tune Intranode Group Cast   ------ #\n",
-            flush=True,
-        )
-
-    best_group_cast_results = None
-    best_time, best_results = 1e10, None
-    nvl_recv_bytes = group_cast_nvl_recv_bytes
-    for nvl_chunk_size in tuple(range(4, 33, 2)) + (0,):
-        if nvl_chunk_size > 0:
-            config = GrpCollConfig(
-                num_sms=num_sms,
-                nvl_chunk_size=nvl_chunk_size,
-                nvl_buffer_size=nvl_buffer_size,
-            )
-        else:  # Test default config as well
-            config = GrpCollConfig.get_default_group_cast_config(num_ranks)
-        tune_args = {
-            "x": x,
-            "handle": handle,
-            "config": config,
-        }  # TODO: add other flags to tune args
-        t = bench(lambda: buffer.group_cast(**tune_args))[0]
-        if t < best_time and nvl_chunk_size > 0:
-            best_time, best_results = t, (num_sms, nvl_chunk_size)
-        if local_rank == 0:
-            print(
-                f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
-                f"{nvl_recv_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us",
-                flush=True,
-            )
-
-    if local_rank == 0:
-        print(
-            f"[tuning] Best group_cast "
-            f'({"FP8" if isinstance(x, tuple) else "BF16"}): '
-            f"SMs {best_results[0]}, NVL chunk {best_results[1]}, "
-            f"{nvl_recv_bytes / 1e9 / best_time:.2f} GB/s (NVL), "
-            f"t: {best_time * 1e6:.2f} us",
-            flush=True,
-        )
-        print("", flush=True)
-
-    # Gather the best config from rank 0 and the first test setting
-    if best_group_cast_results is None:
-        best_group_cast_results = torch.tensor(
-            [best_results[0], best_results[1]],
-            dtype=torch.int32,
-            device="cuda",
-        )
-        all_best_results_list = [
-            torch.zeros_like(best_group_cast_results)
-            for _ in range(torch.distributed.get_world_size())
-        ]
-        dist.all_gather(all_best_results_list, best_group_cast_results, group=group)
-        best_group_cast_results = all_best_results_list[0].tolist()
-
-    # apply group_cast to get handle before group_reduce
-    group_cast_config = GrpCollConfig(
-        num_sms=best_group_cast_results[0],
-        nvl_chunk_size=best_group_cast_results[1],
+    # tune group_cast / group_reduce
+    tune_func(
+        buffer=buffer,
+        group=group,
+        test_kwargs=test_kwargs,
+        test_out=test_out,
+        num_ranks=num_ranks,
+        local_rank=local_rank,
+        num_sms=num_sms,
         nvl_buffer_size=nvl_buffer_size,
+        pass_out_buffer=pass_out_buffer,
+        acc_reduce_out_buffer=acc_reduce_out_buffer,
     )
-    group_cast_args = {
-        "x": x,
-        "num_tokens_per_rank": num_tokens_per_rank,
-        "is_token_in_rank": is_token_in_rank,
-        "config": group_cast_config if group_cast_config is not None else config,
-    }
-    (
-        recv_x,
-        _,  # recv_lse
-        handle,
-        _,  # event
-    ) = buffer.group_cast(**group_cast_args)
-    recv_x = recv_x[0]
-
-    # --------------      tune group_reduce       -------------- #
-
-    # sync before tuning
-    torch.cuda.synchronize()
-    dist.barrier()
-
-    if local_rank == 0:
-        print(
-            "\n# ------    Tune Intranode Group Reduce   ------ #\n",
-            flush=True,
-        )
-
-    best_time, best_results = 1e10, None
-    reduced_x_buf = torch.zeros_like(x) if pass_out_buffer else None
-    for nvl_chunk_size in tuple(range(1, 17, 1)) + (0,):
-        if nvl_chunk_size > 0:
-            config = GrpCollConfig(
-                num_sms=num_sms,
-                nvl_chunk_size=nvl_chunk_size,
-                nvl_buffer_size=nvl_buffer_size,
-            )
-        else:  # Test default config as well
-            config = GrpCollConfig.get_default_group_reduce_config(num_ranks)
-        tune_args = {
-            "x": recv_x,
-            "reduced_x": reduced_x_buf,
-            "handle": handle,
-            "config": config,
-            "reduce_op": "sum",
-            "acc_reduce": acc_reduce_out_buffer,
-        }
-        t = bench(lambda: buffer.group_reduce(**tune_args))[0]
-        if local_rank == 0:
-            print(
-                f'[tuning] SMs {num_sms}, NVL chunk {nvl_chunk_size if nvl_chunk_size else "default"}: '
-                f"{group_reduce_nvl_send_bytes / 1e9 / t:.2f} GB/s (NVL), avg_t: {t * 1e6:.2f} us",
-                flush=True,
-            )
-            if t < best_time and nvl_chunk_size > 0:
-                best_time, best_results = t, (num_sms, nvl_chunk_size)
-
-    if local_rank == 0:
-        print(
-            f"[tuning] Best group_reduce: SMs {best_results[0]}, "
-            f"NVL chunk {best_results[1]}: "
-            f"{group_reduce_nvl_send_bytes / 1e9 / best_time:.2f} GB/s (NVL), "
-            f"t: {best_time * 1e6:.2f} us",
-            flush=True,
-        )
-        print("", flush=True)
 
 
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
