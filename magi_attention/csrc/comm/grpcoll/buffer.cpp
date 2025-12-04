@@ -350,6 +350,9 @@ Buffer::intranode_group_cast(
     std::optional<EventHandle>& previous_event,
     bool async_op,
     bool allocate_on_comm_stream) {
+  // REVIEW: should we release GIL here like internode ?
+  // py::gil_scoped_release release;
+
   // Determine if we are using chunked mode
   bool cached_mode = cached_rank_prefix_matrix.has_value();
 
@@ -943,7 +946,8 @@ Buffer::internode_group_cast(
   // unless we release GIL here.
   py::gil_scoped_release release;
 
-  // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
+  // One channel use two SMs
+  // one for forwarders, the other for (senders, receivers)
   const int num_channels = config.num_sms / 2;
   GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
   GRPCOLL_HOST_ASSERT(get_num_rdma_ranks() > 0 and get_num_rdma_ranks() <= NUM_MAX_RDMA_PEERS);
@@ -1002,10 +1006,6 @@ Buffer::internode_group_cast(
   int64_t* topk_idx_ptr = nullptr;
   float* topk_weights_ptr = nullptr;
 
-  // FP8 scales checks
-  float* x_scales_ptr = nullptr;
-  int num_scales = 0, scale_token_stride = 0, scale_hidden_stride = 0;
-
   // Set current stream to comm stream if needed
   // NOTES: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
@@ -1040,7 +1040,6 @@ Buffer::internode_group_cast(
     // Just a barrier and clean flags
     internode::cached_notify(
         /*hidden_int4=*/hidden_int4,
-        /*num_scales=*/num_scales,
         /*num_topk=*/num_topk,
         /*num_topk_weights=*/num_topk,
         /*num_ranks=*/num_ranks,
@@ -1087,7 +1086,6 @@ Buffer::internode_group_cast(
         /*num_tokens=*/num_tokens,
         /*num_channels=*/num_channels,
         /*hidden_int4=*/hidden_int4,
-        /*num_scales=*/num_scales,
         /*num_topk=*/num_topk,
         /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
         /*recv_rdma_rank_prefix_sum=*/recv_rdma_rank_prefix_sum.data_ptr<int>(),
@@ -1161,18 +1159,15 @@ Buffer::internode_group_cast(
   // Assign ptrs
   int64_t* recv_topk_idx_ptr = nullptr;
   float* recv_topk_weights_ptr = nullptr;
-  float* recv_x_scales_ptr = nullptr;
 
   // Launch data dispatch
   // NOTES: the buffer size checks are moved into the `.cu` file
   internode::dispatch(
       /*recv_x=*/recv_x.data_ptr(),
-      /*recv_x_scales=*/recv_x_scales_ptr,
       /*recv_topk_idx=*/recv_topk_idx_ptr,
       /*recv_topk_weights=*/recv_topk_weights_ptr,
       /*recv_src_meta=*/cached_mode ? nullptr : recv_src_meta->data_ptr(),
       /*x=*/x.data_ptr(),
-      /*x_scales=*/x_scales_ptr,
       /*topk_idx=*/topk_idx_ptr,
       /*topk_weights=*/topk_weights_ptr,
       /*send_rdma_head=*/cached_mode ? nullptr : send_rdma_head->data_ptr<int>(),
@@ -1186,11 +1181,8 @@ Buffer::internode_group_cast(
       /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
       /*num_tokens=*/num_tokens,
       /*hidden_int4=*/hidden_int4,
-      /*num_scales=*/num_scales,
       /*num_topk=*/num_topk,
       /*num_experts=*/num_experts,
-      /*scale_token_stride=*/scale_token_stride,
-      /*scale_hidden_stride=*/scale_hidden_stride,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
       /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
@@ -1286,6 +1278,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::SUM);
 
 #ifndef DISABLE_NVSHMEM
+  // One channel use two SMs
+  // one for forwarders, the other for (senders, receivers)
   const int num_channels = config.num_sms / 2;
   GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
 
@@ -1339,7 +1333,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   // Launch barrier and reset queue head and tail
   internode::cached_notify(
       /*hidden_int4=*/hidden_int4,
-      /*num_scales=*/0,
       /*num_topk_idx=*/0,
       /*num_topk_weights=*/num_topk,
       /*num_ranks=*/num_ranks,

@@ -206,7 +206,6 @@ void notify_dispatch(
     int num_tokens,
     int num_channels,
     int hidden_int4,
-    int num_scales,
     int num_topk,
     int* rdma_channel_prefix_matrix,
     int* recv_rdma_rank_prefix_sum,
@@ -225,12 +224,10 @@ void notify_dispatch(
 
 void dispatch(
     void* recv_x,
-    float* recv_x_scales,
     int64_t* recv_topk_idx,
     float* recv_topk_weights,
     void* recv_src_meta,
     const void* x,
-    const float* x_scales,
     const int64_t* topk_idx,
     const float* topk_weights,
     int* send_rdma_head,
@@ -244,11 +241,8 @@ void dispatch(
     const bool* is_token_in_rank,
     int num_tokens,
     int hidden_int4,
-    int num_scales,
     int num_topk,
     int num_experts,
-    int scale_token_stride,
-    int scale_hidden_stride,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -264,7 +258,6 @@ void dispatch(
 
 void cached_notify(
     int hidden_int4,
-    int num_scales,
     int num_topk_idx,
     int num_topk_weights,
     int num_ranks,
