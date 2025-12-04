@@ -357,7 +357,7 @@ struct CollectiveMainloopFwdSm90 {
     CUTLASS_DEVICE BlockMeta(Params const& params, cute::tuple<int32_t, int32_t, int32_t> const& block_coord, SharedStorage& shared_storage)
         : m_block(get<0>(block_coord)),
           bidh(get<1>(block_coord)),
-          bidh_kv(params.qhead_per_khead_divmod.divide(bidh)),
+          bidh_kv(!PackGQA ? params.qhead_per_khead_divmod.divide(bidh) : bidh),
           q_ranges(params.q_ranges),
           k_ranges(params.k_ranges),
           attn_type_map(params.attn_type_map) {
@@ -575,9 +575,16 @@ struct CollectiveMainloopFwdSm90 {
           return gQ;
         }
       }();
-      if (block_meta.bidh == 0 && threadIdx.x == 0 && block_meta.m_block == 0 && block_meta.bidb == 1) {
+      /*
+      if (block_meta.bidh == 0 && threadIdx.x == 0 && block_meta.m_block == 0 && block_meta.bidb == 0) {
+        if constexpr (PackGQA) {
+          if (bidh ==)
+        }
+        else {
+
+        }
         // print_tensor(gQ_Packed_2d);
-      }
+      } */
 
       Tensor tQgQ = group_modes<0, 3>(block_tma_Q.partition_S(gQ)); // (TMA)
 
@@ -1005,15 +1012,25 @@ struct CollectiveMainloopFwdSm90 {
     barrier_Q.wait(work_idx % 2);
     // Wait for first block of k to be loaded
     consumer_wait(pipeline_k, smem_pipe_read_k);
-
-    if (threadIdx.x == 128 && block_meta.bidh == 1 && block_meta.m_block == 0 && block_meta.bidb == 1) {
+    /*
+    if (threadIdx.x == 128 && block_meta.m_block == 0 && block_meta.bidb == 0) {
+      if constexpr (PackGQA) {
+        if (block_meta.bidh == 1) {
+          print_tensor(sQ);
+        }
+      }
+      else {
+        if (block_meta.bidh == 4) {
+          print_tensor(sQ);
+        }
+      }
       // printf("m_block: %d\n", block_meta.m_block);
       // if (block_meta.seqlen_info.offset_q == 30) {
       // printf("offset_q: %d\n", block_meta.seqlen_info.offset_q);
       // print_tensor(sQ);
       // }
       // print_tensor(sQ_flattened);
-    }
+    } */
 
     // launch Q @ K of n_block and wait for it to finish
     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);

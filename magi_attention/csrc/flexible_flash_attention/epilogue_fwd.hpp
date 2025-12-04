@@ -112,8 +112,11 @@ struct CollectiveEpilogueFwd {
   // (seqlen_q, d, head)
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>;
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
-  using ShapeLSE = cute::Shape<int32_t, int32_t>; // (seqlen_q, nheads_kv)
+  using ShapeLSE = cute::Shape<int32_t, int32_t>; // (seqlen_q, nheads_qo)
   using StrideLSE = cute::Stride<int64_t, _1>; // (seqlen_q, head)
+  using ShapeLSEPacked = std::conditional_t<!PackGQA, ShapeLSE, cute::Shape<cute::Shape<int32_t, int32_t>, int32_t>>; // ((qhead_per_khead, seqlen_q), nheads_kv)
+  using StrideLSEPacked = std::conditional_t<!PackGQA, StrideLSE, cute::Stride<cute::Stride<int32_t, int64_t>, int32_t>>;
+
   using CopyOpR2S = std::conditional_t<
       ArchTag::kMinComputeCapability >= 90,
       // cute::SM90_U32x4_STSM_N if Element size is 2 bytes (fp16, bf16)
@@ -158,10 +161,13 @@ struct CollectiveEpilogueFwd {
     StrideO const stride_O;
     float* ptr_LSE;
     ShapeLSE const shape_LSE;
+    ShapeLSEPacked const shape_LSE_packed;
     StrideLSE const stride_LSE;
+    StrideLSEPacked const stride_LSE_packed;
     cutlass::FastDivmod qhead_per_khead_divmod;
     TMA_O tma_store_O;
     int const nheads;
+    int const nheads_kv;
     int* range_locks = nullptr;
     int2 const* q_ranges = nullptr;
     int2 const* k_ranges = nullptr;
@@ -172,20 +178,27 @@ struct CollectiveEpilogueFwd {
     Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), args.shape_O, args.stride_O);
     TMA_O tma_store_O = make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutO{}, select<0, 1>(TileShape_MNK_PV{}), _1{}); // no mcast
 
-    int const qhead_per_khead = 1;
+    int const qhead_per_khead = !PackGQA ? 1 : args.nheads / args.nheads_kv;
 
     // seqlen_q, num_heads_qo
     auto const shape_LSE = select<0, 2>(args.shape_O);
+    auto const shape_LSE_packed = cute::conditional_return<!PackGQA>(shape_LSE, make_shape(make_shape(qhead_per_khead, get<0>(args.shape_O)), args.nheads_kv));
+
+    auto const stride_LSE_packed = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), qhead_per_khead));
+
     return {
         args.ptr_O,
         args.shape_O,
         args.stride_O,
         args.ptr_LSE,
         shape_LSE,
+        shape_LSE_packed,
         args.stride_LSE,
+        stride_LSE_packed,
         cutlass::FastDivmod(qhead_per_khead),
         tma_store_O,
         args.nheads,
+        args.nheads_kv,
         args.range_locks,
         args.q_ranges,
         args.k_ranges,
@@ -354,8 +367,45 @@ struct CollectiveEpilogueFwd {
 
     // Define Tensor for mLSE
     Tensor mLSE = make_tensor(make_gmem_ptr(params.ptr_LSE), params.shape_LSE, params.stride_LSE)(_, bidh);
-    Tensor gLSE = local_tile(cute::domain_offset(make_coord(offset_o), mLSE), select<0>(TileShape_MNK_PV{}), make_coord(m_block));
+    // Tensor mLSE_packed= make_tensor();
+    /*auto mQPacked = [&]() {
+      if constexpr (!PackGQA) {
+        return mQ;
+      } else {
+        return make_tensor(
+            make_gmem_ptr(args.ptr_Q),
+            make_layout(
+                make_shape(
+                    make_shape(cute::Int<qhead_per_khead>{}, get<0>(args.shape_Q)), // (qhead_per_khead, seqlen)
+                    get<1>(args.shape_Q), // headdim
+                    get<2>(args.shape_K) // numhead_k
+                    ),
+                stride_Q_packed));
+      }
+    }();*/
+    auto mLSEPacked = [&]() {
+      if constexpr (!PackGQA) {
+        return mLSE;
+      } else {
+        return make_tensor(make_gmem_ptr(params.ptr_LSE), make_layout(params.shape_LSE_packed, params.stride_LSE_packed))(_, bidh);
+      }
+    }();
 
+    int qhead_per_khead = !PackGQA ?: (params.nheads / params.nheads_kv);
+    Tensor gLSE = local_tile(cute::domain_offset(make_coord(offset_o), mLSE), select<0>(TileShape_MNK_PV{}), make_coord(m_block));
+    Tensor gLSEPacked = [&]() {
+      if constexpr (!PackGQA) {
+        return gLSE;
+      } else {
+        return local_tile(cute::domain_offset(make_coord(offset_o * qhead_per_khead), mLSEPacked), select<0>(TileShape_MNK_PV{}), make_coord(m_block));
+      }
+    }();
+
+    if (threadIdx.x == 128 && m_block == 1) {
+      // print("offset_o: %d bidh: %d m_block: %d\n", offset_o, bidh, m_block);
+      // print_tensor(gLSEPacked);
+      // print_tensor(lse);
+    }
     // Make sure all WGs have finished reading V
     // Technically we don't need this if we're not using smem, but the mainloop makes the assumption that
     // all epilogue threads sync at least once during the epilogue (so that we can start loading Q with
@@ -433,12 +483,37 @@ struct CollectiveEpilogueFwd {
     for (int mi = 0; mi < size(lse_final); ++mi) {
       int const row_block = get<0>(taccOcO_row(mi));
       int const row_batch = m_block * kBlockM + row_block;
-      if (row_batch < seqlen_o) {
+      /*if (threadIdx.x == 128 && m_block == 0 && bidh == 1) {
+        printf("row_block: %d row_batch: %d\n", row_block, row_batch);
+      } */
+      if (row_batch < seqlen_o * qhead_per_khead) {
         if (get<1>(taccOcO_row(_0{})) == 0) {
-          gLSE(row_block) = lse_final(mi);
+          if constexpr (!PackGQA)
+            gLSE(row_block) = lse_final(mi);
+          else
+            gLSEPacked(row_block) = lse_final(mi);
         }
       }
     }
+
+    //  __syncthreads();
+    /*
+    if (threadIdx.x == 128 && m_block == 0) {
+      if constexpr(PackGQA) {
+        if (bidh == 1) {
+          print_tensor(lse);
+          print_tensor(lse_final);
+          // print_tensor(gLSEPacked);
+        }
+      }
+      else {
+          if (bidh == 4) {
+            print_tensor(lse);
+            print_tensor(lse_final);
+          }
+      }
+    } */
+    // print_tensor();
 
     // Define tiled copy for O
     auto tiled_copy_O = make_tiled_copy_C(Copy_Atom<AutoVectorizingCopyWithAssumedAlignment<128>, ElementPartial>{}, tiled_mma);
