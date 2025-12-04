@@ -27,7 +27,7 @@ from magi_attention.api.functools import (
 )
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnSinkLayout
-from magi_attention.testing import parameterize
+from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.precision import (
     EPSILON,
     MISMATCH_THRES_RATIO,
@@ -35,12 +35,11 @@ from magi_attention.testing.precision import (
     assert_close,
     calc_inf_norm,
     extract_mismatch_threshold,
-    ref_attn_func,
 )
-from magi_attention.utils import get_attn_mask_from_ffa_args
+from magi_attention.utils import make_attn_mask_from_ffa_args
 
 # isort: split
-from extensions.fa2_interface_with_sink import (
+from magi_attn_extensions.fa2_interface_with_sink import (
     fa2_func_with_sink,
     fa2_kvpacked_func_with_sink,
     fa2_qkvpacked_func_with_sink,
@@ -48,7 +47,7 @@ from extensions.fa2_interface_with_sink import (
     fa2_varlen_kvpacked_func_with_sink,
     fa2_varlen_qkvpacked_func_with_sink,
 )
-from extensions.fa3_interface_with_sink import (
+from magi_attn_extensions.fa3_interface_with_sink import (
     fa3_func_with_sink,
     fa3_qkvpacked_func_with_sink,
     fa3_varlen_func_with_sink,
@@ -550,7 +549,7 @@ class TestFAInterfaceWithSink(TestCase):
 
         # -----   build attn mask   ---- #
 
-        mask = get_attn_mask_from_ffa_args(
+        mask = make_attn_mask_from_ffa_args(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
@@ -573,10 +572,10 @@ class TestFAInterfaceWithSink(TestCase):
             sink=total_sink,
             mask=mask,
             layout="thd",
+            sink_layout=sink_layout,
             high_precision=True,
             backend="torch" if has_sink else "sdpa",
             return_lse=True,
-            sink_layout=sink_layout,
         )
         total_out_ref_high_precision.backward(grad_total_out)
         (
@@ -604,10 +603,10 @@ class TestFAInterfaceWithSink(TestCase):
             sink=total_sink,
             mask=mask,
             layout="thd",
+            sink_layout=sink_layout,
             backend="torch" if has_sink else "sdpa",
             high_precision=False,
             return_lse=True,
-            sink_layout=sink_layout,
         )
 
         total_out_ref_low_precision.backward(grad_total_out)

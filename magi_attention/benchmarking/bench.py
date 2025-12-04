@@ -396,7 +396,7 @@ class Mark:
             labels = bench.line_names
             xvars = bench.x_vals
             x_indices = np.arange(len(xvars))
-            bar_width = 0.25 if len(labels) < 4 else 0.15
+            bar_width = 0.25 if len(labels) < 4 else (0.15 if len(labels) < 6 else 0.12)
 
             for provider in bench.line_names:
                 data = dfs[perf_key][provider].dropna().values
