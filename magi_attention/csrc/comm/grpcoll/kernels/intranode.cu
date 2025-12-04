@@ -54,7 +54,7 @@ namespace intranode {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int kNumRanks>
-__global__ void notify_group_cast(
+__global__ void notify_group_cast_kernel(
     const int* num_tokens_per_rank,
     int* grpcoll_recv_counter_mapped,
     int num_tokens,
@@ -163,7 +163,7 @@ void notify_group_cast(
 #define NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks) \
   LAUNCH_KERNEL(                             \
       &cfg,                                  \
-      notify_group_cast<ranks>,              \
+      notify_group_cast_kernel<ranks>,       \
       num_tokens_per_rank,                   \
       grpcoll_recv_counter_mapped,           \
       num_tokens,                            \
@@ -183,7 +183,7 @@ void notify_group_cast(
 }
 
 template <int kNumRanks>
-__global__ void cached_notify_group_cast(const int* rank_prefix_matrix, int num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank) {
+__global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, int num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank) {
   // A simplified version for cached handles
   barrier_block<kNumRanks, true>(barrier_signal_ptrs, rank);
 
@@ -209,8 +209,8 @@ void cached_notify_group_cast(
     int rank,
     int num_ranks,
     cudaStream_t stream) {
-#define CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks)                                                                                 \
-  LAUNCH_KERNEL(&cfg, cached_notify_group_cast<ranks>, rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank); \
+#define CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks)                                                                                        \
+  LAUNCH_KERNEL(&cfg, cached_notify_group_cast_kernel<ranks>, rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank); \
   break
 
   SETUP_LAUNCH_CONFIG(1, 128, stream);
@@ -872,7 +872,7 @@ void group_cast(
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int kNumRanks>
-__global__ void cached_notify_group_reduce(
+__global__ void cached_notify_group_reduce_kernel(
     void** buffer_ptrs,
     int* send_head,
     int num_channels,
@@ -941,8 +941,8 @@ void cached_notify_group_reduce(
     int rank,
     int num_ranks,
     cudaStream_t stream) {
-#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                   \
-  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce<ranks>, buffer_ptrs, send_head, num_channels, num_recv_tokens, num_memset_int, barrier_signal_ptrs, rank); \
+#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                          \
+  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce_kernel<ranks>, buffer_ptrs, send_head, num_channels, num_recv_tokens, num_memset_int, barrier_signal_ptrs, rank); \
   break
 
   const int num_threads = std::max(128, WARP_SIZE * num_ranks);

@@ -933,7 +933,7 @@ Buffer::internode_group_cast(
     bool async_op,
     bool allocate_on_comm_stream) {
 #ifndef DISABLE_NVSHMEM
-  // In dispatch, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
+  // In group_cast stage, CPU will busy-wait until GPU receive tensor size metadata from other ranks, which can be quite long.
   // If users of grpcoll need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
   // unless we release GIL here.
   py::gil_scoped_release release;
@@ -1037,7 +1037,7 @@ Buffer::internode_group_cast(
         /*stream=*/comm_stream,
         /*num_rdma_bytes=*/config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
         /*num_nvl_bytes=*/num_nvl_bytes,
-        /*is_cached_dispatch=*/true,
+        /*is_cached_group_cast=*/true,
         /*low_latency_mode=*/low_latency_mode);
   } else {
     rdma_channel_prefix_matrix = torch::empty({num_rdma_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -1050,7 +1050,7 @@ Buffer::internode_group_cast(
 
     // Notify to clean RDMA/NVL buffers, switch meta data and calculate meta tensors for group cast
     // as well as set the pinned counters
-    internode::notify_dispatch(
+    internode::notify_group_cast(
         /*num_tokens_per_rank=*/num_tokens_per_rank->data_ptr<int>(),
         /*grpcoll_recv_counter_mapped=*/grpcoll_recv_counter_mapped,
         /*num_ranks=*/num_ranks,
@@ -1123,9 +1123,9 @@ Buffer::internode_group_cast(
     send_nvl_head = torch::empty({num_rdma_recv_tokens, NUM_MAX_NVL_PEERS}, dtype(torch::kInt32).device(torch::kCUDA));
   }
 
-  // Launch data dispatch
+  // Launch group_cast kernel
   // NOTES: the buffer size checks are moved into the `.cu` file
-  internode::dispatch(
+  internode::group_cast(
       /*recv_x=*/recv_x.data_ptr(),
       /*recv_src_meta=*/cached_mode ? nullptr : recv_src_meta->data_ptr(),
       /*x=*/x.data_ptr(),
@@ -1148,7 +1148,7 @@ Buffer::internode_group_cast(
       /*num_max_nvl_chunked_recv_tokens=*/config.num_max_nvl_chunked_recv_tokens,
       /*rank=*/rank,
       /*num_ranks=*/num_ranks,
-      /*is_cached_dispatch=*/cached_mode,
+      /*is_cached_group_cast=*/cached_mode,
       /*stream=*/comm_stream,
       /*num_channels=*/num_channels,
       /*low_latency_mode=*/low_latency_mode);
