@@ -113,12 +113,6 @@ struct Buffer {
   // Device-side rank-level mapped counter for num_recv_tokens_this_rank
   int* grpcoll_recv_counter_mapped = nullptr;
 
-  // TODO: remove this counter
-  // Host-side expert-level counter for num_recv_tokens_per_local_expert_this_rank
-  volatile int* moe_recv_expert_counter = nullptr;
-  // Device-side expert-level mapped counter for num_recv_tokens_per_local_expert_this_rank
-  int* moe_recv_expert_counter_mapped = nullptr;
-
   // Host-side RDMA-level counter for num_recv_tokens_this_node
   volatile int* grpcoll_recv_rdma_counter = nullptr;
   // Device-side RDMA-level mapped counter for num_recv_tokens_this_node
@@ -253,7 +247,6 @@ struct Buffer {
       const std::optional<torch::Tensor>& num_tokens_per_rank,
       const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
       const torch::Tensor& is_token_in_rank,
-      const std::optional<torch::Tensor>& num_tokens_per_expert,
       int cached_num_recv_tokens,
       int cached_num_rdma_recv_tokens,
       const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix,

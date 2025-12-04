@@ -103,8 +103,7 @@ class GrpCollBuffer:
             num_nvl_bytes: the buffer size for intranode NVLink communication.
             num_rdma_bytes: the buffer size for internode (also for intranode with low-latency mode) RDMA communication.
             low_latency_mode: whether to enable low-latency mode.
-            num_qps_per_rank: the number of QPs for RDMA, the low-latency mode requires that this number equals
-                to the number of local experts.
+            num_qps_per_rank: the number of QPs for RDMA.
             allow_nvlink_for_low_latency_mode: whether allow NVLink traffic for low-latency mode, you should notice
                 this is somehow incompatible with the hook-based overlapping.
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
@@ -490,7 +489,6 @@ class GrpCollBuffer:
                 num_tokens_per_rank=num_tokens_per_rank,
                 num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
                 is_token_in_rank=is_token_in_rank,
-                num_tokens_per_expert=num_tokens_per_rank,  # FIXME: remove expert concept
                 post_perm_idx=post_perm_idx,
                 previous_event=previous_event,
                 async_op=async_op,
@@ -865,7 +863,6 @@ class GrpCollBuffer:
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
-        num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
         async_op: bool = False,
@@ -889,7 +886,6 @@ class GrpCollBuffer:
             assert isinstance(handle, GrpCollInterHandle)
             num_tokens_per_rank = None
             num_tokens_per_rdma_rank = None
-            num_tokens_per_expert = None
             is_token_in_rank = handle.is_token_in_rank
             num_recv_tokens = handle.num_recv_tokens
             num_rdma_recv_tokens = handle.num_rdma_recv_tokens
@@ -898,11 +894,7 @@ class GrpCollBuffer:
             gbl_channel_prefix_matrix = handle.gbl_channel_prefix_matrix
             recv_gbl_rank_prefix_sum = handle.recv_gbl_rank_prefix_sum
         else:
-            assert (
-                num_tokens_per_rank is not None
-                and is_token_in_rank is not None
-                and num_tokens_per_expert is not None
-            )
+            assert num_tokens_per_rank is not None and is_token_in_rank is not None
             num_recv_tokens = 0
             num_rdma_recv_tokens = 0
             rdma_channel_prefix_matrix = None
@@ -944,7 +936,6 @@ class GrpCollBuffer:
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
             is_token_in_rank,
-            num_tokens_per_expert,
             num_recv_tokens,
             num_rdma_recv_tokens,
             rdma_channel_prefix_matrix,

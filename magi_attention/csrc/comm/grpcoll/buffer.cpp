@@ -140,12 +140,6 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
   CUDA_CHECK(cudaHostGetDevicePointer(&grpcoll_recv_counter_mapped, const_cast<int*>(grpcoll_recv_counter), 0));
   *grpcoll_recv_counter = -1;
 
-  // Initialize `num_recv_tokens_per_local_expert_this_rank` counter array (pinned host memory with its device ptr)
-  CUDA_CHECK(cudaMallocHost(&moe_recv_expert_counter, sizeof(int) * NUM_MAX_LOCAL_EXPERTS, cudaHostAllocMapped));
-  CUDA_CHECK(cudaHostGetDevicePointer(&moe_recv_expert_counter_mapped, const_cast<int*>(moe_recv_expert_counter), 0));
-  for (int i = 0; i < NUM_MAX_LOCAL_EXPERTS; ++i)
-    moe_recv_expert_counter[i] = -1;
-
   // Initialize `num_recv_tokens_this_node` counter (pinned host memory with its device ptr)
   if (num_rdma_ranks > 0) {
     CUDA_CHECK(cudaMallocHost(&grpcoll_recv_rdma_counter, sizeof(int), cudaHostAllocMapped));
@@ -286,7 +280,6 @@ void Buffer::destroy() {
   // Free workspace and counters
   CUDA_CHECK(cudaFree(workspace));
   CUDA_CHECK(cudaFreeHost(const_cast<int*>(grpcoll_recv_counter)));
-  CUDA_CHECK(cudaFreeHost(const_cast<int*>(moe_recv_expert_counter)));
 
   destroyed = true;
   available = false;
@@ -928,7 +921,6 @@ Buffer::internode_group_cast(
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
     const torch::Tensor& is_token_in_rank,
-    const std::optional<torch::Tensor>& num_tokens_per_expert,
     int cached_num_recv_tokens,
     int cached_num_rdma_recv_tokens,
     const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix,
@@ -961,7 +953,6 @@ Buffer::internode_group_cast(
   } else {
     GRPCOLL_HOST_ASSERT(num_tokens_per_rank.has_value());
     GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank.has_value());
-    GRPCOLL_HOST_ASSERT(num_tokens_per_expert.has_value());
   }
 
   // Type checks
@@ -973,7 +964,6 @@ Buffer::internode_group_cast(
   } else {
     GRPCOLL_HOST_ASSERT(num_tokens_per_rank->scalar_type() == torch::kInt32);
     GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank->scalar_type() == torch::kInt32);
-    GRPCOLL_HOST_ASSERT(num_tokens_per_expert->scalar_type() == torch::kInt32);
   }
 
   // Shape and contiguous checks
@@ -991,15 +981,11 @@ Buffer::internode_group_cast(
   } else {
     GRPCOLL_HOST_ASSERT(num_tokens_per_rank->dim() == 1 and num_tokens_per_rank->is_contiguous());
     GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank->dim() == 1 and num_tokens_per_rdma_rank->is_contiguous());
-    GRPCOLL_HOST_ASSERT(num_tokens_per_expert->dim() == 1 and num_tokens_per_expert->is_contiguous());
     GRPCOLL_HOST_ASSERT(num_tokens_per_rank->size(0) == num_ranks);
     GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank->size(0) == num_rdma_ranks);
-    GRPCOLL_HOST_ASSERT(num_tokens_per_expert->size(0) % num_ranks == 0);
-    GRPCOLL_HOST_ASSERT(num_tokens_per_expert->size(0) / num_ranks <= NUM_MAX_LOCAL_EXPERTS);
   }
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
-  auto num_experts = cached_mode ? 0 : static_cast<int>(num_tokens_per_expert->size(0)), num_local_experts = num_experts / num_ranks;
 
   // Set current stream to comm stream if needed
   // NOTES: do not allocate tensors upfront!
@@ -1061,8 +1047,6 @@ Buffer::internode_group_cast(
 
     // Reset all the pinned counters to `-1`
     *grpcoll_recv_counter = -1, *grpcoll_recv_rdma_counter = -1;
-    for (int i = 0; i < num_local_experts; ++i)
-      moe_recv_expert_counter[i] = -1;
 
     // Notify to clean RDMA/NVL buffers, switch meta data and calculate meta tensors for group cast
     // as well as set the pinned counters
@@ -1072,9 +1056,6 @@ Buffer::internode_group_cast(
         /*num_ranks=*/num_ranks,
         /*num_tokens_per_rdma_rank=*/num_tokens_per_rdma_rank->data_ptr<int>(),
         /*grpcoll_recv_rdma_counter_mapped=*/grpcoll_recv_rdma_counter_mapped,
-        /*num_tokens_per_expert=*/num_tokens_per_expert->data_ptr<int>(),
-        /*moe_recv_expert_counter_mapped=*/moe_recv_expert_counter_mapped,
-        /*num_experts=*/num_experts,
         /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
         /*num_tokens=*/num_tokens,
         /*num_channels=*/num_channels,
@@ -1094,21 +1075,17 @@ Buffer::internode_group_cast(
         /*num_nvl_bytes=*/num_nvl_bytes,
         /*low_latency_mode=*/low_latency_mode);
 
-    // Synchronize total received tokens and tokens per expert
+    // Synchronize total received tokens and received tokens for each RDMA peer
     // by let CPU wait for the pinned counters to be set
     // TODO: when `recv_x_buf` is provided, we can use its dim0 for `num_recv_tokens`
     // however, we still don't know `num_rdma_recv_tokens` to avoid CPU sync
     // one possible solution is to let user provide it, but had better find a better way
     auto start_time = std::chrono::high_resolution_clock::now();
     while (true) {
-      // Read total count
+      // Read global count and each RDMA count
       num_recv_tokens = static_cast<int>(*grpcoll_recv_counter);
       num_rdma_recv_tokens = static_cast<int>(*grpcoll_recv_rdma_counter);
-
-      // Read per-expert count
       bool ready = (num_recv_tokens >= 0) and (num_rdma_recv_tokens >= 0);
-      for (int i = 0; i < num_local_experts and ready; ++i)
-        ready &= moe_recv_expert_counter[i] >= 0;
 
       if (ready)
         break;
@@ -1116,8 +1093,6 @@ Buffer::internode_group_cast(
       // Timeout check
       if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::high_resolution_clock::now() - start_time).count() > NUM_CPU_TIMEOUT_SECS) {
         printf("Global rank: %d, num_recv_tokens: %d, num_rdma_recv_tokens: %d\n", rank, num_recv_tokens, num_rdma_recv_tokens);
-        for (int i = 0; i < num_local_experts; ++i)
-          printf("moe_recv_expert_counter[%d]: %d\n", i, moe_recv_expert_counter[i]);
         throw std::runtime_error("grpcoll error: CPU recv timeout for internode group cast");
       }
     }
@@ -1192,7 +1167,6 @@ Buffer::internode_group_cast(
     for (auto& to :
          {num_tokens_per_rank,
           num_tokens_per_rdma_rank,
-          num_tokens_per_expert,
           cached_rdma_channel_prefix_matrix,
           cached_recv_rdma_rank_prefix_sum,
           cached_gbl_channel_prefix_matrix,
@@ -1416,7 +1390,73 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
 #endif
 }
 
-// NOTES: remain original low-latency interface here for future potential usage,
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Common Helper APIs
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+bool Buffer::is_available() const {
+  return available;
+}
+
+bool Buffer::is_internode_available() const {
+  return is_available() and num_ranks > NUM_MAX_NVL_PEERS;
+}
+
+int Buffer::get_num_rdma_ranks() const {
+  return num_rdma_ranks;
+}
+
+int Buffer::get_rdma_rank() const {
+  return rdma_rank;
+}
+
+int Buffer::get_root_rdma_rank(bool global) const {
+  return global ? nvl_rank : 0;
+}
+
+int Buffer::get_local_device_id() const {
+  return device_id;
+}
+
+py::bytearray Buffer::get_local_ipc_handle() const {
+  return {ipc_handles[nvl_rank].reserved, CUDA_IPC_HANDLE_SIZE};
+}
+
+py::bytearray Buffer::get_local_nvshmem_unique_id() const {
+#ifndef DISABLE_NVSHMEM
+  GRPCOLL_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get NVSHMEM unique ID");
+  auto unique_id = internode::get_unique_id();
+  return {reinterpret_cast<const char*>(unique_id.data()), unique_id.size()};
+#else
+  GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
+#endif
+}
+
+torch::Tensor Buffer::get_local_buffer_tensor(const py::object& dtype, int64_t offset, bool use_rdma_buffer) const {
+  torch::ScalarType casted_dtype = torch::python::detail::py_object_to_dtype(dtype);
+  auto element_bytes = static_cast<int64_t>(elementSize(casted_dtype));
+  auto base_ptr = static_cast<uint8_t*>(use_rdma_buffer ? rdma_buffer_ptr : buffer_ptrs[nvl_rank]) + offset;
+  auto num_bytes = use_rdma_buffer ? num_rdma_bytes : num_nvl_bytes;
+  return torch::from_blob(base_ptr, num_bytes / element_bytes, torch::TensorOptions().dtype(casted_dtype).device(at::kCUDA));
+}
+
+torch::Stream Buffer::get_comm_stream() const {
+  return comm_stream;
+}
+
+bool is_sm90_compiled() {
+#ifndef DISABLE_SM90_FEATURES
+  return true;
+#else
+  return false;
+#endif
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Low Latency APIs
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// NOTES: we remain original low-latency APIs here for future potential usage,
 // which won't be exposed to users for now, but guaranteed its compatibility internally
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
 Buffer::low_latency_dispatch(
@@ -1664,12 +1704,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
 #endif
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-// Common Helper APIs
-///////////////////////////////////////////////////////////////////////////////////////////////////
-
-// NOTES: remain original low-latency interface here for future potential usage,
-// which won't be exposed to users for now, but guaranteed its compatibility internally
 void Buffer::clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) {
 #ifndef DISABLE_NVSHMEM
   GRPCOLL_HOST_ASSERT(low_latency_mode);
@@ -1708,64 +1742,6 @@ torch::Tensor Buffer::get_next_low_latency_combine_buffer(int num_max_dispatch_t
 #else
   GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
   return {};
-#endif
-}
-
-bool Buffer::is_available() const {
-  return available;
-}
-
-bool Buffer::is_internode_available() const {
-  return is_available() and num_ranks > NUM_MAX_NVL_PEERS;
-}
-
-int Buffer::get_num_rdma_ranks() const {
-  return num_rdma_ranks;
-}
-
-int Buffer::get_rdma_rank() const {
-  return rdma_rank;
-}
-
-int Buffer::get_root_rdma_rank(bool global) const {
-  return global ? nvl_rank : 0;
-}
-
-int Buffer::get_local_device_id() const {
-  return device_id;
-}
-
-py::bytearray Buffer::get_local_ipc_handle() const {
-  return {ipc_handles[nvl_rank].reserved, CUDA_IPC_HANDLE_SIZE};
-}
-
-py::bytearray Buffer::get_local_nvshmem_unique_id() const {
-#ifndef DISABLE_NVSHMEM
-  GRPCOLL_HOST_ASSERT(rdma_rank == 0 and "Only RDMA rank 0 can get NVSHMEM unique ID");
-  auto unique_id = internode::get_unique_id();
-  return {reinterpret_cast<const char*>(unique_id.data()), unique_id.size()};
-#else
-  GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
-#endif
-}
-
-torch::Tensor Buffer::get_local_buffer_tensor(const py::object& dtype, int64_t offset, bool use_rdma_buffer) const {
-  torch::ScalarType casted_dtype = torch::python::detail::py_object_to_dtype(dtype);
-  auto element_bytes = static_cast<int64_t>(elementSize(casted_dtype));
-  auto base_ptr = static_cast<uint8_t*>(use_rdma_buffer ? rdma_buffer_ptr : buffer_ptrs[nvl_rank]) + offset;
-  auto num_bytes = use_rdma_buffer ? num_rdma_bytes : num_nvl_bytes;
-  return torch::from_blob(base_ptr, num_bytes / element_bytes, torch::TensorOptions().dtype(casted_dtype).device(at::kCUDA));
-}
-
-torch::Stream Buffer::get_comm_stream() const {
-  return comm_stream;
-}
-
-bool is_sm90_compiled() {
-#ifndef DISABLE_SM90_FEATURES
-  return true;
-#else
-  return false;
 #endif
 }
 
