@@ -236,7 +236,6 @@ void dispatch(
     const bool* is_token_in_rank,
     int num_tokens,
     int hidden_int4,
-    int num_experts,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,

@@ -1165,7 +1165,6 @@ Buffer::internode_group_cast(
       /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
       /*num_tokens=*/num_tokens,
       /*hidden_int4=*/hidden_int4,
-      /*num_experts=*/num_experts,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
       /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,

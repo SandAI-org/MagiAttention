@@ -547,7 +547,6 @@ void dispatch(
     const bool* is_token_in_rank,
     int num_tokens,
     int hidden_int4,
-    int num_experts,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -1287,8 +1286,6 @@ void dispatch(
   } else { // WarpRole::kNVLReceivers
     // Retrieve rank offset from barrier results (each lane's register stores an RDMA rank)
     const int src_nvl_rank = target_rank;
-    const int local_expert_begin = rank * (num_experts / num_ranks);
-    const int local_expert_end = local_expert_begin + (num_experts / num_ranks);
 
     // Load global rank offset for the src NVL rank in the RDMA peer indicated by `lane_id`
     //  `recv_gbl_rank_prefix_sum`: shape=(kNumRanks,), dtype=int
@@ -1446,7 +1443,7 @@ void dispatch(
           auto idx_in_recv_topk = token_idx_in_recv_x * num_topk + lane_id;
 
           // Transform and write to recv topk idx/weight
-          topk_idx_value = (topk_idx_value >= local_expert_begin and topk_idx_value < local_expert_end) ? topk_idx_value - local_expert_begin : -1;
+          topk_idx_value = topk_idx_value == rank ? topk_idx_value - rank : -1;
           topk_weight_value = topk_idx_value >= 0 ? topk_weight_value : 0.0f;
           st_na_global(recv_topk_idx + idx_in_recv_topk, topk_idx_value);
           st_na_global(recv_topk_weights + idx_in_recv_topk, topk_weight_value);
@@ -1479,7 +1476,6 @@ void dispatch(
     const bool* is_token_in_rank,
     int num_tokens,
     int hidden_int4,
-    int num_experts,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -1523,7 +1519,6 @@ void dispatch(
         is_token_in_rank,                                                                                                                                    \
         num_tokens,                                                                                                                                          \
         hidden_int4,                                                                                                                                         \
-        num_experts,                                                                                                                                         \
         rdma_buffer_ptr,                                                                                                                                     \
         num_max_rdma_chunked_send_tokens,                                                                                                                    \
         num_max_rdma_chunked_recv_tokens,                                                                                                                    \
