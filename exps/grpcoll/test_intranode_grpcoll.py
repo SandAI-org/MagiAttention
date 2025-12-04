@@ -81,8 +81,6 @@ def prepare_test_func_kwargs(
     hidden_size: int,
     num_heads: int,
     num_input_splits: int,
-    num_experts: int,
-    num_local_experts: int,
     num_data_groups: int,
     dtype: torch.dtype,
     comm_dtype: torch.dtype | None,
@@ -303,7 +301,9 @@ def prepare_test_func_kwargs(
         rank=rank,
         num_ranks=num_ranks,
         num_nodes=1,
-        num_local_experts=num_local_experts,
+        # NOTE: we can assume num_local_experts == 1
+        # thus sending one token to one rank is equivalent to sending to the only one "local expert" in that rank
+        num_local_experts=1,
         input_split_size_list=input_split_size_list,
         dst_indices_list=dst_indices_list,
         output_split_size_list=output_split_size_list,
@@ -418,9 +418,6 @@ def prepare_test_func_kwargs(
     assert torch.allclose(ref_is_token_in_rank, is_token_in_rank)
     assert torch.allclose(ref_num_tokens_per_rank_device, num_tokens_per_rank)
     assert torch.allclose(ref_is_token_in_rank_device, is_token_in_rank)
-
-    # get group_cast layout from buffer as reference
-    assert num_experts == num_ranks
 
     # use host meta
     layout_t2r_idx = transfer_splits_and_dst_idxs_to_t2r_idx(
@@ -1181,17 +1178,10 @@ def test_main(
 ):
     # Settings
     num_tokens, hidden_size = args.num_tokens, args.hidden
-    num_topk, num_experts = args.num_topk, args.num_experts
+    num_topk = args.num_topk
     num_channels = num_sms // 2
     num_heads = 16
     assert hidden_size % num_heads == 0
-
-    # we can assume num_local_experts == 1
-    # thus sending one token to one rank is equivalent to sending to the only one "local expert" in that rank
-    num_experts = num_ranks
-    assert num_experts % num_ranks == 0
-    num_local_experts = num_experts // num_ranks
-    assert num_local_experts == 1
 
     num_max_nvl_chunked_send_tokens = 8
     nvl_buffer_size = num_max_nvl_chunked_recv_tokens = 256
@@ -1268,8 +1258,8 @@ def test_main(
         print(
             (
                 f"[config] {num_sms=} | {num_channels=} | {min_num_nvl_bytes=} ({min_num_nvl_bytes / 1024**2:.2f} MB)\n"
-                f"{num_experts=} | {num_tokens=} | {hidden_size=} | {dtype=} | {comm_dtype=}\n"
-                f"{num_topk=} | {num_local_experts=} | {num_heads=} | {num_data_groups=}\n"
+                f"{num_tokens=} | {hidden_size=} | {dtype=} | {comm_dtype=}\n"
+                f"{num_topk=} | {num_heads=} | {num_data_groups=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
                 f"{cast_lse=} | {reduce_op=}\n"
@@ -1290,8 +1280,6 @@ def test_main(
         hidden_size=hidden_size,
         num_heads=num_heads,
         num_input_splits=num_input_splits,
-        num_experts=num_experts,
-        num_local_experts=num_local_experts,
         num_data_groups=num_data_groups,
         dtype=dtype,
         comm_dtype=comm_dtype,
@@ -1376,7 +1364,7 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     if local_rank == 0:
         print(
             (
-                f"[config]: {num_ranks=} | {num_local_ranks=} | {group.size()=} | "
+                f"[config]: {num_ranks=} | {num_local_ranks=} | {group.size()=} | {num_sms=}"
                 f"{num_nvl_bytes=} ({num_nvl_bytes / 1024**3:.2f} GB) | {num_rdma_bytes=} | {num_qps_per_rank=}\n"
             ),
             flush=True,
@@ -1412,14 +1400,15 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
             **buffer_args,
         )
 
-    if local_rank == 0:
-        print(
-            f"\n\n============================Testing with {num_sms=}============================\n\n",
-            flush=True,
-        )
-    test_main(args, num_sms, local_rank, num_ranks, rank, buffer, group)
-    if local_rank == 0:
-        print("", flush=True)
+    test_main(
+        args=args,
+        num_sms=num_sms,
+        local_rank=local_rank,
+        num_ranks=num_ranks,
+        rank=rank,
+        buffer=buffer,
+        group=group,
+    )
 
     # Destroy the buffer runtime
     if use_grpcoll_mgr:
