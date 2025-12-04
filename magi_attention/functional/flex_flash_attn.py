@@ -760,6 +760,7 @@ def flex_flash_attn_func(
     ref_block_size: tuple[int, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
+    ffa test tag
     An interface similar to flash attention that doesn't require distributed environment, dispatch or undispatch.
     Directly call magi_attn_kernel to get attention output and lse. This is faster when you don't need context parallel.
 
