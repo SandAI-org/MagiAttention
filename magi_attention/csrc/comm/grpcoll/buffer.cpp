@@ -602,9 +602,9 @@ Buffer::intranode_group_cast(
       /*recv_src_idx=*/recv_src_idx.data_ptr<int>(),
       /*recv_channel_offset=*/recv_channel_prefix_matrix.data_ptr<int>(),
       /*send_head=*/send_head.data_ptr<int>(),
-      /*post_perm_idx=*/post_perm_idx_ptr,
       /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
       /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
+      /*post_perm_idx=*/post_perm_idx_ptr,
       /*num_tokens=*/num_tokens,
       /*hidden_int4=*/hidden_int4,
       /*num_heads=*/num_heads,
@@ -852,11 +852,11 @@ Buffer::intranode_group_reduce(
       /*lse=*/lse_ptr,
       /*reduced_x_2nd=*/reduced_x_ptr_2nd,
       /*x_2nd=*/x_ptr_2nd,
-      /*pre_perm_idx=*/pre_perm_idx_ptr,
+      /*send_head=*/send_head.data_ptr<int>(),
       /*src_idx=*/src_idx.data_ptr<int>(),
       /*rank_prefix_matrix=*/rank_prefix_matrix.data_ptr<int>(),
       /*channel_prefix_matrix=*/channel_prefix_matrix.data_ptr<int>(),
-      /*send_head=*/send_head.data_ptr<int>(),
+      /*pre_perm_idx=*/pre_perm_idx_ptr,
       /*num_tokens=*/num_tokens,
       /*num_recv_tokens=*/num_reduced_tokens,
       /*hidden_size=*/hidden_size,
@@ -1148,8 +1148,8 @@ Buffer::internode_group_cast(
       /*recv_rdma_rank_prefix_sum=*/recv_rdma_rank_prefix_sum.data_ptr<int>(),
       /*gbl_channel_prefix_matrix=*/gbl_channel_prefix_matrix.data_ptr<int>(),
       /*recv_gbl_rank_prefix_sum=*/recv_gbl_rank_prefix_sum.data_ptr<int>(),
-      /*post_perm_idx=*/post_perm_idx_ptr,
       /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
+      /*post_perm_idx=*/post_perm_idx_ptr,
       /*num_tokens=*/num_tokens,
       /*hidden_int4=*/hidden_int4,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
@@ -1289,6 +1289,15 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     stream_wait(comm_stream, compute_stream);
   }
 
+  // Assign ptr for pre_perm_idx if needed
+  int64_t* pre_perm_idx_ptr = nullptr;
+  if (pre_perm_idx.has_value()) {
+    GRPCOLL_HOST_ASSERT(pre_perm_idx->dim() == 1 && pre_perm_idx->is_contiguous());
+    GRPCOLL_HOST_ASSERT(pre_perm_idx->scalar_type() == torch::kInt64);
+    GRPCOLL_HOST_ASSERT(pre_perm_idx->size(0) == num_tokens);
+    pre_perm_idx_ptr = pre_perm_idx->data_ptr<int64_t>();
+  }
+
   // Extra check for avoid-dead-lock design
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_send_tokens <= config.num_max_nvl_chunked_recv_tokens / num_rdma_ranks);
@@ -1336,16 +1345,18 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
 
   // Launch group reduce kernel
   internode::group_reduce(
-      /*type=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
       /*reduced_x=*/reduced_x.data_ptr(),
-      /*is_reduced_token_in_rank=*/is_reduced_token_in_rank.data_ptr<bool>(),
+      /*reduced_lse=*/nullptr,
       /*x=*/x.data_ptr(),
+      /*lse=*/nullptr,
+      /*is_reduced_token_in_rank=*/is_reduced_token_in_rank.data_ptr<bool>(),
       /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
       /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
       /*src_meta=*/src_meta.data_ptr(),
       /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
       /*rdma_rank_prefix_sum=*/rdma_rank_prefix_sum.data_ptr<int>(),
       /*gbl_channel_prefix_matrix=*/gbl_channel_prefix_matrix.data_ptr<int>(),
+      /*pre_perm_idx*/ pre_perm_idx_ptr,
       /*num_tokens=*/num_tokens,
       /*num_reduced_tokens=*/num_reduced_tokens,
       /*hidden_size=*/hidden,
@@ -1359,7 +1370,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       /*num_ranks=*/num_ranks,
       /*stream=*/comm_stream,
       /*num_channels=*/num_channels,
-      /*low_latency_mode=*/low_latency_mode);
+      /*low_latency_mode=*/low_latency_mode,
+      /*type=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()));
 
   // Record or wait streams
   std::optional<EventHandle> event;
