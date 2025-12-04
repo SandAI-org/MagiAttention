@@ -1001,11 +1001,6 @@ Buffer::internode_group_cast(
   auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
   auto num_experts = cached_mode ? 0 : static_cast<int>(num_tokens_per_expert->size(0)), num_local_experts = num_experts / num_ranks;
 
-  // Top-k checks
-  int num_topk = 0;
-  int64_t* topk_idx_ptr = nullptr;
-  float* topk_weights_ptr = nullptr;
-
   // Set current stream to comm stream if needed
   // NOTES: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
@@ -1040,8 +1035,6 @@ Buffer::internode_group_cast(
     // Just a barrier and clean flags
     internode::cached_notify(
         /*hidden_int4=*/hidden_int4,
-        /*num_topk=*/num_topk,
-        /*num_topk_weights=*/num_topk,
         /*num_ranks=*/num_ranks,
         /*num_channels=*/num_channels,
         /*num_combined_tokens=*/0,
@@ -1086,7 +1079,6 @@ Buffer::internode_group_cast(
         /*num_tokens=*/num_tokens,
         /*num_channels=*/num_channels,
         /*hidden_int4=*/hidden_int4,
-        /*num_topk=*/num_topk,
         /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
         /*recv_rdma_rank_prefix_sum=*/recv_rdma_rank_prefix_sum.data_ptr<int>(),
         /*gbl_channel_prefix_matrix=*/gbl_channel_prefix_matrix.data_ptr<int>(),
@@ -1156,20 +1148,12 @@ Buffer::internode_group_cast(
     send_nvl_head = torch::empty({num_rdma_recv_tokens, NUM_MAX_NVL_PEERS}, dtype(torch::kInt32).device(torch::kCUDA));
   }
 
-  // Assign ptrs
-  int64_t* recv_topk_idx_ptr = nullptr;
-  float* recv_topk_weights_ptr = nullptr;
-
   // Launch data dispatch
   // NOTES: the buffer size checks are moved into the `.cu` file
   internode::dispatch(
       /*recv_x=*/recv_x.data_ptr(),
-      /*recv_topk_idx=*/recv_topk_idx_ptr,
-      /*recv_topk_weights=*/recv_topk_weights_ptr,
       /*recv_src_meta=*/cached_mode ? nullptr : recv_src_meta->data_ptr(),
       /*x=*/x.data_ptr(),
-      /*topk_idx=*/topk_idx_ptr,
-      /*topk_weights=*/topk_weights_ptr,
       /*send_rdma_head=*/cached_mode ? nullptr : send_rdma_head->data_ptr<int>(),
       /*send_nvl_head=*/cached_mode ? nullptr : send_nvl_head->data_ptr<int>(),
       /*recv_rdma_channel_prefix_matrix=*/cached_mode ? nullptr : recv_rdma_channel_prefix_matrix->data_ptr<int>(),
@@ -1181,7 +1165,6 @@ Buffer::internode_group_cast(
       /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
       /*num_tokens=*/num_tokens,
       /*hidden_int4=*/hidden_int4,
-      /*num_topk=*/num_topk,
       /*num_experts=*/num_experts,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
@@ -1333,8 +1316,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   // Launch barrier and reset queue head and tail
   internode::cached_notify(
       /*hidden_int4=*/hidden_int4,
-      /*num_topk_idx=*/0,
-      /*num_topk_weights=*/num_topk,
       /*num_ranks=*/num_ranks,
       /*num_channels=*/num_channels,
       /*num_combined_tokens=*/num_combined_tokens,
