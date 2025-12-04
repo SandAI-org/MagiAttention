@@ -1330,9 +1330,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       /*is_cached_dispatch=*/false,
       /*low_latency_mode=*/low_latency_mode);
 
-  // Assign bias ptrs
-  void* bias_ptrs[2] = {nullptr, nullptr};
-
   // Allocate combined_x buffer
   auto combined_x = torch::Tensor();
   if (combined_x_buf.has_value()) {
@@ -1358,8 +1355,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       /*combined_x=*/combined_x.data_ptr(),
       /*is_combined_token_in_rank=*/is_combined_token_in_rank.data_ptr<bool>(),
       /*x=*/x.data_ptr(),
-      /*bias_0=*/bias_ptrs[0],
-      /*bias_1=*/bias_ptrs[1],
       /*combined_rdma_head=*/combined_rdma_head.data_ptr<int>(),
       /*combined_nvl_head=*/combined_nvl_head.data_ptr<int>(),
       /*src_meta=*/src_meta.data_ptr(),
