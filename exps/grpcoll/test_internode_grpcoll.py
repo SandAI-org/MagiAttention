@@ -608,6 +608,7 @@ def test_func(
     x_group_reduce = sim_gemm(recv_x, w=sim_gemm_weight)
 
     # permute x to the rank order
+    use_a2av_perm_idxs = "outside"  # FIXME: support "inside" for group reduce
     if random_permute_output:
         if use_a2av_perm_idxs == "inside":
             # will permute inside
@@ -906,16 +907,25 @@ def test_main(
 ):
     # Settings
     num_tokens, hidden_size = args.num_tokens, args.hidden_size
+    num_channels = num_sms // 2
+    num_heads = 16
 
     distinct_token = True
     random_permute_output = True
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
     num_input_splits = 10
+    num_data_groups = 3  # set this > 1 to allow transfer multiple data groups together within the same kernel
+    assert 1 <= num_data_groups <= 3
 
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
     dtype = torch.bfloat16  # TODO: make it parameterizable
     assert dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64)
+
+    # Remake the hidden size to control
+    # the communication bytes per token the same as bf16/fp16
+    hidden_size = hidden_size * 2 // dtype.itemsize
+    assert hidden_size % num_heads == 0
 
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
@@ -926,7 +936,7 @@ def test_main(
     if acc_reduce_out_buffer:
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"
 
-    use_a2av_perm_idxs = "outside"  # TODO: support a2av_perm_idxs inside
+    use_a2av_perm_idxs = "inside"
     assert use_a2av_perm_idxs in ("no", "outside", "inside")
 
     cast_lse = False
@@ -955,8 +965,14 @@ def test_main(
     if local_rank == 0:
         print(
             (
-                f"[config] {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=} | {nvl_buffer_size=}\n"
-                f"{num_max_rdma_chunked_send_tokens=} | {num_max_rdma_chunked_recv_tokens=} | {rdma_buffer_size=}\n"
+                f"[config] {num_sms=} | {num_channels=} | "
+                f"{num_tokens=} | {hidden_size=} | {dtype=}\n"
+                f"{num_heads=} | {num_data_groups=} | {cast_lse=} | {reduce_op=}\n"
+                f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
+                f"{rdma_buffer_size=} | {num_max_rdma_chunked_send_tokens=} | {num_max_rdma_chunked_recv_tokens=}\n"
+                f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
+                f"{pass_out_buffer=} | {pass_out_lse_buffer=} | {pass_padded_out_buffer=}\n"
+                f"{acc_reduce_out_buffer=} | {acc_reduce_constant=} | {use_a2av_perm_idxs=}\n"
             ),
             flush=True,
         )
@@ -1028,11 +1044,6 @@ def test_main(
 
 
 def test_loop(args: argparse.Namespace):
-    use_grpcoll_mgr = True
-
-    num_tokens, hidden_size = args.num_tokens, args.hidden_size
-    num_topk = args.num_topk
-
     # init dist
     (
         rank,
@@ -1046,33 +1057,32 @@ def test_loop(args: argparse.Namespace):
     ) = setup_dist_env(base_seed=0, seed_bias=lambda rank: rank)
     assert num_local_ranks == 8 and num_ranks > 8
 
-    # if args.test_ll_compatibility:
-    #     ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
-    ll_num_experts = 256
+    # set grpcoll config
+    use_grpcoll_mgr = True
+    if args.test_ll_compatibility:
+        ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
+        if local_rank == 0:
+            print(
+                f"Low latency mode: {ll_num_tokens=} | {ll_hidden=} | {ll_num_experts=} | {ll_num_topk=}",
+                flush=True,
+            )
 
     num_sms = 24
     num_qps_per_rank = max(
         num_sms, ll_num_experts // num_ranks if args.test_ll_compatibility else 0
     )
-    args.num_topk_groups = num_topk_groups = num_nodes
 
     num_nvl_bytes = int(2e9)  # ~2GB
     num_rdma_bytes = int(1e9)  # ~1GB
 
-    # reset for group-collective
-    num_topk = num_ranks
-    args.num_topk = num_topk
-
+    # print config
     if local_rank == 0:
         print(
             (
                 f"[config] {num_nvl_bytes=} ({num_nvl_bytes / 1024**3:.2f} GB) | "
                 f"{num_rdma_bytes=} ({num_rdma_bytes / 1024**3:.2f} GB) | "
                 f"{num_nodes=} (num_rdma_ranks) | {num_ranks=} | "
-                f"{num_local_ranks=} | {group.size()=} | "
-                f" {num_sms=} | {num_qps_per_rank=} | "
-                f"{num_tokens=} | {hidden_size=} | {num_topk=} | "
-                f"{num_topk_groups=}\n"
+                f"{num_local_ranks=} | {group.size()=} | {num_qps_per_rank=}\n"
             ),
             flush=True,
         )

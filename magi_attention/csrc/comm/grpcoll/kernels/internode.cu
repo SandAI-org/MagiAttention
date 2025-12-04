@@ -483,9 +483,13 @@ template <
     int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks)>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_cast(kNumGroupCastRDMASenderWarps), 1)
 void group_cast_kernel(
+    /* 1st group of input / output data*/
     int4* recv_x,
-    SourceMeta* recv_src_meta,
+    float* recv_lse,
     const int4* x,
+    const float* lse,
+    /* other metadata */
+    SourceMeta* recv_src_meta,
     int* send_rdma_head,
     int* send_nvl_head,
     int* recv_rdma_channel_prefix_matrix,
@@ -494,6 +498,7 @@ void group_cast_kernel(
     const int* recv_rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
     const int* recv_gbl_rank_prefix_sum,
+    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     int num_tokens,
     int hidden_int4,
@@ -1324,6 +1329,7 @@ void group_cast_kernel(
 
         // Get recv token idx in the `recv_x`
         int64_t token_idx_in_recv_x = broadcast_in_warp(/*val=*/total_offset, /*src_lane=*/src_meta.src_rdma_rank);
+        token_idx_in_recv_x = post_perm_idx == nullptr ? token_idx_in_recv_x : post_perm_idx[token_idx_in_recv_x];
 
         // Increment `total_offset` of next token for `src_rdma_rank`
         (lane_id == src_meta.src_rdma_rank) ? (++total_offset) : 0;
@@ -1412,9 +1418,13 @@ void group_cast_kernel(
 }
 
 void group_cast(
+    /* 1st group of input / output data*/
     void* recv_x,
-    void* recv_src_meta,
+    float* recv_lse,
     const void* x,
+    const float* lse,
+    /* other metadata */
+    void* recv_src_meta,
     int* send_rdma_head,
     int* send_nvl_head,
     int* recv_rdma_channel_prefix_matrix,
@@ -1423,6 +1433,7 @@ void group_cast(
     const int* recv_rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
     const int* recv_gbl_rank_prefix_sum,
+    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     int num_tokens,
     int hidden_int4,
@@ -1457,8 +1468,10 @@ void group_cast(
         &cfg,                                                                                                                          \
         group_cast_func,                                                                                                               \
         reinterpret_cast<int4*>(recv_x),                                                                                               \
-        reinterpret_cast<SourceMeta*>(recv_src_meta),                                                                                  \
+        recv_lse,                                                                                                                      \
         reinterpret_cast<const int4*>(x),                                                                                              \
+        lse,                                                                                                                           \
+        reinterpret_cast<SourceMeta*>(recv_src_meta),                                                                                  \
         send_rdma_head,                                                                                                                \
         send_nvl_head,                                                                                                                 \
         recv_rdma_channel_prefix_matrix,                                                                                               \
@@ -1467,6 +1480,7 @@ void group_cast(
         recv_rdma_rank_prefix_sum,                                                                                                     \
         gbl_channel_prefix_matrix,                                                                                                     \
         recv_gbl_rank_prefix_sum,                                                                                                      \
+        post_perm_idx,                                                                                                                 \
         is_token_in_rank,                                                                                                              \
         num_tokens,                                                                                                                    \
         hidden_int4,                                                                                                                   \
@@ -1546,7 +1560,7 @@ __global__ void cached_notify_kernel(
 
     // Barrier all finally
     barrier_all<kLowLatencyMode, /*kSyncOnly=*/false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
-  } else if (sm_id == 1) { // the second SM is responsible to reset the rdma head before group_reduce
+  } else if (sm_id == 1) { // the second SM is responsible to reset the RDMA head before group_reduce
     // If this is a cached group_cast,
     // no need to reset the rdma head, just return
     if (is_cached_group_cast)
@@ -1570,19 +1584,20 @@ __global__ void cached_notify_kernel(
         }
       }
     }
-  } else { // the rest of SMs are responsible to reset the nvl head before group_reduce
+  } else { // the rest of SMs are responsible to reset the NVL head before group_reduce
     // If this is a cached group_cast,
     // no need to reset the nvl head, just return
     if (is_cached_group_cast)
       return;
 
     if (warp_id < num_channels) {
+      const auto rest_sm_id = sm_id - 2, num_rest_sms = num_channels * 2 - 2;
       constexpr int tma_batch_size = kNumTMABytesPerWarp - sizeof(uint64_t);
       constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
       constexpr int num_tokens_per_batch = tma_batch_size / num_bytes_per_token;
       GRPCOLL_STATIC_ASSERT(num_bytes_per_token % 16 == 0, "num_bytes_per_token should be divisible by 16");
 
-      // TMA stuffs
+      // Prepare TMA buffer and init mbarrier
       extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
       auto tma_buffer = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
       auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + tma_batch_size);
@@ -1594,25 +1609,34 @@ __global__ void cached_notify_kernel(
       }
       __syncwarp();
 
-      for (int dst_rdma_rank = sm_id - 2; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_channels * 2 - 2) {
+      // Each rest SM for one dst RDMA peer
+      for (int dst_rdma_rank = rest_sm_id; dst_rdma_rank < num_rdma_ranks; dst_rdma_rank += num_rest_sms) {
         // Iterate in reverse order
         int token_start_idx = warp_id == 0 ? 0 : rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id - 1];
         int token_end_idx = rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + warp_id];
-        int shift = dst_rdma_rank == 0 ? 0 : rdma_rank_prefix_sum[dst_rdma_rank - 1];
-        token_start_idx += shift, token_end_idx += shift;
+        int rank_prefix = dst_rdma_rank == 0 ? 0 : rdma_rank_prefix_sum[dst_rdma_rank - 1];
+        token_start_idx += rank_prefix, token_end_idx += rank_prefix;
 
-        // NOTES: `1 << 25` is a heuristic large number
-        int last_head = 1 << 25;
+        int last_head = 1 << 25; // NOTES: `1 << 25` is a heuristic large number
         for (int batch_end_idx = token_end_idx; batch_end_idx > token_start_idx; batch_end_idx -= num_tokens_per_batch) {
           auto batch_start_idx = max(token_start_idx, batch_end_idx - num_tokens_per_batch);
 
+          // TMA-copy original reduced NVL head to TMA buffer in shared memory
           if (lane_id == 0) {
-            tma_load_1d(tma_buffer, reduced_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, tma_mbarrier, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
+            tma_load_1d(
+                /*smem_ptr=*/tma_buffer,
+                /*gmem_ptr=*/reduced_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS,
+                /*mbar_ptr=*/tma_mbarrier,
+                /*num_bytes=*/(batch_end_idx - batch_start_idx) * num_bytes_per_token,
+                /*evict_first=*/true);
             mbarrier_arrive_and_expect_tx(tma_mbarrier, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
           }
+
+          // Wait for TMA-load to be finished
           mbarrier_wait(tma_mbarrier, tma_phase);
           __syncwarp();
 
+          // Reset those `-1` entries of NVL head
           for (int token_idx = batch_end_idx - 1; token_idx >= batch_start_idx; --token_idx) {
             if (lane_id < NUM_MAX_NVL_PEERS) {
               auto current_head = reinterpret_cast<int*>(tma_buffer)[(token_idx - batch_start_idx) * NUM_MAX_NVL_PEERS + lane_id];
@@ -1623,11 +1647,23 @@ __global__ void cached_notify_kernel(
               }
             }
           }
+
+          // Fence all lanes to wait for all update to TMA buffer
+          // in shared memory to be visible to each other
+          // before issuing the next TMA-store
           tma_store_fence();
           __syncwarp();
 
-          if (lane_id == 0)
-            tma_store_1d(tma_buffer, reduced_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
+          // TMA-copy updated NVL head from TMA buffer in shared memory to global memory
+          if (lane_id == 0) {
+            tma_store_1d(
+                /*smem_ptr=*/tma_buffer,
+                /*gmem_ptr=*/reduced_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS,
+                /*num_bytes=*/(batch_end_idx - batch_start_idx) * num_bytes_per_token,
+                /*evict_first=*/true);
+          }
+
+          // Wait for TMA-store to be finished
           tma_store_wait();
           __syncwarp();
         }
@@ -1670,7 +1706,7 @@ void cached_notify(
   // REVIEW: why limited to INT_MAX ?
   GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
   GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
-  GRPCOLL_HOST_ASSERT(num_sms > 3); // REVIEW: why num_sms > 3 ?
+  GRPCOLL_HOST_ASSERT(num_sms > 3); // first to barrier, second to reset RDMA head, rest to reset NVL head
   GRPCOLL_HOST_ASSERT(num_warps > 1); // for `barrier_all`
   if (!is_cached_group_cast) {
     // for rdma head reset before group_reduce
