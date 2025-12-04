@@ -107,6 +107,10 @@ struct Flash_fwd_params : public Qkv_params {
   int num_sm;
   int* __restrict__ tile_count_semaphore;
 
+  // Sparse load params
+  int* __restrict__ sparse_load_loop_count;
+  int* __restrict__ sparse_load_invalid_count;
+
   bool has_sink() const {
     return total_sink > 0;
   }
@@ -168,7 +172,7 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction, bool Deterministic>
+template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableFwdAtomicReduction, bool Deterministic, bool ProfileMode, bool SparseLoad>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream);
 
 template <int Arch, typename T, typename T_out, int kHeadDim, bool Has_softcap, bool DisableBwdDkvAtomicReduction, bool Deterministic, bool ProfileMode>
