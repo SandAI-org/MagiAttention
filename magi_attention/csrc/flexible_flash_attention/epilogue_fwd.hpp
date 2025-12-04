@@ -111,7 +111,10 @@ struct CollectiveEpilogueFwd {
 
   // (seqlen_q, d, head)
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>;
+  using ShapeOPacked = std::conditional_t<!PackGQA, ShapeO, cute::Shape<cute::Shape<_4, int32_t>, int32_t, int32_t>>; // ((qhead_per_khead, seqlen_q), d, nheads_kv)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
+  using StrideOPacked = std::conditional_t<!PackGQA, StrideO, cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>>;
+
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (seqlen_q, nheads_qo)
   using StrideLSE = cute::Stride<int64_t, _1>; // (seqlen_q, head)
   using ShapeLSEPacked = std::conditional_t<!PackGQA, ShapeLSE, cute::Shape<cute::Shape<int32_t, int32_t>, int32_t>>; // ((qhead_per_khead, seqlen_q), nheads_kv)
@@ -158,7 +161,9 @@ struct CollectiveEpilogueFwd {
   struct Params {
     Element* ptr_O;
     ShapeO const shape_O;
+    ShapeOPacked const shape_O_packed;
     StrideO const stride_O;
+    StrideOPacked const stride_O_packed;
     float* ptr_LSE;
     ShapeLSE const shape_LSE;
     ShapeLSEPacked const shape_LSE_packed;
@@ -186,10 +191,17 @@ struct CollectiveEpilogueFwd {
 
     auto const stride_LSE_packed = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), qhead_per_khead));
 
+    auto const shape_O_packed =
+        cute::conditional_return<!PackGQA>(args.shape_O, make_shape(make_shape(_4{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
+    auto const stride_O_packed = cute::conditional_return<!PackGQA>(
+        args.stride_O, make_stride(make_stride(get<2>(args.stride_O), get<0>(args.stride_O)), get<1>(args.stride_O), get<2>(args.stride_O) * qhead_per_khead));
+
     return {
         args.ptr_O,
         args.shape_O,
+        shape_O_packed,
         args.stride_O,
+        stride_O_packed,
         args.ptr_LSE,
         shape_LSE,
         shape_LSE_packed,
@@ -357,10 +369,30 @@ struct CollectiveEpilogueFwd {
     // Get warp group index for current thread
     int warp_group_idx = __shfl_sync(0xFFFFFFFF, thread_idx / cutlass::NumThreadsPerWarpGroup, 0);
 
+    // get qhead_per_khead
+    // TODO: we can refer to fa3 to optimize this;
+    int qhead_per_khead = !PackGQA ?: (params.nheads / params.nheads_kv);
+
     // Define Tensors for mO, gO, sO
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
     Tensor gO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
     Tensor sO = make_tensor(make_smem_ptr(shared_storage.tensors.epilogue.smem_o.data()), SmemLayoutO{});
+
+    auto mOPacked = [&]() {
+      if constexpr (!PackGQA) {
+        return mO;
+      } else {
+        return make_tensor(make_gmem_ptr(params.ptr_O), make_layout(params.shape_O_packed, params.stride_O_packed))(_, _, bidh);
+      }
+    }();
+
+    auto gOPacked = [&]() {
+      if constexpr (!PackGQA) {
+        return gO;
+      } else {
+        return local_tile(cute::domain_offset(make_coord(offset_o * qhead_per_khead, _0{}), mOPacked), select<0, 1>(TileShape_MNK_PV{}), make_coord(m_block, _0{}));
+      }
+    }();
 
     // Define sO as position independent swizzle tensor
     // Tensor sO_pi = cute::as_position_independent_swizzle_tensor(sO);
@@ -391,7 +423,6 @@ struct CollectiveEpilogueFwd {
       }
     }();
 
-    int qhead_per_khead = !PackGQA ?: (params.nheads / params.nheads_kv);
     Tensor gLSE = local_tile(cute::domain_offset(make_coord(offset_o), mLSE), select<0>(TileShape_MNK_PV{}), make_coord(m_block));
     Tensor gLSEPacked = [&]() {
       if constexpr (!PackGQA) {
@@ -558,6 +589,7 @@ struct CollectiveEpilogueFwd {
 
     // Initialize tOgO to store O to gmem
     Tensor tOgO = gmem_thr_copy_O.partition_D(gO);
+    Tensor tOgOPacked = gmem_thr_copy_O.partition_D(gOPacked);
 
     // Convert tOrO to Element type and copy to smem
     {
@@ -599,8 +631,13 @@ struct CollectiveEpilogueFwd {
     // }
 
     // Clear_OOB_K must be false since we don't want to write zeros to gmem
-    flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
-        gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
+    if constexpr (!PackGQA) {
+      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+          gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
+    } else {
+      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+          gmem_tiled_copy_O, tOrFinalO, tOgOPacked, tOcO, tOpO, seqlen_o * qhead_per_khead - m_block * kBlockM);
+    }
 
     // TODO: Fix TMA store
     // BUG: The following TMA code does not handle out-of-bounds access, needs to be fixed
