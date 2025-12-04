@@ -465,7 +465,6 @@ void notify_dispatch(
     int num_tokens,
     int num_channels,
     int hidden_int4,
-    int num_topk,
     int* rdma_channel_prefix_matrix,
     int* recv_rdma_rank_prefix_sum,
     int* gbl_channel_prefix_matrix,
@@ -518,9 +517,18 @@ void notify_dispatch(
   break
 
   // Get clean meta
-  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, /*num_scales=*/0, num_topk, num_topk, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-  auto nvl_clean_meta =
-      get_nvl_clean_meta(hidden_int4, /*num_scales=*/0, num_topk, num_topk, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, true);
+  auto rdma_clean_meta =
+      get_rdma_clean_meta(hidden_int4, /*num_scales=*/0, /*num_topk_idx=*/0, /*num_topk_weights=*/0, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
+  auto nvl_clean_meta = get_nvl_clean_meta(
+      hidden_int4,
+      /*num_scales=*/0,
+      /*num_topk_idx=*/0,
+      /*num_topk_weights=*/0,
+      num_rdma_ranks,
+      NUM_MAX_NVL_PEERS,
+      num_max_nvl_chunked_recv_tokens,
+      num_channels,
+      true);
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
   // REVIEW: why limited to INT_MAX ?
@@ -550,12 +558,8 @@ template <
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_dispatch(kNumDispatchRDMASenderWarps), 1)
 void dispatch(
     int4* recv_x,
-    int64_t* recv_topk_idx,
-    float* recv_topk_weights,
     SourceMeta* recv_src_meta,
     const int4* x,
-    const int64_t* topk_idx,
-    const float* topk_weights,
     int* send_rdma_head,
     int* send_nvl_head,
     int* recv_rdma_channel_prefix_matrix,
@@ -567,7 +571,6 @@ void dispatch(
     const bool* is_token_in_rank,
     int num_tokens,
     int hidden_int4,
-    int num_topk,
     int num_experts,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
@@ -589,6 +592,12 @@ void dispatch(
   const float* x_scales = nullptr;
   float* recv_x_scales = nullptr;
   int num_scales = 0, scale_token_stride = 0, scale_hidden_stride = 0;
+
+  int64_t* recv_topk_idx = nullptr;
+  float* recv_topk_weights = nullptr;
+  const int64_t* topk_idx = nullptr;
+  const float* topk_weights = nullptr;
+  int num_topk = 0;
 
   GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
   GRPCOLL_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe == num_channels or ibgda_get_state()->num_rc_per_pe >= num_sms);
@@ -1481,12 +1490,8 @@ void dispatch(
 
 void dispatch(
     void* recv_x,
-    int64_t* recv_topk_idx,
-    float* recv_topk_weights,
     void* recv_src_meta,
     const void* x,
-    const int64_t* topk_idx,
-    const float* topk_weights,
     int* send_rdma_head,
     int* send_nvl_head,
     int* recv_rdma_channel_prefix_matrix,
@@ -1498,7 +1503,6 @@ void dispatch(
     const bool* is_token_in_rank,
     int num_tokens,
     int hidden_int4,
-    int num_topk,
     int num_experts,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
@@ -1530,12 +1534,8 @@ void dispatch(
         &cfg,                                                                                                                                                \
         dispatch_func,                                                                                                                                       \
         reinterpret_cast<int4*>(recv_x),                                                                                                                     \
-        recv_topk_idx,                                                                                                                                       \
-        recv_topk_weights,                                                                                                                                   \
         reinterpret_cast<SourceMeta*>(recv_src_meta),                                                                                                        \
         reinterpret_cast<const int4*>(x),                                                                                                                    \
-        topk_idx,                                                                                                                                            \
-        topk_weights,                                                                                                                                        \
         send_rdma_head,                                                                                                                                      \
         send_nvl_head,                                                                                                                                       \
         recv_rdma_channel_prefix_matrix,                                                                                                                     \
@@ -1547,7 +1547,6 @@ void dispatch(
         is_token_in_rank,                                                                                                                                    \
         num_tokens,                                                                                                                                          \
         hidden_int4,                                                                                                                                         \
-        num_topk,                                                                                                                                            \
         num_experts,                                                                                                                                         \
         rdma_buffer_ptr,                                                                                                                                     \
         num_max_rdma_chunked_send_tokens,                                                                                                                    \
@@ -1560,11 +1559,8 @@ void dispatch(
   }                                                                                                                                                          \
   break
 
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, /*num_scales=*/0, num_topk, num_topk);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, /*num_scales=*/0, /*num_topk_idx=*/0, /*num_topk_weights=*/0);
   GRPCOLL_HOST_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
-  GRPCOLL_HOST_ASSERT((topk_idx == nullptr) == (topk_weights == nullptr));
-  GRPCOLL_HOST_ASSERT((recv_topk_idx == nullptr) == (recv_topk_weights == nullptr));
-  GRPCOLL_HOST_ASSERT(num_topk <= WARP_SIZE);
   // NOTES: in case of splitting, the issued put at the end of the buffer
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0);
 
@@ -1720,8 +1716,6 @@ __global__ void cached_notify(
 
 void cached_notify(
     int hidden_int4,
-    int num_topk_idx,
-    int num_topk_weights,
     int num_ranks,
     int num_channels,
     int num_combined_tokens,
@@ -1748,12 +1742,12 @@ void cached_notify(
 
   // Get clean meta
   auto rdma_clean_meta =
-      get_rdma_clean_meta(hidden_int4, /*num_scales=*/0, num_topk_idx, num_topk_weights, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
+      get_rdma_clean_meta(hidden_int4, /*num_scales=*/0, /*num_topk_idx=*/0, /*num_topk_weights=*/0, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
   auto nvl_clean_meta = get_nvl_clean_meta(
       hidden_int4,
       /*num_scales=*/0,
-      num_topk_idx,
-      num_topk_weights,
+      /*num_topk_idx=*/0,
+      /*num_topk_weights=*/0,
       num_rdma_ranks,
       NUM_MAX_NVL_PEERS,
       num_max_nvl_chunked_recv_tokens,
