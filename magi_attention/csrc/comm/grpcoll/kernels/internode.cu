@@ -98,8 +98,8 @@ constexpr int get_num_threads_group_cast(const int num_group_cast_rdma_sender_wa
   return (num_group_cast_rdma_sender_warps + 1 + NUM_MAX_NVL_PEERS) * WARP_SIZE;
 }
 
-constexpr int get_num_threads_combine(const int num_combine_forwarder_warps) {
-  return (num_combine_forwarder_warps + 1) * WARP_SIZE;
+constexpr int get_num_threads_group_reduce(const int num_group_reduce_forwarder_warps) {
+  return (num_group_reduce_forwarder_warps + 1) * WARP_SIZE;
 }
 
 HOST_DEVICE_INLINE int get_num_bytes_per_token(int hidden_int4) {
@@ -743,7 +743,7 @@ void group_cast_kernel(
       }
       __syncwarp();
 
-      // Store RDMA head for combine stage to reduce
+      // Store RDMA head for group_reduce stage to reduce
       //  `send_rdma_head`: shape=(num_tokens, kNumRDMARanks), dtype=int
       if (lane_id < kNumRDMARanks and not kCachedMode)
         send_rdma_head[token_idx * kNumRDMARanks + lane_id] = rdma_tail_idx;
@@ -996,7 +996,7 @@ void group_cast_kernel(
           num_tokens_to_recv_from_rdma = rdma_token_end_idx - rdma_token_start_idx;
           GRPCOLL_DEVICE_ASSERT(num_tokens_to_recv_from_rdma >= 0);
 
-          // Store `rdma_token_end_idx` for combine stage
+          // Store `rdma_token_end_idx` for group_reduce stage
           //  `recv_rdma_channel_prefix_matrix`: shape=[kNumRDMARanks, kNumChannels], dtype=int
           if (not kCachedMode)
             recv_rdma_channel_prefix_matrix[lane_id * num_channels + channel_id] = rdma_token_end_idx;
@@ -1117,7 +1117,7 @@ void group_cast_kernel(
 
         // If this RDMA token does not need to forward to dst NVL peer, skip it
         // Otherwise, increment `rdma_nvl_token_idx` and update `send_nvl_head`
-        // of current RDMA token for combine stage
+        // of current RDMA token for group_reduce stage
         bool is_in_dst_nvl_rank = src_meta.is_token_in_nvl_rank(dst_nvl_rank);
         if (lane_id == src_rdma_rank) {
           auto cached_head = is_in_dst_nvl_rank ? rdma_nvl_token_idx : -1;
@@ -1274,7 +1274,7 @@ void group_cast_kernel(
     // Warp-reduce across all RDMA peers for the src NVL rank
     num_tokens_to_recv = warp_reduce_sum(end_offset - start_offset);
 
-    // Store `recv_gbl_channel_prefix_matrix` for combine stage
+    // Store `recv_gbl_channel_prefix_matrix` for group_reduce stage
     //  `recv_gbl_channel_prefix_matrix`: shape=(kNumRanks, num_channels), dtype=int
     if (lane_id < kNumRDMARanks and not kCachedMode)
       recv_gbl_channel_prefix_matrix[(lane_id * NUM_MAX_NVL_PEERS + src_nvl_rank) * num_channels + channel_id] = total_offset;
@@ -1379,7 +1379,7 @@ void group_cast_kernel(
               /*ST_FUNC=*/st_na_global);
         }
 
-        // Copy src meta to `recv_src_meta` for combine stage
+        // Copy src meta to `recv_src_meta` for group_reduce stage
         token_ptr_in_buffer += scale_bytes;
         if (lane_id == 0 and not kCachedMode)
           st_na_global(recv_src_meta + token_idx_in_recv_x, src_meta); // non-cached store
@@ -1506,12 +1506,12 @@ __global__ void cached_notify_kernel(
     const int rdma_num_int_clean,
     const int nvl_clean_offset,
     const int nvl_num_int_clean,
-    int* combined_rdma_head,
-    int num_combined_tokens,
+    int* reduced_rdma_head,
+    int num_reduced_tokens,
     int num_channels,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
-    int* combined_nvl_head,
+    int* reduced_nvl_head,
     void* rdma_buffer_ptr,
     void** buffer_ptrs,
     int** barrier_signal_ptrs,
@@ -1546,7 +1546,7 @@ __global__ void cached_notify_kernel(
 
     // Barrier all finally
     barrier_all<kLowLatencyMode, /*kSyncOnly=*/false>(thread_id, rdma_team, barrier_signal_ptrs, nvl_rank);
-  } else if (sm_id == 1) { // the second SM is responsible to reset the rdma head before combine
+  } else if (sm_id == 1) { // the second SM is responsible to reset the rdma head before group_reduce
     // If this is a cached group_cast,
     // no need to reset the rdma head, just return
     if (is_cached_group_cast)
@@ -1557,20 +1557,20 @@ __global__ void cached_notify_kernel(
     // and each lane in any warp is responsible for one rdma rank of the corr. channel
     if (lane_id < num_rdma_ranks and warp_id < num_channels) {
       int token_start_idx, token_end_idx;
-      get_channel_task_range(num_combined_tokens, num_channels, warp_id, token_start_idx, token_end_idx);
+      get_channel_task_range(num_reduced_tokens, num_channels, warp_id, token_start_idx, token_end_idx);
 
       // NOTES: `1 << 25` is a heuristic large number
       int last_head = 1 << 25;
       for (int token_idx = token_end_idx - 1; token_idx >= token_start_idx; --token_idx) {
-        auto current_head = __ldg(combined_rdma_head + token_idx * num_rdma_ranks + lane_id);
+        auto current_head = __ldg(reduced_rdma_head + token_idx * num_rdma_ranks + lane_id);
         if (current_head < 0) {
-          combined_rdma_head[token_idx * num_rdma_ranks + lane_id] = encode(last_head);
+          reduced_rdma_head[token_idx * num_rdma_ranks + lane_id] = encode(last_head);
         } else {
           last_head = current_head;
         }
       }
     }
-  } else { // the rest of SMs are responsible to reset the nvl head before combine
+  } else { // the rest of SMs are responsible to reset the nvl head before group_reduce
     // If this is a cached group_cast,
     // no need to reset the nvl head, just return
     if (is_cached_group_cast)
@@ -1607,7 +1607,7 @@ __global__ void cached_notify_kernel(
           auto batch_start_idx = max(token_start_idx, batch_end_idx - num_tokens_per_batch);
 
           if (lane_id == 0) {
-            tma_load_1d(tma_buffer, combined_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, tma_mbarrier, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
+            tma_load_1d(tma_buffer, reduced_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, tma_mbarrier, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
             mbarrier_arrive_and_expect_tx(tma_mbarrier, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
           }
           mbarrier_wait(tma_mbarrier, tma_phase);
@@ -1627,7 +1627,7 @@ __global__ void cached_notify_kernel(
           __syncwarp();
 
           if (lane_id == 0)
-            tma_store_1d(tma_buffer, combined_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
+            tma_store_1d(tma_buffer, reduced_nvl_head + batch_start_idx * NUM_MAX_NVL_PEERS, (batch_end_idx - batch_start_idx) * num_bytes_per_token);
           tma_store_wait();
           __syncwarp();
         }
@@ -1640,11 +1640,11 @@ void cached_notify(
     int hidden_int4,
     int num_ranks,
     int num_channels,
-    int num_combined_tokens,
-    int* combined_rdma_head,
+    int num_reduced_tokens,
+    int* reduced_rdma_head,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
-    int* combined_nvl_head,
+    int* reduced_nvl_head,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_recv_tokens,
     void** buffer_ptrs,
@@ -1673,11 +1673,11 @@ void cached_notify(
   GRPCOLL_HOST_ASSERT(num_sms > 3); // REVIEW: why num_sms > 3 ?
   GRPCOLL_HOST_ASSERT(num_warps > 1); // for `barrier_all`
   if (!is_cached_group_cast) {
-    // for rdma head reset before combine
+    // for rdma head reset before group_reduce
     GRPCOLL_HOST_ASSERT(num_warps >= num_channels);
     GRPCOLL_HOST_ASSERT(num_rdma_ranks <= WARP_SIZE);
 
-    // for nvl head reset before combine
+    // for nvl head reset before group_reduce
     GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix != nullptr and rdma_rank_prefix_sum != nullptr);
     GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= WARP_SIZE, "Too many NVL peers");
   }
@@ -1693,12 +1693,12 @@ void cached_notify(
       rdma_clean_meta.second,
       nvl_clean_meta.first,
       nvl_clean_meta.second,
-      combined_rdma_head,
-      num_combined_tokens,
+      reduced_rdma_head,
+      num_reduced_tokens,
       num_channels,
       rdma_channel_prefix_matrix,
       rdma_rank_prefix_sum,
-      combined_nvl_head,
+      reduced_nvl_head,
       rdma_buffer_ptr,
       buffer_ptrs,
       barrier_signal_ptrs,
@@ -1713,14 +1713,14 @@ void cached_notify(
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int kNumRanks, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStages, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
-__device__ void combine_token(
+__device__ void group_reduce_token(
     bool is_token_in_rank,
     int head_idx,
     int lane_id,
     int hidden_int4,
     int num_topk,
-    int4* combined_row,
-    float* combined_topk_weights,
+    int4* reduced_row,
+    float* reduced_topk_weights,
     int num_max_recv_tokens,
     const GetAddrFn& get_addr_fn,
     const ReceiveTWFn& recv_tw_fn,
@@ -1776,7 +1776,7 @@ __device__ void combine_token(
     mbarrier_arrive_and_expect_tx(tma_mbarrier(0), lane_id < num_topk_ranks ? kNumTMALoadBytes : 0);
     __syncwarp();
 
-    // Loop over the whole hidden size in int4 and combine
+    // Loop over the whole hidden size in int4 and group_reduce
     // NOTES: hidden_int4 should be a multiple of WARP_SIZE
     // since we need to sync the whole warp in each loop
     for (int shifted = 0, iter = 0; shifted < hidden_int4; shifted += WARP_SIZE, iter += 1) { // warp-strided loop
@@ -1829,7 +1829,7 @@ __device__ void combine_token(
       if (lane_id == 0) { // issued by lane0 for all WARP_SIZE of reduced values
         tma_store_1d(
             /*smem_ptr=*/tma_store_buffer(stage_idx),
-            /*gmem_ptr=*/combined_row + shifted,
+            /*gmem_ptr=*/reduced_row + shifted,
             /*num_bytes=*/kNumTMALoadBytes,
             /*evict_first=*/true);
       }
@@ -1879,7 +1879,7 @@ __device__ void combine_token(
       foreach_assign<dtype_t, float, kDtypePerInt4>(out_dtypes, values);
 
       // Store reduced values to output buffer
-      st_na_global(combined_row + i, out_int4); // non-cached store
+      st_na_global(reduced_row + i, out_int4); // non-cached store
     }
   }
 
@@ -1889,7 +1889,7 @@ __device__ void combine_token(
 #pragma unroll
     for (int i = 0; i < num_topk_ranks; ++i)
       value += recv_tw_fn(topk_ranks[i], slot_indices[i], lane_id);
-    st_na_global(combined_topk_weights + lane_id, value); // non-cached store
+    st_na_global(reduced_topk_weights + lane_id, value); // non-cached store
   }
 }
 
@@ -1898,26 +1898,26 @@ template <
     bool kLowLatencyMode,
     int kNumRDMARanks,
     typename dtype_t,
-    int kNumCombineForwarderWarps,
+    int kNumGroupReduceForwarderWarps,
     int kNumTMABytesPerSenderWarp,
     int kNumTMABytesPerForwarderWarp,
     int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks),
-    int kNumWarpsPerForwarder = (kNumCombineForwarderWarps / kNumRDMARanks > 0) ? kNumCombineForwarderWarps / kNumRDMARanks : 1,
+    int kNumWarpsPerForwarder = (kNumGroupReduceForwarderWarps / kNumRDMARanks > 0) ? kNumGroupReduceForwarderWarps / kNumRDMARanks : 1,
     int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder,
     int kNumRDMAReceivers = kNumForwarders - NUM_MAX_NVL_PEERS>
-GLOBAL_LAUNCH_BOUNDS(get_num_threads_combine(kNumForwarders), 1)
-void combine(
-    int4* combined_x,
-    const bool* is_combined_token_in_rank,
+GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_reduce(kNumForwarders), 1)
+void group_reduce_kernel(
+    int4* reduced_x,
+    const bool* is_reduced_token_in_rank,
     const int4* x,
-    const int* combined_rdma_head,
-    const int* combined_nvl_head,
+    const int* reduced_rdma_head,
+    const int* reduced_nvl_head,
     const SourceMeta* src_meta,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
     int num_tokens,
-    int num_combined_tokens,
+    int num_reduced_tokens,
     int hidden_size,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
@@ -1942,7 +1942,7 @@ void combine(
   // used to be args here to keep the related code for a while
   // which should be removed in the future as long as the code is not used any more
   const float* topk_weights = nullptr;
-  float* combined_topk_weights = nullptr;
+  float* reduced_topk_weights = nullptr;
   int num_topk = 0;
 
   /** NOTE: Determine warp role and its target warp id
@@ -2062,7 +2062,7 @@ void combine(
         // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < kNumRDMARanks) {
           printf(
-              "grpcoll combine NVL sender timeout, channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, RDMA lane: %d, head: %d, tail: %d, start: %d, end: %d\n",
+              "grpcoll group_reduce NVL sender timeout, channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, RDMA lane: %d, head: %d, tail: %d, start: %d, end: %d\n",
               channel_id,
               rdma_rank,
               nvl_rank,
@@ -2202,7 +2202,7 @@ void combine(
         AsymBuffer<int>(local_nvl_buffer, /*num_elems=*/kNumRDMARanks, /*num_ranks=*/NUM_MAX_NVL_PEERS, /*sm_id=*/channel_id, /*num_sms=*/num_channels)
             .advance_also<NUM_MAX_NVL_PEERS>(nvl_buffers);
 
-    // Combiner warp synchronization
+    // Reducer warp synchronization
     //  `forwarder_nvl_head`: shape=(kNumForwarders, NUM_MAX_NVL_PEERS), dtype=int
     //  `forwarder_retired`: shape=(kNumForwarders), dtype=bool
     //  `rdma_receiver_rdma_head`: shape=(kNumRDMAReceivers, kNumRDMARanks), dtype=int
@@ -2265,21 +2265,21 @@ void combine(
       // Get forward tasks
       //  `rdma_channel_prefix_matrix`: shape=(kNumRDMARanks, kNumChannels), dtype=int
       //  `rdma_rank_prefix_sum`: shape=(kNumRDMARanks,), dtype=int
-      //  `combined_nvl_head`: shape=(num_rdma_recv_tokens, NUM_MAX_NVL_PEERS), dtype=int
+      //  `reduced_nvl_head`: shape=(num_rdma_recv_tokens, NUM_MAX_NVL_PEERS), dtype=int
       int cached_nvl_channel_tail_idx = 0;
-      int num_tokens_to_combine = rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id];
+      int num_tokens_to_group_reduce = rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id];
       int num_tokens_prefix = channel_id == 0 ? 0 : rdma_channel_prefix_matrix[dst_rdma_rank * num_channels + channel_id - 1];
-      num_tokens_to_combine -= num_tokens_prefix;
+      num_tokens_to_group_reduce -= num_tokens_prefix;
       num_tokens_prefix += dst_rdma_rank == 0 ? 0 : rdma_rank_prefix_sum[dst_rdma_rank - 1];
-      combined_nvl_head += num_tokens_prefix * NUM_MAX_NVL_PEERS;
+      reduced_nvl_head += num_tokens_prefix * NUM_MAX_NVL_PEERS;
 
-      // Iterate over all tokens, and combine + forward by chunks
-      for (int token_start_idx = 0; token_start_idx < num_tokens_to_combine; token_start_idx += num_max_rdma_chunked_send_tokens) {
+      // Iterate over all tokens, and group_reduce + forward by chunks
+      for (int token_start_idx = 0; token_start_idx < num_tokens_to_group_reduce; token_start_idx += num_max_rdma_chunked_send_tokens) {
         // Check destination queue emptiness, or wait a buffer to be released
-        auto token_end_idx = min(token_start_idx + num_max_rdma_chunked_send_tokens, num_tokens_to_combine);
+        auto token_end_idx = min(token_start_idx + num_max_rdma_chunked_send_tokens, num_tokens_to_group_reduce);
         auto num_chunked_tokens = token_end_idx - token_start_idx;
 
-        // Wait for queue empty enough to combine `num_chunked_tokens` tokens
+        // Wait for queue empty enough to group_reduce `num_chunked_tokens` tokens
         auto start_time = clock64();
         while (sub_warp_id == 0 and lane_id == 0) {
           // Inequality: `num_max_rdma_chunked_recv_tokens - (tail - head) >= num_chunked_tokens`
@@ -2291,7 +2291,7 @@ void combine(
           // Timeout check
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
             printf(
-                "grpcoll combine forwarder (RDMA check) timeout, channel: %d, RDMA: %d, NVL: %d, dst RDMA rank: %d, head: %ld, tail: %d, chunked: %d\n",
+                "grpcoll group_reduce forwarder (RDMA check) timeout, channel: %d, RDMA: %d, NVL: %d, dst RDMA rank: %d, head: %ld, tail: %d, chunked: %d\n",
                 channel_id,
                 rdma_rank,
                 nvl_rank,
@@ -2304,14 +2304,14 @@ void combine(
         }
         sync_forwarder_warp_group();
 
-        // Combine and write to the RDMA send buffer by this warp group,
+        // Reduce and write to the RDMA send buffer by this warp group,
         // each warp for one token in this chunk
         for (int token_idx = token_start_idx + sub_warp_id; token_idx < token_end_idx; token_idx += kNumWarpsPerForwarder) {
           // Read expected NVL head
           // each lane for one NVL peer
           int expected_head = -1;
           if (lane_id < NUM_MAX_NVL_PEERS) {
-            expected_head = ld_nc_global(combined_nvl_head + token_idx * NUM_MAX_NVL_PEERS + lane_id); // non-cached load
+            expected_head = ld_nc_global(reduced_nvl_head + token_idx * NUM_MAX_NVL_PEERS + lane_id); // non-cached load
           }
 
           // Wait all NVL tails for each src NVL peer to be ready
@@ -2323,7 +2323,7 @@ void combine(
             // Timeout check
             if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < NUM_MAX_NVL_PEERS) {
               printf(
-                  "grpcoll combine forwarder (NVL check) timeout, channel: %d, RDMA: %d, NVL: %d, src NVL rank: %d, dst RDMA rank: %d, tail: %d, waiting: %d, total: %d, sub: %d, large: %d, expected: %d\n",
+                  "grpcoll group_reduce forwarder (NVL check) timeout, channel: %d, RDMA: %d, NVL: %d, src NVL rank: %d, dst RDMA rank: %d, tail: %d, waiting: %d, total: %d, sub: %d, large: %d, expected: %d\n",
                   channel_id,
                   rdma_rank,
                   nvl_rank,
@@ -2331,7 +2331,7 @@ void combine(
                   dst_rdma_rank,
                   cached_nvl_channel_tail_idx,
                   token_idx,
-                  num_tokens_to_combine,
+                  num_tokens_to_group_reduce,
                   sub_warp_id,
                   kNumWarpsPerForwarder,
                   expected_head);
@@ -2354,26 +2354,26 @@ void combine(
                 reinterpret_cast<float*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token + hidden_bytes + sizeof(SourceMeta)) + topk_idx);
           };
 
-          // Combine this token
+          // Reduce this token
           //  `head_idx`: the head idx of the token in NVL buffer
-          //  `combined_row`: the token ptr in output buffer to store the combined token
-          //  `combined_topk_weights`: the top-k weights ptr in output buffer to store the combined top-k weights
+          //  `reduced_row`: the token ptr in output buffer to store the reduced token
+          //  `reduced_topk_weights`: the top-k weights ptr in output buffer to store the reduced top-k weights
           //  `num_max_recv_tokens`: the queue size of NVL buffer
           //  `get_addr_fn`: get address of the token in NVL buffer
           //  `recv_tw_fn`: get top-k weights of the token in NVL buffer
-          combine_token</*kNumRanks=*/NUM_MAX_NVL_PEERS,
-                        /*dtype_t=*/dtype_t,
-                        /*kMaxNumRanks=*/NUM_MAX_NVL_PEERS,
-                        /*kUseTMA=*/true,
-                        /*kNumStages=*/kNumStages,
-                        /*kNumTMALoadBytes=*/kNumTMALoadBytes>(
+          group_reduce_token</*kNumRanks=*/NUM_MAX_NVL_PEERS,
+                             /*dtype_t=*/dtype_t,
+                             /*kMaxNumRanks=*/NUM_MAX_NVL_PEERS,
+                             /*kUseTMA=*/true,
+                             /*kNumStages=*/kNumStages,
+                             /*kNumTMALoadBytes=*/kNumTMALoadBytes>(
               /*is_token_in_rank=*/expected_head >= 0,
               /*head_idx=*/expected_head,
               /*lane_id=*/lane_id,
               /*hidden_int4=*/hidden_int4,
               /*num_topk=*/num_topk,
-              /*combined_row=*/static_cast<int4*>(token_ptr_in_rdma_buffer),
-              /*combined_topk_weights=*/reinterpret_cast<float*>(static_cast<int8_t*>(token_ptr_in_rdma_buffer) + hidden_bytes + sizeof(SourceMeta)),
+              /*reduced_row=*/static_cast<int4*>(token_ptr_in_rdma_buffer),
+              /*reduced_topk_weights=*/reinterpret_cast<float*>(static_cast<int8_t*>(token_ptr_in_rdma_buffer) + hidden_bytes + sizeof(SourceMeta)),
               /*num_max_recv_tokens=*/num_max_nvl_chunked_recv_tokens_per_rdma,
               /*get_addr_fn=*/get_addr_fn,
               /*recv_tw_fn=*/recv_tw_fn,
@@ -2381,7 +2381,7 @@ void combine(
               /*tma_phase=*/tma_phase);
 
           // Update NVL head
-          /** NOTE: for those `-1` entries of the original `combined_nvl_head` generated in group-cast stage,
+          /** NOTE: for those `-1` entries of the original `reduced_nvl_head` generated in group-cast stage,
            * we've already in-place updated them in `cached_notify` to the valid next position `p`,
            * but encoded to `-p-1` to maintain them still negative like `-1`
            * and we can decode the correct next expect head by `-expected_head - 1`
@@ -2439,17 +2439,17 @@ void combine(
 
       // The same task as the `kRDMASender` in the group_cast stage
       int token_start_idx, token_end_idx;
-      get_channel_task_range(num_combined_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
+      get_channel_task_range(num_reduced_tokens, num_channels, channel_id, token_start_idx, token_end_idx);
 
-      // Iterate over all tokens, and combine + write to `combined_x`
+      // Iterate over all tokens, and group_reduce + write to `reduced_x`
       // each warp for one token
       int cached_channel_tail_idx = 0;
       for (int64_t token_idx = token_start_idx + target_warp_id; token_idx < token_end_idx; token_idx += kNumRDMAReceivers) {
         // Read expected head from each RDMA peer
-        //  `combined_rdma_head`: shape=[num_combined_tokens, kNumRDMARanks]
+        //  `reduced_rdma_head`: shape=[num_reduced_tokens, kNumRDMARanks]
         int expected_head = -1;
         if (lane_id < kNumRDMARanks) {
-          expected_head = ld_nc_global(combined_rdma_head + token_idx * kNumRDMARanks + lane_id); // non-cached load
+          expected_head = ld_nc_global(reduced_rdma_head + token_idx * kNumRDMARanks + lane_id); // non-cached load
 
           // Record RDMA head into shared memory
           // to let `kCoordinator` update the minimum one across all RDMA ranks
@@ -2466,7 +2466,7 @@ void combine(
           // Timeout check
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
             printf(
-                "grpcoll combine RDMA receiver timeout, channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, tail: %d, waiting: %ld, expect: %d\n",
+                "grpcoll group_reduce RDMA receiver timeout, channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, tail: %d, waiting: %ld, expect: %d\n",
                 channel_id,
                 rdma_rank,
                 nvl_rank,
@@ -2489,26 +2489,26 @@ void combine(
               topk_idx);
         };
 
-        // Combine this token
+        // Reduce this token
         //  `head_idx`: the head idx of the token in RDMA buffer
-        //  `combined_row`: the token ptr in output buffer to store the combined token
-        //  `combined_topk_weights`: the top-k weights ptr in output buffer to store the combined top-k weights
+        //  `reduced_row`: the token ptr in output buffer to store the reduced token
+        //  `reduced_topk_weights`: the top-k weights ptr in output buffer to store the reduced top-k weights
         //  `num_max_recv_tokens`: the queue size of RDMA buffer
         //  `get_addr_fn`: get address of the token in RDMA buffer
         //  `recv_tw_fn`: get top-k weights of the token in RDMA buffer
         uint32_t dummy_tma_phases[2];
-        combine_token</*kNumRanks=*/kNumRDMARanks,
-                      /*dtype_t=*/dtype_t,
-                      /*kMaxNumRanks=*/kNumTopkRDMARanks,
-                      /*kUseTMA=*/false,
-                      /*kNumStages=*/2>(
+        group_reduce_token</*kNumRanks=*/kNumRDMARanks,
+                           /*dtype_t=*/dtype_t,
+                           /*kMaxNumRanks=*/kNumTopkRDMARanks,
+                           /*kUseTMA=*/false,
+                           /*kNumStages=*/2>(
             /*is_token_in_rank=*/expected_head >= 0,
             /*head_idx=*/expected_head,
             /*lane_id=*/lane_id,
             /*hidden_int4=*/hidden_int4,
             /*num_topk=*/num_topk,
-            /*combined_row=*/combined_x + token_idx * hidden_int4,
-            /*combined_topk_weights=*/combined_topk_weights + token_idx * num_topk,
+            /*reduced_row=*/reduced_x + token_idx * hidden_int4,
+            /*reduced_topk_weights=*/reduced_topk_weights + token_idx * num_topk,
             /*num_max_recv_tokens=*/num_max_rdma_chunked_recv_tokens,
             /*get_addr_fn=*/get_addr_fn,
             /*recv_tw_fn=*/recv_tw_fn,
@@ -2532,7 +2532,7 @@ void combine(
       int last_nvl_head[kNumRDMARanks] = {0};
       int dst_rdma_rank = lane_id < kNumRDMARanks ? lane_id : 0;
       int dst_nvl_rank = lane_id < NUM_MAX_NVL_PEERS ? lane_id : 0;
-      GRPCOLL_STATIC_ASSERT(kNumCombineForwarderWarps <= WARP_SIZE, "Invalid number of forwarder warps");
+      GRPCOLL_STATIC_ASSERT(kNumGroupReduceForwarderWarps <= WARP_SIZE, "Invalid number of forwarder warps");
       while (true) {
         // Check if all warps of either `kNVLAndRDMAForwarder` or `kRDMAReceiver` are retired
         if (is_forwarder) { // `kNVLAndRDMAForwarder`
@@ -2588,19 +2588,19 @@ void combine(
   }
 }
 
-void combine(
+void group_reduce(
     cudaDataType_t type,
-    void* combined_x,
-    const bool* is_combined_token_in_rank,
+    void* reduced_x,
+    const bool* is_reduced_token_in_rank,
     const void* x,
-    const int* combined_rdma_head,
-    const int* combined_nvl_head,
+    const int* reduced_rdma_head,
+    const int* reduced_nvl_head,
     const void* src_meta,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
     int num_tokens,
-    int num_combined_tokens,
+    int num_reduced_tokens,
     int hidden_size,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
@@ -2613,48 +2613,48 @@ void combine(
     cudaStream_t stream,
     int num_channels,
     bool low_latency_mode) {
-  constexpr int kNumCombineForwarderWarps = 24;
+  constexpr int kNumGroupReduceForwarderWarps = 24;
   constexpr int kNumTMABytesPerSenderWarp = 16384;
   constexpr int kNumTMABytesPerForwarderWarp = 9248; // REVIEW: why this unusual number ?
-  constexpr int smem_size = std::max(kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, kNumTMABytesPerForwarderWarp * kNumCombineForwarderWarps);
+  constexpr int smem_size = std::max(kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, kNumTMABytesPerForwarderWarp * kNumGroupReduceForwarderWarps);
 
-#define COMBINE_LAUNCH_CASE(num_rdma_ranks)                                                                                                \
-  {                                                                                                                                        \
-    auto combine_func = low_latency_mode                                                                                                   \
-        ? combine<true, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps, kNumTMABytesPerSenderWarp, kNumTMABytesPerForwarderWarp>   \
-        : combine<false, num_rdma_ranks, nv_bfloat16, kNumCombineForwarderWarps, kNumTMABytesPerSenderWarp, kNumTMABytesPerForwarderWarp>; \
-    SET_SHARED_MEMORY_FOR_TMA(combine_func);                                                                                               \
-    LAUNCH_KERNEL(                                                                                                                         \
-        &cfg,                                                                                                                              \
-        combine_func,                                                                                                                      \
-        reinterpret_cast<int4*>(combined_x),                                                                                               \
-        is_combined_token_in_rank,                                                                                                         \
-        reinterpret_cast<const int4*>(x),                                                                                                  \
-        combined_rdma_head,                                                                                                                \
-        combined_nvl_head,                                                                                                                 \
-        reinterpret_cast<const SourceMeta*>(src_meta),                                                                                     \
-        rdma_channel_prefix_matrix,                                                                                                        \
-        rdma_rank_prefix_sum,                                                                                                              \
-        gbl_channel_prefix_matrix,                                                                                                         \
-        num_tokens,                                                                                                                        \
-        num_combined_tokens,                                                                                                               \
-        hidden_size,                                                                                                                       \
-        rdma_buffer_ptr,                                                                                                                   \
-        num_max_rdma_chunked_send_tokens,                                                                                                  \
-        num_max_rdma_chunked_recv_tokens,                                                                                                  \
-        buffer_ptrs,                                                                                                                       \
-        num_max_nvl_chunked_send_tokens,                                                                                                   \
-        num_max_nvl_chunked_recv_tokens,                                                                                                   \
-        rank,                                                                                                                              \
-        num_ranks);                                                                                                                        \
-  }                                                                                                                                        \
+#define GROUP_REDUCE_LAUNCH_CASE(num_rdma_ranks)                                                                                                           \
+  {                                                                                                                                                        \
+    auto group_reduce_func = low_latency_mode                                                                                                              \
+        ? group_reduce_kernel<true, num_rdma_ranks, nv_bfloat16, kNumGroupReduceForwarderWarps, kNumTMABytesPerSenderWarp, kNumTMABytesPerForwarderWarp>   \
+        : group_reduce_kernel<false, num_rdma_ranks, nv_bfloat16, kNumGroupReduceForwarderWarps, kNumTMABytesPerSenderWarp, kNumTMABytesPerForwarderWarp>; \
+    SET_SHARED_MEMORY_FOR_TMA(group_reduce_func);                                                                                                          \
+    LAUNCH_KERNEL(                                                                                                                                         \
+        &cfg,                                                                                                                                              \
+        group_reduce_func,                                                                                                                                 \
+        reinterpret_cast<int4*>(reduced_x),                                                                                                                \
+        is_reduced_token_in_rank,                                                                                                                          \
+        reinterpret_cast<const int4*>(x),                                                                                                                  \
+        reduced_rdma_head,                                                                                                                                 \
+        reduced_nvl_head,                                                                                                                                  \
+        reinterpret_cast<const SourceMeta*>(src_meta),                                                                                                     \
+        rdma_channel_prefix_matrix,                                                                                                                        \
+        rdma_rank_prefix_sum,                                                                                                                              \
+        gbl_channel_prefix_matrix,                                                                                                                         \
+        num_tokens,                                                                                                                                        \
+        num_reduced_tokens,                                                                                                                                \
+        hidden_size,                                                                                                                                       \
+        rdma_buffer_ptr,                                                                                                                                   \
+        num_max_rdma_chunked_send_tokens,                                                                                                                  \
+        num_max_rdma_chunked_recv_tokens,                                                                                                                  \
+        buffer_ptrs,                                                                                                                                       \
+        num_max_nvl_chunked_send_tokens,                                                                                                                   \
+        num_max_nvl_chunked_recv_tokens,                                                                                                                   \
+        rank,                                                                                                                                              \
+        num_ranks);                                                                                                                                        \
+  }                                                                                                                                                        \
   break
 
   const int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
-  const auto num_warps_per_forwarder = std::max(kNumCombineForwarderWarps / num_rdma_ranks, 1);
+  const auto num_warps_per_forwarder = std::max(kNumGroupReduceForwarderWarps / num_rdma_ranks, 1);
   const int num_forwarder_warps = num_rdma_ranks * num_warps_per_forwarder;
-  const int num_threads = get_num_threads_combine(num_forwarder_warps), num_warps = num_threads / WARP_SIZE;
-  GRPCOLL_HOST_ASSERT(num_rdma_ranks <= kNumCombineForwarderWarps);
+  const int num_threads = get_num_threads_group_reduce(num_forwarder_warps), num_warps = num_threads / WARP_SIZE;
+  GRPCOLL_HOST_ASSERT(num_rdma_ranks <= kNumGroupReduceForwarderWarps);
   GRPCOLL_HOST_ASSERT(num_forwarder_warps > NUM_MAX_NVL_PEERS and num_forwarder_warps % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(num_warps == num_forwarder_warps + 1);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
@@ -2670,8 +2670,8 @@ void combine(
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
 
   SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
-  SWITCH_RDMA_RANKS(COMBINE_LAUNCH_CASE);
-#undef COMBINE_LAUNCH_CASE
+  SWITCH_RDMA_RANKS(GROUP_REDUCE_LAUNCH_CASE);
+#undef GROUP_REDUCE_LAUNCH_CASE
 }
 
 } // namespace internode

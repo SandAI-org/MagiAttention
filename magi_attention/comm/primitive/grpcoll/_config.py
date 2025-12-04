@@ -77,7 +77,7 @@ class GrpCollConfig:
     @staticmethod
     def get_default_group_cast_config(num_ranks: int) -> "GrpCollConfig":
         """
-        Get a recommended dispatch config.
+        Get a recommended group cast config.
 
         Argument:
             num_ranks: the number of ranks.
@@ -105,7 +105,7 @@ class GrpCollConfig:
     @staticmethod
     def get_default_group_reduce_config(num_ranks: int) -> "GrpCollConfig":
         """
-        Get a recommended combine config.
+        Get a recommended group reduce config.
 
         Argument:
             num_ranks: the number of ranks.

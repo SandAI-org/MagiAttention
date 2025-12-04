@@ -583,7 +583,7 @@ Buffer::intranode_group_cast(
    * if the ffa kernel is picked first and the sm_margin is not large enough
    * e.g. if the group_cast kernel requires 24 SMs, then the pre-picked ffa kernel will have to give up at least 33 SMs,
    * otherwise the group_cast kernel will wait until the ffa kernel is finished,
-   * the same phenomenon happens with the combine kernel as well
+   * the same phenomenon happens with the group_reduce kernel as well
    *
    * later, we've already figured out this phenomenon is due to
    * both cooperative launch pattern (which at least requires 24 SMs to be launched at the same time),
@@ -1023,11 +1023,11 @@ Buffer::internode_group_cast(
         /*hidden_int4=*/hidden_int4,
         /*num_ranks=*/num_ranks,
         /*num_channels=*/num_channels,
-        /*num_combined_tokens=*/0,
-        /*combined_rdma_head=*/nullptr,
+        /*num_reduced_tokens=*/0,
+        /*reduced_rdma_head=*/nullptr,
         /*rdma_channel_prefix_matrix=*/nullptr,
         /*rdma_rank_prefix_sum=*/nullptr,
-        /*combined_nvl_head=*/nullptr,
+        /*reduced_nvl_head=*/nullptr,
         /*rdma_buffer_ptr=*/rdma_buffer_ptr,
         /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
         /*buffer_ptrs=*/buffer_ptrs_gpu,
@@ -1210,14 +1210,14 @@ Buffer::internode_group_cast(
 
 std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_reduce(
     const torch::Tensor& x,
-    std::optional<torch::Tensor>& combined_x_buf,
+    std::optional<torch::Tensor>& reduced_x_buf,
     const torch::Tensor& src_meta,
-    const torch::Tensor& is_combined_token_in_rank,
+    const torch::Tensor& is_reduced_token_in_rank,
     const torch::Tensor& rdma_channel_prefix_matrix,
     const torch::Tensor& rdma_rank_prefix_sum,
     const torch::Tensor& gbl_channel_prefix_matrix,
-    const torch::Tensor& combined_rdma_head,
-    const torch::Tensor& combined_nvl_head,
+    const torch::Tensor& reduced_rdma_head,
+    const torch::Tensor& reduced_nvl_head,
     const std::optional<torch::Tensor>& pre_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
@@ -1242,25 +1242,25 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   // Shape and contiguous checks
   GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
   GRPCOLL_HOST_ASSERT(src_meta.dim() == 2 and src_meta.is_contiguous() and src_meta.scalar_type() == torch::kByte);
-  GRPCOLL_HOST_ASSERT(is_combined_token_in_rank.dim() == 2 and is_combined_token_in_rank.is_contiguous() and is_combined_token_in_rank.scalar_type() == torch::kBool);
+  GRPCOLL_HOST_ASSERT(is_reduced_token_in_rank.dim() == 2 and is_reduced_token_in_rank.is_contiguous() and is_reduced_token_in_rank.scalar_type() == torch::kBool);
   GRPCOLL_HOST_ASSERT(
       rdma_channel_prefix_matrix.dim() == 2 and rdma_channel_prefix_matrix.is_contiguous() and rdma_channel_prefix_matrix.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(rdma_rank_prefix_sum.dim() == 1 and rdma_rank_prefix_sum.is_contiguous() and rdma_rank_prefix_sum.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(gbl_channel_prefix_matrix.dim() == 2 and gbl_channel_prefix_matrix.is_contiguous() and gbl_channel_prefix_matrix.scalar_type() == torch::kInt32);
-  GRPCOLL_HOST_ASSERT(combined_rdma_head.dim() == 2 and combined_rdma_head.is_contiguous() and combined_rdma_head.scalar_type() == torch::kInt32);
-  GRPCOLL_HOST_ASSERT(combined_nvl_head.dim() == 2 and combined_nvl_head.is_contiguous() and combined_nvl_head.scalar_type() == torch::kInt32);
+  GRPCOLL_HOST_ASSERT(reduced_rdma_head.dim() == 2 and reduced_rdma_head.is_contiguous() and reduced_rdma_head.scalar_type() == torch::kInt32);
+  GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.is_contiguous() and reduced_nvl_head.scalar_type() == torch::kInt32);
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
-  auto num_combined_tokens = static_cast<int>(is_combined_token_in_rank.size(0));
+  auto num_reduced_tokens = static_cast<int>(is_reduced_token_in_rank.size(0));
   GRPCOLL_HOST_ASSERT((hidden * x.element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
   GRPCOLL_HOST_ASSERT(((hidden * x.element_size()) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
   GRPCOLL_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes());
-  GRPCOLL_HOST_ASSERT(is_combined_token_in_rank.size(1) == num_ranks);
+  GRPCOLL_HOST_ASSERT(is_reduced_token_in_rank.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels);
   GRPCOLL_HOST_ASSERT(rdma_rank_prefix_sum.size(0) == num_rdma_ranks);
   GRPCOLL_HOST_ASSERT(gbl_channel_prefix_matrix.size(0) == num_ranks and gbl_channel_prefix_matrix.size(1) == num_channels);
-  GRPCOLL_HOST_ASSERT(combined_rdma_head.dim() == 2 and combined_rdma_head.size(0) == num_combined_tokens and combined_rdma_head.size(1) == num_rdma_ranks);
-  GRPCOLL_HOST_ASSERT(combined_nvl_head.dim() == 2 and combined_nvl_head.size(1) == NUM_MAX_NVL_PEERS);
+  GRPCOLL_HOST_ASSERT(reduced_rdma_head.dim() == 2 and reduced_rdma_head.size(0) == num_reduced_tokens and reduced_rdma_head.size(1) == num_rdma_ranks);
+  GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.size(1) == NUM_MAX_NVL_PEERS);
 
   // Set current stream to comm stream if needed
   // NOTES: do not allocate tensors upfront!
@@ -1286,11 +1286,11 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       /*hidden_int4=*/hidden_int4,
       /*num_ranks=*/num_ranks,
       /*num_channels=*/num_channels,
-      /*num_combined_tokens=*/num_combined_tokens,
-      /*combined_rdma_head=*/combined_rdma_head.data_ptr<int>(),
+      /*num_reduced_tokens=*/num_reduced_tokens,
+      /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
       /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
       /*rdma_rank_prefix_sum=*/rdma_rank_prefix_sum.data_ptr<int>(),
-      /*combined_nvl_head=*/combined_nvl_head.data_ptr<int>(),
+      /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
       /*buffer_ptrs=*/buffer_ptrs_gpu,
@@ -1303,39 +1303,39 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       /*is_cached_dispatch=*/false,
       /*low_latency_mode=*/low_latency_mode);
 
-  // Allocate combined_x buffer
-  auto combined_x = torch::Tensor();
-  if (combined_x_buf.has_value()) {
-    GRPCOLL_HOST_ASSERT(combined_x_buf->dim() == 2 and combined_x_buf->is_contiguous());
-    GRPCOLL_HOST_ASSERT(combined_x_buf->scalar_type() == x.scalar_type());
-    GRPCOLL_HOST_ASSERT(combined_x_buf->size(0) == num_combined_tokens and combined_x_buf->size(1) == hidden);
-    combined_x = combined_x_buf.value();
+  // Allocate reduced_x buffer
+  auto reduced_x = torch::Tensor();
+  if (reduced_x_buf.has_value()) {
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->dim() == 2 and reduced_x_buf->is_contiguous());
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->scalar_type() == x.scalar_type());
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->size(0) == num_reduced_tokens and reduced_x_buf->size(1) == hidden);
+    reduced_x = reduced_x_buf.value();
   } else {
-    GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if combined_x_buf is not provided
+    GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if reduced_x_buf is not provided
     /** NOTE: different from ep, for group-reduce,
-     * some token in combined_x might not reduce anything,
+     * some token in `reduced_x` might not reduce anything,
      * since the corr. token has no destination rank in the corr. group-cast
-     * so we have to zero-initialize combined_x, instead of empty initialization
-     * however, we handle the zero initialization inside the combine kernel
+     * so we have to zero-initialize `reduced_x`, instead of empty initialization
+     * however, we handle the zero initialization inside the group reduce kernel
      * thus here, we still use empty initialization
      */
-    combined_x = torch::empty({num_combined_tokens, hidden}, x.options());
+    reduced_x = torch::empty({num_reduced_tokens, hidden}, x.options());
   }
 
-  // Launch data combine
-  internode::combine(
+  // Launch group reduce kernel
+  internode::group_reduce(
       /*type=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
-      /*combined_x=*/combined_x.data_ptr(),
-      /*is_combined_token_in_rank=*/is_combined_token_in_rank.data_ptr<bool>(),
+      /*reduced_x=*/reduced_x.data_ptr(),
+      /*is_reduced_token_in_rank=*/is_reduced_token_in_rank.data_ptr<bool>(),
       /*x=*/x.data_ptr(),
-      /*combined_rdma_head=*/combined_rdma_head.data_ptr<int>(),
-      /*combined_nvl_head=*/combined_nvl_head.data_ptr<int>(),
+      /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
+      /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
       /*src_meta=*/src_meta.data_ptr(),
       /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
       /*rdma_rank_prefix_sum=*/rdma_rank_prefix_sum.data_ptr<int>(),
       /*gbl_channel_prefix_matrix=*/gbl_channel_prefix_matrix.data_ptr<int>(),
       /*num_tokens=*/num_tokens,
-      /*num_combined_tokens=*/num_combined_tokens,
+      /*num_reduced_tokens=*/num_reduced_tokens,
       /*hidden_size=*/hidden,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
@@ -1357,13 +1357,13 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     for (auto& t :
          {x,
           src_meta,
-          is_combined_token_in_rank,
+          is_reduced_token_in_rank,
           rdma_channel_prefix_matrix,
           rdma_rank_prefix_sum,
           gbl_channel_prefix_matrix,
-          combined_x,
-          combined_rdma_head,
-          combined_nvl_head}) {
+          reduced_x,
+          reduced_rdma_head,
+          reduced_nvl_head}) {
       t.record_stream(comm_stream);
       if (allocate_on_comm_stream)
         t.record_stream(compute_stream);
@@ -1383,7 +1383,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     at::cuda::setCurrentCUDAStream(compute_stream);
 
   // Return values
-  return {combined_x, event};
+  return {reduced_x, event};
 #else
   GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
   return {};

@@ -47,7 +47,7 @@ class GrpCollIntraHandle(GrpCollHandle):
 
     recv_src_idx: shape=[num_recv_tokens,]:
         the original token idx in the sender's buffer of each recv token
-        so this is used in combine stage to indicate the original token position
+        so this is used in group reduce stage to indicate the original token position
         that each recv token should be reduced to calculated in group cast stage
 
     is_token_in_rank: shape=[num_tokens, num_ranks]
