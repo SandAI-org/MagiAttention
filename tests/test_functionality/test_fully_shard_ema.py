@@ -18,7 +18,12 @@ import torch
 import torch.distributed as dist
 from torch.testing._internal.common_utils import run_tests
 
-from magi_fsdp import fully_shard
+from magi_fsdp import (
+    MixedPrecisionPolicy,
+    fully_shard,
+    magi_fsdp_switch_params,
+    magi_fsdp_use_params,
+)
 from magi_fsdp.testing import parameterize
 from magi_fsdp.testing.common_fsdp import MLP, FSDPTest
 
@@ -40,6 +45,9 @@ class TestFullyShardStateDictMultiProcess(FSDPTest):
             recurse (bool): Whether to apply EMA operations recursively to all
                 MagiFSDP submodules or just the top-level module.
         """
+        # 0. Initialize the mixed precision policy to enable EMA parameters.
+        mp_policy = MixedPrecisionPolicy(ema_param_dtype=torch.float32)
+
         # 1. Initialize two models. `old_model` represents the initial EMA state,
         #    and `new_model` represents the latest model weights to be averaged in.
         #    Both are simple MLPs and are moved to the current CUDA device.
@@ -76,41 +84,33 @@ class TestFullyShardStateDictMultiProcess(FSDPTest):
                 ref_param.data = decay * ref_param.data + (1 - decay) * new_param.data
 
         # 4. Wrap the models with `fully_shard` to create a nested FSDP structure.
-        #    The `in_proj` submodule is wrapped first, then the entire model.
-        fully_shard(old_model.in_proj)
-        fsdp_model = fully_shard(old_model)
-        fully_shard(new_model.in_proj)
-        fsdp_new_model = fully_shard(new_model)
+        fully_shard(old_model.in_proj, mp_policy=mp_policy)
+        fsdp_model = fully_shard(old_model, mp_policy=mp_policy)
+        fully_shard(new_model.in_proj, mp_policy=mp_policy)
+        fsdp_new_model = fully_shard(new_model, mp_policy=mp_policy)
 
-        # 5. Initialize the internal storage for EMA parameters within the FSDP model.
-        #    `recurse` determines if storage is created for nested FSDP modules.
-        fsdp_model.create_ema_params(recurse=recurse)
-
-        # 6. To set up the EMA update, we first load the `new_model` weights into
-        #    the main parameters of `fsdp_model`. The `update_ema_params` function
-        #    will then use these main parameters to update its internal EMA storage.
+        # 5. Load the `new_model` parameters into the `fsdp_model` to simulate
+        #    receiving new weights before the EMA update.
         for param, new_param in zip(
             fsdp_model.parameters(), fsdp_new_model.parameters()
         ):
             param.data.copy_(new_param.data)
 
-        # 7. Perform the EMA update. `recurse` controls whether this is applied to submodules.
-        #    After the update, swap the active model parameters with the updated EMA parameters.
+        # 6. Perform the EMA update.
         fsdp_model.update_ema_params(decay=decay, async_op=False, recurse=recurse)
-        fsdp_model.swap_ema_params(recurse=recurse)
 
-        # 8. Compare the parameters of the FSDP model (now holding the EMA values)
+        # 7. Compare the parameters of the FSDP model (now holding the EMA values)
         #    with the manually computed reference model parameters.
-        #    `param.full_tensor()` gathers the sharded parameter across all ranks.
-        for param, ref_param in zip(fsdp_model.parameters(), ref_model.parameters()):
-            param = param.full_tensor()
-            torch.testing.assert_close(param, ref_param, atol=1e-10, rtol=1e-5)
+        with magi_fsdp_switch_params(
+            fsdp_model, param_type="ema", recurse=recurse, raise_if_missing=True
+        ):
+            for param, ref_param in zip(
+                fsdp_model.parameters(), ref_model.parameters()
+            ):
+                param = param.full_tensor()
+                torch.testing.assert_close(param, ref_param, atol=1e-10, rtol=1e-5)
 
-        # 9. Test swapping back and then using the `use_ema_params` method.
-        #    First, swap back, controlled by the `recurse` flag.
-        fsdp_model.swap_ema_params(recurse=recurse)
-
-        #    Verify that the active parameters of `fsdp_model` have been restored
+        #  8. Verify that the active parameters of `fsdp_model` have been restored
         #    and are now identical to the `fsdp_new_model` parameters.
         for param, new_param in zip(
             fsdp_model.parameters(), fsdp_new_model.parameters()
@@ -121,10 +121,11 @@ class TestFullyShardStateDictMultiProcess(FSDPTest):
             )  # Gather the new_param as well since it's from an FSDP model.
             torch.testing.assert_close(param, new_param, atol=1e-10, rtol=1e-5)
 
-        #    Now, call `use_ema_params`. This copies the EMA values into the active parameters.
-        #    The scope of this operation is also controlled by `recurse`.
-        fsdp_model.use_ema_params(recurse=recurse)
-        #    Finally, verify that the active parameters once again match the reference model.
+        # 9. Finally, verify that using `magi_fsdp_use_params` to switch to EMA
+        #    parameters works correctly.
+        magi_fsdp_use_params(
+            fsdp_model, recurse=recurse, param_type="ema", raise_if_missing=True
+        )
         for param, ref_param in zip(fsdp_model.parameters(), ref_model.parameters()):
             param = param.full_tensor()
             torch.testing.assert_close(param, ref_param, atol=1e-10, rtol=1e-5)

@@ -16,7 +16,8 @@ import contextlib
 import copy
 import functools
 from collections import defaultdict
-from typing import Any, Union
+from functools import lru_cache
+from typing import Any, Literal, Union, cast
 
 import torch
 import torch.distributed as dist
@@ -28,17 +29,17 @@ from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import get_cycles_per_ms
 from torch.testing._internal.distributed._tensor.common_dtensor import ModelArgs
 
-import magi_fsdp
 from magi_fsdp import (
     CPUOffloadPolicy,
+    MagiFSDPModule,
     MixedPrecisionPolicy,
     OffloadPolicy,
-    OptimPolicy,
     fully_shard,
+    magi_fsdp_switch_params,
 )
 from magi_fsdp._fsdp_module import MagiFSDPModule as FSDPModule
 from magi_fsdp.testing import (
-    extract_mismatch_threshold,
+    assert_close,
     parameterize,
     switch_envvar_decorator,
 )
@@ -53,6 +54,72 @@ from magi_fsdp.testing.common_fsdp import (
 
 c10d_ops = torch.ops.c10d
 funcol = torch.ops.c10d_functional
+
+
+# Define Some Helper Functions
+def get_precision_meta_info():
+    # Only consider relative error, not absolute error, so set a very small absolute error tolerance
+    EPSILON = 1e-8
+    atol = EPSILON
+    rtol = 0.05
+    # Allow some outliers to not match, so set mismatch threshold
+    mismatch_threshold: float = 0.01
+
+    return atol, rtol, mismatch_threshold
+
+
+def get_model_args():
+    return ModelArgs(
+        n_layers=5,
+        n_heads=4,
+        dim=128,
+        vocab_size=1024,
+        max_seq_len=1024,
+        dropout_p=0,
+        use_attn_mask=False,
+        weight_tying=False,
+        checkpoint_activations=False,
+    )
+
+
+def get_delayed_collective_context(
+    delay_in_ms: int, delay_before_all_gather: bool, delay_before_reduce_scatter: bool
+):
+    orig_all_gather = dist.all_gather_into_tensor
+    orig_reduce_scatter = dist.reduce_scatter_tensor
+
+    def delayed_all_gather(*args, **kwargs):
+        torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
+        return orig_all_gather(*args, **kwargs)
+
+    def delayed_reduce_scatter(*args, **kwargs):
+        torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
+        return orig_reduce_scatter(*args, **kwargs)
+
+    patch_all_gather_ctx = (
+        patch_all_gather(delayed_all_gather)
+        if delay_before_all_gather
+        else contextlib.nullcontext()
+    )
+    patch_reduce_scatter_ctx = (
+        patch_reduce_scatter(delayed_reduce_scatter)
+        if delay_before_reduce_scatter
+        else contextlib.nullcontext()
+    )
+
+    return patch_all_gather_ctx, patch_reduce_scatter_ctx
+
+
+def set_grad_sync_flag(
+    module: nn.Module,
+    reduce_scatter_only,
+    is_last_microbatch: bool,
+    recurse: bool = True,
+):
+    if reduce_scatter_only:
+        module.set_requires_all_reduce(is_last_microbatch, recurse=recurse)
+    else:
+        module.set_requires_gradient_sync(is_last_microbatch, recurse=recurse)
 
 
 class TestFullyShardMultiDtypeTrainingCore(FSDPTest):
@@ -102,28 +169,9 @@ class TestFullyShardMultiDtypeTrainingCore(FSDPTest):
             {
                 "TransformerBlock": {
                     0: torch.float32,
-                    1: torch.float32,
+                    1: torch.float64,
                     2: torch.float32,
-                    3: torch.float32,
-                    4: torch.float32,
-                }
-            },
-            {
-                "TransformerBlock": {
-                    0: torch.float32,
-                    1: torch.bfloat16,
-                    2: torch.float32,
-                    3: torch.bfloat16,
-                    4: torch.float32,
-                },
-                "LayerNorm": torch.float32,
-            },
-            {
-                "TransformerBlock": {
-                    0: torch.float32,
-                    1: torch.bfloat16,
-                    2: torch.bfloat16,
-                    3: torch.bfloat16,
+                    3: torch.float64,
                     4: torch.float32,
                 },
                 "LayerNorm": torch.float32,
@@ -144,358 +192,101 @@ class TestFullyShardMultiDtypeTrainingCore(FSDPTest):
         communication (for communication and computation overlap plus memory
         reduction).
         """
-        EPSILON = 1e-8
+        # Guard Clause
+        assert device_type in ("cuda", "cpu"), f"{device_type}"
 
-        o_atol = EPSILON
-        o_rtol = 0.05
+        # Set random seed
+        torch.manual_seed(42 + self.rank)
 
-        mismatch_thres_ratio: float = 2.0
+        # Get precision meta info
+        atol, rtol, mismatch_threshold = get_precision_meta_info()
 
+        # Set delayed configuration
         delay_after_forward = delay_flags["delay_after_forward"]
         delay_before_all_gather = delay_flags["delay_before_all_gather"]
         delay_before_reduce_scatter = delay_flags["delay_before_reduce_scatter"]
         delay_before_optim = delay_flags["delay_before_optim"]
-
-        assert device_type in ("cuda", "cpu"), f"{device_type}"
-        torch.manual_seed(42)
-        vocab_size = 1024
-        model_args = ModelArgs(
-            n_layers=5,
-            n_heads=4,
-            dim=128,
-            vocab_size=vocab_size,
-            max_seq_len=1024,
-            dropout_p=0,
-            use_attn_mask=False,
-            weight_tying=False,
-            checkpoint_activations=False,
+        delay_in_ms = 100
+        patch_all_gather_ctx, patch_reduce_scatter_ctx = get_delayed_collective_context(
+            delay_in_ms=delay_in_ms,
+            delay_before_all_gather=delay_before_all_gather,
+            delay_before_reduce_scatter=delay_before_reduce_scatter,
         )
-        model = MultiDtypeTransformer(model_args, multi_dtype)
+
+        # Get model args
+        model_args = get_model_args()
+
+        # Initialize model
+        with torch.random.fork_rng():
+            torch.random.manual_seed(42)
+            model = MultiDtypeTransformer(model_args, multi_dtype)
+
+        # Initialize reference model
         ref_model = copy.deepcopy(model)
+        # Set up DDP for reference model
         if device_type == "cuda":
             replicate(ref_model.cuda(), device_ids=[self.rank])
         else:
             gloo_pg = dist.new_group(backend="gloo")
             replicate(ref_model, process_group=gloo_pg)
-        ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-2)
+
+        # Set up FSDP for model
         mesh = init_device_mesh("cuda", (self.world_size,))
-        mp_policy = MixedPrecisionPolicy(reduce_dtype=torch.float32)
         fully_shard_fn = functools.partial(
             fully_shard,
             mesh=mesh,
             reshard_after_forward=reshard_after_forward,
             offload_policy=offload_policy,
-            mp_policy=mp_policy,
         )
         fully_shard_fn([model.layers[0], model.layers[1]])
         fully_shard_fn([model.layers[2], model.layers[3], model.layers[4]])
         fully_shard_fn(model)
         if unshard_async_op:
             model._set_unshard_async_op(unshard_async_op)
+
+        # Initialize optimizer
         optim = torch.optim.Adam(model.parameters(), lr=1e-2)
+        # Initialize reference optimizer
+        ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-2)
 
-        delay_in_ms = 100
-        orig_all_gather = dist.all_gather_into_tensor
-        orig_reduce_scatter = dist.reduce_scatter_tensor
-
-        def delayed_all_gather(*args, **kwargs):
-            torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-            return orig_all_gather(*args, **kwargs)
-
-        def delayed_reduce_scatter(*args, **kwargs):
-            torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-            return orig_reduce_scatter(*args, **kwargs)
-
-        torch.manual_seed(42 + self.rank + 1)
-        patch_all_gather_ctx = (
-            patch_all_gather(delayed_all_gather)
-            if delay_before_all_gather
-            else contextlib.nullcontext()
-        )
-        patch_reduce_scatter_ctx = (
-            patch_reduce_scatter(delayed_reduce_scatter)
-            if delay_before_reduce_scatter
-            else contextlib.nullcontext()
-        )
         with patch_all_gather_ctx, patch_reduce_scatter_ctx:
             for iter_idx in range(10):
-                inp = torch.randint(0, vocab_size, (3, 1024), device=device_type)
-
-                losses: list[torch.Tensor] = []
-                outs: list[torch.Tensor] = []
-                for _model, _optim in ((ref_model, ref_optim), (model, optim)):
-                    _optim.zero_grad(set_to_none=(iter_idx % 2 == 0))
-                    outs.append(_model(inp))
-                    losses.append(outs[-1].sum())
-                    if _model is model and delay_after_forward:
-                        torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-                    losses[-1].backward()
-                    if _model is model and delay_before_optim:
-                        torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-                    _optim.step()
-                max_out_diff = torch.abs(outs[0] - outs[1]).max()
-                loss_diff = torch.abs(losses[0] - losses[1]).max()
-                print(
-                    f"Step {iter_idx=}, max forward diff: {max_out_diff}, loss diff: {loss_diff}"
-                )
-
+                # Set test case string
                 test_case = (
                     f"[{reshard_after_forward=}][{offload_policy=}][{reshard_after_forward=}][{delay_after_forward=}]"
                     f"[{delay_before_all_gather=}][{delay_before_reduce_scatter=}][{delay_before_optim=}]"
                     f"[{unshard_async_op=}][{iter_idx=}]"
                 )
-                # -----   assert close for fwd out   ---- #
 
-                # torch style with atol + rtol + mismatch threshold
-                o_thres = extract_mismatch_threshold(
-                    actual=outs[1],
-                    expected=outs[0],
-                    atol=o_atol,
-                    rtol=o_rtol,
-                    mismatch_thres_ratio=mismatch_thres_ratio,
+                inp = torch.randint(
+                    0, model_args.vocab_size, (3, 1024), device=device_type
                 )
 
-                magi_fsdp.testing.assert_close(
-                    outs[1],
-                    outs[0],
-                    atol=o_atol,
-                    rtol=o_rtol,
-                    mismatch_threshold=o_thres,
+                out = model(inp)
+                if delay_after_forward:
+                    torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
+                ref_out = ref_model(inp)
+                loss = out.mean()
+                ref_loss = ref_out.mean()
+                loss.backward()
+                ref_loss.backward()
+
+                if delay_before_optim:
+                    torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
+                optim.step()
+                ref_optim.step()
+                optim.zero_grad()
+                ref_optim.zero_grad()
+
+                assert_close(
+                    out,
+                    ref_out,
+                    atol=atol,
+                    rtol=rtol,
+                    mismatch_threshold=mismatch_threshold,
                     test_case=f"{test_case} => o",
                 )
 
-        torch.cuda.empty_cache()
-
-    @skip_if_lt_x_gpu(2)
-    @switch_envvar_decorator("MAGI_FSDP_MULTI_DTYPE_REDUCE")
-    @compiled_fsdp_test(compile_compute_on_module=MultiDtypeTransformer)
-    @parameterize("reshard_after_forward", [True, False])
-    @parameterize("offload_policy", [OffloadPolicy()])
-    @parameterize("device_type", ["cuda"])
-    @parameterize(
-        "delay_flags",
-        [
-            {
-                "delay_after_forward": False,
-                "delay_before_all_gather": False,
-                "delay_before_reduce_scatter": False,
-                "delay_before_optim": False,
-            },
-            {
-                "delay_after_forward": True,
-                "delay_before_all_gather": False,
-                "delay_before_reduce_scatter": False,
-                "delay_before_optim": False,
-            },
-            {
-                "delay_after_forward": False,
-                "delay_before_all_gather": True,
-                "delay_before_reduce_scatter": False,
-                "delay_before_optim": False,
-            },
-            {
-                "delay_after_forward": False,
-                "delay_before_all_gather": True,
-                "delay_before_reduce_scatter": True,
-                "delay_before_optim": False,
-            },
-        ],
-    )
-    @parameterize("unshard_async_op", [False])
-    @parameterize(
-        "multi_dtype",
-        [
-            {
-                "TransformerBlock": {
-                    0: torch.float32,
-                    1: torch.float32,
-                    2: torch.float32,
-                    3: torch.float32,
-                    4: torch.float32,
-                }
-            },
-            {
-                "TransformerBlock": {
-                    0: torch.float32,
-                    1: torch.bfloat16,
-                    2: torch.float32,
-                    3: torch.bfloat16,
-                    4: torch.float32,
-                },
-                "LayerNorm": torch.float32,
-            },
-            {
-                "TransformerBlock": {
-                    0: torch.float32,
-                    1: torch.float16,
-                    2: torch.float16,
-                    3: torch.float16,
-                    4: torch.float32,
-                },
-                "LayerNorm": torch.float32,
-            },
-        ],
-    )
-    def test_train_parity_main_parameters_multi_dtype(
-        self,
-        reshard_after_forward: Union[bool, int],
-        offload_policy: OffloadPolicy,
-        device_type: str,
-        delay_flags: dict[str, bool],
-        unshard_async_op: bool,
-        multi_dtype: dict[str, Any],
-    ):
-        """
-        Tests train parity against DDP when using multiple dtypes groups with main parameters
-        for communication (for communication and computation overlap plus memory
-        reduction).
-        """
-        EPSILON = 1e-8
-
-        o_atol = EPSILON
-        o_rtol = 0.05
-
-        # NOTE: an experimental value from magi_fsdp testing
-        mismatch_thres_ratio: float = 2.0
-
-        delay_after_forward = delay_flags["delay_after_forward"]
-        delay_before_all_gather = delay_flags["delay_before_all_gather"]
-        delay_before_reduce_scatter = delay_flags["delay_before_reduce_scatter"]
-        delay_before_optim = delay_flags["delay_before_optim"]
-
-        assert device_type in ("cuda", "cpu"), f"{device_type}"
-        torch.manual_seed(42)
-        vocab_size = 1024
-        model_args = ModelArgs(
-            n_layers=5,
-            n_heads=4,
-            dim=128,
-            vocab_size=vocab_size,
-            max_seq_len=1024,
-            dropout_p=0,
-            use_attn_mask=False,
-            weight_tying=False,
-            checkpoint_activations=False,
-        )
-        model = MultiDtypeTransformer(model_args, multi_dtype)
-        ref_model = copy.deepcopy(model)
-        if device_type == "cuda":
-            replicate(ref_model.cuda(), device_ids=[self.rank])
-        else:
-            gloo_pg = dist.new_group(backend="gloo")
-            replicate(ref_model, process_group=gloo_pg)
-
-        # ref model main parameters
-        ref_main_params = [
-            p.detach().clone().float().requires_grad_(True)
-            for p in ref_model.parameters()
-        ]
-        ref_optim = torch.optim.Adam(ref_main_params, lr=1e-2)
-        mesh = init_device_mesh("cuda", (self.world_size,))
-        mp_policy = MixedPrecisionPolicy(reduce_dtype=torch.float32)
-        fully_shard_fn = functools.partial(
-            fully_shard,
-            mesh=mesh,
-            reshard_after_forward=reshard_after_forward,
-            offload_policy=offload_policy,
-            mp_policy=mp_policy,
-        )
-        fully_shard_fn([model.layers[0], model.layers[1]])
-        fully_shard_fn([model.layers[2], model.layers[3], model.layers[4]])
-        fully_shard_fn(model)
-        if unshard_async_op:
-            model._set_unshard_async_op(unshard_async_op)
-
-        # fsdp model main parameters
-        main_params = [
-            p.detach().clone().float().requires_grad_(True) for p in model.parameters()
-        ]
-        optim = torch.optim.Adam(main_params, lr=1e-2)
-
-        delay_in_ms = 100
-        orig_all_gather = dist.all_gather_into_tensor
-        orig_reduce_scatter = dist.reduce_scatter_tensor
-
-        def delayed_all_gather(*args, **kwargs):
-            torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-            return orig_all_gather(*args, **kwargs)
-
-        def delayed_reduce_scatter(*args, **kwargs):
-            torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-            return orig_reduce_scatter(*args, **kwargs)
-
-        torch.manual_seed(42 + self.rank + 1)
-        patch_all_gather_ctx = (
-            patch_all_gather(delayed_all_gather)
-            if delay_before_all_gather
-            else contextlib.nullcontext()
-        )
-        patch_reduce_scatter_ctx = (
-            patch_reduce_scatter(delayed_reduce_scatter)
-            if delay_before_reduce_scatter
-            else contextlib.nullcontext()
-        )
-        with patch_all_gather_ctx, patch_reduce_scatter_ctx:
-            for iter_idx in range(10):
-                inp = torch.randint(0, vocab_size, (3, 1024), device=device_type)
-
-                losses: list[torch.Tensor] = []
-                outs: list[torch.Tensor] = []
-                for _model, _optim, _main_params in (
-                    (ref_model, ref_optim, ref_main_params),
-                    (model, optim, main_params),
-                ):
-                    _optim.zero_grad(set_to_none=(iter_idx % 2 == 0))
-                    outs.append(_model(inp))
-                    losses.append(outs[-1].sum())
-                    if _model is model and delay_after_forward:
-                        torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-                    losses[-1].backward()
-                    # cast grad to fp32
-                    for model_p, master_p in zip(_model.parameters(), _main_params):
-                        if model_p.grad is not None:
-                            if master_p.grad is None:
-                                master_p.grad = torch.zeros_like(
-                                    master_p, dtype=master_p.dtype
-                                )
-                            master_p.grad.copy_(model_p.grad.detach().float())
-                            model_p.grad.zero_()
-                    if _model is model and delay_before_optim:
-                        torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-                    _optim.step()
-                    # copy main params to model params
-                    for model_p, master_p in zip(_model.parameters(), _main_params):
-                        model_p.data.copy_(master_p.data.to(dtype=model_p.dtype))
-                max_out_diff = torch.abs(outs[0] - outs[1]).max()
-                loss_diff = torch.abs(losses[0] - losses[1]).max()
-                print(
-                    f"Step {iter_idx=}, max forward diff: {max_out_diff}, loss diff: {loss_diff}"
-                )
-
-                test_case = (
-                    f"[{reshard_after_forward=}][{offload_policy=}][{reshard_after_forward=}][{delay_after_forward=}]"
-                    f"[{delay_before_all_gather=}][{delay_before_reduce_scatter=}][{delay_before_optim=}]"
-                    f"[{unshard_async_op=}][{iter_idx=}]"
-                )
-                # -----   assert close for fwd out   ---- #
-
-                # torch style with atol + rtol + mismatch threshold
-                o_thres = extract_mismatch_threshold(
-                    actual=outs[1],
-                    expected=outs[0],
-                    atol=o_atol,
-                    rtol=o_rtol,
-                    mismatch_thres_ratio=mismatch_thres_ratio,
-                )
-
-                magi_fsdp.testing.assert_close(
-                    outs[1],
-                    outs[0],
-                    atol=o_atol,
-                    rtol=o_rtol,
-                    mismatch_threshold=o_thres,
-                    test_case=f"{test_case} => o",
-                )
         torch.cuda.empty_cache()
 
     @skip_if_lt_x_gpu(2)
@@ -528,23 +319,13 @@ class TestFullyShardMultiDtypeTrainingCore(FSDPTest):
             {
                 "TransformerBlock": {
                     0: torch.float32,
-                    1: torch.bfloat16,
-                    2: torch.float32,
-                    3: torch.bfloat16,
+                    1: torch.float64,
+                    2: torch.float64,
+                    3: torch.float64,
                     4: torch.float32,
                 },
                 "LayerNorm": torch.float32,
-            },
-            {
-                "TransformerBlock": {
-                    0: torch.float32,
-                    1: torch.float16,
-                    2: torch.float16,
-                    3: torch.float16,
-                    4: torch.float32,
-                },
-                "LayerNorm": torch.float32,
-            },
+            }
         ],
     )
     @parameterize("num_microbatches", [1, 3])
@@ -563,167 +344,113 @@ class TestFullyShardMultiDtypeTrainingCore(FSDPTest):
         for communication (for communication and computation overlap plus memory
         reduction).
         """
-        EPSILON = 1e-8
+        # Guard Clause
+        assert device_type in ("cuda", "cpu"), f"{device_type}"
 
-        o_atol = EPSILON
-        o_rtol = 0.05
+        # Set random seed
+        torch.manual_seed(42 + self.rank)
 
-        # NOTE: an experimental value from magi_fsdp testing
-        mismatch_thres_ratio: float = 2.0
+        # Get precision meta info
+        atol, rtol, mismatch_threshold = get_precision_meta_info()
 
+        # Set delayed configuration
         delay_after_forward = delay_flags["delay_after_forward"]
         delay_before_all_gather = delay_flags["delay_before_all_gather"]
         delay_before_reduce_scatter = delay_flags["delay_before_reduce_scatter"]
         delay_before_optim = delay_flags["delay_before_optim"]
-
-        assert device_type in ("cuda", "cpu"), f"{device_type}"
-        torch.manual_seed(42)
-        vocab_size = 1024
-        model_args = ModelArgs(
-            n_layers=5,
-            n_heads=4,
-            dim=128,
-            vocab_size=vocab_size,
-            max_seq_len=1024,
-            dropout_p=0,
-            use_attn_mask=False,
-            weight_tying=False,
-            checkpoint_activations=False,
+        delay_in_ms = 100
+        patch_all_gather_ctx, patch_reduce_scatter_ctx = get_delayed_collective_context(
+            delay_in_ms=delay_in_ms,
+            delay_before_all_gather=delay_before_all_gather,
+            delay_before_reduce_scatter=delay_before_reduce_scatter,
         )
-        model = MultiDtypeTransformer(model_args, multi_dtype)
+
+        # Get model args
+        model_args = get_model_args()
+
+        # Initialize model
+        with torch.random.fork_rng():
+            torch.random.manual_seed(42)
+            model = MultiDtypeTransformer(model_args, multi_dtype)
+
+        # Initialize reference model
         ref_model = copy.deepcopy(model)
+        # Set up DDP for reference model
         if device_type == "cuda":
             replicate(ref_model.cuda(), device_ids=[self.rank])
         else:
             gloo_pg = dist.new_group(backend="gloo")
             replicate(ref_model, process_group=gloo_pg)
 
-        # ref model main parameters
-        ref_main_params = [
-            p.detach().clone().float().requires_grad_(True)
-            for p in ref_model.parameters()
-        ]
-        ref_optim = torch.optim.Adam(ref_main_params, lr=1e-2)
+        # Set up FSDP for model
+        mp_policy = MixedPrecisionPolicy(main_param_dtype=torch.float64)
         mesh = init_device_mesh("cuda", (self.world_size,))
-        optim_policy = OptimPolicy(enable_main_param=True)
         fully_shard_fn = functools.partial(
             fully_shard,
             mesh=mesh,
             reshard_after_forward=reshard_after_forward,
             offload_policy=offload_policy,
-            optim_policy=optim_policy,
+            mp_policy=mp_policy,
         )
         fully_shard_fn([model.layers[0], model.layers[1]])
         fully_shard_fn([model.layers[2], model.layers[3], model.layers[4]])
         fully_shard_fn(model)
-        model.create_main_params()
         if unshard_async_op:
             model._set_unshard_async_op(unshard_async_op)
 
-        # fsdp model main parameters
-        optim = torch.optim.Adam(model.main_parameters(), lr=1e-2)
+        # Initialize optimizer
+        with magi_fsdp_switch_params(model, param_type="main", retain_if_missing=True):
+            optim = torch.optim.Adam(cast(nn.Module, model).parameters(), lr=1e-2)
+        # Initialize reference optimizer
+        ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-2)
 
-        delay_in_ms = 100
-        orig_all_gather = dist.all_gather_into_tensor
-        orig_reduce_scatter = dist.reduce_scatter_tensor
-
-        def delayed_all_gather(*args, **kwargs):
-            torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-            return orig_all_gather(*args, **kwargs)
-
-        def delayed_reduce_scatter(*args, **kwargs):
-            torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-            return orig_reduce_scatter(*args, **kwargs)
-
-        torch.manual_seed(42 + self.rank + 1)
-        patch_all_gather_ctx = (
-            patch_all_gather(delayed_all_gather)
-            if delay_before_all_gather
-            else contextlib.nullcontext()
-        )
-        patch_reduce_scatter_ctx = (
-            patch_reduce_scatter(delayed_reduce_scatter)
-            if delay_before_reduce_scatter
-            else contextlib.nullcontext()
-        )
         with patch_all_gather_ctx, patch_reduce_scatter_ctx:
             for iter_idx in range(10):
+                # Set test case string
+                test_case = (
+                    f"[{reshard_after_forward=}][{offload_policy=}][{reshard_after_forward=}][{delay_after_forward=}]"
+                    f"[{delay_before_all_gather=}][{delay_before_reduce_scatter=}][{delay_before_optim=}]"
+                    f"[{unshard_async_op=}][{iter_idx=}]"
+                )
+
                 inps = [
-                    torch.randint(0, vocab_size, (3, 1024), device=device_type)
+                    torch.randint(
+                        0, model_args.vocab_size, (3, 1024), device=device_type
+                    )
                     for _ in range(num_microbatches)
                 ]
-                outs: list[torch.Tensor] = []
-                ref_outs: list[torch.Tensor] = []
-                losses: list[torch.Tensor] = []
-                ref_losses: list[torch.Tensor] = []
 
-                optim.zero_grad(set_to_none=(iter_idx % 2 == 0))
-                ref_optim.zero_grad(set_to_none=(iter_idx % 2 == 0))
                 for inp_idx, inp in enumerate(inps):
                     is_last_microbatch = inp_idx == num_microbatches - 1
                     model.set_requires_gradient_sync(is_last_microbatch)
                     model.set_is_last_backward(is_last_microbatch)
-                    if_first_microbatch = inp_idx == 0
-                    model.set_is_first_forward(if_first_microbatch)
+                    is_first_microbatch = inp_idx == 0
+                    model.set_requires_update_param(is_first_microbatch)
 
-                    outs.append(model(inp))
-                    losses.append(outs[-1].sum())
+                    out = model(inp)
                     if delay_after_forward:
                         torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
-                    losses[-1].backward()
-                    if delay_before_optim:
-                        torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
+                    ref_out = ref_model(inp)
+                    loss = out.mean()
+                    ref_loss = ref_out.mean()
+                    loss.backward()
+                    ref_loss.backward()
 
-                    ref_outs.append(ref_model(inp))
-                    ref_losses.append(ref_outs[-1].sum())
-                    ref_losses[-1].backward()
-
-                    max_out_diff = torch.abs(outs[-1] - ref_outs[-1]).max()
-                    loss_diff = torch.abs(losses[-1] - ref_losses[-1]).max()
-                    print(
-                        f"Step {iter_idx=}, max forward diff: {max_out_diff}, loss diff: {loss_diff}"
+                    assert_close(
+                        out,
+                        ref_out,
+                        atol=atol,
+                        rtol=rtol,
+                        mismatch_threshold=mismatch_threshold,
+                        test_case=f"{test_case}[{inp_idx=}] => o",
                     )
 
-                    test_case = (
-                        f"[{reshard_after_forward=}][{offload_policy=}][{reshard_after_forward=}][{delay_after_forward=}]"
-                        f"[{delay_before_all_gather=}][{delay_before_reduce_scatter=}][{delay_before_optim=}]"
-                        f"[{unshard_async_op=}][{iter_idx=}][{inp_idx=}]"
-                    )
-                    # -----   assert close for fwd out   ---- #
-
-                    # torch style with atol + rtol + mismatch threshold
-                    o_thres = extract_mismatch_threshold(
-                        actual=outs[-1],
-                        expected=ref_outs[-1],
-                        atol=o_atol,
-                        rtol=o_rtol,
-                        mismatch_thres_ratio=mismatch_thres_ratio,
-                    )
-
-                    magi_fsdp.testing.assert_close(
-                        ref_outs[-1],
-                        outs[-1],
-                        atol=o_atol,
-                        rtol=o_rtol,
-                        mismatch_threshold=o_thres,
-                        test_case=f"{test_case} => o",
-                    )
-
+                if delay_before_optim:
+                    torch.cuda._sleep(int(delay_in_ms * get_cycles_per_ms()))
                 optim.step()
-
-                for model_p, master_p in zip(ref_model.parameters(), ref_main_params):
-                    if model_p.grad is not None:
-                        with torch.no_grad():
-                            if master_p.grad is None:
-                                master_p.grad = torch.zeros_like(
-                                    master_p, dtype=master_p.dtype
-                                )
-                            master_p.grad.copy_(model_p.grad.detach().float())
-                            model_p.grad.zero_()
                 ref_optim.step()
-                # copy main params to model params
-                for model_p, master_p in zip(ref_model.parameters(), ref_main_params):
-                    model_p.data.copy_(master_p.data.to(dtype=model_p.dtype))
+                optim.zero_grad()
+                ref_optim.zero_grad()
 
         torch.cuda.empty_cache()
 
@@ -734,9 +461,99 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
 
     @property
     def world_size(self) -> int:
-        return min(4, torch.cuda.device_count())
+        return 4
 
-    @skip_if_lt_x_gpu(2)
+    @property
+    @lru_cache()
+    def hybrid_mesh(self):
+        return init_device_mesh(
+            "cuda",
+            (2, 2),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+
+    @property
+    @lru_cache()
+    def flat_mesh(self):
+        return init_device_mesh("cuda", (self.world_size,))
+
+    @staticmethod
+    def set_fine_grained_communication_flags(
+        model: nn.Sequential,
+        is_first_microbatch: bool,
+        is_last_microbatch: bool,
+        # Config parameters exposed explicitly
+        mode: Literal["all", "root_only", "some_layers"],
+        reduce_scatter_only: bool,
+        reshard_after_backward: bool,
+        some_layer_start_idx: int,
+        some_layer_end_idx: int,
+    ):
+        """
+        Configures gradient synchronization and resharding flags for the backward pass.
+        """
+
+        def _apply_flags(target_module: MagiFSDPModule, recurse: bool):
+            # 1. Handle Gradient Synchronization
+            if reduce_scatter_only:
+                target_module.set_requires_all_reduce(
+                    is_last_microbatch, recurse=recurse
+                )
+            else:
+                target_module.set_requires_gradient_sync(
+                    is_last_microbatch, recurse=recurse
+                )
+
+            # 2. Handle Resharding (Parameter persistence)
+            if not reshard_after_backward:
+                target_module.set_reshard_after_backward(
+                    is_last_microbatch, recurse=recurse
+                )
+
+            # 3. Handle param update from main param
+            target_module.set_requires_update_param(
+                is_first_microbatch, recurse=recurse
+            )
+
+        # Determine targets and recursion strategy
+        targets: MagiFSDPModule | nn.Sequential
+        should_recurse: bool
+
+        match mode:
+            case "root_only":
+                targets = [model]
+                should_recurse = False
+
+            case "some_layers":
+                # Determine slice range (Magic number 3 assumes specific block structure)
+                targets = model[some_layer_start_idx:some_layer_end_idx]
+                should_recurse = True
+
+            case _:  # Default: "all"
+                targets = [model]
+                should_recurse = True
+
+        for target in targets:
+            _apply_flags(target, recurse=should_recurse)
+
+    @staticmethod
+    def get_test_model(
+        num_layers, lin_dim, multi_dtype: dict[str, Any]
+    ) -> nn.Sequential:
+        modules = [nn.Linear(lin_dim, lin_dim)]
+        for layer_idx in range(num_layers):
+            modules.append(
+                FeedForward(
+                    lin_dim,
+                    4 * lin_dim,
+                    0.0,
+                    dtype=multi_dtype["FeedForward"].get(layer_idx, torch.float32),  # type: ignore[index]
+                )
+            )
+        model = nn.Sequential(*modules)
+        return model
+
+    @skip_if_lt_x_gpu(4)
     @switch_envvar_decorator("MAGI_FSDP_MULTI_DTYPE_REDUCE")
     @parameterize("hybrid_mesh", [False, True])
     @parameterize("reshard_after_forward", [True, False, 2])
@@ -781,7 +598,7 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
         self,
         hybrid_mesh: bool,
         reshard_after_forward: Union[bool, int],
-        mode: str,
+        mode: Literal["all", "root_only", "some_layers"],
         reshard_after_backward: bool,
         offload_policy: OffloadPolicy,
         reduce_scatter_only: bool,  # for HSDP
@@ -792,103 +609,57 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
         with/without resharding after backward.
         """
 
-        EPSILON = 1e-8
+        device_mesh = self.hybrid_mesh if hybrid_mesh else self.flat_mesh
 
-        o_atol = EPSILON
-        o_rtol = 0.01
+        # Guard Clause
+        if isinstance(offload_policy, CPUOffloadPolicy) and not reshard_after_forward:
+            # If enable CPU offload, must reshard after forward
+            return
 
-        # NOTE: an experimental value from magi_fsdp testing
-        mismatch_thres_ratio: float = 2.0
+        if device_mesh.ndim != 2 and reduce_scatter_only:
+            # reduce_scatter_only is only for HSDP (2D mesh)
+            return
 
-        if not hybrid_mesh:
-            if TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh is None:
-                TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh = (
-                    init_device_mesh("cuda", (self.world_size,))
-                )
-            mesh = TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh
-        else:
-            if self.world_size == 4:  # test HSDP too if enough GPUs
-                if TestFullyShardMultiDtypeGradientAccumulation.hsdp_mesh is None:
-                    TestFullyShardMultiDtypeGradientAccumulation.hsdp_mesh = (
-                        init_device_mesh(
-                            "cuda",
-                            (2, 2),
-                            mesh_dim_names=("dp_replicate", "dp_shard"),
-                        )
-                    )
-                mesh = TestFullyShardMultiDtypeGradientAccumulation.hsdp_mesh
-            else:
-                if TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh is None:
-                    TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh = (
-                        init_device_mesh("cuda", (self.world_size,))
-                    )
-                mesh = TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh
+        if not reshard_after_backward and reshard_after_forward is not False:
+            # reshard after forward but not after backward is not supported
+            return
 
-        if (
-            (
-                not reshard_after_backward
-                and (reshard_after_forward is not False or mode == "some_layers")
-            )
-            or (
-                isinstance(offload_policy, CPUOffloadPolicy)
-                and reshard_after_forward is not True
-            )
-            or (mesh.ndim != 2 and reduce_scatter_only)
-        ):
-            return  # skip since not common or applicable
+        # Get precision meta info
+        atol, rtol, mismatch_threshold = get_precision_meta_info()
 
-        torch.manual_seed(42)
+        # Set random seed
+        torch.manual_seed(42 + self.rank)
+
+        # Set model hyperparameters
         batch_size, lin_dim, num_layers, num_microbatches = (2, 32, 6, 3)
-        if mode == "some_layers":
-            num_layers_to_disable_reduce_scatter = 1
-        modules = [nn.Linear(lin_dim, lin_dim)]
-        for layer_idx in range(num_layers):
-            modules.append(
-                FeedForward(
-                    lin_dim,
-                    4 * lin_dim,
-                    0.0,
-                    dtype=multi_dtype["FeedForward"].get(layer_idx, torch.float32),  # type: ignore[index]
-                )
-            )
-        model = nn.Sequential(*modules)
-        ref_model = copy.deepcopy(model).cuda()
+
+        # Initialize model
+        with torch.random.fork_rng():
+            torch.manual_seed(42)
+            model = self.get_test_model(num_layers, lin_dim, multi_dtype)
+
+        # Initialize reference model
+        # NOTE(littsk): ref_model does not use DDP to avoid affecting subsequent communication count statistics
+        ref_model = copy.deepcopy(model)
+        # Set up DDP for reference model
+        replicate(ref_model.cuda(), device_ids=[self.rank])
+
+        # Set up FSDP for model
         fully_shard_fn = functools.partial(
             fully_shard,
-            mesh=mesh,
+            mesh=device_mesh,
             reshard_after_forward=reshard_after_forward,
             offload_policy=offload_policy,
         )
         fully_shard_fn([model[1], model[2], model[3]])
         fully_shard_fn([model[4], model[5], model[6]])
-        fully_shard_fn(model)  # root gets the 1st linear
-        ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-2)
+        # root gets the 1st linear
+        fully_shard_fn(model)
+
+        # Initialize optimizer
         optim = torch.optim.Adam(model.parameters(), lr=1e-2)
+        ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-2)
 
-        def set_grad_sync_flag(
-            module: nn.Module, is_last_microbatch: bool, recurse: bool = True
-        ):
-            if reduce_scatter_only:
-                module.set_requires_all_reduce(is_last_microbatch, recurse=recurse)
-            else:
-                module.set_requires_gradient_sync(is_last_microbatch, recurse=recurse)
-
-        def set_backward_flags(_model: nn.Module, is_last_microbatch: bool):
-            if mode == "all":
-                set_grad_sync_flag(_model, is_last_microbatch)
-                if not reshard_after_backward:
-                    _model.set_reshard_after_backward(is_last_microbatch)
-            elif mode == "some_layers":
-                for layer in model[1 : 1 + 3 * num_layers_to_disable_reduce_scatter]:
-                    set_grad_sync_flag(layer, is_last_microbatch)
-                    if not reshard_after_backward:
-                        layer.set_reshard_after_backward(is_last_microbatch)
-            elif mode == "root_only":
-                set_grad_sync_flag(model, is_last_microbatch, recurse=False)
-                if not reshard_after_backward:
-                    model.set_reshard_after_backward(is_last_microbatch, recurse=False)
-
-        torch.manual_seed(42 + self.rank + 1)
         for iter_idx in range(5):
             comm_count_list = []
 
@@ -896,47 +667,47 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
             ref_optim.zero_grad(set_to_none=(iter_idx % 2))
             for microbatch_idx in range(num_microbatches):
                 is_last_microbatch = microbatch_idx == num_microbatches - 1
-                set_backward_flags(model, is_last_microbatch)
-                inp = torch.randn(batch_size, lin_dim, device="cuda")
-                outs: list[torch.Tensor] = []
-                losses: list[torch.Tensor] = []
-                for _model in (ref_model, model):
-                    with CommDebugMode() as comm_mode:
-                        outs.append(_model(inp))
-                        losses.append(outs[-1].sum())
-                        losses[-1].backward()
-                    comm_count_list.append(comm_mode.get_comm_counts())
-                out_diff = torch.abs(outs[0] - outs[1]).max()
-                loss_diff = torch.abs(losses[0] - losses[1]).max()
-                print(
-                    f"Step {iter_idx=}, {microbatch_idx=}, out diff: {out_diff}, loss diff: {loss_diff}"
+
+                self.set_fine_grained_communication_flags(
+                    model,
+                    True,
+                    is_last_microbatch,
+                    mode,
+                    reduce_scatter_only,
+                    reshard_after_backward,
+                    1,
+                    4,
                 )
+
+                inp = torch.randn(batch_size, lin_dim, device="cuda")
+
+                with CommDebugMode() as comm_mode:
+                    out = model(inp)
+                    loss = out.mean()
+                    loss.backward()
+
+                comm_count_list.append(comm_mode.get_comm_counts())
+
+                ref_out = ref_model(inp)
+                ref_loss = ref_out.mean()
+                ref_loss.backward()
 
                 test_case = (
                     f"[{hybrid_mesh=}][{mode=}][{reshard_after_forward=}][{reshard_after_backward=}]"
                     f"[{offload_policy=}][{reduce_scatter_only=}][{iter_idx=}][{microbatch_idx=}]"
                 )
-                # -----   assert close for fwd out   ---- #
 
-                # torch style with atol + rtol + mismatch threshold
-                o_thres = extract_mismatch_threshold(
-                    actual=outs[1],
-                    expected=outs[0],
-                    atol=o_atol,
-                    rtol=o_rtol,
-                    mismatch_thres_ratio=mismatch_thres_ratio,
-                )
-
-                magi_fsdp.testing.assert_close(
-                    outs[1],
-                    outs[0],
-                    atol=o_atol,
-                    rtol=o_rtol,
-                    mismatch_threshold=o_thres,
+                assert_close(
+                    out,
+                    ref_out,
+                    atol=atol,
+                    rtol=rtol,
+                    mismatch_threshold=mismatch_threshold,
                     test_case=f"{test_case} => o",
                 )
 
             comm_counts: dict[str, int] = defaultdict(int)
+
             for comm_count_dict in comm_count_list:
                 for collective, count in comm_count_dict.items():
                     comm_counts[collective] += count
@@ -951,17 +722,18 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
             if mode == "some_layers":
                 # Expect additional reduce-scatters for non-disabled FeedForwards and
                 # the root's linear
-                expected_reduce_scatter_count += (
-                    2 * ((num_layers // 3) - num_layers_to_disable_reduce_scatter) + 1
-                ) * (num_microbatches - 1)
+                expected_reduce_scatter_count += (2 * ((num_layers // 3) - 1) + 1) * (
+                    num_microbatches - 1
+                )
             elif mode == "root_only":
                 # Expect additional reduce-scatters for all FeedForwards
                 expected_reduce_scatter_count += (
                     2 * (num_layers // 3) * (num_microbatches - 1)
                 )
             expected_all_reduce_count = (
-                expected_reduce_scatter_count if mesh.ndim == 2 else 0
+                expected_reduce_scatter_count if device_mesh.ndim == 2 else 0
             )
+
             if reduce_scatter_only:
                 # Specially for HSDP if only reduce-scattering but not
                 # all-reducing until the last microbatch, expect one
@@ -969,6 +741,7 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
                 expected_reduce_scatter_count = (
                     2 * (num_layers // 3) + 1
                 ) * num_microbatches
+
             self.assertEqual(reduce_scatter_count, expected_reduce_scatter_count)
             self.assertEqual(all_reduce_count, expected_all_reduce_count)
 
@@ -992,16 +765,18 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
                 # The MLPs should still contribute all-gathers in each
                 # microbatch forward
                 expected_all_gather_count += (num_layers // 3) * (num_microbatches - 1)
+            elif mode == "some_layers":  # `reshard_after_forward/backward=False`
+                # The non-disabled MLPs and root should still contribute all-gathers
+                # in each microbatch forward
+                expected_all_gather_count += (((num_layers // 3) - 1) + 1) * (
+                    num_microbatches - 1
+                )
             self.assertEqual(all_gather_count, expected_all_gather_count)
-
-            for param in ref_model.parameters():
-                if param.grad is not None:
-                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
 
             optim.step()
             ref_optim.step()
 
-    @skip_if_lt_x_gpu(2)
+    @skip_if_lt_x_gpu(4)
     @switch_envvar_decorator("MAGI_FSDP_MULTI_DTYPE_REDUCE")
     @parameterize("hybrid_mesh", [False, True])
     @parameterize("reshard_after_forward", [True, False, 2])
@@ -1025,11 +800,11 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
         [
             {
                 "FeedForward": {
-                    0: torch.float32,
-                    1: torch.bfloat16,
+                    0: torch.float64,
+                    1: torch.float64,
                     2: torch.float32,
-                    3: torch.bfloat16,
-                    4: torch.bfloat16,
+                    3: torch.float64,
+                    4: torch.float64,
                     5: torch.float32,
                 }
             },
@@ -1039,7 +814,7 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
         self,
         hybrid_mesh: bool,
         reshard_after_forward: Union[bool, int],
-        mode: str,
+        mode: Literal["all", "root_only", "some_layers"],
         reshard_after_backward: bool,
         reduce_scatter_only: bool,  # for HSDP
         multi_dtype: dict[str, Any],
@@ -1048,159 +823,91 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
         Tests gradient accumulation with/without gradient reduction and
         with/without resharding after backward.
         """
+        # Guard Clause
+        if not reshard_after_backward and reshard_after_forward is not False:
+            # reshard after forward but not after backward is not supported
+            return
 
-        EPSILON = 1e-8
+        # Set random seed
+        torch.manual_seed(42 + self.rank)
 
-        o_atol = EPSILON
-        o_rtol = 0.01
+        # Get precision meta info
+        atol, rtol, mismatch_threshold = get_precision_meta_info()
 
-        # NOTE: an experimental value from magi_fsdp testing
-        mismatch_thres_ratio: float = 2.0
+        # Initialize mesh
+        mesh = self.hybrid_mesh if hybrid_mesh else self.flat_mesh
 
-        if not hybrid_mesh:
-            if TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh is None:
-                TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh = (
-                    init_device_mesh("cuda", (self.world_size,))
-                )
-            mesh = TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh
-        else:
-            if self.world_size == 4:  # test HSDP too if enough GPUs
-                if TestFullyShardMultiDtypeGradientAccumulation.hsdp_mesh is None:
-                    TestFullyShardMultiDtypeGradientAccumulation.hsdp_mesh = (
-                        init_device_mesh(
-                            "cuda",
-                            (2, 2),
-                            mesh_dim_names=("dp_replicate", "dp_shard"),
-                        )
-                    )
-                mesh = TestFullyShardMultiDtypeGradientAccumulation.hsdp_mesh
-            else:
-                if TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh is None:
-                    TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh = (
-                        init_device_mesh("cuda", (self.world_size,))
-                    )
-                mesh = TestFullyShardMultiDtypeGradientAccumulation.fsdp_mesh
-
-        if (
-            not reshard_after_backward
-            and (reshard_after_forward is not False or mode == "some_layers")
-        ) or (mesh.ndim != 2 and reduce_scatter_only):
-            return  # skip since not common or applicable
-
-        torch.manual_seed(42)
+        # Initialize model hyperparameters
         batch_size, lin_dim, num_layers, num_microbatches = (2, 32, 6, 3)
-        if mode == "some_layers":
-            num_layers_to_disable_reduce_scatter = 1
-        modules = [nn.Linear(lin_dim, lin_dim)]
-        for layer_idx in range(num_layers):
-            modules.append(
-                FeedForward(
-                    lin_dim,
-                    4 * lin_dim,
-                    0.0,
-                    dtype=multi_dtype["FeedForward"].get(layer_idx, torch.float32),  # type: ignore[index]
-                )
-            )
-        model = nn.Sequential(*modules)
-        ref_model = copy.deepcopy(model).cuda()
-        optim_policy = OptimPolicy(enable_main_param=True)
+
+        # Initialize model
+        with torch.random.fork_rng():
+            torch.manual_seed(42)
+            model = self.get_test_model(num_layers, lin_dim, multi_dtype)
+
+        # Initialize reference model
+        ref_model = copy.deepcopy(model)
+        # Set up DDP for reference model
+        replicate(ref_model.cuda(), device_ids=[self.rank])
+
+        # Set up FSDP for model
+        mp_policy = MixedPrecisionPolicy(main_param_dtype=torch.float64)
         fully_shard_fn = functools.partial(
             fully_shard,
             mesh=mesh,
             reshard_after_forward=reshard_after_forward,
-            optim_policy=optim_policy,
+            mp_policy=mp_policy,
         )
         fully_shard_fn([model[1], model[2], model[3]])
         fully_shard_fn([model[4], model[5], model[6]])
         fully_shard_fn(model)  # root gets the 1st linear
-        model.create_main_params()
 
-        ref_main_params = [
-            p.detach().clone().float().requires_grad_(True)
-            for p in ref_model.parameters()
-        ]
-        ref_optim = torch.optim.Adam(ref_main_params, lr=1e-2)
-        optim = torch.optim.Adam(model.main_parameters(), lr=1e-2)
+        with magi_fsdp_switch_params(model, param_type="main", retain_if_missing=True):
+            optim = torch.optim.Adam(cast(nn.Module, model).parameters(), lr=1e-2)
+        ref_optim = torch.optim.Adam(ref_model.parameters(), lr=1e-2)
 
-        def set_grad_sync_flag(
-            module: nn.Module, is_last_microbatch: bool, recurse: bool = True
-        ):
-            if reduce_scatter_only:
-                module.set_requires_all_reduce(is_last_microbatch, recurse=recurse)
-            else:
-                module.set_requires_gradient_sync(is_last_microbatch, recurse=recurse)
-
-        def set_backward_flags(_model: nn.Module, is_last_microbatch: bool):
-            if mode == "all":
-                set_grad_sync_flag(_model, is_last_microbatch)
-                if not reshard_after_backward:
-                    _model.set_reshard_after_backward(is_last_microbatch)
-            elif mode == "some_layers":
-                for layer in model[1 : 1 + 3 * num_layers_to_disable_reduce_scatter]:
-                    set_grad_sync_flag(layer, is_last_microbatch)
-                    if not reshard_after_backward:
-                        layer.set_reshard_after_backward(is_last_microbatch)
-            elif mode == "root_only":
-                set_grad_sync_flag(model, is_last_microbatch, recurse=False)
-                if not reshard_after_backward:
-                    model.set_reshard_after_backward(is_last_microbatch, recurse=False)
-
-        def set_forward_flags(_model: nn.Module, is_first_microbatch: bool):
-            if mode == "all":
-                _model.set_is_first_forward(is_first_microbatch)
-            elif mode == "some_layers":
-                for layer in model[1 : 1 + 3 * num_layers_to_disable_reduce_scatter]:
-                    layer.set_is_first_forward(is_first_microbatch)
-            elif mode == "root_only":
-                model.set_is_first_forward(is_first_microbatch, recurse=False)
-
-        torch.manual_seed(42 + self.rank + 1)
         for iter_idx in range(5):
             comm_count_list = []
 
-            optim.zero_grad(set_to_none=True)
-            ref_optim.zero_grad(set_to_none=(iter_idx % 2))
             for microbatch_idx in range(num_microbatches):
                 is_last_microbatch = microbatch_idx == num_microbatches - 1
-                set_backward_flags(model, is_last_microbatch)
                 is_first_microbatch = microbatch_idx == 0
-                set_forward_flags(model, is_first_microbatch)
-                inp = torch.randn(batch_size, lin_dim, device="cuda")
-                outs: list[torch.Tensor] = []
-                losses: list[torch.Tensor] = []
-                for _model in (ref_model, model):
-                    with CommDebugMode() as comm_mode:
-                        outs.append(_model(inp))
-                        losses.append(outs[-1].sum())
-                        losses[-1].backward()
-                    comm_count_list.append(comm_mode.get_comm_counts())
-                out_diff = torch.abs(outs[0] - outs[1]).max()
-                loss_diff = torch.abs(losses[0] - losses[1]).max()
-                print(
-                    f"Step {iter_idx=}, {microbatch_idx=}, out diff: {out_diff}, loss diff: {loss_diff}"
+                self.set_fine_grained_communication_flags(
+                    model,
+                    is_first_microbatch,
+                    is_last_microbatch,
+                    mode,
+                    reduce_scatter_only,
+                    reshard_after_backward,
+                    1,
+                    4,
                 )
+
+                inp = torch.randn(batch_size, lin_dim, device="cuda")
+
+                with CommDebugMode() as comm_mode:
+                    out = model(inp)
+                    loss = out.mean()
+                    loss.backward()
+
+                comm_count_list.append(comm_mode.get_comm_counts())
+
+                ref_out = ref_model(inp)
+                ref_loss = ref_out.mean()
+                ref_loss.backward()
 
                 test_case = (
                     f"[{hybrid_mesh=}][{mode=}][{reshard_after_forward=}][{reshard_after_backward=}]"
                     f"[{reduce_scatter_only=}][{iter_idx=}][{microbatch_idx=}]"
                 )
+
                 # -----   assert close for fwd out   ---- #
-
-                # torch style with atol + rtol + mismatch threshold
-                o_thres = extract_mismatch_threshold(
-                    actual=outs[1],
-                    expected=outs[0],
-                    atol=o_atol,
-                    rtol=o_rtol,
-                    mismatch_thres_ratio=mismatch_thres_ratio,
-                )
-
-                magi_fsdp.testing.assert_close(
-                    outs[1],
-                    outs[0],
-                    atol=o_atol,
-                    rtol=o_rtol,
-                    mismatch_threshold=o_thres,
+                assert_close(
+                    out,
+                    ref_out,
+                    atol=atol,
+                    rtol=rtol,
+                    mismatch_threshold=mismatch_threshold,
                     test_case=f"{test_case} => o",
                 )
 
@@ -1219,9 +926,9 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
             if mode == "some_layers":
                 # Expect additional reduce-scatters for non-disabled FeedForwards and
                 # the root's linear
-                expected_reduce_scatter_count += (
-                    2 * ((num_layers // 3) - num_layers_to_disable_reduce_scatter) + 1
-                ) * (num_microbatches - 1)
+                expected_reduce_scatter_count += (2 * ((num_layers // 3) - 1) + 1) * (
+                    num_microbatches - 1
+                )
             elif mode == "root_only":
                 # Expect additional reduce-scatters for all FeedForwards
                 expected_reduce_scatter_count += (
@@ -1260,27 +967,20 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
                 # The MLPs should still contribute all-gathers in each
                 # microbatch forward
                 expected_all_gather_count += (num_layers // 3) * (num_microbatches - 1)
+            elif mode == "some_layers":  # `reshard_after_forward/backward=False`
+                # The non-disabled MLPs and root should still contribute all-gathers
+                # in each microbatch forward
+                expected_all_gather_count += (((num_layers // 3) - 1) + 1) * (
+                    num_microbatches - 1
+                )
             self.assertEqual(all_gather_count, expected_all_gather_count)
 
-            for param in ref_model.parameters():
-                if param.grad is not None:
-                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
-
             optim.step()
-            for model_p, master_p in zip(ref_model.parameters(), ref_main_params):
-                if model_p.grad is not None:
-                    with torch.no_grad():
-                        if master_p.grad is None:
-                            master_p.grad = torch.zeros_like(
-                                master_p, dtype=master_p.dtype
-                            )
-                        master_p.grad.copy_(model_p.grad.detach().float())
-                        model_p.grad.zero_()
             ref_optim.step()
-            for model_p, master_p in zip(ref_model.parameters(), ref_main_params):
-                model_p.data.copy_(master_p.data.to(dtype=model_p.dtype))
+            optim.zero_grad()
+            ref_optim.zero_grad()
 
-    @skip_if_lt_x_gpu(2)
+    @skip_if_lt_x_gpu(4)
     @switch_envvar_decorator("MAGI_FSDP_MULTI_DTYPE_REDUCE")
     @parameterize("use_explicit_unshard", [False, True])
     @parameterize("reshard_after_backward", [False, True])
@@ -1299,31 +999,12 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
             {
                 "TransformerBlock": {
                     0: torch.float32,
-                    1: torch.bfloat16,
+                    1: torch.float64,
                     2: torch.float32,
-                    3: torch.bfloat16,
+                    3: torch.float64,
                     4: torch.float32,
                 },
                 "LayerNorm": torch.float32,
-            },
-            {
-                "TransformerBlock": {
-                    0: torch.float32,
-                    1: torch.bfloat16,
-                    2: torch.bfloat16,
-                    3: torch.bfloat16,
-                    4: torch.float32,
-                },
-                "LayerNorm": torch.float32,
-            },
-            {
-                "TransformerBlock": {
-                    0: torch.bfloat16,
-                    1: torch.bfloat16,
-                    2: torch.bfloat16,
-                    3: torch.bfloat16,
-                    4: torch.float32,
-                }
             },
         ],
     )
@@ -1333,38 +1014,34 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
         reshard_after_backward: bool,
         multi_dtype: dict[str, Any],
     ):
-        EPSILON = 1e-8
+        # Get precision meta information
+        atol, rtol, mismatch_thresh_ratio = get_precision_meta_info()
 
-        o_atol = EPSILON
-        o_rtol = 0.05
+        # Set random seed
+        torch.manual_seed(42 + self.rank)
 
-        # NOTE: an experimental value from magi_fsdp testing
-        mismatch_thres_ratio: float = 2.0
+        # Initialize model
+        with torch.random.fork_rng():
+            torch.manual_seed(42)
+            model_args = get_model_args()
+            model = MultiDtypeTransformer(model_args, multi_dtype)
 
-        torch.manual_seed(42)
-        vocab_size = 1024
-        model_args = ModelArgs(
-            n_layers=5,
-            n_heads=4,
-            dim=128,
-            vocab_size=vocab_size,
-            max_seq_len=1024,
-            dropout_p=0,
-            use_attn_mask=False,
-            weight_tying=False,
-            checkpoint_activations=False,
-        )
-        model = MultiDtypeTransformer(model_args, multi_dtype)
+        # Initialize reference model
+        ref_model = copy.deepcopy(model)
+        # Set up DDP for reference model
+        replicate(ref_model.cuda(), device_ids=[self.rank])
 
-        ref_model = copy.deepcopy(model).cuda()
-        ref_optim = torch.optim.AdamW(ref_model.parameters(), lr=1e-2)
+        # Set up FSDP for model
         fully_shard([model.layers[0], model.layers[1]], reshard_after_forward=False)
         fully_shard(
             [model.layers[2], model.layers[3], model.layers[4]],
             reshard_after_forward=False,
         )
         fully_shard(model, reshard_after_forward=False)
+
+        # Initialize optimizer
         optim = torch.optim.AdamW(model.parameters(), lr=1e-2)
+        ref_optim = torch.optim.AdamW(ref_model.parameters(), lr=1e-2)
 
         num_microbatches = 3
         local_batch_size = 2
@@ -1379,63 +1056,38 @@ class TestFullyShardMultiDtypeGradientAccumulation(FSDPTest):
 
         # Emulate the 1f1b pipeline schedule and only reduce gradients on the
         # last microbatch
-        torch.manual_seed(42 + self.rank + 1)
-        for iter_step in range(3):
-            outs: list[torch.Tensor] = []
-            ref_outs: list[torch.Tensor] = []
-            losses: list[torch.Tensor] = []
-            ref_losses: list[torch.Tensor] = []
-            inps = [
-                torch.randint(
-                    0, model_args.vocab_size, (local_batch_size, 1024), device="cuda"
-                )
-                for _ in range(num_microbatches)
-            ]
-            optim.zero_grad()
-            ref_optim.zero_grad()
-            for inp_idx, inp in enumerate(inps):
-                is_last_microbatch = inp_idx == num_microbatches - 1
+        for iter_idx in range(3):
+            for microbatch_idx in range(num_microbatches):
+                is_last_microbatch = microbatch_idx == num_microbatches - 1
                 model.set_requires_gradient_sync(is_last_microbatch)
                 model.set_is_last_backward(is_last_microbatch)
                 if not reshard_after_backward:
                     model.set_reshard_after_backward(is_last_microbatch)
-                outs.append(model(inp))
-                losses.append(outs[-1].sum())
-                losses[-1].backward()
-                ref_outs.append(ref_model(inp))
-                ref_losses.append(ref_outs[-1].sum())
-                ref_losses[-1].backward()
 
-                max_out_diff = torch.abs(outs[-1] - ref_outs[-1]).max()
-                loss_diff = torch.abs(losses[-1] - ref_losses[-1]).max()
-                print(
-                    f"Step {iter_step=}, {inp_idx=}, max forward diff: {max_out_diff}, loss diff: {loss_diff}"
+                inp = torch.randint(
+                    0, model_args.vocab_size, (local_batch_size, 1024), device="cuda"
                 )
 
-                test_case = f"[{use_explicit_unshard=}][{reshard_after_backward=}][{iter_step=}][{inp_idx=}]"
+                out = model(inp)
+                loss = out.mean()
+                loss.backward()
+                ref_out = ref_model(inp)
+                ref_loss = ref_out.mean()
+                ref_loss.backward()
+
+                test_case = f"[{use_explicit_unshard=}][{reshard_after_backward=}][{iter_idx=}][{microbatch_idx=}]"
 
                 # -----   assert close for fwd out   ---- #
-
-                # torch style with atol + rtol + mismatch threshold
-                o_thres = extract_mismatch_threshold(
-                    actual=outs[-1],
-                    expected=ref_outs[-1],
-                    atol=o_atol,
-                    rtol=o_rtol,
-                    mismatch_thres_ratio=mismatch_thres_ratio,
-                )
-
-                magi_fsdp.testing.assert_close(
-                    outs[-1],
-                    ref_outs[-1],
-                    atol=o_atol,
-                    rtol=o_rtol,
-                    mismatch_threshold=o_thres,
+                assert_close(
+                    out,
+                    ref_out,
+                    atol=atol,
+                    rtol=rtol,
+                    mismatch_threshold=mismatch_thresh_ratio,
                     test_case=f"{test_case} => o",
                 )
 
-            for param in ref_model.parameters():
-                dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
-
             optim.step()
             ref_optim.step()
+            optim.zero_grad()
+            ref_optim.zero_grad()

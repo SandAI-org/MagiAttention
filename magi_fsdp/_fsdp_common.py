@@ -25,7 +25,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._composable.contract import _get_registry
 from torch.distributed.tensor import DeviceMesh, DTensor
-from torch.distributed.tensor._dtensor_spec import DTensorSpec
+from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 
 _compiled_autograd_enabled: bool = False
 
@@ -158,6 +158,17 @@ def _from_local_no_grad(
     This method is similar to ``DTensor.from_local()`` except that in eager mode
     it avoids some CPU overhead by avoiding default args and not being differentiable.
     """
+
+    # Use only the distributed metadata while preserving the original tensor dtype
+    sharding_spec = DTensorSpec(
+        mesh=sharding_spec.mesh,
+        placements=sharding_spec.placements,
+        tensor_meta=TensorMeta(
+            shape=sharding_spec.shape,
+            stride=sharding_spec.stride,
+            dtype=local_tensor.dtype,
+        ),
+    )
 
     if not compiled_autograd_enabled():
         return DTensor(

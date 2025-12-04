@@ -13,14 +13,19 @@
 # limitations under the License.
 
 import functools
+from typing import cast
 
 import torch
 from torch.distributed.tensor import init_device_mesh
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.distributed._tensor.common_dtensor import ModelArgs
 
-from magi_fsdp import OptimPolicy, fully_shard
-from magi_fsdp._fsdp_module import switch_named_main_params_on_modules
+from magi_fsdp import (
+    MagiFSDPModule,
+    MixedPrecisionPolicy,
+    fully_shard,
+    magi_fsdp_switch_params,
+)
 from magi_fsdp.testing import parameterize
 from magi_fsdp.testing.common_fsdp import FSDPTest, MultiDtypeTransformer
 
@@ -68,13 +73,12 @@ class TestInitOptimMainParams(FSDPTest):
         fully_shard_fn = functools.partial(
             fully_shard,
             mesh=mesh,
-            optim_policy=OptimPolicy(enable_ema_param=False, enable_main_param=True),
+            mp_policy=MixedPrecisionPolicy(main_param_dtype=torch.float64),
         )
         fully_shard_fn([model.layers[0], model.layers[1]])
         fully_shard_fn([model.layers[2], model.layers[3], model.layers[4]])
         fully_shard_fn(model)
-        model.create_main_params()
-        main_params = list(model.main_parameters())
-        with switch_named_main_params_on_modules(model, enable_main_param=True):
+        main_params = list(cast(MagiFSDPModule, model).main_parameters())
+        with magi_fsdp_switch_params(model, param_type="main"):
             orig_params = list(model.parameters())
             self.assertEqual(main_params, orig_params)

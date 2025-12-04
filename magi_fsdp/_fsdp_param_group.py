@@ -17,6 +17,7 @@
 import contextlib
 import logging
 import warnings
+from itertools import groupby
 from typing import Any, Callable, NamedTuple, Optional, Union, cast
 
 import torch
@@ -35,7 +36,6 @@ from ._fsdp_api import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
     OffloadPolicy,
-    OptimPolicy,
 )
 from ._fsdp_collectives import (
     AllGatherResult,
@@ -50,7 +50,7 @@ from ._fsdp_common import (
     TrainingState,
     compiled_autograd_enabled,
 )
-from ._fsdp_param import MagiFSDPParam, ParamModuleInfo, ParamPackInfo, ShardedState
+from ._fsdp_param import MagiFSDPParam, ParamModuleInfo, ShardedState
 
 logger = logging.getLogger("magi_fsdp")
 
@@ -134,7 +134,14 @@ class AllReduceState(NamedTuple):
 class MagiFSDPParamGroup:
     """This class represents a parameter group to communicate together."""
 
-    _orig_dtype: torch.dtype
+    # dtype of the parameters in this group, set to None if there are multiple dtypes
+    _param_dtype: Optional[torch.dtype]
+    # dtype of the gradients of the parameters in this group, set to None if there are multiple dtypes
+    _grad_dtype: Optional[torch.dtype]
+    # dtype used for reduce-scatter / all-reduce
+    # there are 2 cases where this is None:
+    # 1. reduce dtype is not specified in mp_policy
+    # 2. reduce dtype is same as param dtypes for all params in the group
     _reduce_dtype: Optional[torch.dtype]
 
     def __init__(
@@ -147,7 +154,6 @@ class MagiFSDPParamGroup:
         shard_placement_fn: Optional[Callable[[nn.Parameter], Optional[Shard]]],
         mp_policy: MixedPrecisionPolicy,
         offload_policy: OffloadPolicy,
-        optim_policy: Optional[OptimPolicy] = OptimPolicy(),
     ):
         self.modules = modules  # permit ref cycle because 1:1 lifetime
         param_module_infos = _get_param_module_infos(params, modules)
@@ -165,20 +171,12 @@ class MagiFSDPParamGroup:
             )
             for param, module_info in zip(params, param_module_infos)
         ]
-        self.main_param_dtype: torch.dtype = None
-        self.optim_policy = optim_policy
-        if self.optim_policy.enable_main_param:  # type: ignore[union-attr]
-            self.main_param_dtype = mp_policy.main_param_dtype  # type: ignore[union-attr]
-            if mp_policy.main_param_dtype is None:  # type: ignore[union-attr]
-                self.main_param_dtype = torch.float32
-        self._create_param_pack_infos()
-        self.is_first_fwd: bool = True
+
         self.mesh_info = mesh_info
         self.post_forward_mesh_info = post_forward_mesh_info
         self.device = device
         self.device_handle = _get_device_handle(device.type)
         self.mp_policy = mp_policy
-        self._uniform_reduce_dtype: Optional[torch.dtype] = None
         self.offload_policy = offload_policy
         if (
             isinstance(offload_policy, CPUOffloadPolicy)
@@ -229,6 +227,9 @@ class MagiFSDPParamGroup:
         # Whether to unshard in backward: can be overridden by the user if the
         # parameters in this group are not needed for backward (e.g. embedding)
         self.unshard_in_backward: bool = True
+        # Whether to copy from sharded main parameters to sharded parameters
+        # before all_gather parameters in forward when main parameters are enabled
+        self.copy_main_param: bool = True
 
         # - CUDA events for stream synchronization
         # Holds the all-gather output buffer, sync objects, and metadata
@@ -257,45 +258,34 @@ class MagiFSDPParamGroup:
         for fsdp_param in self.fsdp_params:
             fsdp_param.init_dtype_attrs(self.mp_policy)
 
-        if magi_fsdp.is_multi_dtype_reduce_enable():
-            reduce_dtypes = {
-                fsdp_param.reduce_dtype
-                for fsdp_param in self.fsdp_params
-                if fsdp_param.sharded_param.requires_grad
-            }
-            if len(reduce_dtypes) == 1:
-                self._uniform_reduce_dtype = next(iter(reduce_dtypes))
-            else:
-                self._uniform_reduce_dtype = None
+        param_dtypes = {
+            fsdp_param.sharded_param.dtype for fsdp_param in self.fsdp_params
+        }
+        grad_dtypes = {fsdp_param.grad_dtype for fsdp_param in self.fsdp_params}
+        reduce_dtypes = {fsdp_param.reduce_dtype for fsdp_param in self.fsdp_params}
+
+        if len(param_dtypes) == 1:
+            self._param_dtype = next(iter(param_dtypes))
         else:
-            orig_dtypes = {fsdp_param.orig_dtype for fsdp_param in self.fsdp_params}
-            if len(orig_dtypes) != 1:
-                # This can be relaxed if we copy-out for the reduce-scatter
-                raise AssertionError(
-                    f"MagiFSDP expects uniform original parameter dtype but got {orig_dtypes}"
-                )
-            self._orig_dtype = next(iter(orig_dtypes))
-            reduce_dtypes = {fsdp_param.reduce_dtype for fsdp_param in self.fsdp_params}
-            if len(reduce_dtypes) != 1:
+            self._param_dtype = None
+
+        if len(reduce_dtypes) == 1:
+            self._reduce_dtype = next(iter(reduce_dtypes))
+        else:
+            if not magi_fsdp.is_multi_dtype_reduce_enable() and len(reduce_dtypes) != 1:
                 # This can be relaxed if we issue one reduce-scatter per reduce
                 # dtype (but we would need a way for users to specify multiple
                 # reduce dtypes)
                 raise AssertionError(
-                    f"MagiFSDP expects uniform reduce dtype but got {reduce_dtypes}"
+                    f"MagiFSDP expects uniform reduce dtype when multi-dtype reduce is disabled, but got {reduce_dtypes}"
                 )
-            self._reduce_dtype = next(iter(reduce_dtypes))
 
-    def _create_param_pack_infos(self):
-        self.param_pack_infos = {}
-        for fsdp_param in self.fsdp_params:
-            self.param_pack_infos[fsdp_param.sharded_param] = ParamPackInfo(
-                sharded_main_param=fsdp_param.sharded_main_param
-                if hasattr(fsdp_param, "sharded_main_param")
-                else None,
-                sharded_ema_param=fsdp_param.sharded_ema_param
-                if hasattr(fsdp_param, "sharded_ema_param")
-                else None,
-            )
+            self._reduce_dtype = None
+
+        if len(grad_dtypes) == 1:
+            self._grad_dtype = next(iter(grad_dtypes))
+        else:
+            self._grad_dtype = None
 
     def lazy_init(self):
         # Lazy init should be idempotent
@@ -316,10 +306,6 @@ class MagiFSDPParamGroup:
         self._init_mp_dtypes()
         self._register_state_dict_hooks()
 
-    def copy_from_main_params(self):
-        for fsdp_param in self.fsdp_params:
-            fsdp_param.copy_from_main_param()
-
     # Runtime #
     def unshard(self, async_op: bool = False):
         if self._all_gather_result is not None:  # already called, pending wait
@@ -336,14 +322,49 @@ class MagiFSDPParamGroup:
             # used in the all-gather streams
             self._wait_all_gather_streams_on_event(self._reshard_after_forward_event)
             self._reshard_after_forward_event = None
-        if self.optim_policy.enable_main_param:  # type: ignore[union-attr]
-            with record_function(self._with_fqn("MagiFSDP::copy_main_param")):
-                if self._training_state == TrainingState.FORWARD and self.is_first_fwd:
-                    all_gather_copy_in_stream, _ = self.comm_ctx.get_all_gather_streams(
-                        async_op, self._training_state
-                    )
-                    with self.device_handle.stream(all_gather_copy_in_stream):
-                        self.copy_from_main_params()
+
+        if (
+            self._training_state == TrainingState.FORWARD
+            and self.mp_policy.main_param_dtype is not None
+            and self.copy_main_param
+        ):
+            all_gather_copy_in_stream, _ = self.comm_ctx.get_all_gather_streams(
+                async_op, self._training_state
+            )
+            with record_function(
+                self._with_fqn("MagiFSDP::copy_main_param")
+            ), self.device_handle.stream(all_gather_copy_in_stream):
+                # NOTE(littsk): torch._foreach_copy_ only supports tensors with the same dtype.
+                # Here we group parameters by dtype and perform foreach_copy for each group.
+
+                # groupby requires sorted input
+                key_fn = lambda p: str(  # noqa: E731
+                    p.sharded_param.data._local_tensor.dtype
+                )
+                sorted_fsdp_params = sorted(self.fsdp_params, key=key_fn)
+
+                for _, group in groupby(sorted_fsdp_params, key=key_fn):
+                    # For each dtype group, perform the foreach_copy operation
+                    # NOTE(littsk): If main_param_dtype is the same as sharded_param dtype,
+                    # the main param is not created and sharded_main_param is None,
+                    # so we need to filter them out.
+                    param_pairs = [
+                        (
+                            p.sharded_param.data._local_tensor,
+                            p.sharded_main_param.data._local_tensor,
+                        )
+                        for p in group
+                        if p.sharded_main_param is not None
+                    ]
+
+                    if not param_pairs:
+                        # If all params in this group have the same dtype as main_param_dtype,
+                        # skip this group.
+                        continue
+
+                    dests, srcs = zip(*param_pairs)
+                    torch._foreach_copy_(dests, srcs)
+
         with record_function(self._with_fqn("MagiFSDP::all_gather")):
             self._all_gather_result = foreach_all_gather(
                 self.fsdp_params,
@@ -355,7 +376,7 @@ class MagiFSDPParamGroup:
 
     def wait_for_unshard(self):
         """
-        1. In forward with implict prefetching, to overlap the current copy-out
+        1. In forward with implicit prefetching, to overlap the current copy-out
         with the next all-gather, we save a reference to the current all-gather
         result to free after the next copy-out.
         2. Otherwise (explicit prefetching or in backward), we free the
@@ -516,7 +537,11 @@ class MagiFSDPParamGroup:
 
             self._wait_for_post_backward()
 
-            if magi_fsdp.is_multi_dtype_reduce_enable():
+            if (
+                magi_fsdp.is_multi_dtype_reduce_enable()
+                and self._param_dtype is None
+                and self._reduce_dtype is None
+            ):
                 (
                     reduce_scatter_inputs,
                     reduce_scatter_event,
@@ -529,7 +554,7 @@ class MagiFSDPParamGroup:
                     unsharded_grads,
                     self._reduce_scatter_process_group,
                     self.comm_ctx.reduce_scatter_stream,
-                    self._uniform_reduce_dtype,
+                    self._grad_dtype,
                     self.device,
                     self.reduce_scatter_reduce_op,
                     self._all_reduce_process_group if self._is_hsdp else None,
@@ -537,7 +562,6 @@ class MagiFSDPParamGroup:
                     self.all_reduce_grads,
                     self._partial_reduce_outputs,
                     self._all_reduce_hook,
-                    self.main_param_dtype,
                 )
                 self.comm_ctx.reduce_scatter_state = ReduceScatterState(
                     reduce_scatter_inputs, reduce_scatter_event
@@ -561,7 +585,7 @@ class MagiFSDPParamGroup:
                     unsharded_grads,
                     self._reduce_scatter_process_group,
                     self.comm_ctx.reduce_scatter_stream,
-                    self._orig_dtype,
+                    self._grad_dtype,
                     self._reduce_dtype,
                     self.device,
                     self.reduce_scatter_reduce_op,
@@ -570,7 +594,6 @@ class MagiFSDPParamGroup:
                     self.all_reduce_grads,
                     self._partial_reduce_outputs,
                     self._all_reduce_hook,
-                    self.main_param_dtype,
                 )
                 self.comm_ctx.reduce_scatter_state = ReduceScatterState(
                     reduce_scatter_input, reduce_scatter_event
@@ -792,27 +815,25 @@ class MagiFSDPParamGroup:
                 "For example, call module.to_empty(device) to materialize to device and "
                 "call module.reset_parameters() on each module to initialize values."
             )
-        main_param_names_on_meta = []
-        if self.optim_policy.enable_main_param:
-            for fsdp_param in self.fsdp_params:
-                if (
-                    fsdp_param.sharded_main_param is not None
-                    and fsdp_param.sharded_main_param.device.type == "meta"
-                ):
-                    main_param_names_on_meta.append(fsdp_param._param_fqn)
+
+        main_param_names_on_meta = [
+            fsdp_param._param_fqn
+            for fsdp_param in self.fsdp_params
+            if fsdp_param.sharded_main_param is not None
+            and fsdp_param.sharded_main_param.device.type == "meta"
+        ]
         if main_param_names_on_meta:
             raise RuntimeError(
                 "MagiFSDP main parameters should be materialized from meta device before training, "
                 f"but the following were still on meta device: {main_param_names_on_meta}\n"
             )
-        ema_param_names_on_meta = []
-        if self.optim_policy.enable_ema_param:
-            for fsdp_param in self.fsdp_params:
-                if (
-                    fsdp_param.sharded_ema_param is not None
-                    and fsdp_param.sharded_ema_param.device.type == "meta"
-                ):
-                    ema_param_names_on_meta.append(fsdp_param._param_fqn)
+
+        ema_param_names_on_meta = [
+            fsdp_param._param_fqn
+            for fsdp_param in self.fsdp_params
+            if fsdp_param.sharded_ema_param is not None
+            and fsdp_param.sharded_ema_param.device.type == "meta"
+        ]
         if ema_param_names_on_meta:
             raise RuntimeError(
                 "MagiFSDP EMA parameters should be materialized from meta device before training, "
@@ -837,34 +858,6 @@ class MagiFSDPParamGroup:
                 "Found following parameters on non-CPU device: "
                 f"{[(fsdp_param._param_fqn, fsdp_param.sharded_param.device) for fsdp_param in fsdp_params_not_on_cpu]}\n"
             )
-
-    def create_main_params(self) -> None:
-        assert self.main_param_dtype is not None
-        for fsdp_param in self.fsdp_params:
-            fsdp_param._init_sharded_main_param(self.main_param_dtype)
-            self.param_pack_infos[
-                fsdp_param.sharded_param
-            ].sharded_main_param = fsdp_param.sharded_main_param
-
-    # EMA-related methods
-    def create_ema_params(self) -> None:
-        for fsdp_param in self.fsdp_params:
-            fsdp_param.create_ema_param()
-            self.param_pack_infos[
-                fsdp_param.sharded_param
-            ].sharded_ema_param = fsdp_param.sharded_ema_param
-
-    def update_ema_params(self, decay: float) -> None:
-        for fsdp_param in self.fsdp_params:
-            fsdp_param.update_ema_param(decay)
-
-    def use_ema_params(self) -> None:
-        for fsdp_param in self.fsdp_params:
-            fsdp_param.use_ema_param()
-
-    def swap_ema_params(self) -> None:
-        for fsdp_param in self.fsdp_params:
-            fsdp_param.swap_ema_param()
 
 
 def _get_param_module_infos(

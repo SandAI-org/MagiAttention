@@ -151,7 +151,7 @@ def _get_managed_modules(
 ) -> list[nn.Module]:
     modules: list[nn.Module] = []
     root_modules_set = set(root_modules)
-    # Track visisted modules to avoid visiting shared modules multiple times
+    # Track visited modules to avoid visiting shared modules multiple times
     visited_modules: set[nn.Module] = set()
 
     def dfs(module: nn.Module) -> None:

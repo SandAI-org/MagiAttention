@@ -19,7 +19,7 @@ import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, Optional, TypeAlias, cast
 
 import torch
 import torch.nn as nn
@@ -78,6 +78,12 @@ it in-place thereafter. For the default ``torch.Tensor` original parameter
 case, the all-gather output and unsharded parameter share the same
 data, so we use storage resizing on the all-gather output.
 """
+
+# Type aliases for different parameter variants in MagiFSDP
+ShardedParam: TypeAlias = nn.Parameter
+ShardedMainParam: TypeAlias = nn.Parameter
+ShardedEmaParam: TypeAlias = nn.Parameter
+UnshardedParam: TypeAlias = nn.Parameter
 
 lib = torch.library.Library("magi_fsdp", "FRAGMENT")  # noqa: TOR901
 
@@ -195,13 +201,11 @@ class ParamModuleInfo:
 @dataclass
 class ParamPackInfo:
     """
-    Records parameter variants (master and EMA) for an FSDP-sharded parameter.
-    Maintains a dictionary of other related params to ensure the same order
-    as `module.named_parameters()` during collection.
+    For a shared_param, this stores its related parameter variants.
     """
 
-    sharded_main_param: DTensor
-    sharded_ema_param: nn.Parameter
+    sharded_main_param: ShardedMainParam | None
+    sharded_ema_param: ShardedEmaParam | None
 
 
 @dataclass
@@ -222,9 +226,13 @@ class MagiFSDPParam:
     implementing dim-0 per-parameter sharding.
     """
 
+    # dtype of sharded parameter
     orig_dtype: torch.dtype
+    # gradient dtype, determined by the parameter actually used (sharded parameter or sharded main parameter)
+    grad_dtype: torch.dtype
     param_dtype: Optional[torch.dtype]
     reduce_dtype: Optional[torch.dtype]
+
     _orig_size: torch.Size  # ND
     sharded_size: torch.Size  # ND
     contiguous_sharded_stride: tuple[int, ...]
@@ -232,23 +240,23 @@ class MagiFSDPParam:
     sharded_post_forward_size: torch.Size  # ND
     contiguous_sharded_post_forward_stride: tuple[int, ...]
     _sharded_param_data: torch.Tensor  # 1D
-    sharded_param: nn.Parameter  # ND
-    sharded_main_param: nn.Parameter  # ND
+    sharded_param: ShardedParam  # ND
     _sharded_post_forward_param_data: Optional[torch.Tensor]  # 1D
     _sharded_post_forward_param: Optional[nn.Parameter]  # ND
-    _unsharded_param: nn.Parameter  # ND
+    _unsharded_param: UnshardedParam  # ND
     unsharded_accumulated_grad: Optional[torch.Tensor]  # ND
     _sharding_spec: DTensorSpec
-    _sharding_main_param_spec: DTensorSpec
     # DTensor attributes (only defined for DTensor `param`):
     _tp_spec: DTensorSpec
     all_gather_outputs: list[torch.Tensor]  # 1D
+
     # All-gather extension attributes
-    _extensions_data: ExtensionsData
+    _extensions_data: Optional[ExtensionsData]
     _unsharded_inner_tensors: list[torch.Tensor]
 
     # EMA-related attributes
-    sharded_ema_param: Optional[nn.Parameter]  # ND
+    sharded_main_param: Optional[ShardedMainParam]  # ND
+    sharded_ema_param: Optional[ShardedEmaParam]  # ND
 
     def __init__(
         self,
@@ -275,6 +283,18 @@ class MagiFSDPParam:
         )
         self.grad_offload_event: Optional[torch.Event] = None
         self._init_sharded_param(param, device, shard_placement_fn)
+
+        if self.mp_policy.main_param_dtype is not None:
+            # If main_param_dtype is set, initialize sharded main parameter
+            self._init_sharded_main_param(mp_policy.main_param_dtype)
+        else:
+            self.sharded_main_param = None
+        if self.mp_policy.ema_param_dtype is not None:
+            # If ema_param_dtype is set, initialize sharded EMA parameter
+            self._init_sharded_ema_param(mp_policy.ema_param_dtype)
+        else:
+            self.sharded_ema_param = None
+
         if self.post_forward_mesh_info:
             self._init_sharded_post_forward_param_metadata(param)
         self._init_extensions()
@@ -438,29 +458,25 @@ class MagiFSDPParam:
         self._setattr_on_modules(self.sharded_param)
         self.sharded_state = ShardedState.SHARDED
 
+    @torch.no_grad()
     def _init_sharded_main_param(self, main_param_dtype: Optional[torch.dtype] = None):
-        # FP16/BF16 Sharded Param -> Sharded Main Param
-        with torch.no_grad():
-            if not self.sharded_param.requires_grad:
-                self.sharded_main_param = None
-            else:
-                self.main_param_dtype = main_param_dtype
-                if self.sharded_param.dtype != self.main_param_dtype:
-                    self.sharded_main_param = (
-                        self.sharded_param.detach().clone().to(self.main_param_dtype)
-                    )
-                    self.sharded_main_param.requires_grad_(True)
-                else:
-                    self.sharded_main_param = self.sharded_param
-                self._sharding_main_param_spec = DTensorSpec(
-                    self._spmd_mesh,
-                    self._spmd_placements,
-                    tensor_meta=TensorMeta(
-                        self._sharding_spec.shape,
-                        self._sharding_spec.stride,
-                        self.main_param_dtype,
-                    ),
-                )
+        if self.sharded_param.dtype != main_param_dtype:
+            self.sharded_main_param = nn.Parameter(
+                self.sharded_param.detach().clone().to(main_param_dtype)
+            )
+            set_requires_grad_if_needed(self.sharded_main_param, self.sharded_param)
+        else:
+            # NOTE(littsk): If the sharded param dtype matches the main param dtype,
+            # set the sharded main param to None to avoid redundant copies.
+            self.sharded_main_param = None
+
+    @torch.no_grad()
+    def _init_sharded_ema_param(self, ema_param_dtype: Optional[torch.dtype] = None):
+        self.sharded_ema_param = nn.Parameter(
+            self.sharded_param.detach().clone().to(ema_param_dtype)
+        )
+        # NOTE(littsk): EMA parameters do not require gradients.
+        self.sharded_ema_param.requires_grad = False
 
     def _init_sharded_post_forward_param_metadata(self, param: torch.Tensor) -> None:
         mesh_info = self.post_forward_mesh_info
@@ -489,6 +505,11 @@ class MagiFSDPParam:
             param_dtype = None
         self.param_dtype = param_dtype
         self.reduce_dtype = reduce_dtype
+        self.grad_dtype = (
+            self.sharded_main_param.dtype
+            if self.sharded_main_param is not None
+            else self.orig_dtype
+        )
         # None indicates that the mixed precision is not enabled
 
     def _init_extensions(self) -> None:
@@ -502,6 +523,8 @@ class MagiFSDPParam:
             )
         if has_fsdp_pre_all_gather:
             self._extensions_data = ExtensionsData()
+        else:
+            self._extensions_data = None
         self._unsharded_inner_tensors: list[torch.Tensor] = []
 
     def init_all_gather_outputs(
@@ -599,6 +622,8 @@ class MagiFSDPParam:
             )
 
     def _unflatten_all_gather_outputs(self) -> tuple[torch.Tensor, ...]:
+        assert self._extensions_data is not None
+
         return tuple(
             t.view(-1, *s[1:])
             for t, s in zip(
@@ -667,6 +692,11 @@ class MagiFSDPParam:
         ):
             unsafe_setattr_param(shared_module, shared_param_name, param)
 
+    def _swap_param_on_modules(self, new_param: nn.Parameter) -> nn.Parameter:
+        old_param = getattr(self._module_info.module, self._module_info.param_name)
+        self._setattr_on_modules(new_param)
+        return old_param
+
     def to_sharded_dtensor(self, tensor: torch.Tensor) -> DTensor:
         """
         Converts a local tensor representing either the sharded parameter or
@@ -676,18 +706,9 @@ class MagiFSDPParam:
             _raise_assert_with_print(
                 f"Expects size {self.sharded_size} but got {tensor.shape}"
             )
-        return _from_local_no_grad(tensor, self._sharding_spec)
 
-    def to_sharded_main_param_dtensor(self, tensor: torch.Tensor) -> DTensor:
-        """
-        Converts a local tensor representing either the sharded main parameter
-        or sharded main parameter gradient to DTensor.
-        """
-        if tensor.shape != self.sharded_size:
-            _raise_assert_with_print(
-                f"Expects size {self.sharded_size} but got {tensor.shape}"
-            )
-        return _from_local_no_grad(tensor, self._sharding_main_param_spec)
+        # NOTE(littsk): We don't use _sharding_spec.tensor_meta.dtype, the dtype still uses tensor's dtype
+        return _from_local_no_grad(tensor, self._sharding_spec)
 
     def to_sharded_post_forward_dtensor(self, tensor: torch.Tensor) -> DTensor:
         if tensor.shape != self.sharded_post_forward_size:
@@ -751,36 +772,6 @@ class MagiFSDPParam:
             ):
                 free_storage(tensor)
 
-    def copy_from_main_param(self) -> None:
-        if (
-            self.sharded_main_param is not None
-            and self.sharded_main_param is not self.sharded_param
-        ):
-            with torch.no_grad():
-                cast_dtype = self.sharded_param.dtype
-                self.sharded_param._local_tensor.copy_(
-                    self.sharded_main_param._local_tensor.to(cast_dtype)
-                )
-
-    def grad_copy_to_main_param(self) -> None:
-        if (
-            self.sharded_main_param is not None
-            and self.sharded_main_param is not self.sharded_param
-        ):
-            if self.sharded_param.grad is not None:
-                with torch.no_grad():
-                    if self.sharded_main_param.grad is None:
-                        self.sharded_main_param.grad = torch.zeros_like(
-                            self.sharded_main_param
-                        )
-                    cast_dtype = self.sharded_main_param.dtype
-                    self.sharded_main_param.grad._local_tensor.copy_(
-                        self.sharded_param.grad._local_tensor.to(cast_dtype)
-                    )
-                    self.sharded_param.grad._local_tensor.zero_()
-            else:
-                self.sharded_main_param.grad = None
-
     @property
     def all_gather_inputs(self) -> list[torch.Tensor]:  # 1D
         self._assert_in_states(ShardedState.SHARDED, ShardedState.SHARDED_POST_FORWARD)
@@ -788,11 +779,10 @@ class MagiFSDPParam:
             if not compiled_autograd_enabled() and hasattr(
                 self._sharded_local_tensor, "fsdp_pre_all_gather"
             ):
+                assert (
+                    self._extensions_data is not None
+                ), "_extensions_data should be initialized if fsdp_pre_all_gather is defined"
                 sharded_local_tensor = self._sharded_local_tensor
-                if self.offload_to_cpu:
-                    sharded_local_tensor = sharded_local_tensor.to(
-                        self.device, non_blocking=True
-                    )
                 pre_all_gather_signature = inspect.signature(
                     sharded_local_tensor.fsdp_pre_all_gather
                 )
@@ -845,10 +835,6 @@ class MagiFSDPParam:
                 ]
                 return [t.view(-1) for t in all_gather_inputs]
             sharded_param_data = self._sharded_param_data
-            if self.offload_to_cpu:
-                sharded_param_data = sharded_param_data.to(
-                    self.device, non_blocking=True
-                )
             return [_to_dtype_if_needed(sharded_param_data, self.param_dtype)]
         elif self.sharded_state == ShardedState.SHARDED_POST_FORWARD:
             if not compiled_autograd_enabled() and hasattr(
@@ -946,6 +932,7 @@ class MagiFSDPParam:
         shard_dim = self.fsdp_placement.dim
         length = local_tensor.size(shard_dim) if local_tensor.numel() > 0 else 0
         if local_tensor.size() != padded_sharded_size:
+            # Re-pad the local tensor if needed
             assert (
                 shard_dim == 0
             ), f"Shard({shard_dim}) requires even sharding: {local_tensor.size()=}"
@@ -956,55 +943,46 @@ class MagiFSDPParam:
             local_tensor = padded_local_tensor
             updated_local_tensor = True
         if self.pin_memory and not local_tensor.is_pinned():
+            # Re-pin memory if needed
             local_tensor = local_tensor.cpu().pin_memory(device=self.device)
             updated_local_tensor = True
         self._sharded_param_data = local_tensor.view(-1)
         assert isinstance(self.sharded_param, DTensor)  # mypy
         if updated_local_tensor:
-            # Only change the local tensor object if needed
+            # If the local tensor has been updated, set it back and check contiguity
             self.sharded_param._local_tensor = local_tensor.narrow(
                 dim=shard_dim, start=0, length=length
             )
             assert self.sharded_param._local_tensor.is_contiguous()
         self._sharding_spec = self.sharded_param._spec
 
+    def reset_sharded_main_param(self):
+        if self.sharded_main_param is not None:
+            self.sharded_main_param.data.copy_(
+                self.sharded_param.data.to(self.sharded_main_param.dtype)
+            )
+
+    def reset_sharded_ema_param(self):
+        if self.sharded_ema_param is not None:
+            self.sharded_ema_param.data.copy_(
+                self.sharded_param.data.to(self.sharded_ema_param.dtype)
+            )
+
     def __repr__(self) -> str:
         return f"MagiFSDPParam(fqn={self._param_fqn}, orig_size={self._orig_size})"
 
     # EMA-related methods
-    def create_ema_param(self) -> None:
-        assert not hasattr(self, "sharded_ema_param"), "Cannot create ema_param twice"
-        self.sharded_ema_param = torch.nn.Parameter(
-            data=self.sharded_param.data.clone(),
-            requires_grad=False,
-        )
-
+    @torch.no_grad()
     def update_ema_param(self, decay: float) -> None:
-        if (
-            hasattr(self, "sharded_ema_param") is False
-            or self.sharded_ema_param is None
-        ):
-            raise AssertionError("Expects sharded_ema_param to be not None")
-        with torch.no_grad():
-            self.sharded_ema_param.data.mul_(decay).add_(
-                self.sharded_param.data, alpha=1 - decay
-            )
+        assert (
+            self.sharded_ema_param is not None
+        ), "Expects sharded_ema_param to be not None"
 
-    def use_ema_param(self) -> None:
-        if (
-            hasattr(self, "sharded_ema_param") is False
-            or self.sharded_ema_param is None
-        ):
-            raise AssertionError("Expects sharded_ema_param to be not None")
-        self.sharded_param.data.copy_(self.sharded_ema_param.data)
+        dtype = self.sharded_ema_param.dtype
 
-    def swap_ema_param(self) -> None:
-        if (
-            hasattr(self, "sharded_ema_param") is False
-            or self.sharded_ema_param is None
-        ):
-            raise AssertionError("Expects sharded_ema_param to be not None")
-        torch.utils.swap_tensors(t1=self.sharded_param, t2=self.sharded_ema_param)
+        self.sharded_ema_param.data.mul_(decay).add_(
+            self.sharded_param.data.to(dtype), alpha=1 - decay
+        )
 
 
 def alloc_storage(tensor: torch.Tensor) -> None:

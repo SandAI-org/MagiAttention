@@ -17,15 +17,18 @@
 import os
 
 from ._fsdp_api import (
-    CkptLoadPolicy,
-    CkptSavePolicy,
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
     OffloadPolicy,
-    OptimPolicy,
 )
+from ._fsdp_ckpt_state import EMAParamStatefulWrapper, MainParamStatefulWrapper
 from ._fsdp_mem_tracker import MagiFSDPMemTracker
-from ._fsdp_module import MagiFSDPModule, UnshardHandle
+from ._fsdp_module import (
+    MagiFSDPModule,
+    UnshardHandle,
+    magi_fsdp_switch_params,
+    magi_fsdp_use_params,
+)
 from ._fully_shard import fully_shard, register_fsdp_forward_method
 
 __all__ = [
@@ -37,9 +40,10 @@ __all__ = [
     "register_fsdp_forward_method",
     "UnshardHandle",
     "MagiFSDPMemTracker",
-    "OptimPolicy",
-    "CkptSavePolicy",
-    "CkptLoadPolicy",
+    "magi_fsdp_use_params",
+    "magi_fsdp_switch_params",
+    "MainParamStatefulWrapper",
+    "EMAParamStatefulWrapper",
 ]
 
 

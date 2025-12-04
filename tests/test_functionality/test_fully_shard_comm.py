@@ -277,7 +277,7 @@ class TestFullyShardCollectiveOps(FSDPTestMultiThread):
             unsharded_grads,
             group,
             reduce_scatter_stream,
-            orig_dtype=orig_params[0].dtype,
+            cast_dtype=orig_params[0].dtype,
             reduce_dtype=reduce_scatter_dtype,
             device=self.device,
             reduce_scatter_reduce_op=None,

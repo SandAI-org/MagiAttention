@@ -1730,7 +1730,7 @@ class MultiDtypeTransformer(nn.Module):
             self.layers.append(
                 MultiDtypeTransformerBlock(
                     args,
-                    dtype=multidtype_kwargs["TransformerBlock"].get(layer_idx, torch.float32),  # type: ignore
+                    dtype=multidtype_kwargs.setdefault("TransformerBlock", {}).get(layer_idx, torch.float32),  # type: ignore
                     norm_dtype=norm_dtype,
                 )
             )

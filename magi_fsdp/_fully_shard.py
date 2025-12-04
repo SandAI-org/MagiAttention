@@ -25,11 +25,8 @@ from torch.distributed._composable import contract
 from torch.distributed.utils import _get_root_modules
 
 from ._fsdp_api import (
-    CkptLoadPolicy,
-    CkptSavePolicy,
     MixedPrecisionPolicy,
     OffloadPolicy,
-    OptimPolicy,
 )
 from ._fsdp_common import MagiFSDPMeshInfo, MagiHSDPMeshInfo
 from ._fsdp_init import (
@@ -66,9 +63,6 @@ def fully_shard(
     mp_policy: MixedPrecisionPolicy = ...,
     offload_policy: OffloadPolicy = ...,
     ignored_params: Optional[set[nn.Parameter]] = ...,
-    optim_policy: OptimPolicy = ...,
-    save_policy: CkptSavePolicy = ...,
-    load_policy: CkptLoadPolicy = ...,
 ) -> list[MagiFSDPModule]:
     ...
 
@@ -83,9 +77,6 @@ def fully_shard(
     mp_policy: MixedPrecisionPolicy = ...,
     offload_policy: OffloadPolicy = ...,
     ignored_params: Optional[set[nn.Parameter]] = ...,
-    optim_policy: OptimPolicy = ...,
-    save_policy: CkptSavePolicy = ...,
-    load_policy: CkptLoadPolicy = ...,
 ) -> MagiFSDPModule:
     ...
 
@@ -105,9 +96,6 @@ def fully_shard(
     mp_policy: MixedPrecisionPolicy = MixedPrecisionPolicy(),
     offload_policy: OffloadPolicy = OffloadPolicy(),
     ignored_params: Optional[set[nn.Parameter]] = None,
-    optim_policy: OptimPolicy = OptimPolicy(),
-    save_policy: CkptSavePolicy = CkptSavePolicy(),
-    load_policy: CkptLoadPolicy = CkptLoadPolicy(),
 ):
     """
     Apply fully sharded data parallelism (MagiFSDP) to ``module``, where MagiFSDP
@@ -190,7 +178,7 @@ def fully_shard(
             i.e. the tensor dim size on that dim must be divisible by the MagiFSDP
             shard mesh size.
         mp_policy (MixedPrecisionPolicy): This controls the mixed precision
-            policy, which offers parameter/reduction mixed precision for this
+            policy, which offers parameter/reduction/main/ema mixed precision for this
             module. See :class:`MixedPrecisionPolicy` for details.
         offload_policy (OffloadPolicy): This controls the offloading policy,
             which offers parameter/gradient/optimizer state offloading. See
@@ -198,10 +186,6 @@ def fully_shard(
         ignored_params: Optional(Set[nn.Parameter]): The set of parameters to be
             ignored by MagiFSDP. They will not be sharded, nor moved to the device
             during init, nor have their gradients reduced in backward.
-        optim_policy (OptimPolicy): This controls how to optimize the model runtime
-            process. See :class:`OptimPolicy` for details.
-        save_policy (Optional[CkptSavePolicy]): The policy to save the checkpoint for MagiFSDP.
-        load_policy (Optional[CkptLoadPolicy]): The policy to load the checkpoint for MagiFSDP.
 
     Returns:
         MagiFSDPModule: The module with MagiFSDP applied (in-place).
@@ -247,23 +231,18 @@ def fully_shard(
             shard_placement_fn,
             mp_policy,
             offload_policy,
-            optim_policy,
         )
-    if optim_policy.enable_main_param:
+
+    if mp_policy.main_param_dtype is not None:
         warnings.warn(
-            "Remind to call model.named_main_parameters to init optimizer.", UserWarning
+            "Reminder: Use the magi_fsdp_switch_params context manager to initialize the optimizer.",
+            UserWarning,
         )
 
     # For Dynamo
     for managed_module in managed_modules:
         managed_module._is_fsdp_managed_module = True  # type: ignore[assignment]
         managed_module._fsdp_use_orig_params = True  # type: ignore[assignment]
-
-    # For Checkpoint
-    for managed_module in managed_modules:
-        managed_module._save_policy = save_policy
-        managed_module._load_policy = load_policy
-        managed_module._optim_policy = optim_policy
 
     # Place MagiFSDP leftmost for highest priority in the method resolution order
     for module in modules:
