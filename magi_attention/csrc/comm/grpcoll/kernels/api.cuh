@@ -193,7 +193,7 @@ namespace internode {
 
 int get_source_meta_bytes();
 
-void notify_dispatch(
+void notify_group_cast(
     const int* num_tokens_per_rank,
     int* grpcoll_recv_counter_mapped,
     int num_ranks,
@@ -218,7 +218,7 @@ void notify_dispatch(
     int64_t num_nvl_bytes,
     bool low_latency_mode);
 
-void dispatch(
+void group_cast(
     void* recv_x,
     void* recv_src_meta,
     const void* x,
@@ -241,7 +241,7 @@ void dispatch(
     int num_max_nvl_chunked_recv_tokens,
     int rank,
     int num_ranks,
-    bool is_cached_dispatch,
+    bool is_cached_group_cast,
     cudaStream_t stream,
     int num_channels,
     bool low_latency_mode);
@@ -264,7 +264,7 @@ void cached_notify(
     cudaStream_t stream,
     int64_t num_rdma_bytes,
     int64_t num_nvl_bytes,
-    bool is_cached_dispatch,
+    bool is_cached_group_cast,
     bool low_latency_mode);
 
 void combine(
