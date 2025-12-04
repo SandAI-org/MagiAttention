@@ -274,10 +274,8 @@ void cached_notify(
 void combine(
     cudaDataType_t type,
     void* combined_x,
-    float* combined_topk_weights,
     const bool* is_combined_token_in_rank,
     const void* x,
-    const float* topk_weights,
     const void* bias_0,
     const void* bias_1,
     const int* combined_rdma_head,
@@ -289,7 +287,6 @@ void combine(
     int num_tokens,
     int num_combined_tokens,
     int hidden_size,
-    int num_topk,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,

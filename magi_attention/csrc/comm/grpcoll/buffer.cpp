@@ -1304,11 +1304,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     stream_wait(comm_stream, compute_stream);
   }
 
-  // Top-k checks
-  int num_topk = 0;
-  float* topk_weights_ptr = nullptr;
-  float* combined_topk_weights_ptr = nullptr;
-
   // Extra check for avoid-dead-lock design
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_send_tokens <= config.num_max_nvl_chunked_recv_tokens / num_rdma_ranks);
@@ -1361,10 +1356,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   internode::combine(
       /*type=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()),
       /*combined_x=*/combined_x.data_ptr(),
-      /*combined_topk_weights=*/combined_topk_weights_ptr,
       /*is_combined_token_in_rank=*/is_combined_token_in_rank.data_ptr<bool>(),
       /*x=*/x.data_ptr(),
-      /*topk_weights=*/topk_weights_ptr,
       /*bias_0=*/bias_ptrs[0],
       /*bias_1=*/bias_ptrs[1],
       /*combined_rdma_head=*/combined_rdma_head.data_ptr<int>(),
@@ -1376,7 +1369,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       /*num_tokens=*/num_tokens,
       /*num_combined_tokens=*/num_combined_tokens,
       /*hidden_size=*/hidden,
-      /*num_topk=*/num_topk,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
       /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,

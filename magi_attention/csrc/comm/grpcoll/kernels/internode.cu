@@ -102,36 +102,22 @@ constexpr int get_num_threads_combine(const int num_combine_forwarder_warps) {
   return (num_combine_forwarder_warps + 1) * WARP_SIZE;
 }
 
-HOST_DEVICE_INLINE int get_num_bytes_per_token(int hidden_int4, int num_scales, int num_topk_idx, int num_topk_weights) {
+HOST_DEVICE_INLINE int get_num_bytes_per_token(int hidden_int4) {
   return static_cast<int>(align(
-      /*hidden_states*/ hidden_int4 * sizeof(int4) +
-          /*source_meta*/ sizeof(SourceMeta) +
-          /*fp8_scales*/ num_scales * sizeof(float) +
-          /*topk_idx*/ num_topk_idx * sizeof(int) +
-          /*topk_weights*/ num_topk_weights * sizeof(float),
+      /*hidden_states=*/hidden_int4 * sizeof(int4) +
+          /*source_meta=*/sizeof(SourceMeta),
       sizeof(int4)));
 }
 
-HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(
-    int hidden_int4,
-    int num_scales,
-    int num_topk_idx,
-    int num_topk_weights,
-    int num_rdma_ranks,
-    int num_rdma_recv_buffer_tokens,
-    int num_channels) {
+HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_rdma_ranks, int num_rdma_recv_buffer_tokens, int num_channels) {
   // Return `int32_t` offset and count to clean
   return {
-      (get_num_bytes_per_token(hidden_int4, num_scales, num_topk_idx, num_topk_weights) * num_rdma_recv_buffer_tokens * num_rdma_ranks * 2 * num_channels) /
-          sizeof(int),
+      (get_num_bytes_per_token(hidden_int4) * num_rdma_recv_buffer_tokens * num_rdma_ranks * 2 * num_channels) / sizeof(int),
       (NUM_MAX_NVL_PEERS * 2 + 4) * num_rdma_ranks * 2 * num_channels};
 }
 
 HOST_DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
     int hidden_int4,
-    int num_scales,
-    int num_topk_idx,
-    int num_topk_weights,
     int num_rdma_ranks,
     int num_nvl_ranks,
     int num_nvl_recv_buffer_tokens,
@@ -141,7 +127,7 @@ HOST_DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
   GRPCOLL_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
 
   return {
-      (num_nvl_recv_buffer_tokens * get_num_bytes_per_token(hidden_int4, num_scales, num_topk_idx, num_topk_weights) * num_nvl_ranks * num_channels) / sizeof(int),
+      (num_nvl_recv_buffer_tokens * get_num_bytes_per_token(hidden_int4) * num_nvl_ranks * num_channels) / sizeof(int),
       num_nvl_ranks * (2 * num_rdma_ranks + 2) * num_channels,
   };
 }
@@ -517,18 +503,8 @@ void notify_dispatch(
   break
 
   // Get clean meta
-  auto rdma_clean_meta =
-      get_rdma_clean_meta(hidden_int4, /*num_scales=*/0, /*num_topk_idx=*/0, /*num_topk_weights=*/0, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-  auto nvl_clean_meta = get_nvl_clean_meta(
-      hidden_int4,
-      /*num_scales=*/0,
-      /*num_topk_idx=*/0,
-      /*num_topk_weights=*/0,
-      num_rdma_ranks,
-      NUM_MAX_NVL_PEERS,
-      num_max_nvl_chunked_recv_tokens,
-      num_channels,
-      true);
+  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
+  auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, true);
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
   // REVIEW: why limited to INT_MAX ?
@@ -649,7 +625,7 @@ void dispatch(
   //  `rdma_channel_head`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
   //  `rdma_channel_tail`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
   const auto hidden_bytes = hidden_int4 * sizeof(int4), scale_bytes = num_scales * sizeof(float);
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_scales, num_topk, num_topk);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4);
   constexpr int num_meta_per_rdma_channel = 2 * (NUM_MAX_NVL_PEERS + 1); // (start, end) idx for dst RDMA peer (latter) + its each NVL rank (former)
   auto rdma_channel_data = SymBuffer<uint8_t, /*kDecoupled=*/true>(
       rdma_buffer_ptr,
@@ -1559,7 +1535,7 @@ void dispatch(
   }                                                                                                                                                          \
   break
 
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, /*num_scales=*/0, /*num_topk_idx=*/0, /*num_topk_weights=*/0);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4);
   GRPCOLL_HOST_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
   // NOTES: in case of splitting, the issued put at the end of the buffer
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0);
@@ -1741,18 +1717,8 @@ void cached_notify(
   const int num_sms = num_channels * 2;
 
   // Get clean meta
-  auto rdma_clean_meta =
-      get_rdma_clean_meta(hidden_int4, /*num_scales=*/0, /*num_topk_idx=*/0, /*num_topk_weights=*/0, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-  auto nvl_clean_meta = get_nvl_clean_meta(
-      hidden_int4,
-      /*num_scales=*/0,
-      /*num_topk_idx=*/0,
-      /*num_topk_weights=*/0,
-      num_rdma_ranks,
-      NUM_MAX_NVL_PEERS,
-      num_max_nvl_chunked_recv_tokens,
-      num_channels,
-      is_cached_dispatch);
+  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
+  auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, is_cached_dispatch);
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
   // REVIEW: why limited to INT_MAX ?
@@ -2002,10 +1968,8 @@ template <
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_combine(kNumForwarders), 1)
 void combine(
     int4* combined_x,
-    float* combined_topk_weights,
     const bool* is_combined_token_in_rank,
     const int4* x,
-    const float* topk_weights,
     const int4* bias_0,
     const int4* bias_1,
     const int* combined_rdma_head,
@@ -2017,7 +1981,6 @@ void combine(
     int num_tokens,
     int num_combined_tokens,
     int hidden_size,
-    int num_topk,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -2033,9 +1996,16 @@ void combine(
   const bool is_forwarder = sm_id % 2 == 1;
 
   const auto hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t)), hidden_bytes = hidden_int4 * sizeof(int4);
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, /*num_scales=*/0, /*num_topk_idx=*/0, num_topk);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4);
   const auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks; // split NVL queue for each RDMA peer
   GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
+
+  // FIXME: remain some unused dummy variables
+  // used to be args here to keep the related code for a while
+  // which should be removed in the future as long as the code is not used any more
+  const float* topk_weights = nullptr;
+  float* combined_topk_weights = nullptr;
+  int num_topk = 0;
 
   /** NOTE: Determine warp role and its target warp id
    * For Forwarder (Odd SMs):
@@ -2689,10 +2659,8 @@ void combine(
 void combine(
     cudaDataType_t type,
     void* combined_x,
-    float* combined_topk_weights,
     const bool* is_combined_token_in_rank,
     const void* x,
-    const float* topk_weights,
     const void* bias_0,
     const void* bias_1,
     const int* combined_rdma_head,
@@ -2704,7 +2672,6 @@ void combine(
     int num_tokens,
     int num_combined_tokens,
     int hidden_size,
-    int num_topk,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -2731,10 +2698,8 @@ void combine(
         &cfg,                                                                                                                              \
         combine_func,                                                                                                                      \
         reinterpret_cast<int4*>(combined_x),                                                                                               \
-        combined_topk_weights,                                                                                                             \
         is_combined_token_in_rank,                                                                                                         \
         reinterpret_cast<const int4*>(x),                                                                                                  \
-        topk_weights,                                                                                                                      \
         reinterpret_cast<const int4*>(bias_0),                                                                                             \
         reinterpret_cast<const int4*>(bias_1),                                                                                             \
         combined_rdma_head,                                                                                                                \
@@ -2746,7 +2711,6 @@ void combine(
         num_tokens,                                                                                                                        \
         num_combined_tokens,                                                                                                               \
         hidden_size,                                                                                                                       \
-        num_topk,                                                                                                                          \
         rdma_buffer_ptr,                                                                                                                   \
         num_max_rdma_chunked_send_tokens,                                                                                                  \
         num_max_rdma_chunked_recv_tokens,                                                                                                  \
@@ -2768,7 +2732,6 @@ void combine(
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / num_rdma_ranks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= num_warps_per_forwarder);
-  GRPCOLL_HOST_ASSERT(num_topk <= WARP_SIZE);
   GRPCOLL_HOST_ASSERT(type == CUDA_R_16BF);
   GRPCOLL_HOST_ASSERT(hidden_size % (sizeof(int4) / sizeof(nv_bfloat16) * WARP_SIZE) == 0); // hidden_int4 must be a multiple of WARP_SIZE
   GRPCOLL_HOST_ASSERT(hidden_size * sizeof(nv_bfloat16) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
