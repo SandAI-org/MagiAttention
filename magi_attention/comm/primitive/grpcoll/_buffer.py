@@ -997,10 +997,6 @@ class GrpCollBuffer:
     ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """Internode group reduce implementation"""
 
-        # TODO: support pre_perm_idx for internode group reduce
-        assert (
-            pre_perm_idx is None
-        ), "Internode group reduce does not support `pre_perm_idx`"
         # TODO: support specific comm dtype for internode group reduce
         assert (
             comm_dtype is None

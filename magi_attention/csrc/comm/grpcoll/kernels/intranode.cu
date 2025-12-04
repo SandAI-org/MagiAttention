@@ -240,9 +240,9 @@ void group_cast_kernel(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -568,7 +568,7 @@ void group_cast_kernel(
       // Warp-copy received tokens from recv queue to recv buffer
       int num_recv_tokens = cached_channel_tail_idx - cached_channel_head_idx;
       for (int chunk_idx = recv_warp_id_in_rank; chunk_idx < num_recv_tokens; chunk_idx += num_recv_warps_per_rank) { // warp-group strided
-        // Determine the final destination token idx in the recv buffer
+        // Determine the final dst token idx in the recv buffer
         auto token_idx_in_recv_x = static_cast<int64_t>(total_offset + chunk_idx); // original token idx in recv buffer in rank order
         token_idx_in_recv_x = post_perm_idx == nullptr ? token_idx_in_recv_x : post_perm_idx[token_idx_in_recv_x];
 
@@ -657,6 +657,7 @@ void group_cast_kernel(
 
 #pragma unroll 4
       // Thead-copy `channel_src_idx` stored by the sender to `recv_src_idx`
+      // NOTES: here we don't apply `post_perm_idx` to `recv_src_idx`
       for (int chunk_idx = cached_channel_head_idx + recv_thread_id_in_rank; chunk_idx < cached_channel_tail_idx;
            chunk_idx += num_recv_threads_per_rank) // warp-group strided
         recv_src_idx[total_offset + chunk_idx - cached_channel_head_idx] = ld_nc_global(channel_src_idx_buffers.buffer() + chunk_idx % num_recv_buffer_tokens);
@@ -722,9 +723,9 @@ void launch_group_cast(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -766,9 +767,9 @@ void launch_group_cast(
         recv_src_idx,                                                                                                                             \
         recv_channel_offset,                                                                                                                      \
         send_head,                                                                                                                                \
-        post_perm_idx,                                                                                                                            \
         is_token_in_rank,                                                                                                                         \
         channel_prefix_matrix,                                                                                                                    \
+        post_perm_idx,                                                                                                                            \
         num_tokens,                                                                                                                               \
         hidden_int4,                                                                                                                              \
         num_heads,                                                                                                                                \
@@ -812,9 +813,9 @@ void group_cast(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -840,9 +841,9 @@ void group_cast(
         recv_src_idx,                                                 \
         recv_channel_offset,                                          \
         send_head,                                                    \
-        post_perm_idx,                                                \
         is_token_in_rank,                                             \
         channel_prefix_matrix,                                        \
+        post_perm_idx,                                                \
         num_tokens,                                                   \
         hidden_int4,                                                  \
         num_heads,                                                    \
@@ -982,11 +983,11 @@ void group_reduce_kernel(
     dtype_t* reduced_x_2nd,
     const dtype_t* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
+    const int64_t* pre_perm_idx,
     int num_tokens,
     int num_recv_tokens,
     int hidden_size,
@@ -1140,7 +1141,7 @@ void group_reduce_kernel(
         int dst_slot_idx = (current_channel_tail_idx + i) % num_recv_buffer_tokens;
         int send_token_idx = token_idx + i;
 
-        // Determine the actual source token idx in the send buffer
+        // Determine the actual src token idx in the send buffer
         auto token_idx_in_x = static_cast<int64_t>(send_token_idx);
         token_idx_in_x = pre_perm_idx == nullptr ? token_idx_in_x : pre_perm_idx[token_idx_in_x];
 
@@ -1191,8 +1192,11 @@ void group_reduce_kernel(
         }
 
         // Copy channel src idx by lane0
-        // NOTES: `src_idx` is actually the `recv_src_idx` in group_cast stage
-        //  thus src_idx[j] indicates the token idx in `reduced_x` for x[j] to reduce to
+        // NOTES:
+        //  1. `src_idx` is actually the `recv_src_idx` in group_cast stage
+        //    thus src_idx[j] indicates the token idx in `reduced_x` for x[j] to reduce to
+        //  2. since we've NOT applied `post_perm_idx` to `recv_src_idx` in group cast stage,
+        //    here we don't apply `pre_perm_idx` to `src_idx` either
         if (lane_id == 0)
           channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + send_token_idx);
 
@@ -1605,11 +1609,11 @@ void launch_group_reduce(
     void* reduced_x_2nd,
     const void* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
+    const int64_t* pre_perm_idx,
     int num_tokens,
     int num_recv_tokens,
     int hidden_size,
@@ -1668,11 +1672,11 @@ void launch_group_reduce(
         lse,                                       \
         reinterpret_cast<dtype_t*>(reduced_x_2nd), \
         reinterpret_cast<const dtype_t*>(x_2nd),   \
-        pre_perm_idx,                              \
+        send_head,                                 \
         src_idx,                                   \
         rank_prefix_matrix,                        \
         channel_prefix_matrix,                     \
-        send_head,                                 \
+        pre_perm_idx,                              \
         num_tokens,                                \
         num_recv_tokens,                           \
         hidden_size,                               \
@@ -1703,11 +1707,11 @@ void group_reduce(
     void* reduced_x_2nd,
     const void* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
+    const int64_t* pre_perm_idx,
     int num_tokens,
     int num_recv_tokens,
     int hidden_size,
@@ -1733,11 +1737,11 @@ void group_reduce(
         lse,                                                                                                         \
         reduced_x_2nd,                                                                                               \
         x_2nd,                                                                                                       \
-        pre_perm_idx,                                                                                                \
+        send_head,                                                                                                   \
         src_idx,                                                                                                     \
         rank_prefix_matrix,                                                                                          \
         channel_prefix_matrix,                                                                                       \
-        send_head,                                                                                                   \
+        pre_perm_idx,                                                                                                \
         num_tokens,                                                                                                  \
         num_recv_tokens,                                                                                             \
         hidden_size,                                                                                                 \

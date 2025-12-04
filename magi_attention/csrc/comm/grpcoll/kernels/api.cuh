@@ -128,9 +128,9 @@ void group_cast(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -164,11 +164,11 @@ void group_reduce(
     void* reduced_x_2nd,
     const void* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
+    const int64_t* pre_perm_idx,
     int num_tokens,
     int num_recv_tokens,
     int hidden_size,
@@ -234,8 +234,8 @@ void group_cast(
     const int* recv_rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
     const int* recv_gbl_rank_prefix_sum,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     void* rdma_buffer_ptr,
@@ -273,16 +273,20 @@ void cached_notify(
     bool low_latency_mode);
 
 void group_reduce(
-    cudaDataType_t type,
+    /* 1st group of input / output data*/
     void* reduced_x,
-    const bool* is_reduced_token_in_rank,
+    float* reduced_lse,
     const void* x,
+    const float* lse,
+    /* other metadata */
+    const bool* is_reduced_token_in_rank,
     const int* reduced_rdma_head,
     const int* reduced_nvl_head,
     const void* src_meta,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
+    const int64_t* pre_perm_idx,
     int num_tokens,
     int num_reduced_tokens,
     int hidden_size,
@@ -296,7 +300,8 @@ void group_reduce(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
-    bool low_latency_mode);
+    bool low_latency_mode,
+    cudaDataType_t type);
 
 } // namespace internode
 

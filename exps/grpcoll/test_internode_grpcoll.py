@@ -608,7 +608,6 @@ def test_func(
     x_group_reduce = sim_gemm(recv_x, w=sim_gemm_weight)
 
     # permute x to the rank order
-    use_a2av_perm_idxs = "outside"  # FIXME: support "inside" for group reduce
     if random_permute_output:
         if use_a2av_perm_idxs == "inside":
             # will permute inside
@@ -915,11 +914,11 @@ def test_main(
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
     num_input_splits = 10
-    num_data_groups = 3  # set this > 1 to allow transfer multiple data groups together within the same kernel
+    num_data_groups = 1  # TODO: support num_data_groups > 1
     assert 1 <= num_data_groups <= 3
 
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
-    dtype = torch.bfloat16  # TODO: make it parameterizable
+    dtype = torch.bfloat16  # TODO: support other dtypes
     assert dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64)
 
     # Remake the hidden size to control
@@ -929,7 +928,7 @@ def test_main(
 
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
-    pass_padded_out_buffer = False  # set to True to use max buffer for group_cast output and group_reduce input
+    pass_padded_out_buffer = False  # TODO: support pass padded out buffer
 
     acc_reduce_out_buffer = False  # TODO: support acc_reduce for internode_group_reduce
     acc_reduce_constant = rank
@@ -939,8 +938,8 @@ def test_main(
     use_a2av_perm_idxs = "inside"
     assert use_a2av_perm_idxs in ("no", "outside", "inside")
 
-    cast_lse = False
-    reduce_op: GroupReduceOp = "sum"  # choose from {"sum", "avg", "lse"}
+    cast_lse = False  # TODO: support cast_lse
+    reduce_op: GroupReduceOp = "sum"  # TODO: support other reduce ops
     if reduce_op == "lse":
         assert cast_lse, "we need to cast lse first before reducing"
 

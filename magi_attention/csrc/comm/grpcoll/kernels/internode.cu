@@ -498,8 +498,8 @@ void group_cast_kernel(
     const int* recv_rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
     const int* recv_gbl_rank_prefix_sum,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     void* rdma_buffer_ptr,
@@ -1328,8 +1328,10 @@ void group_cast_kernel(
         auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(token_ptr_in_buffer + hidden_bytes + scale_bytes));
 
         // Get recv token idx in the `recv_x`
-        int64_t token_idx_in_recv_x = broadcast_in_warp(/*val=*/total_offset, /*src_lane=*/src_meta.src_rdma_rank);
-        token_idx_in_recv_x = post_perm_idx == nullptr ? token_idx_in_recv_x : post_perm_idx[token_idx_in_recv_x];
+        int64_t recv_token_idx = broadcast_in_warp(/*val=*/total_offset, /*src_lane=*/src_meta.src_rdma_rank);
+
+        // Determine the final dst token idx in the recv buffer
+        auto token_idx_in_recv_x = post_perm_idx == nullptr ? recv_token_idx : post_perm_idx[recv_token_idx];
 
         // Increment `total_offset` of next token for `src_rdma_rank`
         (lane_id == src_meta.src_rdma_rank) ? (++total_offset) : 0;
@@ -1386,9 +1388,11 @@ void group_cast_kernel(
         }
 
         // Copy src meta to `recv_src_meta` for group_reduce stage
+        // NOTES: here we don't apply `post_perm_idx` to `recv_src_meta`
         token_ptr_in_buffer += scale_bytes;
-        if (lane_id == 0 and not kCachedMode)
-          st_na_global(recv_src_meta + token_idx_in_recv_x, src_meta); // non-cached store
+        if (lane_id == 0 and not kCachedMode) {
+          st_na_global(recv_src_meta + recv_token_idx, src_meta); // non-cached store
+        }
 
         // Copy `topk_idx` and `topk_weights` to `recv_topk_idx` and `recv_topk_weights`
         token_ptr_in_buffer += sizeof(SourceMeta);
@@ -1433,8 +1437,8 @@ void group_cast(
     const int* recv_rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
     const int* recv_gbl_rank_prefix_sum,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     void* rdma_buffer_ptr,
@@ -1480,8 +1484,8 @@ void group_cast(
         recv_rdma_rank_prefix_sum,                                                                                                     \
         gbl_channel_prefix_matrix,                                                                                                     \
         recv_gbl_rank_prefix_sum,                                                                                                      \
-        post_perm_idx,                                                                                                                 \
         is_token_in_rank,                                                                                                              \
+        post_perm_idx,                                                                                                                 \
         num_tokens,                                                                                                                    \
         hidden_int4,                                                                                                                   \
         rdma_buffer_ptr,                                                                                                               \
@@ -1943,15 +1947,20 @@ template <
     int kNumRDMAReceivers = kNumForwarders - NUM_MAX_NVL_PEERS>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_reduce(kNumForwarders), 1)
 void group_reduce_kernel(
+    /* 1st group of input / output data*/
     int4* reduced_x,
-    const bool* is_reduced_token_in_rank,
+    float* reduced_lse,
     const int4* x,
+    const float* lse,
+    /* other metadata */
+    const bool* is_reduced_token_in_rank,
     const int* reduced_rdma_head,
     const int* reduced_nvl_head,
     const SourceMeta* src_meta,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
+    const int64_t* pre_perm_idx,
     int num_tokens,
     int num_reduced_tokens,
     int hidden_size,
@@ -2135,8 +2144,11 @@ void group_reduce_kernel(
           }
           dst_slot_idx = broadcast_in_warp(/*val=*/dst_slot_idx, /*src_lane=*/current_rdma_idx);
 
-          // Get token ptr in `x` as well as the one in NVL buffer of dst NVL peer
-          auto token_ptr_in_x = x + token_idx * hidden_int4;
+          // Determine the actual src token idx in the NVL buffer
+          auto token_idx_in_x = pre_perm_idx == nullptr ? token_idx : pre_perm_idx[token_idx];
+
+          // Get token ptr in `x` and the one in NVL buffer of dst NVL peer
+          auto token_ptr_in_x = x + token_idx_in_x * hidden_int4;
           auto token_ptr_in_buffer = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
 
           // TMA-copy token from `x` to TMA buffer in shared memory
@@ -2160,6 +2172,8 @@ void group_reduce_kernel(
           mbarrier_wait(tma_mbarrier, /*stage=*/tma_phase);
 
           // Copy source meta to shared memory
+          // NOTES: since we've NOT applied `post_perm_idx` to `recv_src_meta` in group cast stage,
+          //    here we don't apply `pre_perm_idx` to `src_meta` either
           if (lane_id == num_topk) {
             *reinterpret_cast<SourceMeta*>(tma_buffer + hidden_bytes) = ld_nc_global(src_meta + token_idx); // non-cached load
           }
@@ -2167,7 +2181,7 @@ void group_reduce_kernel(
           // Copy `topk_weights` to shared memory
           if (lane_id < num_topk) {
             *reinterpret_cast<float*>(tma_buffer + hidden_bytes + sizeof(SourceMeta) + lane_id * sizeof(float)) =
-                ld_nc_global(topk_weights + token_idx * num_topk + lane_id); // non-cached load
+                ld_nc_global(topk_weights + token_idx_in_x * num_topk + lane_id); // non-cached load
           }
 
           // Fence TMA store to wait the TMA buffer for each lane to be ready
@@ -2625,16 +2639,20 @@ void group_reduce_kernel(
 }
 
 void group_reduce(
-    cudaDataType_t type,
+    /* 1st group of input / output data*/
     void* reduced_x,
-    const bool* is_reduced_token_in_rank,
+    float* reduced_lse,
     const void* x,
+    const float* lse,
+    /* other metadata */
+    const bool* is_reduced_token_in_rank,
     const int* reduced_rdma_head,
     const int* reduced_nvl_head,
     const void* src_meta,
     const int* rdma_channel_prefix_matrix,
     const int* rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
+    const int64_t* pre_perm_idx,
     int num_tokens,
     int num_reduced_tokens,
     int hidden_size,
@@ -2648,7 +2666,8 @@ void group_reduce(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
-    bool low_latency_mode) {
+    bool low_latency_mode,
+    cudaDataType_t type) {
   constexpr int kNumGroupReduceForwarderWarps = 24;
   constexpr int kNumTMABytesPerSenderWarp = 16384;
   constexpr int kNumTMABytesPerForwarderWarp = 9248; // REVIEW: why this unusual number ?
@@ -2664,14 +2683,17 @@ void group_reduce(
         &cfg,                                                                                                                                              \
         group_reduce_func,                                                                                                                                 \
         reinterpret_cast<int4*>(reduced_x),                                                                                                                \
-        is_reduced_token_in_rank,                                                                                                                          \
+        reduced_lse,                                                                                                                                       \
         reinterpret_cast<const int4*>(x),                                                                                                                  \
+        lse,                                                                                                                                               \
+        is_reduced_token_in_rank,                                                                                                                          \
         reduced_rdma_head,                                                                                                                                 \
         reduced_nvl_head,                                                                                                                                  \
         reinterpret_cast<const SourceMeta*>(src_meta),                                                                                                     \
         rdma_channel_prefix_matrix,                                                                                                                        \
         rdma_rank_prefix_sum,                                                                                                                              \
         gbl_channel_prefix_matrix,                                                                                                                         \
+        pre_perm_idx,                                                                                                                                      \
         num_tokens,                                                                                                                                        \
         num_reduced_tokens,                                                                                                                                \
         hidden_size,                                                                                                                                       \
