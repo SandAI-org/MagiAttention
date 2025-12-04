@@ -1109,6 +1109,15 @@ Buffer::internode_group_cast(
     recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
   }
 
+  // Assign ptr for post_perm_idx if needed
+  int64_t* post_perm_idx_ptr = nullptr;
+  if (post_perm_idx.has_value()) {
+    GRPCOLL_HOST_ASSERT(post_perm_idx->scalar_type() == torch::kInt64);
+    GRPCOLL_HOST_ASSERT(post_perm_idx->dim() == 1);
+    GRPCOLL_HOST_ASSERT(post_perm_idx->size(0) == num_recv_tokens);
+    post_perm_idx_ptr = post_perm_idx->data_ptr<int64_t>();
+  }
+
   // Allocate new tensors
   auto recv_src_meta = std::optional<torch::Tensor>();
   auto recv_rdma_channel_prefix_matrix = std::optional<torch::Tensor>();
@@ -1127,8 +1136,10 @@ Buffer::internode_group_cast(
   // NOTES: the buffer size checks are moved into the `.cu` file
   internode::group_cast(
       /*recv_x=*/recv_x.data_ptr(),
-      /*recv_src_meta=*/cached_mode ? nullptr : recv_src_meta->data_ptr(),
+      /*recv_lse=*/nullptr,
       /*x=*/x.data_ptr(),
+      /*lse=*/nullptr,
+      /*recv_src_meta=*/cached_mode ? nullptr : recv_src_meta->data_ptr(),
       /*send_rdma_head=*/cached_mode ? nullptr : send_rdma_head->data_ptr<int>(),
       /*send_nvl_head=*/cached_mode ? nullptr : send_nvl_head->data_ptr<int>(),
       /*recv_rdma_channel_prefix_matrix=*/cached_mode ? nullptr : recv_rdma_channel_prefix_matrix->data_ptr<int>(),
@@ -1137,6 +1148,7 @@ Buffer::internode_group_cast(
       /*recv_rdma_rank_prefix_sum=*/recv_rdma_rank_prefix_sum.data_ptr<int>(),
       /*gbl_channel_prefix_matrix=*/gbl_channel_prefix_matrix.data_ptr<int>(),
       /*recv_gbl_rank_prefix_sum=*/recv_gbl_rank_prefix_sum.data_ptr<int>(),
+      /*post_perm_idx=*/post_perm_idx_ptr,
       /*is_token_in_rank=*/is_token_in_rank.data_ptr<bool>(),
       /*num_tokens=*/num_tokens,
       /*hidden_int4=*/hidden_int4,

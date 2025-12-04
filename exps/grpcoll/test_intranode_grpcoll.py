@@ -1178,10 +1178,8 @@ def test_main(
 ):
     # Settings
     num_tokens, hidden_size = args.num_tokens, args.hidden
-    num_topk = args.num_topk
     num_channels = num_sms // 2
     num_heads = 16
-    assert hidden_size % num_heads == 0
 
     num_max_nvl_chunked_send_tokens = 8
     nvl_buffer_size = num_max_nvl_chunked_recv_tokens = 256
@@ -1193,10 +1191,10 @@ def test_main(
     # Remake the hidden size to control
     # the communication bytes per token the same as bf16/fp16
     hidden_size = hidden_size * 2 // dtype.itemsize
+    assert hidden_size % num_heads == 0
 
     # Re-Settings for group-collective
     # TODO: make these parameterizable
-    num_topk = num_ranks  # we can assume num_topk == num_ranks
     num_input_splits = 10
     distinct_token = True
     random_permute_output = True  # set to False to make the output / input of group-cast / group-reduce in a2a rank order
@@ -1259,10 +1257,9 @@ def test_main(
             (
                 f"[config] {num_sms=} | {num_channels=} | {min_num_nvl_bytes=} ({min_num_nvl_bytes / 1024**2:.2f} MB)\n"
                 f"{num_tokens=} | {hidden_size=} | {dtype=} | {comm_dtype=}\n"
-                f"{num_topk=} | {num_heads=} | {num_data_groups=}\n"
+                f"{num_heads=} | {num_data_groups=} | {cast_lse=} | {reduce_op=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{distinct_token=} | {random_permute_output=} | {sim_gemm_weight=} | {min_num_dst_ranks=}\n"
-                f"{cast_lse=} | {reduce_op=}\n"
                 f"{pass_out_buffer=} | {pass_out_lse_buffer=} | {pass_padded_out_buffer=}\n"
                 f"{acc_reduce_out_buffer=} | {acc_reduce_constant=} | {use_a2av_perm_idxs=}\n"
             ),
@@ -1336,15 +1333,11 @@ def test_main(
 
 
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
-    # rank: global rank in default group
-    # num_ranks: number of ranks in default group
-    # group: the default world group
-
-    use_grpcoll_mgr = True
-
     # init dist
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
 
+    # set grpcoll config
+    use_grpcoll_mgr = True
     test_ll_compatibility, num_rdma_bytes = False, 0
     if test_ll_compatibility:
         ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk = 16, 5120, 256, 9
@@ -1361,10 +1354,11 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_sms = 24
     num_qps_per_rank = ll_num_experts // num_ranks if test_ll_compatibility else 1
 
+    # print config
     if local_rank == 0:
         print(
             (
-                f"[config]: {num_ranks=} | {num_local_ranks=} | {group.size()=} | {num_sms=}"
+                f"[config]: {num_ranks=} | {num_local_ranks=} | {group.size()=} | "
                 f"{num_nvl_bytes=} ({num_nvl_bytes / 1024**3:.2f} GB) | {num_rdma_bytes=} | {num_qps_per_rank=}\n"
             ),
             flush=True,

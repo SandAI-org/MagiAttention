@@ -219,9 +219,13 @@ void notify_group_cast(
     bool low_latency_mode);
 
 void group_cast(
+    /* 1st group of input / output data*/
     void* recv_x,
-    void* recv_src_meta,
+    float* recv_lse,
     const void* x,
+    const float* lse,
+    /* other metadata */
+    void* recv_src_meta,
     int* send_rdma_head,
     int* send_nvl_head,
     int* recv_rdma_channel_prefix_matrix,
@@ -230,6 +234,7 @@ void group_cast(
     const int* recv_rdma_rank_prefix_sum,
     const int* gbl_channel_prefix_matrix,
     const int* recv_gbl_rank_prefix_sum,
+    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     int num_tokens,
     int hidden_int4,

@@ -877,8 +877,6 @@ class GrpCollBuffer:
 
         # TODO: support lse for internode group cast
         assert not cast_lse
-        # TODO: support post-perm for internode group cast
-        assert post_perm_idx is None
 
         # Unpack handle if given
         is_handle_given = handle is not None
