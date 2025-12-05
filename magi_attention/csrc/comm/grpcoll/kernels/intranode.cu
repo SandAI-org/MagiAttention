@@ -49,8 +49,12 @@ namespace magi_attn_comm::grpcoll {
 
 namespace intranode {
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// (Cached) Notify Group Cast
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <int kNumRanks>
-__global__ void notify_group_cast(
+__global__ void notify_group_cast_kernel(
     const int* num_tokens_per_rank,
     int* grpcoll_recv_counter_mapped,
     int num_tokens,
@@ -159,7 +163,7 @@ void notify_group_cast(
 #define NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks) \
   LAUNCH_KERNEL(                             \
       &cfg,                                  \
-      notify_group_cast<ranks>,              \
+      notify_group_cast_kernel<ranks>,       \
       num_tokens_per_rank,                   \
       grpcoll_recv_counter_mapped,           \
       num_tokens,                            \
@@ -179,7 +183,7 @@ void notify_group_cast(
 }
 
 template <int kNumRanks>
-__global__ void cached_notify_group_cast(const int* rank_prefix_matrix, int num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank) {
+__global__ void cached_notify_group_cast_kernel(const int* rank_prefix_matrix, int num_memset_int, void** buffer_ptrs, int** barrier_signal_ptrs, int rank) {
   // A simplified version for cached handles
   barrier_block<kNumRanks, true>(barrier_signal_ptrs, rank);
 
@@ -205,14 +209,18 @@ void cached_notify_group_cast(
     int rank,
     int num_ranks,
     cudaStream_t stream) {
-#define CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks)                                                                                 \
-  LAUNCH_KERNEL(&cfg, cached_notify_group_cast<ranks>, rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank); \
+#define CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE(ranks)                                                                                        \
+  LAUNCH_KERNEL(&cfg, cached_notify_group_cast_kernel<ranks>, rank_prefix_matrix, num_memset_int, buffer_ptrs, barrier_signal_ptrs, rank); \
   break
 
   SETUP_LAUNCH_CONFIG(1, 128, stream);
   SWITCH_RANKS(CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE);
 #undef CACHED_NOTIFY_GROUP_CAST_LAUNCH_CASE
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Cast
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int kNumDataGroups, int kNumRanks, int kNumThreads, int kWarpCopyUnrollStages, int kNumTMAStages, int kNumTMABytesPerWarp, bool kCastLSE>
 GLOBAL_LAUNCH_BOUNDS(kNumThreads, 1)
@@ -232,9 +240,9 @@ void group_cast_kernel(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -365,7 +373,7 @@ void group_cast_kernel(
       while (lane_id == 0) { // the lane0 in this warp
         // Load channel head idx stored by the receiver
         // NOTES: the head idxs received by each warp for the responsible rank might not be the same
-        int num_used_slots = cached_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile
+        int num_used_slots = cached_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile load
 
         // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
         if (num_used_slots <= max_num_used_slots_in_queue)
@@ -493,9 +501,9 @@ void group_cast_kernel(
 
     // Load non-empty channel start/end offset stored by the sender by lane0 in each warp
     int total_offset, num_tokens_to_recv;
-    while (lane_id == 0 and (total_offset = ld_volatile_global(channel_start_offset.buffer())) == 0) // volatile
+    while (lane_id == 0 and (total_offset = ld_volatile_global(channel_start_offset.buffer())) == 0) // volatile load
       ;
-    while (lane_id == 0 and (num_tokens_to_recv = ld_volatile_global(channel_end_offset.buffer())) == 0) // volatile
+    while (lane_id == 0 and (num_tokens_to_recv = ld_volatile_global(channel_end_offset.buffer())) == 0) // volatile load
       ;
     if (lane_id == 0) {
       // Recover the real channel start/end offset from the code by `-code - 1`
@@ -560,7 +568,7 @@ void group_cast_kernel(
       // Warp-copy received tokens from recv queue to recv buffer
       int num_recv_tokens = cached_channel_tail_idx - cached_channel_head_idx;
       for (int chunk_idx = recv_warp_id_in_rank; chunk_idx < num_recv_tokens; chunk_idx += num_recv_warps_per_rank) { // warp-group strided
-        // Determine the final destination token idx in the recv buffer
+        // Determine the final dst token idx in the recv buffer
         auto token_idx_in_recv_x = static_cast<int64_t>(total_offset + chunk_idx); // original token idx in recv buffer in rank order
         token_idx_in_recv_x = post_perm_idx == nullptr ? token_idx_in_recv_x : post_perm_idx[token_idx_in_recv_x];
 
@@ -649,6 +657,7 @@ void group_cast_kernel(
 
 #pragma unroll 4
       // Thead-copy `channel_src_idx` stored by the sender to `recv_src_idx`
+      // NOTES: here we don't apply `post_perm_idx` to `recv_src_idx`
       for (int chunk_idx = cached_channel_head_idx + recv_thread_id_in_rank; chunk_idx < cached_channel_tail_idx;
            chunk_idx += num_recv_threads_per_rank) // warp-group strided
         recv_src_idx[total_offset + chunk_idx - cached_channel_head_idx] = ld_nc_global(channel_src_idx_buffers.buffer() + chunk_idx % num_recv_buffer_tokens);
@@ -714,9 +723,9 @@ void launch_group_cast(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -758,9 +767,9 @@ void launch_group_cast(
         recv_src_idx,                                                                                                                             \
         recv_channel_offset,                                                                                                                      \
         send_head,                                                                                                                                \
-        post_perm_idx,                                                                                                                            \
         is_token_in_rank,                                                                                                                         \
         channel_prefix_matrix,                                                                                                                    \
+        post_perm_idx,                                                                                                                            \
         num_tokens,                                                                                                                               \
         hidden_int4,                                                                                                                              \
         num_heads,                                                                                                                                \
@@ -804,9 +813,9 @@ void group_cast(
     int* recv_src_idx,
     int* recv_channel_offset,
     int* send_head,
-    const int64_t* post_perm_idx,
     const bool* is_token_in_rank,
     const int* channel_prefix_matrix,
+    const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
     int num_heads,
@@ -832,9 +841,9 @@ void group_cast(
         recv_src_idx,                                                 \
         recv_channel_offset,                                          \
         send_head,                                                    \
-        post_perm_idx,                                                \
         is_token_in_rank,                                             \
         channel_prefix_matrix,                                        \
+        post_perm_idx,                                                \
         num_tokens,                                                   \
         hidden_int4,                                                  \
         num_heads,                                                    \
@@ -859,8 +868,12 @@ void group_cast(
 #undef LAUNCH_INTRANODE_GROUP_CAST
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Cached Notify Group Reduce
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
 template <int kNumRanks>
-__global__ void cached_notify_group_reduce(
+__global__ void cached_notify_group_reduce_kernel(
     void** buffer_ptrs,
     int* send_head,
     int num_channels,
@@ -908,7 +921,7 @@ __global__ void cached_notify_group_reduce(
         const int head = broadcast_in_warp(/*val=*/current_head, /*src_lane=*/i);
         if (head < 0) {
           if (lane_id == i)
-            expected_head = -last_head - 1;
+            expected_head = encode(last_head);
         } else {
           last_head = head;
         }
@@ -929,8 +942,8 @@ void cached_notify_group_reduce(
     int rank,
     int num_ranks,
     cudaStream_t stream) {
-#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                   \
-  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce<ranks>, buffer_ptrs, send_head, num_channels, num_recv_tokens, num_memset_int, barrier_signal_ptrs, rank); \
+#define CACHED_NOTIFY_GROUP_REDUCE(ranks)                                                                                                                          \
+  LAUNCH_KERNEL(&cfg, cached_notify_group_reduce_kernel<ranks>, buffer_ptrs, send_head, num_channels, num_recv_tokens, num_memset_int, barrier_signal_ptrs, rank); \
   break
 
   const int num_threads = std::max(128, WARP_SIZE * num_ranks);
@@ -940,6 +953,10 @@ void cached_notify_group_reduce(
   SWITCH_RANKS(CACHED_NOTIFY_GROUP_REDUCE);
 #undef CACHED_NOTIFY_GROUP_REDUCE
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Reduce
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 // FIXME: the register usage is spilled for both load/store in some template cases
 template <
@@ -966,11 +983,11 @@ void group_reduce_kernel(
     dtype_t* reduced_x_2nd,
     const dtype_t* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
+    const int64_t* pre_perm_idx,
     int num_tokens,
     int num_recv_tokens,
     int hidden_size,
@@ -1102,7 +1119,7 @@ void group_reduce_kernel(
       while (lane_id == 0) { // the lane0 in this warp
         // Load channel head idx stored by the receiver
         // NOTES: the head idxs received by each warp for the responsible rank might not be the same
-        int num_used_slots = current_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile
+        int num_used_slots = current_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile load
 
         // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
         if (num_used_slots <= max_num_used_slots_in_queue)
@@ -1124,7 +1141,7 @@ void group_reduce_kernel(
         int dst_slot_idx = (current_channel_tail_idx + i) % num_recv_buffer_tokens;
         int send_token_idx = token_idx + i;
 
-        // Determine the actual source token idx in the send buffer
+        // Determine the actual src token idx in the send buffer
         auto token_idx_in_x = static_cast<int64_t>(send_token_idx);
         token_idx_in_x = pre_perm_idx == nullptr ? token_idx_in_x : pre_perm_idx[token_idx_in_x];
 
@@ -1175,8 +1192,11 @@ void group_reduce_kernel(
         }
 
         // Copy channel src idx by lane0
-        // NOTES: `src_idx` is actually the `recv_src_idx` in group_cast stage
-        //  thus src_idx[j] indicates the token idx in `reduced_x` for x[j] to reduce to
+        // NOTES:
+        //  1. `src_idx` is actually the `recv_src_idx` in group_cast stage
+        //    thus src_idx[j] indicates the token idx in `reduced_x` for x[j] to reduce to
+        //  2. since we've NOT applied `post_perm_idx` to `recv_src_idx` in group cast stage,
+        //    here we don't apply `pre_perm_idx` to `src_idx` either
         if (lane_id == 0)
           channel_src_idx_buffers[dst_slot_idx] = __ldg(src_idx + send_token_idx);
 
@@ -1533,6 +1553,7 @@ void group_reduce_kernel(
               tma_ptr_int4_cur_stage[lane_id * kCommDtypePerDtype + l] = reduced_hidval_int4[l];
 
             // Fence TMA store to wait the TMA buffer for each lane to be ready
+            // before issuing the next TMA store by lane0
             // NOTES: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
             tma_store_fence();
             __syncwarp();
@@ -1560,7 +1581,7 @@ void group_reduce_kernel(
          * and we can decode the correct next expect head by `-expected_head - 1`
          */
         if (responsible_rank < kNumRanks)
-          shared_warp_channel_head_idx[reduce_warp_id][responsible_rank] = (expected_head < 0) ? -expected_head - 1 : expected_head + 1;
+          shared_warp_channel_head_idx[reduce_warp_id][responsible_rank] = expected_head < 0 ? decode(expected_head) : expected_head + 1;
       }
 
       // Retired this warp by toggling the retire flag
@@ -1588,11 +1609,11 @@ void launch_group_reduce(
     void* reduced_x_2nd,
     const void* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
+    const int64_t* pre_perm_idx,
     int num_tokens,
     int num_recv_tokens,
     int hidden_size,
@@ -1651,11 +1672,11 @@ void launch_group_reduce(
         lse,                                       \
         reinterpret_cast<dtype_t*>(reduced_x_2nd), \
         reinterpret_cast<const dtype_t*>(x_2nd),   \
-        pre_perm_idx,                              \
+        send_head,                                 \
         src_idx,                                   \
         rank_prefix_matrix,                        \
         channel_prefix_matrix,                     \
-        send_head,                                 \
+        pre_perm_idx,                              \
         num_tokens,                                \
         num_recv_tokens,                           \
         hidden_size,                               \
@@ -1686,11 +1707,11 @@ void group_reduce(
     void* reduced_x_2nd,
     const void* x_2nd,
     /* other metadata */
-    const int64_t* pre_perm_idx,
+    int* send_head,
     const int* src_idx,
     const int* rank_prefix_matrix,
     const int* channel_prefix_matrix,
-    int* send_head,
+    const int64_t* pre_perm_idx,
     int num_tokens,
     int num_recv_tokens,
     int hidden_size,
@@ -1716,11 +1737,11 @@ void group_reduce(
         lse,                                                                                                         \
         reduced_x_2nd,                                                                                               \
         x_2nd,                                                                                                       \
-        pre_perm_idx,                                                                                                \
+        send_head,                                                                                                   \
         src_idx,                                                                                                     \
         rank_prefix_matrix,                                                                                          \
         channel_prefix_matrix,                                                                                       \
-        send_head,                                                                                                   \
+        pre_perm_idx,                                                                                                \
         num_tokens,                                                                                                  \
         num_recv_tokens,                                                                                             \
         hidden_size,                                                                                                 \

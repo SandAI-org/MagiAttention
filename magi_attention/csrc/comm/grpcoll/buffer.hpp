@@ -113,17 +113,10 @@ struct Buffer {
   // Device-side rank-level mapped counter for num_recv_tokens_this_rank
   int* grpcoll_recv_counter_mapped = nullptr;
 
-  // TODO: remove this counter
-  // Host-side expert-level counter for num_recv_tokens_per_local_expert_this_rank
-  volatile int* moe_recv_expert_counter = nullptr;
-  // Device-side expert-level mapped counter for num_recv_tokens_per_local_expert_this_rank
-  int* moe_recv_expert_counter_mapped = nullptr;
-
-  // TODO: rename this counter
   // Host-side RDMA-level counter for num_recv_tokens_this_node
-  volatile int* moe_recv_rdma_counter = nullptr;
+  volatile int* grpcoll_recv_rdma_counter = nullptr;
   // Device-side RDMA-level mapped counter for num_recv_tokens_this_node
-  int* moe_recv_rdma_counter_mapped = nullptr;
+  int* grpcoll_recv_rdma_counter_mapped = nullptr;
 
  public:
   Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
@@ -251,19 +244,16 @@ struct Buffer {
   internode_group_cast(
       const torch::Tensor& x,
       std::optional<torch::Tensor>& recv_x_buf,
-      const std::optional<torch::Tensor>& x_scales,
-      const std::optional<torch::Tensor>& topk_idx,
-      const std::optional<torch::Tensor>& topk_weights,
       const std::optional<torch::Tensor>& num_tokens_per_rank,
       const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
       const torch::Tensor& is_token_in_rank,
-      const std::optional<torch::Tensor>& num_tokens_per_expert,
       int cached_num_recv_tokens,
       int cached_num_rdma_recv_tokens,
       const std::optional<torch::Tensor>& cached_rdma_channel_prefix_matrix,
       const std::optional<torch::Tensor>& cached_recv_rdma_rank_prefix_sum,
       const std::optional<torch::Tensor>& cached_gbl_channel_prefix_matrix,
       const std::optional<torch::Tensor>& cached_recv_gbl_rank_prefix_sum,
+      const std::optional<torch::Tensor>& post_perm_idx,
       const Config& config,
       std::optional<EventHandle>& previous_event,
       bool async_op,
@@ -271,17 +261,15 @@ struct Buffer {
 
   std::tuple<torch::Tensor, std::optional<EventHandle>> internode_group_reduce(
       const torch::Tensor& x,
-      std::optional<torch::Tensor>& combined_x_buf,
-      const std::optional<torch::Tensor>& topk_weights,
-      const std::optional<torch::Tensor>& bias_0,
-      const std::optional<torch::Tensor>& bias_1,
+      std::optional<torch::Tensor>& reduced_x_buf,
       const torch::Tensor& src_meta,
-      const torch::Tensor& is_combined_token_in_rank,
+      const torch::Tensor& is_reduced_token_in_rank,
       const torch::Tensor& rdma_channel_prefix_matrix,
       const torch::Tensor& rdma_rank_prefix_sum,
       const torch::Tensor& gbl_channel_prefix_matrix,
-      const torch::Tensor& combined_rdma_head,
-      const torch::Tensor& combined_nvl_head,
+      const torch::Tensor& reduced_rdma_head,
+      const torch::Tensor& reduced_nvl_head,
+      const std::optional<torch::Tensor>& pre_perm_idx,
       const Config& config,
       std::optional<EventHandle>& previous_event,
       bool async_op,

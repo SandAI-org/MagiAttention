@@ -1554,3 +1554,25 @@ def get_a2av_perm_idxs_from_group_cast_meta(
     )
 
     return perm_to_a2av_idx
+
+
+class NativeGrpcollMetaCalculator:
+    def __init__(
+        self,
+        input_seqlen_per_rank: list[int],
+        input_split_sizes_per_rank: list[list[int]],
+        dst_indices_per_rank: list[list[list[int]]],
+        src_index_per_rank: list[list[int]],
+        hidden_size: int,
+        dtype: torch.dtype,
+        num_ranks: int = 0,
+        group: dist.ProcessGroup | None = None,
+        cast_lse: bool = False,
+        num_heads: int = 0,
+        reduce_op: GroupReduceOp = "sum",
+        comm_dtype: torch.dtype | None = None,
+        max_output_seqlen: int = 0,
+        max_rdma_output_seqlen: int = 0,
+        distributed_mode: bool = False,
+    ):
+        raise NotImplementedError("TODO ...")

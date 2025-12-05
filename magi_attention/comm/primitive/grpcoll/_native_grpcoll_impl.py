@@ -119,7 +119,7 @@ def native_group_cast_impl(
     handle_dict: dict[str, GrpCollHandle] = kwargs.pop("native_grpcoll_handle_dict", {})
     handle: GrpCollHandle | None = handle_dict.get("group_cast", None)
 
-    # transfer group-cast meta args to dispatch meta args
+    # transfer to native group-cast meta args
     if meta_dict:
         num_tokens_per_rank = meta_dict["num_tokens_per_rank"]
         num_tokens_per_rdma_rank = meta_dict["num_tokens_per_rdma_rank"]
@@ -149,7 +149,7 @@ def native_group_cast_impl(
             output_seqlen=output_seqlen,
         )
 
-    # launch dispatch kernel
+    # launch group cast kernel
     (
         recv_x,
         recv_lse,
@@ -296,7 +296,7 @@ def native_group_reduce_impl(
             t2r_idx=kwargs.pop("t2r_idx", None),
         )
 
-    # transfer symmetric group-cast meta args to dispatch meta args
+    # transfer to symmetric native group-cast meta args
     if meta_dict:
         pre_perm_idx = meta_dict["pre_perm_idx"]
     else:
@@ -309,7 +309,7 @@ def native_group_reduce_impl(
             output_seqlen=input_seqlen,
         )
 
-    # launch combine kernel
+    # launch group reduce kernel
     (
         reduced_x,
         reduced_lse,

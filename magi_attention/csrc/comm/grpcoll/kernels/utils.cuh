@@ -49,7 +49,7 @@
 
 #define DEVICE_INLINE __device__ __forceinline__
 
-#define HOST_DEVICE __host__ __device__
+#define HOST_DEVICE_INLINE __host__ __device__ __forceinline__
 
 #define GLOBAL_LAUNCH_BOUNDS(MAX_THREADS_PER_BLOCK, MIN_BLOCKS_PER_SM) __global__ __launch_bounds__(MAX_THREADS_PER_BLOCK, MIN_BLOCKS_PER_SM)
 
@@ -107,12 +107,12 @@ DEVICE_INLINE int get_lane_id() {
 }
 
 template <typename dtype_t>
-HOST_DEVICE constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
+HOST_DEVICE_INLINE constexpr dtype_t ceil_div(dtype_t a, dtype_t b) {
   return (a + b - 1) / b;
 }
 
 template <typename dtype_t>
-HOST_DEVICE constexpr dtype_t align(dtype_t a, dtype_t b) {
+HOST_DEVICE_INLINE constexpr dtype_t align(dtype_t a, dtype_t b) {
   return ceil_div<dtype_t>(a, b) * b;
 }
 
@@ -207,6 +207,40 @@ DEVICE_INLINE int fast_log2_ceil(float x) {
   auto exp_x = (bits_x >> 23) & 0xff;
   auto man_bits = bits_x & ((1 << 23) - 1);
   return exp_x - 127 + (man_bits != 0);
+}
+
+template <typename dtype_t, typename lp_dtype_t, typename vec_dtype_t>
+DEVICE_INLINE vec_dtype_t vec_downcast(vec_dtype_t* vec_ptr) {
+  constexpr int kDtypePerVec = sizeof(vec_dtype_t) / sizeof(dtype_t);
+  constexpr int kLowPrecisionDtypePerDtype = sizeof(dtype_t) / sizeof(lp_dtype_t);
+
+  vec_dtype_t downcast_val_vec;
+  lp_dtype_t* downcast_val_ptr_lp = reinterpret_cast<lp_dtype_t*>(&downcast_val_vec);
+
+#pragma unroll
+  for (int i = 0; i < kLowPrecisionDtypePerDtype; ++i) {
+    dtype_t* ith_dtype_ptr = reinterpret_cast<dtype_t*>(vec_ptr + i);
+#pragma unroll
+    for (int j = 0; j < kDtypePerVec; ++j)
+      downcast_val_ptr_lp[i * kDtypePerVec + j] = static_cast<lp_dtype_t>(ith_dtype_ptr[j]);
+  }
+
+  return downcast_val_vec;
+}
+
+template <typename dtype_t>
+DEVICE_INLINE void make_prefix_sum(dtype_t* ptr, int n) {
+#pragma unroll
+  for (int i = 1; i < n; ++i)
+    ptr[i] += ptr[i - 1];
+}
+
+DEVICE_INLINE int encode(int value) {
+  return -value - 1;
+}
+
+DEVICE_INLINE int decode(int value) {
+  return -value - 1;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -656,17 +690,9 @@ DEVICE_INLINE int broadcast_in_warp(int val, int src_lane = 0) {
   return __shfl_sync(0xffffffff, val, src_lane);
 }
 
-DEVICE_INLINE int any_in_warp(int pred) {
-  return __any_sync(0xffffffff, pred);
-}
-
-DEVICE_INLINE int all_in_warp(int pred) {
-  return __all_sync(0xffffffff, pred);
-}
-
 template <typename dtype_t>
 DEVICE_INLINE dtype_t broadcast_ptr_in_warp(dtype_t& ptr, int src_lane = 0) {
-  GRPCOLL_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "");
+  GRPCOLL_STATIC_ASSERT(sizeof(dtype_t) % sizeof(int) == 0, "Invalid dtype_t");
 
   auto send_int_vals = reinterpret_cast<int*>(&ptr);
   int recv_int_vals[sizeof(dtype_t) / sizeof(int)];
@@ -676,6 +702,14 @@ DEVICE_INLINE dtype_t broadcast_ptr_in_warp(dtype_t& ptr, int src_lane = 0) {
     recv_int_vals[i] = broadcast_in_warp(send_int_vals[i], src_lane);
 
   return *reinterpret_cast<dtype_t*>(recv_int_vals);
+}
+
+DEVICE_INLINE int any_in_warp(int pred) {
+  return __any_sync(0xffffffff, pred);
+}
+
+DEVICE_INLINE int all_in_warp(int pred) {
+  return __all_sync(0xffffffff, pred);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -702,7 +736,7 @@ struct ReduceMin {
   }
 };
 
-// Unified reduction function
+// Unified warp reduce function for the given op and given dtype
 template <uint32_t kNumLanes, typename T, typename Op>
 DEVICE_INLINE T warp_reduce(T value, Op op) {
   GRPCOLL_STATIC_ASSERT(kNumLanes == 32 or kNumLanes == 16 or kNumLanes == 8 or kNumLanes == 4 or kNumLanes == 2 or kNumLanes == 1, "Invalid number of lanes");
@@ -794,9 +828,9 @@ template <typename FuncT>
 struct PatternVisitor {
   FuncT func;
 
-  HOST_DEVICE explicit PatternVisitor(FuncT&& func) : func(std::forward<FuncT>(func)) {}
+  HOST_DEVICE_INLINE explicit PatternVisitor(FuncT&& func) : func(std::forward<FuncT>(func)) {}
 
-  HOST_DEVICE auto operator[](const uint32_t& i) {
+  HOST_DEVICE_INLINE auto operator[](const uint32_t& i) {
     return func(i);
   }
 };
@@ -821,25 +855,6 @@ DEVICE_INLINE void unpack2(const dtype_b_t& packed, dtype_a_t& x, dtype_a_t& y) 
   GRPCOLL_STATIC_ASSERT(sizeof(dtype_a_t) * 2 == sizeof(dtype_b_t), "Invalid dtypes");
   auto unpacked_ptr = reinterpret_cast<const dtype_a_t*>(&packed);
   x = unpacked_ptr[0], y = unpacked_ptr[1];
-}
-
-template <typename dtype_t, typename lp_dtype_t, typename vec_dtype_t>
-DEVICE_INLINE vec_dtype_t vec_downcast(vec_dtype_t* vec_ptr) {
-  constexpr int kDtypePerVec = sizeof(vec_dtype_t) / sizeof(dtype_t);
-  constexpr int kLowPrecisionDtypePerDtype = sizeof(dtype_t) / sizeof(lp_dtype_t);
-
-  vec_dtype_t downcast_val_vec;
-  lp_dtype_t* downcast_val_ptr_lp = reinterpret_cast<lp_dtype_t*>(&downcast_val_vec);
-
-#pragma unroll
-  for (int i = 0; i < kLowPrecisionDtypePerDtype; ++i) {
-    dtype_t* ith_dtype_ptr = reinterpret_cast<dtype_t*>(vec_ptr + i);
-#pragma unroll
-    for (int j = 0; j < kDtypePerVec; ++j)
-      downcast_val_ptr_lp[i * kDtypePerVec + j] = static_cast<lp_dtype_t>(ith_dtype_ptr[j]);
-  }
-
-  return downcast_val_vec;
 }
 
 constexpr float kFP8Margin = 1e-4;
