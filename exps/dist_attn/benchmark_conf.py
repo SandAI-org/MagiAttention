@@ -55,27 +55,27 @@ class BENCH_CONFIG:
     bench_flops = True
     bench_mem = False
     bench_mode = "mean"
-    iteration = 25
-    warmup = 5
+    iteration = 1
+    warmup = 1
     output_path = "./outputs"
     mask_pattern = [
         FlashMaskType.FULL,
-        FlashMaskType.CAUSAL,
-        FlashMaskType.FULL_DOCUMENT,
-        FlashMaskType.CAUSAL_DOCUMENT,
+        # FlashMaskType.CAUSAL,
+        # FlashMaskType.FULL_DOCUMENT,
+        # FlashMaskType.CAUSAL_DOCUMENT,
     ]
     dist_attn_impl = [
-        AttnImpl.ULYSSES,
-        AttnImpl.RING_P2P,
-        AttnImpl.RING_ALLGATHER,
-        AttnImpl.USP,
-        AttnImpl.LOONGTRAIN,
+        # AttnImpl.ULYSSES,
+        # AttnImpl.RING_P2P,
+        # AttnImpl.RING_ALLGATHER,
+        # AttnImpl.USP,
+        # AttnImpl.LOONGTRAIN,
         AttnImpl.MAGI_ATTENTION,
     ]
     workload = [
         "fwd",
-        "bwd",
-        "1f1b",
+        # "bwd",
+        # "1f1b",
     ]
 
 
@@ -92,8 +92,9 @@ class SAMPLE_CONFIG:
         - to_attn_ranges: convert to attn_ranges.
     """
 
-    dataset_path = "./benchmark/datasets/default/doc_length_distribution.csv"
-    pack_num = 20
+    # dataset_path = "./benchmark/datasets/default/doc_length_distribution.csv"
+    dataset_path = None
+    pack_num = 1
     chunk_ratio = 0.25
     is_binned = True
     to_attn_ranges = True
@@ -111,11 +112,11 @@ class DATA_CONFIG:
         - dtype: data dtype.
     """
 
-    seqlen_per_rank = 8 * 1024
+    seqlen_per_rank = 64
     embed_dim = 1024
     hidden_size = 128
-    heads_q = 64
-    heads_kv = 8
+    heads_q = 4
+    heads_kv = 2
     dtype = torch.bfloat16
 
 
@@ -140,7 +141,7 @@ class ATTN_CONFIG:
     deterministic = False
 
     # -----    magi-attention conf   ---- #
-    chunk_size = 2048
+    chunk_size = 64
     dispatch_alg = MinHeapDispatchAlg
 
     enable_overlap = True
