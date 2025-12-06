@@ -371,7 +371,7 @@ struct CollectiveEpilogueFwd {
 
     // get qhead_per_khead
     // TODO: we can refer to fa3 to optimize this;
-    int qhead_per_khead = !PackGQA ?: (params.nheads / params.nheads_kv);
+    int qhead_per_khead = !PackGQA ? 1 : (params.nheads / params.nheads_kv);
 
     // Define Tensors for mO, gO, sO
     Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O)(_, _, bidh);
@@ -474,7 +474,7 @@ struct CollectiveEpilogueFwd {
           deterministic_sync(
               params.determin_range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads, left_range_conflict_msg >> 1, right_range_conflict_msg >> 1);
         }
-        acquire_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
+        acquire_lock(params.range_locks, bidh, offset_o * qhead_per_khead + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
       }
       flash::named_barrier_sync(NumEpilogueThreads, cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
 
@@ -483,14 +483,18 @@ struct CollectiveEpilogueFwd {
         // Load lse_prev from gmem -> smem, and calculate lse_final
         int const row_block = get<0>(taccOcO_row(mi));
         int const row_batch = m_block * kBlockM + row_block;
-        if (row_batch >= seqlen_o) {
+        if (row_batch >= seqlen_o * qhead_per_khead) {
           lse(mi) = -INFINITY;
         }
 
-        int const row_global = row_batch + offset_o;
-        if (row_global < get<0>(params.shape_O)) {
-          lse_prev(mi) = gLSE(row_block);
-
+        int const row_global = row_batch + offset_o * qhead_per_khead;
+        if (row_global < get<0>(params.shape_O) * qhead_per_khead) {
+          // lse_prev(mi) = gLSE(row_block);  // todo: modify to read gLSEPacked here.
+          if constexpr (!PackGQA) {
+            lse_prev(mi) = gLSE(row_block);
+          } else {
+            lse_prev(mi) = gLSEPacked(row_block);
+          }
           if (lse_prev(mi) != -INFINITY) {
             // If there is any non-inf lse_prev, we cannot skip correction
             skip_correction = false;
@@ -564,8 +568,14 @@ struct CollectiveEpilogueFwd {
       // Define tOrPrevO, tOrPrevO_copy_view, tOgPrevO
       Tensor tOrPrevO = make_fragment_like(tOrO);
       Tensor tOrPrevO_copy_view = thr_copy_O.retile_D(tOrPrevO);
-      Tensor tOgPrevO = thr_copy_O.partition_S(gO);
-
+      // Tensor tOgPrevO = thr_copy_O.partition_S(gO);  // todo: add packgqa
+      auto tOgPrevO = [&]() {
+        if constexpr (!PackGQA) {
+          return thr_copy_O.partition_S(gO);
+        } else {
+          return thr_copy_O.partition_S(gOPacked);
+        }
+      }();
       // Copy prev O from gmem to smem
       cute::copy_if(tOpO, tOgPrevO, tOrPrevO_copy_view);
 
@@ -687,7 +697,7 @@ struct CollectiveEpilogueFwd {
               left_range_conflict_msg & 1,
               right_range_conflict_msg & 1);
         }
-        release_lock(params.range_locks, bidh, offset_o + m_block * kBlockM, kBlockM, params.nheads);
+        release_lock(params.range_locks, bidh, offset_o * qhead_per_khead + m_block * kBlockM, kBlockM, !PackGQA ? params.nheads : params.nheads_kv);
       }
     }
   }
