@@ -480,8 +480,8 @@ template <
     bool kCachedMode,
     int kNumTMABytesPerWarp,
     int kNumGroupCastRDMASenderWarps,
-    int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks),
-    bool kCastLSE>
+    bool kCastLSE,
+    int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks)>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_cast(kNumGroupCastRDMASenderWarps), 1)
 void group_cast_kernel(
     /* 1st group of input / output data*/
@@ -1523,7 +1523,7 @@ void group_cast(
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  SWITCH_RDMA_RANKS(GROUP_CAST_LAUNCH_CASE);
+  SWITCH_RDMA_RANKS(GROUP_CAST_CAST_LSE_LAUNCH_CASE);
 
 #undef GROUP_CAST_CAST_LSE_LAUNCH_CASE
 #undef GROUP_CAST_LAUNCH_CASE
