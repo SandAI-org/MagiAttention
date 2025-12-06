@@ -302,6 +302,8 @@ def magi_attn_flex_key(
     is_same_source: bool = True,
     is_q_permutable: bool = True,
     is_k_permutable: bool = True,
+    num_heads_q: int = 1,
+    num_heads_kv: int = 1,
 ) -> DistAttnRuntimeKey:
     """This is the most flexible interface,
     directly passing in q_ranges, k_ranges and attn_mask_type to
@@ -475,6 +477,8 @@ def magi_attn_flex_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
     )
 
     # init dist attn runtime mgr and map it to the key
@@ -492,6 +496,8 @@ def magi_attn_flex_key(
             is_k_permutable=is_k_permutable,
             dist_attn_config=dist_attn_config,
             cp_mesh=cp_mesh,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
         )
 
     return key
@@ -511,6 +517,8 @@ def magi_attn_flex_dispatch(
     is_same_source: bool = True,
     is_q_permutable: bool = True,
     is_k_permutable: bool = True,
+    num_heads_q: int = 1,
+    num_heads_kv: int = 1,
 ) -> tuple[torch.Tensor, DistAttnRuntimeKey]:
     """This is the most flexible interface,
     directly passing in q_ranges, k_ranges and attn_mask_type to
@@ -637,6 +645,8 @@ def magi_attn_flex_dispatch(
         is_same_source=is_same_source,
         is_q_permutable=is_q_permutable,
         is_k_permutable=is_k_permutable,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
     )
 
     local_x = dispatch(x, key)
@@ -1097,6 +1107,9 @@ def make_flex_key_for_new_mask_after_dispatch(
     is_q_permutable = mgr.is_q_permutable
     is_k_permutable = mgr.is_k_permutable
 
+    num_heads_q = mgr.num_heads_q
+    num_heads_kv = mgr.num_heads_kv
+
     # apply padding
     if pad_size > 0:
         # apply padding to the new mask with the empty slice
@@ -1120,6 +1133,8 @@ def make_flex_key_for_new_mask_after_dispatch(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=new_dist_attn_config,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
     )
 
     # init new dist attn runtime mgr and map it to the new key
@@ -1139,6 +1154,8 @@ def make_flex_key_for_new_mask_after_dispatch(
             cp_mesh=cp_mesh,
             ref_dispatch_meta_q=ref_dispatch_meta_q,
             ref_dispatch_meta_k=ref_dispatch_meta_k,
+            num_heads_q=num_heads_q,
+            num_heads_kv=num_heads_kv,
         )
 
     return new_key

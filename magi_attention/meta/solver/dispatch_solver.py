@@ -921,6 +921,8 @@ class DispatchSolver(nn.Module):
                 - the job array needs O(n) space
                 - the min-heap and other auxiliary data needs O(k) space
         """
+        # only for debug
+        print("Solve with min-heap dispatch algorithm.")
         # get dispatch jobs from data config
         jobs: list[DispatchJob] = dispatch_data.jobs
         num_buckets: int = dispatch_data.num_buckets

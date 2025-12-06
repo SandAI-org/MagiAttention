@@ -14,6 +14,9 @@
 
 import copy
 import random
+import time
+
+import torch.distributed as dist
 
 from magi_attention.common import AttnRange, AttnRanges, AttnRectangles
 from magi_attention.common.enum import DynamicAttnAlgType
@@ -88,8 +91,9 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         comm_len_n: list[int],
         eval_solver_map: list[list[int]],
         area_map: list[list[int]],
+        average_area: float,
         qk_rate: float = 1.0,
-    ) -> float:
+    ) -> tuple[float, float, int]:
         # calc the area max
         area_per_rank = [0 for _ in range(cp_size)]
         for i in range(m):
@@ -102,6 +106,8 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
 
         # calc the communication max
         comm_max = 0.0
+        # calc the communication sum
+        comm_sum = 0.0
         qo_lhrc: list[set] = [set() for _ in range(m)]
         kv_lhrc: list[set] = [set() for _ in range(n)]
         qo_lcrh: list[set] = [set() for _ in range(cp_size)]
@@ -141,9 +147,14 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 qk_rate * qo_lcrh_len[i] + kv_lcrh_len[i] * 2 + qk_rate * qo_lhrc_len[i]
             )
             comm_max = max(comm_max, fwd_send_len, fwd_recv_len)
+            comm_sum += fwd_send_len + fwd_recv_len
 
-        # cost function: communication cost max * area max
-        return comm_max * area_max
+        # cost function
+        return (
+            comm_max * (area_max - average_area + cp_size * 4) + comm_sum,
+            comm_max,
+            area_max,
+        )
 
     def _greedy_algorithm(
         self,
@@ -208,7 +219,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     [max_area - rank_calc_area[rank] for rank in rank_choice_list]
                 )
                 weights_list = [
-                    (max_area - rank_calc_area[rank]) / sum_area_weight
+                    (max_area - rank_calc_area[rank]) / sum_area_weight * 2
                     for rank in rank_choice_list
                 ]
                 # normalize the communication length weight
@@ -251,10 +262,19 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             num_heads_kv: The number of KV heads
             bucket_per_rank: The buckets of each rank
         """
+        # Get rank number for distributed training (only in debug mode)
+        rank = -1
+        if dist.is_initialized():
+            rank = dist.get_rank()
+
+        # measure solver execution time on rank 0
+        start_time = time.perf_counter() if rank == 0 else None
+
         # set the same random seed for dist devices
         random.seed(42)
 
         qk_rate = num_heads_q / num_heads_kv
+        print(f"{qk_rate=}")
         # get the host rank list of Q and K
         cp_size = len(bucket_per_rank)
         rank_m = []
@@ -295,10 +315,14 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         area_map = [[-1 for _ in range(n)] for _ in range(m)]
         job_list = []
 
+        # initialize the total area
+        total_area = 0
+
         # initialize the solver_map and job_list
         for i in range(m):
             for j in range(n):
                 area_map[i][j] = grid_rects[i][j].area()
+                total_area += area_map[i][j]
                 if rank_m[i] == rank_n[j]:
                     # greedy choices: host job, no communication cost
                     solver_map[i][j] = rank_m[i]
@@ -307,12 +331,17 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     if grid_rects[i][j].area() > 0:
                         job_list.append((i, j))
 
+        # calculate average area
+        average_area = total_area / cp_size
+
         # random initialize stage
         random_times = min(
-            1000000 // m // n, 1000
+            100000000 // m // n, 1000
         )  # limit the maximum number of iterations
+        if rank == 0:
+            print(f"random initialize stage: {m=} {n=} {random_times=}")
         local_eval = float("inf")
-        for _ in range(random_times):
+        for iter in range(random_times):
             new_solver_map = self._greedy_algorithm(
                 m,
                 n,
@@ -326,7 +355,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 grid_rects,
                 job_list,
             )
-            new_solver_eval = self._eval_greedy_algorithm(
+            new_solver_eval, _, _ = self._eval_greedy_algorithm(
                 cp_size,
                 m,
                 n,
@@ -336,25 +365,57 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 comm_len_n,
                 new_solver_map,
                 area_map,
+                average_area,
                 qk_rate,
             )
-            if new_solver_eval < local_eval:
+            if new_solver_eval <= local_eval:
+                if rank == 0:
+                    print(f"initial iter {iter}: {new_solver_eval=}")
                 local_eval = new_solver_eval
                 local_optimal_solver_map = new_solver_map
             random.shuffle(job_list)
 
         # refinement stage
         refine_times = min(
-            1000000 // m // n, 1000
+            100000000 // m // n, 10000
         )  # limit the maximum number of iterations
+        if rank == 0:
+            print(f"refinement stage: {m=} {n=} {refine_times=} {local_eval=}")
+        early_stop_counter = 0
         for iter in range(refine_times):
-            random.shuffle(job_list)
-            solver_map = copy.deepcopy(local_optimal_solver_map)
+            # # calculate the number of rows and columns to select
+            # # as the iteration progresses, the number of selected rows and columns gradually decreases
+            # numm = max(2, m * (refine_times - iter) // refine_times)
+            # numn = max(2, n * (refine_times - iter) // refine_times)
+            # numr = max(2, cp_size * (refine_times - iter) // refine_times)
+
+            # solver_map = copy.deepcopy(local_optimal_solver_map)
+
+            # # randomly select numm row indices and numn column indices
+            # selected_rows = random.sample(range(m), numm)
+            # selected_cols = random.sample(range(n), numn)
+            # selected_ranks = random.sample(range(cp_size), numr)
+
+            # # create a set of selected rows and columns for quick lookup
+            # selected_rows_set = set(selected_rows)
+            # selected_cols_set = set(selected_cols)
+            # selected_ranks_set = set(selected_ranks)
+
+            # # find all tasks in the selected rows and columns that are in job_list
+            # partial_job_list = []
+            # for i, j in job_list:
+            #     if i in selected_rows_set or j in selected_cols_set or solver_map[i][j] in selected_ranks_set:
+            #         solver_map[i][j] = -1
+            #         partial_job_list.append((i, j))
+
+            # original logic: directly random select from job_list
             refinement_position_num = (
                 len(job_list) * (refine_times - iter) // refine_times
             )
             if refinement_position_num == 0:
                 break
+            solver_map = copy.deepcopy(local_optimal_solver_map)
+            random.shuffle(job_list)
             # TODO: make some heuristics positions choices
             for pos_id in range(refinement_position_num):
                 i, j = job_list[pos_id]
@@ -363,7 +424,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
 
             # process greedy algorithm on partial job list
             random_times = 10
-            for _ in range(random_times):
+            for random_iter in range(random_times):
                 random.shuffle(partial_job_list)
                 new_solver_map = self._greedy_algorithm(
                     m,
@@ -378,7 +439,11 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     grid_rects,
                     partial_job_list,
                 )
-                new_solver_eval = self._eval_greedy_algorithm(
+                (
+                    new_solver_eval,
+                    new_comm_max,
+                    new_area_max,
+                ) = self._eval_greedy_algorithm(
                     cp_size,
                     m,
                     n,
@@ -388,11 +453,28 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     comm_len_n,
                     new_solver_map,
                     area_map,
+                    average_area,
                     qk_rate,
                 )
-                if new_solver_eval < local_eval:
+                if new_solver_eval > local_eval:
+                    early_stop_counter += 1
+                elif new_solver_eval == local_eval:
+                    early_stop_counter += 100
+                else:
+                    early_stop_counter = 0
+                if new_solver_eval <= local_eval:
+                    if rank == 0:
+                        print(
+                            f"refinement iter {iter} random_iter {random_iter}: "
+                            f"{new_solver_eval=} {local_eval=} {new_comm_max=} {new_area_max=}"
+                        )
                     local_eval = new_solver_eval
                     local_optimal_solver_map = new_solver_map
+
+            if early_stop_counter >= 20000:
+                if rank == 0:
+                    print(f"refinement early stop at iter {iter}")
+                break
 
         # print(f"local_optimal_solver_map: {local_optimal_solver_map}")
 
@@ -406,3 +488,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     bucket_per_rank[local_optimal_solver_map[i][j]].extend(
                         grid_rects[i][j]
                     )
+
+        if rank == 0 and start_time is not None:
+            elapsed = time.perf_counter() - start_time
+            print(f"[GRGDynamicAttnAlgorithm] solve elapsed time: {elapsed:.6f}s")

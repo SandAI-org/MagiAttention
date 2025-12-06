@@ -15,14 +15,14 @@
 # limitations under the License.
 
 export NNODES=${NNODES:-1}
-export GPUS_PER_NODE=8
+export GPUS_PER_NODE=1
 export WORLD_SIZE=$((GPUS_PER_NODE * NNODES))
 export NODE_RANK=${RANK:-0}
-export MAGI_ATTENTION_HIERARCHICAL_COMM=${MAGI_ATTENTION_HIERARCHICAL_COMM:-1}
+# export MAGI_ATTENTION_HIERARCHICAL_COMM=${MAGI_ATTENTION_HIERARCHICAL_COMM:-0}
 
 if [[ $NNODES -eq 1 ]]; then # single-node
     export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
-    export MASTER_PORT=${MASTER_PORT:-16988}
+    export MASTER_PORT=${MASTER_PORT:-16985}
 fi
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
@@ -48,4 +48,18 @@ DISTRIBUTED_ARGS="
 echo $DISTRIBUTED_ARGS
 
 TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
+
+CMD="nsys profile \
+    --force-overwrite true \
+    -o magi_dynamic_valen_full_16k_ws8.nsys-rep \
+    --capture-range=cudaProfilerApi \
+    $TORCHRUN_CMD"
+
+# TORCHRUN_CMD="nsys profile \
+#     --force-overwrite true \
+#     -o ring_allgather.nsys-rep \
+#     --capture-range=cudaProfilerApi \
+#     $CMD"
+
 $TORCHRUN_CMD
+# $CMD
