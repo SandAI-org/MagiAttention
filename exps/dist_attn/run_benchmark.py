@@ -385,6 +385,8 @@ def run_magi_attn(
         chunk_size=chunk_size,
         cp_group_or_mesh=cp_group_or_mesh,
         dist_attn_config=dist_attn_config,
+        num_heads_q=q_heads,
+        num_heads_kv=kv_heads,
     )
 
     # -----   projection  ----- #
@@ -449,7 +451,7 @@ dist_attn_benchmarks = [
             "mem": "Peak Memory (GB)",
         },
         # Name for the plot. Used also as a file name for saving the plot.
-        plot_name=f"Total seqlen of {TOTAL_SEQLEN} {wd} with {mask.value}",
+        plot_name=f"Total_seqlen_of_{TOTAL_SEQLEN}_{wd}_with_{mask.value}",
         args={  # Values for function arguments not in `x_names` and `y_name`.
             "mask_nums": SAMPLE_CONFIG.pack_num,
             "mask_type": mask,
@@ -525,6 +527,13 @@ def run_benchmark(
     for q_ranges, k_ranges, attn_mask_type, _ in mask_iterator:
         global already_known_oom_before_run
         already_known_oom_before_run = False
+
+        # q_ranges = AttnRanges.from_ranges([[i * 8192, (i + 1) * 8192] for i in range(8)])
+        # k_ranges = AttnRanges.from_ranges([[i * 8192, (i + 1) * 8192] for i in range(8)])
+        # attn_mask_type = [AttnMaskType.FULL] * 8
+        # print(q_ranges)
+        # print(k_ranges)
+        # print(attn_mask_type)
 
         if attn_impl != AttnImpl.MAGI_ATTENTION:
             fn = run_dist_attn(

@@ -101,7 +101,8 @@ class DynamicAttnSolver(BaseDistAttnSolver):
         self.rect = AttnRectangles.from_ranges(
             q_ranges=q_ranges, k_ranges=k_ranges, mask_types=attn_mask_type
         )
-
+        # only for debug
+        print("==========Dynamic Solver solve begin=============")
         self.algorithm.solve(
             rects=self.rect,
             host_ranges_q=self.host_ranges_q,
@@ -110,6 +111,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
             num_heads_kv=self.num_heads_kv,
             bucket_per_rank=self.bucket_per_rank,
         )
+        print("==========Dynamic Solver solve end================")
 
         self.calc_host_and_remote_bucket_this_rank()
 
@@ -119,11 +121,30 @@ class DynamicAttnSolver(BaseDistAttnSolver):
     def is_solved(self) -> bool:
         return self._is_solved
 
-    def output_solve_result(self) -> None:
+    def output_solve_result(
+        self,
+        visualize: bool = False,
+        save_path: str | None = None,
+    ) -> None:
         for rank in range(self.cp_size):
             print(f"rank {rank} bucket:")
             for rect in self.bucket_per_rank[rank]:
                 print(rect)
+
+        if not visualize:
+            return
+
+        # only for debug: local import, not depend on matplotlib in production environment
+        try:
+            from .dynamic_solver_vis import visualize_buckets
+
+            visualize_buckets(
+                bucket_per_rank=self.bucket_per_rank,
+                title="DynamicAttnSolver buckets",
+                save_path=save_path,
+            )
+        except Exception as e:  # pragma: no cover - debug only
+            print(f"output_solve_result visualization skipped: {e}")
 
     @nvtx.instrument_nvtx
     def _calc_intersection_with_index(

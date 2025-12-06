@@ -129,22 +129,9 @@ def do_bench(
     else:
         cache = torch.empty(int(256e6), dtype=torch.int8, device="cuda")
 
-    # Estimate the runtime of the function
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-
-    start_event.record()
-    for _ in range(5):
-        cache.zero_()
-        fn()
-    end_event.record()
-
-    torch.cuda.synchronize()
-    estimate_ms = start_event.elapsed_time(end_event) / 5
-
     # compute number of warmup and repeat
-    n_warmup = max(1, int(warmup / estimate_ms))
-    n_repeat = max(1, int(rep / estimate_ms))
+    n_warmup = warmup
+    n_repeat = rep
     start_event = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
     end_event = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
     mems = [0.0] * n_repeat
@@ -163,6 +150,10 @@ def do_bench(
                 x.grad = None
         # we clear the L2 cache before each run
         cache.zero_()
+
+        if torch.distributed.is_initialized():
+            torch.cuda.synchronize()
+            torch.distributed.barrier()
 
         # record mem of `fn`
         start_event[i].record()
