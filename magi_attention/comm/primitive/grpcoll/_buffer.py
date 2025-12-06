@@ -875,9 +875,6 @@ class GrpCollBuffer:
     ]:
         """Internode group cast implementation"""
 
-        # TODO: support lse for internode group cast
-        assert not cast_lse
-
         # Unpack handle if given
         is_handle_given = handle is not None
         if is_handle_given:  # cached mode
@@ -902,7 +899,7 @@ class GrpCollBuffer:
 
         # Prepare lse and recv_lse
         if cast_lse:
-            assert lse is not None, "lse should not be None when `cast_lse` is set"  # type: ignore[unreachable]
+            assert lse is not None, "lse should not be None when `cast_lse` is set"
         else:  # no need to cast lse, even passed in
             lse = None
             # recv_lse = None
@@ -916,6 +913,7 @@ class GrpCollBuffer:
         # Launch the internode group cast kernel
         (
             recv_x_1st,
+            recv_lse,
             # handle
             rdma_channel_prefix_matrix,
             gbl_channel_prefix_matrix,
@@ -931,6 +929,8 @@ class GrpCollBuffer:
         ) = self.runtime.internode_group_cast(
             x_1st,
             recv_x_1st,
+            lse,
+            recv_lse,
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
             is_token_in_rank,

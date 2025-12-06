@@ -480,7 +480,8 @@ template <
     bool kCachedMode,
     int kNumTMABytesPerWarp,
     int kNumGroupCastRDMASenderWarps,
-    int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks)>
+    int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks),
+    bool kCastLSE>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_cast(kNumGroupCastRDMASenderWarps), 1)
 void group_cast_kernel(
     /* 1st group of input / output data*/
@@ -502,6 +503,7 @@ void group_cast_kernel(
     const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
+    int num_heads,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -1441,6 +1443,7 @@ void group_cast(
     const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
+    int num_heads,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -1460,44 +1463,54 @@ void group_cast(
   constexpr int kNumWarps = kNumThreads / WARP_SIZE;
   GRPCOLL_STATIC_ASSERT(kNumWarps == kNumGroupCastRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS, "Invalid number of warps");
 
-#define GROUP_CAST_LAUNCH_CASE(num_rdma_ranks)                                                                                         \
-  {                                                                                                                                    \
-    auto group_cast_func = low_latency_mode                                                                                            \
-        ? (is_cached_group_cast ? group_cast_kernel<true, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumGroupCastRDMASenderWarps>     \
-                                : group_cast_kernel<true, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumGroupCastRDMASenderWarps>)   \
-        : (is_cached_group_cast ? group_cast_kernel<false, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumGroupCastRDMASenderWarps>    \
-                                : group_cast_kernel<false, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumGroupCastRDMASenderWarps>); \
-    SET_SHARED_MEMORY_FOR_TMA(group_cast_func);                                                                                        \
-    LAUNCH_KERNEL(                                                                                                                     \
-        &cfg,                                                                                                                          \
-        group_cast_func,                                                                                                               \
-        reinterpret_cast<int4*>(recv_x),                                                                                               \
-        recv_lse,                                                                                                                      \
-        reinterpret_cast<const int4*>(x),                                                                                              \
-        lse,                                                                                                                           \
-        reinterpret_cast<SourceMeta*>(recv_src_meta),                                                                                  \
-        send_rdma_head,                                                                                                                \
-        send_nvl_head,                                                                                                                 \
-        recv_rdma_channel_prefix_matrix,                                                                                               \
-        recv_gbl_channel_prefix_matrix,                                                                                                \
-        rdma_channel_prefix_matrix,                                                                                                    \
-        recv_rdma_rank_prefix_sum,                                                                                                     \
-        gbl_channel_prefix_matrix,                                                                                                     \
-        recv_gbl_rank_prefix_sum,                                                                                                      \
-        is_token_in_rank,                                                                                                              \
-        post_perm_idx,                                                                                                                 \
-        num_tokens,                                                                                                                    \
-        hidden_int4,                                                                                                                   \
-        rdma_buffer_ptr,                                                                                                               \
-        num_max_rdma_chunked_send_tokens,                                                                                              \
-        num_max_rdma_chunked_recv_tokens,                                                                                              \
-        buffer_ptrs,                                                                                                                   \
-        num_max_nvl_chunked_send_tokens,                                                                                               \
-        num_max_nvl_chunked_recv_tokens,                                                                                               \
-        rank,                                                                                                                          \
-        num_ranks);                                                                                                                    \
-  }                                                                                                                                    \
+#define GROUP_CAST_LAUNCH_CASE(cast_lse, num_rdma_ranks)                                                                                         \
+  {                                                                                                                                              \
+    auto group_cast_func = low_latency_mode                                                                                                      \
+        ? (is_cached_group_cast ? group_cast_kernel<true, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumGroupCastRDMASenderWarps, cast_lse>     \
+                                : group_cast_kernel<true, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumGroupCastRDMASenderWarps, cast_lse>)   \
+        : (is_cached_group_cast ? group_cast_kernel<false, num_rdma_ranks, true, kNumTMABytesPerWarp, kNumGroupCastRDMASenderWarps, cast_lse>    \
+                                : group_cast_kernel<false, num_rdma_ranks, false, kNumTMABytesPerWarp, kNumGroupCastRDMASenderWarps, cast_lse>); \
+    SET_SHARED_MEMORY_FOR_TMA(group_cast_func);                                                                                                  \
+    LAUNCH_KERNEL(                                                                                                                               \
+        &cfg,                                                                                                                                    \
+        group_cast_func,                                                                                                                         \
+        reinterpret_cast<int4*>(recv_x),                                                                                                         \
+        recv_lse,                                                                                                                                \
+        reinterpret_cast<const int4*>(x),                                                                                                        \
+        lse,                                                                                                                                     \
+        reinterpret_cast<SourceMeta*>(recv_src_meta),                                                                                            \
+        send_rdma_head,                                                                                                                          \
+        send_nvl_head,                                                                                                                           \
+        recv_rdma_channel_prefix_matrix,                                                                                                         \
+        recv_gbl_channel_prefix_matrix,                                                                                                          \
+        rdma_channel_prefix_matrix,                                                                                                              \
+        recv_rdma_rank_prefix_sum,                                                                                                               \
+        gbl_channel_prefix_matrix,                                                                                                               \
+        recv_gbl_rank_prefix_sum,                                                                                                                \
+        is_token_in_rank,                                                                                                                        \
+        post_perm_idx,                                                                                                                           \
+        num_tokens,                                                                                                                              \
+        hidden_int4,                                                                                                                             \
+        num_heads,                                                                                                                               \
+        rdma_buffer_ptr,                                                                                                                         \
+        num_max_rdma_chunked_send_tokens,                                                                                                        \
+        num_max_rdma_chunked_recv_tokens,                                                                                                        \
+        buffer_ptrs,                                                                                                                             \
+        num_max_nvl_chunked_send_tokens,                                                                                                         \
+        num_max_nvl_chunked_recv_tokens,                                                                                                         \
+        rank,                                                                                                                                    \
+        num_ranks);                                                                                                                              \
+  }                                                                                                                                              \
   break
+
+#define GROUP_CAST_CAST_LSE_LAUNCH_CASE(...)        \
+  {                                                 \
+    if (num_heads == 0) {                           \
+      GROUP_CAST_LAUNCH_CASE(false, ##__VA_ARGS__); \
+    } else {                                        \
+      GROUP_CAST_LAUNCH_CASE(true, ##__VA_ARGS__);  \
+    }                                               \
+  }
 
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4);
   GRPCOLL_HOST_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
@@ -1511,6 +1524,8 @@ void group_cast(
 
   SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
   SWITCH_RDMA_RANKS(GROUP_CAST_LAUNCH_CASE);
+
+#undef GROUP_CAST_CAST_LSE_LAUNCH_CASE
 #undef GROUP_CAST_LAUNCH_CASE
 }
 

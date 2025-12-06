@@ -228,7 +228,9 @@ struct Buffer {
       std::optional<c10::ScalarType> comm_dtype);
 
   std::tuple<
+      /* 1st group of output data */
       torch::Tensor,
+      std::optional<torch::Tensor>,
       /* handle */
       torch::Tensor,
       torch::Tensor,
@@ -242,8 +244,12 @@ struct Buffer {
       /* event */
       std::optional<EventHandle>>
   internode_group_cast(
+      /* 1st group of input / output data*/
       const torch::Tensor& x,
       std::optional<torch::Tensor>& recv_x_buf,
+      const std::optional<torch::Tensor>& lse,
+      std::optional<torch::Tensor>& recv_lse_buf,
+      /* other metadata */
       const std::optional<torch::Tensor>& num_tokens_per_rank,
       const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
       const torch::Tensor& is_token_in_rank,

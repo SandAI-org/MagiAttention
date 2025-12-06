@@ -238,6 +238,7 @@ void group_cast(
     const int64_t* post_perm_idx,
     int num_tokens,
     int hidden_int4,
+    int num_heads,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,

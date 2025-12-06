@@ -902,7 +902,9 @@ Buffer::intranode_group_reduce(
 }
 
 std::tuple<
+    /* 1st group of output data */
     torch::Tensor,
+    std::optional<torch::Tensor>,
     /* handle */
     torch::Tensor,
     torch::Tensor,
@@ -916,8 +918,12 @@ std::tuple<
     /* event */
     std::optional<EventHandle>>
 Buffer::internode_group_cast(
+    /* 1st group of input / output data*/
     const torch::Tensor& x,
     std::optional<torch::Tensor>& recv_x_buf,
+    const std::optional<torch::Tensor>& lse,
+    std::optional<torch::Tensor>& recv_lse_buf,
+    /* other metadata */
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
     const torch::Tensor& is_token_in_rank,
@@ -985,7 +991,20 @@ Buffer::internode_group_cast(
     GRPCOLL_HOST_ASSERT(num_tokens_per_rdma_rank->size(0) == num_rdma_ranks);
   }
 
-  auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
+  auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1)),
+       hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
+
+  // LSE checks
+  float* lse_ptr = nullptr;
+  int num_heads = 0; // NOTES: when lse is not provided, num_heads is set to 0 and consumes empty buffer
+  if (lse.has_value()) {
+    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
+    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
+    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens);
+    GRPCOLL_HOST_ASSERT(hidden_size % lse->size(1) == 0); // hidden size should be divisible by num_heads
+    num_heads = static_cast<int>(lse->size(1));
+    lse_ptr = lse->data_ptr<float>();
+  }
 
   // Set current stream to comm stream if needed
   // NOTES: do not allocate tensors upfront!
@@ -1103,10 +1122,10 @@ Buffer::internode_group_cast(
   if (recv_x_buf.has_value()) {
     GRPCOLL_HOST_ASSERT(recv_x_buf->dim() == 2 && recv_x_buf->is_contiguous());
     GRPCOLL_HOST_ASSERT(recv_x_buf->scalar_type() == x.scalar_type());
-    GRPCOLL_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens and recv_x_buf->size(1) == hidden);
+    GRPCOLL_HOST_ASSERT(recv_x_buf->size(0) == num_recv_tokens and recv_x_buf->size(1) == hidden_size);
     recv_x = recv_x_buf.value();
   } else {
-    recv_x = torch::empty({num_recv_tokens, hidden}, x.options());
+    recv_x = torch::empty({num_recv_tokens, hidden_size}, x.options());
   }
 
   // Assign ptr for post_perm_idx if needed
@@ -1119,6 +1138,7 @@ Buffer::internode_group_cast(
   }
 
   // Allocate new tensors
+  auto recv_lse = std::optional<torch::Tensor>();
   auto recv_src_meta = std::optional<torch::Tensor>();
   auto recv_rdma_channel_prefix_matrix = std::optional<torch::Tensor>();
   auto recv_gbl_channel_prefix_matrix = std::optional<torch::Tensor>();
@@ -1132,13 +1152,27 @@ Buffer::internode_group_cast(
     send_nvl_head = torch::empty({num_rdma_recv_tokens, NUM_MAX_NVL_PEERS}, dtype(torch::kInt32).device(torch::kCUDA));
   }
 
+  // Allocate recv_lse buffer and assign the ptr if needed
+  float* recv_lse_ptr = nullptr;
+  if (lse.has_value()) {
+    if (recv_lse_buf.has_value()) {
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->dim() == 2 && recv_lse_buf->is_contiguous());
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->scalar_type() == torch::kFloat32);
+      GRPCOLL_HOST_ASSERT(recv_lse_buf->size(0) == num_recv_tokens && recv_lse_buf->size(1) == num_heads);
+      recv_lse.emplace(recv_lse_buf.value());
+    } else {
+      recv_lse = torch::empty({num_recv_tokens, num_heads}, lse->options());
+    }
+    recv_lse_ptr = recv_lse->data_ptr<float>();
+  }
+
   // Launch group_cast kernel
   // NOTES: the buffer size checks are moved into the `.cu` file
   internode::group_cast(
       /*recv_x=*/recv_x.data_ptr(),
-      /*recv_lse=*/nullptr,
+      /*recv_lse=*/recv_lse_ptr,
       /*x=*/x.data_ptr(),
-      /*lse=*/nullptr,
+      /*lse=*/lse_ptr,
       /*recv_src_meta=*/cached_mode ? nullptr : recv_src_meta->data_ptr(),
       /*send_rdma_head=*/cached_mode ? nullptr : send_rdma_head->data_ptr<int>(),
       /*send_nvl_head=*/cached_mode ? nullptr : send_nvl_head->data_ptr<int>(),
@@ -1152,6 +1186,7 @@ Buffer::internode_group_cast(
       /*post_perm_idx=*/post_perm_idx_ptr,
       /*num_tokens=*/num_tokens,
       /*hidden_int4=*/hidden_int4,
+      /*num_heads=*/num_heads,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
       /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
@@ -1177,7 +1212,9 @@ Buffer::internode_group_cast(
     }
     // record optional tensors
     for (auto& to :
-         {num_tokens_per_rank,
+         {lse,
+          recv_lse,
+          num_tokens_per_rank,
           num_tokens_per_rdma_rank,
           cached_rdma_channel_prefix_matrix,
           cached_recv_rdma_rank_prefix_sum,
@@ -1204,6 +1241,7 @@ Buffer::internode_group_cast(
   // Return values
   return {
       recv_x,
+      recv_lse,
       rdma_channel_prefix_matrix,
       gbl_channel_prefix_matrix,
       recv_rdma_channel_prefix_matrix,
@@ -1262,10 +1300,10 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   GRPCOLL_HOST_ASSERT(reduced_rdma_head.dim() == 2 and reduced_rdma_head.is_contiguous() and reduced_rdma_head.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.is_contiguous() and reduced_nvl_head.scalar_type() == torch::kInt32);
 
-  auto num_tokens = static_cast<int>(x.size(0)), hidden = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
+  auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
   auto num_reduced_tokens = static_cast<int>(is_reduced_token_in_rank.size(0));
-  GRPCOLL_HOST_ASSERT((hidden * x.element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
-  GRPCOLL_HOST_ASSERT(((hidden * x.element_size()) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
+  GRPCOLL_HOST_ASSERT((hidden_size * x.element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
+  GRPCOLL_HOST_ASSERT(((hidden_size * x.element_size()) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
   GRPCOLL_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes());
   GRPCOLL_HOST_ASSERT(is_reduced_token_in_rank.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels);
@@ -1329,7 +1367,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   if (reduced_x_buf.has_value()) {
     GRPCOLL_HOST_ASSERT(reduced_x_buf->dim() == 2 and reduced_x_buf->is_contiguous());
     GRPCOLL_HOST_ASSERT(reduced_x_buf->scalar_type() == x.scalar_type());
-    GRPCOLL_HOST_ASSERT(reduced_x_buf->size(0) == num_reduced_tokens and reduced_x_buf->size(1) == hidden);
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->size(0) == num_reduced_tokens and reduced_x_buf->size(1) == hidden_size);
     reduced_x = reduced_x_buf.value();
   } else {
     GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if reduced_x_buf is not provided
@@ -1340,7 +1378,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
      * however, we handle the zero initialization inside the group reduce kernel
      * thus here, we still use empty initialization
      */
-    reduced_x = torch::empty({num_reduced_tokens, hidden}, x.options());
+    reduced_x = torch::empty({num_reduced_tokens, hidden_size}, x.options());
   }
 
   // Launch group reduce kernel
@@ -1359,7 +1397,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       /*pre_perm_idx*/ pre_perm_idx_ptr,
       /*num_tokens=*/num_tokens,
       /*num_reduced_tokens=*/num_reduced_tokens,
-      /*hidden_size=*/hidden,
+      /*hidden_size=*/hidden_size,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
       /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
