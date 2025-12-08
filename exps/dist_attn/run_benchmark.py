@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import os
 from datetime import datetime
+from importlib.util import module_from_spec, spec_from_file_location
 from typing import Any, Dict, List
 
 import pandas as pd
 import torch
 import torch.distributed as dist
+from pydantic import TypeAdapter
 from torch.distributed.device_mesh import init_device_mesh
 
 import magi_attention
@@ -40,13 +43,6 @@ from exps.dist_attn.baselines.usp import USP
 from exps.dist_attn.baselines.utils_cp import AttnBackend
 from exps.dist_attn.benchmark.enums import FlashMaskType
 from exps.dist_attn.benchmark.mask import MaskIterator
-from exps.dist_attn.benchmark_conf import (
-    ATTN_CONFIG,
-    BENCH_CONFIG,
-    DATA_CONFIG,
-    SAMPLE_CONFIG,
-    SEED,
-)
 from magi_attention.api import calc_attn, compute_pad_size, magi_attn_flex_dispatch
 from magi_attention.benchmarking.bench import Benchmark, do_bench, perf_report
 from magi_attention.common import AttnRanges
@@ -54,10 +50,20 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.config import DistAttnConfig
 from magi_attention.meta.solver.dispatch_solver import DispatchConfig
 from magi_attention.meta.solver.overlap_solver import OverlapConfig, UniformOverlapAlg
+from magi_attention.testing.utils import switch_envvars
+
+# benchmark config to be loaded
+ATTN_CONFIG: Any = None
+BENCH_CONFIG: Any = None
+DATA_CONFIG: Any = None
+ENVVAR_CONFIG: Any = None
+SAMPLE_CONFIG: Any = None
+SEED: Any = None
+# total seqlen = seqlen_per_rank * world_size
+TOTAL_SEQLEN: Any = None
 
 already_known_oom_before_run = False
 WORLD_SIZE = int(os.environ["WORLD_SIZE"])
-TOTAL_SEQLEN = DATA_CONFIG.seqlen_per_rank * WORLD_SIZE
 OUTLIER = int(-1e10)
 
 CP_GROUP_META = {
@@ -99,6 +105,14 @@ CP_GROUP = {  # type: ignore[var-annotated]
     AttnImpl.LOONGTRAIN: {},
     AttnImpl.MAGI_ATTENTION: {},
 }
+
+
+def fn_range_key(
+    attn_impl: AttnImpl,
+    wd: str,
+    iteration: int,
+):
+    return f"{attn_impl.name}_{wd}_mask{iteration}"
 
 
 def init_dist_environment(
@@ -191,6 +205,7 @@ def run_dist_attn(
     attn_backend: AttnBackend,
     cp_group,
     wd: str,
+    iteration: int = 0,
 ):
     device = torch.cuda.current_device()
 
@@ -309,6 +324,8 @@ def run_dist_attn(
             )
             out.backward(dout_local, retain_graph=True)
 
+    range_key = fn_range_key(attn_impl, wd, iteration)
+    setattr(fn, "profile_range", range_key)
     return fn
 
 
@@ -326,6 +343,7 @@ def run_magi_attn(
     attn_mask_type: list[AttnMaskType],
     cp_group_or_mesh,
     wd: str,
+    iteration: int = 0,
 ):
     device = torch.cuda.current_device()
 
@@ -425,41 +443,9 @@ def run_magi_attn(
             out, _ = calc_attn(q_local, k_local, v_local, magi_attn_runtime_key)
             out.backward(dout_local, retain_graph=True)
 
+    range_key = fn_range_key(AttnImpl.MAGI_ATTENTION, wd, iteration)
+    setattr(fn, "profile_range", range_key)
     return fn
-
-
-x_vals = [dist_attn for dist_attn in BENCH_CONFIG.dist_attn_impl]
-x_names = ["attn_impl" for _ in x_vals]
-dist_attn_benchmarks = [
-    Benchmark(
-        x_names=x_names,
-        x_vals=x_vals,
-        x_log=False,
-        line_arg="seqlen",
-        line_vals=[TOTAL_SEQLEN],
-        line_names=[str(TOTAL_SEQLEN)],
-        styles=[  # Line styles.
-            ("green", "--"),
-            ("orange", "--"),
-            ("steelblue", "--"),
-            ("red", "-"),
-        ],
-        ylabel={  # Label name for the y-axis.
-            "flops": "Throughout (TFLOPs/s)",
-            "mem": "Peak Memory (GB)",
-        },
-        # Name for the plot. Used also as a file name for saving the plot.
-        plot_name=f"Total seqlen of {TOTAL_SEQLEN} {wd} with {mask.value}",
-        args={  # Values for function arguments not in `x_names` and `y_name`.
-            "mask_nums": SAMPLE_CONFIG.pack_num,
-            "mask_type": mask,
-            "seed": SEED,
-            "wd": wd,
-        },
-    )
-    for mask in BENCH_CONFIG.mask_pattern
-    for wd in BENCH_CONFIG.workload
-]
 
 
 def extend_bench_results(
@@ -484,216 +470,361 @@ def extend_bench_results(
     return result_info
 
 
-@perf_report(dist_attn_benchmarks)
-def run_benchmark(
-    mask_nums: int,
-    mask_type: FlashMaskType,
-    seed: int = 42,
-    seqlen: int = 0,
-    attn_impl: AttnImpl = AttnImpl.RING_P2P,
-    wd: str = "fwd",
-):
-    set_seed(seed)
+def load_py_as_dict(config_path: str) -> dict[str, Any]:
+    """Load and validate configuration from a Python file.
 
-    # -----    init mask iterator with dataset sampler   ---- #
-    mask_iterator = MaskIterator(
-        num_iterations=mask_nums,
-        mask_type=mask_type,
-        total_seqlen=TOTAL_SEQLEN,
-        data_path=SAMPLE_CONFIG.dataset_path,
-        chunk_ratio=SAMPLE_CONFIG.chunk_ratio,
-        is_binned=SAMPLE_CONFIG.is_binned,
-        to_attn_ranges=SAMPLE_CONFIG.to_attn_ranges,
-        seed=seed,
-    )
+    This function loads a Python file as a module and extracts all non-builtin variables
+    as configuration parameters. The configuration is then validated using Pydantic.
 
-    # -----    init dist environment   ---- #
-    cp_pg_meta = CP_GROUP_META[attn_impl]
-    cp_group = init_dist_environment(
-        attn_impl=attn_impl,
-        world_size=WORLD_SIZE,
-        cp_pg_meta=cp_pg_meta,
-    )
+    Args:
+        config_path (str): Path to the Python configuration file
 
-    output_n = len(BENCH_CONFIG.quantiles) if BENCH_CONFIG.quantiles else 1
-    perf_dict_total = {
-        "flops": [0] * output_n,
-        "mem": [0] * output_n,
+    Returns:
+        dict[str, Any]: Validated configuration dictionary
+
+    Raises:
+        FileNotFoundError: If config_path does not exist
+        ImportError: If the config file cannot be loaded as a module
+        ValidationError: If the config fails Pydantic validation
+    """
+    # Verify config file exists
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    # Get absolute path
+    config_path = os.path.abspath(config_path)
+    module_name = "conf"
+
+    # Load config file as module
+    spec = spec_from_file_location(module_name, config_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load config file: {config_path}")
+
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # Extract non-builtin variables as config
+    raw_config = {
+        k: v
+        for k, v in module.__dict__.items()
+        if (not k.startswith("__") and k[0].isupper())
     }
 
-    # generate mask_nums pack
-    for q_ranges, k_ranges, attn_mask_type, _ in mask_iterator:
-        global already_known_oom_before_run
-        already_known_oom_before_run = False
+    # Validate config using Pydantic
+    try:
+        return TypeAdapter(dict[str, Any]).validate_python(raw_config)
+    except Exception as e:
+        raise ValueError(f"Failed to validate config: {str(e)}")
 
-        if attn_impl != AttnImpl.MAGI_ATTENTION:
-            fn = run_dist_attn(
-                total_seqlen=seqlen,
-                embed_dim=DATA_CONFIG.embed_dim,
-                q_heads=DATA_CONFIG.heads_q,
-                kv_heads=DATA_CONFIG.heads_kv,
-                hidden_size=DATA_CONFIG.hidden_size,
-                dtype=DATA_CONFIG.dtype,
-                q_ranges=q_ranges,
-                k_ranges=k_ranges,
-                dropout=ATTN_CONFIG.dropout,
-                softmax_scale=ATTN_CONFIG.softmax_scale,  # type: ignore
-                deterministic=ATTN_CONFIG.deterministic,
-                world_size=WORLD_SIZE,
-                attn_mask_type=attn_mask_type[0],
-                attn_impl=attn_impl,
-                attn_backend=ATTN_CONFIG.attn_backend,
-                cp_group=cp_group,
-                wd=wd,
-            )
-        else:
-            assert attn_impl is AttnImpl.MAGI_ATTENTION
-            fn = run_magi_attn(
-                total_seqlen=TOTAL_SEQLEN,
-                embed_dim=DATA_CONFIG.embed_dim,
-                q_heads=DATA_CONFIG.heads_q,
-                kv_heads=DATA_CONFIG.heads_kv,
-                hidden_size=DATA_CONFIG.hidden_size,
-                dtype=DATA_CONFIG.dtype,
-                q_ranges=q_ranges,
-                k_ranges=k_ranges,
-                world_size=WORLD_SIZE,
-                chunk_size=ATTN_CONFIG.chunk_size,
-                attn_mask_type=attn_mask_type,
-                cp_group_or_mesh=cp_group,
-                wd=wd,
-            )
 
-        if already_known_oom_before_run:
-            perf_dict = {
-                "flops": [OUTLIER] * output_n,
-                "mem": [OUTLIER] * output_n,
-            }
-            perf_dict_total = {
-                "flops": [OUTLIER] * output_n,
-                "mem": [OUTLIER] * output_n,
-            }
-            break
+def load_bench_config():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    args = parser.parse_args()
+    config_dict = load_py_as_dict(args.config)
 
-        attn_flops_dict = calculate_attn_flops(
-            q_ranges=q_ranges,
-            k_ranges=k_ranges,
-            attn_mask_type=attn_mask_type,
-            total_seqlen_q=seqlen,
-            num_heads_q=DATA_CONFIG.heads_q,
-            head_dim=DATA_CONFIG.hidden_size,
-        )
-        attn_flops = attn_flops_dict[wd]
-
-        try:
-            perf_dict = do_bench(
-                fn,
-                quantiles=BENCH_CONFIG.quantiles,
-                mem_record_mode="peak",
-                return_mode=BENCH_CONFIG.bench_mode,
-                return_flops=BENCH_CONFIG.bench_flops,
-                return_mem=BENCH_CONFIG.bench_mem,
-                warmup=BENCH_CONFIG.warmup,
-                rep=BENCH_CONFIG.iteration,
-            )
-
-            # post process the perf_dict
-            def ms_to_tflops(ms: float) -> float:
-                return attn_flops / ms * 1e-9
-
-            def mem_to_gb(mem: int) -> float:
-                if mem <= 0:
-                    return mem
-                return mem / (1024**3)
-
-            if BENCH_CONFIG.bench_flops:
-                flops = perf_dict["flops"]
-                flops = torch.tensor(
-                    flops, dtype=torch.float32, device=torch.cuda.current_device()
-                )
-                dist.all_reduce(flops, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
-                perf_dict["flops"] = flops.tolist()  # type: ignore
-                perf_dict["flops"] = list(map(ms_to_tflops, perf_dict["flops"]))  # type: ignore
-                perf_dict_total["flops"] = [
-                    perf_dict_total["flops"][i] + perf_dict["flops"][i]
-                    for i in range(len(perf_dict_total["flops"]))
-                ]
-            if BENCH_CONFIG.bench_mem:
-                mem = perf_dict["mem"]
-                mem = torch.tensor(
-                    mem, dtype=torch.float32, device=torch.cuda.current_device()
-                )
-                dist.all_reduce(mem, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
-                perf_dict["mem"] = [m // WORLD_SIZE for m in mem.tolist()]  # type: ignore
-                perf_dict["mem"] = list(map(mem_to_gb, perf_dict["mem"]))  # type: ignore
-                perf_dict_total["mem"] = [
-                    perf_dict_total["mem"][i] + perf_dict["mem"][i]
-                    for i in range(len(perf_dict_total["mem"]))
-                ]
-
-        except Exception as e:
-            if "CUDA out of memory" not in str(e):
-                raise e
-            # negative indicates oom
-            perf_dict = {
-                "flops": [OUTLIER] * output_n,
-                "mem": [OUTLIER] * output_n,
-            }
-            perf_dict_total = {
-                "flops": [OUTLIER] * output_n,
-                "mem": [OUTLIER] * output_n,
-            }
-            break
-
-    # avg results
-    perf_dict_total["flops"] = [
-        metric / mask_nums for metric in perf_dict_total["flops"]  # type: ignore
-    ]
-    perf_dict_total["mem"] = [metric / mask_nums for metric in perf_dict_total["mem"]]  # type: ignore
-    rank = int(os.environ.get("RANK", 0))
-    if rank == 0:
-        result_info = {
-            "baseline": attn_impl.value,
-            "masktype": mask_type.value,
-            "world_size": WORLD_SIZE,
-            "ulysses": cp_pg_meta.get(ParallelMode.ULYSESS, -1),
-            "ring": cp_pg_meta.get(ParallelMode.RING, -1),
-        }
-        result_info = extend_bench_results(
-            perf_dict_total,
-            result_info,
-            BENCH_CONFIG.bench_mode,
-            BENCH_CONFIG.quantiles,
-            BENCH_CONFIG.bench_flops,
-            BENCH_CONFIG.bench_mem,
-        )
-
-        df_new = pd.DataFrame([result_info])
-        output_file = os.path.join(
-            BENCH_CONFIG.output_path,
-            "output-"
-            + str(WORLD_SIZE)
-            + "-"
-            + str(mask_type.value)
-            + "-"
-            + wd
-            + ".csv",
-        )
-
-        if not os.path.exists(output_file):
-            df_new.to_csv(output_file, index=False, header=True)
-        else:
-            df_new.to_csv(output_file, mode="a", index=False, header=False)
-
-    return perf_dict_total
+    # load and set global config
+    global BENCH_CONFIG, ATTN_CONFIG, DATA_CONFIG, ENVVAR_CONFIG, SAMPLE_CONFIG, SEED, TOTAL_SEQLEN
+    BENCH_CONFIG = config_dict["BENCH_CONFIG"]
+    ATTN_CONFIG = config_dict["ATTN_CONFIG"]
+    DATA_CONFIG = config_dict["DATA_CONFIG"]
+    ENVVAR_CONFIG = config_dict["ENVVAR_CONFIG"]
+    SAMPLE_CONFIG = config_dict["SAMPLE_CONFIG"]
+    SEED = config_dict["SEED"]
+    TOTAL_SEQLEN = DATA_CONFIG.seqlen_per_rank * WORLD_SIZE
 
 
 if __name__ == "__main__":
+    # -----    load bench config   ---- #
+    is_profile = os.environ.get("PROFILE", "0") == "1"
+    load_bench_config()
+    if is_profile:
+        # NOTE: if running in profile mode, we use the env vars to set the iteration and warmup
+        profile_iter = os.environ.get("PROFILE_ITER", None)
+        if profile_iter is not None:
+            BENCH_CONFIG.iteration = int(profile_iter)
+        profile_warmup = os.environ.get("PROFILE_WARMUP", None)
+        if profile_warmup is not None:
+            BENCH_CONFIG.warmup = int(profile_warmup)
     current_time = datetime.strftime(datetime.now(), "%Y-%m-%d_%H-%M-%S")
 
+    # custom xlabels to plot, in case keys are too long
+    short_for_xlables = {
+        AttnImpl.ULYSSES: "a2a",
+        AttnImpl.RING_P2P: "p2p",
+        AttnImpl.RING_ALLGATHER: "ag",
+        AttnImpl.USP: "usp",
+        AttnImpl.LOONGTRAIN: "loongt",
+        AttnImpl.MAGI_ATTENTION: "magi",
+    }
     os.makedirs(BENCH_CONFIG.output_path, exist_ok=True)
+
+    x_vals = [dist_attn for dist_attn in BENCH_CONFIG.dist_attn_impl]
+    x_names = ["attn_impl" for _ in x_vals]
+    dist_attn_benchmarks = [
+        Benchmark(
+            x_names=x_names,
+            x_vals=x_vals,
+            x_log=False,
+            line_arg="seqlen",
+            line_vals=[TOTAL_SEQLEN],
+            line_names=[str(TOTAL_SEQLEN)],
+            styles=[  # Line styles.
+                ("green", "--"),
+                ("orange", "--"),
+                ("steelblue", "--"),
+                ("red", "-"),
+            ],
+            ylabel={  # Label name for the y-axis.
+                "flops": "Throughout (TFLOPs/s)",
+                "mem": "Peak Memory (GB)",
+            },
+            # Name for the plot. Used also as a file name for saving the plot.
+            plot_name=f"Total_seqlen_of_{TOTAL_SEQLEN}_{wd}_with_{mask.value}",
+            args={  # Values for function arguments not in `x_names` and `y_name`.
+                "mask_nums": SAMPLE_CONFIG.pack_num
+                if mask in [FlashMaskType.FULL_DOCUMENT, FlashMaskType.CAUSAL_DOCUMENT]
+                else 2,
+                "mask_type": mask,
+                "seed": SEED,
+                "wd": wd,
+            },
+        )
+        for mask in BENCH_CONFIG.mask_pattern
+        for wd in BENCH_CONFIG.workload
+    ]
+
+    @perf_report(dist_attn_benchmarks)
+    def run_benchmark(
+        mask_nums: int,
+        mask_type: FlashMaskType,
+        seed: int = 42,
+        seqlen: int = 0,
+        attn_impl: AttnImpl = AttnImpl.RING_P2P,
+        wd: str = "fwd",
+        **kwargs,
+    ):
+        set_seed(seed)
+        # switch the env flags
+        switch_back = switch_envvars(
+            envvar_name_list=["MAGI_ATTENTION_HIERARCHICAL_COMM"],
+            enable_dict={
+                "MAGI_ATTENTION_HIERARCHICAL_COMM": ENVVAR_CONFIG.hier_comm,
+            },
+        )
+
+        # -----    init mask iterator with dataset sampler   ---- #
+        mask_iterator = MaskIterator(
+            num_iterations=mask_nums,
+            mask_type=mask_type,
+            total_seqlen=TOTAL_SEQLEN,
+            data_path=SAMPLE_CONFIG.dataset_path,
+            chunk_ratio=SAMPLE_CONFIG.chunk_ratio,
+            is_binned=SAMPLE_CONFIG.is_binned,
+            to_attn_ranges=SAMPLE_CONFIG.to_attn_ranges,
+            seed=seed,
+        )
+
+        # -----    init dist environment   ---- #
+        cp_pg_meta = CP_GROUP_META[attn_impl]
+        cp_group = init_dist_environment(
+            attn_impl=attn_impl,
+            world_size=WORLD_SIZE,
+            cp_pg_meta=cp_pg_meta,
+        )
+
+        output_n = len(BENCH_CONFIG.quantiles) if BENCH_CONFIG.quantiles else 1
+        perf_dict_total = {
+            "flops": [0] * output_n,
+            "mem": [0] * output_n,
+        }
+
+        # generate mask_nums pack
+        for mask_idx, (q_ranges, k_ranges, attn_mask_type, _) in enumerate(
+            mask_iterator
+        ):
+            global already_known_oom_before_run
+            already_known_oom_before_run = False
+
+            if attn_impl != AttnImpl.MAGI_ATTENTION:
+                fn = run_dist_attn(
+                    total_seqlen=seqlen,
+                    embed_dim=DATA_CONFIG.embed_dim,
+                    q_heads=DATA_CONFIG.heads_q,
+                    kv_heads=DATA_CONFIG.heads_kv,
+                    hidden_size=DATA_CONFIG.hidden_size,
+                    dtype=DATA_CONFIG.dtype,
+                    q_ranges=q_ranges,
+                    k_ranges=k_ranges,
+                    dropout=ATTN_CONFIG.dropout,
+                    softmax_scale=ATTN_CONFIG.softmax_scale,  # type: ignore
+                    deterministic=ATTN_CONFIG.deterministic,
+                    world_size=WORLD_SIZE,
+                    attn_mask_type=attn_mask_type[0],
+                    attn_impl=attn_impl,
+                    attn_backend=ATTN_CONFIG.attn_backend,
+                    cp_group=cp_group,
+                    wd=wd,
+                    iteration=mask_idx,
+                )
+            else:
+                assert attn_impl is AttnImpl.MAGI_ATTENTION
+                fn = run_magi_attn(
+                    total_seqlen=TOTAL_SEQLEN,
+                    embed_dim=DATA_CONFIG.embed_dim,
+                    q_heads=DATA_CONFIG.heads_q,
+                    kv_heads=DATA_CONFIG.heads_kv,
+                    hidden_size=DATA_CONFIG.hidden_size,
+                    dtype=DATA_CONFIG.dtype,
+                    q_ranges=q_ranges,
+                    k_ranges=k_ranges,
+                    world_size=WORLD_SIZE,
+                    chunk_size=ATTN_CONFIG.chunk_size,
+                    attn_mask_type=attn_mask_type,
+                    cp_group_or_mesh=cp_group,
+                    wd=wd,
+                    iteration=mask_idx,
+                )
+
+            if already_known_oom_before_run:
+                perf_dict = {
+                    "flops": [OUTLIER] * output_n,
+                    "mem": [OUTLIER] * output_n,
+                }
+                perf_dict_total = {
+                    "flops": [OUTLIER] * output_n,
+                    "mem": [OUTLIER] * output_n,
+                }
+                break
+
+            attn_flops_dict = calculate_attn_flops(
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                attn_mask_type=attn_mask_type,
+                total_seqlen_q=seqlen,
+                num_heads_q=DATA_CONFIG.heads_q,
+                head_dim=DATA_CONFIG.hidden_size,
+            )
+            attn_flops = attn_flops_dict[wd]
+
+            try:
+                torch.cuda.nvtx.range_push(
+                    f"dobench_{attn_impl.name}_{mask_type.name}_{wd}_mask{mask_idx}"
+                )
+                perf_dict = do_bench(
+                    fn,
+                    quantiles=BENCH_CONFIG.quantiles,
+                    mem_record_mode="peak",
+                    return_mode=BENCH_CONFIG.bench_mode,
+                    return_flops=BENCH_CONFIG.bench_flops,
+                    return_mem=BENCH_CONFIG.bench_mem,
+                    warmup=BENCH_CONFIG.warmup,
+                    rep=BENCH_CONFIG.iteration,
+                )
+                torch.cuda.nvtx.range_pop()
+
+                # post process the perf_dict
+                def ms_to_tflops(ms: float) -> float:
+                    return attn_flops / ms * 1e-9
+
+                def mem_to_gb(mem: int) -> float:
+                    if mem <= 0:
+                        return mem
+                    return mem / (1024**3)
+
+                if BENCH_CONFIG.bench_flops:
+                    flops = perf_dict["flops"]
+                    flops = torch.tensor(
+                        flops, dtype=torch.float32, device=torch.cuda.current_device()
+                    )
+                    dist.all_reduce(flops, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
+                    perf_dict["flops"] = flops.tolist()  # type: ignore
+                    perf_dict["flops"] = list(map(ms_to_tflops, perf_dict["flops"]))  # type: ignore
+                    perf_dict_total["flops"] = [
+                        perf_dict_total["flops"][i] + perf_dict["flops"][i]
+                        for i in range(len(perf_dict_total["flops"]))
+                    ]
+                if BENCH_CONFIG.bench_mem:
+                    mem = perf_dict["mem"]
+                    mem = torch.tensor(
+                        mem, dtype=torch.float32, device=torch.cuda.current_device()
+                    )
+                    dist.all_reduce(mem, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
+                    perf_dict["mem"] = [m // WORLD_SIZE for m in mem.tolist()]  # type: ignore
+                    perf_dict["mem"] = list(map(mem_to_gb, perf_dict["mem"]))  # type: ignore
+                    perf_dict_total["mem"] = [
+                        perf_dict_total["mem"][i] + perf_dict["mem"][i]
+                        for i in range(len(perf_dict_total["mem"]))
+                    ]
+
+            except Exception as e:
+                if "CUDA out of memory" not in str(e):
+                    raise e
+                # negative indicates oom
+                perf_dict = {
+                    "flops": [OUTLIER] * output_n,
+                    "mem": [OUTLIER] * output_n,
+                }
+                perf_dict_total = {
+                    "flops": [OUTLIER] * output_n,
+                    "mem": [OUTLIER] * output_n,
+                }
+                break
+
+        # switch the env flags back
+        switch_back()
+
+        # avg results
+        perf_dict_total["flops"] = [
+            metric / mask_nums for metric in perf_dict_total["flops"]  # type: ignore
+        ]
+        perf_dict_total["mem"] = [metric / mask_nums for metric in perf_dict_total["mem"]]  # type: ignore
+        rank = int(os.environ.get("RANK", 0))
+        if rank == 0:
+            result_info = {
+                "baseline": attn_impl.value,
+                "masktype": mask_type.value,
+                "world_size": WORLD_SIZE,
+                "ulysses": cp_pg_meta.get(ParallelMode.ULYSESS, -1),
+                "ring": cp_pg_meta.get(ParallelMode.RING, -1),
+            }
+            result_info = extend_bench_results(
+                perf_dict_total,
+                result_info,
+                BENCH_CONFIG.bench_mode,
+                BENCH_CONFIG.quantiles,
+                BENCH_CONFIG.bench_flops,
+                BENCH_CONFIG.bench_mem,
+            )
+
+            df_new = pd.DataFrame([result_info])
+            output_file = os.path.join(
+                BENCH_CONFIG.output_path,
+                "output-"
+                + str(WORLD_SIZE)
+                + "-"
+                + str(mask_type.value)
+                + "-"
+                + wd
+                + ".csv",
+            )
+
+            if not os.path.exists(output_file):
+                df_new.to_csv(output_file, index=False, header=True)
+            else:
+                df_new.to_csv(output_file, mode="a", index=False, header=False)
+
+        return perf_dict_total
+
+    if is_profile:
+        emit_nvtx_ctx = torch.autograd.profiler.emit_nvtx(record_shapes=True)
+        _EMIT_NVTX_CTX = emit_nvtx_ctx.__enter__()
+        torch.cuda.cudart().cudaProfilerStart()
     run_benchmark.run(
-        print_data=True, print_value_on_bar=False, save_path=BENCH_CONFIG.output_path
+        print_data=True,
+        print_value_on_bar=False,
+        save_path=BENCH_CONFIG.output_path,
+        short_for_xlables=short_for_xlables,
     )
 
     # destroy cp comm group
@@ -711,3 +842,8 @@ if __name__ == "__main__":
                             dist.destroy_process_group(pg)
                         except Exception:
                             pass
+
+    if is_profile:
+        torch.cuda.cudart().cudaProfilerStop()
+        _EMIT_NVTX_CTX.__exit__(None, None, None)  # type: ignore[union-attr]
+        _EMIT_NVTX_CTX = None
