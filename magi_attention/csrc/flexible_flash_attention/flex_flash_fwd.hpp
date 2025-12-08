@@ -74,7 +74,7 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   int const total_k = k.size(0);
   int const num_heads_qo = q.size(1);
   int const num_heads_kv = k.size(1);
-  int const qhead_per_khead = num_heads_qo / num_heads_kv;
+  int const qhead_per_khead = !pack_gqa ? 1 : num_heads_qo / num_heads_kv;
   int const head_size = q.size(2);
   auto opts = q.options();
 
@@ -245,7 +245,6 @@ std::tuple<Flash_fwd_params, at::Tensor, at::Tensor> prepare_mha_fwd(
   // FIXME: hack way to get the block size
   // int const kBlockM = std::get<0>(tile_size_fwd_sm90(head_size, element_size, softcap > 0.0));
   // Initialize range_locks, ceil_div(total_q, kBlockM) + 1 rows, num_heads_qo columns
-  int q_block_size = !pack_gqa ? kBlockM : kBlockM / qhead_per_khead;
   int num_heads = !pack_gqa ? num_heads_qo : num_heads_kv;
   int total_seqlen_q = !pack_gqa ? total_q : total_q * qhead_per_khead;
   at::Tensor range_locks = torch::empty({(total_seqlen_q + kBlockM - 1) / kBlockM + 1, num_heads}, opts.dtype(torch::kInt32));

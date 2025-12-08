@@ -45,6 +45,7 @@ template <
     int NumEpilogueThreads_,
     bool DisableFwdAtomicReduction_,
     bool PackGQA_,
+    int Qhead_per_khead_,
     bool Deterministic_ = false>
 struct CollectiveEpilogueFwd {
   // KblockM, Kheaddim, KblockN
@@ -54,9 +55,11 @@ struct CollectiveEpilogueFwd {
   using ElementPartial = float;
   using ArchTag = ArchTag_;
   using BlockCoordType = BlockCoordType_;
+
   static constexpr int NumEpilogueThreads = NumEpilogueThreads_;
   static constexpr bool DisableFwdAtomicReduction = DisableFwdAtomicReduction_;
   static constexpr bool PackGQA = PackGQA_;
+  static constexpr int qhead_per_khead = Qhead_per_khead_;
   static constexpr bool Deterministic = Deterministic_;
 
   static_assert(ArchTag::kMinComputeCapability >= 90 || CUTE_STATIC_V(size(ClusterShape{})) == 1);
@@ -111,13 +114,16 @@ struct CollectiveEpilogueFwd {
 
   // (seqlen_q, d, head)
   using ShapeO = cute::Shape<int32_t, int32_t, int32_t>;
-  using ShapeOPacked = std::conditional_t<!PackGQA, ShapeO, cute::Shape<cute::Shape<_4, int32_t>, int32_t, int32_t>>; // ((qhead_per_khead, seqlen_q), d, nheads_kv)
+  using ShapeOPacked =
+      std::conditional_t<!PackGQA, ShapeO, cute::Shape<cute::Shape<cute::Int<qhead_per_khead>, int32_t>, int32_t, int32_t>>; // ((qhead_per_khead, seqlen_q), d,
+                                                                                                                             // nheads_kv)
   using StrideO = cute::Stride<int64_t, _1, int64_t>;
   using StrideOPacked = std::conditional_t<!PackGQA, StrideO, cute::Stride<cute::Stride<int64_t, int64_t>, _1, int64_t>>;
 
   using ShapeLSE = cute::Shape<int32_t, int32_t>; // (seqlen_q, nheads_qo)
   using StrideLSE = cute::Stride<int64_t, _1>; // (seqlen_q, head)
-  using ShapeLSEPacked = std::conditional_t<!PackGQA, ShapeLSE, cute::Shape<cute::Shape<int32_t, int32_t>, int32_t>>; // ((qhead_per_khead, seqlen_q), nheads_kv)
+  using ShapeLSEPacked =
+      std::conditional_t<!PackGQA, ShapeLSE, cute::Shape<cute::Shape<cute::Int<qhead_per_khead>, int32_t>, int32_t>>; // ((qhead_per_khead, seqlen_q), nheads_kv)
   using StrideLSEPacked = std::conditional_t<!PackGQA, StrideLSE, cute::Stride<cute::Stride<int32_t, int64_t>, int32_t>>;
 
   using CopyOpR2S = std::conditional_t<
@@ -183,16 +189,17 @@ struct CollectiveEpilogueFwd {
     Tensor mO = make_tensor(make_gmem_ptr(args.ptr_O), args.shape_O, args.stride_O);
     TMA_O tma_store_O = make_tma_copy(GmemTiledCopyOTMA{}, mO, SmemLayoutO{}, select<0, 1>(TileShape_MNK_PV{}), _1{}); // no mcast
 
-    int const qhead_per_khead = !PackGQA ? 1 : args.nheads / args.nheads_kv;
+    // int const qhead_per_khead = !PackGQA ? 1 : args.nheads / args.nheads_kv;
 
     // seqlen_q, num_heads_qo
     auto const shape_LSE = select<0, 2>(args.shape_O);
-    auto const shape_LSE_packed = cute::conditional_return<!PackGQA>(shape_LSE, make_shape(make_shape(qhead_per_khead, get<0>(args.shape_O)), args.nheads_kv));
+    auto const shape_LSE_packed =
+        cute::conditional_return<!PackGQA>(shape_LSE, make_shape(make_shape(cute::Int<qhead_per_khead>{}, get<0>(args.shape_O)), args.nheads_kv));
 
     auto const stride_LSE_packed = cute::conditional_return<!PackGQA>(args.stride_LSE, make_stride(make_stride(1, get<0>(args.stride_LSE)), qhead_per_khead));
 
-    auto const shape_O_packed =
-        cute::conditional_return<!PackGQA>(args.shape_O, make_shape(make_shape(_4{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
+    auto const shape_O_packed = cute::conditional_return<!PackGQA>(
+        args.shape_O, make_shape(make_shape(cute::Int<qhead_per_khead>{}, get<0>(args.shape_O)), get<1>(args.shape_O), args.nheads_kv));
     auto const stride_O_packed = cute::conditional_return<!PackGQA>(
         args.stride_O, make_stride(make_stride(get<2>(args.stride_O), get<0>(args.stride_O)), get<1>(args.stride_O), get<2>(args.stride_O) * qhead_per_khead));
 
@@ -558,7 +565,7 @@ struct CollectiveEpilogueFwd {
       // TODO: need reduce compute for pO, and add predicate k for pO
       Tensor cO = cute::make_identity_tensor(select<0, 1>(TileShape_MNK_PV{})); // (BLK_M,BLK_K) -> (blk_m,blk_k)
       Tensor pO = make_tensor<bool>(make_shape(size<0>(cO), size<1>(cO)), make_stride(_1{}, _0{}));
-      int bound = get<0>(params.shape_O) - (offset_o + m_block * kBlockM);
+      int bound = get<0>(params.shape_O) * qhead_per_khead - (offset_o * qhead_per_khead + m_block * kBlockM);
 #pragma unroll
       for (int n = 0; n < size<0>(pO); ++n) {
         pO(n, _0{}) = get<0>(cO(n, _0{})) < bound;
@@ -645,7 +652,7 @@ struct CollectiveEpilogueFwd {
       flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
           gmem_tiled_copy_O, tOrFinalO, tOgO, tOcO, tOpO, seqlen_o - m_block * kBlockM);
     } else {
-      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
+      flash::copy</*Is_even_MN=*/false, /*Is_even_K=*/false, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(      // the qhead_per_khead dim of  tOgOPacked should be known at compile time.
           gmem_tiled_copy_O, tOrFinalO, tOgOPacked, tOcO, tOpO, seqlen_o * qhead_per_khead - m_block * kBlockM);
     }
 

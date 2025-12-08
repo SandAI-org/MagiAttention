@@ -97,6 +97,7 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
       CollectiveMainloop::NumMmaThreads,
       DisableFwdAtomicReduction,
       PackGQA,
+      Qhead_per_khead,
       Deterministic>;
   using AttnKernel = flash::enable_sm90_or_later<flash::FlashAttnFwdSm90<CollectiveMainloop, CollectiveEpilogue, Scheduler, MergeRange>>;
 

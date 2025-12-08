@@ -104,7 +104,7 @@ def get_ffa_uri(
         f"{'_deterministic' if deterministic else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_pack_gqa' if pack_gqa else ''}"
-        f"_{qhead_per_khead}_"
+        f"_{qhead_per_khead}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -311,7 +311,7 @@ def get_ffa_jit_mod(
     arch = torch.cuda.get_device_capability()
     check_cuda_compute_capability(arch)
     if pack_gqa is False:
-        qhead_per_khead = 0
+        qhead_per_khead = 1
 
     spec, _ = get_ffa_jit_spec(
         arch,

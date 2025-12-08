@@ -219,7 +219,6 @@ def _flex_flash_attn_forward_compilable(
     sm_margin: int,
 ) -> None:
     qhead_per_khead = q.size(1) // k.size(1)
-    print(f"{qhead_per_khead=}")
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     mod = get_ffa_jit_mod(
         direction="fwd",
