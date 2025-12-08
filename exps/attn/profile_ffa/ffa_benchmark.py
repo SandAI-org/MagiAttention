@@ -263,7 +263,14 @@ def generate_block_sparse_qkv(
     return q, k, v
 
 
-fwd_event_keys = ["fwd_range_merge", "fwd_prepare", "fwd_run", "fwd_fill", "fwd_cast"]
+fwd_event_keys = [
+    "fwd_range_merge",
+    "fwd_sparse_load_preprocess",
+    "fwd_prepare",
+    "fwd_run",
+    "fwd_fill",
+    "fwd_cast",
+]
 bwd_event_keys = [
     "bwd_range_merge",
     "bwd_prepare",

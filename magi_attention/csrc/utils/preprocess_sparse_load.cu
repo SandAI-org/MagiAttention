@@ -45,6 +45,8 @@ __global__ void compute_sparse_load_kernel(
   if (unique_idx >= unique_count)
     return;
 
+  const int2* k_ranges_vec = reinterpret_cast<const int2*>(k_ranges);
+
   // Get the start and end indices for this unique Q range
   int start_idx = cu_k_ranges_num[unique_idx];
   int end_idx = cu_k_ranges_num[unique_idx + 1];
@@ -55,15 +57,15 @@ __global__ void compute_sparse_load_kernel(
   int block_size = blockDim.x;
 
   // Reference length from the first global range
-  int ref_len = k_ranges[1] - k_ranges[0];
+  int2 ref_val = k_ranges_vec[0];
+  int ref_len = ref_val.y - ref_val.x;
 
   int local_sum = 0;
 
   for (int i = tid; i < num_k_ranges; i += block_size) {
     int k_idx = start_idx + i;
-    int k_start = k_ranges[k_idx * 2];
-    int k_end = k_ranges[k_idx * 2 + 1];
-    int len = k_end - k_start;
+    int2 range = k_ranges_vec[k_idx];
+    int len = range.y - range.x;
 
     local_sum += len;
 

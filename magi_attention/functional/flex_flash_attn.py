@@ -634,6 +634,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     fwd_unique_count,
                 ) = merge_ranges(q_ranges, k_ranges, attn_type_map=attn_type_map)
 
+            with maybe_profile_ffa_ctx("fwd_sparse_load_preprocess"):
                 if sparse_load:
                     is_all_full_mask = attn_type_map is None or (
                         (attn_type_map == 0).any().item()
