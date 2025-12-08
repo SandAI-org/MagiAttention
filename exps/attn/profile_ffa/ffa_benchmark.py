@@ -38,6 +38,7 @@ from exps.attn.baselines.utils import (
 # -----------------------------------------------------------------------------
 from magi_attention.functional import flex_flash_attn_func as ffa_func
 from magi_attention.utils.sparse_utils import (
+    choose_ref_block,
     flatten_block_mask,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
@@ -206,26 +207,29 @@ def generate_dense_qkv(
 def prepare_block_sparse_ffa_args(
     seqlen: int,
     sparsity_ratio: float,
-    block_size: int,
+    q_block_size: int,
+    k_block_size: int,
+    sparse_load: bool,
     nhq: int,
     nhk: int,
     device: str,
     **kwargs,
 ) -> Tuple[Dict[str, Any], None]:
-    if seqlen % block_size != 0:
+    if seqlen % q_block_size != 0 and seqlen % k_block_size != 0:
         raise ValueError("Sequence length must be divisible by block_size.")
-    num_blocks = seqlen // block_size
+    q_num_blocks = seqlen // q_block_size
+    k_num_blocks = seqlen // k_block_size
     block_mask, _ = generate_block_sparse_pattern(
         num_q_heads=nhq,
         num_kv_heads=nhk,
-        num_q_blocks=num_blocks,
-        num_kv_blocks=num_blocks,
+        num_q_blocks=q_num_blocks,
+        num_kv_blocks=k_num_blocks,
         sparsity=sparsity_ratio,
         device=device,
     )
     flat_mask = flatten_block_mask(block_mask, nhq, nhk)
     q_ranges, k_ranges = generate_ranges_from_block_mask(
-        flat_mask, block_size, block_size
+        flat_mask, q_block_size, k_block_size
     )
     attn_type_map = torch.zeros(q_ranges.shape[0], dtype=torch.int32, device=device)
     args = {
@@ -233,6 +237,7 @@ def prepare_block_sparse_ffa_args(
         "k_ranges": k_ranges,
         "attn_type_map": attn_type_map,
         "auto_range_merge": True,
+        "sparse_load": sparse_load,
     }
     return args, None
 
@@ -333,10 +338,10 @@ def run_benchmark_framework(
                 ), torch.cuda.Event(enable_timing=True)
 
                 # Add block_size for sparse tests if available in config
-                if "block_size" in config:
-                    ffa_args["ref_block_size"] = (
-                        config["block_size"],
-                        config["block_size"],
+                if "q_block_size" in config and "k_block_size" in config:
+                    ffa_args["ref_block_size"] = choose_ref_block(
+                        (config["q_block_size"], config["k_block_size"]),
+                        sparse_load=config["sparse_load"],
                     )
 
                 # B. Forward pass
@@ -507,14 +512,24 @@ def run_dense_tests(args, common_params):
 
 def run_block_sparse_tests(args, common_params):
     seqlens_to_test = [49152]
-    sparsity_ratios_to_test = [0.1, 0.2, 0.5]
-    block_sizes_to_test = [64, 128]
+    sparsity_ratios_to_test = [0.05, 0.1, 0.2]
+    q_block_sizes_to_test = [128]
+    k_block_sizes_to_test = [1]
+    sparse_load_options_to_test = [True]
     configs_to_test = [
-        {"seqlen": sl, "sparsity_ratio": sr, "block_size": bs}
+        {
+            "seqlen": sl,
+            "sparsity_ratio": sr,
+            "q_block_size": q_bs,
+            "k_block_size": k_bs,
+            "sparse_load": sparse_load,
+        }
         for sl in seqlens_to_test
         for sr in sparsity_ratios_to_test
-        for bs in block_sizes_to_test
-        if sl % bs == 0
+        for q_bs in q_block_sizes_to_test
+        for k_bs in k_block_sizes_to_test
+        for sparse_load in sparse_load_options_to_test
+        if sl % q_bs == 0 and sl % k_bs == 0
     ]
 
     config_keys = list(configs_to_test[0].keys())

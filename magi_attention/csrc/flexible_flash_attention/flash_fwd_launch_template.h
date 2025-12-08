@@ -52,7 +52,8 @@ template <
     bool Deterministic,
     bool MergeRange,
     bool ProfileMode = false,
-    bool SparseLoad = false>
+    bool SparseLoad = false,
+    bool EqualKRangeSize = false>
 void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
   using ArchTag = std::conditional_t<Arch >= 90, cutlass::arch::Sm90, cutlass::arch::Sm80>;
   // Get tile size and kernel configuration for SM90
@@ -81,7 +82,8 @@ void run_flash_fwd(Flash_fwd_params& params, cudaStream_t stream) {
           Has_softcap,
           MmaPV_is_RS,
           IntraWGOverlap,
-          MergeRange>>;
+          MergeRange,
+          EqualKRangeSize>>;
   using Scheduler = flash::
       DynamicPersistentTileScheduler<kBlockM, CollectiveMainloop::NumMmaThreads, CollectiveMainloop::NumProducerThreads, Arch >= 90 /*WarpSpecialized*/, Deterministic>;
   using CollectiveEpilogue = flash::CollectiveEpilogueFwd<
@@ -202,7 +204,8 @@ template <
     bool DisableFwdAtomicReduction,
     bool Deterministic,
     bool kProfileMode,
-    bool kSparseLoad>
+    bool kSparseLoad,
+    bool kEqualKRangeSize>
 void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
   static_assert(sizeof(T) == 2, "Only 16bit computation are supported");
   // TODO: support cluster launch
@@ -223,7 +226,8 @@ void run_mha_fwd_(Flash_fwd_params& params, cudaStream_t stream) {
           /*Deterministic=*/Deterministic,
           /*MergeRange=*/MergeRange,
           /*ProfileMode=*/kProfileMode,
-          /*SparseLoad=*/kSparseLoad>(params, stream);
+          /*SparseLoad=*/kSparseLoad,
+          /*EqualKRangeSize=*/kEqualKRangeSize>(params, stream);
     });
   });
 }

@@ -53,7 +53,8 @@ template <
     bool Has_softcap_,
     bool MmaPV_is_RS_,
     bool IntraWGOverlap_,
-    bool RangeMerge_>
+    bool RangeMerge_,
+    bool EqualKRangeSize_>
 struct CollectiveMainloopSparseFwdSm90 {
   static constexpr int kStages = Stages;
   using ClusterShape = ClusterShape_;
@@ -77,6 +78,7 @@ struct CollectiveMainloopSparseFwdSm90 {
   static constexpr bool IntraWGOverlap = IntraWGOverlap_;
   static constexpr bool RangeMerge = RangeMerge_;
   static constexpr bool SparseLoad = true;
+  static constexpr bool EqualKRangeSize = EqualKRangeSize_;
 
   // By default, we use TMA for Q and KV to get better performance
   static constexpr bool Use_TMA_Q = true;
@@ -301,6 +303,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     int cur_loop;
     int loop_count;
     int stride_kv_s_kv;
+    int k_range_size; // size of all k ranges, only used with EqualKRangeSize=true
 
     int2 const* const q_ranges;
     int2 const* const k_ranges;
@@ -347,6 +350,10 @@ struct CollectiveMainloopSparseFwdSm90 {
       cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
       prev_token_indices[last_idx] = -1;
 
+      if constexpr (EqualKRangeSize) {
+        k_range_size = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x;
+      }
+
       int idx_in_warpgroup = thread_idx % 128;
       int group_idx = idx_in_warpgroup / GROUP_SIZE;
 
@@ -368,29 +375,48 @@ struct CollectiveMainloopSparseFwdSm90 {
             num_steps = 0;
           }
         }
-        while (cnt < num_steps) {
-          // int2 cur_k_range = k_ranges[cur_k_range_indices[last_idx]];
-          // int seqlen_k = cur_k_range.y - cur_k_range.x;
-          int rest = num_steps - cnt;
-          // Old: k_range size larger, move inner pointer
-          // New: extra inner pointer to move
-          if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
-            cur_k_range_inner_indices[last_idx] -= rest;
-            break;
+
+        if constexpr (EqualKRangeSize) {
+          // equal size, we can compute the next token index directly with random access
+          int n_k_ranges = num_steps / k_range_size;
+          int n_k_range_inner = num_steps % k_range_size;
+
+          // Check if the current inner index is sufficient to subtract n_k_range_inner
+          if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
+            // Sufficient; no borrow required
+            cur_k_range_indices[last_idx] -= n_k_ranges;
+            cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
           } else {
-            cur_k_range_indices[last_idx] -= 1;
-            cnt += (cur_k_range_inner_indices[last_idx] + 1);
-            // load previous K range, since we iterate from rightmost to leftmost
-            int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
-            cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
-            // k_range out-of-bounds
-            // if (bidb + cur_k_range_indices[last_idx] >= end_batches) {
-            //   is_kv_valid[0] = false;
-            //   break;
-            // }
+            // Insufficient; need to borrow from the previous range
+            // E.g., if current is 5 and we subtract 6 (n_k_range_inner=6), move to the previous range
+            cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
+            // New inner index = (current value + block size) - value to subtract
+            cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
+          }
+        } else {
+          while (cnt < num_steps) {
+            // int2 cur_k_range = k_ranges[cur_k_range_indices[last_idx]];
+            // int seqlen_k = cur_k_range.y - cur_k_range.x;
+            int rest = num_steps - cnt;
+            // Old: k_range size larger, move inner pointer
+            // New: extra inner pointer to move
+            if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
+              cur_k_range_inner_indices[last_idx] -= rest;
+              break;
+            } else {
+              cur_k_range_indices[last_idx] -= 1;
+              cnt += (cur_k_range_inner_indices[last_idx] + 1);
+              // load previous K range, since we iterate from rightmost to leftmost
+              int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
+              cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
+              // k_range out-of-bounds
+              // if (bidb + cur_k_range_indices[last_idx] >= end_batches) {
+              //   is_kv_valid[0] = false;
+              //   break;
+              // }
+            }
           }
         }
-
         // 2. search for next NUM_ROWS_PER_GROUP tokens and compute token indices
         // K/V index: params.k_range[cur_k_range].x + cur_k_range_inner
         token_indices[last_idx] = (k_ranges[cur_k_range_indices[last_idx]].x + cur_k_range_inner_indices[last_idx]) * stride_kv_s_kv;
@@ -510,26 +536,45 @@ struct CollectiveMainloopSparseFwdSm90 {
           }
         }
 
-        while (cnt < num_steps) {
-          // int2 cur_k_range = k_ranges[cur_k_range_indices[last_idx]];
-          // int seqlen_k = cur_k_range.y - cur_k_range.x;
-          int rest = num_steps - cnt;
-          // Old: k_range size larger, move inner pointer
-          // New: extra inner pointer to move
-          if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
-            cur_k_range_inner_indices[last_idx] -= rest;
-            break;
+        if constexpr (EqualKRangeSize) {
+          // equal size, we can compute the next token index directly with random access
+          int n_k_ranges = num_steps / k_range_size;
+          int n_k_range_inner = num_steps % k_range_size;
+
+          // Check if the current inner index is sufficient to subtract n_k_range_inner
+          if (cur_k_range_inner_indices[last_idx] >= n_k_range_inner) {
+            // Sufficient; no borrow required
+            cur_k_range_indices[last_idx] -= n_k_ranges;
+            cur_k_range_inner_indices[last_idx] -= n_k_range_inner;
           } else {
-            cur_k_range_indices[last_idx] -= 1;
-            cnt += (cur_k_range_inner_indices[last_idx] + 1);
-            // load previous K range, since we iterate from rightmost to leftmost
-            int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
-            cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
-            // k_range out-of-bounds
-            // if (bidb + cur_k_range_indices[last_idx] >= end_batches) {
-            //   is_kv_valid[0] = false;
-            //   break;
-            // }
+            // Insufficient; need to borrow from the previous range
+            // E.g., if current is 5 and we subtract 6 (n_k_range_inner=6), move to the previous range
+            cur_k_range_indices[last_idx] -= (n_k_ranges + 1);
+            // New inner index = (current value + block size) - value to subtract
+            cur_k_range_inner_indices[last_idx] = cur_k_range_inner_indices[last_idx] + k_range_size - n_k_range_inner;
+          }
+        } else {
+          while (cnt < num_steps) {
+            // int2 cur_k_range = k_ranges[cur_k_range_indices[last_idx]];
+            // int seqlen_k = cur_k_range.y - cur_k_range.x;
+            int rest = num_steps - cnt;
+            // Old: k_range size larger, move inner pointer
+            // New: extra inner pointer to move
+            if (cur_k_range_inner_indices[last_idx] + 1 > rest) {
+              cur_k_range_inner_indices[last_idx] -= rest;
+              break;
+            } else {
+              cur_k_range_indices[last_idx] -= 1;
+              cnt += (cur_k_range_inner_indices[last_idx] + 1);
+              // load previous K range, since we iterate from rightmost to leftmost
+              int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
+              cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
+              // k_range out-of-bounds
+              // if (bidb + cur_k_range_indices[last_idx] >= end_batches) {
+              //   is_kv_valid[0] = false;
+              //   break;
+              // }
+            }
           }
         }
 

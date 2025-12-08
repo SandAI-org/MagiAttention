@@ -86,6 +86,7 @@ def get_ffa_uri(
     deterministic: bool,
     profile_mode: bool,
     sparse_load: bool,
+    equal_k_range_size: bool,
     kblock_m: int | None,
     kblock_n: int | None,
 ) -> str:
@@ -103,6 +104,7 @@ def get_ffa_uri(
         f"{'_deterministic' if deterministic else ''}"
         f"{'_profile_mode' if profile_mode else ''}"
         f"{'_sparse_load' if sparse_load else ''}"
+        f"{'_equal_k_range_size' if equal_k_range_size else ''}"
         + (
             f"_m{kblock_m}n{kblock_n}"
             if kblock_m is not None and kblock_n is not None
@@ -152,6 +154,7 @@ def get_ffa_jit_spec(
     profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
     sparse_load: bool = False,
+    equal_k_range_size: bool = False,
 ) -> tuple[JitSpec, str]:
     sanity_check(arch, direction, head_dim, compute_dtype, output_dtype)
 
@@ -177,6 +180,7 @@ def get_ffa_jit_spec(
         deterministic,
         profile_mode,
         sparse_load,
+        equal_k_range_size,
         kblock_m,
         kblock_n,
     )
@@ -211,6 +215,7 @@ def get_ffa_jit_spec(
         kblock_m=(kblock_m if kblock_m is not None else ""),
         kblock_n=(kblock_n if kblock_n is not None else ""),
         sparse_load=str(sparse_load).lower(),
+        equal_k_range_size=str(equal_k_range_size).lower(),
     )
 
     inst_cu = gen_directory / f"{direction}_inst.cu"
@@ -299,6 +304,7 @@ def get_ffa_jit_mod(
     profile_mode: bool,
     ref_block_size: tuple[int, int] | None = None,
     sparse_load: bool = False,
+    equal_k_range_size: bool = False,
 ) -> Any:
     assert torch.cuda.is_available(), "CUDA is not available"
     arch = torch.cuda.get_device_capability()
@@ -316,6 +322,7 @@ def get_ffa_jit_mod(
         profile_mode,
         ref_block_size,
         sparse_load,
+        equal_k_range_size,
     )
 
     return spec.build_and_load()

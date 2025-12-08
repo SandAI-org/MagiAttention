@@ -219,6 +219,7 @@ def _flex_flash_attn_forward_compilable(
     deterministic: bool,
     sm_margin: int,
     sparse_load: bool,
+    equal_k_range_size: bool,
 ) -> None:
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     mod = get_ffa_jit_mod(
@@ -235,6 +236,7 @@ def _flex_flash_attn_forward_compilable(
         if kblock_m is not None and kblock_n is not None
         else None,
         sparse_load=sparse_load,
+        equal_k_range_size=equal_k_range_size,
     )
 
     out_, lse = mod.fwd(
@@ -288,6 +290,7 @@ def _flex_flash_attn_forward_compilable_fake(
     deterministic: bool,
     sm_margin: int,
     sparse_load: bool,
+    equal_k_range_size: bool,
 ) -> None:
     pass
 
@@ -317,6 +320,7 @@ def _flex_flash_attn_forward(
     deterministic: bool,
     sm_margin: int,
     sparse_load: bool,
+    equal_k_range_size: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if profile_mode:  # NOTE: stop_event is called inside the kernel
         ffa_utils.start_event("fwd_prepare")
@@ -380,6 +384,7 @@ def _flex_flash_attn_forward(
         deterministic=deterministic,
         sm_margin=sm_margin,
         sparse_load=sparse_load,
+        equal_k_range_size=equal_k_range_size,
     )
 
     return out, lse
@@ -643,6 +648,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                     (
                         sparse_load_loop_count,
                         sparse_load_invalid_count,
+                        equal_k_range_size,
                     ) = ffa_utils.compute_sparse_load_metadata(
                         fwd_k_ranges, fwd_qk_map, fwd_unique_count, tile_size
                     )
@@ -654,6 +660,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
                 else:
                     sparse_load_loop_count = None
                     sparse_load_invalid_count = None
+                    equal_k_range_size = False
         else:
             fwd_q_ranges = q_ranges
             fwd_k_ranges = k_ranges
@@ -663,6 +670,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             fwd_unique_count = None
             sparse_load_loop_count = None
             sparse_load_invalid_count = None
+            equal_k_range_size = False
 
         out, lse = _flex_flash_attn_forward(
             q=q,
@@ -690,6 +698,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             deterministic=deterministic,
             sm_margin=sm_margin,
             sparse_load=sparse_load,
+            equal_k_range_size=equal_k_range_size,
         )
 
         # Cast output to the same dtype as q

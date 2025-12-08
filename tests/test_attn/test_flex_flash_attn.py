@@ -325,6 +325,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             sparse_load=False,
+            equal_k_range_size=False,
         )
 
         o_ref, lse_ref = correct_attn_fwd_result(
@@ -357,6 +358,7 @@ class TestFlexFlashAttn(DistTestBase):
             deterministic=deterministic,
             sm_margin=0,
             sparse_load=False,
+            equal_k_range_size=False,
         )
 
         assert_close(
