@@ -51,7 +51,7 @@ def generate_block_sparse_pattern(
     """
     if num_q_heads % num_kv_heads != 0:
         raise ValueError("num_q_heads must be divisible by num_kv_heads")
-
+    # print(f"{num_kv_heads=}")
     k = max(1, int(sparsity * num_kv_blocks))
     k = min(k, num_kv_blocks)
 
@@ -95,8 +95,39 @@ def generate_block_sparse_pattern(
     # 6. Add batch dimension
     block_sparse_mask = block_sparse_mask.unsqueeze(0)
     scores = scores.unsqueeze(0)
+    # print(f"{block_sparse_mask.shape=}")
+    # print(f"{scores.shape=}")
 
     return block_sparse_mask, scores
+
+
+def flatten_block_mask_to_kv_shape(mask_kv_4d: torch.Tensor) -> torch.Tensor:
+    """
+    Args:
+        mask_kv_4d: shape [1, num_kv_heads, num_q_blocks, num_k_blocks]
+
+    Returns:
+        mask_flat: shape [num_kv_heads * num_q_blocks, num_kv_heads * num_k_blocks]
+    """
+    b, h_kv, num_q, num_k = mask_kv_4d.shape
+    if b != 1:
+        raise ValueError("Batch size must be 1")
+
+    num_q_flat = h_kv * num_q
+    num_k_flat = h_kv * num_k
+
+    _, h_indices, q_indices, k_indices = torch.nonzero(mask_kv_4d, as_tuple=True)
+
+    q_indices_flat = q_indices + h_indices * num_q
+
+    k_indices_flat = k_indices + h_indices * num_k
+
+    mask_flat = torch.zeros(
+        num_q_flat, num_k_flat, dtype=torch.bool, device=mask_kv_4d.device
+    )
+    mask_flat[q_indices_flat, k_indices_flat] = True
+
+    return mask_flat
 
 
 def flatten_block_mask(
@@ -179,7 +210,6 @@ def generate_ranges_from_block_mask(
     """
     # 1. Find the coordinates (i, j) of all True elements
     true_indices = torch.nonzero(block_mask, as_tuple=False)
-
     if true_indices.numel() == 0:
         return torch.empty((0, 2), dtype=torch.long), torch.empty(
             (0, 2), dtype=torch.long
@@ -208,6 +238,7 @@ def get_sdpa_mask_from_block_sparse_mask(
     seqlen_k: int,
     block_size_q: int,
     block_size_k: int,
+    num_q_heads: int,
     batch_size: int = 1,
 ) -> torch.Tensor:
     """
@@ -225,6 +256,10 @@ def get_sdpa_mask_from_block_sparse_mask(
     Returns:
         torch.Tensor: An SDPA-compatible mask of shape [B, H, S_q, S_k].
     """
+    num_kv_heads = block_mask.shape[1]
+    num_groups = num_q_heads // num_kv_heads
+    # Repeat the mask for each Q head in the group
+    block_mask = torch.repeat_interleave(block_mask, repeats=num_groups, dim=1)
     num_heads = block_mask.shape[1]
     device = block_mask.device
 
@@ -246,6 +281,7 @@ def get_sdpa_mask_from_block_sparse_mask(
         # "Paint" the corresponding rectangular region on the canvas to True,
         # indicating that attention is allowed for these positions.
         sdpa_mask[:, h, q_start:q_end, k_start:k_end] = True
+    # print(f"{sdpa_mask.shape=}")
 
     return sdpa_mask
 
@@ -377,13 +413,15 @@ def generate_variable_block_sparse_pattern(
     base_mask.scatter_(2, topk_indices, True)
 
     # --- 4. Expand mask for GQA if necessary ---
+    """
     if mode == "per_kv_head" and num_q_heads != num_kv_heads:
         final_mask = torch.repeat_interleave(
             base_mask, num_q_heads // num_kv_heads, dim=0
         )
     else:
         final_mask = base_mask
-
+    """
+    final_mask = base_mask
     # --- 5. Add batch dimension and return ---
     final_mask = final_mask.unsqueeze(0)
 
@@ -515,6 +553,7 @@ def get_sdpa_mask_from_var_block_mask(
     seqlen_k: int,
     block_row_sz: torch.Tensor,
     block_col_sz: torch.Tensor,
+    num_q_heads: int,
     bsz: int = 1,
 ) -> torch.Tensor:
     """
@@ -527,6 +566,10 @@ def get_sdpa_mask_from_var_block_mask(
     # --- 0. Determine correct head counts for Q and KV ---
     if block_mask.shape[0] != 1:
         raise ValueError("This implementation assumes batch size of block_mask is 1.")
+    num_kv_heads = block_mask.shape[1]
+    num_groups = num_q_heads // num_kv_heads
+    # Repeat the mask for each Q head in the group
+    block_mask = torch.repeat_interleave(block_mask, repeats=num_groups, dim=1)
 
     num_q_heads = block_mask.shape[1]
     num_kv_heads = block_col_sz.shape[0]
