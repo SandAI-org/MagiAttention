@@ -15,10 +15,41 @@
 # limitations under the License.
 
 export NNODES=${NNODES:-1}
-export GPUS_PER_NODE=8
+export GPUS_PER_NODE=4
 export WORLD_SIZE=$((GPUS_PER_NODE * NNODES))
 export NODE_RANK=${RANK:-0}
-export MAGI_ATTENTION_HIERARCHICAL_COMM=${MAGI_ATTENTION_HIERARCHICAL_COMM:-1}
+# export MAGI_ATTENTION_HIERARCHICAL_COMM=${MAGI_ATTENTION_HIERARCHICAL_COMM:-0}
+
+# dynamic generate nsys profile using `--profile` argument
+PROFILE="0"
+PROFILE_NAME="cp_benchmark"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    # --profile=xxx
+        --profile=*)
+            PROFILE=1
+            PROFILE_NAME="${1#*=}"
+            shift 1
+            ;;
+        --profile)
+            PROFILE=1
+            # --profile xxx
+            if [[ -n "$2" && "$2" != --* ]]; then
+                PROFILE_NAME="$2"
+                shift 2
+            else
+            # --profile
+                PROFILE=1
+                shift 1
+                fi
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            exit 1
+            ;;
+    esac
+done
+export PROFILE=$PROFILE
 
 if [[ $NNODES -eq 1 ]]; then # single-node
     export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
@@ -29,13 +60,8 @@ export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 
 export PYTHONPATH=../../
 
-if [ "${MAGI_ATTENTION_HIERARCHICAL_COMM}" == "1" ]; then
-    export CUDA_DEVICE_MAX_CONNECTIONS=8
-    echo "set CUDA_DEVICE_MAX_CONNECTIONS=8"
-else
-    export CUDA_DEVICE_MAX_CONNECTIONS=1
-    echo "set CUDA_DEVICE_MAX_CONNECTIONS=1"
-fi
+export CUDA_DEVICE_MAX_CONNECTIONS=8
+echo "set CUDA_DEVICE_MAX_CONNECTIONS=8"
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \
@@ -48,4 +74,28 @@ DISTRIBUTED_ARGS="
 echo $DISTRIBUTED_ARGS
 
 TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
-$TORCHRUN_CMD
+
+# specify the config file
+CONFIG_PATH=${CONFIG_PATH:-"benchmark_conf.py"}
+
+# generate a timestamp for the nsys output file
+# --capture-range=cudaProfilerApi \
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+if [[ $PROFILE -eq 1 ]]; then
+    OUT_NAME="${PROFILE_NAME}_${TIMESTAMP}"
+    echo "Profiling enabled, output: ${OUT_NAME}.nsys-rep"
+    export PROFILE_ITER=3
+    export PROFILE_WARMUP=0
+    CMD="
+        nsys profile \
+        --force-overwrite true \
+        --capture-range=cudaProfilerApi \
+        -o ${PROFILE_NAME}_${TIMESTAMP}.nsys-rep \
+        ${TORCHRUN_CMD} --config ${CONFIG_PATH}
+    "
+else
+    echo "Profiling disabled."
+    CMD="$TORCHRUN_CMD --config $CONFIG_PATH"
+fi
+
+$CMD
