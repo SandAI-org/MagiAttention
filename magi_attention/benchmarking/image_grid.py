@@ -400,6 +400,9 @@ def make_img_grid(
         raise ValueError('layout must be either "wide" or "tall"')
 
     # transfer image to tensor
+    max_w = max(img.width for img in image_files)
+    max_h = max(img.height for img in image_files)
+    image_files = [img.resize((max_w, max_h)) for img in image_files]
     image_tensors = [ToTensor()(img) for img in image_files]
 
     grid_image = make_grid(image_tensors, nrow=num_per_row)
