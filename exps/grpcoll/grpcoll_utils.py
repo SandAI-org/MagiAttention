@@ -161,6 +161,9 @@ def init_dist(local_rank: int, num_local_ranks: int):
 
 
 def calc_diff(x: torch.Tensor, y: torch.Tensor):
+    # Calc Dissimilarity Distance:
+    # sim = 2 * x * y / (x^2 + y^2)
+    # diff = 1 - sim
     x, y = x.double() + 1, y.double() + 1
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator

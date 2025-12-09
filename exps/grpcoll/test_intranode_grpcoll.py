@@ -100,12 +100,17 @@ def prepare_test_func_kwargs(
     head_dim = hidden_size // num_heads
     x = torch.ones((num_tokens, hidden_size), dtype=dtype, device="cuda")
     if distinct_token:
-        x *= torch.arange(
-            rank * num_tokens,
-            (rank + 1) * num_tokens,
-            dtype=dtype,
-            device="cuda",
-        ).view(-1, 1) / (num_ranks * num_tokens)
+        x *= (
+            torch.arange(
+                rank * num_tokens,
+                (rank + 1) * num_tokens,
+                dtype=torch.int64,
+                device="cuda",
+            )
+            .view(-1, 1)
+            .double()
+            / (num_ranks * num_tokens)
+        ).to(dtype)
     else:
         x *= rank
     if cast_lse:
