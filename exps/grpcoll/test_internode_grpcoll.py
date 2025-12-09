@@ -1143,7 +1143,7 @@ def test_main(
     assert 1 <= num_data_groups <= 3
 
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
-    dtype = torch.bfloat16
+    dtype = torch.bfloat16  # TODO: make it parameterizable
     assert dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64)
 
     # Remake the hidden size to control

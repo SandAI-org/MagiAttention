@@ -1771,7 +1771,17 @@ void cached_notify(
 // Group Reduce
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int kNumRanks, typename dtype_t, int kMaxNumRanks, bool kUseTMA, int kNumStages, int kNumTMALoadBytes = 0, typename GetAddrFn, typename ReceiveTWFn>
+template <
+    int kNumRanks,
+    typename dtype_t,
+    typename comm_dtype_t,
+    typename reduce_dtype_t,
+    int kMaxNumRanks,
+    bool kUseTMA,
+    int kNumStages,
+    int kNumTMALoadBytes = 0,
+    typename GetAddrFn,
+    typename ReceiveTWFn>
 __device__ void group_reduce_token(
     bool is_token_in_rank,
     int head_idx,
@@ -1786,13 +1796,10 @@ __device__ void group_reduce_token(
     uint8_t* smem_ptr,
     uint32_t (&tma_phase)[kNumStages]) {
   constexpr auto kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
-  GRPCOLL_STATIC_ASSERT(kNumStages == 2, "Only support 2 stages now");
-
-  // FIXME: remain some unused dummy variables
-  // used to be args here to keep the related code for a while
-  // which should be removed in the future as long as the code is not used any more
-  const int4 *bias_0_int4 = nullptr, *bias_1_int4 = nullptr;
-  constexpr bool kMaybeWithBias = false;
+  constexpr auto kCommDtypePerDtype = sizeof(dtype_t) / sizeof(comm_dtype_t);
+  constexpr auto kCommDtypePerInt4 = kCommDtypePerDtype * kDtypePerInt4;
+  const int hidden_int4_comm = hidden_int4 / kCommDtypePerDtype;
+  GRPCOLL_STATIC_ASSERT(kNumStages == 2, "Only support 2 stages for now");
 
   // Count and collect topk slots and corr. src ranks from all heads within the warp
   // NOTES: lane `r` holds the `head_idx` and `is_token_in_rank` of rank `r`
@@ -1863,11 +1870,11 @@ __device__ void group_reduce_token(
 
       // Reduce current hidden values of topk tokens in high precision
       // from TMA buffer in shared memory into registers
-      float values[kDtypePerInt4] = {0};
+      reduce_dtype_t hp_hidval_reduce_buf[kCommDtypePerInt4] = {0};
 #pragma unroll
       for (int j = 0; j < num_topk_ranks; ++j) {
-        auto recv_value_dtypes = reinterpret_cast<const dtype_t*>(tma_load_buffer(stage_idx, j) + lane_id);
-        foreach_reduce_add<float, dtype_t, kDtypePerInt4>(values, recv_value_dtypes);
+        auto recv_value_dtypes = reinterpret_cast<const comm_dtype_t*>(tma_load_buffer(stage_idx, j) + lane_id);
+        foreach_reduce_add<reduce_dtype_t, comm_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, recv_value_dtypes);
       }
 
       // Wait for the TMA store in previous round with `stage_idx` to be finished
@@ -1876,8 +1883,9 @@ __device__ void group_reduce_token(
 
       // Cast and store the reduced values of topk tokens
       // from registers to TMA buffer in shared memory
+      GRPCOLL_STATIC_ASSERT(kCommDtypePerInt4 == kDtypePerInt4, "TODO: support lp comm dtype");
       auto out_dtypes = reinterpret_cast<dtype_t*>(tma_store_buffer(stage_idx) + lane_id);
-      foreach_assign<dtype_t, float, kDtypePerInt4>(out_dtypes, values);
+      foreach_assign<dtype_t, reduce_dtype_t, kCommDtypePerInt4>(out_dtypes, hp_hidval_reduce_buf);
 
       // Fence all lanes to make sure their access to TMA buffer
       // in shared memory are visible to each other
@@ -1899,46 +1907,35 @@ __device__ void group_reduce_token(
     tma_store_wait();
   } else {
 #pragma unroll
-    for (int i = lane_id; i < hidden_int4; i += WARP_SIZE) { // warp-strided loop
-      // Read bias
-      // TODO: make it as a finer-grained template
-      int4 bias_0_value_int4, bias_1_value_int4;
-      if constexpr (kMaybeWithBias) {
-        bias_0_value_int4 = bias_0_int4 != nullptr ? ld_nc_global(bias_0_int4 + i) : make_int4(0, 0, 0, 0); // non-cached load
-        bias_1_value_int4 = bias_1_int4 != nullptr ? ld_nc_global(bias_1_int4 + i) : make_int4(0, 0, 0, 0); // non-cached load
-      }
-
+    for (int i = lane_id; i < hidden_int4_comm; i += WARP_SIZE) { // warp-strided loop
       // Read hidden states of topk tokens
       // TODO: maybe too many registers here
       int4 recv_value_int4[kMaxNumRanks];
 #pragma unroll
-      for (int j = 0; j < num_topk_ranks; ++j)
-        recv_value_int4[j] = ld_nc_global(get_addr_fn(topk_ranks[j], slot_indices[j], i));
-
-      // Reduce bias
-      float values[kDtypePerInt4] = {0};
-      if constexpr (kMaybeWithBias) {
-        auto bias_0_values = reinterpret_cast<const dtype_t*>(&bias_0_value_int4);
-        auto bias_1_values = reinterpret_cast<const dtype_t*>(&bias_1_value_int4);
-#pragma unroll
-        for (int j = 0; j < kDtypePerInt4; ++j)
-          values[j] = static_cast<float>(bias_0_values[j]) + static_cast<float>(bias_1_values[j]);
+      for (int j = 0; j < num_topk_ranks; ++j) {
+        recv_value_int4[j] = ld_nc_global(get_addr_fn(topk_ranks[j], slot_indices[j], i * kCommDtypePerDtype));
       }
+
+      // Prepare high-precision reduce buffer
+      reduce_dtype_t hp_hidval_reduce_buf[kCommDtypePerInt4] = {0};
 
 #pragma unroll
       // Reduce hidden states from topk tokens in high precision
       for (int j = 0; j < num_topk_ranks; ++j) {
-        auto recv_value_dtypes = reinterpret_cast<const dtype_t*>(&recv_value_int4[j]);
-        foreach_reduce_add<float, dtype_t, kDtypePerInt4>(values, recv_value_dtypes);
+        auto recv_value_dtypes = reinterpret_cast<const comm_dtype_t*>(&recv_value_int4[j]);
+        foreach_reduce_add<reduce_dtype_t, comm_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, recv_value_dtypes);
       }
 
       // Cast reduced values back to `dtype_t`
-      int4 out_int4;
-      auto out_dtypes = reinterpret_cast<dtype_t*>(&out_int4);
-      foreach_assign<dtype_t, float, kDtypePerInt4>(out_dtypes, values);
+      int4 out_int4[kCommDtypePerDtype];
+      auto out_dtypes = reinterpret_cast<dtype_t*>(out_int4);
+      foreach_assign<dtype_t, reduce_dtype_t, kCommDtypePerInt4>(out_dtypes, hp_hidval_reduce_buf);
 
+#pragma unroll
       // Store reduced values to output buffer
-      st_na_global(reduced_row + i, out_int4); // non-cached store
+      for (int l = 0; l < kCommDtypePerDtype; ++l) {
+        st_na_global(reduced_row + i * kCommDtypePerDtype + l, out_int4[l]); // non-cached store
+      }
     }
   }
 
@@ -2436,6 +2433,8 @@ void group_reduce_kernel(
           //  `recv_tw_fn`: get top-k weights of the token in NVL buffer
           group_reduce_token</*kNumRanks=*/NUM_MAX_NVL_PEERS,
                              /*dtype_t=*/dtype_t,
+                             /*comm_dtype_t=*/comm_dtype_t,
+                             /*reduced_dtype_t=*/reduce_dtype_t,
                              /*kMaxNumRanks=*/NUM_MAX_NVL_PEERS,
                              /*kUseTMA=*/true,
                              /*kNumStages=*/kNumStages,
@@ -2572,6 +2571,8 @@ void group_reduce_kernel(
         uint32_t dummy_tma_phases[2];
         group_reduce_token</*kNumRanks=*/kNumRDMARanks,
                            /*dtype_t=*/dtype_t,
+                           /*comm_dtype_t=*/comm_dtype_t,
+                           /*reduced_dtype_t=*/reduce_dtype_t,
                            /*kMaxNumRanks=*/kNumTopkRDMARanks,
                            /*kUseTMA=*/false,
                            /*kNumStages=*/2>(
