@@ -1160,7 +1160,7 @@ def test_main(
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
     pass_padded_out_buffer = False  # TODO: support pass padded out buffer
 
-    acc_reduce_out_buffer = False  # TODO: support acc_reduce for internode_group_reduce
+    acc_reduce_out_buffer = True
     acc_reduce_constant = rank
     if acc_reduce_out_buffer:
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"

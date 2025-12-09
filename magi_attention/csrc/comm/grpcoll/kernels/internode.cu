@@ -1778,6 +1778,7 @@ template <
     typename reduce_dtype_t,
     int kMaxNumRanks,
     bool kUseTMA,
+    bool kAccReduce,
     int kNumStages,
     int kNumTMALoadBytes = 0,
     typename GetAddrFn,
@@ -1909,6 +1910,9 @@ __device__ void group_reduce_token(
   } else {
 #pragma unroll
     for (int i = lane_id; i < hidden_int4_comm; i += WARP_SIZE) { // warp-strided loop
+      // Get the hidden value ptr of `int_4` to reduce to in `reduced_row`
+      int4* reduce_hidval_ptr_int4 = reduced_row + i * kCommDtypePerDtype;
+
       // Read hidden states of topk tokens
       // TODO: maybe too many registers here
       int4 recv_value_int4[kMaxNumRanks];
@@ -1918,7 +1922,18 @@ __device__ void group_reduce_token(
       }
 
       // Prepare high-precision reduce buffer
-      reduce_dtype_t hp_hidval_reduce_buf[kCommDtypePerInt4] = {0};
+      reduce_dtype_t hp_hidval_reduce_buf[kCommDtypePerInt4];
+
+      // Initialize the high-precision reduce buffer
+      if constexpr (kAccReduce) { // if in `kAccReduce` mode
+        // Initialize the high-precision reduce buffer
+        // with the old value in `reduced_row`
+        auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
+        foreach_assign<reduce_dtype_t, dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
+      } else { // not in `kAccReduce` mode
+        // Zero-initialize the high-precision reduce buffer
+        foreach_fill<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, 0);
+      }
 
 #pragma unroll
       // Reduce hidden states from topk tokens in high precision
@@ -1935,7 +1950,7 @@ __device__ void group_reduce_token(
 #pragma unroll
       // Store reduced values to output buffer
       for (int l = 0; l < kCommDtypePerDtype; ++l) {
-        st_na_global(reduced_row + i * kCommDtypePerDtype + l, out_int4[l]); // non-cached store
+        st_na_global(reduce_hidval_ptr_int4 + l, out_int4[l]); // non-cached store
       }
     }
   }
@@ -2439,6 +2454,7 @@ void group_reduce_kernel(
                              /*reduced_dtype_t=*/reduce_dtype_t,
                              /*kMaxNumRanks=*/NUM_MAX_NVL_PEERS,
                              /*kUseTMA=*/true,
+                             /*kAccReduce=*/false,
                              /*kNumStages=*/kNumStages,
                              /*kNumTMALoadBytes=*/kNumTMALoadBytes>(
               /*is_token_in_rank=*/expected_head >= 0,
@@ -2577,6 +2593,7 @@ void group_reduce_kernel(
                            /*reduced_dtype_t=*/reduce_dtype_t,
                            /*kMaxNumRanks=*/kNumTopkRDMARanks,
                            /*kUseTMA=*/false,
+                           /*kAccReduce=*/kAccReduce,
                            /*kNumStages=*/2>(
             /*is_token_in_rank=*/expected_head >= 0,
             /*head_idx=*/expected_head,

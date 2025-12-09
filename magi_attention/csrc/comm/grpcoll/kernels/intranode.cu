@@ -1432,8 +1432,9 @@ void group_reduce_kernel(
             // Store the weight to rescale the old `reduced_lse` for each head
             // which will be read later to reduce the hidden values
             // if in `kAccReduce` mode
-            if constexpr (kAccReduce)
+            if constexpr (kAccReduce) {
               shared_old_lse_rescale_weight_buf[reduce_warp_id][h] = get_lse_rescale_weight(/*lse_to_rescale=*/old_lse_val, /*rescaled_lse=*/reduced_lse_val);
+            }
 
             // Store the reduced lse to `reduced_lse` as well
             // REVIEW: is it necessary to use TMA copy here to optimize ?
