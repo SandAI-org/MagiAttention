@@ -42,6 +42,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from magi_attention.api.functools import pad_at_dim
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.primitive.grpcoll._buffer import GrpCollBuffer
 from magi_attention.comm.primitive.grpcoll._config import GrpCollConfig
@@ -63,7 +64,6 @@ from grpcoll_utils import (
     get_output_split_size_list_and_src_index_list,
     get_random_dst_indices_list,
     get_random_split_size_list,
-    per_token_cast_to_fp8,
     perm_idxs2unperm_idxs,
     sim_gemm,
     transfer_native_group_cast_meta,
@@ -79,8 +79,10 @@ def prepare_test_func_kwargs(
     buffer: GrpCollBuffer,
     num_tokens: int,
     hidden_size: int,
+    num_heads: int,
     num_input_splits: int,
     dtype: torch.dtype,
+    comm_dtype: torch.dtype | None,
     distinct_token: bool,
     cast_lse: bool,
     reduce_op: GroupReduceOp,
@@ -94,6 +96,7 @@ def prepare_test_func_kwargs(
     min_num_dst_ranks: int,
 ) -> dict[str, Any]:
     # Random data
+    head_dim = hidden_size // num_heads
     x = torch.ones((num_tokens, hidden_size), dtype=dtype, device="cuda")
     if distinct_token:
         x *= torch.arange(
@@ -102,12 +105,21 @@ def prepare_test_func_kwargs(
             dtype=dtype,
             device="cuda",
         ).view(-1, 1) / (num_ranks * num_tokens)
-        print(f"[RANK {rank}]: distinct_input: {x=}\n", flush=True)
     else:
         x *= rank
+    if cast_lse:
+        assert num_heads > 0
+        lse = (
+            torch.arange(num_tokens, dtype=torch.float32, device="cuda")
+            .repeat_interleave(repeats=num_heads, dim=0)
+            .reshape(-1, num_heads)
+        )
+        lse_shape = lse.shape
+    else:
+        lse = None
+        lse_shape = None
 
-    x_e4m3 = per_token_cast_to_fp8(x)
-    x_e4m3 = (x_e4m3[0], x_e4m3[1].T.contiguous().T)
+    print(f"[RANK {rank}]: {x.shape=} | {x=}\n" f"{lse_shape=} | {lse=}\n", flush=True)
 
     # Random score
     input_split_size_list = get_random_split_size_list(num_tokens, num_input_splits)
@@ -164,6 +176,21 @@ def prepare_test_func_kwargs(
         (sum(output_split_size_list), *x.shape[1:]), dtype=dtype, device="cuda"
     )
     recv_x_gc_buf = recv_x_gc.clone() if pass_out_buffer else None
+    pad_size = num_tokens * num_ranks - sum(output_split_size_list)
+    if pass_out_buffer and pass_padded_out_buffer:
+        recv_x_gc_buf = pad_at_dim(recv_x_gc_buf, dim=0, pad_size=pad_size, value=-1)
+
+    recv_lse_gc = (
+        torch.empty((recv_x_gc.shape[0], lse.shape[1]), dtype=lse.dtype, device="cuda")
+        if cast_lse and pass_out_lse_buffer
+        else None
+    )
+    recv_lse_gc_buf = recv_lse_gc.clone() if cast_lse and pass_out_lse_buffer else None
+    if cast_lse and pass_out_lse_buffer and pass_padded_out_buffer:
+        recv_lse_gc_buf = pad_at_dim(
+            recv_lse_gc_buf, dim=0, pad_size=pad_size, value=-1
+        )
+
     work_with_pf_gc = group_cast(
         input=x,
         output=recv_x_gc,
@@ -172,9 +199,27 @@ def prepare_test_func_kwargs(
         dst_indices=dst_indices_list,
         src_index=src_index_list,
         group=group,
+        async_op=True,
+        cast_lse=cast_lse,
+        input_lse=lse,
+        output_lse=recv_lse_gc,
     )
-    recv_x_gc = work_with_pf_gc.wait_post_process(recv_x_gc)
-    print(f"[RANK {rank}]: {recv_x_gc.shape=} | {recv_x_gc=}\n", flush=True)
+
+    if cast_lse:
+        recv_x_gc, recv_lse_gc = work_with_pf_gc.wait_post_process(
+            recv_x_gc, recv_lse_gc
+        )
+        recv_lse_gc_shape = recv_lse_gc.shape
+    else:
+        recv_x_gc = work_with_pf_gc.wait_post_process(recv_x_gc)
+        recv_lse_gc_shape = None
+
+    print(
+        f"[RANK {rank}]: {recv_x_gc.shape=} | {recv_x_gc=}\n"
+        f"{recv_lse_gc_shape=} | {recv_lse_gc=}\n"
+        f"{pad_size=}\n",
+        flush=True,
+    )
 
     # get ref group_reduce output by group-reduce
     x_gr = sim_gemm(recv_x_gc, w=sim_gemm_weight)
@@ -182,6 +227,30 @@ def prepare_test_func_kwargs(
     if acc_reduce_out_buffer:
         reduced_x_gr += acc_reduce_constant
     reduced_x_gr_buf = reduced_x_gr.clone() if pass_out_buffer else None
+
+    lse_gr = recv_lse_gc.clone() if reduce_op == "lse" else None
+    reduced_lse_gr = (
+        torch.full(
+            (reduced_x_gr.shape[0], lse.shape[1]),
+            fill_value=1 / (acc_reduce_constant + 1)
+            if acc_reduce_out_buffer
+            else float("-inf"),
+            dtype=lse.dtype,
+            device="cuda",
+        )
+        if reduce_op == "lse"
+        else None
+    )
+    reduced_lse_gr_buf = (
+        reduced_lse_gr.clone() if reduce_op == "lse" and pass_out_lse_buffer else None
+    )
+
+    if reduce_op == "lse":
+        x_gr = x_gr.view(-1, num_heads, head_dim)
+        reduced_x_gr = reduced_x_gr.view(-1, num_heads, head_dim)
+
+    comm_dtype = comm_dtype or x.dtype
+
     work_with_pf_gr = group_reduce(
         input=x_gr,
         output=reduced_x_gr,
@@ -190,9 +259,29 @@ def prepare_test_func_kwargs(
         dst_index=src_index_list,
         src_indices=dst_indices_list,
         group=group,
+        async_op=True,
+        reduce_op=reduce_op,
+        input_lse=lse_gr,
+        output_lse=reduced_lse_gr,
     )
-    reduced_x_gr = work_with_pf_gr.wait_post_process(reduced_x_gr)
-    print(f"[RANK {rank}]: {reduced_x_gr.shape=} | {reduced_x_gr=}\n", flush=True)
+
+    if reduce_op == "lse":
+        reduced_x_gr, reduced_lse_gr = work_with_pf_gr.wait_post_process(
+            reduced_x_gr, reduced_lse_gr
+        )
+        reduced_lse_gr_shape = reduced_lse_gr.shape
+        reduced_lse_gr_dtype = reduced_lse_gr.dtype
+        reduced_x_gr = reduced_x_gr.view(-1, hidden_size)
+    else:
+        reduced_x_gr = work_with_pf_gr.wait_post_process(reduced_x_gr)
+        reduced_lse_gr_shape = None
+        reduced_lse_gr_dtype = None
+
+    print(
+        f"[RANK {rank}]: {reduced_x_gr.shape=} | {reduced_x_gr.dtype=} | {reduced_x_gr=}\n"
+        f"{reduced_lse_gr_shape=} | {reduced_lse_gr_dtype=} | {reduced_lse_gr=}\n",
+        flush=True,
+    )
 
     # transfer group-cast meta args to group_cast meta args
     (
@@ -364,10 +453,16 @@ def prepare_test_func_kwargs(
 
     return dict(
         x=x,
+        lse=lse,
         recv_x_gc=recv_x_gc,
         recv_x_gc_buf=recv_x_gc_buf,
+        recv_lse_gc=recv_lse_gc,
+        recv_lse_gc_buf=recv_lse_gc_buf,
         reduced_x_gr=reduced_x_gr,
         reduced_x_gr_buf=reduced_x_gr_buf,
+        reduced_lse_gr=reduced_lse_gr,
+        reduced_lse_gr_buf=reduced_lse_gr_buf,
+        comm_dtype=comm_dtype,
         is_token_in_rank=is_token_in_rank,
         num_tokens_per_rank=num_tokens_per_rank,
         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
@@ -403,10 +498,16 @@ def test_func(
 ) -> dict[str, Any]:
     # fetch kwargs
     x: torch.Tensor = kwargs["x"]
+    lse: torch.Tensor | None = kwargs["lse"]
     recv_x_gc: torch.Tensor = kwargs["recv_x_gc"]
     recv_x_gc_buf: torch.Tensor | None = kwargs["recv_x_gc_buf"]
+    recv_lse_gc: torch.Tensor | None = kwargs["recv_lse_gc"]
+    recv_lse_gc_buf: torch.Tensor | None = kwargs["recv_lse_gc_buf"]
     reduced_x_gr: torch.Tensor = kwargs["reduced_x_gr"]
     reduced_x_gr_buf: torch.Tensor | None = kwargs["reduced_x_gr_buf"]
+    reduced_lse_gr: torch.Tensor | None = kwargs["reduced_lse_gr"]
+    reduced_lse_gr_buf: torch.Tensor | None = kwargs["reduced_lse_gr_buf"]
+    comm_dtype: torch.dtype = kwargs["comm_dtype"]
     is_token_in_rank: torch.Tensor = kwargs["is_token_in_rank"]
     num_tokens_per_rank: torch.Tensor = kwargs["num_tokens_per_rank"]
     num_tokens_per_rdma_rank: torch.Tensor = kwargs["num_tokens_per_rdma_rank"]
@@ -429,15 +530,20 @@ def test_func(
             flush=True,
         )
 
-    group_cast_args = {
+    common_group_cast_args: dict[str, Any] = {  # w/o handle tensors
         "x": x,
         "recv_x": recv_x_gc_buf,
-        "num_tokens_per_rank": num_tokens_per_rank,
-        "num_tokens_per_rdma_rank": num_tokens_per_rdma_rank,
-        "is_token_in_rank": is_token_in_rank,
         "config": config,
         "async_op": async_mode,
         "post_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
+        "cast_lse": cast_lse,
+        "lse": lse,
+        "recv_lse": recv_lse_gc_buf,
+    }
+    group_cast_args: dict[str, Any] = common_group_cast_args | {
+        "is_token_in_rank": is_token_in_rank,
+        "num_tokens_per_rank": num_tokens_per_rank,
+        "num_tokens_per_rdma_rank": num_tokens_per_rdma_rank,
     }
     if previous_mode:
         group_cast_args.update({"previous_event": buffer.capture()})
@@ -485,7 +591,7 @@ def test_func(
     #   and if this recv token won't be sent to local rank r, then send_nvl_head[i, r] == -1 as well
     (
         recv_x,
-        _,  # recv_lse
+        recv_lse,
         handle,
         event,
     ) = buffer.group_cast(**group_cast_args)
@@ -494,10 +600,15 @@ def test_func(
     # wait
     event.current_stream_wait() if async_mode else ()
 
-    # check in-place
+    # check recv_x in-place
     if pass_out_buffer:
         assert recv_x_gc_buf is not None
         assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()
+
+    # check recv_lse in-place
+    if cast_lse and pass_out_lse_buffer:
+        assert recv_lse_gc_buf is not None
+        assert recv_lse_gc_buf.data_ptr() == recv_lse.data_ptr()
 
     # unpermute recv_x to the order indicated by
     # output_split_size_list and src_index_list
@@ -516,9 +627,23 @@ def test_func(
                 )
             assert recv_x_from_a2av.shape == recv_x.shape
 
+            # recv_lse
+            if cast_lse:
+                recv_lse_from_a2av = recv_lse.clone()
+                if use_a2av_perm_idxs == "outside":
+                    recv_lse = recv_lse[unperm_from_a2av_idx]
+                elif use_a2av_perm_idxs == "no":
+                    recv_lse = unpermute_output(
+                        output=recv_lse,
+                        unperm_after_a2a_kwargs=range_gather_post_group_cast_kwargs,
+                    )
+                assert recv_lse_from_a2av.shape == recv_lse.shape
+
     # print
     assert isinstance(handle, GrpCollInterHandle)
 
+    actual_gc_output_seqlen = recv_x_gc.size(0)
+    recv_lse_shape = recv_lse.shape if cast_lse else None
     is_token_in_rank_handle = handle.is_token_in_rank
     rdma_channel_prefix_matrix = handle.rdma_channel_prefix_matrix
     gbl_channel_prefix_matrix = handle.gbl_channel_prefix_matrix
@@ -533,6 +658,7 @@ def test_func(
     print(
         (
             f"\n[RANK {rank}]: {recv_x.shape=} | {recv_x=}\n"
+            f"{recv_lse_shape=} | {recv_lse=}\n"
             f"{is_token_in_rank_handle.shape=} | {is_token_in_rank_handle=}\n"  # handle[0]
             f"{rdma_channel_prefix_matrix.shape=} | {rdma_channel_prefix_matrix=}\n"  # handle[1]
             f"{gbl_channel_prefix_matrix.shape=} | {gbl_channel_prefix_matrix=}\n"  # handle[2]
@@ -549,12 +675,21 @@ def test_func(
 
     # check
     assert torch.equal(recv_x, recv_x_gc)
-    assert recv_gbl_rank_prefix_sum[-1].item() == recv_x.size(
-        0
-    ), f"{recv_gbl_rank_prefix_sum[-1].item()} != {recv_x.size(0)}"
-    assert gbl_num_tokens_per_rank[rank].item() == recv_x.size(
-        0
-    ), f"{gbl_num_tokens_per_rank[rank].item()} != {recv_x.size(0)}"
+    if cast_lse:
+        if pass_padded_out_buffer:
+            assert recv_lse.size(0) > actual_gc_output_seqlen
+            assert torch.equal(recv_lse[:actual_gc_output_seqlen], recv_lse_gc)
+        else:
+            assert torch.equal(recv_lse, recv_lse_gc)
+    assert (
+        recv_gbl_rank_prefix_sum[-1].item()
+        == gbl_num_tokens_per_rank[rank].item()
+        == recv_x.size(0)
+    )
+
+    # TODO: specific check for recv_lse
+    if cast_lse:
+        assert recv_lse.size(0) == recv_src_meta.size(0)
 
     if local_rank == 0:
         print(
@@ -571,24 +706,46 @@ def test_func(
         )
 
     # Test cached group_cast (must without top-k staffs)
-    group_cast_args = {
+    cached_group_cast_args: dict[str, Any] = common_group_cast_args | {
         "x": x,
+        "recv_x": torch.empty_like(recv_x_gc_buf) if pass_out_buffer else None,
+        "recv_lse": torch.empty_like(recv_lse_gc_buf)
+        if cast_lse and pass_out_buffer
+        else None,
         "handle": handle,
-        "config": config,
-        "async_op": async_mode,
     }
     if previous_mode:
-        group_cast_args.update({"previous_event": buffer.capture()})
+        cached_group_cast_args.update({"previous_event": buffer.capture()})
     (
         recv_cached_x,
-        _,  # recv_cached_lse
+        recv_cached_lse,
         _,  # handle
         event,
-    ) = buffer.group_cast(**group_cast_args)
+    ) = buffer.group_cast(**cached_group_cast_args)
     recv_cached_x = recv_cached_x[0]
 
     # wait
     event.current_stream_wait() if async_mode else ()
+
+    # check recv_cache_x
+    if pass_padded_out_buffer:
+        assert recv_cached_x.size(0) > actual_gc_output_seqlen
+        assert torch.equal(
+            recv_cached_x[:actual_gc_output_seqlen], recv_x[:actual_gc_output_seqlen]
+        )
+    else:
+        assert torch.equal(recv_cached_x, recv_x)
+
+    # check recv_cache_lse
+    if cast_lse:
+        if pass_padded_out_buffer:
+            assert recv_cached_lse.size(0) > actual_gc_output_seqlen
+            assert torch.equal(
+                recv_cached_lse[:actual_gc_output_seqlen],
+                recv_lse[:actual_gc_output_seqlen],
+            )
+        else:
+            assert torch.equal(recv_cached_lse, recv_lse)
 
     if local_rank == 0:
         print(
@@ -606,6 +763,7 @@ def test_func(
 
     # simulate gemm
     x_group_reduce = sim_gemm(recv_x, w=sim_gemm_weight)
+    lse_group_reduce = recv_lse.clone() if reduce_op == "lse" else None
 
     # permute x to the rank order
     if random_permute_output:
@@ -623,7 +781,22 @@ def test_func(
                 )
             assert x_group_reduce_before_to_a2av.shape == x_group_reduce.shape
 
+            if reduce_op == "lse":
+                lse_group_reduce_before_to_a2av = lse_group_reduce.clone()
+                if use_a2av_perm_idxs == "outside":
+                    lse_group_reduce = lse_group_reduce[perm_to_a2av_idx]
+                elif use_a2av_perm_idxs == "no":
+                    lse_group_reduce = unpermute_output(
+                        output=lse_group_reduce,
+                        unperm_after_a2a_kwargs=range_gather_pre_group_reduce_kwargs,
+                    )
+                assert lse_group_reduce_before_to_a2av.shape == lse_group_reduce.shape
+
     # prepare group_reduce args
+    send_nvl_head_copy, send_rdma_head_copy = (
+        send_nvl_head.clone(),
+        send_rdma_head.clone(),
+    )
     group_reduce_args = {
         "x": x_group_reduce,
         "reduced_x": reduced_x_gr_buf,
@@ -634,6 +807,8 @@ def test_func(
         "acc_reduce": acc_reduce_out_buffer,
         # NOTE: still perm_to_a2av_idx, instead of unperm_to_a2av_idx
         "pre_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
+        "lse": lse_group_reduce,
+        "reduced_lse": reduced_lse_gr_buf,
     }
     if previous_mode:
         group_reduce_args.update({"previous_event": buffer.capture()})
@@ -651,7 +826,7 @@ def test_func(
     #       even though it is not sent to the target rdma rank
     (
         reduced_x,
-        _,  # reduced_lse
+        reduced_lse,
         event,
     ) = buffer.group_reduce(**group_reduce_args)
     reduced_x = reduced_x[0]
@@ -659,43 +834,84 @@ def test_func(
     # wait
     event.current_stream_wait() if async_mode else ()
 
-    # check in-place
+    # check reduced_x in-place
     if pass_out_buffer:
         assert reduced_x_gr_buf is not None
         assert reduced_x_gr_buf.data_ptr() == reduced_x.data_ptr()
 
+    # check reduced_lse in-place
+    if reduce_op == "lse" and pass_out_lse_buffer:
+        assert reduced_lse_gr_buf is not None
+        assert reduced_lse_gr_buf.data_ptr() == reduced_lse.data_ptr()
+
     # print
+    reduced_lse_shape = reduced_lse.shape if reduce_op == "lse" else None
     print(
         (
             f"\n[RANK {rank}]: {reduced_x.shape=} | {reduced_x=}\n"
+            f"{reduced_lse_shape=} | {reduced_lse=}\n"
             f"Before group_reduce: {send_rdma_head.shape=} | {send_rdma_head=}\n\n"
             f"Before group_reduce: {send_nvl_head.shape=} | {send_nvl_head=}\n\n"
         ),
         flush=True,
     )
 
-    # check
-    torch.testing.assert_close(reduced_x, reduced_x_gr)
+    # check reduced_x
+    match x.dtype:
+        case torch.float32:
+            if comm_dtype != torch.float32:  # low-precision comm
+                torch.testing.assert_close(
+                    reduced_x, reduced_x_gr, atol=1e-8, rtol=5e-3
+                )
+            else:
+                torch.testing.assert_close(reduced_x, reduced_x_gr)
+        case torch.bfloat16 | torch.float64:
+            torch.testing.assert_close(reduced_x, reduced_x_gr)
+        case torch.float16:
+            torch.testing.assert_close(reduced_x, reduced_x_gr, atol=1e-8, rtol=5e-3)
+        case _:
+            raise ValueError("Unsupported dtype")
 
-    send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
-    check_x = reduced_x.float() / send_token_nums
-    ref_x = sim_gemm(x, w=sim_gemm_weight)
-    # if acc_reduce, the reduced token should add with a constant rank bias
-    if acc_reduce_out_buffer:
-        ref_x += acc_reduce_constant / send_token_nums
+    # check reduced_lse
+    if reduce_op == "lse":
+        torch.testing.assert_close(reduced_lse, reduced_lse_gr)
 
-    # if some token is not sent to any rank, the reduced token should be 0
-    if min_num_dst_ranks == 0:
-        zero_num_dst_ranks_mask = (send_token_nums == 0.0).expand_as(reduced_x)
-        check_x[zero_num_dst_ranks_mask] = (
-            acc_reduce_constant if acc_reduce_out_buffer else 0.0
-        )
-        ref_x[zero_num_dst_ranks_mask] = (
-            acc_reduce_constant if acc_reduce_out_buffer else 0.0
-        )
+    # check send head for both nvl and rdma
+    # cached_notify_group_reduce will modify send_head in-place for any entry == -1
+    assert torch.equal(
+        send_nvl_head[send_nvl_head_copy != -1],
+        send_nvl_head_copy[send_nvl_head_copy != -1],
+    )
+    assert torch.equal(
+        send_rdma_head[send_rdma_head_copy != -1],
+        send_rdma_head_copy[send_rdma_head_copy != -1],
+    )
 
-    diff = calc_diff(check_x, ref_x)
-    assert diff < 5e-6, f"{check_x} != {ref_x} with ({diff=})"
+    # specific check for reduced_x for specific reduce op
+    if reduce_op in ("sum", "avg"):
+        send_token_nums = is_token_in_rank.sum(dim=1).unsqueeze(1)
+        check_x = reduced_x.float()
+        ref_x = sim_gemm(x.float(), w=sim_gemm_weight) * send_token_nums
+
+        # if acc_reduce, the reduced token should add with a constant rank bias
+        if acc_reduce_out_buffer:
+            ref_x += acc_reduce_constant
+
+        if reduce_op == "avg":
+            ref_x /= send_token_nums + (1 if acc_reduce_out_buffer else 0)
+
+        # if some token is not sent to any rank, the reduced token should be 0 or acc_reduce_constant
+        if min_num_dst_ranks == 0:
+            zero_num_dst_ranks_mask_x = (send_token_nums == 0.0).expand_as(reduced_x)
+            check_x[zero_num_dst_ranks_mask_x] = (
+                acc_reduce_constant if acc_reduce_out_buffer else 0.0
+            )
+            ref_x[zero_num_dst_ranks_mask_x] = (
+                acc_reduce_constant if acc_reduce_out_buffer else 0.0
+            )
+
+        diff_x = calc_diff(check_x, ref_x)
+        assert diff_x < 5e-6, f"{check_x=} != {ref_x=} with ({diff_x=})"
 
     if local_rank == 0:
         print(
@@ -704,8 +920,8 @@ def test_func(
         )
 
     # For later tuning
-    group_cast_rdma_send_bytes = num_rdma_token_sent * hidden_size * 2
-    group_cast_nvl_recv_bytes = recv_x.numel() * 2
+    group_cast_rdma_send_bytes = num_rdma_token_sent * hidden_size * x.dtype.itemsize
+    group_cast_nvl_recv_bytes = recv_x.numel() * recv_x_gc.dtype.itemsize
     group_reduce_nvl_send_bytes = group_cast_nvl_recv_bytes
     group_reduce_rdma_recv_bytes = group_cast_rdma_send_bytes
 
@@ -926,6 +1142,11 @@ def test_main(
     hidden_size = hidden_size * 2 // dtype.itemsize
     assert hidden_size % num_heads == 0
 
+    cast_lse = True
+    reduce_op: GroupReduceOp = "sum"  # TODO: support other reduce ops
+    if reduce_op == "lse":
+        assert cast_lse, "we need to cast lse first before reducing"
+
     pass_out_buffer = True  # for both group_cast and group_reduce
     pass_out_lse_buffer = True  # for both group_cast and group_reduce
     pass_padded_out_buffer = False  # TODO: support pass padded out buffer
@@ -935,23 +1156,29 @@ def test_main(
     if acc_reduce_out_buffer:
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"
 
+    # set to True to use bf16/fp16 precision for comm when the input/output is fp32
+    use_lp_comm_dtype_for_reduce = False
+    if use_lp_comm_dtype_for_reduce:
+        assert dtype == torch.float32
+        comm_dtype = torch.bfloat16
+    else:
+        comm_dtype = None
+
+    # choose from {"no", "outside", "inside"}
     use_a2av_perm_idxs = "inside"
     assert use_a2av_perm_idxs in ("no", "outside", "inside")
 
-    cast_lse = False  # TODO: support cast_lse
-    reduce_op: GroupReduceOp = "sum"  # TODO: support other reduce ops
-    if reduce_op == "lse":
-        assert cast_lse, "we need to cast lse first before reducing"
+    # we only allow inside usage when passing padded out buffer
+    if pass_padded_out_buffer:
+        assert use_a2av_perm_idxs == "inside"
 
+    # Config
     num_max_nvl_chunked_send_tokens = 8
     nvl_buffer_size = num_max_nvl_chunked_recv_tokens = (
         720 if num_ranks in (144, 160) else 512
     )
-
     num_max_rdma_chunked_send_tokens = 16
     rdma_buffer_size = num_max_rdma_chunked_recv_tokens = 128
-
-    # Config
     config = GrpCollConfig(
         num_sms=num_sms,  # num_sms, default 20
         nvl_chunk_size=num_max_nvl_chunked_send_tokens,  # num_max_nvl_chunked_send_tokens (nvl_chunk_size), default 6
@@ -986,8 +1213,10 @@ def test_main(
         buffer=buffer,
         num_tokens=num_tokens,
         hidden_size=hidden_size,
+        num_heads=num_heads,
         num_input_splits=num_input_splits,
         dtype=dtype,
+        comm_dtype=comm_dtype,
         distinct_token=distinct_token,
         cast_lse=cast_lse,
         reduce_op=reduce_op,

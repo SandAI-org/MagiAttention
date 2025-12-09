@@ -99,6 +99,15 @@ def prepare_test_func_kwargs(
     # Random data
     head_dim = hidden_size // num_heads
     x = torch.ones((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    if distinct_token:
+        x *= torch.arange(
+            rank * num_tokens,
+            (rank + 1) * num_tokens,
+            dtype=dtype,
+            device="cuda",
+        ).view(-1, 1) / (num_ranks * num_tokens)
+    else:
+        x *= rank
     if cast_lse:
         assert num_heads > 0
         lse = (
@@ -110,16 +119,6 @@ def prepare_test_func_kwargs(
     else:
         lse = None
         lse_shape = None
-
-    if distinct_token:
-        x *= torch.arange(
-            rank * num_tokens,
-            (rank + 1) * num_tokens,
-            dtype=dtype,
-            device="cuda",
-        ).view(-1, 1) / (num_ranks * num_tokens)
-    else:
-        x *= rank
 
     print(f"[RANK {rank}]: {x.shape=} | {x=}\n" f"{lse_shape=} | {lse=}\n", flush=True)
 
@@ -534,8 +533,8 @@ def test_func(
     x_3rd: torch.Tensor | None = kwargs["x_3rd"]
     recv_x_gc_3rd: torch.Tensor | None = kwargs["recv_x_gc_3rd"]
     reduced_x_gr: torch.Tensor = kwargs["reduced_x_gr"]
-    reduced_lse_gr: torch.Tensor | None = kwargs["reduced_lse_gr"]
     reduced_x_gr_buf: torch.Tensor | None = kwargs["reduced_x_gr_buf"]
+    reduced_lse_gr: torch.Tensor | None = kwargs["reduced_lse_gr"]
     reduced_lse_gr_buf: torch.Tensor | None = kwargs["reduced_lse_gr_buf"]
     comm_dtype: torch.dtype = kwargs["comm_dtype"]
     is_token_in_rank: torch.Tensor = kwargs["is_token_in_rank"]

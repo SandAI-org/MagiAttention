@@ -973,7 +973,7 @@ class GrpCollBuffer:
 
         return (
             recv_x,
-            None,  # recv_lse
+            recv_lse,
             handle,  # type: ignore[return-value]
             EventOverlap(event),
         )
