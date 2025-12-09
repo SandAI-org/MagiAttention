@@ -1956,6 +1956,7 @@ template <
     typename comm_dtype_t,
     typename reduce_dtype_t,
     ReduceOp kReduceOp,
+    bool kAccReduce,
     bool kLowLatencyMode,
     int kNumRDMARanks,
     int kNumGroupReduceForwarderWarps,
@@ -2693,6 +2694,7 @@ void group_reduce(
     cudaStream_t stream,
     int num_channels,
     bool low_latency_mode,
+    bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
     ReduceOp reduce_op) {
@@ -2701,29 +2703,20 @@ void group_reduce(
   constexpr int kNumTMABytesPerForwarderWarp = 9248; // REVIEW: why this unusual number ?
   constexpr int smem_size = std::max(kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, kNumTMABytesPerForwarderWarp * kNumGroupReduceForwarderWarps);
 
-#define GROUP_REDUCE_LAUNCH_CASE(dtype, comm_dtype, reduce_dtype, reduce_op, num_rdma_ranks)               \
+#define GROUP_REDUCE_LAUNCH_CASE(acc_reduce, dtype, comm_dtype, reduce_dtype, reduce_op, num_rdma_ranks)   \
   {                                                                                                        \
     GRPCOLL_HOST_ASSERT(hidden_size * sizeof(comm_dtype) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp); \
-    auto group_reduce_func = low_latency_mode ? group_reduce_kernel<                                       \
-                                                    dtype,                                                 \
-                                                    comm_dtype,                                            \
-                                                    reduce_dtype,                                          \
-                                                    reduce_op,                                             \
-                                                    true,                                                  \
-                                                    num_rdma_ranks,                                        \
-                                                    kNumGroupReduceForwarderWarps,                         \
-                                                    kNumTMABytesPerSenderWarp,                             \
-                                                    kNumTMABytesPerForwarderWarp>                          \
-                                              : group_reduce_kernel<                                       \
-                                                    dtype,                                                 \
-                                                    comm_dtype,                                            \
-                                                    reduce_dtype,                                          \
-                                                    reduce_op,                                             \
-                                                    false,                                                 \
-                                                    num_rdma_ranks,                                        \
-                                                    kNumGroupReduceForwarderWarps,                         \
-                                                    kNumTMABytesPerSenderWarp,                             \
-                                                    kNumTMABytesPerForwarderWarp>;                         \
+    auto group_reduce_func = group_reduce_kernel<                                                          \
+        dtype,                                                                                             \
+        comm_dtype,                                                                                        \
+        reduce_dtype,                                                                                      \
+        reduce_op,                                                                                         \
+        acc_reduce,                                                                                        \
+        false, /*disable low_latency_mode to decrease compilation overhead*/                               \
+        num_rdma_ranks,                                                                                    \
+        kNumGroupReduceForwarderWarps,                                                                     \
+        kNumTMABytesPerSenderWarp,                                                                         \
+        kNumTMABytesPerForwarderWarp>;                                                                     \
     SET_SHARED_MEMORY_FOR_TMA(group_reduce_func);                                                          \
     LAUNCH_KERNEL(                                                                                         \
         &cfg,                                                                                              \
@@ -2755,10 +2748,20 @@ void group_reduce(
   }                                                                                                        \
   break
 
-#define GROUP_REDUCE_DTYPE_LAUNCH_CASE(...)                                           \
-  {                                                                                   \
-    SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(GROUP_REDUCE_LAUNCH_CASE, ##__VA_ARGS__); \
-  }                                                                                   \
+#define GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE(...)      \
+  {                                                   \
+    if (acc_reduce) {                                 \
+      GROUP_REDUCE_LAUNCH_CASE(true, ##__VA_ARGS__);  \
+    } else {                                          \
+      GROUP_REDUCE_LAUNCH_CASE(false, ##__VA_ARGS__); \
+    }                                                 \
+  }                                                   \
+  break
+
+#define GROUP_REDUCE_DTYPE_LAUNCH_CASE(...)                                                      \
+  {                                                                                              \
+    SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE, ##__VA_ARGS__); \
+  }                                                                                              \
   break
 
 #define GROUP_REDUCE_REDUCE_OP_LAUNCH_CASE(...)                       \
@@ -2789,6 +2792,7 @@ void group_reduce(
 
 #undef GROUP_REDUCE_REDUCE_OP_LAUNCH_CASE
 #undef GROUP_REDUCE_DTYPE_LAUNCH_CASE
+#undef GROUP_REDUCE_ACC_REDUCE_LAUNCH_CASE
 #undef GROUP_REDUCE_LAUNCH_CASE
 }
 

@@ -305,6 +305,7 @@ void group_reduce(
     cudaStream_t stream,
     int num_channels,
     bool low_latency_mode,
+    bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
     ReduceOp reduce_op);

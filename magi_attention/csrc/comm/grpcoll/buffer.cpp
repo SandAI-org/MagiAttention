@@ -1277,9 +1277,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     const std::string& reduce_op,
     bool acc_reduce,
     std::optional<c10::ScalarType> comm_dtype) {
-  // TODO: support acc_reduce
-  GRPCOLL_HOST_ASSERT(!acc_reduce);
-
   // Transfer reduce ops
   ReduceOp reduce_op_ = str_to_reduce_op(reduce_op);
   // TODO: support other reduce ops
@@ -1418,6 +1415,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       /*stream=*/comm_stream,
       /*num_channels=*/num_channels,
       /*low_latency_mode=*/low_latency_mode,
+      /*acc_reduce=*/acc_reduce,
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
       /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
       /*reduce_op=*/reduce_op_);
