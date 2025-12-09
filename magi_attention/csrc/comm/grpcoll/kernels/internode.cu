@@ -1776,10 +1776,11 @@ template <
     typename dtype_t,
     typename comm_dtype_t,
     typename reduce_dtype_t,
+    ReduceOp kReduceOp,
+    bool kAccReduce,
     int kMaxNumRanks,
     bool kUseTMA,
-    bool kAccReduce,
-    int kNumStages,
+    int kNumTMAStages,
     int kNumTMALoadBytes = 0,
     typename GetAddrFn,
     typename ReceiveTWFn>
@@ -1795,12 +1796,12 @@ __device__ void group_reduce_token(
     const GetAddrFn& get_addr_fn,
     const ReceiveTWFn& recv_tw_fn,
     uint8_t* smem_ptr,
-    uint32_t (&tma_phase)[kNumStages]) {
+    uint32_t (&tma_phase)[kNumTMAStages]) {
   constexpr auto kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
   constexpr auto kCommDtypePerDtype = sizeof(dtype_t) / sizeof(comm_dtype_t);
   constexpr auto kCommDtypePerInt4 = kCommDtypePerDtype * kDtypePerInt4;
   const int hidden_int4_comm = hidden_int4 / kCommDtypePerDtype;
-  GRPCOLL_STATIC_ASSERT(kNumStages == 2, "Only support 2 stages for now");
+  GRPCOLL_STATIC_ASSERT(kNumTMAStages == 2, "Only support 2 stages for now, whether you enable TMA or not");
 
   // Count and collect topk slots and corr. src ranks from all heads within the warp
   // NOTES: lane `r` holds the `head_idx` and `is_token_in_rank` of rank `r`
@@ -1847,8 +1848,8 @@ __device__ void group_reduce_token(
     // NOTES: hidden_int4 should be a multiple of WARP_SIZE
     // since we need to sync the whole warp in each loop
     for (int shifted = 0, iter = 0; shifted < hidden_int4; shifted += WARP_SIZE, iter += 1) { // warp-strided loop
-      const int stage_idx = iter % kNumStages;
-      const int next_stage_idx = (iter + 1) % kNumStages;
+      const int stage_idx = iter % kNumTMAStages;
+      const int next_stage_idx = (iter + 1) % kNumTMAStages;
 
       // Prefetch the hidden states of topk tokens for next stage with TMA-load
       // each lane for one token
@@ -1879,8 +1880,8 @@ __device__ void group_reduce_token(
       }
 
       // Wait for the TMA store in previous round with `stage_idx` to be finished
-      // allowing previous `kNumStages - 1` stages to be inflight
-      tma_store_wait<kNumStages - 1>();
+      // allowing previous `kNumTMAStages - 1` stages to be inflight
+      tma_store_wait<kNumTMAStages - 1>();
 
       // Cast and store the reduced values of topk tokens
       // from registers to TMA buffer in shared memory
@@ -2320,18 +2321,18 @@ void group_reduce_kernel(
           kNumWarpsPerForwarder == 1 or kNumRDMARanks + 2 <= 16, "Barriers are not enough"); // This limits maximum number of RDMA peers to 14, TODO: extend it
 
       // Prepare TMA buffer and init mbarrier
-      constexpr int kNumStages = 2;
+      constexpr int kNumTMAStages = 2;
       constexpr int kNumTMALoadBytes = sizeof(int4) * WARP_SIZE;
       constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + 16;
-      GRPCOLL_STATIC_ASSERT(kNumTMABufferBytesPerStage * kNumStages <= kNumTMABytesPerForwarderWarp, "TMA buffer is not larger enough");
+      GRPCOLL_STATIC_ASSERT(kNumTMABufferBytesPerStage * kNumTMAStages <= kNumTMABytesPerForwarderWarp, "TMA buffer is not larger enough");
 
       extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
-      auto smem_ptr = smem_buffer + target_warp_id * kNumStages * kNumTMABufferBytesPerStage;
+      auto smem_ptr = smem_buffer + target_warp_id * kNumTMAStages * kNumTMABufferBytesPerStage;
       auto tma_mbarrier = [=](const int& i) {
         return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage + kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1));
       };
-      uint32_t tma_phase[kNumStages] = {0};
-      if (lane_id < kNumStages) {
+      uint32_t tma_phase[kNumTMAStages] = {0};
+      if (lane_id < kNumTMAStages) {
         mbarrier_init(tma_mbarrier(lane_id), WARP_SIZE);
         fence_view_async_shared();
         fence_barrier_init();
@@ -2452,10 +2453,11 @@ void group_reduce_kernel(
                              /*dtype_t=*/dtype_t,
                              /*comm_dtype_t=*/comm_dtype_t,
                              /*reduced_dtype_t=*/reduce_dtype_t,
+                             /*kReduceOp=*/kReduceOp,
+                             /*kAccReduce=*/false,
                              /*kMaxNumRanks=*/NUM_MAX_NVL_PEERS,
                              /*kUseTMA=*/true,
-                             /*kAccReduce=*/false,
-                             /*kNumStages=*/kNumStages,
+                             /*kNumTMAStages=*/kNumTMAStages,
                              /*kNumTMALoadBytes=*/kNumTMALoadBytes>(
               /*is_token_in_rank=*/expected_head >= 0,
               /*head_idx=*/expected_head,
@@ -2522,6 +2524,8 @@ void group_reduce_kernel(
         forwarder_retired[target_warp_id] = true;
       }
     } else if (warp_role == WarpRole::kRDMAReceiver) {
+      constexpr int kNumTMAStages = 2;
+
       // Clean shared memory and sync with the `kCoordinator` warp
       lane_id < kNumRDMARanks ? (rdma_receiver_rdma_head[target_warp_id][lane_id] = 0) : 0;
       lane_id == 0 ? (rdma_receiver_retired[target_warp_id] = false) : 0;
@@ -2586,15 +2590,16 @@ void group_reduce_kernel(
         //  `num_max_recv_tokens`: the queue size of RDMA buffer
         //  `get_addr_fn`: get address of the token in RDMA buffer
         //  `recv_tw_fn`: get top-k weights of the token in RDMA buffer
-        uint32_t dummy_tma_phases[2];
+        uint32_t dummy_tma_phases[kNumTMAStages];
         group_reduce_token</*kNumRanks=*/kNumRDMARanks,
                            /*dtype_t=*/dtype_t,
                            /*comm_dtype_t=*/comm_dtype_t,
                            /*reduced_dtype_t=*/reduce_dtype_t,
-                           /*kMaxNumRanks=*/kNumTopkRDMARanks,
-                           /*kUseTMA=*/false,
+                           /*kReduceOp=*/kReduceOp,
                            /*kAccReduce=*/kAccReduce,
-                           /*kNumStages=*/2>(
+                           /*kMaxNumRanks=*/kNumTopkRDMARanks,
+                           /*kUseTMA=*/false, // REVIEW: why not use TMA here ?
+                           /*kNumTMAStages=*/kNumTMAStages>(
             /*is_token_in_rank=*/expected_head >= 0,
             /*head_idx=*/expected_head,
             /*lane_id=*/lane_id,
