@@ -808,7 +808,7 @@ def test_func(
         "handle": handle,
         "config": config,
         "async_op": async_mode,
-        "reduce_op": "sum",
+        "reduce_op": reduce_op,
         "acc_reduce": acc_reduce_out_buffer,
         # NOTE: still perm_to_a2av_idx, instead of unperm_to_a2av_idx
         "pre_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
@@ -1152,7 +1152,8 @@ def test_main(
     assert hidden_size % num_heads == 0
 
     cast_lse = True
-    reduce_op: GroupReduceOp = "sum"  # TODO: support other reduce ops
+    # choose from {"sum", "avg", "lse"}
+    reduce_op: GroupReduceOp = "sum"  # TODO: support lse reduce
     if reduce_op == "lse":
         assert cast_lse, "we need to cast lse first before reducing"
 

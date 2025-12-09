@@ -1208,7 +1208,8 @@ def test_main(
     assert 1 <= num_data_groups <= 3
 
     cast_lse = True
-    reduce_op: GroupReduceOp = "lse"  # choose from {"sum", "avg", "lse"}
+    # choose from {"sum", "avg", "lse"}
+    reduce_op: GroupReduceOp = "lse"
     if reduce_op == "lse":
         assert cast_lse, "we need to cast lse first before reducing"
 
