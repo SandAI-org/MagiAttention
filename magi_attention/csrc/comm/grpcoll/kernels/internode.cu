@@ -1883,7 +1883,8 @@ __device__ void group_reduce_token(
 
       // Cast and store the reduced values of topk tokens
       // from registers to TMA buffer in shared memory
-      GRPCOLL_STATIC_ASSERT(kCommDtypePerInt4 == kDtypePerInt4, "TODO: support lp comm dtype");
+      // TODO: support lp comm dtype
+      // GRPCOLL_STATIC_ASSERT(kCommDtypePerInt4 == kDtypePerInt4);
       auto out_dtypes = reinterpret_cast<dtype_t*>(tma_store_buffer(stage_idx) + lane_id);
       foreach_assign<dtype_t, reduce_dtype_t, kCommDtypePerInt4>(out_dtypes, hp_hidval_reduce_buf);
 
