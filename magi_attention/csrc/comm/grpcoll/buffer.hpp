@@ -281,7 +281,8 @@ struct Buffer {
       bool async_op,
       bool allocate_on_comm_stream,
       const std::string& reduce_op,
-      bool acc_reduce);
+      bool acc_reduce,
+      std::optional<c10::ScalarType> comm_dtype);
 
   void clean_low_latency_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts);
 

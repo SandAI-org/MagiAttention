@@ -180,14 +180,14 @@ using namespace magi_attn_comm::grpcoll;
   }                                                           \
   while (false)
 
-#define SWITCH_REDUCE_OPS(case_macro)                         \
+#define SWITCH_REDUCE_OPS(case_macro, ...)                    \
   switch (reduce_op) {                                        \
     case ReduceOp::SUM:                                       \
-      case_macro(ReduceOp::SUM);                              \
+      case_macro(ReduceOp::SUM, ##__VA_ARGS__);               \
     case ReduceOp::AVG:                                       \
-      case_macro(ReduceOp::AVG);                              \
+      case_macro(ReduceOp::AVG, ##__VA_ARGS__);               \
     case ReduceOp::LSE:                                       \
-      case_macro(ReduceOp::LSE);                              \
+      case_macro(ReduceOp::LSE, ##__VA_ARGS__);               \
     default:                                                  \
       GRPCOLL_HOST_ASSERT(false and "Unsupported reduce op"); \
   }                                                           \
@@ -223,7 +223,8 @@ using namespace magi_attn_comm::grpcoll;
   }                                                       \
   while (false)
 
-// comm_dtype <= dtype <= reduce_dtype
+// (dtype, comm_dtype, reduce_dtype)
+// which satisfies: `comm_dtype <= dtype <= reduce_dtype`
 #define SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(case_macro, ...)                   \
   switch (dtype) {                                                                 \
     case CUDA_R_16BF:                                                              \

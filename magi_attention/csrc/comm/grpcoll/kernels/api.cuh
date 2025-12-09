@@ -305,7 +305,9 @@ void group_reduce(
     cudaStream_t stream,
     int num_channels,
     bool low_latency_mode,
-    cudaDataType_t type);
+    cudaDataType_t dtype,
+    cudaDataType_t comm_dtype,
+    ReduceOp reduce_op);
 
 } // namespace internode
 

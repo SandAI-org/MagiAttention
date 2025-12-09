@@ -1123,6 +1123,10 @@ def test_main(
     # Settings
     num_tokens, hidden_size = args.num_tokens, args.hidden_size
     num_channels = num_sms // 2
+    # NOTE: different from intranode group reduce,
+    # if num_heads * size(float) % 16 == 0, i.e. num_heads % 4 == 0,
+    # internode group reduce `kNVLReceivers` will use TMA to copy lse
+    # otherwise using normal unrolled warp copy
     num_heads = 16
 
     distinct_token = True

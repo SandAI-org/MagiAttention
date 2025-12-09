@@ -681,7 +681,6 @@ Buffer::intranode_group_reduce(
 
   // Transfer dtypes and item sizes in bytes
   auto x_dtype = x.scalar_type();
-  auto x_elem_size = c10::elementSize(x_dtype);
   auto comm_dtype_ = comm_dtype.value_or(x_dtype);
   auto comm_elem_size = c10::elementSize(comm_dtype_);
 
@@ -1276,7 +1275,8 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     bool async_op,
     bool allocate_on_comm_stream,
     const std::string& reduce_op,
-    bool acc_reduce) {
+    bool acc_reduce,
+    std::optional<c10::ScalarType> comm_dtype) {
   // TODO: support acc_reduce
   GRPCOLL_HOST_ASSERT(!acc_reduce);
 
@@ -1284,6 +1284,11 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   ReduceOp reduce_op_ = str_to_reduce_op(reduce_op);
   // TODO: support other reduce ops
   GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::SUM);
+
+  // Transfer dtypes and item sizes in bytes
+  auto x_dtype = x.scalar_type();
+  auto comm_dtype_ = comm_dtype.value_or(x_dtype);
+  auto comm_elem_size = c10::elementSize(comm_dtype_);
 
 #ifndef DISABLE_NVSHMEM
   // One channel use two SMs
@@ -1302,10 +1307,10 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   GRPCOLL_HOST_ASSERT(reduced_rdma_head.dim() == 2 and reduced_rdma_head.is_contiguous() and reduced_rdma_head.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.is_contiguous() and reduced_nvl_head.scalar_type() == torch::kInt32);
 
-  auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(x.size(1) * x.element_size() / sizeof(int4));
-  auto num_reduced_tokens = static_cast<int>(is_reduced_token_in_rank.size(0));
-  GRPCOLL_HOST_ASSERT((hidden_size * x.element_size()) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
-  GRPCOLL_HOST_ASSERT(((hidden_size * x.element_size()) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
+  const auto num_tokens = static_cast<int>(x.size(0)), num_reduced_tokens = static_cast<int>(is_reduced_token_in_rank.size(0));
+  const auto hidden_size = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(hidden_size * comm_elem_size / sizeof(int4));
+  GRPCOLL_HOST_ASSERT((hidden_size * comm_elem_size) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
+  GRPCOLL_HOST_ASSERT(hidden_int4 % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
   GRPCOLL_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes());
   GRPCOLL_HOST_ASSERT(is_reduced_token_in_rank.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels);
@@ -1369,7 +1374,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   auto reduced_x = torch::Tensor();
   if (reduced_x_buf.has_value()) {
     GRPCOLL_HOST_ASSERT(reduced_x_buf->dim() == 2 and reduced_x_buf->is_contiguous());
-    GRPCOLL_HOST_ASSERT(reduced_x_buf->scalar_type() == x.scalar_type());
+    GRPCOLL_HOST_ASSERT(reduced_x_buf->scalar_type() == x_dtype);
     GRPCOLL_HOST_ASSERT(reduced_x_buf->size(0) == num_reduced_tokens and reduced_x_buf->size(1) == hidden_size);
     reduced_x = reduced_x_buf.value();
   } else {
@@ -1413,7 +1418,9 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       /*stream=*/comm_stream,
       /*num_channels=*/num_channels,
       /*low_latency_mode=*/low_latency_mode,
-      /*type=*/at::cuda::ScalarTypeToCudaDataType(x.scalar_type()));
+      /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
+      /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
+      /*reduce_op=*/reduce_op_);
 
   // Record or wait streams
   std::optional<EventHandle> event;

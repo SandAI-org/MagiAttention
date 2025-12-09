@@ -997,11 +997,6 @@ class GrpCollBuffer:
     ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """Internode group reduce implementation"""
 
-        # TODO: support specific comm dtype for internode group reduce
-        assert (
-            comm_dtype is None
-        ), "Internode group reduce does not support `comm_dtype`"
-
         assert isinstance(handle, GrpCollInterHandle)
 
         # Prepare lse and reduced_lse
@@ -1038,6 +1033,7 @@ class GrpCollBuffer:
             allocate_on_comm_stream,
             reduce_op,
             acc_reduce,
+            comm_dtype,
         )
 
         # Pack reduced_x groups

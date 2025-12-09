@@ -46,6 +46,7 @@
 #include "exception.cuh"
 #include "ibgda_device.cuh"
 #include "launch.cuh"
+#include "reduce_op.cuh"
 #include "utils.cuh"
 
 namespace magi_attn_comm::grpcoll {
@@ -1953,9 +1954,12 @@ __device__ void group_reduce_token(
 
 // FIXME: the register usage is highly spilled for both load/store
 template <
+    typename dtype_t,
+    typename comm_dtype_t,
+    typename reduce_dtype_t,
+    ReduceOp kReduceOp,
     bool kLowLatencyMode,
     int kNumRDMARanks,
-    typename dtype_t,
     int kNumGroupReduceForwarderWarps,
     int kNumTMABytesPerSenderWarp,
     int kNumTMABytesPerForwarderWarp,
@@ -2687,46 +2691,77 @@ void group_reduce(
     cudaStream_t stream,
     int num_channels,
     bool low_latency_mode,
-    cudaDataType_t type) {
+    cudaDataType_t dtype,
+    cudaDataType_t comm_dtype,
+    ReduceOp reduce_op) {
   constexpr int kNumGroupReduceForwarderWarps = 24;
   constexpr int kNumTMABytesPerSenderWarp = 16384;
   constexpr int kNumTMABytesPerForwarderWarp = 9248; // REVIEW: why this unusual number ?
   constexpr int smem_size = std::max(kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, kNumTMABytesPerForwarderWarp * kNumGroupReduceForwarderWarps);
 
-#define GROUP_REDUCE_LAUNCH_CASE(num_rdma_ranks)                                                                                                           \
-  {                                                                                                                                                        \
-    auto group_reduce_func = low_latency_mode                                                                                                              \
-        ? group_reduce_kernel<true, num_rdma_ranks, nv_bfloat16, kNumGroupReduceForwarderWarps, kNumTMABytesPerSenderWarp, kNumTMABytesPerForwarderWarp>   \
-        : group_reduce_kernel<false, num_rdma_ranks, nv_bfloat16, kNumGroupReduceForwarderWarps, kNumTMABytesPerSenderWarp, kNumTMABytesPerForwarderWarp>; \
-    SET_SHARED_MEMORY_FOR_TMA(group_reduce_func);                                                                                                          \
-    LAUNCH_KERNEL(                                                                                                                                         \
-        &cfg,                                                                                                                                              \
-        group_reduce_func,                                                                                                                                 \
-        reinterpret_cast<int4*>(reduced_x),                                                                                                                \
-        reduced_lse,                                                                                                                                       \
-        reinterpret_cast<const int4*>(x),                                                                                                                  \
-        lse,                                                                                                                                               \
-        is_reduced_token_in_rank,                                                                                                                          \
-        reduced_rdma_head,                                                                                                                                 \
-        reduced_nvl_head,                                                                                                                                  \
-        reinterpret_cast<const SourceMeta*>(src_meta),                                                                                                     \
-        rdma_channel_prefix_matrix,                                                                                                                        \
-        rdma_rank_prefix_sum,                                                                                                                              \
-        gbl_channel_prefix_matrix,                                                                                                                         \
-        pre_perm_idx,                                                                                                                                      \
-        num_tokens,                                                                                                                                        \
-        num_reduced_tokens,                                                                                                                                \
-        hidden_size,                                                                                                                                       \
-        num_heads,                                                                                                                                         \
-        rdma_buffer_ptr,                                                                                                                                   \
-        num_max_rdma_chunked_send_tokens,                                                                                                                  \
-        num_max_rdma_chunked_recv_tokens,                                                                                                                  \
-        buffer_ptrs,                                                                                                                                       \
-        num_max_nvl_chunked_send_tokens,                                                                                                                   \
-        num_max_nvl_chunked_recv_tokens,                                                                                                                   \
-        rank,                                                                                                                                              \
-        num_ranks);                                                                                                                                        \
-  }                                                                                                                                                        \
+#define GROUP_REDUCE_LAUNCH_CASE(dtype, comm_dtype, reduce_dtype, reduce_op, num_rdma_ranks) \
+  {                                                                                          \
+    auto group_reduce_func = low_latency_mode ? group_reduce_kernel<                         \
+                                                    dtype,                                   \
+                                                    comm_dtype,                              \
+                                                    reduce_dtype,                            \
+                                                    reduce_op,                               \
+                                                    true,                                    \
+                                                    num_rdma_ranks,                          \
+                                                    kNumGroupReduceForwarderWarps,           \
+                                                    kNumTMABytesPerSenderWarp,               \
+                                                    kNumTMABytesPerForwarderWarp>            \
+                                              : group_reduce_kernel<                         \
+                                                    dtype,                                   \
+                                                    comm_dtype,                              \
+                                                    reduce_dtype,                            \
+                                                    reduce_op,                               \
+                                                    false,                                   \
+                                                    num_rdma_ranks,                          \
+                                                    kNumGroupReduceForwarderWarps,           \
+                                                    kNumTMABytesPerSenderWarp,               \
+                                                    kNumTMABytesPerForwarderWarp>;           \
+    SET_SHARED_MEMORY_FOR_TMA(group_reduce_func);                                            \
+    LAUNCH_KERNEL(                                                                           \
+        &cfg,                                                                                \
+        group_reduce_func,                                                                   \
+        reinterpret_cast<int4*>(reduced_x),                                                  \
+        reduced_lse,                                                                         \
+        reinterpret_cast<const int4*>(x),                                                    \
+        lse,                                                                                 \
+        is_reduced_token_in_rank,                                                            \
+        reduced_rdma_head,                                                                   \
+        reduced_nvl_head,                                                                    \
+        reinterpret_cast<const SourceMeta*>(src_meta),                                       \
+        rdma_channel_prefix_matrix,                                                          \
+        rdma_rank_prefix_sum,                                                                \
+        gbl_channel_prefix_matrix,                                                           \
+        pre_perm_idx,                                                                        \
+        num_tokens,                                                                          \
+        num_reduced_tokens,                                                                  \
+        hidden_size,                                                                         \
+        num_heads,                                                                           \
+        rdma_buffer_ptr,                                                                     \
+        num_max_rdma_chunked_send_tokens,                                                    \
+        num_max_rdma_chunked_recv_tokens,                                                    \
+        buffer_ptrs,                                                                         \
+        num_max_nvl_chunked_send_tokens,                                                     \
+        num_max_nvl_chunked_recv_tokens,                                                     \
+        rank,                                                                                \
+        num_ranks);                                                                          \
+  }                                                                                          \
+  break
+
+#define GROUP_REDUCE_DTYPE_LAUNCH_CASE(...)                                           \
+  {                                                                                   \
+    SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(GROUP_REDUCE_LAUNCH_CASE, ##__VA_ARGS__); \
+  }                                                                                   \
+  break
+
+#define GROUP_REDUCE_REDUCE_OP_LAUNCH_CASE(...)                       \
+  {                                                                   \
+    SWITCH_REDUCE_OPS(GROUP_REDUCE_DTYPE_LAUNCH_CASE, ##__VA_ARGS__); \
+  }                                                                   \
   break
 
   const int num_rdma_ranks = num_ranks / NUM_MAX_NVL_PEERS;
@@ -2739,9 +2774,8 @@ void group_reduce(
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / num_rdma_ranks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= num_warps_per_forwarder);
-  GRPCOLL_HOST_ASSERT(type == CUDA_R_16BF);
-  GRPCOLL_HOST_ASSERT(hidden_size % (sizeof(int4) / sizeof(nv_bfloat16) * WARP_SIZE) == 0); // hidden_int4 must be a multiple of WARP_SIZE
-  GRPCOLL_HOST_ASSERT(hidden_size * sizeof(nv_bfloat16) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
+  GRPCOLL_HOST_ASSERT(dtype == comm_dtype); // TODO: support lp comm dtype
+  GRPCOLL_HOST_ASSERT(hidden_size * sizeof(comm_dtype) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
 
   // Even-numbered SMs for NVL senders and RDMA receivers
   // odd-numbered SMs for forwarders
@@ -2749,7 +2783,10 @@ void group_reduce(
   GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
 
   SETUP_LAUNCH_CONFIG(num_sms, num_threads, stream);
-  SWITCH_RDMA_RANKS(GROUP_REDUCE_LAUNCH_CASE);
+  SWITCH_RDMA_RANKS(GROUP_REDUCE_REDUCE_OP_LAUNCH_CASE);
+
+#undef GROUP_REDUCE_REDUCE_OP_LAUNCH_CASE
+#undef GROUP_REDUCE_DTYPE_LAUNCH_CASE
 #undef GROUP_REDUCE_LAUNCH_CASE
 }
 
