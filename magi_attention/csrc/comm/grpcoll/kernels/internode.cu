@@ -60,6 +60,10 @@ extern nvshmem_team_t cpu_rdma_team;
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct SourceMeta {
+  // `src_rdma_rank`: the src RDMA peer to return to in group reduce stage
+  // `is_token_in_nvl_rank_bits`: whether the token is in each NVL peer
+  // REVIEW: why we need to keep the `is_token_in_nvl_rank_bits`,
+  // instead of just keeping the src NVL peer directly ?
   int src_rdma_rank, is_token_in_nvl_rank_bits;
 
   GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS == 8, "Invalid number of maximum NVL peers");
@@ -71,8 +75,8 @@ struct SourceMeta {
     src_rdma_rank = rdma_rank;
     is_token_in_nvl_rank_bits = is_token_in_nvl_ranks[0];
 #pragma unroll
-    for (int i = 1; i < NUM_MAX_NVL_PEERS; ++i)
-      is_token_in_nvl_rank_bits |= is_token_in_nvl_ranks[i] << i;
+    for (int r = 1; r < NUM_MAX_NVL_PEERS; ++r)
+      is_token_in_nvl_rank_bits |= is_token_in_nvl_ranks[r] << r;
   }
 
   DEVICE_INLINE bool is_token_in_nvl_rank(int nvl_rank) const {
@@ -90,9 +94,9 @@ int get_source_meta_bytes() {
 // Helpers
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-// At most 8 RDMA ranks to be sent
+// REVIEW: why at most 8 RDMA ranks to be sent
 constexpr int get_num_topk_rdma_ranks(const int num_rdma_ranks) {
-  return num_rdma_ranks < 8 ? num_rdma_ranks : 8;
+  return min(num_rdma_ranks, 8);
 }
 
 constexpr int get_num_threads_group_cast(const int num_group_cast_rdma_sender_warps) {
@@ -1806,15 +1810,15 @@ __device__ void group_reduce_token(
   // Count and collect topk slots and corr. src ranks from all heads within the warp
   // NOTES: lane `r` holds the `head_idx` and `is_token_in_rank` of rank `r`
   GRPCOLL_STATIC_ASSERT(kMaxNumRanks <= WARP_SIZE, "Too many ranks");
-  int num_topk_ranks = 0, topk_ranks[kMaxNumRanks], slot_indices[kMaxNumRanks];
+  int num_src_ranks = 0, src_rank_idxs[kMaxNumRanks], slot_indices[kMaxNumRanks];
 #pragma unroll
   for (int r = 0; r < kNumRanks; ++r) {
     if (broadcast_in_warp(/*val=*/is_token_in_rank, /*src_lane=*/r)) {
-      slot_indices[num_topk_ranks] = broadcast_in_warp(/*val=*/head_idx, /*src_lane=*/r) % num_max_recv_tokens;
-      topk_ranks[num_topk_ranks++] = r;
+      slot_indices[num_src_ranks] = broadcast_in_warp(/*val=*/head_idx, /*src_lane=*/r) % num_max_recv_tokens;
+      src_rank_idxs[num_src_ranks++] = r;
     }
   }
-  GRPCOLL_DEVICE_ASSERT(num_topk_ranks <= kMaxNumRanks);
+  GRPCOLL_DEVICE_ASSERT(num_src_ranks <= kMaxNumRanks);
 
   // Reduce token from topk src ranks
   if constexpr (kUseTMA) {
@@ -1833,15 +1837,15 @@ __device__ void group_reduce_token(
 
     // Prefetch the hidden states of topk tokens for stage0 with TMA-load
     // each lane for one token
-    if (lane_id < num_topk_ranks) {
+    if (lane_id < num_src_ranks) {
       tma_load_1d(
           /*smem_ptr=*/tma_load_buffer(0, lane_id),
-          /*gmem_ptr=*/get_addr_fn(topk_ranks[lane_id], slot_indices[lane_id], 0),
+          /*gmem_ptr=*/get_addr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], 0),
           /*mbar_ptr=*/tma_mbarrier(0),
           /*num_bytes=*/kNumTMALoadBytes,
           /*evict_first=*/true);
     }
-    mbarrier_arrive_and_expect_tx(tma_mbarrier(0), lane_id < num_topk_ranks ? kNumTMALoadBytes : 0);
+    mbarrier_arrive_and_expect_tx(tma_mbarrier(0), lane_id < num_src_ranks ? kNumTMALoadBytes : 0);
     __syncwarp();
 
     // Loop over the whole hidden size in int4 and group_reduce
@@ -1854,15 +1858,15 @@ __device__ void group_reduce_token(
       // Prefetch the hidden states of topk tokens for next stage with TMA-load
       // each lane for one token
       if (shifted + WARP_SIZE < hidden_int4) {
-        if (lane_id < num_topk_ranks) {
+        if (lane_id < num_src_ranks) {
           tma_load_1d(
               /*smem_ptr=*/tma_load_buffer(next_stage_idx, lane_id),
-              /*gmem_ptr=*/get_addr_fn(topk_ranks[lane_id], slot_indices[lane_id], shifted + WARP_SIZE),
+              /*gmem_ptr=*/get_addr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], shifted + WARP_SIZE),
               /*mbar_ptr=*/tma_mbarrier(next_stage_idx),
               /*num_bytes=*/kNumTMALoadBytes,
               /*evict_first=*/true);
         }
-        mbarrier_arrive_and_expect_tx(tma_mbarrier(next_stage_idx), lane_id < num_topk_ranks ? kNumTMALoadBytes : 0);
+        mbarrier_arrive_and_expect_tx(tma_mbarrier(next_stage_idx), lane_id < num_src_ranks ? kNumTMALoadBytes : 0);
         __syncwarp();
       }
 
@@ -1874,9 +1878,15 @@ __device__ void group_reduce_token(
       // from TMA buffer in shared memory into registers
       reduce_dtype_t hp_hidval_reduce_buf[kCommDtypePerInt4] = {0};
 #pragma unroll
-      for (int j = 0; j < num_topk_ranks; ++j) {
+      for (int j = 0; j < num_src_ranks; ++j) {
         auto recv_value_dtypes = reinterpret_cast<const comm_dtype_t*>(tma_load_buffer(stage_idx, j) + lane_id);
         foreach_reduce_add<reduce_dtype_t, comm_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, recv_value_dtypes);
+      }
+
+      if constexpr (kReduceOp == ReduceOp::AVG) {
+        auto num_reduces = kAccReduce ? num_src_ranks + 1 : num_src_ranks; // if in `kAccReduce` mode, the old value also counts
+        if (num_reduces > 1) // average by dividing non-trivial `num_reduces`
+          foreach_div<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, static_cast<reduce_dtype_t>(num_reduces));
       }
 
       // Wait for the TMA store in previous round with `stage_idx` to be finished
@@ -1918,8 +1928,8 @@ __device__ void group_reduce_token(
       // TODO: maybe too many registers here
       int4 recv_value_int4[kMaxNumRanks];
 #pragma unroll
-      for (int j = 0; j < num_topk_ranks; ++j) {
-        recv_value_int4[j] = ld_nc_global(get_addr_fn(topk_ranks[j], slot_indices[j], i * kCommDtypePerDtype));
+      for (int j = 0; j < num_src_ranks; ++j) {
+        recv_value_int4[j] = ld_nc_global(get_addr_fn(src_rank_idxs[j], slot_indices[j], i * kCommDtypePerDtype));
       }
 
       // Prepare high-precision reduce buffer
@@ -1938,9 +1948,15 @@ __device__ void group_reduce_token(
 
 #pragma unroll
       // Reduce hidden states from topk tokens in high precision
-      for (int j = 0; j < num_topk_ranks; ++j) {
+      for (int j = 0; j < num_src_ranks; ++j) {
         auto recv_value_dtypes = reinterpret_cast<const comm_dtype_t*>(&recv_value_int4[j]);
         foreach_reduce_add<reduce_dtype_t, comm_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, recv_value_dtypes);
+      }
+
+      if constexpr (kReduceOp == ReduceOp::AVG) {
+        auto num_reduces = kAccReduce ? num_src_ranks + 1 : num_src_ranks; // if in `kAccReduce` mode, the old value also counts
+        if (num_reduces > 1) // average by dividing non-trivial `num_reduces`
+          foreach_div<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, static_cast<reduce_dtype_t>(num_reduces));
       }
 
       // Cast reduced values back to `dtype_t`
@@ -1960,8 +1976,8 @@ __device__ void group_reduce_token(
   if (lane_id < num_topk) {
     float value = 0;
 #pragma unroll
-    for (int i = 0; i < num_topk_ranks; ++i)
-      value += recv_tw_fn(topk_ranks[i], slot_indices[i], lane_id);
+    for (int i = 0; i < num_src_ranks; ++i)
+      value += recv_tw_fn(src_rank_idxs[i], slot_indices[i], lane_id);
     st_na_global(reduced_topk_weights + lane_id, value); // non-cached store
   }
 }

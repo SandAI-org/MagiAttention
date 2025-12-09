@@ -1525,9 +1525,7 @@ void group_reduce_kernel(
               }
 
               if constexpr (kReduceOp == ReduceOp::AVG) {
-                auto num_reduces = num_src_ranks;
-                if constexpr (kAccReduce) // if in `kAccReduce` mode, the old value also counts
-                  ++num_reduces;
+                auto num_reduces = kAccReduce ? num_src_ranks + 1 : num_src_ranks; // if in `kAccReduce` mode, the old value also counts
                 if (num_reduces > 1) // average by dividing non-trivial `num_reduces`
                   foreach_div<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, static_cast<reduce_dtype_t>(num_reduces));
               }
