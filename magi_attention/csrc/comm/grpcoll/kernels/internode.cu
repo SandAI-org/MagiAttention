@@ -1777,27 +1777,30 @@ void cached_notify(
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
-    int kNumRanks,
     typename dtype_t,
     typename comm_dtype_t,
     typename reduce_dtype_t,
     ReduceOp kReduceOp,
     bool kAccReduce,
-    int kMaxNumRanks,
+    bool kGlobalReduce,
+    int kNumRanks,
+    int kMaxNumSrcRanks,
     bool kUseTMA,
     int kNumTMAStages,
     int kNumTMALoadBytes = 0,
     typename GetAddrFn,
     typename ReceiveTWFn>
-__device__ void group_reduce_token(
+__device__ void group_reduce_token_in_warp(
     bool is_token_in_rank,
     int head_idx,
     int lane_id,
     int hidden_int4,
     int num_topk,
+    int num_global_ranks,
     int4* reduced_row,
     float* reduced_topk_weights,
     int num_max_recv_tokens,
+    const bool* is_token_in_global_rank,
     const GetAddrFn& get_addr_fn,
     const ReceiveTWFn& recv_tw_fn,
     uint8_t* smem_ptr,
@@ -1807,11 +1810,12 @@ __device__ void group_reduce_token(
   constexpr auto kCommDtypePerInt4 = kCommDtypePerDtype * kDtypePerInt4;
   const int hidden_int4_comm = hidden_int4 / kCommDtypePerDtype;
   GRPCOLL_STATIC_ASSERT(kNumTMAStages == 2, "Only support 2 stages for now, whether you enable TMA or not");
+  GRPCOLL_STATIC_ASSERT(kReduceOp == ReduceOp::AVG or !kGlobalReduce, "Only support global reduce for ReduceOp::AVG");
 
   // Count and collect topk slots and corr. src ranks from all heads within the warp
   // NOTES: lane `r` holds the `head_idx` and `is_token_in_rank` of rank `r`
-  GRPCOLL_STATIC_ASSERT(kMaxNumRanks <= WARP_SIZE, "Too many ranks");
-  int num_src_ranks = 0, src_rank_idxs[kMaxNumRanks], slot_indices[kMaxNumRanks];
+  GRPCOLL_STATIC_ASSERT(kMaxNumSrcRanks <= WARP_SIZE, "Too many ranks");
+  int num_src_ranks = 0, src_rank_idxs[kMaxNumSrcRanks], slot_indices[kMaxNumSrcRanks];
 #pragma unroll
   for (int r = 0; r < kNumRanks; ++r) {
     if (broadcast_in_warp(/*val=*/is_token_in_rank, /*src_lane=*/r)) {
@@ -1819,7 +1823,19 @@ __device__ void group_reduce_token(
       src_rank_idxs[num_src_ranks++] = r;
     }
   }
-  GRPCOLL_DEVICE_ASSERT(num_src_ranks <= kMaxNumRanks);
+  GRPCOLL_DEVICE_ASSERT(num_src_ranks <= kMaxNumSrcRanks);
+
+  // Get the actual number of ranks to reduce
+  // which is only used for `kReduceOp == ReduceOp::AVG` by now
+  int num_ranks_to_reduce = 0;
+  if constexpr (kGlobalReduce) { // read and reduce from `is_token_in_global_rank`
+    for (int r = lane_id; r < num_global_ranks; r += WARP_SIZE) {
+      num_ranks_to_reduce += is_token_in_global_rank[r];
+    }
+    num_ranks_to_reduce = warp_reduce_sum(num_ranks_to_reduce);
+  } else { // just use `num_src_ranks`
+    num_ranks_to_reduce = num_src_ranks;
+  }
 
   // Reduce token from topk src ranks
   if constexpr (kUseTMA) {
@@ -1885,7 +1901,7 @@ __device__ void group_reduce_token(
       }
 
       if constexpr (kReduceOp == ReduceOp::AVG) {
-        auto num_reduces = kAccReduce ? num_src_ranks + 1 : num_src_ranks; // if in `kAccReduce` mode, the old value also counts
+        auto num_reduces = kAccReduce ? num_ranks_to_reduce + 1 : num_ranks_to_reduce; // if in `kAccReduce` mode, the old value also counts
         if (num_reduces > 1) // average by dividing non-trivial `num_reduces`
           foreach_div<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, static_cast<reduce_dtype_t>(num_reduces));
       }
@@ -1927,7 +1943,7 @@ __device__ void group_reduce_token(
 
       // Read hidden states of topk tokens
       // TODO: maybe too many registers here
-      int4 recv_value_int4[kMaxNumRanks];
+      int4 recv_value_int4[kMaxNumSrcRanks];
 #pragma unroll
       for (int j = 0; j < num_src_ranks; ++j) {
         recv_value_int4[j] = ld_nc_global(get_addr_fn(src_rank_idxs[j], slot_indices[j], i * kCommDtypePerDtype));
@@ -1955,7 +1971,7 @@ __device__ void group_reduce_token(
       }
 
       if constexpr (kReduceOp == ReduceOp::AVG) {
-        auto num_reduces = kAccReduce ? num_src_ranks + 1 : num_src_ranks; // if in `kAccReduce` mode, the old value also counts
+        auto num_reduces = kAccReduce ? num_ranks_to_reduce + 1 : num_ranks_to_reduce; // if in `kAccReduce` mode, the old value also counts
         if (num_reduces > 1) // average by dividing non-trivial `num_reduces`
           foreach_div<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, static_cast<reduce_dtype_t>(num_reduces));
       }
@@ -2459,6 +2475,11 @@ void group_reduce_kernel(
                 reinterpret_cast<float*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token + hidden_bytes + sizeof(SourceMeta)) + topk_idx);
           };
 
+          // NOTE: for `kReduceOp == ReduceOp::AVG`,
+          // it's incorrect to partial-reduce it by `kNVLAndRDMAForwarder` in advance,
+          // but had better leave it to `kRDMAReceiver` to global-reduce
+          constexpr auto kForwardReduceOp = kReduceOp == ReduceOp::AVG ? ReduceOp::SUM : kReduceOp;
+
           // Reduce this token
           //  `head_idx`: the head idx of the token in NVL buffer
           //  `reduced_row`: the token ptr in output buffer to store the reduced token
@@ -2466,24 +2487,27 @@ void group_reduce_kernel(
           //  `num_max_recv_tokens`: the queue size of NVL buffer
           //  `get_addr_fn`: get address of the token in NVL buffer
           //  `recv_tw_fn`: get top-k weights of the token in NVL buffer
-          group_reduce_token</*kNumRanks=*/NUM_MAX_NVL_PEERS,
-                             /*dtype_t=*/dtype_t,
-                             /*comm_dtype_t=*/comm_dtype_t,
-                             /*reduced_dtype_t=*/reduce_dtype_t,
-                             /*kReduceOp=*/kReduceOp,
-                             /*kAccReduce=*/false,
-                             /*kMaxNumRanks=*/NUM_MAX_NVL_PEERS,
-                             /*kUseTMA=*/true,
-                             /*kNumTMAStages=*/kNumTMAStages,
-                             /*kNumTMALoadBytes=*/kNumTMALoadBytes>(
+          group_reduce_token_in_warp</*dtype_t=*/dtype_t,
+                                     /*comm_dtype_t=*/comm_dtype_t,
+                                     /*reduced_dtype_t=*/reduce_dtype_t,
+                                     /*kReduceOp=*/kForwardReduceOp,
+                                     /*kAccReduce=*/false,
+                                     /*kGlobalReduce=*/false,
+                                     /*kNumRanks=*/NUM_MAX_NVL_PEERS,
+                                     /*kMaxNumSrcRanks=*/NUM_MAX_NVL_PEERS,
+                                     /*kUseTMA=*/true,
+                                     /*kNumTMAStages=*/kNumTMAStages,
+                                     /*kNumTMALoadBytes=*/kNumTMALoadBytes>(
               /*is_token_in_rank=*/expected_head >= 0,
               /*head_idx=*/expected_head,
               /*lane_id=*/lane_id,
               /*hidden_int4=*/hidden_int4,
               /*num_topk=*/num_topk,
+              /*num_global_ranks=*/num_ranks,
               /*reduced_row=*/static_cast<int4*>(token_ptr_in_rdma_buffer),
               /*reduced_topk_weights=*/reinterpret_cast<float*>(static_cast<int8_t*>(token_ptr_in_rdma_buffer) + hidden_bytes + sizeof(SourceMeta)),
               /*num_max_recv_tokens=*/num_max_nvl_chunked_recv_tokens_per_rdma,
+              /*is_token_in_global_rank=*/nullptr,
               /*get_addr_fn=*/get_addr_fn,
               /*recv_tw_fn=*/recv_tw_fn,
               /*smem_ptr=*/smem_ptr,
@@ -2600,6 +2624,11 @@ void group_reduce_kernel(
               topk_idx);
         };
 
+        // NOTE: for `kReduceOp == ReduceOp::AVG`,
+        // it's incorrect to partial-reduce it by `kNVLAndRDMAForwarder`,
+        // but let `kRDMAReceiver` global-reduce it here
+        constexpr bool kGlobalReduce = kReduceOp == ReduceOp::AVG;
+
         // Reduce this token
         //  `head_idx`: the head idx of the token in RDMA buffer
         //  `reduced_row`: the token ptr in output buffer to store the reduced token
@@ -2608,23 +2637,26 @@ void group_reduce_kernel(
         //  `get_addr_fn`: get address of the token in RDMA buffer
         //  `recv_tw_fn`: get top-k weights of the token in RDMA buffer
         uint32_t dummy_tma_phases[kNumTMAStages];
-        group_reduce_token</*kNumRanks=*/kNumRDMARanks,
-                           /*dtype_t=*/dtype_t,
-                           /*comm_dtype_t=*/comm_dtype_t,
-                           /*reduced_dtype_t=*/reduce_dtype_t,
-                           /*kReduceOp=*/kReduceOp,
-                           /*kAccReduce=*/kAccReduce,
-                           /*kMaxNumRanks=*/kNumMaxSrcRDMARanks,
-                           /*kUseTMA=*/false, // REVIEW: why not use TMA here ?
-                           /*kNumTMAStages=*/kNumTMAStages>(
+        group_reduce_token_in_warp</*dtype_t=*/dtype_t,
+                                   /*comm_dtype_t=*/comm_dtype_t,
+                                   /*reduced_dtype_t=*/reduce_dtype_t,
+                                   /*kReduceOp=*/kReduceOp,
+                                   /*kAccReduce=*/kAccReduce,
+                                   /*kGlobalReduce*/ kGlobalReduce,
+                                   /*kNumRanks=*/kNumRDMARanks,
+                                   /*kMaxNumSrcRanks=*/kNumMaxSrcRDMARanks,
+                                   /*kUseTMA=*/false, // REVIEW: why not use TMA here ?
+                                   /*kNumTMAStages=*/kNumTMAStages>(
             /*is_token_in_rank=*/expected_head >= 0,
             /*head_idx=*/expected_head,
             /*lane_id=*/lane_id,
             /*hidden_int4=*/hidden_int4,
             /*num_topk=*/num_topk,
+            /*num_global_ranks=*/num_ranks,
             /*reduced_row=*/reduced_x + token_idx * hidden_int4,
             /*reduced_topk_weights=*/reduced_topk_weights + token_idx * num_topk,
             /*num_max_recv_tokens=*/num_max_rdma_chunked_recv_tokens,
+            /*is_token_in_global_rank=*/is_reduced_token_in_rank + token_idx * num_ranks,
             /*get_addr_fn=*/get_addr_fn,
             /*recv_tw_fn=*/recv_tw_fn,
             /*smem_ptr=*/nullptr,

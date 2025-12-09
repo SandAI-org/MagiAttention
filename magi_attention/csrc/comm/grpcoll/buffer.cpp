@@ -1279,8 +1279,6 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     std::optional<c10::ScalarType> comm_dtype) {
   // Transfer reduce ops
   ReduceOp reduce_op_ = str_to_reduce_op(reduce_op);
-  // TODO: support other reduce ops
-  GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::SUM);
 
   // Transfer dtypes and item sizes in bytes
   auto x_dtype = x.scalar_type();
