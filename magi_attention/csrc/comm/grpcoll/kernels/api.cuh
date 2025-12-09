@@ -203,6 +203,7 @@ void notify_group_cast(
     int num_tokens,
     int num_channels,
     int hidden_int4,
+    int num_heads,
     int* rdma_channel_prefix_matrix,
     int* recv_rdma_rank_prefix_sum,
     int* gbl_channel_prefix_matrix,
@@ -254,6 +255,7 @@ void group_cast(
 
 void cached_notify(
     int hidden_int4,
+    int num_heads,
     int num_ranks,
     int num_channels,
     int num_reduced_tokens,
@@ -291,6 +293,7 @@ void group_reduce(
     int num_tokens,
     int num_reduced_tokens,
     int hidden_size,
+    int num_heads,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,

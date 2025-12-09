@@ -1040,6 +1040,7 @@ Buffer::internode_group_cast(
     // Just a barrier and clean flags
     internode::cached_notify(
         /*hidden_int4=*/hidden_int4,
+        /*num_heads=*/num_heads,
         /*num_ranks=*/num_ranks,
         /*num_channels=*/num_channels,
         /*num_reduced_tokens=*/0,
@@ -1079,6 +1080,7 @@ Buffer::internode_group_cast(
         /*num_tokens=*/num_tokens,
         /*num_channels=*/num_channels,
         /*hidden_int4=*/hidden_int4,
+        /*num_heads=*/num_heads,
         /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
         /*recv_rdma_rank_prefix_sum=*/recv_rdma_rank_prefix_sum.data_ptr<int>(),
         /*gbl_channel_prefix_matrix=*/gbl_channel_prefix_matrix.data_ptr<int>(),
@@ -1343,6 +1345,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   // Launch barrier and reset queue head and tail
   internode::cached_notify(
       /*hidden_int4=*/hidden_int4,
+      /*num_heads=*/0,
       /*num_ranks=*/num_ranks,
       /*num_channels=*/num_channels,
       /*num_reduced_tokens=*/num_reduced_tokens,
@@ -1398,6 +1401,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
       /*num_tokens=*/num_tokens,
       /*num_reduced_tokens=*/num_reduced_tokens,
       /*hidden_size=*/hidden_size,
+      /*num_heads=*/0, // TODO: support lse reduce
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
       /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,

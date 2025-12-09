@@ -102,22 +102,24 @@ constexpr int get_num_threads_group_reduce(const int num_group_reduce_forwarder_
   return (num_group_reduce_forwarder_warps + 1) * WARP_SIZE;
 }
 
-HOST_DEVICE_INLINE int get_num_bytes_per_token(int hidden_int4) {
+HOST_DEVICE_INLINE int get_num_bytes_per_token(int hidden_int4, int num_heads) {
   return static_cast<int>(align(
       /*hidden_states=*/hidden_int4 * sizeof(int4) +
+          /*lse*/ num_heads * sizeof(float) +
           /*source_meta=*/sizeof(SourceMeta),
       sizeof(int4)));
 }
 
-HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_rdma_ranks, int num_rdma_recv_buffer_tokens, int num_channels) {
+HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_heads, int num_rdma_ranks, int num_rdma_recv_buffer_tokens, int num_channels) {
   // Return `int32_t` offset and count to clean
   return {
-      (get_num_bytes_per_token(hidden_int4) * num_rdma_recv_buffer_tokens * num_rdma_ranks * 2 * num_channels) / sizeof(int),
+      (get_num_bytes_per_token(hidden_int4, num_heads) * num_rdma_recv_buffer_tokens * num_rdma_ranks * 2 * num_channels) / sizeof(int),
       (NUM_MAX_NVL_PEERS * 2 + 4) * num_rdma_ranks * 2 * num_channels};
 }
 
 HOST_DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
     int hidden_int4,
+    int num_heads,
     int num_rdma_ranks,
     int num_nvl_ranks,
     int num_nvl_recv_buffer_tokens,
@@ -127,7 +129,7 @@ HOST_DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
 
   // Return `int32_t` offset and to clean
   return {
-      (num_nvl_recv_buffer_tokens * get_num_bytes_per_token(hidden_int4) * num_nvl_ranks * num_channels) / sizeof(int),
+      (num_nvl_recv_buffer_tokens * get_num_bytes_per_token(hidden_int4, num_heads) * num_nvl_ranks * num_channels) / sizeof(int),
       num_nvl_ranks * (2 * num_rdma_ranks + 2) * num_channels,
   };
 }
@@ -406,6 +408,7 @@ void notify_group_cast(
     int num_tokens,
     int num_channels,
     int hidden_int4,
+    int num_heads,
     int* rdma_channel_prefix_matrix,
     int* recv_rdma_rank_prefix_sum,
     int* gbl_channel_prefix_matrix,
@@ -455,8 +458,8 @@ void notify_group_cast(
   break
 
   // Get clean meta
-  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-  auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, true);
+  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_heads, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
+  auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_heads, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, true);
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
   // REVIEW: why limited to INT_MAX ?
@@ -521,10 +524,6 @@ void group_cast_kernel(
   // FIXME: remain some unused dummy variables
   // used to be args here to keep the related code for a while
   // which should be removed in the future as long as the code is not used any more
-  const float* x_scales = nullptr;
-  float* recv_x_scales = nullptr;
-  int num_scales = 0, scale_token_stride = 0, scale_hidden_stride = 0;
-
   int64_t* recv_topk_idx = nullptr;
   float* recv_topk_weights = nullptr;
   const int64_t* topk_idx = nullptr;
@@ -580,8 +579,8 @@ void group_cast_kernel(
   //  `rdma_channel_meta`: shape=(num_channels, kNumRDMARanks, num_meta_per_rdma_channel), dtype=int
   //  `rdma_channel_head`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
   //  `rdma_channel_tail`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
-  const auto hidden_bytes = hidden_int4 * sizeof(int4), scale_bytes = num_scales * sizeof(float);
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4);
+  const auto hidden_bytes = hidden_int4 * sizeof(int4), lse_bytes = num_heads * sizeof(float);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   constexpr int num_meta_per_rdma_channel = 2 * (NUM_MAX_NVL_PEERS + 1); // (start, end) idx for dst RDMA peer (latter) + its each NVL rank (former)
   auto rdma_channel_data = SymBuffer<uint8_t, /*kDecoupled=*/true>(
       rdma_buffer_ptr,
@@ -752,8 +751,9 @@ void group_cast_kernel(
 
       // Store RDMA head for group_reduce stage to reduce
       //  `send_rdma_head`: shape=(num_tokens, kNumRDMARanks), dtype=int
-      if (lane_id < kNumRDMARanks and not kCachedMode)
+      if (lane_id < kNumRDMARanks and not kCachedMode) {
         send_rdma_head[token_idx * kNumRDMARanks + lane_id] = rdma_tail_idx;
+      }
 
       // Broadcast tails
       SourceMeta src_meta;
@@ -799,25 +799,26 @@ void group_cast_kernel(
         dst_send_buffers[r] = reinterpret_cast<int4*>(dst_send_buffers[r]) + hidden_int4;
 
 #pragma unroll
-      // Copy `x_scales`
+      // Copy `lse`
       // into each RDMA send buffer for each topk RDMA rank to send to
-      for (int i = lane_id; i < num_scales; i += WARP_SIZE) {
-        auto offset = token_idx * scale_token_stride + i * scale_hidden_stride;
-        auto value = ld_nc_global(x_scales + offset);
+      for (int i = lane_id; i < num_heads; i += WARP_SIZE) {
+        auto offset = token_idx * num_heads + i;
+        auto value = ld_nc_global(lse + offset);
 #pragma unroll
         for (int j = 0; j < num_topk_rdma_ranks; ++j)
           st_na_global(reinterpret_cast<float*>(dst_send_buffers[j]) + i, value);
       }
 
 #pragma unroll
-      // Offset the send buffers across the scales
+      // Offset the send buffers across the lse
       for (int r = 0; r < num_topk_rdma_ranks; ++r)
-        dst_send_buffers[r] = reinterpret_cast<float*>(dst_send_buffers[r]) + num_scales;
+        dst_send_buffers[r] = reinterpret_cast<float*>(dst_send_buffers[r]) + num_heads;
 
       // Copy `src_meta`
       // into each RDMA send buffer for each topk RDMA rank to send to
-      if (lane_id < num_topk_rdma_ranks)
+      if (lane_id < num_topk_rdma_ranks) {
         st_na_global(reinterpret_cast<SourceMeta*>(dst_send_buffers[lane_id]), src_meta);
+      }
 
 #pragma unroll
       // Offset the send buffers across the src_meta
@@ -1117,7 +1118,7 @@ void group_cast_kernel(
         auto rdma_token_ptr = rdma_channel_data.recv_buffer(src_rdma_rank) + rdma_slot_idx * num_bytes_per_token;
 
         // Get `src_meta` for current token
-        auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(rdma_token_ptr + hidden_bytes + scale_bytes)); // non-cached load
+        auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(rdma_token_ptr + hidden_bytes + lse_bytes)); // non-cached load
 
         // Decrement `num_tokens_to_recv_from_rdma`
         lane_id == src_rdma_rank ? (num_tokens_to_recv_from_rdma -= 1) : 0;
@@ -1327,7 +1328,7 @@ void group_cast_kernel(
         auto token_ptr_in_buffer = nvl_channel_x.buffer() + slot_idx_in_queue * num_bytes_per_token;
 
         // Load src meta to get the `src_rdma_rank` for this token
-        auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(token_ptr_in_buffer + hidden_bytes + scale_bytes));
+        auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(token_ptr_in_buffer + hidden_bytes + lse_bytes));
 
         // Get recv token idx in the `recv_x`
         int64_t recv_token_idx = broadcast_in_warp(/*val=*/total_offset, /*src_lane=*/src_meta.src_rdma_rank);
@@ -1338,12 +1339,12 @@ void group_cast_kernel(
         // Increment `total_offset` of next token for `src_rdma_rank`
         (lane_id == src_meta.src_rdma_rank) ? (++total_offset) : 0;
 
-        // Get TMA load bytes, including hidden states and scales
-        bool scale_aligned = (scale_bytes % 16 == 0);
-        auto tma_load_bytes = hidden_bytes + (scale_aligned ? scale_bytes : 0);
+        // Get TMA load bytes, including hidden states and lse
+        bool lse_aligned = lse_bytes % 16 == 0;
+        auto tma_load_bytes = hidden_bytes + (lse_aligned ? lse_bytes : 0);
 
         // TMA-copy token from NVL recv buffer to TMA buffer in shared memory
-        // including hidden states and scales
+        // including hidden states and lse
         if (lane_id == 0) { // issued by lane0
           tma_load_1d(
               /*smem_ptr=*/tma_buffer,
@@ -1369,21 +1370,21 @@ void group_cast_kernel(
         }
         __syncwarp();
 
-        // Copy scales of the token from TMA buffer in shared memory to `recv_x_scales`
+        // Copy lse of the token from TMA buffer in shared memory to `recv_lse`
         // TODO: make it as templated
         token_ptr_in_buffer += hidden_bytes;
-        if (scale_aligned) { // if aligned to 16 bytes, use TMA copy
+        if (lse_aligned) { // if aligned to 16 bytes, use TMA copy
           tma_store_1d(
               /*smem_ptr=*/tma_buffer + hidden_bytes,
-              /*gmem_ptr=*/recv_x_scales + token_idx_in_recv_x * num_scales,
-              /*num_bytes=*/scale_bytes,
+              /*gmem_ptr=*/recv_lse + token_idx_in_recv_x * num_heads,
+              /*num_bytes=*/lse_bytes,
               /*evict_first=*/false);
         } else { // if not aligned, use warp copy
           UNROLLED_WARP_COPY(
               /*UNROLL_FACTOR=*/1,
               /*LANE_ID=*/lane_id,
-              /*N=*/num_scales,
-              /*DST=*/recv_x_scales + token_idx_in_recv_x * num_scales,
+              /*N=*/num_heads,
+              /*DST=*/recv_lse + token_idx_in_recv_x * num_heads,
               /*SRC=*/reinterpret_cast<float*>(token_ptr_in_buffer),
               /*LD_FUNC=*/ld_nc_global,
               /*ST_FUNC=*/st_na_global);
@@ -1391,7 +1392,7 @@ void group_cast_kernel(
 
         // Copy src meta to `recv_src_meta` for group_reduce stage
         // NOTES: here we don't apply `post_perm_idx` to `recv_src_meta`
-        token_ptr_in_buffer += scale_bytes;
+        token_ptr_in_buffer += lse_bytes;
         if (lane_id == 0 and not kCachedMode) {
           st_na_global(recv_src_meta + recv_token_idx, src_meta); // non-cached store
         }
@@ -1512,7 +1513,7 @@ void group_cast(
     }                                               \
   }
 
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   GRPCOLL_HOST_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
   // NOTES: in case of splitting, the issued put at the end of the buffer
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0);
@@ -1693,6 +1694,7 @@ __global__ void cached_notify_kernel(
 
 void cached_notify(
     int hidden_int4,
+    int num_heads,
     int num_ranks,
     int num_channels,
     int num_reduced_tokens,
@@ -1718,8 +1720,9 @@ void cached_notify(
   const int num_sms = num_channels * 2;
 
   // Get clean meta
-  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-  auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, is_cached_group_cast);
+  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_heads, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
+  auto nvl_clean_meta =
+      get_nvl_clean_meta(hidden_int4, num_heads, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, is_cached_group_cast);
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
   // REVIEW: why limited to INT_MAX ?
@@ -1979,6 +1982,7 @@ void group_reduce_kernel(
     int num_tokens,
     int num_reduced_tokens,
     int hidden_size,
+    int num_heads,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -1994,7 +1998,7 @@ void group_reduce_kernel(
   const bool is_forwarder = sm_id % 2 == 1;
 
   const auto hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t)), hidden_bytes = hidden_int4 * sizeof(int4);
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   const auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks; // split NVL queue for each RDMA peer
   GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
 
@@ -2671,6 +2675,7 @@ void group_reduce(
     int num_tokens,
     int num_reduced_tokens,
     int hidden_size,
+    int num_heads,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -2712,6 +2717,7 @@ void group_reduce(
         num_tokens,                                                                                                                                        \
         num_reduced_tokens,                                                                                                                                \
         hidden_size,                                                                                                                                       \
+        num_heads,                                                                                                                                         \
         rdma_buffer_ptr,                                                                                                                                   \
         num_max_rdma_chunked_send_tokens,                                                                                                                  \
         num_max_rdma_chunked_recv_tokens,                                                                                                                  \
