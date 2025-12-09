@@ -95,8 +95,9 @@ int get_source_meta_bytes() {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 // REVIEW: why at most 8 RDMA ranks to be sent
-constexpr int get_num_topk_rdma_ranks(const int num_rdma_ranks) {
-  return min(num_rdma_ranks, 8);
+constexpr int get_num_max_src_rdma_ranks(const int num_rdma_ranks) {
+  // static version of min(num_rdma_ranks, 8)
+  return num_rdma_ranks < 8 ? num_rdma_ranks : 8;
 }
 
 constexpr int get_num_threads_group_cast(const int num_group_cast_rdma_sender_warps) {
@@ -489,7 +490,7 @@ template <
     int kNumTMABytesPerWarp,
     int kNumGroupCastRDMASenderWarps,
     bool kCastLSE,
-    int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks)>
+    int kNumMaxSrcRDMARanks = get_num_max_src_rdma_ranks(kNumRDMARanks)>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_cast(kNumGroupCastRDMASenderWarps), 1)
 void group_cast_kernel(
     /* 1st group of input / output data*/
@@ -762,8 +763,8 @@ void group_cast_kernel(
 
       // Broadcast tails
       SourceMeta src_meta;
-      int num_topk_rdma_ranks = 0;
-      void* dst_send_buffers[kNumTopkRDMARanks];
+      int num_src_rdma_ranks = 0;
+      void* dst_send_buffers[kNumMaxSrcRDMARanks];
 #pragma unroll
       // Broadcast info about the topk RDMA ranks this token will be sent to, including:
       //  1. the `src_meta` to tell which NVL ranks this token should be sent to in each RDMA peer
@@ -773,19 +774,19 @@ void group_cast_kernel(
           slot_idx = slot_idx % num_max_rdma_chunked_recv_tokens;
           auto recv_is_token_in_rank_uint64 = broadcast_ptr_in_warp(/*ptr=*/is_token_in_rank_uint64, /*src_lane=*/r);
           auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint64);
-          if (lane_id == num_topk_rdma_ranks)
+          if (lane_id == num_src_rdma_ranks)
             src_meta = SourceMeta(rdma_rank, recv_is_token_in_rank_values);
-          dst_send_buffers[num_topk_rdma_ranks++] =
+          dst_send_buffers[num_src_rdma_ranks++] =
               reinterpret_cast<uint8_t*>(broadcast_ptr_in_warp(/*ptr=*/send_buffer, /*src_lane=*/r)) + slot_idx * num_bytes_per_token;
         }
       }
-      GRPCOLL_DEVICE_ASSERT(num_topk_rdma_ranks <= kNumTopkRDMARanks); // REVIEW: why at most 8 RDMA peers to send to ?
+      GRPCOLL_DEVICE_ASSERT(num_src_rdma_ranks <= kNumMaxSrcRDMARanks); // REVIEW: why at most 8 RDMA peers to send to ?
 
       // Warp-copy the hidden value of this token
       // into each RDMA send buffer for each topk RDMA rank to send to
       auto st_topk_rdma_ranks = [=](const int hidden_offset, const int4& hidden_val_int4) {
 #pragma unroll
-        for (int j = 0; j < num_topk_rdma_ranks; ++j)
+        for (int j = 0; j < num_src_rdma_ranks; ++j)
           st_na_global(reinterpret_cast<int4*>(dst_send_buffers[j]) + hidden_offset, hidden_val_int4);
       };
       UNROLLED_WARP_COPY(
@@ -800,7 +801,7 @@ void group_cast_kernel(
 
 #pragma unroll
       // Offset the send buffers across the hidden states part
-      for (int r = 0; r < num_topk_rdma_ranks; ++r)
+      for (int r = 0; r < num_src_rdma_ranks; ++r)
         dst_send_buffers[r] = reinterpret_cast<int4*>(dst_send_buffers[r]) + hidden_int4;
 
 #pragma unroll
@@ -810,30 +811,30 @@ void group_cast_kernel(
         auto offset = token_idx * num_heads + i;
         auto value = ld_nc_global(lse + offset);
 #pragma unroll
-        for (int j = 0; j < num_topk_rdma_ranks; ++j)
+        for (int j = 0; j < num_src_rdma_ranks; ++j)
           st_na_global(reinterpret_cast<float*>(dst_send_buffers[j]) + i, value);
       }
 
 #pragma unroll
       // Offset the send buffers across the lse
-      for (int r = 0; r < num_topk_rdma_ranks; ++r)
+      for (int r = 0; r < num_src_rdma_ranks; ++r)
         dst_send_buffers[r] = reinterpret_cast<float*>(dst_send_buffers[r]) + num_heads;
 
       // Copy `src_meta`
       // into each RDMA send buffer for each topk RDMA rank to send to
-      if (lane_id < num_topk_rdma_ranks) {
+      if (lane_id < num_src_rdma_ranks) {
         st_na_global(reinterpret_cast<SourceMeta*>(dst_send_buffers[lane_id]), src_meta);
       }
 
 #pragma unroll
       // Offset the send buffers across the src_meta
-      for (int r = 0; r < num_topk_rdma_ranks; ++r)
+      for (int r = 0; r < num_src_rdma_ranks; ++r)
         dst_send_buffers[r] = reinterpret_cast<SourceMeta*>(dst_send_buffers[r]) + 1;
 
 #pragma unroll
       // Copy `topk_idx` and `topk_weights`
       // into each RDMA send buffer for each topk RDMA rank to send to
-      for (int i = lane_id; i < num_topk * num_topk_rdma_ranks; i += WARP_SIZE) {
+      for (int i = lane_id; i < num_topk * num_src_rdma_ranks; i += WARP_SIZE) {
         auto rank_idx = i / num_topk, copy_idx = i % num_topk;
         auto idx_value = static_cast<int>(ld_nc_global(topk_idx + token_idx * num_topk + copy_idx));
         auto weight_value = ld_nc_global(topk_weights + token_idx * num_topk + copy_idx);
@@ -1994,7 +1995,7 @@ template <
     int kNumGroupReduceForwarderWarps,
     int kNumTMABytesPerSenderWarp,
     int kNumTMABytesPerForwarderWarp,
-    int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks),
+    int kNumMaxSrcRDMARanks = get_num_max_src_rdma_ranks(kNumRDMARanks),
     int kNumWarpsPerForwarder = (kNumGroupReduceForwarderWarps / kNumRDMARanks > 0) ? kNumGroupReduceForwarderWarps / kNumRDMARanks : 1,
     int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder,
     int kNumRDMAReceivers = kNumForwarders - NUM_MAX_NVL_PEERS>
@@ -2613,7 +2614,7 @@ void group_reduce_kernel(
                            /*reduced_dtype_t=*/reduce_dtype_t,
                            /*kReduceOp=*/kReduceOp,
                            /*kAccReduce=*/kAccReduce,
-                           /*kMaxNumRanks=*/kNumTopkRDMARanks,
+                           /*kMaxNumRanks=*/kNumMaxSrcRDMARanks,
                            /*kUseTMA=*/false, // REVIEW: why not use TMA here ?
                            /*kNumTMAStages=*/kNumTMAStages>(
             /*is_token_in_rank=*/expected_head >= 0,
