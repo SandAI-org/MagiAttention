@@ -1777,7 +1777,7 @@ __device__ void reduce_token_in_warp(
   // Reduce token from src ranks
   if constexpr (kUseTMA) {
     GRPCOLL_STATIC_ASSERT(kNumTMALoadBytes == sizeof(int4) * WARP_SIZE, "Invalid kNumTMALoadBytes");
-    GRPCOLL_STATIC_ASSERT(kNumTMABufferBytesPerStage == kNumTMALoadBytes * (kMaxNumSrcRanks + 1) + NUM_MAX_BARRIERS);
+    GRPCOLL_STATIC_ASSERT(kNumTMABufferBytesPerStage == kNumTMALoadBytes * (kMaxNumSrcRanks + 1) + NUM_MAX_BARRIERS, "Invalid kNumTMABufferBytesPerStage");
 
     // Define functions to access TMA load/store buffers and mbarriers
     // `tma_load_buffer`: shape=(kNumTMAStages, )
@@ -1991,15 +1991,18 @@ void group_reduce_kernel(
   const auto num_channels = static_cast<int>(gridDim.x) / 2, channel_id = sm_id / 2;
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const bool is_forwarder = sm_id % 2 == 1;
+
   constexpr int kNumMaxSrcNVLRanks = NUM_MAX_NVL_PEERS;
   constexpr bool kIsLSEReduce = kReduceOp == ReduceOp::LSE;
   constexpr int max_num_heads = kIsLSEReduce ? kMaxNumHeads : 1;
+  constexpr int max_num_shared_warps = static_max(kNumForwarders, kNumRDMAReceivers);
+  constexpr int max_num_shared_src_ranks = static_max(kNumRDMARanks, NUM_MAX_NVL_PEERS);
+  GRPCOLL_STATIC_ASSERT(max_num_shared_src_ranks <= WARP_SIZE, "Invalid number of RDMA peers");
 
   const auto hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t)), hidden_bytes = hidden_int4 * sizeof(int4);
   const int head_dim = kIsLSEReduce ? hidden_size / num_heads : -1;
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   const auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks; // split NVL queue for each RDMA peer
-  GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
 
   /** NOTE: Determine warp role and its target warp id
    * For Forwarder (Odd SMs):
@@ -2020,17 +2023,17 @@ void group_reduce_kernel(
    */
   enum class WarpRole { kNVLSender, kNVLAndRDMAForwarder, kRDMAReceiver, kCoordinator };
   auto role_meta = [=]() -> std::pair<WarpRole, int> {
-    if (!is_forwarder) {
-      if (warp_id < NUM_MAX_NVL_PEERS) {
-        return {WarpRole::kNVLSender, (warp_id + channel_id) % NUM_MAX_NVL_PEERS};
-      } else if (warp_id < kNumForwarders) {
-        return {WarpRole::kRDMAReceiver, warp_id - NUM_MAX_NVL_PEERS};
+    if (is_forwarder) {
+      if (warp_id < kNumForwarders) {
+        return {WarpRole::kNVLAndRDMAForwarder, (warp_id + channel_id) % kNumForwarders};
       } else {
         return {WarpRole::kCoordinator, 0};
       }
     } else {
-      if (warp_id < kNumForwarders) {
-        return {WarpRole::kNVLAndRDMAForwarder, (warp_id + channel_id) % kNumForwarders};
+      if (warp_id < NUM_MAX_NVL_PEERS) {
+        return {WarpRole::kNVLSender, (warp_id + channel_id) % NUM_MAX_NVL_PEERS};
+      } else if (warp_id < kNumForwarders) {
+        return {WarpRole::kRDMAReceiver, warp_id - NUM_MAX_NVL_PEERS};
       } else {
         return {WarpRole::kCoordinator, 0};
       }
@@ -2257,16 +2260,17 @@ void group_reduce_kernel(
             .advance_also<NUM_MAX_NVL_PEERS>(nvl_buffers);
 
     // Reducer warp synchronization
-    //  `forwarder_nvl_head`: shape=(kNumForwarders, NUM_MAX_NVL_PEERS), dtype=int
-    //  `forwarder_retired`: shape=(kNumForwarders), dtype=bool
-    //  `rdma_receiver_rdma_head`: shape=(kNumRDMAReceivers, kNumRDMARanks), dtype=int
-    //  `rdma_receiver_retired`: shape=(kNumRDMAReceivers), dtype=bool
-    //  `sync_forwarder_smem`: synchronize warps of `kNumForwarders` and `kCoordinator` warps
-    //  `sync_rdma_receiver_smem`: synchronize warps of `kRDMAReceiver` and `kCoordinator` warps
-    __shared__ volatile int forwarder_nvl_head[kNumForwarders][NUM_MAX_NVL_PEERS]; // for each `kNVLAndRDMAForwarder` warp
-    __shared__ volatile bool forwarder_retired[kNumForwarders]; // for each `kNVLAndRDMAForwarder` warp
-    __shared__ volatile int rdma_receiver_rdma_head[kNumRDMAReceivers][kNumRDMARanks]; // for each `kRDMAReceiver` warp
-    __shared__ volatile bool rdma_receiver_retired[kNumRDMAReceivers]; // for each `kRDMAReceiver` warp
+    // for kNVLAndRDMAForwarder:
+    //    `shared_head`: shape=(kNumForwarders, NUM_MAX_NVL_PEERS), dtype=int
+    //    `warp_retired`: shape=(kNumForwarders), dtype=bool
+    //    `sync_forwarder_smem`: synchronize warps of `kNumForwarders` and `kCoordinator` warps
+    // for kRDMAReceiver:
+    //    `shared_head`: shape=(kNumRDMAReceivers, kNumRDMARanks), dtype=int
+    //    `warp_retired`: shape=(kNumRDMAReceivers), dtype=bool
+    //    `sync_rdma_receiver_smem`: synchronize warps of `kRDMAReceiver` and `kCoordinator` warps
+    __shared__ volatile int shared_head[max_num_shared_warps][max_num_shared_src_ranks];
+    __shared__ volatile bool warp_retired[max_num_shared_warps];
+
     auto sync_forwarder_smem = [=]() { sync_warp_group(/*group_flag=*/0, /*group_size=*/(kNumForwarders + 1) * WARP_SIZE); };
     auto sync_rdma_receiver_smem = [=]() { sync_warp_group(/*group_flag=*/1, /*group_size=*/(kNumRDMAReceivers + 1) * WARP_SIZE); };
 
@@ -2326,9 +2330,8 @@ void group_reduce_kernel(
       nvl_channel_tail.advance(dst_rdma_rank);
 
       // Clean shared memory and sync with `kCoordinator`
-      GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= WARP_SIZE, "Invalid number of NVL peers");
-      lane_id < NUM_MAX_NVL_PEERS ? (forwarder_nvl_head[target_warp_id][lane_id] = 0) : 0;
-      lane_id == 0 ? (forwarder_retired[target_warp_id] = false) : false;
+      lane_id < NUM_MAX_NVL_PEERS ? (shared_head[target_warp_id][lane_id] = 0) : 0;
+      lane_id == 0 ? (warp_retired[target_warp_id] = false) : false;
       sync_forwarder_smem();
 
       // Get forward tasks
@@ -2463,7 +2466,7 @@ void group_reduce_kernel(
            * and we can decode the correct next expect head by `-expected_head - 1`
            */
           if (lane_id < NUM_MAX_NVL_PEERS) {
-            forwarder_nvl_head[target_warp_id][lane_id] = expected_head < 0 ? decode(expected_head) : (expected_head + 1);
+            shared_head[target_warp_id][lane_id] = expected_head < 0 ? decode(expected_head) : (expected_head + 1);
           }
         }
         sync_forwarder_warp_group();
@@ -2505,12 +2508,12 @@ void group_reduce_kernel(
 
       // Mark this warp as retired
       if (lane_id == 0) {
-        forwarder_retired[target_warp_id] = true;
+        warp_retired[target_warp_id] = true;
       }
     } else if (warp_role == WarpRole::kRDMAReceiver) {
       // Clean shared memory and sync with the `kCoordinator` warp
-      lane_id < kNumRDMARanks ? (rdma_receiver_rdma_head[target_warp_id][lane_id] = 0) : 0;
-      lane_id == 0 ? (rdma_receiver_retired[target_warp_id] = false) : 0;
+      lane_id < kNumRDMARanks ? (shared_head[target_warp_id][lane_id] = 0) : 0;
+      lane_id == 0 ? (warp_retired[target_warp_id] = false) : 0;
       sync_rdma_receiver_smem();
 
       // The same task as the `kRDMASender` in the group_cast stage
@@ -2530,7 +2533,7 @@ void group_reduce_kernel(
           // Record RDMA head into shared memory
           // to let `kCoordinator` update the minimum one across all RDMA ranks
           // REVIEW: why not `expected_head + 1` like others when valid ?
-          rdma_receiver_rdma_head[target_warp_id][lane_id] = expected_head < 0 ? decode(expected_head) : expected_head;
+          shared_head[target_warp_id][lane_id] = expected_head < 0 ? decode(expected_head) : expected_head;
         }
 
         // Wait the queue non-empty for each RDMA peer
@@ -2602,13 +2605,15 @@ void group_reduce_kernel(
       __syncwarp();
 
       // Mark this warp as retired
-      if (lane_id == 0)
-        rdma_receiver_retired[target_warp_id] = true;
+      if (lane_id == 0) {
+        warp_retired[target_warp_id] = true;
+      }
     } else { // WarpRole::kCoordinator, for both forwarder and sender/receiver, only one warp
       // Sync with either `kNVLAndRDMAForwarder` or `kRDMAReceiver` warps
       // to wait all shared memory cleaned before accessing
       is_forwarder ? sync_forwarder_smem() : sync_rdma_receiver_smem();
-      const auto num_warps_per_rdma_rank = kNumForwarders / kNumRDMARanks;
+      constexpr auto num_warps_per_rdma_rank = kNumForwarders / kNumRDMARanks;
+      GRPCOLL_STATIC_ASSERT(kNumForwarders % kNumRDMARanks == 0, "Invalid number of forwarder warps");
 
       // Check retirement and update minimum head
       // for either `kNVLAndRDMAForwarder` or `kRDMAReceiver`
@@ -2620,21 +2625,37 @@ void group_reduce_kernel(
       while (true) {
         // Check if all warps of either `kNVLAndRDMAForwarder` or `kRDMAReceiver` are retired
         if (is_forwarder) { // `kNVLAndRDMAForwarder`
-          if (all_in_warp(lane_id >= kNumForwarders or forwarder_retired[lane_id]))
+          if (all_in_warp(lane_id >= kNumForwarders or warp_retired[lane_id]))
             break;
         } else { // `kRDMAReceiver`
-          if (all_in_warp(lane_id >= kNumRDMAReceivers or rdma_receiver_retired[lane_id]))
+          if (all_in_warp(lane_id >= kNumRDMAReceivers or warp_retired[lane_id]))
             break;
         }
 
         // Update minimum head for either RDMA or NVL ranks
-        if (!is_forwarder) { // `kRDMAReceiver`
+        if (is_forwarder) { // `kNVLAndRDMAForwarder`
+#pragma unroll
+          for (int i = 0; i < kNumRDMARanks; ++i) {
+            // Find minimum NVL head
+            int min_head = INT_MAX;
+#pragma unroll
+            for (int j = 0; j < num_warps_per_rdma_rank; ++j) {
+              if (!warp_retired[i * num_warps_per_rdma_rank + j])
+                min_head = min(min_head, shared_head[i * num_warps_per_rdma_rank + j][dst_nvl_rank]);
+            }
+
+            // Update NVL head
+            if (lane_id < NUM_MAX_NVL_PEERS and min_head != INT_MAX and min_head > last_nvl_head[i])
+              st_relaxed_sys_global(nvl_channel_head.buffer_by(dst_nvl_rank) + i, last_nvl_head[i] = min_head); // system scope, relaxed order
+          }
+        } else { // `kRDMAReceiver`
           // Find minimum RDMA head
           int min_head = INT_MAX;
 #pragma unroll
           for (int i = 0; i < kNumRDMAReceivers; ++i) {
-            if (!rdma_receiver_retired[i])
-              min_head = min(min_head, rdma_receiver_rdma_head[i][dst_rdma_rank]);
+            if (!warp_retired[i]) {
+              min_head = min(min_head, shared_head[i][dst_rdma_rank]);
+            }
           }
 
           // Update RDMA head by atomic add
@@ -2647,21 +2668,6 @@ void group_reduce_kernel(
                 /*qp_id=*/channel_id + num_channels,
                 /*is_local_copy=*/dst_rdma_rank == rdma_rank);
             last_rdma_head = min_head;
-          }
-        } else { // `kNVLAndRDMAForwarder`
-#pragma unroll
-          for (int i = 0; i < kNumRDMARanks; ++i) {
-            // Find minimum NVL head
-            int min_head = INT_MAX;
-#pragma unroll
-            for (int j = 0; j < num_warps_per_rdma_rank; ++j) {
-              if (!forwarder_retired[i * num_warps_per_rdma_rank + j])
-                min_head = min(min_head, forwarder_nvl_head[i * num_warps_per_rdma_rank + j][dst_nvl_rank]);
-            }
-
-            // Update NVL head
-            if (lane_id < NUM_MAX_NVL_PEERS and min_head != INT_MAX and min_head > last_nvl_head[i])
-              st_relaxed_sys_global(nvl_channel_head.buffer_by(dst_nvl_rank) + i, last_nvl_head[i] = min_head); // system scope, relaxed order
           }
         }
 
