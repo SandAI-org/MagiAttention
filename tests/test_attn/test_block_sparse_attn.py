@@ -58,7 +58,7 @@ class TestBlockSparseAttn(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 600  # Increase timeout for JIT compilation
+        return 3000  # Increase timeout for JIT compilation
 
     def check_deterministic(
         self,
@@ -386,8 +386,14 @@ class TestBlockSparseAttn(DistTestBase):
         k.grad = None
         v.grad = None
         """
+        qhead_per_khead = q.size(1) // k.size(1)
+        ref_block_size = choose_ref_block(
+            block_size,
+            swap_ab=False,
+            pack_gqa=pack_gqa,
+            qhead_per_khead=qhead_per_khead,
+        )
 
-        ref_block_size = choose_ref_block(block_size)
         o, _ = flex_flash_attn_func(
             q,
             k,
@@ -401,7 +407,7 @@ class TestBlockSparseAttn(DistTestBase):
         )
         # o = rearrange(o, "(b h s) 1 d -> b s h d", b=1, s=s, h=h)
         o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
-        # o.backward(grad_output)
+        o.backward(grad_output)
 
         if deterministic:
             err_msg_list.append(
@@ -561,10 +567,6 @@ class TestBlockSparseAttn(DistTestBase):
         ffa_dq, ffa_dk, ffa_dv = q.grad, k.grad, v.grad
 
         norm_rtol_ratio = 2.0
-        # if sparsity_ratio == 0.1:
-        #    norm_rtol_ratio = 10.0
-        # if sparsity_ratio == 0.5 and block_size[0] == 16:
-        #    norm_rtol_ratio = 15.0
         out_norm = calc_inf_norm(ffa_out, high_precision_torch_out_ref)
         out_ref_norm = calc_inf_norm(
             low_precision_torch_out_ref, high_precision_torch_out_ref
@@ -741,7 +743,6 @@ class TestBlockSparseAttn(DistTestBase):
             # {"type": "uniform", "q_size": 64, "k_size": 16},
             # {"type": "uniform", "q_size": 64, "k_size": 8},
             # Variable blocks
-            """
             {
                 "type": "variable",
                 "q_size": 64,
@@ -756,7 +757,6 @@ class TestBlockSparseAttn(DistTestBase):
                 "min_q_size": 16,
                 "min_k_size": 16,
             },
-            """,
         ],
     )
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
@@ -821,6 +821,7 @@ class TestBlockSparseAttn(DistTestBase):
             average_block_size=average_block_size,
             min_block_size=min_block_size,
         )
+
         # Construct a descriptive test case name
         q_bs, k_bs = block_sizes
         block_info = (
