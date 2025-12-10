@@ -226,7 +226,8 @@ void run_flash_bwd(Flash_bwd_params& params, cudaStream_t stream) {
       params.determin_range_locks,
   };
 
-  typename flash::TileSchedulerArguments scheduler_args{/*num_heads=*/params.h_qo,
+  typename flash::TileSchedulerArguments scheduler_args{/*num_heads_q=*/params.h_qo,
+                                                        /*num_heads_kv=*/params.h_kv,
                                                         /*num_batches=*/params.merge_batch_size,
                                                         /*tile_count_semaphore=*/params.tile_count_semaphore,
                                                         /*ranges=*/params.k_ranges,

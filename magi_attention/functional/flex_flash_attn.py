@@ -208,6 +208,7 @@ def _flex_flash_attn_forward_compilable(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
+    pack_gqa: bool,
     kblock_m: int | None,
     kblock_n: int | None,
     softmax_scale: float,
@@ -217,6 +218,7 @@ def _flex_flash_attn_forward_compilable(
     deterministic: bool,
     sm_margin: int,
 ) -> None:
+    qhead_per_khead = q.size(1) // k.size(1)
     """torch.ops.flex_flash_attn._flex_flash_attn_forward_compilable"""
     mod = get_ffa_jit_mod(
         direction="fwd",
@@ -228,6 +230,8 @@ def _flex_flash_attn_forward_compilable(
         disable_atomic_reduction=disable_fwd_atomic_reduction,
         deterministic=deterministic,
         profile_mode=profile_mode,
+        pack_gqa=pack_gqa,
+        qhead_per_khead=qhead_per_khead,
         ref_block_size=(kblock_m, kblock_n)
         if kblock_m is not None and kblock_n is not None
         else None,
@@ -246,6 +250,7 @@ def _flex_flash_attn_forward_compilable(
         merge_q_ranges,
         qk_map,
         fwd_unique_count,
+        pack_gqa,
         softmax_scale,
         softcap,
         disable_fwd_atomic_reduction,
@@ -271,6 +276,7 @@ def _flex_flash_attn_forward_compilable_fake(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
+    pack_gqa: bool,
     kblock_m: int | None,
     kblock_n: int | None,
     softmax_scale: float,
@@ -298,6 +304,7 @@ def _flex_flash_attn_forward(
     merge_q_ranges: torch.Tensor | None,
     qk_map: torch.Tensor | None,
     fwd_unique_count: torch.Tensor | None,
+    pack_gqa: bool,
     ref_block_size: tuple[int, int] | None,
     softmax_scale: float,
     softcap: float,
@@ -357,6 +364,7 @@ def _flex_flash_attn_forward(
         merge_q_ranges=merge_q_ranges,
         qk_map=qk_map,
         fwd_unique_count=fwd_unique_count,
+        pack_gqa=pack_gqa,
         kblock_m=kblock_m,
         kblock_n=kblock_n,
         softmax_scale=softmax_scale,
@@ -406,6 +414,7 @@ def _flex_flash_attn_backward_compilable(
     deterministic: bool,
     sm_margin: int,
 ) -> None:
+    qhead_per_khead = q.size(1) / k.size(1)
     """torch.ops.flex_flash_attn._flex_flash_attn_backward_compilable"""
     mod = get_ffa_jit_mod(
         direction="bwd",
@@ -415,6 +424,8 @@ def _flex_flash_attn_backward_compilable(
         or (k.dtype if disable_bwd_dkv_atomic_reduction else torch.float32),
         softcap=softcap > 0.0,
         disable_atomic_reduction=disable_bwd_dkv_atomic_reduction,
+        pack_gqa=False,
+        qhead_per_khead=qhead_per_khead,
         deterministic=deterministic,
         profile_mode=profile_mode,
     )
@@ -593,6 +604,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
         sm_margin: int = 0,
         disable_fwd_atomic_reduction: bool = False,
         auto_range_merge: bool = False,
+        pack_gqa: bool = False,
         ref_block_size: tuple[int, int] | None = None,
     ):
         softmax_scale = (
@@ -631,6 +643,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             merge_q_ranges=merge_q_ranges,
             qk_map=fwd_qk_map,
             fwd_unique_count=fwd_unique_count,
+            pack_gqa=pack_gqa,
             ref_block_size=ref_block_size,
             softmax_scale=softmax_scale,
             softcap=softcap,
@@ -734,6 +747,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             None,  # sm_margin
             None,  # disable_fwd_atomic_reduction
             None,  # auto_range_merge
+            None,  # pack_gqa
             None,  # ref_block_size
         )
 
@@ -757,6 +771,7 @@ def flex_flash_attn_func(
     sm_margin: int = 0,
     disable_fwd_atomic_reduction: bool = False,
     auto_range_merge: bool = False,
+    pack_gqa: bool = False,
     ref_block_size: tuple[int, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -810,6 +825,11 @@ def flex_flash_attn_func(
         auto_range_merge (bool, optional):
             Whether to automatically merge k_ranges for the same q_range. Defaults to ``False``.
             **Note:** This flag is useful for sparse attention scenarios but still under development.
+
+        pack_gqa (bool, optional):
+            Whether to group query heads sharing the same KV head into a single computation block for small
+            seqlen_q scenarios.
+
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]:
@@ -945,5 +965,6 @@ def flex_flash_attn_func(
         sm_margin,
         disable_fwd_atomic_reduction,
         auto_range_merge,
+        pack_gqa,
         ref_block_size,
     )

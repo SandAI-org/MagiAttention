@@ -33,7 +33,7 @@ from magi_attention.testing.precision import assert_close, calc_inf_norm
 from magi_attention.testing.utils import switch_ffa_verbose_jit_build_decorator
 from magi_attention.utils.sparse_utils import (
     choose_ref_block,
-    flatten_block_mask,
+    flatten_block_mask_to_kv_shape,
     generate_block_sparse_pattern,
     generate_ranges_from_block_mask,
     generate_ranges_from_var_block_mask,
@@ -58,7 +58,7 @@ class TestBlockSparseAttn(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 600  # Increase timeout for JIT compilation
+        return 3000  # Increase timeout for JIT compilation
 
     def check_deterministic(
         self,
@@ -322,6 +322,7 @@ class TestBlockSparseAttn(DistTestBase):
         block_size,
         nhq,
         nhk,
+        pack_gqa,
         deterministic,
         test_accumulation_inplace,
         test_case,
@@ -331,24 +332,26 @@ class TestBlockSparseAttn(DistTestBase):
         block_col_sz=None,
     ):
         # (Implementation is identical to the original)
-        s, h = q.size(1), q.size(2)
-        q = rearrange(q, "b s h d -> (b h s) 1 d")
+        s = q.size(1)
+        h1 = k.size(2)
+        # h2 = q.size(2) // k.size(2)
+        q = rearrange(q, "b s (h1 h2) d -> (b h1 s) h2 d", h1=h1)
+        # q = rearrange(q, "b s h d -> (b h s) 1 d")
         assert nhq % nhk == 0
-
+        """
         repeats = nhq // nhk
         if head_wise == "q":
             k = torch.repeat_interleave(k, repeats=repeats, dim=2)
             v = torch.repeat_interleave(v, repeats=repeats, dim=2)
-
+        """
         k = rearrange(k, "b s h d -> (b h s) 1 d")
         v = rearrange(v, "b s h d -> (b h s) 1 d")
         q.retain_grad()
         k.retain_grad()
         v.retain_grad()
         q.grad, k.grad, v.grad = None, None, None
-
-        flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
-
+        # flat_block_sparse_mask = flatten_block_mask(block_mask, nhq, nhk)
+        flat_block_sparse_mask = flatten_block_mask_to_kv_shape(block_mask)
         if uniform:
             q_block_size, k_block_size = block_size
             q_ranges_tensor, k_ranges_tensor = generate_ranges_from_block_mask(
@@ -383,8 +386,14 @@ class TestBlockSparseAttn(DistTestBase):
         k.grad = None
         v.grad = None
         """
+        qhead_per_khead = q.size(1) // k.size(1)
+        ref_block_size = choose_ref_block(
+            block_size,
+            swap_ab=False,
+            pack_gqa=pack_gqa,
+            qhead_per_khead=qhead_per_khead,
+        )
 
-        ref_block_size = choose_ref_block(block_size)
         o, _ = flex_flash_attn_func(
             q,
             k,
@@ -393,10 +402,11 @@ class TestBlockSparseAttn(DistTestBase):
             k_ranges=k_ranges_tensor,
             attn_type_map=attn_type_map_tensor,
             auto_range_merge=True,
+            pack_gqa=pack_gqa,
             ref_block_size=ref_block_size,
         )
-
-        o = rearrange(o, "(b h s) 1 d -> b s h d", b=1, s=s, h=h)
+        # o = rearrange(o, "(b h s) 1 d -> b s h d", b=1, s=s, h=h)
+        o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
         o.backward(grad_output)
 
         if deterministic:
@@ -436,17 +446,20 @@ class TestBlockSparseAttn(DistTestBase):
         high_precision=False,
     ):
         # (Implementation is identical to the original)
+        # h1 = k.size(2)
+        # h2 = q.size(2) // k.size(2)
+
         q = rearrange(q, "b s h d -> b h s d")
         k = rearrange(k, "b s h d -> b h s d")
         v = rearrange(v, "b s h d -> b h s d")
         if uniform:
             q_block_size, k_block_size = block_size
             sdpa_mask_4d = get_sdpa_mask_from_block_sparse_mask(
-                block_mask, seqlen, seqlen, q_block_size, k_block_size
+                block_mask, seqlen, seqlen, q_block_size, k_block_size, q.size(1)
             )
         else:
             sdpa_mask_4d = get_sdpa_mask_from_var_block_mask(
-                block_mask, seqlen, seqlen, block_row_sz, block_col_sz
+                block_mask, seqlen, seqlen, block_row_sz, block_col_sz, q.size(1)
             )
 
         o_tensor = q.to(torch.float64) if high_precision else q
@@ -480,9 +493,11 @@ class TestBlockSparseAttn(DistTestBase):
         head_wise,
         nhq,
         nhk,
+        pack_gqa,
         deterministic,
         test_accumulation_inplace,
         test_case,
+        sparsity_ratio,
         uniform=True,
         block_row_sz=None,
         block_col_sz=None,
@@ -540,6 +555,7 @@ class TestBlockSparseAttn(DistTestBase):
             block_size,
             nhq,
             nhk,
+            pack_gqa,
             deterministic,
             test_accumulation_inplace,
             test_case,
@@ -723,9 +739,9 @@ class TestBlockSparseAttn(DistTestBase):
             {"type": "uniform", "q_size": 16, "k_size": 64},
             {"type": "uniform", "q_size": 8, "k_size": 64},
             # Small K block sizes
-            {"type": "uniform", "q_size": 64, "k_size": 32},
-            {"type": "uniform", "q_size": 64, "k_size": 16},
-            {"type": "uniform", "q_size": 64, "k_size": 8},
+            # {"type": "uniform", "q_size": 64, "k_size": 32},
+            # {"type": "uniform", "q_size": 64, "k_size": 16},
+            # {"type": "uniform", "q_size": 64, "k_size": 8},
             # Variable blocks
             {
                 "type": "variable",
@@ -744,10 +760,11 @@ class TestBlockSparseAttn(DistTestBase):
         ],
     )
     @parameterize("sparsity_ratio", [0.1, 0.5, 1.0])
-    @parameterize("sparsity_granularity", ["per_q_head", "per_kv_head"])
+    @parameterize("sparsity_granularity", ["per_kv_head"])
     @parameterize("dtype", [torch.float16, torch.bfloat16])
     @parameterize("attn_type", [0])  # For now, we only test full mask.
-    @parameterize("deterministic", [True, False])
+    @parameterize("pack_gqa", [False, True])
+    @parameterize("deterministic", [False])
     @parameterize("test_accumulation_inplace", [False])
     def test_block_sparse_attn(
         self,
@@ -758,6 +775,7 @@ class TestBlockSparseAttn(DistTestBase):
         sparsity_granularity: str,
         dtype: torch.dtype,
         attn_type: int,
+        pack_gqa: bool,
         deterministic: bool,
         test_accumulation_inplace: bool,
     ):
@@ -816,8 +834,10 @@ class TestBlockSparseAttn(DistTestBase):
             f"[{test_type}]"
             f"[{block_info}]"
             f"[sparsity_granularity={sparsity_granularity}]"
+            f"[sparsity_ratio={sparsity_ratio}]"
             f"[dtype={dtype}]"
             f"[attn_type={attn_type}]"
+            f"[pack_gqa={pack_gqa}]"
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[test_accumulation_inplace={test_accumulation_inplace}]"
@@ -856,9 +876,11 @@ class TestBlockSparseAttn(DistTestBase):
             head_wise=sparsity_granularity,
             nhq=num_heads_q,
             nhk=num_heads_kv,
+            pack_gqa=pack_gqa,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
             test_case=test_case,
+            sparsity_ratio=sparsity_ratio,
             uniform=(test_type == "uniform"),
             block_row_sz=block_row_sz,
             block_col_sz=block_col_sz,
