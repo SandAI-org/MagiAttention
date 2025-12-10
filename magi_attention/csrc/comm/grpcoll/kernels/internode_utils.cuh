@@ -342,7 +342,7 @@ DEVICE_INLINE void timeout_check_nvl2rdma_forwarder_rdma_head(
     const int rdma_rank,
     const int nvl_rank,
     const int dst_rdma_rank,
-    const int head,
+    const uint64_t head,
     const int tail,
     const int num_chunked_tokens) {
   if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {

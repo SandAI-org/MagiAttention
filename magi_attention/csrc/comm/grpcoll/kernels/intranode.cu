@@ -1032,7 +1032,7 @@ void group_reduce_kernel(
   // Prepare TMA buffer in dynamic shared memory for this warp
   extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
   auto tma_buffer = smem_buffer + warp_id * kNumTMABytesPerWarp;
-  constexpr int kTMAStoreBytesPerWarp = WARP_SIZE * kCommDtypePerDtype * sizeof(int4); // the number of bytes per warp when using tma store
+  constexpr int kTMAStoreBytesPerWarp = WARP_SIZE * kCommDtypePerDtype * sizeof(int4); // the number of bytes per warp when using TMA store
 #endif
 
   if (is_sender) {
@@ -1422,11 +1422,10 @@ void group_reduce_kernel(
             for (int j = 0; j < num_src_ranks; ++j) {
               lse_reduce<reduce_dtype_t, float>(/*reduced_lse=*/reduced_lse_val, /*src_lse=*/recv_lses[j]);
             }
-            auto reduced_lse_val_float = static_cast<float>(reduced_lse_val);
 
             // Store the reduced lse to shared memory buffer temporarily
             // which will be read later to reduce the hidden values
-            shared_reduced_lse_buf[reduce_warp_id][h] = reduced_lse_val_float;
+            shared_reduced_lse_buf[reduce_warp_id][h] = reduced_lse_val;
 
             // Store the weight to rescale the old `reduced_lse` for each head
             // which will be read later to reduce the hidden values if in `kAccReduce` mode
@@ -1436,7 +1435,7 @@ void group_reduce_kernel(
 
             // Store the reduced lse to `reduced_lse` as well
             // REVIEW: is it necessary to use TMA copy here to optimize ?
-            *reduced_lse_ptr = reduced_lse_val_float;
+            *reduced_lse_ptr = static_cast<float>(reduced_lse_val);
           }
           __syncwarp();
         }
@@ -1458,7 +1457,7 @@ void group_reduce_kernel(
         // Reduce this token by all the received partial token from all src ranks
         // NOTES: we guarantee that `hidden_int4_comm` is a multiple of `WARP_SIZE`
         // so that all lanes in warp will always enter the loop together
-        // to make `__syncwarp` hang-free and tma store bytes constant
+        // to make `__syncwarp` hang-free and TMA store bytes constant
 #pragma unroll
         for (int g = 0; g < kNumDataGroups; ++g) {
           int4* reduced_token_ptr_int4 = reduced_token_ptr_int4_array[g];
@@ -1489,7 +1488,8 @@ void group_reduce_kernel(
               // Initialize the high-precision reduce buffer
               // with the old value in `reduced_x`
               auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
-              foreach_assign<reduce_dtype_t, dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
+              foreach_assign<reduce_dtype_t, dtype_t, kCommDtypePerInt4>(
+                  hp_hidval_reduce_buf, reduce_hidval_ptr_dtype); // NOTE: we have `kCommDtypePerInt4` of `dtype_t` elems to process
 
               // Rescale the initial old value in advance if `kIsLSEReduce`
               if constexpr (kIsLSEReduce) {
@@ -1510,7 +1510,7 @@ void group_reduce_kernel(
               for (int j = 0; j < num_src_ranks; ++j) {
                 auto jth_recv_hidval_comm_dtype = reinterpret_cast<const comm_dtype_t*>(&recv_hidval_int4[j]);
                 // TODO: optimize the repeated load of each head of lse with dynamic shared memory
-                // but be careful of the high occupancy of the tma buffer
+                // but be careful of the high occupancy of the TMA buffer
                 auto jth_recv_lse = __ldg(channel_lse_buffers[src_rank_idxs[j]].buffer() + slot_indices[j] * num_heads + head_idx);
                 foreach_reduce_lse<reduce_dtype_t, comm_dtype_t, float, kCommDtypePerInt4>(
                     hp_hidval_reduce_buf, reduced_lse_val, jth_recv_hidval_comm_dtype, jth_recv_lse);
@@ -1637,10 +1637,11 @@ void launch_group_reduce(
 
   // NOTES: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
-  if (reduce_op != ReduceOp::LSE)
+  if (reduce_op != ReduceOp::LSE) {
     GRPCOLL_HOST_ASSERT(num_heads == 0);
-  else
+  } else {
     GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
+  }
 
   GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 && kNumDataGroups <= 2, "Invalid kNumDataGroups");
 
