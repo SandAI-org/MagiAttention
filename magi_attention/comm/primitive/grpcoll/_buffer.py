@@ -1048,7 +1048,7 @@ class GrpCollBuffer:
         for i in range(num_groups):
             reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
 
-        return (reduced_x, None, EventOverlap(event))  # reduced_lse
+        return (reduced_x, reduced_lse, EventOverlap(event))
 
     # NOTE: remain original low-latency interface here for future potential usage,
     # which won't be exposed to users for now, but guaranteed its compatibility internally

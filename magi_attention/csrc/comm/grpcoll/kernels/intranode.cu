@@ -377,7 +377,7 @@ void group_cast_kernel(
         if (num_used_slots <= max_num_used_slots_in_queue)
           break; // the empty slots in recv queue is enough for this send chunk size
 
-        // Check timeout
+        // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
           printf("grpcoll timeout for group cast senders, rank=%d, responsible_channel=%d\n", rank, responsible_channel);
           trap();
@@ -549,7 +549,7 @@ void group_cast_kernel(
           break;
         }
 
-        // Check timeout
+        // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
           printf("grpcoll timeout for group cast receivers, rank=%d, responsible_channel=%d, tokens_to_recv=%d\n", rank, responsible_channel, num_tokens_to_recv);
           trap();
@@ -1123,7 +1123,7 @@ void group_reduce_kernel(
         if (num_used_slots <= max_num_used_slots_in_queue)
           break;
 
-        // Check timeout
+        // Timeout check
         if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
           printf("grpcoll timeout for group reduce senders, rank=%d, responsible_channel=%d\n", rank, responsible_channel);
           trap();
@@ -1368,7 +1368,7 @@ void group_reduce_kernel(
         // NOTES: here we should check `expected_head >= 0` first
         // to avoid invalid `responsible_rank` when accessing `shared_channel_tail_idx`
         while (any_in_warp(/*pred=*/expected_head >= 0 and shared_channel_tail_idx[responsible_rank] <= expected_head)) {
-          // Check timeout
+          // Timeout check
           if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
             printf("grpcoll timeout for group reduce receivers, rank=%d, responsible_channel=%d, expect_head=%d\n", rank, responsible_channel, expected_head);
             trap();
