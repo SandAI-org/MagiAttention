@@ -2007,19 +2007,9 @@ void group_reduce_kernel(
           cached_channel_head_idx = ld_volatile_global(nvl_channel_head.buffer() + lane_id); // volatile load
 
         // Timeout check
-        if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < kNumRDMARanks) {
-          printf(
-              "grpcoll group_reduce NVL sender timeout, channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, RDMA lane: %d, head: %d, tail: %d, start: %d, end: %d\n",
-              channel_id,
-              rdma_rank,
-              nvl_rank,
-              dst_nvl_rank,
-              lane_id,
-              ld_volatile_global(nvl_channel_head.buffer() + lane_id),
-              cached_channel_tail_idx,
-              token_start_idx,
-              token_end_idx);
-          trap();
+        if (lane_id < kNumRDMARanks) {
+          timeout_check_nvl_sender(
+              start_time, channel_id, rdma_rank, nvl_rank, dst_nvl_rank, lane_id, cached_channel_head_idx, cached_channel_tail_idx, token_start_idx, token_end_idx);
         }
       }
 
@@ -2181,8 +2171,8 @@ void group_reduce_kernel(
           sync_warp_group(/*group_flag=*/dst_rdma_rank + 2, /*group_size=*/kNumWarpsPerForwarder * WARP_SIZE);
         }
       };
-      GRPCOLL_STATIC_ASSERT(
-          kNumWarpsPerForwarder == 1 or kNumRDMARanks + 2 <= 16, "Barriers are not enough"); // This limits maximum number of RDMA peers to 14, TODO: extend it
+      // FIXME: This limits maximum number of RDMA peers to 14
+      GRPCOLL_STATIC_ASSERT(kNumWarpsPerForwarder == 1 or kNumRDMARanks + 2 <= 16, "Barriers are not enough");
 
       // Prepare TMA buffer and init mbarrier
       constexpr int kNumTMAStages = 2;
@@ -2235,24 +2225,14 @@ void group_reduce_kernel(
         auto start_time = clock64();
         while (sub_warp_id == 0 and lane_id == 0) {
           // Inequality: `num_max_rdma_chunked_recv_tokens - (tail - head) >= num_chunked_tokens`
-          // Here, `token_start_idx` is the actual tail
-          int num_used_slots = token_start_idx - ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank)); // volatile load
+          // NOTE: `token_start_idx` is the actual tail here
+          auto rdma_head_idx = ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank)); // volatile load
+          int num_used_slots = token_start_idx - rdma_head_idx;
           if (num_max_rdma_chunked_recv_tokens - num_used_slots >= num_chunked_tokens)
             break;
 
           // Timeout check
-          if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-            printf(
-                "grpcoll group_reduce forwarder (RDMA check) timeout, channel: %d, RDMA: %d, NVL: %d, dst RDMA rank: %d, head: %ld, tail: %d, chunked: %d\n",
-                channel_id,
-                rdma_rank,
-                nvl_rank,
-                dst_rdma_rank,
-                ld_volatile_global(rdma_channel_head.buffer(dst_rdma_rank)),
-                token_start_idx,
-                num_chunked_tokens);
-            trap();
-          }
+          timeout_check_nvl2rdma_forwarder_rdma_head(start_time, channel_id, rdma_rank, nvl_rank, dst_rdma_rank, rdma_head_idx, token_start_idx, num_chunked_tokens);
         }
         sync_forwarder_warp_group();
 
@@ -2273,9 +2253,9 @@ void group_reduce_kernel(
             cached_nvl_channel_tail_idx = ld_acquire_sys_global(nvl_channel_tail.buffer(lane_id)); // system scope, acquire order
 
             // Timeout check
-            if (clock64() - start_time > NUM_TIMEOUT_CYCLES and lane_id < NUM_MAX_NVL_PEERS) {
-              printf(
-                  "grpcoll group_reduce forwarder (NVL check) timeout, channel: %d, RDMA: %d, NVL: %d, src NVL rank: %d, dst RDMA rank: %d, tail: %d, waiting: %d, total: %d, sub: %d, large: %d, expected: %d\n",
+            if (lane_id < NUM_MAX_NVL_PEERS) {
+              timeout_check_nvl2rdma_forwarder_nvl_head(
+                  start_time,
                   channel_id,
                   rdma_rank,
                   nvl_rank,
@@ -2285,9 +2265,7 @@ void group_reduce_kernel(
                   token_idx,
                   num_tokens_to_group_reduce,
                   sub_warp_id,
-                  kNumWarpsPerForwarder,
                   expected_head);
-              trap();
             }
           }
 
@@ -2430,18 +2408,7 @@ void group_reduce_kernel(
           cached_channel_tail_idx = static_cast<int>(ld_acquire_sys_global(rdma_channel_tail.buffer(lane_id))); // system scope, acquire order
 
           // Timeout check
-          if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
-            printf(
-                "grpcoll group_reduce RDMA receiver timeout, channel: %d, RDMA: %d, NVL: %d, src RDMA rank: %d, tail: %d, waiting: %ld, expect: %d\n",
-                channel_id,
-                rdma_rank,
-                nvl_rank,
-                lane_id,
-                cached_channel_tail_idx,
-                token_idx,
-                expected_head);
-            trap();
-          }
+          timeout_check_rdma_recevier(start_time, channel_id, rdma_rank, nvl_rank, lane_id, cached_channel_tail_idx, token_idx, expected_head);
         }
         __syncwarp();
 

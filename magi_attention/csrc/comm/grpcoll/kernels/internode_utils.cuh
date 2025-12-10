@@ -305,4 +305,110 @@ DEVICE_INLINE void timeout_check_nvl_receiver_tail(
   }
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Group Reduce Timeout Check
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+DEVICE_INLINE void timeout_check_nvl_sender(
+    const int64_t start_time,
+    const int channel_id,
+    const int rdma_rank,
+    const int nvl_rank,
+    const int dst_nvl_rank,
+    const int src_rdma_lane,
+    const int head,
+    const int tail,
+    const int token_start_idx,
+    const int token_end_idx) {
+  if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
+    printf(
+        "grpcoll group_reduce NVL sender timeout, channel: %d, RDMA: %d, NVL: %d, dst NVL rank: %d, src RDMA lane: %d, head: %d, tail: %d, start: %d, end: %d\n",
+        channel_id,
+        rdma_rank,
+        nvl_rank,
+        dst_nvl_rank,
+        src_rdma_lane,
+        head,
+        tail,
+        token_start_idx,
+        token_end_idx);
+    trap();
+  }
+}
+
+DEVICE_INLINE void timeout_check_nvl2rdma_forwarder_rdma_head(
+    const int64_t start_time,
+    const int channel_id,
+    const int rdma_rank,
+    const int nvl_rank,
+    const int dst_rdma_rank,
+    const int head,
+    const int tail,
+    const int num_chunked_tokens) {
+  if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
+    printf(
+        "grpcoll group_reduce forwarder (RDMA head) timeout, channel: %d, RDMA: %d, NVL: %d, dst RDMA rank: %d, head: %ld, tail: %d, chunked: %d\n",
+        channel_id,
+        rdma_rank,
+        nvl_rank,
+        dst_rdma_rank,
+        head,
+        tail,
+        num_chunked_tokens);
+    trap();
+  }
+}
+
+DEVICE_INLINE void timeout_check_nvl2rdma_forwarder_nvl_head(
+    const int64_t start_time,
+    const int channel_id,
+    const int rdma_rank,
+    const int nvl_rank,
+    const int src_nvl_rank,
+    const int dst_rdma_rank,
+    const int tail,
+    const int token_idx,
+    const int num_tokens_to_reduce,
+    const int warp_idx_in_group,
+    const int expected_head) {
+  if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
+    printf(
+        "grpcoll group_reduce forwarder (NVL head) timeout, channel: %d, RDMA: %d, NVL: %d, src NVL rank: %d, dst RDMA rank: %d, tail: %d, token_info: (token idx: %d, num tokens: %d, warp idx: %d, expected head: %d)\n",
+        channel_id,
+        rdma_rank,
+        nvl_rank,
+        src_nvl_rank,
+        dst_rdma_rank,
+        tail,
+        token_idx,
+        num_tokens_to_reduce,
+        warp_idx_in_group,
+        expected_head);
+    trap();
+  }
+}
+
+DEVICE_INLINE void timeout_check_rdma_recevier(
+    const int64_t start_time,
+    const int channel_id,
+    const int rdma_rank,
+    const int nvl_rank,
+    const int src_rdma_lane,
+    const int tail,
+    const int token_idx,
+    const int expected_head) {
+  if (clock64() - start_time > NUM_TIMEOUT_CYCLES) {
+    printf(
+        "grpcoll group_reduce RDMA receiver timeout, channel: %d, RDMA: %d, NVL: %d, src RDMA lane: %d, tail: %d, token_info: (token idx: %d, expected head: %d)\n",
+        channel_id,
+        rdma_rank,
+        nvl_rank,
+        src_rdma_lane,
+        tail,
+        token_idx,
+        expected_head);
+    trap();
+  }
+}
+
 } // namespace magi_attn_comm::grpcoll::internode
