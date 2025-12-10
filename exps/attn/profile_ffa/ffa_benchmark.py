@@ -347,7 +347,7 @@ def run_benchmark_framework(
                 # Add block_size for sparse tests if available in config
                 if "q_block_size" in config:
                     swap_ab = config.get("swap_ab", False)
-                    pack_gqa = config.get("packgqa", False)
+                    pack_gqa = config.get("pack_gqa", False)
                     nhq = q.size(1)
                     nhk = k.size(1)
                     kblockm, kblockn = choose_ref_block(
@@ -548,7 +548,7 @@ def run_dense_tests(args, common_params):
 
 def run_block_sparse_tests(args, common_params):
     seqlens_to_test = [49152]
-    sparsity_ratios_to_test = [0.05, 0.1, 0.2, 0.5]
+    sparsity_ratios_to_test = [0.05, 0.1, 0.2, 0.5, 1.0]
     q_block_sizes = [64, 128]
     k_block_sizes = [64, 128]
 
@@ -556,12 +556,19 @@ def run_block_sparse_tests(args, common_params):
     swap_ab_options = [False]
 
     configs_to_test = [
-        {"seqlen": sl, "sparsity_ratio": sr, "q_block_size": q_bs, "k_block_size": k_bs}
+        {
+            "seqlen": sl,
+            "sparsity_ratio": sr,
+            "q_block_size": q_bs,
+            "k_block_size": k_bs,
+            "swap_ab": swap_ab,
+            "pack_gqa": pack_gqa,
+        }
         for sl in seqlens_to_test
         for sr in sparsity_ratios_to_test
         for q_bs, k_bs in zip(q_block_sizes, k_block_sizes)
-        for swap in swap_ab_options
-        for pack in pack_gqa_options
+        for swap_ab in swap_ab_options
+        for pack_gqa in pack_gqa_options
         if sl % q_bs == 0 and sl % k_bs == 0
     ]
 
