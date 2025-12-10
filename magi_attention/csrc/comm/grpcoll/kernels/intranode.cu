@@ -45,9 +45,7 @@
 #include "reduce_op.cuh"
 #include "utils.cuh"
 
-namespace magi_attn_comm::grpcoll {
-
-namespace intranode {
+namespace magi_attn_comm::grpcoll::intranode {
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // (Cached) Notify Group Cast
@@ -1784,6 +1782,4 @@ void group_reduce(
 #undef LAUNCH_INTRANODE_GROUP_REDUCE
 }
 
-} // namespace intranode
-
-} // namespace magi_attn_comm::grpcoll
+} // namespace magi_attn_comm::grpcoll::intranode
