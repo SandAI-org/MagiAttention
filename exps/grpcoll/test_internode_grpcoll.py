@@ -1152,8 +1152,7 @@ def test_main(
     assert hidden_size % num_heads == 0
 
     cast_lse = True
-    # choose from {"sum", "avg", "lse"}
-    reduce_op: GroupReduceOp = "sum"  # TODO: support lse reduce
+    reduce_op: GroupReduceOp = "lse"  # choose from {"sum", "avg", "lse"}
     if reduce_op == "lse":
         assert cast_lse, "we need to cast lse first before reducing"
 

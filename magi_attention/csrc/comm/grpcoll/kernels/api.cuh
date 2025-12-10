@@ -216,8 +216,7 @@ void notify_group_cast(
     int rank,
     cudaStream_t stream,
     int64_t num_rdma_bytes,
-    int64_t num_nvl_bytes,
-    bool low_latency_mode);
+    int64_t num_nvl_bytes);
 
 void group_cast(
     /* 1st group of input / output data*/
@@ -250,8 +249,7 @@ void group_cast(
     int num_ranks,
     bool is_cached_group_cast,
     cudaStream_t stream,
-    int num_channels,
-    bool low_latency_mode);
+    int num_channels);
 
 void cached_notify(
     int hidden_int4,
@@ -272,8 +270,7 @@ void cached_notify(
     cudaStream_t stream,
     int64_t num_rdma_bytes,
     int64_t num_nvl_bytes,
-    bool is_cached_group_cast,
-    bool low_latency_mode);
+    bool is_cached_group_cast);
 
 void group_reduce(
     /* 1st group of input / output data*/
@@ -304,7 +301,6 @@ void group_reduce(
     int num_ranks,
     cudaStream_t stream,
     int num_channels,
-    bool low_latency_mode,
     bool acc_reduce,
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,

@@ -1056,8 +1056,7 @@ Buffer::internode_group_cast(
         /*stream=*/comm_stream,
         /*num_rdma_bytes=*/config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
         /*num_nvl_bytes=*/num_nvl_bytes,
-        /*is_cached_group_cast=*/true,
-        /*low_latency_mode=*/low_latency_mode);
+        /*is_cached_group_cast=*/true);
   } else {
     rdma_channel_prefix_matrix = torch::empty({num_rdma_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
     recv_rdma_rank_prefix_sum = torch::empty({num_rdma_ranks}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -1092,8 +1091,7 @@ Buffer::internode_group_cast(
         /*rank=*/rank,
         /*stream=*/comm_stream,
         /*num_rdma_bytes=*/config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
-        /*num_nvl_bytes=*/num_nvl_bytes,
-        /*low_latency_mode=*/low_latency_mode);
+        /*num_nvl_bytes=*/num_nvl_bytes);
 
     // Synchronize total received tokens and received tokens for each RDMA peer
     // by let CPU wait for the pinned counters to be set
@@ -1198,8 +1196,7 @@ Buffer::internode_group_cast(
       /*num_ranks=*/num_ranks,
       /*is_cached_group_cast=*/cached_mode,
       /*stream=*/comm_stream,
-      /*num_channels=*/num_channels,
-      /*low_latency_mode=*/low_latency_mode);
+      /*num_channels=*/num_channels);
 
   // Record or wait streams
   std::optional<EventHandle> event;
@@ -1391,7 +1388,7 @@ Buffer::internode_group_reduce(
   // Launch barrier and reset queue head and tail
   internode::cached_notify(
       /*hidden_int4=*/hidden_int4,
-      /*num_heads=*/0,
+      /*num_heads=*/num_heads,
       /*num_ranks=*/num_ranks,
       /*num_channels=*/num_channels,
       /*num_reduced_tokens=*/num_reduced_tokens,
@@ -1408,8 +1405,7 @@ Buffer::internode_group_reduce(
       /*stream=*/comm_stream,
       /*num_rdma_bytes=*/config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
       /*num_nvl_bytes=*/num_nvl_bytes,
-      /*is_cached_dispatch=*/false,
-      /*low_latency_mode=*/low_latency_mode);
+      /*is_cached_dispatch=*/false);
 
   // Allocate reduced_x buffer
   auto reduced_x = torch::Tensor();
@@ -1447,7 +1443,7 @@ Buffer::internode_group_reduce(
       /*num_tokens=*/num_tokens,
       /*num_reduced_tokens=*/num_reduced_tokens,
       /*hidden_size=*/hidden_size,
-      /*num_heads=*/0, // TODO: support lse reduce
+      /*num_heads=*/num_heads,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
       /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
@@ -1458,7 +1454,6 @@ Buffer::internode_group_reduce(
       /*num_ranks=*/num_ranks,
       /*stream=*/comm_stream,
       /*num_channels=*/num_channels,
-      /*low_latency_mode=*/low_latency_mode,
       /*acc_reduce=*/acc_reduce,
       /*dtype=*/at::cuda::ScalarTypeToCudaDataType(x_dtype),
       /*comm_dtype=*/at::cuda::ScalarTypeToCudaDataType(comm_dtype_),
