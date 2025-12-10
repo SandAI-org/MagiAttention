@@ -1132,7 +1132,7 @@ def test_main(
     # if num_heads * size(float) % 16 == 0, i.e. num_heads % 4 == 0,
     # internode group reduce `kNVLReceivers` will use TMA to copy lse
     # otherwise using normal unrolled warp copy
-    num_heads = 16
+    num_heads = 2  # DE-BUG
 
     distinct_token = True
     random_permute_output = True

@@ -68,10 +68,10 @@ int get_source_meta_bytes() {
 // Helpers
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-// REVIEW: why at most 8 RDMA ranks to be sent
+// NOTES: due to shared memory size limit, at most 8 RDMA ranks can be sent to
 constexpr int get_num_max_src_rdma_ranks(const int num_rdma_ranks) {
-  // static version of min(num_rdma_ranks, 8)
-  return num_rdma_ranks < 8 ? num_rdma_ranks : 8;
+  // static version of min(num_rdma_ranks, NUM_MAX_NVL_PEERS)
+  return num_rdma_ranks < NUM_MAX_NVL_PEERS ? num_rdma_ranks : NUM_MAX_NVL_PEERS;
 }
 
 constexpr int get_num_threads_group_cast(const int num_group_cast_rdma_sender_warps) {

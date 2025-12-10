@@ -366,6 +366,7 @@ template <
     int kNumRDMARanks,
     int kNumTMABytesPerWarp,
     int kNumGroupCastRDMASenderWarps,
+    int kWarpCopyUnrollStages,
     bool kCastLSE,
     int kNumMaxSrcRDMARanks = get_num_max_src_rdma_ranks(kNumRDMARanks)>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_cast(kNumGroupCastRDMASenderWarps), 1)
@@ -648,7 +649,7 @@ void group_cast_kernel(
           st_na_global(reinterpret_cast<int4*>(dst_send_buffers[j]) + hidden_offset, hidden_val_int4);
       };
       UNROLLED_WARP_COPY(
-          /*UNROLL_FACTOR=*/5,
+          /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
           /*LANE_ID=*/lane_id,
           /*N=*/hidden_int4,
           /*DST=*/0,
@@ -1242,12 +1243,15 @@ void group_cast(
     bool is_cached_group_cast,
     cudaStream_t stream,
     int num_channels) {
+  constexpr int kWarpCopyUnrollStages = 5;
   constexpr int kNumGroupCastRDMASenderWarps = 7;
-  constexpr int kNumTMABytesPerWarp = 16384;
-  constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS;
   constexpr int kNumThreads = get_num_threads_group_cast(kNumGroupCastRDMASenderWarps);
   constexpr int kNumWarps = kNumThreads / WARP_SIZE;
   GRPCOLL_STATIC_ASSERT(kNumWarps == kNumGroupCastRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS, "Invalid number of warps");
+
+  // Prepare for TMA
+  constexpr int kNumTMABytesPerWarp = 16384;
+  constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS;
 
 #define GROUP_CAST_LAUNCH_CASE(is_cached_group_cast, cast_lse, num_rdma_ranks) \
   {                                                                            \
@@ -1257,6 +1261,7 @@ void group_cast(
         num_rdma_ranks,                                                        \
         kNumTMABytesPerWarp,                                                   \
         kNumGroupCastRDMASenderWarps,                                          \
+        kWarpCopyUnrollStages,                                                 \
         cast_lse>;                                                             \
     SET_SHARED_MEMORY_FOR_TMA(group_cast_func);                                \
     LAUNCH_KERNEL(                                                             \
@@ -1698,7 +1703,8 @@ template <
     int kMaxNumSrcRanks,
     bool kUseTMA,
     int kNumTMAStages,
-    int kNumTMALoadBytes = 0,
+    int kNumTMALoadBytes,
+    int kNumTMABufferBytesPerStage,
     typename GetAddrFn,
     typename ReceiveLSEFn>
 __device__ void reduce_token_in_warp(
@@ -1725,9 +1731,8 @@ __device__ void reduce_token_in_warp(
   constexpr int kCommDtypePerInt4 = kCommDtypePerDtype * kDtypePerInt4;
   constexpr bool kIsLSEReduce = kReduceOp == ReduceOp::LSE;
   const int hidden_int4_comm = hidden_int4 / kCommDtypePerDtype;
-  GRPCOLL_STATIC_ASSERT(kNumTMAStages == 2, "Only support 2 stages for now, whether you enable TMA or not");
   GRPCOLL_STATIC_ASSERT(kReduceOp == ReduceOp::AVG or !kGlobalReduce, "Only support global reduce for ReduceOp::AVG");
-  GRPCOLL_STATIC_ASSERT(kMaxNumSrcRanks <= WARP_SIZE, "Too many ranks");
+  GRPCOLL_STATIC_ASSERT(kMaxNumSrcRanks <= WARP_SIZE, "Too many src ranks");
 
   // Count and collect src slots and corr. src ranks from all lanes
   // NOTES: lane `r` holds the `token_idx_in_queue` and `is_token_in_rank` of rank `r`
@@ -1771,17 +1776,19 @@ __device__ void reduce_token_in_warp(
 
   // Reduce token from src ranks
   if constexpr (kUseTMA) {
-    constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + 16;
+    GRPCOLL_STATIC_ASSERT(kNumTMALoadBytes == sizeof(int4) * WARP_SIZE, "Invalid kNumTMALoadBytes");
+    GRPCOLL_STATIC_ASSERT(kNumTMABufferBytesPerStage == kNumTMALoadBytes * (kMaxNumSrcRanks + 1) + NUM_MAX_BARRIERS);
 
     // Define functions to access TMA load/store buffers and mbarriers
-    auto tma_load_buffer = [=](const int& i, const int& j) -> int4* {
-      return reinterpret_cast<int4*>(smem_ptr + i * kNumTMABufferBytesPerStage + j * kNumTMALoadBytes);
+    // `tma_load_buffer`: shape=(kNumTMAStages, )
+    auto tma_load_buffer = [=](const int& stage_idx, const int& src_rank_idx) -> int4* {
+      return reinterpret_cast<int4*>(smem_ptr + stage_idx * kNumTMABufferBytesPerStage + src_rank_idx * kNumTMALoadBytes);
     };
-    auto tma_store_buffer = [=](const int& i) -> int4* {
-      return reinterpret_cast<int4*>(smem_ptr + i * kNumTMABufferBytesPerStage + NUM_MAX_NVL_PEERS * kNumTMALoadBytes);
+    auto tma_store_buffer = [=](const int& stage_idx) -> int4* {
+      return reinterpret_cast<int4*>(smem_ptr + stage_idx * kNumTMABufferBytesPerStage + NUM_MAX_NVL_PEERS * kNumTMALoadBytes);
     };
-    auto tma_mbarrier = [=](const int& i) -> uint64_t* {
-      return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage + (NUM_MAX_NVL_PEERS + 1) * kNumTMALoadBytes);
+    auto tma_mbarrier = [=](const int& stage_idx) -> uint64_t* {
+      return reinterpret_cast<uint64_t*>(smem_ptr + stage_idx * kNumTMABufferBytesPerStage + (NUM_MAX_NVL_PEERS + 1) * kNumTMALoadBytes);
     };
 
     // Prefetch the hidden states of src tokens for stage0 with TMA-load
@@ -1799,7 +1806,7 @@ __device__ void reduce_token_in_warp(
 
     // Loop over the whole hidden size in int4 and group_reduce
     // NOTES: hidden_int4 should be a multiple of WARP_SIZE
-    // since we need to sync the whole warp in each loop
+    // since we need to sync the whole warp in each loop, and copy WARP_SIZE of int4s to/from shared memory
     for (int shifted = 0, iter = 0; shifted < hidden_int4; shifted += WARP_SIZE, iter += 1) { // warp-strided loop
       // Get TMA stage info
       const int stage_idx = iter % kNumTMAStages;
@@ -1942,6 +1949,9 @@ template <
     int kMaxNumHeads,
     int kNumRDMARanks,
     int kNumGroupReduceForwarderWarps,
+    int kNumTMAStages,
+    int kNumTMALoadBytes,
+    int kNumTMABufferBytesPerStage,
     int kNumTMABytesPerSenderWarp,
     int kNumTMABytesPerForwarderWarp,
     int kNumMaxSrcRDMARanks = get_num_max_src_rdma_ranks(kNumRDMARanks),
@@ -1981,6 +1991,7 @@ void group_reduce_kernel(
   const auto num_channels = static_cast<int>(gridDim.x) / 2, channel_id = sm_id / 2;
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const bool is_forwarder = sm_id % 2 == 1;
+  constexpr int kNumMaxSrcNVLRanks = NUM_MAX_NVL_PEERS;
   constexpr bool kIsLSEReduce = kReduceOp == ReduceOp::LSE;
   constexpr int max_num_heads = kIsLSEReduce ? kMaxNumHeads : 1;
 
@@ -2282,19 +2293,24 @@ void group_reduce_kernel(
           sync_warp_group(/*group_flag=*/dst_rdma_rank + 2, /*group_size=*/kNumWarpsPerForwarder * WARP_SIZE);
         }
       };
-      // FIXME: This limits maximum number of RDMA peers to 14
-      GRPCOLL_STATIC_ASSERT(kNumWarpsPerForwarder == 1 or kNumRDMARanks + 2 <= 16, "Barriers are not enough");
+      // NOTES: since `kNumGroupReduceForwarderWarps` is set to 24 for now,
+      // so when `kNumRDMARanks` > 12, `kNumWarpsPerForwarder` will always be 1,
+      // thus no worry to reach the barrier limit (`kNumWarpsPerForwarder > 1` and `kNumRDMARanks > 14`)
+      GRPCOLL_STATIC_ASSERT(kNumWarpsPerForwarder == 1 or kNumRDMARanks + 2 <= NUM_MAX_BARRIERS, "Barriers are not enough");
 
       // Prepare TMA buffer and init mbarrier
-      constexpr int kNumTMAStages = 2;
-      constexpr int kNumTMALoadBytes = sizeof(int4) * WARP_SIZE;
-      constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + 16; // 4624B
-      GRPCOLL_STATIC_ASSERT(kNumTMABufferBytesPerStage * kNumTMAStages <= kNumTMABytesPerForwarderWarp, "TMA buffer is not larger enough");
+      // kNumTMABufferBytesPerStage:
+      //    1. TMA load buffer: kNumMaxSrcNVLRanks * kNumTMALoadBytes
+      //    2. TMA store buffer: 1 * kNumTMALoadBytes
+      //    3. mbarrier: at most NUM_MAX_BARRIERS * 1
+      GRPCOLL_STATIC_ASSERT(kNumTMALoadBytes == sizeof(int4) * WARP_SIZE, "Invalid kNumTMALoadBytes");
+      GRPCOLL_STATIC_ASSERT(kNumTMABufferBytesPerStage == kNumTMALoadBytes * (kNumMaxSrcNVLRanks + 1) + NUM_MAX_BARRIERS, "Invalid kNumTMABufferBytesPerStage");
+      GRPCOLL_STATIC_ASSERT(kNumTMAStages * kNumTMABufferBytesPerStage <= kNumTMABytesPerForwarderWarp, "TMA buffer is not larger enough");
 
       extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
       auto smem_ptr = smem_buffer + target_warp_id * kNumTMAStages * kNumTMABufferBytesPerStage;
-      auto tma_mbarrier = [=](const int& i) {
-        return reinterpret_cast<uint64_t*>(smem_ptr + i * kNumTMABufferBytesPerStage + kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1));
+      auto tma_mbarrier = [=](const int& stage_idx) {
+        return reinterpret_cast<uint64_t*>(smem_ptr + stage_idx * kNumTMABufferBytesPerStage + kNumTMALoadBytes * (kNumMaxSrcNVLRanks + 1));
       };
       uint32_t tma_phase[kNumTMAStages] = {0};
       if (lane_id < kNumTMAStages) {
@@ -2415,11 +2431,12 @@ void group_reduce_kernel(
                                /*kGlobalReduce=*/false, // no need to global-reduce for forwarder
                                /*kMaxNumHeads=*/max_num_heads,
                                /*kNumReduceWarps=*/kNumForwarders,
-                               /*kNumRanks=*/NUM_MAX_NVL_PEERS,
-                               /*kMaxNumSrcRanks=*/NUM_MAX_NVL_PEERS,
+                               /*kNumRanks=*/kNumMaxSrcNVLRanks,
+                               /*kMaxNumSrcRanks=*/kNumMaxSrcNVLRanks,
                                /*kUseTMA=*/true,
                                /*kNumTMAStages=*/kNumTMAStages,
-                               /*kNumTMALoadBytes=*/kNumTMALoadBytes>(
+                               /*kNumTMALoadBytes=*/kNumTMALoadBytes,
+                               /*kNumTMABufferBytesPerStage=*/kNumTMABufferBytesPerStage>(
               /*is_token_in_rank=*/expected_head >= 0,
               /*token_idx_in_queue=*/expected_head,
               /*reduce_warp_id=*/target_warp_id,
@@ -2491,8 +2508,6 @@ void group_reduce_kernel(
         forwarder_retired[target_warp_id] = true;
       }
     } else if (warp_role == WarpRole::kRDMAReceiver) {
-      constexpr int kNumTMAStages = 2;
-
       // Clean shared memory and sync with the `kCoordinator` warp
       lane_id < kNumRDMARanks ? (rdma_receiver_rdma_head[target_warp_id][lane_id] = 0) : 0;
       lane_id == 0 ? (rdma_receiver_retired[target_warp_id] = false) : 0;
@@ -2561,8 +2576,10 @@ void group_reduce_kernel(
                              /*kNumReduceWarps=*/kNumRDMAReceivers,
                              /*kNumRanks=*/kNumRDMARanks,
                              /*kMaxNumSrcRanks=*/kNumMaxSrcRDMARanks,
-                             /*kUseTMA=*/false, // REVIEW: why not use TMA here ?
-                             /*kNumTMAStages=*/kNumTMAStages>(
+                             /*kUseTMA=*/false,
+                             /*kNumTMAStages=*/kNumTMAStages,
+                             /*kNumTMALoadBytes=*/0,
+                             /*kNumTMABufferBytesPerStage=*/0>(
             /*is_token_in_rank=*/expected_head >= 0,
             /*token_idx_in_queue=*/expected_head,
             /*reduce_warp_id=*/target_warp_id,
@@ -2688,12 +2705,21 @@ void group_reduce(
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
     ReduceOp reduce_op) {
-  constexpr int kMaxNumHeads = 128; // the maximum number of heads supported for lse
   constexpr int kNumGroupReduceForwarderWarps = 24;
-  constexpr int kNumTMABytesPerSenderWarp = 16384; // 16KB * 8 = 128KB, can still be raised up
-  constexpr int kNumTMABytesPerForwarderWarp =
-      9248; // 2 * (sizeof(int4) * WARP_SIZE * (NUM_MAX_NVL_PEERS + 1) + 16) = 9248B, 9248B * 24 = 216.75KB < 228KB, can hardly be raised up
-  constexpr int smem_size = std::max(kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, kNumTMABytesPerForwarderWarp * kNumGroupReduceForwarderWarps);
+
+  // Prepare for TMA
+  constexpr int kNumTMABytesPerSenderWarp = 16384;
+  constexpr int kNumTMALoadBytes = sizeof(int4) * WARP_SIZE; // warp-copy unit, each lane for one int4
+  constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + NUM_MAX_BARRIERS; // 4624B
+  constexpr int kNumTMAStages = 2;
+  constexpr int kNumTMABytesPerForwarderWarp = kNumTMAStages * kNumTMABufferBytesPerStage;
+  constexpr int smem_size = std::max(
+      kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, // 16KB * 8 = 128KB, can still be raised up
+      kNumTMABytesPerForwarderWarp * kNumGroupReduceForwarderWarps // 9248B * 24 = 216.75KB < 228KB, can hardly be raised up
+  );
+
+  // Prepare for maximum number of heads for lse
+  constexpr int kMaxNumHeads = 2; // DE-BUG
 
   // NOTES: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
@@ -2720,6 +2746,9 @@ void group_reduce(
         max_num_heads,                                                                                     \
         num_rdma_ranks,                                                                                    \
         kNumGroupReduceForwarderWarps,                                                                     \
+        kNumTMAStages,                                                                                     \
+        kNumTMALoadBytes,                                                                                  \
+        kNumTMABufferBytesPerStage,                                                                        \
         kNumTMABytesPerSenderWarp,                                                                         \
         kNumTMABytesPerForwarderWarp>;                                                                     \
     SET_SHARED_MEMORY_FOR_TMA(group_reduce_func);                                                          \
