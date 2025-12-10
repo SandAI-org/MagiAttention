@@ -2491,8 +2491,8 @@ void group_reduce_kernel(
                                      /*comm_dtype_t=*/comm_dtype_t,
                                      /*reduced_dtype_t=*/reduce_dtype_t,
                                      /*kReduceOp=*/kForwardReduceOp,
-                                     /*kAccReduce=*/false,
-                                     /*kGlobalReduce=*/false,
+                                     /*kAccReduce=*/false, // no need to acc-reduce for forwarder
+                                     /*kGlobalReduce=*/false, // no need to global-reduce for forwarder
                                      /*kNumRanks=*/NUM_MAX_NVL_PEERS,
                                      /*kMaxNumSrcRanks=*/NUM_MAX_NVL_PEERS,
                                      /*kUseTMA=*/true,
@@ -2507,7 +2507,7 @@ void group_reduce_kernel(
               /*reduced_row=*/static_cast<int4*>(token_ptr_in_rdma_buffer),
               /*reduced_topk_weights=*/reinterpret_cast<float*>(static_cast<int8_t*>(token_ptr_in_rdma_buffer) + hidden_bytes + sizeof(SourceMeta)),
               /*num_max_recv_tokens=*/num_max_nvl_chunked_recv_tokens_per_rdma,
-              /*is_token_in_global_rank=*/nullptr,
+              /*is_token_in_global_rank=*/nullptr, // no need to global-reduce for forwarder
               /*get_addr_fn=*/get_addr_fn,
               /*recv_tw_fn=*/recv_tw_fn,
               /*smem_ptr=*/smem_ptr,

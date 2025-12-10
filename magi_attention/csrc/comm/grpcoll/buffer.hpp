@@ -265,9 +265,19 @@ struct Buffer {
       bool async_op,
       bool allocate_on_comm_stream);
 
-  std::tuple<torch::Tensor, std::optional<EventHandle>> internode_group_reduce(
+  std::tuple<
+      /* 1st group of output data */
+      torch::Tensor,
+      std::optional<torch::Tensor>,
+      /* event */
+      std::optional<EventHandle>>
+  internode_group_reduce(
+      /* 1st group of input / output data*/
       const torch::Tensor& x,
       std::optional<torch::Tensor>& reduced_x_buf,
+      const std::optional<torch::Tensor>& lse,
+      std::optional<torch::Tensor>& reduced_lse_buf,
+      /* other metadata */
       const torch::Tensor& src_meta,
       const torch::Tensor& is_reduced_token_in_rank,
       const torch::Tensor& rdma_channel_prefix_matrix,

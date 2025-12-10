@@ -1335,15 +1335,16 @@ void group_reduce_kernel(
         ptr = reinterpret_cast<void*>(static_cast<int8_t*>(ptr) + num_channel_tokens_total * sizeof(int));
 
         // Get `channel_lse_buffers` for curr rank if `kIsLSEReduce`
-        if constexpr (kIsLSEReduce)
-          // Get `channel_lse_buffers` for curr rank
-          // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
+        // `lse_buffers`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, num_heads), dtype=float
+        if constexpr (kIsLSEReduce) {
           channel_lse_buffers[curr_rank] = Buffer<float>(ptr, num_channel_tokens_total * num_heads, channel_rank_token_offset * num_heads);
+        }
 
         // Get `channel_x_buffers_2nd` for curr rank if `kIs2ndGroupExists`
         // `x_buffers_2nd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4_comm), dtype=int, alignment=sizeof(int4)
-        if constexpr (kIs2ndGroupExists)
+        if constexpr (kIs2ndGroupExists) {
           channel_x_buffers_2nd[curr_rank] = Buffer<int4, sizeof(int4)>(ptr, num_channel_tokens_total * hidden_int4_comm, channel_rank_token_offset * hidden_int4_comm);
+        }
       }
 
       // Get reduce tasks
@@ -1397,8 +1398,7 @@ void group_reduce_kernel(
         __syncwarp();
 #endif
 
-        // Reduce `reduced_lse` from `channel_lse_buffers` first
-        // if `kIsLSEReduce`
+        // Reduce `reduced_lse` from `channel_lse_buffers` first if `kIsLSEReduce`
         if constexpr (kIsLSEReduce) {
           for (int h = lane_id; h < num_heads; h += WARP_SIZE) {
             auto reduced_lse_ptr = reduced_lse + token_idx * num_heads + h;
@@ -1421,8 +1421,9 @@ void group_reduce_kernel(
 
 #pragma unroll
             // Apply lse reduce for each src rank
-            for (int j = 0; j < num_src_ranks; ++j)
+            for (int j = 0; j < num_src_ranks; ++j) {
               lse_reduce<reduce_dtype_t, float>(/*reduced_lse=*/reduced_lse_val, /*src_lse=*/recv_lses[j]);
+            }
             auto reduced_lse_val_float = static_cast<float>(reduced_lse_val);
 
             // Store the reduced lse to shared memory buffer temporarily
@@ -1430,8 +1431,7 @@ void group_reduce_kernel(
             shared_reduced_lse_buf[reduce_warp_id][h] = reduced_lse_val_float;
 
             // Store the weight to rescale the old `reduced_lse` for each head
-            // which will be read later to reduce the hidden values
-            // if in `kAccReduce` mode
+            // which will be read later to reduce the hidden values if in `kAccReduce` mode
             if constexpr (kAccReduce) {
               shared_old_lse_rescale_weight_buf[reduce_warp_id][h] = get_lse_rescale_weight(/*lse_to_rescale=*/old_lse_val, /*rescaled_lse=*/reduced_lse_val);
             }
@@ -1479,8 +1479,9 @@ void group_reduce_kernel(
             // REVIEW: why use a temp buffer here instead of loading and reducing in one iteration ?
             int4 recv_hidval_int4[kNumRanks];
 #pragma unroll
-            for (int j = 0; j < num_src_ranks; ++j)
+            for (int j = 0; j < num_src_ranks; ++j) {
               recv_hidval_int4[j] = ld_nc_global(channel_x_buffers_ptr[src_rank_idxs[j]].buffer() + slot_indices[j] * hidden_int4_comm + i);
+            }
 
             // Prepare high-precision reduce buffer for this hidden value
             reduce_dtype_t hp_hidval_reduce_buf[kCommDtypePerInt4];
@@ -1492,8 +1493,7 @@ void group_reduce_kernel(
               auto reduce_hidval_ptr_dtype = reinterpret_cast<const dtype_t*>(reduce_hidval_ptr_int4);
               foreach_assign<reduce_dtype_t, dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, reduce_hidval_ptr_dtype);
 
-              // Rescale the initial old value in advance
-              // if `kIsLSEReduce`
+              // Rescale the initial old value in advance if `kIsLSEReduce`
               if constexpr (kIsLSEReduce) {
                 reduce_dtype_t rescale_weight = shared_old_lse_rescale_weight_buf[reduce_warp_id][head_idx];
                 foreach_mul<reduce_dtype_t, kCommDtypePerInt4>(hp_hidval_reduce_buf, rescale_weight);

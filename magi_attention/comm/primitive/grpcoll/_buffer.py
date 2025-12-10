@@ -1015,10 +1015,13 @@ class GrpCollBuffer:
         # Launch the internode group reduce kernel
         (
             reduced_x_1st,
+            reduced_lse,
             event,
         ) = self.runtime.internode_group_reduce(
             x_1st,
             reduced_x_1st,
+            lse,
+            reduced_lse,
             handle.recv_src_meta,  # src_meta
             handle.is_token_in_rank,  # is_reduced_token_in_rank
             handle.recv_rdma_channel_prefix_matrix,  # rdma_channel_prefix_matrix

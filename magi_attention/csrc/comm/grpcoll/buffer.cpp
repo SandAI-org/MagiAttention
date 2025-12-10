@@ -747,10 +747,11 @@ Buffer::intranode_group_reduce(
     GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
     GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
     GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0); // hidden size should be divisible by num_heads
+
+    lse_ptr = lse->data_ptr<float>();
     num_heads = static_cast<int>(lse->size(1));
     auto head_dim = hidden_size / num_heads;
     GRPCOLL_HOST_ASSERT(head_dim % (sizeof(int4) / comm_elem_size) == 0); // each group of elems with dtype `comm_dtype` in one int4 should share the same head
-    lse_ptr = lse->data_ptr<float>();
 
     if (reduced_lse_buf.has_value()) {
       GRPCOLL_HOST_ASSERT(reduced_lse_buf->dim() == 2 and reduced_lse_buf->is_contiguous());
@@ -768,7 +769,6 @@ Buffer::intranode_group_reduce(
        */
       reduced_lse = torch::empty({num_reduced_tokens, num_heads}, lse->options());
     }
-
     reduced_lse_ptr = reduced_lse->data_ptr<float>();
   } else {
     GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE); // lse must be provided when reduce_op == ReduceOp::LSE
@@ -1259,9 +1259,19 @@ Buffer::internode_group_cast(
 #endif
 }
 
-std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_reduce(
+std::tuple<
+    /* 1st group of output data */
+    torch::Tensor,
+    std::optional<torch::Tensor>,
+    /* event */
+    std::optional<EventHandle>>
+Buffer::internode_group_reduce(
+    /* 1st group of input / output data*/
     const torch::Tensor& x,
     std::optional<torch::Tensor>& reduced_x_buf,
+    const std::optional<torch::Tensor>& lse,
+    std::optional<torch::Tensor>& reduced_lse_buf,
+    /* other metadata */
     const torch::Tensor& src_meta,
     const torch::Tensor& is_reduced_token_in_rank,
     const torch::Tensor& rdma_channel_prefix_matrix,
@@ -1338,6 +1348,42 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     pre_perm_idx_ptr = pre_perm_idx->data_ptr<int64_t>();
   }
 
+  // Allocate reduced_lse buffer and assign the ptr if needed
+  int num_heads = 0; // NOTES: when `reduce_op != ReduceOp::LSE`, num_heads is set to 0 and consumes empty buffer
+  auto reduced_lse = std::optional<torch::Tensor>();
+  float *lse_ptr = nullptr, *reduced_lse_ptr = nullptr;
+  if (lse.has_value()) {
+    GRPCOLL_HOST_ASSERT(reduce_op_ == ReduceOp::LSE); // no point to transfer lse if reduce_op != ReduceOp::LSE
+    GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
+    GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
+    GRPCOLL_HOST_ASSERT(lse->size(0) == num_tokens && hidden_size % lse->size(1) == 0); // hidden size should be divisible by num_heads
+
+    lse_ptr = lse->data_ptr<float>();
+    num_heads = static_cast<int>(lse->size(1));
+    auto head_dim = hidden_size / num_heads;
+    GRPCOLL_HOST_ASSERT(head_dim % (sizeof(int4) / comm_elem_size) == 0); // each group of elems with dtype `comm_dtype` in one int4 should share the same head
+
+    if (reduced_lse_buf.has_value()) {
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->dim() == 2 and reduced_lse_buf->is_contiguous());
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->scalar_type() == lse->scalar_type());
+      GRPCOLL_HOST_ASSERT(reduced_lse_buf->size(0) == num_reduced_tokens && reduced_lse_buf->size(1) == num_heads);
+      reduced_lse.emplace(reduced_lse_buf.value());
+    } else {
+      GRPCOLL_HOST_ASSERT(!acc_reduce); // no point to acc_reduce if reduced_lse_buf is not provided
+      /** NOTE: different from ep, for group-reduce with reduce_op == ReduceOp::LSE,
+       * some token in reduced_lse might not reduce anything,
+       * since the corr. token has no destination rank in the corr. group-cast
+       * so we have to "-inf"-initialize reduced_lse, instead of empty initialization
+       * however, we handle the "-inf" initialization inside the group_reduce kernel
+       * thus here, we still use empty initialization
+       */
+      reduced_lse = torch::empty({num_reduced_tokens, num_heads}, lse->options());
+    }
+    reduced_lse_ptr = reduced_lse->data_ptr<float>();
+  } else {
+    GRPCOLL_HOST_ASSERT(reduce_op_ != ReduceOp::LSE); // lse must be provided when reduce_op == ReduceOp::LSE
+  }
+
   // Extra check for avoid-dead-lock design
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_recv_tokens % num_rdma_ranks == 0);
   GRPCOLL_HOST_ASSERT(config.num_max_nvl_chunked_send_tokens <= config.num_max_nvl_chunked_recv_tokens / num_rdma_ranks);
@@ -1387,9 +1433,9 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
   // Launch group reduce kernel
   internode::group_reduce(
       /*reduced_x=*/reduced_x.data_ptr(),
-      /*reduced_lse=*/nullptr,
+      /*reduced_lse=*/reduced_lse_ptr,
       /*x=*/x.data_ptr(),
-      /*lse=*/nullptr,
+      /*lse=*/lse_ptr,
       /*is_reduced_token_in_rank=*/is_reduced_token_in_rank.data_ptr<bool>(),
       /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
       /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
@@ -1438,7 +1484,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
         t.record_stream(compute_stream);
     }
     // record optional tensors
-    for (auto& to : {pre_perm_idx}) {
+    for (auto& to : {lse, reduced_lse, pre_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
@@ -1452,7 +1498,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>> Buffer::internode_group_re
     at::cuda::setCurrentCUDAStream(compute_stream);
 
   // Return values
-  return {reduced_x, event};
+  return {reduced_x, reduced_lse, event};
 #else
   GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
   return {};
