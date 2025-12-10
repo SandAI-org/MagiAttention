@@ -621,8 +621,12 @@ def get_sdpa_mask_from_var_block_mask(
     return sdpa_mask
 
 
+# TODO: we need a more resable way to choose kblocmm and kblockn automically.
 def choose_ref_block(
-    block_size: tuple[int, int], swap_ab: bool = False
+    block_size: tuple[int, int],
+    swap_ab: bool = False,
+    pack_gqa: bool = False,
+    qhead_per_khead: int | None = None,
 ) -> tuple[int, int]:
     """
     Choose the proper reference block size for different Q/K block sizes, currently for uniform block mask.
@@ -635,6 +639,9 @@ def choose_ref_block(
     if swap_ab:
         raise NotImplementedError("SwapAB Attention is not supported yet.")
     else:
+        if pack_gqa and q_block_size < 64:
+            assert qhead_per_khead is not None
+            q_block_size = q_block_size * qhead_per_khead
         # Tile_M must be a multiple of 64
         if q_block_size >= 64:
             ref_q_block_size = min(192, ((q_block_size + 63) // 64) * 64)

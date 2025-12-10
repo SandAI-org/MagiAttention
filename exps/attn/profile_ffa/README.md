@@ -24,7 +24,10 @@ You can change the dense-related settings in `run_dense_tests` within `ffa_bench
 
 - seqlens_to_test = [49152]
 - sparsity_ratios_to_test = [0.1, 0.2, 0.5]
-- block_sizes_to_test = [64, 128]
+- q_block_sizes = [64, 128]
+- k_block_sizes = [64, 128]
+- pack_gqa_options = [False]
+- swap_ab_options = [False]
 
 You can change the block_sparse-related settings in `run_block_sparse_tests` within `ffa_benchmark.py`.
 
@@ -45,6 +48,8 @@ You can change the block_sparse-related settings in `run_block_sparse_tests` wit
     TEST_TYPE="dense" # choose from {"dense", "block_sparse"}
     OUTPUT_NAME="output"
 
+    # you can add --fwd or --bwd to run fwd or bwd only.
+    # by default we run both fwd and bwd.
     PYTHONPATH=../../../ python ffa_benchmark.py --test_type ${TEST_TYPE} --o ${OUT_DIR}/${OUTPUT_NAME}.csv
     ```
 
