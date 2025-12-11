@@ -151,13 +151,23 @@ def merge_ranges(
         "extension module is not installed."
     )
 
-    sorted_idx = torch.argsort(outer_ranges[:, 0], dim=0, stable=True)
-    sorted_outer_ranges = outer_ranges[sorted_idx]
-    sorted_inner_ranges = inner_ranges[sorted_idx]
+    sorted_idx, is_sorted = ffa_utils.argsort_ranges(outer_ranges)
+    # early exit for sorted ranges
+    if not is_sorted:
+        (
+            sorted_outer_ranges,
+            sorted_inner_ranges,
+            sorted_attn_type_map,
+        ) = ffa_utils.reorder_ranges_and_attn_type_maps(
+            outer_ranges, inner_ranges, attn_type_map, sorted_idx
+        )
+    else:
+        sorted_outer_ranges = outer_ranges
+        sorted_inner_ranges = inner_ranges
+        sorted_attn_type_map = attn_type_map
     if attn_type_map is None:
         sorted_attn_type_map = None
-    else:
-        sorted_attn_type_map = attn_type_map[sorted_idx]
+
     (
         merge_outer_ranges,
         range_map,
