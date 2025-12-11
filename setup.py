@@ -312,6 +312,7 @@ def build_magi_attn_comm_module(
         "-O3",
         "-Xptxas",
         "-v",
+        # "-G", # Turn this on and recompile to enable device debug info
         "-Xcompiler",
         "-std=c++17",
         "-lineinfo",

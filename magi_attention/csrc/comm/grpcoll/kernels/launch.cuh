@@ -87,19 +87,9 @@ using namespace magi_attn_comm::grpcoll;
 
 #ifndef SET_SHARED_MEMORY_FOR_TMA
 #ifndef DISABLE_SM90_FEATURES
-#define SET_SHARED_MEMORY_FOR_TMA(kernel)                                                 \
-  do {                                                                                    \
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size); \
-    cudaError_t e = cudaGetLastError();                                                   \
-    if (e != cudaSuccess) {                                                               \
-      GrpCollException cuda_exception("CUDA", __FILE__, __LINE__, cudaGetErrorString(e)); \
-      fprintf(stderr, "%s\n", cuda_exception.what());                                     \
-      throw cuda_exception;                                                               \
-    } else {                                                                              \
-      cfg.dynamicSmemBytes = smem_size;                                                   \
-    }
-}
-while (0)
+#define SET_SHARED_MEMORY_FOR_TMA(kernel)                                                                                   \
+  GRPCOLL_HOST_ASSERT(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size) == cudaSuccess); \
+  cfg.dynamicSmemBytes = smem_size;
 #else
 #define SET_SHARED_MEMORY_FOR_TMA(kernel) void()
 #endif

@@ -2716,7 +2716,7 @@ void group_reduce(
   constexpr int kNumTMABytesPerSenderWarp = 16384;
   constexpr int kNumTMALoadBytes = sizeof(int4) * WARP_SIZE; // warp-copy unit, each lane for one int4
   constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + 16; // 4624B, REVIEW: why add 16 bytes ?
-  constexpr int kNumTMAStages = 2;
+  constexpr int kNumTMAStages = 2; // REVIEW: why kNumTMAStages can not be 1 ?
   constexpr int kNumTMABytesPerForwarderWarp = kNumTMAStages * kNumTMABufferBytesPerStage;
   constexpr int smem_size = std::max(
       kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, // 16KB * 8 = 128KB, can still be raised up
@@ -2724,7 +2724,7 @@ void group_reduce(
   );
 
   // Prepare for maximum number of heads for lse
-  constexpr int kMaxNumHeads = 48; // FIXME: too few max_num_heads ()>=48, < 56)
+  constexpr int kMaxNumHeads = 48; // FIXME: too few max_num_heads (>=48, < 52)
 
   // NOTES: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
