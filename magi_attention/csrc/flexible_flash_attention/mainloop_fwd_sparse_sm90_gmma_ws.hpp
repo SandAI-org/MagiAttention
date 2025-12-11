@@ -342,10 +342,6 @@ struct CollectiveMainloopSparseFwdSm90 {
 
       int last_idx = NUM_ROWS_PER_GROUP - 1;
       // initialize to the last valid token index
-      // for (int i = 0; i < NUM_ROWS_PER_GROUP; ++i) {
-      //   cur_k_range_indices[i] = end_batches - 1;
-      //   cur_k_range_inner_indices[i] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
-      // }
       cur_k_range_indices[last_idx] = end_batches - 1;
       cur_k_range_inner_indices[last_idx] = k_ranges[end_batches - 1].y - k_ranges[end_batches - 1].x - 1;
       prev_token_indices[last_idx] = -1;
@@ -395,8 +391,6 @@ struct CollectiveMainloopSparseFwdSm90 {
           }
         } else {
           while (cnt < num_steps) {
-            // int2 cur_k_range = k_ranges[cur_k_range_indices[last_idx]];
-            // int seqlen_k = cur_k_range.y - cur_k_range.x;
             int rest = num_steps - cnt;
             // Old: k_range size larger, move inner pointer
             // New: extra inner pointer to move
@@ -409,11 +403,6 @@ struct CollectiveMainloopSparseFwdSm90 {
               // load previous K range, since we iterate from rightmost to leftmost
               int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
               cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
-              // k_range out-of-bounds
-              // if (bidb + cur_k_range_indices[last_idx] >= end_batches) {
-              //   is_kv_valid[0] = false;
-              //   break;
-              // }
             }
           }
         }
@@ -423,8 +412,6 @@ struct CollectiveMainloopSparseFwdSm90 {
 
         CUTE_UNROLL
         for (int i = last_idx - 1; i >= 0; --i) {
-          // int2 cur_k_range = k_ranges[cur_k_range_indices[i + 1]];
-          // int seqlen_k = cur_k_range.y - cur_k_range.x;
           if (cur_k_range_inner_indices[i + 1] > 0) {
             // only move inner pointer
             cur_k_range_indices[i] = cur_k_range_indices[i + 1];
@@ -517,8 +504,6 @@ struct CollectiveMainloopSparseFwdSm90 {
       for (int i = 0; i < NUM_ROWS_PER_GROUP; ++i) {
         prev_token_indices[i] = token_indices[i];
       }
-      // is_kv_valid[1] = is_kv_valid[0];
-      // is_kv_valid[0] = true;
       // update token index for each thread
       if (!is_finish()) {
         int num_threads = NumProducerThreads;
@@ -555,8 +540,6 @@ struct CollectiveMainloopSparseFwdSm90 {
           }
         } else {
           while (cnt < num_steps) {
-            // int2 cur_k_range = k_ranges[cur_k_range_indices[last_idx]];
-            // int seqlen_k = cur_k_range.y - cur_k_range.x;
             int rest = num_steps - cnt;
             // Old: k_range size larger, move inner pointer
             // New: extra inner pointer to move
@@ -569,11 +552,6 @@ struct CollectiveMainloopSparseFwdSm90 {
               // load previous K range, since we iterate from rightmost to leftmost
               int2 prev_k_range = k_ranges[cur_k_range_indices[last_idx]];
               cur_k_range_inner_indices[last_idx] = prev_k_range.y - prev_k_range.x - 1;
-              // k_range out-of-bounds
-              // if (bidb + cur_k_range_indices[last_idx] >= end_batches) {
-              //   is_kv_valid[0] = false;
-              //   break;
-              // }
             }
           }
         }
@@ -584,8 +562,6 @@ struct CollectiveMainloopSparseFwdSm90 {
 
         CUTE_UNROLL
         for (int i = last_idx - 1; i >= 0; --i) {
-          // int2 cur_k_range = k_ranges[cur_k_range_indices[i + 1]];
-          // int seqlen_k = cur_k_range.y - cur_k_range.x;
           if (cur_k_range_inner_indices[i + 1] > 0) {
             // only move inner pointer
             cur_k_range_indices[i] = cur_k_range_indices[i + 1];
@@ -595,7 +571,6 @@ struct CollectiveMainloopSparseFwdSm90 {
             cur_k_range_indices[i] = cur_k_range_indices[i + 1] - 1;
             int2 prev_k_range = k_ranges[cur_k_range_indices[i]];
             cur_k_range_inner_indices[i] = prev_k_range.y - prev_k_range.x - 1;
-            // TODO: check kv valid
           }
           token_indices[i] = (k_ranges[cur_k_range_indices[i]].x + cur_k_range_inner_indices[i]) * stride_kv_s_kv;
         }
@@ -615,11 +590,6 @@ struct CollectiveMainloopSparseFwdSm90 {
         //   }
         // }
       }
-    }
-
-    CUTLASS_DEVICE
-    bool is_valid() {
-      return true; // always true because we use is_kv_valid to determine validity
     }
 
     CUTLASS_DEVICE
@@ -804,11 +774,7 @@ struct CollectiveMainloopSparseFwdSm90 {
         CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
           Element* dst_ptr = &sK(group_idx * NUM_ROWS_PER_GROUP + local_row, idx_in_group * 8 + tile_idx * 64, smem_pipe_write.index());
-          cp_async_cacheglobal_l2_prefetch_256B(
-              ptr_gK_base + token_idx + tile_idx * 64,
-              dst_ptr,
-              true, // TODO: check kv valid
-              cache_policy);
+          cp_async_cacheglobal_l2_prefetch_256B(ptr_gK_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
         }
       }
 
@@ -832,10 +798,6 @@ struct CollectiveMainloopSparseFwdSm90 {
       // }
     };
 
-    // TODO: boundary mask
-    // Instead of recording `is_valid`, directly record the size `s` of the rightmost key-value block.
-    // 128 - `s` is the column that needs to be masked after the QK block.
-
     auto load_V = [&](auto& smem_pipe_write) {
       pipeline_v.producer_acquire(smem_pipe_write);
       // Producer Ops. calculate src/dst offset based on token index, then cp.async load
@@ -853,11 +815,7 @@ struct CollectiveMainloopSparseFwdSm90 {
         CUTE_UNROLL
         for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
           Element* dst_ptr = &sVt(idx_in_group * 8 + tile_idx * 64, group_idx * NUM_ROWS_PER_GROUP + local_row, smem_pipe_write.index());
-          cp_async_cacheglobal_l2_prefetch_256B(
-              ptr_gV_base + token_idx + tile_idx * 64,
-              dst_ptr,
-              true, // TODO: check kv valid
-              cache_policy);
+          cp_async_cacheglobal_l2_prefetch_256B(ptr_gV_base + token_idx + tile_idx * 64, dst_ptr, true, cache_policy);
         }
       }
 
@@ -869,34 +827,18 @@ struct CollectiveMainloopSparseFwdSm90 {
     int n_block_max = block_meta.loop_count;
     if constexpr (IntraWGOverlap) {
       load_K(smem_pipe_write_k);
-      // if (block_meta.m_block == 0 && blockIdx.x == 0) {
-      //   printf("=====Prologue Load=======\n");
-      //   printf("Thread %d load (token index, is valid):(%d, %d)  for K\n", thread_idx, block_meta.token_idx, block_meta.is_kv_valid);
-      //   printf("=========================\n");
-      // }
       load_Q();
       shared_storage.pipelines.barrier_O.wait((work_idx + 1) % 2);
     }
 
     do {
       // Prefetch the next block_meta
-      // printf("Producer: Before block_meta.prefetch()...\n");
       block_meta.prefetch();
       int n_block = block_meta.cur_loop;
-      // int prev_n_block = n_block - 1;
-      // bool is_valid = block_meta.is_kv_valid;
 
       if (n_block < n_block_max) {
         // Load interleaved K/V
         if constexpr (IntraWGOverlap) {
-          // if (block_meta.m_block == 0 && blockIdx.x == 0) {
-          //   printf("======Mainloop Load=======\n");
-          //   printf("Thread %d load (token index, is valid):(%d, %d) for K\n", thread_idx, block_meta.token_idx, block_meta.is_kv_valid);
-          //   printf("Thread %d load (token index, is valid):(%d, %d) for V\n", thread_idx, block_meta.prev_token_idx, block_meta.is_kv_valid);
-          //   printf("=========================\n");
-          // }
-          // load_K(block_meta.token_idx, block_meta.is_kv_valid[0], smem_pipe_write_k);
-          // load_V(block_meta.prev_token_idx, block_meta.is_kv_valid[1], smem_pipe_write_v);
           load_K(smem_pipe_write_k);
           load_V(smem_pipe_write_v);
         }
@@ -905,12 +847,6 @@ struct CollectiveMainloopSparseFwdSm90 {
     } while (!block_meta.is_finish());
 
     // Epilogue, load the tail V
-    // if (block_meta.m_block == 0 && blockIdx.x == 0) {
-    //   printf("=====Epilogue Load=======\n");
-    //   printf("Thread %d load (token index, is valid):(%d, %d) for V\n", thread_idx, block_meta.prev_token_idx, block_meta.is_kv_valid);
-    //   printf("=========================\n");
-    // }
-    // load_V(block_meta.prev_token_idx, block_meta.is_kv_valid[1], smem_pipe_write_v);
     load_V(smem_pipe_write_v);
 
     return true;
@@ -1098,60 +1034,19 @@ struct CollectiveMainloopSparseFwdSm90 {
     //   );
     // }
 
-    // // Get n_block for kv
-    // int n_block = block_meta.n_block_max - 1;
+    // Get n_block for kv
     int n_block_max = block_meta.loop_count;
     int n_block = 0;
-    // // Get seqlen for kv
-    // int seqlen_k = block_meta.seqlen_info.seqlen_k;
-    // // Get the minimum number of blocks to calculate
-    // int n_block_min = block_meta.n_block_min;
     // // Get attention type for n_block
     flash::AttnType attn_type = block_meta.attn_type;
     // Get mask for n_block
     flash::Mask<kBlockM, kBlockN, TiledMmaQK> mask;
-    //
-    bool finish_boundary = true;
-
-    // According to the specific attn_type, define three types of mask_fn, used in different situations
-    // boundary_mask_fn: mask for boundary block, for the rightmost block in a tile job
-    auto bypass_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {};
-    // auto boundary_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-    //   mask.template apply<true /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    // };
-    // auto boundary_mask_fn = [&](auto& tSrS, int num_invalid_token) { mask.template apply_sparse_load(tSrS, num_invalid_token, thread_idx); };
-    // no_mask_fn: no mask, for full attention block in a tile job
-    auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      if constexpr (RangeMerge) {
-        if (!finish_boundary) {
-          boundary_mask_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
-          finish_boundary = true;
-        }
-      } else {
-        bypass_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
-      }
-    };
-    // regular_mask_fn: mask for specific attention type block, for all other blocks in a tile job
-    // auto regular_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-    //   if constexpr (RangeMerge) {
-    //     if (!finish_boundary) {
-    //       boundary_mask_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
-    //       finish_boundary = true;
-    //     } else {
-    //       mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    //     }
-    //   } else {
-    //     mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
-    //   }
-    // };
 
     /* ================================================= Prologue ================================================= */
     // Wait for the Q to be loaded
     barrier_Q.wait(work_idx % 2);
-    // printf("Consumer: Q loaded\n");
     // Wait for first block of k to be loaded
     consumer_wait(pipeline_k, smem_pipe_read_k);
-    // printf("Consumer: first K loaded\n");
 
     // launch Q @ K of n_block and wait for it to finish
     flash::gemm</*zero_init=*/true, /*wg_wait=*/-1>(tiled_mma_qk, tSrQ, tSrK(_, _, _, smem_pipe_read_k.index()), tSrS);
@@ -1173,8 +1068,7 @@ struct CollectiveMainloopSparseFwdSm90 {
     //     printf("============================================ tSrS m_block: %d ==============================\n", m_block);
     // }
 
-    // Apply mask
-    // boundary_mask_fn(tSrS, block_meta.num_invalid_token);
+    // Apply boundary mask
     mask.template apply_sparse_load(tSrS, block_meta.num_invalid_token, thread_idx);
     // if (bidb == 0 && bidh == 0 && thread_idx == 0 && m_block == 0) {
     //     printf("============================================ tSrS after mask m_block: %d ==============================\n", m_block);
@@ -1224,7 +1118,7 @@ struct CollectiveMainloopSparseFwdSm90 {
 #pragma unroll 2
     do {
       // Each step does Q @ K for iter n_block, P @ V for iter n_block + 1, and softmax for iter n_block.
-      auto fwd_step = [&](int const n_block, auto mask_fn, auto check_inf_type) {
+      auto fwd_step = [&](int const n_block, auto check_inf_type) {
         // Forward step: perform gemm0 (Q@K), gemm1 (P@V) and softmax in an interleaved fashion
 
         // Extract the boolean value from the check_inf_type template parameter to determine if we need to check for infinity values
@@ -1269,9 +1163,7 @@ struct CollectiveMainloopSparseFwdSm90 {
         // Apply score-modification-function(currently only support softcap) before mask
         scoremod_premask_fn(tSrS);
 
-        // Apply mask
-        // TODO: add mask_fn
-        // mask_fn(tSrS, n_block, attn_type, block_meta.seqlen_info.seqlen_q, seqlen_k);
+        // Apply mask (no operation here because sparse load only supports full attention types)
 
         // if (bidb == 1 && bidh == 0 && thread_idx == 255 && m_block == 1) {
         //     printf("============================================ tSrS fwd before online_softmax m_block: %d ==============================\n", m_block);
@@ -1319,55 +1211,13 @@ struct CollectiveMainloopSparseFwdSm90 {
       block_meta.prefetch();
       n_block = block_meta.cur_loop;
 
-      // if (n_block >= n_block_min && seqlen_k % kBlockN == 0 && attn_type == flash::AttnType::Full) {
       if (n_block < n_block_max && attn_type == flash::AttnType::Full) {
-        // If seqlen_k is a multiple of kBlockN, we can skip the boundary mask for the first n_block
-        fwd_step(n_block, bypass_fn, cute::true_type{} /*check_inf*/);
+        fwd_step(n_block, cute::true_type{} /*check_inf*/);
         ++n_block;
-        finish_boundary = true;
       }
 
-      //       if (n_block >= n_block_min) {
-      //         if (attn_type == flash::AttnType::Causal || attn_type == flash::AttnType::BiCausal) {
-      //           int const m_idx_min = block_meta.m_block * kBlockM;
-      //           int const n_block_min_causal_local_mask = std::max(n_block_min, (m_idx_min + seqlen_k - block_meta.seqlen_info.seqlen_q) / kBlockN);
-      // #pragma unroll 1
-      //           for (; n_block >= n_block_min_causal_local_mask; --n_block) {
-      //             fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
-      //           }
-      //         }
-
-      //         // Calculate the number of iterations needed before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
-      //         int const m_idx_max = (block_meta.m_block + 1) * kBlockM;
-      //         int const n_block_min_before_inv_causal_mask =
-      //             attn_type == flash::AttnType::Full || attn_type == flash::AttnType::Causal ? n_block_min : cute::ceil_div(m_idx_max, kBlockN);
-      //         // Skip applying mask to the iterations before the left boundary of inv-causal and bi-causal, where we can skip applying mask to speed up
-      // #pragma unroll 1
-      //         for (; n_block >= n_block_min_before_inv_causal_mask; --n_block) {
-      //           fwd_step(n_block, no_mask_fn, cute::false_type{} /*check_inf*/);
-      //         }
-
-      //         // Separate masking iterations on the left for inv-causal and bi-causal attention, because they are both top-left aligned
-      //         if (attn_type == flash::AttnType::InvCausal || attn_type == flash::AttnType::BiCausal) {
-      // #pragma unroll 1
-      //           for (; n_block >= n_block_min; --n_block) {
-      //             fwd_step(n_block, regular_mask_fn, cute::true_type{} /*check_inf*/);
-      //           }
-      //         }
-      //       }
-
       // Step into the next block
-      // n_block = block_meta.n_block_max - 1;
-      // seqlen_k = block_meta.seqlen_info.seqlen_k;
-      // n_block_min = block_meta.n_block_min;
       attn_type = block_meta.attn_type;
-      finish_boundary = []() {
-        if constexpr (RangeMerge) {
-          return false;
-        } else {
-          return true;
-        }
-      }();
     } while (!block_meta.is_finish());
 
     cutlass::arch::NamedBarrier::arrive(NumMmaThreadsQK + NumProducerThreads, static_cast<uint32_t>(FwdNamedBarriers::QueryEmpty) /*id*/);

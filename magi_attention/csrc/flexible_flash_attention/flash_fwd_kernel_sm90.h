@@ -321,7 +321,6 @@ class FlashAttnFwdSm90 {
         }
         mainloop.load_tail(pipeline_k, pipeline_v, smem_pipe_write_k, smem_pipe_write_v, shared_storage, work_idx);
       } else {
-        // TODO: Sparse Load using cp.async
         using BlockMetaT = typename CollectiveMainloop::SparseBlockMeta<true>;
 
         // Deallocate the registers for the producer WG, this makes the consumer
@@ -353,7 +352,6 @@ class FlashAttnFwdSm90 {
 
           BlockMetaT block_meta = BlockMetaT{params.mainloop, block_coord, shared_storage, thread_idx};
 
-          // printf("Producer: Prepare to call load...\n");
           bool has_tile_valid = mainloop.load(
               params.mainloop,
               pipeline_k,
