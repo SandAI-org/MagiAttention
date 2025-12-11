@@ -1778,18 +1778,20 @@ __device__ void reduce_token_in_warp(
   if constexpr (kUseTMA) {
     GRPCOLL_STATIC_ASSERT(kNumTMALoadBytes == sizeof(int4) * WARP_SIZE, "Invalid kNumTMALoadBytes");
     GRPCOLL_STATIC_ASSERT(
-        kNumTMABufferBytesPerStage == kNumTMALoadBytes * (kMaxNumSrcRanks + 1) + 16, "Invalid kNumTMABufferBytesPerStage"); // REVIEW: why add 16 bytes ?
+        kNumTMABufferBytesPerStage == align(kNumTMALoadBytes * (kMaxNumSrcRanks + 1) + sizeof(uint64_t), sizeof(int4)), "Invalid kNumTMABufferBytesPerStage");
 
     // Define functions to access TMA load/store buffers and mbarriers
-    // `tma_load_buffer`: shape=(kNumTMAStages, )
+    //  `tma_load_buffer`: shape=(kNumTMAStages, kMaxNumSrcRanks, kNumTMALoadBytes), dtype=int4
+    //  `tma_store_buffer`: shape=(kNumTMAStages, kNumTMALoadBytes), dtype=int4
+    //  `tma_mbarrier`: shape=(kNumTMAStages, 1), dtype=uint64_t
     auto tma_load_buffer = [=](const int& stage_idx, const int& src_rank_idx) -> int4* {
       return reinterpret_cast<int4*>(smem_ptr + stage_idx * kNumTMABufferBytesPerStage + src_rank_idx * kNumTMALoadBytes);
     };
     auto tma_store_buffer = [=](const int& stage_idx) -> int4* {
-      return reinterpret_cast<int4*>(smem_ptr + stage_idx * kNumTMABufferBytesPerStage + NUM_MAX_NVL_PEERS * kNumTMALoadBytes);
+      return reinterpret_cast<int4*>(smem_ptr + stage_idx * kNumTMABufferBytesPerStage + kMaxNumSrcRanks * kNumTMALoadBytes);
     };
     auto tma_mbarrier = [=](const int& stage_idx) -> uint64_t* {
-      return reinterpret_cast<uint64_t*>(smem_ptr + stage_idx * kNumTMABufferBytesPerStage + (NUM_MAX_NVL_PEERS + 1) * kNumTMALoadBytes);
+      return reinterpret_cast<uint64_t*>(smem_ptr + stage_idx * kNumTMABufferBytesPerStage + (kMaxNumSrcRanks + 1) * kNumTMALoadBytes);
     };
 
     // Prefetch the hidden states of src tokens for stage0 with TMA-load
@@ -1863,7 +1865,7 @@ __device__ void reduce_token_in_warp(
       // allowing previous `kNumTMAStages - 1` stages to be inflight
       tma_store_wait<kNumTMAStages - 1>();
 
-      // Cast and store the reduced values of src tokens
+      // Cast and store the reduced hidden states of src tokens
       // from registers to TMA buffer in shared memory
       // GRPCOLL_STATIC_ASSERT(kCommDtypePerInt4 == kDtypePerInt4); // TODO: support lp comm dtype
       auto out_dtypes = reinterpret_cast<dtype_t*>(tma_store_buffer(stage_idx) + lane_id);
@@ -1874,7 +1876,8 @@ __device__ void reduce_token_in_warp(
       tma_store_fence();
       __syncwarp();
 
-      // Issue TMA store for current hidden states of src tokens
+      // Store the reduced hidden states of src tokens of current stage with TMA-store
+      // from TMA buffer in shared memory to output buffer
       if (lane_id == 0) { // issued by lane0 for all WARP_SIZE of reduced values
         tma_store_1d(
             /*smem_ptr=*/tma_store_buffer(stage_idx),
@@ -2307,7 +2310,7 @@ void group_reduce_kernel(
       //    3. mbarrier: 1 * 8 bytes
       GRPCOLL_STATIC_ASSERT(kNumTMALoadBytes == sizeof(int4) * WARP_SIZE, "Invalid kNumTMALoadBytes");
       GRPCOLL_STATIC_ASSERT(
-          kNumTMABufferBytesPerStage == kNumTMALoadBytes * (kNumMaxSrcNVLRanks + 1) + 16, "Invalid kNumTMABufferBytesPerStage"); // REVIEW: why add 16 bytes ?
+          kNumTMABufferBytesPerStage == align(kNumTMALoadBytes * (kNumMaxSrcNVLRanks + 1) + sizeof(uint64_t), sizeof(int4)), "Invalid kNumTMABufferBytesPerStage");
       GRPCOLL_STATIC_ASSERT(kNumTMAStages * kNumTMABufferBytesPerStage <= kNumTMABytesPerForwarderWarp, "TMA buffer is not larger enough");
 
       extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
@@ -2715,7 +2718,7 @@ void group_reduce(
   // Prepare for TMA
   constexpr int kNumTMABytesPerSenderWarp = 16384;
   constexpr int kNumTMALoadBytes = sizeof(int4) * WARP_SIZE; // warp-copy unit, each lane for one int4
-  constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + 16; // 4624B, REVIEW: why add 16 bytes ?
+  constexpr int kNumTMABufferBytesPerStage = align(kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + sizeof(uint64_t), sizeof(int4)); // 4624B
   constexpr int kNumTMAStages = 2; // REVIEW: why kNumTMAStages can not be 1 ?
   constexpr int kNumTMABytesPerForwarderWarp = kNumTMAStages * kNumTMABufferBytesPerStage;
   constexpr int smem_size = std::max(
