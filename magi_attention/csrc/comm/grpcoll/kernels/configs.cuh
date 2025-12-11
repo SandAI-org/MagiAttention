@@ -44,10 +44,10 @@
 #define NUM_MAX_BARRIERS 16
 
 #define NUM_MAX_NVL_PEERS 8
-// Some warp roles require at least `kNumRDMARank` warps, such as the group reduce forwarder
-// thus too large number of RDMA peers may cause the number of warps to exceed the limit.
-// See issue: https://github.com/deepseek-ai/DeepEP/issues/237
-#define NUM_MAX_RDMA_PEERS 20
+// NOTE: according to this issue: https://github.com/deepseek-ai/DeepEP/issues/237,
+// too large number of RDMA peers over `20` may cause the number of warps to exceed the limit,
+// but we (seem to) relax the constraint for now
+#define NUM_MAX_RDMA_PEERS WARP_SIZE
 #define NUM_MAX_PEERS (NUM_MAX_NVL_PEERS * NUM_MAX_RDMA_PEERS)
 
 #define NUM_WORKSPACE_BYTES (32 * 1024 * 1024)

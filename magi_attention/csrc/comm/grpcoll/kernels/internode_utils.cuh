@@ -76,9 +76,10 @@ constexpr int static_max(const int a, const int b) {
   return a > b ? a : b;
 }
 
-// NOTES: due to shared memory size limit, at most 8 RDMA ranks can be sent to
 constexpr int get_num_max_src_rdma_ranks(const int num_rdma_ranks) {
-  return static_min(num_rdma_ranks, NUM_MAX_NVL_PEERS);
+  // REVIEW: why at most 8 RDMA ranks can be sent to in the original code ?
+  // return static_min(num_rdma_ranks, NUM_MAX_NVL_PEERS);
+  return num_rdma_ranks;
 }
 
 constexpr int get_num_threads_group_cast(const int num_group_cast_rdma_sender_warps) {

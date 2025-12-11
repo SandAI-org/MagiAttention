@@ -141,7 +141,25 @@ using namespace magi_attn_comm::grpcoll;
   }                                                           \
   while (false)
 
-// TODO: support other RDMA num_ranks
+#define SWITCH_RDMA_RANKS_WITH_FORWARDER_WARPS(case_macro)         \
+  switch (num_ranks / NUM_MAX_NVL_PEERS) {                         \
+    case 2:                                                        \
+      case_macro(2, 24);                                           \
+    case 4:                                                        \
+      case_macro(4, 24);                                           \
+    case 8:                                                        \
+      case_macro(8, 24);                                           \
+    case 16:                                                       \
+      case_macro(16, 24);                                          \
+    case 24:                                                       \
+      case_macro(24, 24);                                          \
+    case 32:                                                       \
+      case_macro(32, 32);                                          \
+    default:                                                       \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported num_rdma_ranks"); \
+  }                                                                \
+  while (false)
+
 #define SWITCH_RDMA_RANKS(case_macro)                              \
   switch (num_ranks / NUM_MAX_NVL_PEERS) {                         \
     case 2:                                                        \
@@ -152,6 +170,10 @@ using namespace magi_attn_comm::grpcoll;
       case_macro(8);                                               \
     case 16:                                                       \
       case_macro(16);                                              \
+    case 24:                                                       \
+      case_macro(24);                                              \
+    case 32:                                                       \
+      case_macro(32);                                              \
     default:                                                       \
       GRPCOLL_HOST_ASSERT(false and "Unsupported num_rdma_ranks"); \
   }                                                                \
