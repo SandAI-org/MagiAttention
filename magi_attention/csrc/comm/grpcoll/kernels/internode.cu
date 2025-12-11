@@ -1795,17 +1795,19 @@ __device__ void reduce_token_in_warp(
     };
 
     // Prefetch the hidden states of src tokens for stage0 with TMA-load
-    // each lane for one token
-    if (lane_id < num_src_ranks) {
-      tma_load_1d(
-          /*smem_ptr=*/tma_load_buffer(0, lane_id),
-          /*gmem_ptr=*/get_addr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], 0),
-          /*mbar_ptr=*/tma_mbarrier(0),
-          /*num_bytes=*/kNumTMALoadBytes,
-          /*evict_first=*/true);
+    // each lane for one token, if `kNumTMAStages > 1`
+    if constexpr (kNumTMAStages > 1) {
+      if (lane_id < num_src_ranks) {
+        tma_load_1d(
+            /*smem_ptr=*/tma_load_buffer(0, lane_id),
+            /*gmem_ptr=*/get_addr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], 0),
+            /*mbar_ptr=*/tma_mbarrier(0),
+            /*num_bytes=*/kNumTMALoadBytes,
+            /*evict_first=*/true);
+      }
+      mbarrier_arrive_and_expect_tx(tma_mbarrier(0), lane_id < num_src_ranks ? kNumTMALoadBytes : 0);
+      __syncwarp();
     }
-    mbarrier_arrive_and_expect_tx(tma_mbarrier(0), lane_id < num_src_ranks ? kNumTMALoadBytes : 0);
-    __syncwarp();
 
     // Loop over the whole hidden size in int4 and group_reduce
     // NOTES: hidden_int4 should be a multiple of WARP_SIZE
@@ -1822,18 +1824,31 @@ __device__ void reduce_token_in_warp(
       // NOTES: we guarantee that each `kCommDtypePerInt4` of elems share the same head
       const int head_idx = kIsLSEReduce ? shifted / head_dim : -1;
 
-      // Prefetch the hidden states of src tokens for next stage with TMA-load
-      // each lane for one token
-      if (shifted + WARP_SIZE < hidden_int4) {
+      // Prefetch the hidden states of src tokens for next stage
+      // each lane for one token, if `kNumTMAStages > 1`
+      if constexpr (kNumTMAStages > 1) {
+        if (shifted + WARP_SIZE < hidden_int4) { // not last iter
+          if (lane_id < num_src_ranks) {
+            tma_load_1d(
+                /*smem_ptr=*/tma_load_buffer(next_stage_idx, lane_id),
+                /*gmem_ptr=*/get_addr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], shifted + WARP_SIZE),
+                /*mbar_ptr=*/tma_mbarrier(next_stage_idx),
+                /*num_bytes=*/kNumTMALoadBytes,
+                /*evict_first=*/true);
+          }
+          mbarrier_arrive_and_expect_tx(tma_mbarrier(next_stage_idx), lane_id < num_src_ranks ? kNumTMALoadBytes : 0);
+          __syncwarp();
+        }
+      } else { // Load the hidden states of src tokens for current stage if `kNumTMAStages == 1`
         if (lane_id < num_src_ranks) {
           tma_load_1d(
-              /*smem_ptr=*/tma_load_buffer(next_stage_idx, lane_id),
-              /*gmem_ptr=*/get_addr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], shifted + WARP_SIZE),
-              /*mbar_ptr=*/tma_mbarrier(next_stage_idx),
+              /*smem_ptr=*/tma_load_buffer(stage_idx, lane_id),
+              /*gmem_ptr=*/get_addr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], shifted),
+              /*mbar_ptr=*/tma_mbarrier(stage_idx),
               /*num_bytes=*/kNumTMALoadBytes,
               /*evict_first=*/true);
         }
-        mbarrier_arrive_and_expect_tx(tma_mbarrier(next_stage_idx), lane_id < num_src_ranks ? kNumTMALoadBytes : 0);
+        mbarrier_arrive_and_expect_tx(tma_mbarrier(stage_idx), lane_id < num_src_ranks ? kNumTMALoadBytes : 0);
         __syncwarp();
       }
 
@@ -1876,7 +1891,7 @@ __device__ void reduce_token_in_warp(
       tma_store_fence();
       __syncwarp();
 
-      // Store the reduced hidden states of src tokens of current stage with TMA-store
+      // Store the reduced hidden states of src tokens for current stage
       // from TMA buffer in shared memory to output buffer
       if (lane_id == 0) { // issued by lane0 for all WARP_SIZE of reduced values
         tma_store_1d(
@@ -1942,7 +1957,6 @@ __device__ void reduce_token_in_warp(
   }
 }
 
-// FIXME: the register usage is highly spilled for both load/store
 template <
     typename dtype_t,
     typename comm_dtype_t,
@@ -2719,7 +2733,7 @@ void group_reduce(
   constexpr int kNumTMABytesPerSenderWarp = 16384;
   constexpr int kNumTMALoadBytes = sizeof(int4) * WARP_SIZE; // warp-copy unit, each lane for one int4
   constexpr int kNumTMABufferBytesPerStage = align(kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + sizeof(uint64_t), sizeof(int4)); // 4624B
-  constexpr int kNumTMAStages = 2; // REVIEW: why kNumTMAStages can not be 1 ?
+  constexpr int kNumTMAStages = 1;
   constexpr int kNumTMABytesPerForwarderWarp = kNumTMAStages * kNumTMABufferBytesPerStage;
   constexpr int smem_size = std::max(
       kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, // 16KB * 8 = 128KB, can still be raised up
@@ -2727,15 +2741,15 @@ void group_reduce(
   );
 
   // Prepare for maximum number of heads for lse
-  constexpr int kMaxNumHeads = 48; // FIXME: too few max_num_heads (>=48, < 52)
+  constexpr int kMaxNumHeads = 128; // FIXME: too few max_num_heads (>=48, < 52) for kNumTMAStages=2
 
   // NOTES: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
   if (reduce_op != ReduceOp::LSE) {
     GRPCOLL_HOST_ASSERT(num_heads == 0);
   } else {
-    if (dtype == CUDA_R_64F) { // NOTE: too much shared memory usage for double, so we half the number of heads
-      GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads / 2);
+    if (dtype == CUDA_R_64F) { // NOTE: too much shared memory usage for double, so we reduce the maximum number of heads
+      GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads - 8);
     }
     GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
   }
@@ -2743,7 +2757,7 @@ void group_reduce(
 #define GROUP_REDUCE_LAUNCH_CASE(acc_reduce, dtype, comm_dtype, reduce_dtype, reduce_op, num_rdma_ranks)   \
   {                                                                                                        \
     GRPCOLL_HOST_ASSERT(hidden_size * sizeof(comm_dtype) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp); \
-    constexpr int max_num_heads = std::is_same_v<dtype, double> ? kMaxNumHeads / 2 : kMaxNumHeads;         \
+    constexpr int max_num_heads = std::is_same_v<dtype, double> ? kMaxNumHeads - 8 : kMaxNumHeads;         \
     auto group_reduce_func = group_reduce_kernel<                                                          \
         dtype,                                                                                             \
         comm_dtype,                                                                                        \
