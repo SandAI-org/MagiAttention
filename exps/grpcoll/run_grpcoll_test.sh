@@ -26,7 +26,10 @@ mkdir -p ${LOG_ROOT}
 
 export PYTHONPATH=$PYTHONPATH:.
 
-# grpcoll test will set the env vars in the script
+# For debug
+# export CUDA_LAUNCH_BLOCKING=1
+
+# NOTE: grpcoll test will set the env vars in the script
 # export NVSHMEM_IB_ENABLE_IBGDA=1
 # export NVSHMEM_IBGDA_NIC_HANDLER=gpu
 # export NVSHMEM_DISABLE_P2P=0 # set to 0 to enable NVLink in low-latency mode

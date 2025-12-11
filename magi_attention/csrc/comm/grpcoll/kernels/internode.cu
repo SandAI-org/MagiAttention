@@ -1606,7 +1606,7 @@ __device__ void reduce_lse_in_warp(
     // which will be read later to reduce the hidden values
     shared_reduced_lse[reduce_warp_id][h] = reduced_lse_val;
 
-    // Store the weight to rescale the old `reduced_lse` for each head
+    // Store the rescale weight of old `reduced_lse` for each head
     // which will be read later to reduce the hidden values if in `kAccReduce` mode
     if constexpr (kAccReduce) {
       shared_old_lse_rescale_weight[reduce_warp_id][h] = get_lse_rescale_weight(/*lse_to_rescale=*/old_lse_val, /*rescaled_lse=*/reduced_lse_val);
@@ -1777,7 +1777,8 @@ __device__ void reduce_token_in_warp(
   // Reduce token from src ranks
   if constexpr (kUseTMA) {
     GRPCOLL_STATIC_ASSERT(kNumTMALoadBytes == sizeof(int4) * WARP_SIZE, "Invalid kNumTMALoadBytes");
-    GRPCOLL_STATIC_ASSERT(kNumTMABufferBytesPerStage == kNumTMALoadBytes * (kMaxNumSrcRanks + 1) + NUM_MAX_BARRIERS, "Invalid kNumTMABufferBytesPerStage");
+    GRPCOLL_STATIC_ASSERT(
+        kNumTMABufferBytesPerStage == kNumTMALoadBytes * (kMaxNumSrcRanks + 1) + 16, "Invalid kNumTMABufferBytesPerStage"); // REVIEW: why add 16 bytes ?
 
     // Define functions to access TMA load/store buffers and mbarriers
     // `tma_load_buffer`: shape=(kNumTMAStages, )
@@ -2277,12 +2278,9 @@ void group_reduce_kernel(
     // Prepare some static shared memory for temporary lse buffers
     // which will be read frequently while reducing the hidden values of some single token
     // FIXME: the bank conflict is very severe for these buffers
-    __shared__ reduce_dtype_t forwarder_reduced_lse[kNumForwarders][max_num_heads]; // reduced lse buffer for each head, each forwarder warp
+    __shared__ reduce_dtype_t shared_reduced_lse_buf[max_num_shared_warps][max_num_heads]; // reduced lse buffer for each head and each warp
     __shared__ reduce_dtype_t
-        forwarder_old_lse_rescale_weight[kNumForwarders][max_num_heads]; // the weight to rescale the old `reduced_lse` for each head, each forwarder warp
-    __shared__ reduce_dtype_t rdma_receiver_reduced_lse[kNumRDMAReceivers][max_num_heads]; // reduced lse buffer for each head, each receiver warp
-    __shared__ reduce_dtype_t
-        rdma_receiver_old_lse_rescale_weight[kNumRDMAReceivers][max_num_heads]; // the weight to rescale the old `reduced_lse` for each head, each receiver warp
+        shared_old_lse_rescale_weight_buf[max_num_shared_warps][max_num_heads]; // the rescale weight of old `reduced_lse` for each head and each warp
 
     if (warp_role == WarpRole::kNVLAndRDMAForwarder) {
       // Determine warp group
@@ -2306,9 +2304,10 @@ void group_reduce_kernel(
       // kNumTMABufferBytesPerStage:
       //    1. TMA load buffer: kNumMaxSrcNVLRanks * kNumTMALoadBytes
       //    2. TMA store buffer: 1 * kNumTMALoadBytes
-      //    3. mbarrier: at most NUM_MAX_BARRIERS * 1
+      //    3. mbarrier: 1 * 8 bytes
       GRPCOLL_STATIC_ASSERT(kNumTMALoadBytes == sizeof(int4) * WARP_SIZE, "Invalid kNumTMALoadBytes");
-      GRPCOLL_STATIC_ASSERT(kNumTMABufferBytesPerStage == kNumTMALoadBytes * (kNumMaxSrcNVLRanks + 1) + NUM_MAX_BARRIERS, "Invalid kNumTMABufferBytesPerStage");
+      GRPCOLL_STATIC_ASSERT(
+          kNumTMABufferBytesPerStage == kNumTMALoadBytes * (kNumMaxSrcNVLRanks + 1) + 16, "Invalid kNumTMABufferBytesPerStage"); // REVIEW: why add 16 bytes ?
       GRPCOLL_STATIC_ASSERT(kNumTMAStages * kNumTMABufferBytesPerStage <= kNumTMABytesPerForwarderWarp, "TMA buffer is not larger enough");
 
       extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
@@ -2454,8 +2453,8 @@ void group_reduce_kernel(
               /*is_token_in_global_rank=*/nullptr, // no need to global-reduce for forwarder
               /*get_addr_fn=*/get_addr_fn,
               /*recv_lse_fn=*/recv_lse_fn,
-              /*shared_reduced_lse=*/forwarder_reduced_lse,
-              /*shared_old_lse_rescale_weight=*/forwarder_old_lse_rescale_weight,
+              /*shared_reduced_lse=*/shared_reduced_lse_buf,
+              /*shared_old_lse_rescale_weight=*/shared_old_lse_rescale_weight_buf,
               /*smem_ptr=*/smem_ptr,
               /*tma_phase=*/tma_phase);
 
@@ -2597,8 +2596,8 @@ void group_reduce_kernel(
             /*is_token_in_global_rank=*/is_reduced_token_in_rank + token_idx * num_ranks,
             /*get_addr_fn=*/get_addr_fn,
             /*recv_lse_fn=*/recv_lse_fn,
-            /*shared_reduced_lse=*/rdma_receiver_reduced_lse,
-            /*shared_old_lse_rescale_weight=*/rdma_receiver_old_lse_rescale_weight,
+            /*shared_reduced_lse=*/shared_reduced_lse_buf,
+            /*shared_old_lse_rescale_weight=*/shared_old_lse_rescale_weight_buf,
             /*smem_ptr=*/nullptr,
             /*tma_phases=*/dummy_tma_phases);
       }
@@ -2716,16 +2715,16 @@ void group_reduce(
   // Prepare for TMA
   constexpr int kNumTMABytesPerSenderWarp = 16384;
   constexpr int kNumTMALoadBytes = sizeof(int4) * WARP_SIZE; // warp-copy unit, each lane for one int4
-  constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + NUM_MAX_BARRIERS; // 4624B
+  constexpr int kNumTMABufferBytesPerStage = kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + 16; // 4624B, REVIEW: why add 16 bytes ?
   constexpr int kNumTMAStages = 2;
   constexpr int kNumTMABytesPerForwarderWarp = kNumTMAStages * kNumTMABufferBytesPerStage;
   constexpr int smem_size = std::max(
       kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, // 16KB * 8 = 128KB, can still be raised up
-      kNumTMABytesPerForwarderWarp * kNumGroupReduceForwarderWarps // 9248B * 24 = 216.75KB < 228KB, can hardly be raised up
+      kNumTMABytesPerForwarderWarp * kNumGroupReduceForwarderWarps // 9248B * 24 = 216.75KB < 224KB, can hardly be raised up
   );
 
   // Prepare for maximum number of heads for lse
-  constexpr int kMaxNumHeads = 2; // DE-BUG
+  constexpr int kMaxNumHeads = 48; // FIXME: too few max_num_heads ()>=48, < 56)
 
   // NOTES: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty

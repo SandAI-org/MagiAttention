@@ -1241,7 +1241,7 @@ void group_reduce_kernel(
     // FIXME: the bank conflict is very severe for these buffers
     __shared__ reduce_dtype_t shared_reduced_lse_buf[num_reduce_warps][max_num_heads]; // reduced lse buffer for each head, each reduce warp
     __shared__ reduce_dtype_t
-        shared_old_lse_rescale_weight_buf[num_reduce_warps][max_num_heads]; // the weight to rescale the old `reduced_lse` for each head, each reduce warp
+        shared_old_lse_rescale_weight_buf[num_reduce_warps][max_num_heads]; // the rescale weight of old `reduced_lse` for each head, each reduce warp
 
     // Init the static shared memory buffers
     if (thread_id < num_reduce_warps)
@@ -1427,7 +1427,7 @@ void group_reduce_kernel(
             // which will be read later to reduce the hidden values
             shared_reduced_lse_buf[reduce_warp_id][h] = reduced_lse_val;
 
-            // Store the weight to rescale the old `reduced_lse` for each head
+            // Store the rescale weight of old `reduced_lse` for each head
             // which will be read later to reduce the hidden values if in `kAccReduce` mode
             if constexpr (kAccReduce) {
               shared_old_lse_rescale_weight_buf[reduce_warp_id][h] = get_lse_rescale_weight(/*lse_to_rescale=*/old_lse_val, /*rescaled_lse=*/reduced_lse_val);
