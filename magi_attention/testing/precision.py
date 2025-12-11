@@ -222,6 +222,9 @@ def calc_attn_lse(
         softmax_scale=softmax_scale,
     )
 
+    # apply row-wise lse `LSE = logsumexp(S, dim=-1)`
+    # where LSE.shape = [nhq, sq]
+
     # calculate lse
     lse = (
         # apply `S = Q x K.T * scale + bias`
@@ -235,7 +238,7 @@ def calc_attn_lse(
         .logsumexp(dim=-1)
         # transpose and make contiguous
         # where LSE.shape = [sq, nhq]
-        .t().contiguous()
+        .transpose(-1, -2).contiguous()
     )
 
     return lse
