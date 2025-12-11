@@ -151,8 +151,6 @@ using namespace magi_attn_comm::grpcoll;
       case_macro(8, 24);                                           \
     case 16:                                                       \
       case_macro(16, 24);                                          \
-    case 24:                                                       \
-      case_macro(24, 24);                                          \
     case 32:                                                       \
       case_macro(32, 32);                                          \
     default:                                                       \
@@ -170,8 +168,6 @@ using namespace magi_attn_comm::grpcoll;
       case_macro(8);                                               \
     case 16:                                                       \
       case_macro(16);                                              \
-    case 24:                                                       \
-      case_macro(24);                                              \
     case 32:                                                       \
       case_macro(32);                                              \
     default:                                                       \

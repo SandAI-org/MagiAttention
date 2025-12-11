@@ -2900,15 +2900,15 @@ void group_reduce(
 #define GROUP_REDUCE_TMA_STAGES_MAX_NUM_HEADS_LAUNCH_CASE(dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps) \
   {                                                                                                                                  \
     if (num_heads <= 48) { /*only set max_num_heads=48 to reduce shared memory*/                                                     \
-      if (num_forwarder_warps > 24) { /*too many warps, then only num_tma_stages=1*/                                                 \
+      if constexpr (num_forwarder_warps > 24) { /*too many warps, then only num_tma_stages=1*/                                       \
         LAUNCH_INTERNODE_GROUP_REDUCE(1, 48, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps);             \
       } else { /*small num_heads and num_warps, num_tma_stages=2 is ok*/                                                             \
         LAUNCH_INTERNODE_GROUP_REDUCE(2, 48, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps);             \
       }                                                                                                                              \
     } else { /*try to set max_num_heads=128, then only num_tma_stages=1*/                                                            \
-      if (std::is_same_v<reduce_dtype_t, double>) { /*double reduce dtype costs too much shared memory*/                             \
-        if (num_forwarder_warps > 24) { /*too many warps, then max_num_heads=90*/                                                    \
-          LAUNCH_INTERNODE_GROUP_REDUCE(1, 90, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps);           \
+      if constexpr (std::is_same_v<reduce_dtype_t, double>) { /*double reduce dtype costs too much shared memory*/                   \
+        if constexpr (num_forwarder_warps > 24) { /*too many warps, then max_num_heads=86*/                                          \
+          LAUNCH_INTERNODE_GROUP_REDUCE(1, 86, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps);           \
         } else { /*small num_warps, max_num_heads=120 is ok*/                                                                        \
           LAUNCH_INTERNODE_GROUP_REDUCE(1, 120, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps);          \
         }                                                                                                                            \

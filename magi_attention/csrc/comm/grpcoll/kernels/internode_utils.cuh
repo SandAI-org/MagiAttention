@@ -77,7 +77,8 @@ constexpr int static_max(const int a, const int b) {
 }
 
 constexpr int get_num_max_src_rdma_ranks(const int num_rdma_ranks) {
-  // REVIEW: why at most 8 RDMA ranks can be sent to in the original code ?
+  // NOTE: in the original code, it uses at most 8 RDMA ranks can be sent to
+  // which is probably due to highly spilled registers (at most 3KB) as `num_rdma_ranks` grows
   // return static_min(num_rdma_ranks, NUM_MAX_NVL_PEERS);
   return num_rdma_ranks;
 }

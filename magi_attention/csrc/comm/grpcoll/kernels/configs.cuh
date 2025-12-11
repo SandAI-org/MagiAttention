@@ -45,8 +45,9 @@
 
 #define NUM_MAX_NVL_PEERS 8
 // NOTE: according to this issue: https://github.com/deepseek-ai/DeepEP/issues/237,
-// too large number of RDMA peers over `20` may cause the number of warps to exceed the limit,
-// but we (seem to) relax the constraint for now
+// too large number of RDMA peers over `20` may cause the number of warps exceeding the limit,
+// but we relax the constraint for now, yet still be careful of the performance degradation
+// due to highly spilled registers (at most 3KB) as the number of RDMA peers grows
 #define NUM_MAX_RDMA_PEERS WARP_SIZE
 #define NUM_MAX_PEERS (NUM_MAX_NVL_PEERS * NUM_MAX_RDMA_PEERS)
 
