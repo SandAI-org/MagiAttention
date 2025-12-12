@@ -413,8 +413,9 @@ class TestBlockSparseAttn(DistTestBase):
             pack_gqa=pack_gqa,
             ref_block_size=ref_block_size,
         )
-        # o = rearrange(o, "(b h s) 1 d -> b s h d", b=1, s=s, h=h)
         o = rearrange(o, "(b h1 s) h2 d -> b s (h1 h2) d", b=1, s=s, h1=h1)
+        lse = rearrange(lse, "(h1 s) h2 -> s (h1 h2)", s=s, h1=h1)
+
         o.backward(grad_output)
 
         if deterministic:
@@ -473,11 +474,6 @@ class TestBlockSparseAttn(DistTestBase):
         sdpa_mask = rearrange(
             sdpa_mask_4d, "1 h seqlen_q seqlen_k -> h seqlen_q seqlen_k"
         )
-        """
-        o_tensor = q.to(torch.float64) if high_precision else q
-        k_tensor = k.to(torch.float64) if high_precision else k
-        v_tensor = v.to(torch.float64) if high_precision else v
-        """
 
         o, lse = ref_attn_func(
             q=q,
@@ -492,19 +488,8 @@ class TestBlockSparseAttn(DistTestBase):
             sink_layout=None,
         )
 
-        """
-        o = sdpa_func(
-            o_tensor,
-            k_tensor,
-            v_tensor,
-            attn_mask=sdpa_mask_4d,
-            is_causal=False,
-            enable_gqa=True,
-        )
-        """
-        # o = rearrange(o, "b h s d -> b s h d")
-        # o = o.to(q.dtype)
         o = rearrange(o, "s h d -> 1 s h d")
+        lse = rearrange(lse, "1 seqlen h -> seqlen h")
         o.backward(grad_output)
 
         return o, lse
@@ -608,7 +593,7 @@ class TestBlockSparseAttn(DistTestBase):
         o_max_mismatch_thres = err_ratio_dict.get(
             "o_max_mismatch_thres", MAX_MISMATCH_THRES
         )
-        """
+
         lse_atol = EPSILON
         lse_rtol = 0.001
         lse_norm_rtol_ratio = err_ratio_dict.get("lse_norm_rtol_ratio", NORM_RTOL_RATIO)
@@ -620,7 +605,7 @@ class TestBlockSparseAttn(DistTestBase):
         lse_max_mismatch_thres = err_ratio_dict.get(
             "lse_max_mismatch_thres", MAX_MISMATCH_THRES
         )
-        """
+
         dq_atol = EPSILON
         dq_rtol = {torch.bfloat16: 0.3, torch.float16: 0.2}.get(dtype, 0.2)
         dq_norm_rtol_ratio = err_ratio_dict.get("dq_norm_rtol_ratio", NORM_RTOL_RATIO)
@@ -700,20 +685,8 @@ class TestBlockSparseAttn(DistTestBase):
 
         # -----   assert close for fwd lse   ---- #
 
-        h2 = nhk
-
-        high_precision_lse_ref = rearrange(
-            high_precision_lse_ref, "1 seqlen (h1 h2) -> (seqlen h1) h2", h2=h2
-        )
-        low_precision_lse_ref = rearrange(
-            low_precision_lse_ref, "1 seqlen (h1 h2) -> (seqlen h1) h2", h2=h2
-        )
-
-        """
         lse_norm = calc_inf_norm(ffa_lse, high_precision_lse_ref)
-        lse_ref_norm = calc_inf_norm(
-            low_precision_lse_ref, high_precision_lse_ref
-        )
+        lse_ref_norm = calc_inf_norm(low_precision_lse_ref, high_precision_lse_ref)
         try:
             self.assertLessEqual(
                 lse_norm,
@@ -747,7 +720,6 @@ class TestBlockSparseAttn(DistTestBase):
             )
         except Exception as e:
             err_msg_list.append(str(e))
-        """
 
         dq_norm = calc_inf_norm(ffa_dq, high_precision_dq_ref)
         dq_ref_norm = calc_inf_norm(low_precision_dq_ref, high_precision_dq_ref)
@@ -970,7 +942,7 @@ class TestBlockSparseAttn(DistTestBase):
             # },
         ],
     )
-    @parameterize("seqlen", [128])
+    @parameterize("seqlen", [2048])
     @parameterize(
         "block_config",
         [
@@ -982,9 +954,9 @@ class TestBlockSparseAttn(DistTestBase):
             {"type": "uniform", "q_size": 16, "k_size": 64},
             {"type": "uniform", "q_size": 8, "k_size": 64},
             # Small K block sizes
-            # {"type": "uniform", "q_size": 64, "k_size": 32},
-            # {"type": "uniform", "q_size": 64, "k_size": 16},
-            # {"type": "uniform", "q_size": 64, "k_size": 8},
+            {"type": "uniform", "q_size": 64, "k_size": 32},
+            {"type": "uniform", "q_size": 64, "k_size": 16},
+            {"type": "uniform", "q_size": 64, "k_size": 8},
             # Variable blocks
             {
                 "type": "variable",
