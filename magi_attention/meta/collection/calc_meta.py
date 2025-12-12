@@ -165,12 +165,8 @@ class AttnArg:
 
 @dataclass(repr=False)
 class FA4AttnArg(AttnArg):
-    seqlen_q: int
-    seqlen_k: int
-    n_max_func: int
-    
     tile_m: int = 128
-    tile_max: int = 128
+    tile_n: int = 128
     
     def __post_init__(self):
         assert is_fa4_installed, "FlashAttn4 is not installed"
@@ -189,6 +185,11 @@ class FA4AttnArg(AttnArg):
         self.ffa_bwd_args_dict.clear()
         
     def _transfer_ffa_args_to_fa4_args(self) -> None:
+        # Get meta FA4 args
+        self.seqlen_q = self.q_ranges.end
+        self.seqlen_k = self.k_ranges.end
+        self.n_max_func = magi_attention.functional.fa4_hsfu_max_num_funcs()
+        
         # Transfer representation of attn mask
         # from AttnSlice to HSTU Functions
         # where hstu_func: shape=(nfunc, sq)
@@ -280,8 +281,20 @@ class CalcMeta:
 
     def __post_init__(self):
         assert (
-            self.overlap_degree >= 0
-        ), f"Overlap degree must be >= 0, but got {self.overlap_degree=}"
+            self.overlap_degree >= 1
+        ), f"Overlap degree must be >= 1, but got {self.overlap_degree=}"
+        
+        if magi_attention.is_fa4_backend_enable():
+            local_attn_kwargs = vars(self.local_attn_arg)
+            self.local_attn_arg = FA4AttnArg(
+                **local_attn_kwargs,
+            )
+            
+            for stage in range(self.overlap_degree):
+                remote_attn_kwargs = vars(self.remote_attn_args_list[stage])
+                self.remote_attn_args_list[stage] = FA4AttnArg(
+                    **remote_attn_kwargs,
+                )
 
     def __repr__(self) -> str:
         indent = ""

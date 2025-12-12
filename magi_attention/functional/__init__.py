@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 
 from .dispatch import dispatch_func, undispatch_func
 from .dist_attn import dist_attn_func
@@ -27,3 +28,21 @@ __all__ = [
     "correct_attn_out",
     "correct_attn_lse",
 ]
+
+
+def fa4_hsfu_max_num_funcs() -> int:
+    """
+    HACK: since the FA4 with the attention mask representation of HSFU Functions
+    requires the maximum number of functions to be set, 
+    and it is hard to pass through the user API to the arguments,
+    thus we let user set it through the environment variable, if using FA4 backend.
+
+    NOTE: this is a beta feature, under development
+    """
+    
+    max_num_funcs = int(os.environ.get("MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS", "0"))
+    
+    if max_num_funcs == 0:
+        raise ValueError("MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS is not set")
+    
+    return max_num_funcs
