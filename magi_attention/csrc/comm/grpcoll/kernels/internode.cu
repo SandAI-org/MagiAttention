@@ -1313,8 +1313,7 @@ void launch_group_cast(
     } else {                                \
       GROUP_CAST_CACHED_LAUNCH_CASE(true);  \
     }                                       \
-  }                                         \
-  break
+  }
 
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   GRPCOLL_HOST_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
