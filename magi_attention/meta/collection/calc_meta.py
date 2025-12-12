@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-import math
 
 import torch
 from torch.nn.attention.flex_attention import create_block_mask
@@ -32,8 +31,11 @@ except ImportError:
 
 is_fa4_installed = False
 try:
+    from flash_attn.cute.block_sparsity import (
+        BlockSparseTensorsTorch,
+        bhqk_to_linear_sparse_tensors,
+    )
     from flash_attn.cute.mask_definitions import flex_arbitrary_mask
-    from flash_attn.cute.block_sparsity import BlockSparseTensorsTorch, bhqk_to_linear_sparse_tensors
 
     is_fa4_installed = True
 except ImportError:
@@ -167,56 +169,64 @@ class AttnArg:
 class FA4AttnArg(AttnArg):
     tile_m: int = 128
     tile_n: int = 128
-    
+
     def __post_init__(self):
         assert is_fa4_installed, "FlashAttn4 is not installed"
         assert is_magi_to_hstu_installed, "magi_to_hstu_cuda is not installed"
-        
+
         if COMPUTE_CAPABILITY == 10 and (self.tile_m, self.tile_n) != (128, 128):
-            raise ValueError("TODO: Non-128x128 tiles currently not supported on SM 10.0. due to TMEM")
-        
+            raise ValueError(
+                "TODO: Non-128x128 tiles currently not supported on SM 10.0. due to TMEM"
+            )
+
         super().__post_init__()
-        
+
         # Transfer from FFA args to FA4 args
         self._transfer_ffa_args_to_fa4_args()
-        
+
         # Clear FFA args
         self.ffa_fwd_args_dict.clear()
         self.ffa_bwd_args_dict.clear()
-        
+
     def _transfer_ffa_args_to_fa4_args(self) -> None:
         # Get meta FA4 args
         self.seqlen_q = self.q_ranges.end
         self.seqlen_k = self.k_ranges.end
         self.n_max_func = magi_attention.functional.fa4_hsfu_max_num_funcs()
-        
+
         # Transfer representation of attn mask
         # from AttnSlice to HSTU Functions
         # where hstu_func: shape=(nfunc, sq)
         #   and unsqueeze to shape=(1, 1, nfunc, sq) to be broadcastable
-        hstu_func = magi_to_hstu_cuda.magi_to_hstu(
-            q_ranges=self.ffa_fwd_args_dict["q_ranges"],
-            k_ranges=self.ffa_fwd_args_dict["k_ranges"], 
-            mask_types=self.ffa_fwd_args_dict["attn_type_map"],
-            seqlen_q=self.seqlen_q,
-            seqlen_k=self.seqlen_k, 
-            n_max_func=self.n_max_func,
-        ).unsqueeze(0).unsqueeze(0)
+        hstu_func = (
+            magi_to_hstu_cuda.magi_to_hstu(
+                q_ranges=self.ffa_fwd_args_dict["q_ranges"],
+                k_ranges=self.ffa_fwd_args_dict["k_ranges"],
+                mask_types=self.ffa_fwd_args_dict["attn_type_map"],
+                seqlen_q=self.seqlen_q,
+                seqlen_k=self.seqlen_k,
+                n_max_func=self.n_max_func,
+            )
+            .unsqueeze(0)
+            .unsqueeze(0)
+        )
         aux_tensors = [hstu_func]
-        
+
         # DE-BUG:
-        # print(f'{hstu_func.shape=} | {self.seqlen_q=} | {self.seqlen_k=} | {self.n_max_func=} | {self.ffa_fwd_args_dict["q_ranges"]=} | {self.ffa_fwd_args_dict["k_ranges"]=} | {self.ffa_fwd_args_dict["attn_type_map"]} | {hstu_func=}\n')
+        # print(f'{hstu_func.shape=} | {self.seqlen_q=} | {self.seqlen_k=} | {self.n_max_func=}\n')
+        # print(f'{self.ffa_fwd_args_dict["q_ranges"]=} | {self.ffa_fwd_args_dict["k_ranges"]=}\n')
+        # print(f'{self.ffa_fwd_args_dict["attn_type_map"]=} | {hstu_func=}\n')
         # torch.save(self.ffa_fwd_args_dict["q_ranges"], "q_ranges.pt")
         # torch.save(self.ffa_fwd_args_dict["k_ranges"], "k_ranges.pt")
         # torch.save(self.ffa_fwd_args_dict["attn_type_map"], "attn_type_map.pt")
         # torch.save(hstu_func, "hstu_func.pt")
-        
+
         # Compute block sparsity for mask_mod
         if COMPUTE_CAPABILITY == 10:
             sparse_tile_m = 2 * self.tile_m
         else:
             sparse_tile_m = self.tile_m
-            
+
         # Prepare mask_mod
         def mask_mod_flex(b, h, q_idx, kv_idx, arbitrary_func=hstu_func):
             return flex_arbitrary_mask(b, h, q_idx, kv_idx, arbitrary_func)
@@ -250,7 +260,19 @@ class FA4AttnArg(AttnArg):
             device="cuda",
             BLOCK_SIZE=(self.tile_m, self.tile_n),
         )
-        _, _, _, _, _, _, q_mask_cnt, q_mask_idx, q_full_cnt, q_full_idx, *_ = bm_bwd.as_tuple()
+        (
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            q_mask_cnt,
+            q_mask_idx,
+            q_full_cnt,
+            q_full_idx,
+            *_,
+        ) = bm_bwd.as_tuple()
         q_block_sparse_mask = BlockSparseTensorsTorch(
             mask_block_cnt=q_mask_cnt,
             mask_block_idx=q_mask_idx,
@@ -258,7 +280,7 @@ class FA4AttnArg(AttnArg):
             full_block_idx=q_full_idx,
         )
         linear_q_block_sparse_mask = bhqk_to_linear_sparse_tensors(q_block_sparse_mask)
-        
+
         # Prepare FA4 args for both forward and backward
         self.fa4_fwd_args_dict = dict(
             linear_k_block_sparse_mask=linear_k_block_sparse_mask,
@@ -266,16 +288,16 @@ class FA4AttnArg(AttnArg):
             aux_tensors=aux_tensors,
         )
         self.fa4_bwd_args_dict = self.fa4_fwd_args_dict
-        
+
     def to_fa4_args(self, is_bwd: bool = False) -> dict:
         return self.fa4_bwd_args_dict if is_bwd else self.fa4_fwd_args_dict
-    
+
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         raise RuntimeError("FA4AttnArg does not support to_ffa_args")
-    
+
     def can_skip(self, is_bwd: bool = False) -> bool:
         return False
-        
+
 
 @dataclass(repr=False)
 class CalcMeta:
@@ -290,7 +312,7 @@ class CalcMeta:
         assert (
             self.overlap_degree >= 1
         ), f"Overlap degree must be >= 1, but got {self.overlap_degree=}"
-        
+
         if magi_attention.is_fa4_backend_enable():
             self.local_attn_arg = FA4AttnArg(
                 q_ranges=self.local_attn_arg.q_ranges,
@@ -298,14 +320,14 @@ class CalcMeta:
                 attn_type_map=self.local_attn_arg.attn_type_map,
                 total_area=self.local_attn_arg.total_area,
             )
-            
+
             for stage in range(self.overlap_degree):
                 remote_attn_arg = self.remote_attn_args_list[stage]
                 self.remote_attn_args_list[stage] = FA4AttnArg(
                     q_ranges=remote_attn_arg.q_ranges,
                     k_ranges=remote_attn_arg.k_ranges,
                     attn_type_map=remote_attn_arg.attn_type_map,
-                    total_area=remote_attn_arg.total_area,   
+                    total_area=remote_attn_arg.total_area,
                 )
 
     def __repr__(self) -> str:

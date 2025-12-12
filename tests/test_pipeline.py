@@ -89,7 +89,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             flags=list(self.flag_to_envvar.keys()),
             options={
                 "device_max_connections": [1, 8],
-                "enable_native_grpcoll": [False], # FIXME: blackwell does not support native grpcoll
+                "enable_native_grpcoll": [
+                    False
+                ],  # FIXME: blackwell does not support native grpcoll
             },
             defaults={
                 "device_max_connections": 8,
@@ -152,7 +154,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                     ),
                 )
             except Exception as e:
-                print(f"The NCCL group {nccl_group} cannot be registered due to error: \n{e}\n")
+                print(
+                    f"The NCCL group {nccl_group} cannot be registered due to error: \n{e}\n"
+                )
 
     @property
     def timeout(self) -> int:
