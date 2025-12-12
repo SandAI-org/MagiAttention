@@ -23,6 +23,7 @@ from torch.distributed import ReduceOp
 import magi_attention
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
+from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.meta.collection import CalcMeta, CommMeta
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 
@@ -188,54 +189,18 @@ class DistAttnRuntime:
         _softmax_scale: float = (
             q.shape[-1] ** -0.5 if softmax_scale is None else softmax_scale
         )
-        with nvtx.add_nvtx_event(
-            f"attn-fwd: "
-            f"{attn_arg.total_area=} | "
-            f"{attn_arg.q_ranges=} | "
-            f"{attn_arg.k_ranges=}"
-        ):
-            if self.use_sdpa_backend:
-                partial_out, partial_lse = sdpa_fwd(
-                    q=q,
-                    k=k,
-                    v=v,
-                    # NOTE: sink token needs to be applied only once
-                    # thus we only apply it at the host stage if not skipped
-                    sink=sink if is_host_stage else None,
-                    attn_arg=attn_arg,
-                    softmax_scale=_softmax_scale,
-                    softcap=softcap,
-                    sink_layout="sh",
-                )
-            else:
-                partial_out, partial_lse = _flex_flash_attn_forward(
-                    q=q,
-                    k=k,
-                    v=v,
-                    # NOTE: sink token needs to be applied only once
-                    # thus we only apply it at the host stage if not skipped
-                    sink=sink if is_host_stage else None,
-                    sink_layout="sh",
-                    out=out_acc,  # directly reduce to out_acc
-                    lse=lse_acc,  # directly reduce to lse_acc
-                    **attn_arg.to_ffa_args(is_bwd=False),
-                    merge_q_ranges=None,
-                    qk_map=None,
-                    fwd_unique_count=None,
-                    ref_block_size=None,
-                    softmax_scale=_softmax_scale,
-                    deterministic=self.deterministic,
-                    softcap=softcap,
-                    sm_margin=self.fwd_sm_margin,
-                    # NOTE: always use high-precision for the partial out,
-                    # to reduce the error caused by the out/lse correction
-                    out_type=self.hp_dtype,
-                    # NOTE: when using accumulative buffer, we need to always enable atomic reduction
-                    # unless it is the first call when accumulative buffer is still None
-                    disable_fwd_atomic_reduction=(
-                        attn_arg.disable_fwd_atomic_reduction and out_acc is None
-                    ),
-                )
+        partial_out, partial_lse = self._launch_attn_fwd_kernel(
+            q=q,
+            k=k,
+            v=v,
+            sink=sink,
+            out_acc=out_acc,
+            lse_acc=lse_acc,
+            attn_arg=attn_arg,
+            softmax_scale=_softmax_scale,
+            softcap=softcap,
+            is_host_stage=is_host_stage,
+        )
 
         # maybe downcast out to q dtype for the host stage
         if is_host_stage and self.fwd_local_out_lp_init:
@@ -479,69 +444,25 @@ class DistAttnRuntime:
             dkv_shape = (k.shape[0] * 2, *k.shape[1:])
 
         # attention backward pass
-        if self.use_sdpa_backend:
-            partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
-                do=do,
-                q=q,
-                k=k,
-                v=v,
-                # NOTE: dsink should be computed only once
-                # thus we only compute it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                o=o,
-                lse=lse,
-                attn_arg=attn_arg,
-                softmax_scale=_softmax_scale,
-                softcap=softcap,
-                sink_layout="sh",
-            )
-            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=True)
-        else:
-            # init partial_dkv buffer
-            # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
-            # and we need to zero-initialize partial_dkv since it needs to be reduced
-            partial_dkv = torch.zeros(
-                dkv_shape,
-                dtype=self.hp_dtype,
-                device=k.device,
-            )
-            partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
-
-            (
-                partial_dq,
-                partial_dk,
-                partial_dv,
-                partial_dsink,
-            ) = _flex_flash_attn_backward(
-                dout=do,
-                q=q,
-                k=k,
-                v=v,
-                # NOTE: dsink should be computed only once
-                # thus we only compute it at the host stage if not skipped
-                sink=sink if is_host_stage else None,
-                sink_layout="sh",
-                out=o,
-                lse=lse,
-                dq=dq_acc,  # directly reduce to dq_acc
-                dk=partial_dk,
-                dv=partial_dv,
-                dsink=None,  # let kernel initialize dsink if required
-                # NOTE: always use high precision for the partial dq, dkv
-                # to reduce the error caused by the atomic reduction inside the kernel
-                dq_type=self.hp_dtype,
-                dk_type=self.hp_dtype,
-                dv_type=self.hp_dtype,
-                **attn_arg.to_ffa_args(is_bwd=True),
-                merge_k_ranges=None,
-                bwd_kq_map=None,
-                bwd_unique_count=None,
-                softmax_scale=_softmax_scale,
-                deterministic=self.deterministic,
-                softcap=softcap,
-                disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
-                sm_margin=self.bwd_sm_margin,
-            )
+        (
+            partial_dq,
+            partial_dkv,
+            partial_dsink,
+        ) = self._launch_attn_bwd_kernel(
+            do=do,
+            q=q,
+            k=k,
+            v=v,
+            o=o,
+            lse=lse,
+            sink=sink,
+            dq_acc=dq_acc,
+            attn_arg=attn_arg,
+            softmax_scale=_softmax_scale,
+            softcap=softcap,
+            is_host_stage=is_host_stage,
+            dkv_shape=dkv_shape,
+        )
 
         # maybe downcast dq,dkv to q,kv dtype for the host stage
         if is_host_stage:
@@ -815,6 +736,10 @@ class DistAttnRuntime:
     @property
     def use_sdpa_backend(self) -> bool:
         return magi_attention.is_sdpa_backend_enable()
+    
+    @property
+    def use_fa4_backend(self) -> bool:
+        return magi_attention.is_fa4_backend_enable()
 
     @property
     def use_native_grpcoll(self) -> bool:
@@ -881,6 +806,152 @@ class DistAttnRuntime:
         return self.get_next_stage(overlap_stage) - 1
 
     # ----------    internal API   --------- #
+    
+    def _launch_attn_fwd_kernel(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sink: torch.Tensor | None,
+        out_acc: torch.Tensor | None,
+        lse_acc: torch.Tensor | None,
+        attn_arg: AttnArg,
+        softmax_scale: float,
+        softcap: float,
+        is_host_stage: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        with nvtx.add_nvtx_event(
+            f"attn-fwd: "
+            f"{attn_arg.total_area=} | "
+            f"{attn_arg.q_ranges=} | "
+            f"{attn_arg.k_ranges=}"
+        ):
+            if self.use_sdpa_backend:
+                partial_out, partial_lse = sdpa_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                )
+            else:
+                partial_out, partial_lse = _flex_flash_attn_forward(
+                    q=q,
+                    k=k,
+                    v=v,
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    sink_layout="sh",
+                    out=out_acc,  # directly reduce to out_acc
+                    lse=lse_acc,  # directly reduce to lse_acc
+                    **attn_arg.to_ffa_args(is_bwd=False),
+                    merge_q_ranges=None,
+                    qk_map=None,
+                    fwd_unique_count=None,
+                    ref_block_size=None,
+                    softmax_scale=softmax_scale,
+                    deterministic=self.deterministic,
+                    softcap=softcap,
+                    sm_margin=self.fwd_sm_margin,
+                    # NOTE: always use high-precision for the partial out,
+                    # to reduce the error caused by the out/lse correction
+                    out_type=self.hp_dtype,
+                    # NOTE: when using accumulative buffer, we need to always enable atomic reduction
+                    # unless it is the first call when accumulative buffer is still None
+                    disable_fwd_atomic_reduction=(
+                        attn_arg.disable_fwd_atomic_reduction and out_acc is None
+                    ),
+                )
+                
+        return partial_out, partial_lse
+
+    def _launch_attn_bwd_kernel(
+        self,
+        do: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        o: torch.Tensor,
+        lse: torch.Tensor,
+        sink: torch.Tensor | None,
+        dq_acc: torch.Tensor | None,
+        attn_arg: AttnArg,
+        softmax_scale: float,
+        softcap: float,
+        is_host_stage: bool,
+        dkv_shape: tuple[int, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if self.use_sdpa_backend:
+            partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
+                do=do,
+                q=q,
+                k=k,
+                v=v,
+                # NOTE: dsink should be computed only once
+                # thus we only compute it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
+                o=o,
+                lse=lse,
+                attn_arg=attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                sink_layout="sh",
+            )
+            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=True)
+        else:
+            # init partial_dkv buffer
+            # NOTE: we initial partial dkv and chunk to dk, dv to avoid concat them back before return
+            # and we need to zero-initialize partial_dkv since it needs to be reduced
+            partial_dkv = torch.zeros(
+                dkv_shape,
+                dtype=self.hp_dtype,
+                device=k.device,
+            )
+            partial_dk, partial_dv = self._maybe_chunk(partial_dkv, num_chunks=2)
+
+            (
+                partial_dq,
+                partial_dk,
+                partial_dv,
+                partial_dsink,
+            ) = _flex_flash_attn_backward(
+                dout=do,
+                q=q,
+                k=k,
+                v=v,
+                # NOTE: dsink should be computed only once
+                # thus we only compute it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
+                sink_layout="sh",
+                out=o,
+                lse=lse,
+                dq=dq_acc,  # directly reduce to dq_acc
+                dk=partial_dk,
+                dv=partial_dv,
+                dsink=None,  # let kernel initialize dsink if required
+                # NOTE: always use high precision for the partial dq, dkv
+                # to reduce the error caused by the atomic reduction inside the kernel
+                dq_type=self.hp_dtype,
+                dk_type=self.hp_dtype,
+                dv_type=self.hp_dtype,
+                **attn_arg.to_ffa_args(is_bwd=True),
+                merge_k_ranges=None,
+                bwd_kq_map=None,
+                bwd_unique_count=None,
+                softmax_scale=softmax_scale,
+                deterministic=self.deterministic,
+                softcap=softcap,
+                disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
+                sm_margin=self.bwd_sm_margin,
+            )
+            
+        return partial_dq, partial_dkv, partial_dsink
 
     @nvtx.instrument_nvtx
     def _fetch_remote_kv(
