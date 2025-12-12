@@ -20,17 +20,16 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ReduceOp
 
-
 import magi_attention
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
-from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.meta.collection import CalcMeta, CommMeta
+from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 
+from .fa4 import fa4_bwd, fa4_fwd
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
-from .fa4 import fa4_fwd, fa4_bwd
 from .utils import calc_lse_sink_compiled, correct_attn_fwd_result, sink_bwd_compiled
 
 FusedOrTupleTensor: TypeAlias = torch.Tensor | tuple[torch.Tensor, ...]
@@ -473,9 +472,6 @@ class DistAttnRuntime:
             if self.bwd_local_dkv_lp_init:
                 partial_dkv = partial_dkv.to(kv.dtype)
 
-        if not self.concat_dkv:  # make partial_dkv tupled tensors
-            partial_dkv = (partial_dk, partial_dv)
-
         return partial_dq, partial_dkv, partial_dsink
 
     @nvtx.instrument_nvtx
@@ -738,7 +734,7 @@ class DistAttnRuntime:
     @property
     def use_sdpa_backend(self) -> bool:
         return magi_attention.is_sdpa_backend_enable()
-    
+
     @property
     def use_fa4_backend(self) -> bool:
         return magi_attention.is_fa4_backend_enable()
@@ -808,7 +804,7 @@ class DistAttnRuntime:
         return self.get_next_stage(overlap_stage) - 1
 
     # ----------    internal API   --------- #
-    
+
     def _launch_attn_fwd_kernel(
         self,
         q: torch.Tensor,
@@ -883,7 +879,7 @@ class DistAttnRuntime:
                         attn_arg.disable_fwd_atomic_reduction and out_acc is None
                     ),
                 )
-                
+
         return partial_out, partial_lse
 
     def _launch_attn_bwd_kernel(
@@ -901,7 +897,7 @@ class DistAttnRuntime:
         softcap: float,
         is_host_stage: bool,
         dkv_shape: tuple[int, ...],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, FusedOrTupleTensor, torch.Tensor | None]:
         if self.use_sdpa_backend:
             partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
                 do=do,
@@ -983,7 +979,10 @@ class DistAttnRuntime:
                 disable_bwd_dkv_atomic_reduction=attn_arg.disable_bwd_dkv_atomic_reduction,
                 sm_margin=self.bwd_sm_margin,
             )
-            
+
+            if not self.concat_dkv:  # make partial_dkv tupled tensors
+                partial_dkv = (partial_dk, partial_dv)
+
         return partial_dq, partial_dkv, partial_dsink
 
     @nvtx.instrument_nvtx

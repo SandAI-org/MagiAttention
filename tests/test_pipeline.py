@@ -89,7 +89,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
             flags=list(self.flag_to_envvar.keys()),
             options={
                 "device_max_connections": [1, 8],
-                "enable_native_grpcoll": [False], # FIXME: blackwell does not support native grpcoll
+                "enable_native_grpcoll": [
+                    False
+                ],  # FIXME: blackwell does not support native grpcoll
             },
             defaults={
                 "device_max_connections": 8,
@@ -147,12 +149,16 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 grpcoll_mgr.register_buffer(
                     group=nccl_group,
                     config=GrpCollConfig(
-                        num_nvl_bytes=int(2e9) * self.world_size // 8,  # 2GB for 8 ranks
+                        num_nvl_bytes=int(2e9)
+                        * self.world_size
+                        // 8,  # 2GB for 8 ranks
                     ),
                 )
                 grpcoll_mgr.check_registered(group=nccl_group)
             except Exception as e:
-                print(f"The NCCL group {nccl_group} cannot be registered due to error: \n{e}\n")
+                print(
+                    f"The NCCL group {nccl_group} cannot be registered due to error: \n{e}\n"
+                )
 
     def destroy_pg(self):
         # -----    clean up for native grpcoll   ---- #
@@ -162,7 +168,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 grpcoll_mgr.release_buffer(group=nccl_group)
                 grpcoll_mgr.check_released(group=nccl_group)
             except Exception as e:
-                print(f"The NCCL group {nccl_group} cannot be released due to error: \n{e}\n")
+                print(
+                    f"The NCCL group {nccl_group} cannot be released due to error: \n{e}\n"
+                )
 
         super().destroy_pg()
 

@@ -20,12 +20,13 @@ from flash_attn import flash_attn_func as fa2_func
 from flash_attn import flash_attn_varlen_func as fa2_varlen_func
 from flash_attn.cute.interface import flash_attn_func as fa4_func
 from flash_attn.cute.interface import flash_attn_varlen_func as fa4_varlen_func
+
 try:
     from flash_attn_interface import flash_attn_func as fa3_func
     from flash_attn_interface import flash_attn_varlen_func as fa3_varlen_func
-except:
-    fa3_func = lambda: None
-    fa3_varlen_func = lambda: None
+except ImportError:
+    fa3_func = lambda: None  # noqa: E731
+    fa3_varlen_func = lambda: None  # noqa: E731
 from packaging import version
 from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.functional import scaled_dot_product_attention as sdpa_func
