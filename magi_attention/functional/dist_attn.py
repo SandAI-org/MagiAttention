@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ReduceOp
 
+
 import magi_attention
 from magi_attention.comm.primitive.grpcoll import group_cast, group_reduce
 from magi_attention.comm.work import GeneralWork, WorkWithPostProcessFn
@@ -29,6 +30,7 @@ from magi_attention.utils import is_same_process_group, max_fp_dtype, nvtx
 
 from .flex_flash_attn import _flex_flash_attn_backward, _flex_flash_attn_forward
 from .sdpa import sdpa_bwd, sdpa_fwd
+from .fa4 import fa4_fwd, fa4_bwd
 from .utils import calc_lse_sink_compiled, correct_attn_fwd_result, sink_bwd_compiled
 
 FusedOrTupleTensor: TypeAlias = torch.Tensor | tuple[torch.Tensor, ...]
@@ -839,6 +841,19 @@ class DistAttnRuntime:
                     softcap=softcap,
                     sink_layout="sh",
                 )
+            elif self.use_fa4_backend:
+                partial_out, partial_lse = fa4_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    # NOTE: sink token needs to be applied only once
+                    # thus we only apply it at the host stage if not skipped
+                    sink=sink if is_host_stage else None,
+                    attn_arg=attn_arg,
+                    softmax_scale=softmax_scale,
+                    softcap=softcap,
+                    sink_layout="sh",
+                )
             else:
                 partial_out, partial_lse = _flex_flash_attn_forward(
                     q=q,
@@ -889,6 +904,23 @@ class DistAttnRuntime:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         if self.use_sdpa_backend:
             partial_dq, partial_dk, partial_dv, partial_dsink = sdpa_bwd(
+                do=do,
+                q=q,
+                k=k,
+                v=v,
+                # NOTE: dsink should be computed only once
+                # thus we only compute it at the host stage if not skipped
+                sink=sink if is_host_stage else None,
+                o=o,
+                lse=lse,
+                attn_arg=attn_arg,
+                softmax_scale=softmax_scale,
+                softcap=softcap,
+                sink_layout="sh",
+            )
+            partial_dkv = self._maybe_concat(partial_dk, partial_dv, need_concat=True)
+        elif self.use_fa4_backend:
+            partial_dq, partial_dk, partial_dv, partial_dsink = fa4_bwd(
                 do=do,
                 q=q,
                 k=k,
