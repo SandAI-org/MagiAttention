@@ -201,6 +201,13 @@ class FA4AttnArg(AttnArg):
         ).unsqueeze(0).unsqueeze(0)
         aux_tensors = [hstu_func]
         
+        # DE-BUG:
+        # print(f'{hstu_func.shape=} | {self.seqlen_q=} | {self.seqlen_k=} | {self.n_max_func=} | {self.ffa_fwd_args_dict["q_ranges"]=} | {self.ffa_fwd_args_dict["k_ranges"]=} | {self.ffa_fwd_args_dict["attn_type_map"]} | {hstu_func=}\n')
+        # torch.save(self.ffa_fwd_args_dict["q_ranges"], "q_ranges.pt")
+        # torch.save(self.ffa_fwd_args_dict["k_ranges"], "k_ranges.pt")
+        # torch.save(self.ffa_fwd_args_dict["attn_type_map"], "attn_type_map.pt")
+        # torch.save(hstu_func, "hstu_func.pt")
+        
         # Compute block sparsity for mask_mod
         if COMPUTE_CAPABILITY == 10:
             sparse_tile_m = 2 * self.tile_m
@@ -282,15 +289,20 @@ class CalcMeta:
         ), f"Overlap degree must be >= 1, but got {self.overlap_degree=}"
         
         if magi_attention.is_fa4_backend_enable():
-            local_attn_kwargs = vars(self.local_attn_arg)
             self.local_attn_arg = FA4AttnArg(
-                **local_attn_kwargs,
+                q_ranges=self.local_attn_arg.q_ranges,
+                k_ranges=self.local_attn_arg.k_ranges,
+                attn_type_map=self.local_attn_arg.attn_type_map,
+                total_area=self.local_attn_arg.total_area,
             )
             
             for stage in range(self.overlap_degree):
-                remote_attn_kwargs = vars(self.remote_attn_args_list[stage])
+                remote_attn_arg = self.remote_attn_args_list[stage]
                 self.remote_attn_args_list[stage] = FA4AttnArg(
-                    **remote_attn_kwargs,
+                    q_ranges=remote_attn_arg.q_ranges,
+                    k_ranges=remote_attn_arg.k_ranges,
+                    attn_type_map=remote_attn_arg.attn_type_map,
+                    total_area=remote_attn_arg.total_area,   
                 )
 
     def __repr__(self) -> str:
