@@ -26,7 +26,10 @@ mkdir -p ${LOG_ROOT}
 
 export PYTHONPATH=$PYTHONPATH:.
 
-# grpcoll test will set the env vars in the script
+# For debug
+# export CUDA_LAUNCH_BLOCKING=1
+
+# NOTE: grpcoll test will set the env vars in the script
 # export NVSHMEM_IB_ENABLE_IBGDA=1
 # export NVSHMEM_IBGDA_NIC_HANDLER=gpu
 # export NVSHMEM_DISABLE_P2P=0 # set to 0 to enable NVLink in low-latency mode
@@ -74,6 +77,12 @@ export MASTER_PORT=23457
 export NNODES=2 # in deepep internode kernels, it will check num_ranks > NUM_MAX_NVL_PEERS, which equals to 8 by default
 export NPROC_PER_NODE=8
 export RANK=$1
+
+echo "MASTER_ADDR=$MASTER_ADDR, MASTER_PORT=$MASTER_PORT, NNODES=$NNODES, NPROC_PER_NODE=$NPROC_PER_NODE, RANK=$RANK"
+
+# set nccl env vars
+# export NCCL_DEBUG=INFO
+export NCCL_SOCKET_IFNAME=bond1
 
 if [[ $RANK -ge $NNODES ]]; then
     echo "Error: RANK=$RANK, but NNODES=$NNODES"

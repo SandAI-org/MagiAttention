@@ -141,7 +141,23 @@ using namespace magi_attn_comm::grpcoll;
   }                                                           \
   while (false)
 
-// TODO: support other RDMA num_ranks
+#define SWITCH_RDMA_RANKS_WITH_FORWARDER_WARPS(case_macro)         \
+  switch (num_ranks / NUM_MAX_NVL_PEERS) {                         \
+    case 2:                                                        \
+      case_macro(2, 24);                                           \
+    case 4:                                                        \
+      case_macro(4, 24);                                           \
+    case 8:                                                        \
+      case_macro(8, 24);                                           \
+    case 16:                                                       \
+      case_macro(16, 24);                                          \
+    case 32:                                                       \
+      case_macro(32, 32);                                          \
+    default:                                                       \
+      GRPCOLL_HOST_ASSERT(false and "Unsupported num_rdma_ranks"); \
+  }                                                                \
+  while (false)
+
 #define SWITCH_RDMA_RANKS(case_macro)                              \
   switch (num_ranks / NUM_MAX_NVL_PEERS) {                         \
     case 2:                                                        \
@@ -152,6 +168,8 @@ using namespace magi_attn_comm::grpcoll;
       case_macro(8);                                               \
     case 16:                                                       \
       case_macro(16);                                              \
+    case 32:                                                       \
+      case_macro(32);                                              \
     default:                                                       \
       GRPCOLL_HOST_ASSERT(false and "Unsupported num_rdma_ranks"); \
   }                                                                \
@@ -180,14 +198,14 @@ using namespace magi_attn_comm::grpcoll;
   }                                                           \
   while (false)
 
-#define SWITCH_REDUCE_OPS(case_macro)                         \
+#define SWITCH_REDUCE_OPS(case_macro, ...)                    \
   switch (reduce_op) {                                        \
     case ReduceOp::SUM:                                       \
-      case_macro(ReduceOp::SUM);                              \
+      case_macro(ReduceOp::SUM, ##__VA_ARGS__);               \
     case ReduceOp::AVG:                                       \
-      case_macro(ReduceOp::AVG);                              \
+      case_macro(ReduceOp::AVG, ##__VA_ARGS__);               \
     case ReduceOp::LSE:                                       \
-      case_macro(ReduceOp::LSE);                              \
+      case_macro(ReduceOp::LSE, ##__VA_ARGS__);               \
     default:                                                  \
       GRPCOLL_HOST_ASSERT(false and "Unsupported reduce op"); \
   }                                                           \
@@ -223,7 +241,8 @@ using namespace magi_attn_comm::grpcoll;
   }                                                       \
   while (false)
 
-// comm_dtype <= dtype <= reduce_dtype
+// (dtype, comm_dtype, reduce_dtype)
+// which satisfies: `comm_dtype <= dtype <= reduce_dtype`
 #define SWITCH_DTYPES_COMM_DTYPES_REDUCE_DTYPES(case_macro, ...)                   \
   switch (dtype) {                                                                 \
     case CUDA_R_16BF:                                                              \

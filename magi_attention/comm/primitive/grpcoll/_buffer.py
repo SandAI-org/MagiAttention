@@ -103,8 +103,7 @@ class GrpCollBuffer:
             num_nvl_bytes: the buffer size for intranode NVLink communication.
             num_rdma_bytes: the buffer size for internode (also for intranode with low-latency mode) RDMA communication.
             low_latency_mode: whether to enable low-latency mode.
-            num_qps_per_rank: the number of QPs for RDMA, the low-latency mode requires that this number equals
-                to the number of local experts.
+            num_qps_per_rank: the number of QPs for RDMA.
             allow_nvlink_for_low_latency_mode: whether allow NVLink traffic for low-latency mode, you should notice
                 this is somehow incompatible with the hook-based overlapping.
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
@@ -490,7 +489,6 @@ class GrpCollBuffer:
                 num_tokens_per_rank=num_tokens_per_rank,
                 num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
                 is_token_in_rank=is_token_in_rank,
-                num_tokens_per_expert=num_tokens_per_rank,  # FIXME: remove expert concept
                 post_perm_idx=post_perm_idx,
                 previous_event=previous_event,
                 async_op=async_op,
@@ -865,7 +863,6 @@ class GrpCollBuffer:
         num_tokens_per_rank: torch.Tensor | None = None,
         num_tokens_per_rdma_rank: torch.Tensor | None = None,
         is_token_in_rank: torch.Tensor | None = None,
-        num_tokens_per_expert: torch.Tensor | None = None,
         post_perm_idx: torch.Tensor | None = None,
         previous_event: EventOverlap | None = None,
         async_op: bool = False,
@@ -878,18 +875,12 @@ class GrpCollBuffer:
     ]:
         """Internode group cast implementation"""
 
-        # TODO: support lse for internode group cast
-        assert not cast_lse
-        # TODO: support post-perm for internode group cast
-        assert post_perm_idx is None
-
         # Unpack handle if given
         is_handle_given = handle is not None
         if is_handle_given:  # cached mode
             assert isinstance(handle, GrpCollInterHandle)
             num_tokens_per_rank = None
             num_tokens_per_rdma_rank = None
-            num_tokens_per_expert = None
             is_token_in_rank = handle.is_token_in_rank
             num_recv_tokens = handle.num_recv_tokens
             num_rdma_recv_tokens = handle.num_rdma_recv_tokens
@@ -898,11 +889,7 @@ class GrpCollBuffer:
             gbl_channel_prefix_matrix = handle.gbl_channel_prefix_matrix
             recv_gbl_rank_prefix_sum = handle.recv_gbl_rank_prefix_sum
         else:
-            assert (
-                num_tokens_per_rank is not None
-                and is_token_in_rank is not None
-                and num_tokens_per_expert is not None
-            )
+            assert num_tokens_per_rank is not None and is_token_in_rank is not None
             num_recv_tokens = 0
             num_rdma_recv_tokens = 0
             rdma_channel_prefix_matrix = None
@@ -912,7 +899,7 @@ class GrpCollBuffer:
 
         # Prepare lse and recv_lse
         if cast_lse:
-            assert lse is not None, "lse should not be None when `cast_lse` is set"  # type: ignore[unreachable]
+            assert lse is not None, "lse should not be None when `cast_lse` is set"
         else:  # no need to cast lse, even passed in
             lse = None
             # recv_lse = None
@@ -926,6 +913,7 @@ class GrpCollBuffer:
         # Launch the internode group cast kernel
         (
             recv_x_1st,
+            recv_lse,
             # handle
             rdma_channel_prefix_matrix,
             gbl_channel_prefix_matrix,
@@ -941,19 +929,18 @@ class GrpCollBuffer:
         ) = self.runtime.internode_group_cast(
             x_1st,
             recv_x_1st,
-            None,  # x_scales
-            None,  # topk_idx
-            None,  # topk_weights
+            lse,
+            recv_lse,
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
             is_token_in_rank,
-            num_tokens_per_expert,
             num_recv_tokens,
             num_rdma_recv_tokens,
             rdma_channel_prefix_matrix,
             recv_rdma_rank_prefix_sum,
             gbl_channel_prefix_matrix,
             recv_gbl_rank_prefix_sum,
+            post_perm_idx,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_op,
@@ -986,7 +973,7 @@ class GrpCollBuffer:
 
         return (
             recv_x,
-            None,  # recv_lse
+            recv_lse,
             handle,  # type: ignore[return-value]
             EventOverlap(event),
         )
@@ -1010,15 +997,6 @@ class GrpCollBuffer:
     ) -> tuple[list[torch.Tensor], torch.Tensor | None, EventOverlap]:
         """Internode group reduce implementation"""
 
-        # TODO: support pre_perm_idx for internode group reduce
-        assert (
-            pre_perm_idx is None
-        ), "Internode group reduce does not support `pre_perm_idx`"
-        # TODO: support specific comm dtype for internode group reduce
-        assert (
-            comm_dtype is None
-        ), "Internode group reduce does not support `comm_dtype`"
-
         assert isinstance(handle, GrpCollInterHandle)
 
         # Prepare lse and reduced_lse
@@ -1037,13 +1015,13 @@ class GrpCollBuffer:
         # Launch the internode group reduce kernel
         (
             reduced_x_1st,
+            reduced_lse,
             event,
         ) = self.runtime.internode_group_reduce(
             x_1st,
             reduced_x_1st,
-            None,  # topk_weights
-            None,  # bias_0
-            None,  # bias_1
+            lse,
+            reduced_lse,
             handle.recv_src_meta,  # src_meta
             handle.is_token_in_rank,  # is_reduced_token_in_rank
             handle.recv_rdma_channel_prefix_matrix,  # rdma_channel_prefix_matrix
@@ -1051,12 +1029,14 @@ class GrpCollBuffer:
             handle.recv_gbl_channel_prefix_matrix,  # gbl_channel_prefix_matrix
             handle.send_rdma_head,  # send_rdma_head
             handle.send_nvl_head,  # send_nvl_head
+            pre_perm_idx,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_op,
             allocate_on_comm_stream,
             reduce_op,
             acc_reduce,
+            comm_dtype,
         )
 
         # Pack reduced_x groups
@@ -1068,7 +1048,7 @@ class GrpCollBuffer:
         for i in range(num_groups):
             reduced_x[i] = reduced_x[i].view(-1, *hidden_shape)
 
-        return (reduced_x, None, EventOverlap(event))  # reduced_lse
+        return (reduced_x, reduced_lse, EventOverlap(event))
 
     # NOTE: remain original low-latency interface here for future potential usage,
     # which won't be exposed to users for now, but guaranteed its compatibility internally
