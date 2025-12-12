@@ -247,9 +247,9 @@ void group_cast(
     int num_max_nvl_chunked_recv_tokens,
     int rank,
     int num_ranks,
+    int num_channels,
     bool is_cached_group_cast,
-    cudaStream_t stream,
-    int num_channels);
+    cudaStream_t stream);
 
 void cached_notify(
     int hidden_int4,

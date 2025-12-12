@@ -1194,9 +1194,9 @@ Buffer::internode_group_cast(
       /*num_max_nvl_chunked_recv_tokens=*/config.num_max_nvl_chunked_recv_tokens,
       /*rank=*/rank,
       /*num_ranks=*/num_ranks,
+      /*num_channels=*/num_channels,
       /*is_cached_group_cast=*/cached_mode,
-      /*stream=*/comm_stream,
-      /*num_channels=*/num_channels);
+      /*stream=*/comm_stream);
 
   // Record or wait streams
   std::optional<EventHandle> event;

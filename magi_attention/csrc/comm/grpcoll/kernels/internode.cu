@@ -364,11 +364,11 @@ template <
     bool kLowLatencyMode,
     bool kCachedMode,
     int kNumRDMARanks,
+    int kNumMaxSrcRDMARanks,
     int kNumTMABytesPerWarp,
     int kNumGroupCastRDMASenderWarps,
     int kWarpCopyUnrollStages,
-    bool kCastLSE,
-    int kNumMaxSrcRDMARanks = get_num_max_src_rdma_ranks(kNumRDMARanks)>
+    bool kCastLSE>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_cast(kNumGroupCastRDMASenderWarps), 1)
 void group_cast_kernel(
     /* 1st group of input / output data*/
@@ -1211,6 +1211,129 @@ void group_cast_kernel(
   }
 }
 
+template <int kNumRDMARanks>
+void launch_group_cast(
+    /* 1st group of input / output data*/
+    void* recv_x,
+    float* recv_lse,
+    const void* x,
+    const float* lse,
+    /* other metadata */
+    void* recv_src_meta,
+    int* send_rdma_head,
+    int* send_nvl_head,
+    int* recv_rdma_channel_prefix_matrix,
+    int* recv_gbl_channel_prefix_matrix,
+    const int* rdma_channel_prefix_matrix,
+    const int* recv_rdma_rank_prefix_sum,
+    const int* gbl_channel_prefix_matrix,
+    const int* recv_gbl_rank_prefix_sum,
+    const bool* is_token_in_rank,
+    const int64_t* post_perm_idx,
+    int num_tokens,
+    int hidden_int4,
+    int num_heads,
+    void* rdma_buffer_ptr,
+    int num_max_rdma_chunked_send_tokens,
+    int num_max_rdma_chunked_recv_tokens,
+    void** buffer_ptrs,
+    int num_max_nvl_chunked_send_tokens,
+    int num_max_nvl_chunked_recv_tokens,
+    int rank,
+    int num_ranks,
+    int num_channels,
+    bool is_cached_group_cast,
+    cudaStream_t stream) {
+  constexpr int kNumMaxSrcRDMARanks = get_num_max_src_rdma_ranks(kNumRDMARanks);
+  constexpr int kWarpCopyUnrollStages = 5;
+  constexpr int kNumGroupCastRDMASenderWarps = 7;
+  constexpr int kNumThreads = get_num_threads_group_cast(kNumGroupCastRDMASenderWarps);
+  constexpr int kNumWarps = kNumThreads / WARP_SIZE;
+  GRPCOLL_STATIC_ASSERT(kNumWarps == kNumGroupCastRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS, "Invalid number of warps");
+
+  constexpr int kNumTMABytesPerWarp = 16384; // 16KB
+  constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS; // 128KB
+
+#define GROUP_CAST_LAUNCH_CASE(is_cached_group_cast, cast_lse)               \
+  {                                                                          \
+    auto group_cast_func = group_cast_kernel<                                \
+        false, /*disable low_latency_mode to decrease compilation overhead*/ \
+        is_cached_group_cast,                                                \
+        kNumRDMARanks,                                                       \
+        kNumMaxSrcRDMARanks,                                                 \
+        kNumTMABytesPerWarp,                                                 \
+        kNumGroupCastRDMASenderWarps,                                        \
+        kWarpCopyUnrollStages,                                               \
+        cast_lse>;                                                           \
+    SET_SHARED_MEMORY_FOR_TMA(group_cast_func);                              \
+    LAUNCH_KERNEL(                                                           \
+        &cfg,                                                                \
+        group_cast_func,                                                     \
+        reinterpret_cast<int4*>(recv_x),                                     \
+        recv_lse,                                                            \
+        reinterpret_cast<const int4*>(x),                                    \
+        lse,                                                                 \
+        reinterpret_cast<SourceMeta*>(recv_src_meta),                        \
+        send_rdma_head,                                                      \
+        send_nvl_head,                                                       \
+        recv_rdma_channel_prefix_matrix,                                     \
+        recv_gbl_channel_prefix_matrix,                                      \
+        rdma_channel_prefix_matrix,                                          \
+        recv_rdma_rank_prefix_sum,                                           \
+        gbl_channel_prefix_matrix,                                           \
+        recv_gbl_rank_prefix_sum,                                            \
+        is_token_in_rank,                                                    \
+        post_perm_idx,                                                       \
+        num_tokens,                                                          \
+        hidden_int4,                                                         \
+        num_heads,                                                           \
+        rdma_buffer_ptr,                                                     \
+        num_max_rdma_chunked_send_tokens,                                    \
+        num_max_rdma_chunked_recv_tokens,                                    \
+        buffer_ptrs,                                                         \
+        num_max_nvl_chunked_send_tokens,                                     \
+        num_max_nvl_chunked_recv_tokens,                                     \
+        rank,                                                                \
+        num_ranks);                                                          \
+  }
+
+#define GROUP_CAST_CACHED_LAUNCH_CASE(...)          \
+  {                                                 \
+    if (is_cached_group_cast) {                     \
+      GROUP_CAST_LAUNCH_CASE(true, ##__VA_ARGS__);  \
+    } else {                                        \
+      GROUP_CAST_LAUNCH_CASE(false, ##__VA_ARGS__); \
+    }                                               \
+  }
+
+#define GROUP_CAST_CAST_LSE_LAUNCH_CASE()   \
+  {                                         \
+    if (num_heads == 0) {                   \
+      GROUP_CAST_CACHED_LAUNCH_CASE(false); \
+    } else {                                \
+      GROUP_CAST_CACHED_LAUNCH_CASE(true);  \
+    }                                       \
+  }                                         \
+  break
+
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
+  GRPCOLL_HOST_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
+  // NOTES: in case of splitting, the issued put at the end of the buffer
+  GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0);
+
+  // Even-numbered SMs for forwarders
+  // odd-numbered SMs for RDMA senders and NVL receivers
+  const int num_sms = num_channels * 2;
+  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
+
+  SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
+  GROUP_CAST_CAST_LSE_LAUNCH_CASE();
+
+#undef GROUP_CAST_CAST_LSE_LAUNCH_CASE
+#undef GROUP_CAST_CACHED_LAUNCH_CASE
+#undef GROUP_CAST_LAUNCH_CASE
+}
+
 void group_cast(
     /* 1st group of input / output data*/
     void* recv_x,
@@ -1240,96 +1363,47 @@ void group_cast(
     int num_max_nvl_chunked_recv_tokens,
     int rank,
     int num_ranks,
+    int num_channels,
     bool is_cached_group_cast,
-    cudaStream_t stream,
-    int num_channels) {
-  constexpr int kWarpCopyUnrollStages = 5;
-  constexpr int kNumGroupCastRDMASenderWarps = 7;
-  constexpr int kNumThreads = get_num_threads_group_cast(kNumGroupCastRDMASenderWarps);
-  constexpr int kNumWarps = kNumThreads / WARP_SIZE;
-  GRPCOLL_STATIC_ASSERT(kNumWarps == kNumGroupCastRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS, "Invalid number of warps");
-
-  // Prepare for TMA
-  constexpr int kNumTMABytesPerWarp = 16384; // 16KB
-  constexpr int smem_size = kNumTMABytesPerWarp * NUM_MAX_NVL_PEERS; // 128KB
-
-#define GROUP_CAST_LAUNCH_CASE(is_cached_group_cast, cast_lse, num_rdma_ranks) \
-  {                                                                            \
-    auto group_cast_func = group_cast_kernel<                                  \
-        false, /*disable low_latency_mode to decrease compilation overhead*/   \
-        is_cached_group_cast,                                                  \
-        num_rdma_ranks,                                                        \
-        kNumTMABytesPerWarp,                                                   \
-        kNumGroupCastRDMASenderWarps,                                          \
-        kWarpCopyUnrollStages,                                                 \
-        cast_lse>;                                                             \
-    SET_SHARED_MEMORY_FOR_TMA(group_cast_func);                                \
-    LAUNCH_KERNEL(                                                             \
-        &cfg,                                                                  \
-        group_cast_func,                                                       \
-        reinterpret_cast<int4*>(recv_x),                                       \
-        recv_lse,                                                              \
-        reinterpret_cast<const int4*>(x),                                      \
-        lse,                                                                   \
-        reinterpret_cast<SourceMeta*>(recv_src_meta),                          \
-        send_rdma_head,                                                        \
-        send_nvl_head,                                                         \
-        recv_rdma_channel_prefix_matrix,                                       \
-        recv_gbl_channel_prefix_matrix,                                        \
-        rdma_channel_prefix_matrix,                                            \
-        recv_rdma_rank_prefix_sum,                                             \
-        gbl_channel_prefix_matrix,                                             \
-        recv_gbl_rank_prefix_sum,                                              \
-        is_token_in_rank,                                                      \
-        post_perm_idx,                                                         \
-        num_tokens,                                                            \
-        hidden_int4,                                                           \
-        num_heads,                                                             \
-        rdma_buffer_ptr,                                                       \
-        num_max_rdma_chunked_send_tokens,                                      \
-        num_max_rdma_chunked_recv_tokens,                                      \
-        buffer_ptrs,                                                           \
-        num_max_nvl_chunked_send_tokens,                                       \
-        num_max_nvl_chunked_recv_tokens,                                       \
-        rank,                                                                  \
-        num_ranks);                                                            \
-  }
-
-#define GROUP_CAST_CACHED_LAUNCH_CASE(...)          \
-  {                                                 \
-    if (is_cached_group_cast) {                     \
-      GROUP_CAST_LAUNCH_CASE(true, ##__VA_ARGS__);  \
-    } else {                                        \
-      GROUP_CAST_LAUNCH_CASE(false, ##__VA_ARGS__); \
-    }                                               \
-  }
-
-#define GROUP_CAST_CAST_LSE_LAUNCH_CASE(...)               \
-  {                                                        \
-    if (num_heads == 0) {                                  \
-      GROUP_CAST_CACHED_LAUNCH_CASE(false, ##__VA_ARGS__); \
-    } else {                                               \
-      GROUP_CAST_CACHED_LAUNCH_CASE(true, ##__VA_ARGS__);  \
-    }                                                      \
-  }                                                        \
+    cudaStream_t stream) {
+#define LAUNCH_INTERNODE_GROUP_REDUCE(num_rdma_ranks) \
+  {                                                   \
+    launch_group_cast<num_rdma_ranks>(                \
+        recv_x,                                       \
+        recv_lse,                                     \
+        x,                                            \
+        lse,                                          \
+        recv_src_meta,                                \
+        send_rdma_head,                               \
+        send_nvl_head,                                \
+        recv_rdma_channel_prefix_matrix,              \
+        recv_gbl_channel_prefix_matrix,               \
+        rdma_channel_prefix_matrix,                   \
+        recv_rdma_rank_prefix_sum,                    \
+        gbl_channel_prefix_matrix,                    \
+        recv_gbl_rank_prefix_sum,                     \
+        is_token_in_rank,                             \
+        post_perm_idx,                                \
+        num_tokens,                                   \
+        hidden_int4,                                  \
+        num_heads,                                    \
+        rdma_buffer_ptr,                              \
+        num_max_rdma_chunked_send_tokens,             \
+        num_max_rdma_chunked_recv_tokens,             \
+        buffer_ptrs,                                  \
+        num_max_nvl_chunked_send_tokens,              \
+        num_max_nvl_chunked_recv_tokens,              \
+        rank,                                         \
+        num_ranks,                                    \
+        num_channels,                                 \
+        is_cached_group_cast,                         \
+        stream);                                      \
+  }                                                   \
   break
 
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
-  GRPCOLL_HOST_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
-  // NOTES: in case of splitting, the issued put at the end of the buffer
-  GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0);
+  SWITCH_RDMA_RANKS(LAUNCH_INTERNODE_GROUP_REDUCE);
 
-  // Even-numbered SMs for forwarders
-  // odd-numbered SMs for RDMA senders and NVL receivers
-  const int num_sms = num_channels * 2;
-  GRPCOLL_HOST_ASSERT(num_sms % 2 == 0);
-
-  SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
-  SWITCH_RDMA_RANKS(GROUP_CAST_CAST_LSE_LAUNCH_CASE);
-
-#undef GROUP_CAST_CAST_LSE_LAUNCH_CASE
-#undef GROUP_CAST_CACHED_LAUNCH_CASE
-#undef GROUP_CAST_LAUNCH_CASE
+#undef LAUNCH_INTERNODE_GROUP_REDUCE
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1580,16 +1654,16 @@ template <
     bool kLowLatencyMode,
     int kMaxNumHeads,
     int kNumRDMARanks,
-    int kNumGroupReduceForwarderWarps,
+    int kNumMaxSrcRDMARanks,
     int kNumTMAStages,
     int kNumTMALoadBytes,
     int kNumTMABufferBytesPerStage,
     int kNumTMABytesPerSenderWarp,
     int kNumTMABytesPerForwarderWarp,
-    int kNumMaxSrcRDMARanks = get_num_max_src_rdma_ranks(kNumRDMARanks),
-    int kNumWarpsPerForwarder = (kNumGroupReduceForwarderWarps / kNumRDMARanks > 0) ? kNumGroupReduceForwarderWarps / kNumRDMARanks : 1,
-    int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder, // approx to kNumGroupReduceForwarderWarps
-    int kNumRDMAReceivers = kNumForwarders - NUM_MAX_NVL_PEERS>
+    int kNumForwarderWarps,
+    int kNumWarpsPerForwarder,
+    int kNumForwarders,
+    int kNumRDMAReceivers>
 GLOBAL_LAUNCH_BOUNDS(get_num_threads_group_reduce(kNumForwarders), 1)
 void group_reduce_kernel(
     /* 1st group of input / output data*/
@@ -1928,7 +2002,7 @@ void group_reduce_kernel(
           sync_warp_group(/*group_flag=*/dst_rdma_rank + 2, /*group_size=*/kNumWarpsPerForwarder * WARP_SIZE);
         }
       };
-      // NOTES: since `kNumGroupReduceForwarderWarps` is set to 24 for now,
+      // NOTES: since `kNumForwarderWarps` is set to 24 for now,
       // so when `kNumRDMARanks` > 12, `kNumWarpsPerForwarder` will always be 1,
       // thus no worry to reach the barrier limit (`kNumWarpsPerForwarder > 1` and `kNumRDMARanks > 14`)
       GRPCOLL_STATIC_ASSERT(kNumWarpsPerForwarder == 1 or kNumRDMARanks + 2 <= NUM_MAX_BARRIERS, "Barriers are not enough");
@@ -2255,7 +2329,7 @@ void group_reduce_kernel(
       int last_nvl_head[kNumRDMARanks] = {0};
       int dst_rdma_rank = lane_id < kNumRDMARanks ? lane_id : 0;
       int dst_nvl_rank = lane_id < NUM_MAX_NVL_PEERS ? lane_id : 0;
-      GRPCOLL_STATIC_ASSERT(kNumGroupReduceForwarderWarps <= WARP_SIZE, "Invalid number of forwarder warps");
+      GRPCOLL_STATIC_ASSERT(kNumForwarderWarps <= WARP_SIZE, "Invalid number of forwarder warps");
       while (true) {
         // Check if all warps of either `kNVLAndRDMAForwarder` or `kRDMAReceiver` are retired
         if (is_forwarder) { // `kNVLAndRDMAForwarder`
@@ -2312,7 +2386,7 @@ void group_reduce_kernel(
   }
 }
 
-template <typename dtype_t, typename comm_dtype_t, typename reduce_dtype_t, int kNumRDMARanks, int kMaxNumHeads, int kNumGroupReduceForwarderWarps, int kNumTMAStages>
+template <typename dtype_t, typename comm_dtype_t, typename reduce_dtype_t, int kNumRDMARanks, int kMaxNumHeads, int kNumForwarderWarps, int kNumTMAStages>
 void launch_group_reduce(
     /* 1st group of input / output data*/
     void* reduced_x,
@@ -2344,13 +2418,14 @@ void launch_group_reduce(
     int num_channels,
     bool acc_reduce,
     ReduceOp reduce_op) {
-  constexpr int num_warps_per_forwarder = static_max(kNumGroupReduceForwarderWarps / kNumRDMARanks, 1);
-  constexpr int num_active_forwarder_warps = kNumRDMARanks * num_warps_per_forwarder;
-  constexpr int num_threads = get_num_threads_group_reduce(num_active_forwarder_warps), num_warps = num_threads / WARP_SIZE;
-  GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= kNumGroupReduceForwarderWarps, "Invalid number of forwarder warps");
-  GRPCOLL_STATIC_ASSERT(
-      num_active_forwarder_warps > NUM_MAX_NVL_PEERS and num_active_forwarder_warps <= kNumGroupReduceForwarderWarps, "Invalid number of active forwarder warps");
-  GRPCOLL_STATIC_ASSERT(num_warps == num_active_forwarder_warps + 1, "Invalid number of warps");
+  constexpr int kNumMaxSrcRDMARanks = get_num_max_src_rdma_ranks(kNumRDMARanks);
+  constexpr int kNumWarpsPerForwarder = static_max(kNumForwarderWarps / kNumRDMARanks, 1);
+  constexpr int kNumForwarders = kNumRDMARanks * kNumWarpsPerForwarder; // approx to kNumForwarderWarps
+  constexpr int kNumRDMAReceivers = kNumForwarders - NUM_MAX_NVL_PEERS;
+  constexpr int num_threads = get_num_threads_group_reduce(kNumForwarders), num_warps = num_threads / WARP_SIZE;
+  GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= kNumForwarderWarps, "Invalid number of forwarder warps");
+  GRPCOLL_STATIC_ASSERT(kNumForwarders > NUM_MAX_NVL_PEERS and kNumForwarders <= kNumForwarderWarps, "Invalid number of active forwarder warps");
+  GRPCOLL_STATIC_ASSERT(num_warps == kNumForwarders + 1, "Invalid number of warps");
 
   constexpr int kNumTMABytesPerSenderWarp = 16384; // 16KB
   constexpr int kNumTMALoadBytes = sizeof(int4) * WARP_SIZE; // 512B, as a warp-copy unit, each lane for one int4
@@ -2358,7 +2433,7 @@ void launch_group_reduce(
   constexpr int kNumTMABytesPerForwarderWarp = kNumTMAStages * kNumTMABufferBytesPerStage;
   constexpr int smem_size = std::max(
       kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, // 16KB * 8 = 128KB, can still be raised up
-      kNumTMABytesPerForwarderWarp * kNumGroupReduceForwarderWarps // 9248B * 24 = 216.75KB < 224KB, can hardly be raised up
+      kNumTMABytesPerForwarderWarp * kNumForwarderWarps // 9248B * 24 = 216.75KB < 224KB, can hardly be raised up
   );
 
 #define GROUP_REDUCE_LAUNCH_CASE(acc_reduce, reduce_op)                      \
@@ -2372,12 +2447,16 @@ void launch_group_reduce(
         false, /*disable low_latency_mode to decrease compilation overhead*/ \
         kMaxNumHeads,                                                        \
         kNumRDMARanks,                                                       \
-        kNumGroupReduceForwarderWarps,                                       \
+        kNumMaxSrcRDMARanks,                                                 \
         kNumTMAStages,                                                       \
         kNumTMALoadBytes,                                                    \
         kNumTMABufferBytesPerStage,                                          \
         kNumTMABytesPerSenderWarp,                                           \
-        kNumTMABytesPerForwarderWarp>;                                       \
+        kNumTMABytesPerForwarderWarp,                                        \
+        kNumForwarderWarps,                                                  \
+        kNumWarpsPerForwarder,                                               \
+        kNumForwarders,                                                      \
+        kNumRDMAReceivers>;                                                  \
     SET_SHARED_MEMORY_FOR_TMA(group_reduce_func);                            \
     LAUNCH_KERNEL(                                                           \
         &cfg,                                                                \
@@ -2430,7 +2509,7 @@ void launch_group_reduce(
   GRPCOLL_HOST_ASSERT(hidden_size * sizeof(comm_dtype_t) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % kNumRDMARanks == 0);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / kNumRDMARanks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
-  GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= num_warps_per_forwarder);
+  GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= kNumWarpsPerForwarder);
 
   // Even-numbered SMs for NVL senders and RDMA receivers
   // odd-numbered SMs for forwarders
