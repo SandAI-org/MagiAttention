@@ -2038,11 +2038,11 @@ void group_reduce_kernel(
           // Get token ptr in RDMA send buffer
           void* token_ptr_in_rdma_buffer = send_buffer + rdma_slot_idx * num_bytes_per_token;
 
-          // Define `get_addr_fn` and `recv_lse_fn`
-          auto get_addr_fn = [&](int src_nvl_rank, int slot_idx, int hidden_int4_idx) -> int4* {
+          // Define `get_hidval_ptr_fn` and `get_lse_fn`
+          auto get_hidval_ptr_fn = [&](int src_nvl_rank, int slot_idx, int hidden_int4_idx) -> int4* {
             return reinterpret_cast<int4*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token) + hidden_int4_idx;
           };
-          auto recv_lse_fn = [&](int src_nvl_rank, int slot_idx, int head_idx) -> float {
+          auto get_lse_fn = [&](int src_nvl_rank, int slot_idx, int head_idx) -> float {
             return ld_nc_global(
                 reinterpret_cast<float*>(nvl_channel_x.buffer(src_nvl_rank) + slot_idx * num_bytes_per_token + hidden_bytes + sizeof(SourceMeta)) + head_idx);
           };
@@ -2057,8 +2057,8 @@ void group_reduce_kernel(
           //  `reduced_token`: the token ptr in output buffer to store the reduced token
           //  `reduced_lse`: the lse ptr in output buffer to store the reduced lse
           //  `num_max_recv_tokens`: the queue size of NVL buffer
-          //  `get_addr_fn`: get address of the token in NVL buffer
-          //  `recv_lse_fn`: get lse of the token in NVL buffer
+          //  `get_hidval_ptr_fn`: get the hidden value ptr of the token in NVL buffer
+          //  `get_lse_fn`: get lse of the token in NVL buffer
           reduce_token_in_warp</*dtype_t=*/dtype_t,
                                /*comm_dtype_t=*/comm_dtype_t,
                                /*reduced_dtype_t=*/reduce_dtype_t,
@@ -2085,8 +2085,8 @@ void group_reduce_kernel(
               /*reduced_lse=*/reinterpret_cast<float*>(static_cast<int8_t*>(token_ptr_in_rdma_buffer) + hidden_bytes + sizeof(SourceMeta)),
               /*num_max_recv_tokens=*/num_max_nvl_chunked_recv_tokens_per_rdma,
               /*is_token_in_global_rank=*/nullptr, // no need to global-reduce for forwarder
-              /*get_addr_fn=*/get_addr_fn,
-              /*recv_lse_fn=*/recv_lse_fn,
+              /*get_hidval_ptr_fn=*/get_hidval_ptr_fn,
+              /*get_lse_fn=*/get_lse_fn,
               /*shared_reduced_lse=*/shared_reduced_lse_buf,
               /*shared_old_lse_rescale_weight=*/shared_old_lse_rescale_weight_buf,
               /*smem_ptr=*/smem_ptr,
@@ -2180,11 +2180,11 @@ void group_reduce_kernel(
         }
         __syncwarp();
 
-        // Define `get_addr_fn` and `recv_lse_fn`
-        auto get_addr_fn = [&](int src_rdma_rank, int slot_idx, int hidden_int4_idx) -> int4* {
+        // Define `get_hidval_ptr_fn` and `get_lse_fn`
+        auto get_hidval_ptr_fn = [&](int src_rdma_rank, int slot_idx, int hidden_int4_idx) -> int4* {
           return reinterpret_cast<int4*>(rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * num_bytes_per_token) + hidden_int4_idx;
         };
-        auto recv_lse_fn = [&](int src_rdma_rank, int slot_idx, int head_idx) -> float {
+        auto get_lse_fn = [&](int src_rdma_rank, int slot_idx, int head_idx) -> float {
           return ld_nc_global(
               reinterpret_cast<const float*>(rdma_channel_data.recv_buffer(src_rdma_rank) + slot_idx * num_bytes_per_token + hidden_bytes + sizeof(SourceMeta)) +
               head_idx);
@@ -2200,7 +2200,8 @@ void group_reduce_kernel(
         //  `reduced_token`: the token ptr in output buffer to store the reduced token
         //  `reduced_lse`: the lse ptr in output buffer to store the reduced lse
         //  `num_max_recv_tokens`: the queue size of RDMA buffer
-        //  `get_addr_fn`: get address of the token in RDMA buffer
+        //  `get_hidval_ptr_fn`: get the hidden value ptr of the token in RDMA buffer
+        //  `get_lse_fn`: get lse of the token in RDMA buffer
         uint32_t dummy_tma_phases[kNumTMAStages];
         reduce_token_in_warp</*dtype_t=*/dtype_t,
                              /*comm_dtype_t=*/comm_dtype_t,
@@ -2228,8 +2229,8 @@ void group_reduce_kernel(
             /*reduced_lse=*/reduced_lse + token_idx * num_heads,
             /*num_max_recv_tokens=*/num_max_rdma_chunked_recv_tokens,
             /*is_token_in_global_rank=*/is_reduced_token_in_rank + token_idx * num_ranks,
-            /*get_addr_fn=*/get_addr_fn,
-            /*recv_lse_fn=*/recv_lse_fn,
+            /*get_hidval_ptr_fn=*/get_hidval_ptr_fn,
+            /*get_lse_fn=*/get_lse_fn,
             /*shared_reduced_lse=*/shared_reduced_lse_buf,
             /*shared_old_lse_rescale_weight=*/shared_old_lse_rescale_weight_buf,
             /*smem_ptr=*/nullptr,

@@ -424,10 +424,10 @@ DEVICE_INLINE void timeout_check_rdma_recevier(
 // Group Reduce Helper Functions
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <typename reduce_dtype_t, bool kAccReduce, int kMaxNumHeads, int kNumReduceWarps, typename ReceiveLSEFn>
+template <typename reduce_dtype_t, bool kAccReduce, int kMaxNumHeads, int kNumReduceWarps, typename GetLSEFn>
 __device__ void reduce_lse_in_warp(
     float* reduced_lse,
-    const ReceiveLSEFn& recv_lse_fn,
+    const GetLSEFn& get_lse_fn,
     reduce_dtype_t shared_reduced_lse[kNumReduceWarps][kMaxNumHeads],
     reduce_dtype_t shared_old_lse_rescale_weight[kNumReduceWarps][kMaxNumHeads],
     int* src_rank_idxs,
@@ -452,7 +452,7 @@ __device__ void reduce_lse_in_warp(
 #pragma unroll
     // Apply lse reduce for each src rank
     for (int j = 0; j < num_src_ranks; ++j) {
-      lse_reduce<reduce_dtype_t, float>(/*reduced_lse=*/reduced_lse_val, /*src_lse=*/recv_lse_fn(src_rank_idxs[j], slot_indices[j], h));
+      lse_reduce<reduce_dtype_t, float>(/*reduced_lse=*/reduced_lse_val, /*src_lse=*/get_lse_fn(src_rank_idxs[j], slot_indices[j], h));
     }
 
     // Store the reduced lse to shared memory buffer temporarily
@@ -480,7 +480,7 @@ template <
     int kNumReduceWarps,
     int kCommDtypePerInt4,
     typename ReceiveHidValFn,
-    typename ReceiveLSEFn>
+    typename GetLSEFn>
 __device__ void reduce_hidval_in_warp(
     int reduce_warp_id,
     int head_idx,
@@ -491,7 +491,7 @@ __device__ void reduce_hidval_in_warp(
     int* src_rank_idxs,
     int* slot_indices,
     const ReceiveHidValFn& recv_hidval_int4_fn,
-    const ReceiveLSEFn& recv_lse_fn,
+    const GetLSEFn& get_lse_fn,
     reduce_dtype_t shared_reduced_lse[kNumReduceWarps][kMaxNumHeads],
     reduce_dtype_t shared_old_lse_rescale_weight[kNumReduceWarps][kMaxNumHeads]) {
   constexpr bool kIsLSEReduce = kReduceOp == ReduceOp::LSE;
@@ -524,7 +524,7 @@ __device__ void reduce_hidval_in_warp(
       auto jth_recv_hidval_comm_dtype = reinterpret_cast<const comm_dtype_t*>(recv_hidval_int4_fn(j));
       // TODO: optimize the repeated load of each head of lse with dynamic shared memory
       // but be careful of the high occupancy of the TMA buffer
-      auto jth_recv_lse = recv_lse_fn(src_rank_idxs[j], slot_indices[j], head_idx);
+      auto jth_recv_lse = get_lse_fn(src_rank_idxs[j], slot_indices[j], head_idx);
       foreach_reduce_lse<reduce_dtype_t, comm_dtype_t, float, kCommDtypePerInt4>(hp_hidval_reduce_buf, reduced_lse_val, jth_recv_hidval_comm_dtype, jth_recv_lse);
     }
   } else if constexpr (kReduceOp == ReduceOp::SUM || kReduceOp == ReduceOp::AVG) {
@@ -558,8 +558,8 @@ template <
     int kNumTMAStages,
     int kNumTMALoadBytes,
     int kNumTMABufferBytesPerStage,
-    typename GetAddrFn,
-    typename ReceiveLSEFn>
+    typename GetHidValPtrFn,
+    typename GetLSEFn>
 __device__ void reduce_token_in_warp(
     bool is_token_in_rank,
     int token_idx_in_queue,
@@ -573,8 +573,8 @@ __device__ void reduce_token_in_warp(
     float* reduced_lse,
     int num_max_recv_tokens,
     const bool* is_token_in_global_rank,
-    const GetAddrFn& get_addr_fn,
-    const ReceiveLSEFn& recv_lse_fn,
+    const GetHidValPtrFn& get_hidval_ptr_fn,
+    const GetLSEFn& get_lse_fn,
     reduce_dtype_t shared_reduced_lse[kNumReduceWarps][kMaxNumHeads],
     reduce_dtype_t shared_old_lse_rescale_weight[kNumReduceWarps][kMaxNumHeads],
     uint8_t* smem_ptr,
@@ -615,7 +615,7 @@ __device__ void reduce_token_in_warp(
   if constexpr (kIsLSEReduce) {
     reduce_lse_in_warp<reduce_dtype_t, kAccReduce, kMaxNumHeads, kNumReduceWarps>(
         /*reduced_lse=*/reduced_lse,
-        /*recv_lse_fn=*/recv_lse_fn,
+        /*get_lse_fn=*/get_lse_fn,
         /*shared_reduced_lse=*/shared_reduced_lse,
         /*shared_old_lse_rescale_weight=*/shared_old_lse_rescale_weight,
         /*src_rank_idxs=*/src_rank_idxs,
@@ -653,7 +653,7 @@ __device__ void reduce_token_in_warp(
       if (lane_id < num_src_ranks) {
         tma_load_1d(
             /*smem_ptr=*/tma_load_buffer(0, lane_id),
-            /*gmem_ptr=*/get_addr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], 0),
+            /*gmem_ptr=*/get_hidval_ptr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], 0),
             /*mbar_ptr=*/tma_mbarrier(0),
             /*num_bytes=*/kNumTMALoadBytes,
             /*evict_first=*/true);
@@ -684,7 +684,7 @@ __device__ void reduce_token_in_warp(
           if (lane_id < num_src_ranks) {
             tma_load_1d(
                 /*smem_ptr=*/tma_load_buffer(next_stage_idx, lane_id),
-                /*gmem_ptr=*/get_addr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], shifted + WARP_SIZE),
+                /*gmem_ptr=*/get_hidval_ptr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], shifted + WARP_SIZE),
                 /*mbar_ptr=*/tma_mbarrier(next_stage_idx),
                 /*num_bytes=*/kNumTMALoadBytes,
                 /*evict_first=*/true);
@@ -696,7 +696,7 @@ __device__ void reduce_token_in_warp(
         if (lane_id < num_src_ranks) {
           tma_load_1d(
               /*smem_ptr=*/tma_load_buffer(stage_idx, lane_id),
-              /*gmem_ptr=*/get_addr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], shifted),
+              /*gmem_ptr=*/get_hidval_ptr_fn(src_rank_idxs[lane_id], slot_indices[lane_id], shifted),
               /*mbar_ptr=*/tma_mbarrier(stage_idx),
               /*num_bytes=*/kNumTMALoadBytes,
               /*evict_first=*/true);
@@ -725,7 +725,7 @@ __device__ void reduce_token_in_warp(
           /*src_rank_idxs=*/src_rank_idxs,
           /*slot_indices=*/slot_indices,
           /*recv_hidval_int4_fn=*/recv_hidval_int4_fn,
-          /*recv_lse_fn=*/recv_lse_fn,
+          /*get_lse_fn=*/get_lse_fn,
           /*shared_reduced_lse=*/shared_reduced_lse,
           /*shared_old_lse_rescale_weight=*/shared_old_lse_rescale_weight);
 
@@ -773,7 +773,7 @@ __device__ void reduce_token_in_warp(
       int4 recv_hidval_int4[kMaxNumSrcRanks];
 #pragma unroll
       for (int j = 0; j < num_src_ranks; ++j) {
-        recv_hidval_int4[j] = ld_nc_global(get_addr_fn(src_rank_idxs[j], slot_indices[j], i * kCommDtypePerDtype));
+        recv_hidval_int4[j] = ld_nc_global(get_hidval_ptr_fn(src_rank_idxs[j], slot_indices[j], i * kCommDtypePerDtype));
       }
 
       // Prepare high-precision reduce buffer and recv_hidval_int4_fn
@@ -792,7 +792,7 @@ __device__ void reduce_token_in_warp(
           /*src_rank_idxs=*/src_rank_idxs,
           /*slot_indices=*/slot_indices,
           /*recv_hidval_int4_fn=*/recv_hidval_int4_fn,
-          /*recv_lse_fn=*/recv_lse_fn,
+          /*get_lse_fn=*/get_lse_fn,
           /*shared_reduced_lse=*/shared_reduced_lse,
           /*shared_old_lse_rescale_weight=*/shared_old_lse_rescale_weight);
 
