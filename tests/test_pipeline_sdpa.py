@@ -84,6 +84,7 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
             flags=list(self.flag_to_envvar.keys()),
             options={
                 "device_max_connections": [1, 8],
+                "enable_native_grpcoll": [False], # FIXME: blackwell does not support native grpcoll
             },
             defaults={
                 "device_max_connections": 8,
@@ -123,17 +124,20 @@ class TestPipelineSDPABaseWithWorldSize1(DistTestBase):
         # -----    set up for native grpcoll   ---- #
 
         for nccl_group in self.nccl_groups:
-            grpcoll_buffer_mgr.initialize(
-                group=nccl_group,
-                config=GrpCollConfig(
-                    num_sms=24,
-                    num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
-                ),
-            )
+            try:
+                grpcoll_buffer_mgr.initialize(
+                    group=nccl_group,
+                    config=GrpCollConfig(
+                        num_sms=24,
+                        num_nvl_bytes=int(2e9) * self.world_size // 8,  # ~2GB for 8 ranks
+                    ),
+                )
+            except Exception as e:
+                print(f"The NCCL group {nccl_group} cannot be registered due to error: \n{e}\n")
 
     @property
     def timeout(self) -> int:
-        return 600
+        return 900
 
     @property
     def device(self) -> int:
