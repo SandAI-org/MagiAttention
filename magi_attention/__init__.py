@@ -116,13 +116,12 @@ def is_sdpa_backend_enable() -> bool:
 def is_fa4_backend_enable() -> bool:
     """
     Toggle this env variable to ``1`` to switch the attn kernel backend
-    from ffa to customized fa4 implementation,
-    to support arbitary mask on Blackwell GPUs
+    from ffa to a monkey patch version of flash-attention 4 implementation,
+    to temporarily support arbitrary mask on Blackwell GPUs
 
     Default value is ``0``
 
-    NOTE: this is only supposed to be used for testing or debugging,
-    since the performance is not acceptable
+    NOTE: this is a beta feature, under development
     """
     return os.environ.get("MAGI_ATTENTION_FA4_BACKEND", "0") == "1"
 
