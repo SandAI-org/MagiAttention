@@ -70,6 +70,8 @@ mask_types = ["full"]
 # mask_types = ["varlen_causal"]
 # mask_types = ["sliding_window_causal"]
 # mask_types = ["varlen_block_causal"]
+# mask_types = ["full", "causal", "sliding_window_causal"]
+# mask_types = ["varlen_full"]
 
 
 varlen_seqlen_distribution = {
@@ -88,13 +90,13 @@ varlen_seqlen_distribution = {
 }
 
 
-ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32]]
+ss = [k * 1024 for k in [1, 2, 4, 8, 16, 24, 32, 64]]
 ds = [128]
 wds = ["fwd", "bwd"]
 
 
 b = 1
-nhq = 8
+nhq = 48
 nhk = 8
 dtype = torch.bfloat16
 
