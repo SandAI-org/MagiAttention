@@ -606,7 +606,7 @@ void group_cast_kernel(
           for (int j = 0; j < kNumTMAStages; ++j) {
             if (lane_id == 0) { // only the lane0 in this warp issues the TMA
               // Wait for all previous TMA stores to be finished
-              // REVIEW: can we use multiple buffers for multiple stages ?
+              // REVIEW: can we use multiple TMA buffers for multiple TMA stages ?
               tma_store_wait();
 
               // Load the token from recv queue to shared memory
@@ -1042,11 +1042,10 @@ void group_reduce_kernel(
     constexpr int num_send_warps = kNumThreads / WARP_SIZE;
     constexpr int num_send_warps_per_rank = num_send_warps / kNumRanks;
     constexpr int num_send_threads_per_rank = num_send_warps_per_rank * WARP_SIZE;
-    const auto send_warp_id = warp_id;
-    const auto responsible_rank = (responsible_channel + send_warp_id) % kNumRanks; // REVIEW: why shifted by responsible_channel ?
-    const auto send_warp_id_in_rank = send_warp_id / kNumRanks;
-
     GRPCOLL_STATIC_ASSERT(num_send_warps % kNumRanks == 0, "Invalid number of send warps");
+
+    const auto send_warp_id = warp_id, send_warp_id_in_rank = send_warp_id / kNumRanks;
+    const auto responsible_rank = (responsible_channel + send_warp_id) % kNumRanks; // REVIEW: why shifted by responsible_channel
 
     // Get buffer ptr of the recv rank
     // (the metadata of any pair of (sender, receiver) is all stored on the receiver side)
@@ -1070,15 +1069,17 @@ void group_reduce_kernel(
         Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4_comm, /*elem_offset=*/channel_rank_token_offset * hidden_int4_comm);
     auto channel_src_idx_buffers = Buffer<int>(ptr, /*num_elems=*/num_channel_tokens_total, /*elem_offset=*/channel_rank_token_offset);
     Buffer<float> channel_lse_buffers;
-    if constexpr (kIsLSEReduce)
+    if constexpr (kIsLSEReduce) {
       channel_lse_buffers = Buffer<float>(ptr, /*num_elems=*/num_channel_tokens_total * num_heads, /*elem_offset=*/channel_rank_token_offset * num_heads);
+    }
 
     // Get channel data buffers for other groups
     //  `x_buffers_2nd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4_comm), dtype=int4, alignment=sizeof(int4)
     Buffer<int4, sizeof(int4)> channel_x_buffers_2nd;
-    if constexpr (kIs2ndGroupExists)
+    if constexpr (kIs2ndGroupExists) {
       channel_x_buffers_2nd =
           Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4_comm, /*elem_offset=*/channel_rank_token_offset * hidden_int4_comm);
+    }
 
     // Get rank offset
     // NOTES: `rank_prefix_matrix`: shape=(kNumRanks, kNumRanks), dtype=int

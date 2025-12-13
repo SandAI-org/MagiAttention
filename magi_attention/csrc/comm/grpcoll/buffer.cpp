@@ -237,9 +237,9 @@ void Buffer::sync(
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 Buffer::~Buffer() noexcept(false) {
-  if (not explicitly_destroy) {
+  if (!explicitly_destroy) {
     destroy();
-  } else if (not destroyed) {
+  } else if (!destroyed) {
     printf("WARNING: destroy() was not called before grpcoll buffer destruction, which may leak resources.\n");
     fflush(stdout);
   }
@@ -1143,7 +1143,7 @@ Buffer::internode_group_cast(
   auto recv_gbl_channel_prefix_matrix = std::optional<torch::Tensor>();
   auto send_rdma_head = std::optional<torch::Tensor>();
   auto send_nvl_head = std::optional<torch::Tensor>();
-  if (not cached_mode) {
+  if (!cached_mode) {
     recv_src_meta = torch::empty({num_recv_tokens, internode::get_source_meta_bytes()}, dtype(torch::kByte).device(torch::kCUDA));
     recv_rdma_channel_prefix_matrix = torch::empty({num_rdma_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
     recv_gbl_channel_prefix_matrix = torch::empty({num_ranks, num_channels}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -1612,7 +1612,7 @@ Buffer::low_latency_dispatch(
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   auto launch_stream = return_recv_hook ? compute_stream : comm_stream;
   GRPCOLL_HOST_ASSERT(not(async_op and return_recv_hook));
-  if (not return_recv_hook)
+  if (!return_recv_hook)
     stream_wait(launch_stream, compute_stream);
 
   // Allocate packed tensors

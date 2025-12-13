@@ -847,7 +847,7 @@ void group_cast_kernel(
 
           // Store `rdma_token_end_idx` for group_reduce stage
           //  `recv_rdma_channel_prefix_matrix`: shape=[kNumRDMARanks, kNumChannels], dtype=int
-          if (not kCachedMode)
+          if (!kCachedMode)
             recv_rdma_channel_prefix_matrix[lane_id * num_channels + channel_id] = rdma_token_end_idx;
 
           // Shift `rdma_token_start_idx` by RDMA rank offset
@@ -952,7 +952,7 @@ void group_cast_kernel(
         if (lane_id == src_rdma_rank) {
           auto cached_head = is_in_dst_nvl_rank ? rdma_nvl_token_idx : -1;
           rdma_nvl_token_idx += is_in_dst_nvl_rank;
-          if (not kCachedMode)
+          if (!kCachedMode)
             send_nvl_head[i * NUM_MAX_NVL_PEERS] = cached_head;
         }
         if (!is_in_dst_nvl_rank)
@@ -1697,6 +1697,10 @@ void group_reduce_kernel(
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const bool is_forwarder = sm_id % 2 == 1;
 
+  constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
+  constexpr int kCommDtypePerDtype = sizeof(dtype_t) / sizeof(comm_dtype_t);
+  constexpr int kCommDtypePerInt4 = kCommDtypePerDtype * kDtypePerInt4;
+
   constexpr int kNumMaxSrcNVLRanks = NUM_MAX_NVL_PEERS;
   constexpr bool kIsLSEReduce = kReduceOp == ReduceOp::LSE;
   constexpr int max_num_heads = kIsLSEReduce ? kMaxNumHeads : 1;
@@ -1706,9 +1710,10 @@ void group_reduce_kernel(
   GRPCOLL_STATIC_ASSERT(kNumForwarders == kNumRDMAReceivers + NUM_MAX_NVL_PEERS, "Invalid number of forwarders and receivers");
   GRPCOLL_STATIC_ASSERT(kNumForwarders >= kNumRDMARanks, "Invalid number of forwarders");
 
-  const auto hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t)), hidden_bytes = hidden_int4 * sizeof(int4);
+  const int hidden_int4 = hidden_size / kDtypePerInt4, hidden_bytes = hidden_int4 * sizeof(int4);
+  const int hidden_int4_comm = hidden_int4 / kCommDtypePerDtype, hidden_bytes_comm = hidden_int4_comm * sizeof(int4);
   const int head_dim = kIsLSEReduce ? hidden_size / num_heads : -1;
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4_comm, num_heads);
   const auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks; // split NVL queue for each RDMA peer
 
   /** NOTE: Determine warp role and its target warp id
@@ -1776,14 +1781,15 @@ void group_reduce_kernel(
             dst_buffer_ptr, /*num_elems=*/kNumRDMARanks, /*num_ranks=*/NUM_MAX_NVL_PEERS, /*sm_id=*/channel_id, /*num_sms=*/num_channels, /*offset=*/nvl_rank)
             .advance_also(local_buffer_ptr);
 
-    // Prepare TMA buffers and init mbarrier
+    // Prepare TMA buffer and init mbarrier
+    // NOTES: it satisfies `hidden_size * sizeof(comm_dtype) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp`
+    // which is checked in host
     extern __shared__ __align__(1024) uint8_t smem_tma_buffer[]; // REVIEW: why aligned to 1024 bytes ?
-    auto tma_buffer =
-        smem_tma_buffer + dst_nvl_rank * kNumTMABytesPerSenderWarp; // NOTES: hidden_size * sizeof(comm_dtype) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp
+    auto tma_buffer = smem_tma_buffer + dst_nvl_rank * kNumTMABytesPerSenderWarp;
     auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes);
     uint32_t tma_phase = 0;
     if (lane_id == 0) {
-      mbarrier_init(tma_mbarrier, 1);
+      mbarrier_init(tma_mbarrier, /*arrive_count=*/1);
       fence_view_async_shared();
       fence_barrier_init();
     }
@@ -1866,7 +1872,7 @@ void group_reduce_kernel(
           // TMA-copy token from `x` to TMA buffer in shared memory
           if (lane_id == 0) { // issued by lane0
             // Wait for all previous TMA stores to be finished
-            // REVIEW: can we use multiple buffers for multiple stages ?
+            // REVIEW: can we use multiple TMA buffers for multiple TMA stages ?
             tma_store_wait();
 
             tma_load_1d(
@@ -1883,7 +1889,7 @@ void group_reduce_kernel(
           // and flip the `tma_phase` in-place
           mbarrier_wait(tma_mbarrier, /*stage=*/tma_phase);
 
-          // Copy source meta to shared memory
+          // Copy src meta to shared memory
           // NOTES: since we've NOT applied `post_perm_idx` to `recv_src_meta` in group cast stage,
           //    here we don't apply `pre_perm_idx` to `src_meta` either
           if (lane_id == 0) {
@@ -1903,7 +1909,8 @@ void group_reduce_kernel(
           tma_store_fence();
           __syncwarp();
 
-          // TMA-copy token from TMA buffer in shared memory to NVL buffer
+          // TMA-copy token from TMA buffer in shared memory
+          // to NVL buffer of dst NVL peer
           if (lane_id == 0) {
             tma_store_1d(
                 /*smem_ptr=*/tma_buffer,

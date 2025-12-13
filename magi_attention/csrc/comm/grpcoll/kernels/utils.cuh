@@ -209,6 +209,9 @@ DEVICE_INLINE int fast_log2_ceil(float x) {
   return exp_x - 127 + (man_bits != 0);
 }
 
+// Make `m` elems in `vec_dtype_t` to one elem in `vec_dtype_t`
+// by downcasting each sub-elem in `dtype_t` to `lp_dtype_t`
+// where `m = sizeof(dtype_t) / sizeof(lp_dtype_t)`, i.e. `m` `lp_dtype_t` elems in one `dtype_t`
 template <typename dtype_t, typename lp_dtype_t, typename vec_dtype_t>
 DEVICE_INLINE vec_dtype_t vec_downcast(vec_dtype_t* vec_ptr) {
   constexpr int kDtypePerVec = sizeof(vec_dtype_t) / sizeof(dtype_t);
@@ -221,8 +224,11 @@ DEVICE_INLINE vec_dtype_t vec_downcast(vec_dtype_t* vec_ptr) {
   for (int i = 0; i < kLowPrecisionDtypePerDtype; ++i) {
     dtype_t* ith_dtype_ptr = reinterpret_cast<dtype_t*>(vec_ptr + i);
 #pragma unroll
-    for (int j = 0; j < kDtypePerVec; ++j)
+    for (int j = 0; j < kDtypePerVec; ++j) {
+      // REVIEW: might had better use cuda intrinsics here
+      // like `_float2bfloat16_rn` for specific downcast
       downcast_val_ptr_lp[i * kDtypePerVec + j] = static_cast<lp_dtype_t>(ith_dtype_ptr[j]);
+    }
   }
 
   return downcast_val_vec;
