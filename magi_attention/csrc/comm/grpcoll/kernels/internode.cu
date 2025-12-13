@@ -1894,8 +1894,8 @@ void group_reduce_kernel(
           if constexpr (isLowPrecisionComm) {
             auto hidval_int4_ptr = reinterpret_cast<int4*>(tma_buffer);
 #pragma unroll
-            for (int i = lane_id; i < hidden_int4_comm; ++WARP_SIZE) {
-              hidval_int4_ptr[i] = vec_downcast(hidval_int4_ptr[i * kCommDtypePerDtype]);
+            for (int i = lane_id; i < hidden_int4_comm; i += WARP_SIZE) {
+              hidval_int4_ptr[i] = vec_downcast</*dtype_t=*/dtype_t, /*lp_dtype_t=*/comm_dtype_t, /*vec_dtype_t=*/int4>(hidval_int4_ptr + i * kCommDtypePerDtype);
             }
             __syncwarp();
           }
