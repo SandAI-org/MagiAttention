@@ -342,7 +342,7 @@ class FA3FuncWithSink(torch.autograd.Function):
                 rearrange(sink, "b sq s h -> (b sq) s h")
                 if sink_layout == "ssh"
                 else sink
-            )
+            ).detach()
 
             # correct out, lse with sink
             out, lse = correct_attn_out_lse_with_sink_compiled(
@@ -377,7 +377,7 @@ class FA3FuncWithSink(torch.autograd.Function):
                 rearrange(sink, "b sq s h -> (b sq) s h")
                 if sink_layout == "ssh"
                 else sink
-            )
+            ).detach()
 
             # compute dsink
             dsink = sink_bwd_compiled(
@@ -616,7 +616,7 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
             out, lse = correct_attn_out_lse_with_sink_compiled(
                 out=out,
                 lse=lse,
-                sink=sink,
+                sink=sink.detach(),
                 sink_layout=sink_layout,
                 inplace=True,
             )
@@ -640,7 +640,7 @@ class FA3VarlenFuncWithSink(torch.autograd.Function):
 
             # compute dsink
             dsink = sink_bwd_compiled(
-                sink=sink,
+                sink=sink.detach(),
                 lse=lse,
                 o=out,
                 do=dout,

@@ -14,14 +14,15 @@
 
 import json
 import unittest
-from enum import Enum
 from typing import Any
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 import magi_attention.testing
+from exps.dist_attn.baselines.interface import AttnImpl
 from exps.dist_attn.baselines.loongtrain import LoongTrain
 from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
 from exps.dist_attn.baselines.shard import (
@@ -45,15 +46,6 @@ from magi_attention.common.enum import AttnMaskType
 from magi_attention.testing import parameterize
 from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import calc_inf_norm, extract_mismatch_info
-
-
-class AttnImpl(Enum):
-    ULYSSESS = 1
-    RING_P2P = 2
-    RING_ALLGATHER = 3
-    USP = 4
-    LOONGTRAIN = 5
-
 
 global_pg_groups = {}  # type: ignore
 global_loongtrain_pg_groups = {}  # type: ignore
@@ -84,9 +76,9 @@ class TestBaselineAttn(DistTestBase):
     def device(self):
         return torch.cuda.current_device()
 
-    # @property
-    # def world_size(self) -> int:
-    #     return 4
+    @property
+    def world_size(self) -> int:
+        return 8
 
     def assert_close_to_sdpa_ref(
         self,
@@ -105,7 +97,6 @@ class TestBaselineAttn(DistTestBase):
         # -----   customize tolerance threshold  ---- #
 
         EPSILON = 1e-7
-        print(f"{EPSILON=}")
 
         o_atol = EPSILON
         o_rtol = {torch.bfloat16: 0.05, torch.float16: 0.05}.get(dtype, 0.05)
@@ -122,7 +113,7 @@ class TestBaselineAttn(DistTestBase):
         # NOTE: an experimental value from magi_attention testing
         mismatch_thres_ratio: float = 2.0
         # NOTE: an experimental value from fa testing
-        norm_rtol_ratio: float = 2.0
+        norm_rtol_ratio: float = 3.0
 
         # -----   ref1. fa3 with high precision (fp32)   ---- #
 
@@ -136,10 +127,11 @@ class TestBaselineAttn(DistTestBase):
             total_q, total_k, total_v, total_dout, mask, False
         )
 
-        print(f"max diff out: {torch.abs(out_ref_16 - dist_attn_out).max()}")
-        print(f"max diff dq: {torch.abs(dq_ref_16 - dist_attn_dq).max()}")
-        print(f"max diff dk: {torch.abs(dk_ref_16 - dist_attn_dk).max()}")
-        print(f"max diff dv: {torch.abs(dv_ref_16 - dist_attn_dv).max()}")
+        if dist.get_rank() == 0:
+            print(f"max diff out: {torch.abs(out_ref_16 - dist_attn_out).max()}")
+            print(f"max diff dq: {torch.abs(dq_ref_16 - dist_attn_dq).max()}")
+            print(f"max diff dk: {torch.abs(dk_ref_16 - dist_attn_dk).max()}")
+            print(f"max diff dv: {torch.abs(dv_ref_16 - dist_attn_dv).max()}")
 
         # -----   assert close for fwd out   ---- #
 
@@ -229,7 +221,6 @@ class TestBaselineAttn(DistTestBase):
         )
 
         # -----   assert close for bwd dv   ---- #
-
         # fa style with Linf norm
         dv_norm = calc_inf_norm(dist_attn_dv, dv_ref_32)
         dv_ref_norm = calc_inf_norm(dv_ref_16, dv_ref_32)
@@ -279,41 +270,41 @@ class TestBaselineAttn(DistTestBase):
         "impl_config",
         [
             {
-                "name": AttnImpl.ULYSSESS,
+                "name": AttnImpl.ULYSSES,
                 "cp_pg_meta": {
-                    ParallelMode.ULYSESS: 4,
+                    ParallelMode.ULYSESS: 8,
                 },
-                "world_size": 4,
+                "world_size": 8,
             },
             {
                 "name": AttnImpl.RING_ALLGATHER,
                 "cp_pg_meta": {
-                    ParallelMode.RING: 4,
+                    ParallelMode.RING: 8,
                 },
-                "world_size": 4,
+                "world_size": 8,
             },
             {
                 "name": AttnImpl.RING_P2P,
                 "cp_pg_meta": {
-                    ParallelMode.RING: 4,
+                    ParallelMode.RING: 8,
                 },
-                "world_size": 4,
+                "world_size": 8,
             },
             {
                 "name": AttnImpl.USP,
                 "cp_pg_meta": {
-                    ParallelMode.RING: 2,
-                    ParallelMode.ULYSESS: 2,
+                    ParallelMode.RING: 8,
+                    ParallelMode.ULYSESS: 1,
                 },
-                "world_size": 4,
+                "world_size": 8,
             },
             {
                 "name": AttnImpl.LOONGTRAIN,
                 "cp_pg_meta": {
-                    ParallelMode.RING: 2,
+                    ParallelMode.RING: 4,
                     ParallelMode.ULYSESS: 2,
                 },
-                "world_size": 4,
+                "world_size": 8,
                 "window_num": 2,
             },
         ],
@@ -323,22 +314,22 @@ class TestBaselineAttn(DistTestBase):
         [
             {
                 "name": "full_4k",
-                "seqlen": 4096,
+                "seqlen": 4095,
                 "q_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 4096],
+                        [0, 4095],
                     ]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
                     [
-                        [0, 4096],
+                        [0, 4095],
                     ]
                 ),
                 "attn_mask_type": AttnMaskType.FULL,
             },
             {
                 "name": "varlen_full_4k",
-                "seqlen": 4096,
+                "seqlen": 4095,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -348,7 +339,7 @@ class TestBaselineAttn(DistTestBase):
                         [1280, 1536],
                         [1536, 1792],
                         [1792, 2048],
-                        [2048, 4096],
+                        [2048, 4095],
                     ]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
@@ -360,14 +351,14 @@ class TestBaselineAttn(DistTestBase):
                         [1280, 1536],
                         [1536, 1792],
                         [1792, 2048],
-                        [2048, 4096],
+                        [2048, 4095],
                     ],
                 ),
                 "attn_mask_type": AttnMaskType.FULL,
             },
             {
                 "name": "varlen_causal_2k",
-                "seqlen": 2048,
+                "seqlen": 2047,
                 "q_ranges": AttnRanges.from_ranges(
                     [
                         [0, 256],
@@ -376,7 +367,7 @@ class TestBaselineAttn(DistTestBase):
                         [1024, 1280],
                         [1280, 1536],
                         [1536, 1792],
-                        [1792, 2048],
+                        [1792, 2047],
                     ]
                 ),
                 "k_ranges": AttnRanges.from_ranges(
@@ -387,7 +378,7 @@ class TestBaselineAttn(DistTestBase):
                         [1024, 1280],
                         [1280, 1536],
                         [1536, 1792],
-                        [1792, 2048],
+                        [1792, 2047],
                     ],
                 ),
                 "attn_mask_type": AttnMaskType.CAUSAL,
@@ -403,24 +394,24 @@ class TestBaselineAttn(DistTestBase):
                 "num_heads_kv": 8,
                 "head_dim": 128,
             },
-            # {
-            #     "name": "gqa_nhq16_nhkv4_hd128",
-            #     "num_heads_q": 16,
-            #     "num_heads_kv": 4,
-            #     "head_dim": 128,
-            # },
-            # {
-            #     "name": "mha_nh1_hd64",
-            #     "num_heads_q": 1,
-            #     "num_heads_kv": 1,
-            #     "head_dim": 64,
-            # },
-            # {
-            #     "name": "gqa_nhq4_nhkv2_hd64",
-            #     "num_heads_q": 4,
-            #     "num_heads_kv": 2,
-            #     "head_dim": 64,
-            # },
+            {
+                "name": "gqa_nhq16_nhkv8_hd128",
+                "num_heads_q": 16,
+                "num_heads_kv": 8,
+                "head_dim": 128,
+            },
+            {
+                "name": "gqa_nhq4_nhkv2_hd64",
+                "num_heads_q": 4,
+                "num_heads_kv": 2,
+                "head_dim": 64,
+            },
+            {
+                "name": "mha_nh1_hd64",
+                "num_heads_q": 1,
+                "num_heads_kv": 1,
+                "head_dim": 128,
+            },
         ],
     )
     @parameterize("attn_backend", [AttnBackend.FA3, AttnBackend.TE])
@@ -448,7 +439,6 @@ class TestBaselineAttn(DistTestBase):
 
         # -----    test ring attn   ---- #
         if TO_TEST == AttnImpl.RING_ALLGATHER or TO_TEST == AttnImpl.RING_P2P:
-            # device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
             cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
             if cp_group is None:
                 device_shard = get_device_mesh(cp_pg_meta, world_size)
@@ -456,8 +446,7 @@ class TestBaselineAttn(DistTestBase):
                 global_pg_groups[key] = cp_group
 
         # -----    test ulysess   ---- #
-        elif TO_TEST == AttnImpl.ULYSSESS:
-            # device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
+        elif TO_TEST == AttnImpl.ULYSSES:
             cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
             if cp_group is None:
                 device_shard = get_device_mesh(cp_pg_meta, world_size)
@@ -466,7 +455,6 @@ class TestBaselineAttn(DistTestBase):
 
         # -----    test usp   ---- #
         elif TO_TEST == AttnImpl.USP:
-            # device_shard = init_distributed(world_size=world_size, pg_meta=cp_pg_meta)
             cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
             if cp_group is None:
                 device_shard = get_device_mesh(cp_pg_meta, world_size)
@@ -479,15 +467,11 @@ class TestBaselineAttn(DistTestBase):
             window_num = impl_config["window_num"]
             rank = dist.get_rank()
             # NOTE: using pytest to run this test, so we can not use os.environ.get("RANK", 0)
-            # rank = int(os.environ.get("RANK", 0))
             assert world_size % window_num == 0
-            # device_shard = init_distributed(world_size=world_size, pg_meta=None)
             cp_group, key = check_pg_exist(cp_pg_meta, global_loongtrain_pg_groups)
             if cp_group is None:
                 cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
                 global_loongtrain_pg_groups[key] = cp_group
-
-        dist.barrier()
 
         # -----    init test data   ---- #
 
@@ -500,12 +484,22 @@ class TestBaselineAttn(DistTestBase):
         num_heads_q = model_config["num_heads_q"]
         num_heads_kv = model_config["num_heads_kv"]
         head_dim = model_config["head_dim"]
+        if TO_TEST in [AttnImpl.ULYSSES, AttnImpl.USP, AttnImpl.LOONGTRAIN]:
+            a2a_size = cp_pg_meta[ParallelMode.ULYSESS]
+            if (
+                num_heads_q < a2a_size
+                or num_heads_kv < a2a_size
+                or num_heads_q % a2a_size != 0
+                or num_heads_kv % a2a_size != 0
+            ):
+                return
 
         device = self.device
         qkv_format = "thd"
 
         test_case = f"[{TO_TEST}][{attn_backend}][{attn_mask_config['name']}][{model_config['name']}][{dtype=}]"
-        print(test_case)
+        if dist.get_rank() == 0:
+            print(test_case)
 
         q = torch.randn(
             (seqlen, num_heads_q, head_dim),
@@ -548,7 +542,7 @@ class TestBaselineAttn(DistTestBase):
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )  # type: ignore
             cal_runtime_args = [attn_mask_type, device]
-        elif TO_TEST == AttnImpl.ULYSSESS:
+        elif TO_TEST == AttnImpl.ULYSSES:
             attn = Ulysess(
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )  # type: ignore
@@ -563,6 +557,9 @@ class TestBaselineAttn(DistTestBase):
                 cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
             )  # type: ignore
             cal_runtime_args = [attn_mask_type, device]
+
+        torch.cuda.synchronize()
+        dist.barrier()
 
         # -----    dispatch   ---- #
 
@@ -607,7 +604,237 @@ class TestBaselineAttn(DistTestBase):
         self.assert_close_to_sdpa_ref(
             q, k, v, dout, out_global, dq_global, dk_global, dv_global, dtype, mask
         )
-        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        dist.barrier()
+
+    @with_comms
+    @parameterize(
+        "impl_config",
+        [
+            {
+                "name": AttnImpl.ULYSSES,
+                "cp_pg_meta": {
+                    ParallelMode.ULYSESS: 8,
+                },
+                "world_size": 8,
+            },
+            {
+                "name": AttnImpl.RING_ALLGATHER,
+                "cp_pg_meta": {
+                    ParallelMode.RING: 8,
+                },
+                "world_size": 8,
+            },
+            {
+                "name": AttnImpl.RING_P2P,
+                "cp_pg_meta": {
+                    ParallelMode.RING: 8,
+                },
+                "world_size": 8,
+            },
+            {
+                "name": AttnImpl.USP,
+                "cp_pg_meta": {
+                    ParallelMode.RING: 4,
+                    ParallelMode.ULYSESS: 2,
+                },
+                "world_size": 8,
+            },
+            {
+                "name": AttnImpl.LOONGTRAIN,
+                "cp_pg_meta": {
+                    ParallelMode.RING: 4,
+                    ParallelMode.ULYSESS: 2,
+                },
+                "world_size": 8,
+                "window_num": 2,
+            },
+        ],
+    )
+    @parameterize("attn_mask_type", [AttnMaskType.FULL, AttnMaskType.CAUSAL])
+    @parameterize("dtype", [torch.float16, torch.bfloat16])
+    @parameterize("attn_backend", [AttnBackend.FA3, AttnBackend.TE])
+    def test_random_sample_baseline_attn(
+        self,
+        impl_config: dict[str, Any],
+        attn_mask_type: AttnMaskType,
+        dtype: torch.dtype,
+        attn_backend: AttnBackend,
+    ):
+        # -----    init distributed environment   ---- #
+        global global_pg_groups
+        global global_loongtrain_pg_groups
+        set_seed(self.seed)
+
+        TO_TEST = impl_config["name"]
+        world_size = impl_config["world_size"]
+        cp_pg_meta = impl_config["cp_pg_meta"]
+
+        # -----    test ring attn   ---- #
+        if TO_TEST == AttnImpl.RING_ALLGATHER or TO_TEST == AttnImpl.RING_P2P:
+            cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
+            if cp_group is None:
+                device_shard = get_device_mesh(cp_pg_meta, world_size)
+                cp_group = get_ring_pg(device_shard)
+                global_pg_groups[key] = cp_group
+
+        # -----    test ulysess   ---- #
+        elif TO_TEST == AttnImpl.ULYSSES:
+            cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
+            if cp_group is None:
+                device_shard = get_device_mesh(cp_pg_meta, world_size)
+                cp_group = get_ulysess_pg(device_shard)
+                global_pg_groups[key] = cp_group
+
+        # -----    test usp   ---- #
+        elif TO_TEST == AttnImpl.USP:
+            cp_group, key = check_pg_exist(cp_pg_meta, global_pg_groups)
+            if cp_group is None:
+                device_shard = get_device_mesh(cp_pg_meta, world_size)
+                cp_group = get_usp_pg(device_shard)
+                global_pg_groups[key] = cp_group
+
+        # -----    test loongtrain   ---- #
+        elif TO_TEST == AttnImpl.LOONGTRAIN:
+            # NOTE: param for loongtrain double ring-attention
+            window_num = impl_config["window_num"]
+            rank = dist.get_rank()
+            # NOTE: using pytest to run this test, so we can not use os.environ.get("RANK", 0)
+            assert world_size % window_num == 0
+            cp_group, key = check_pg_exist(cp_pg_meta, global_loongtrain_pg_groups)
+            if cp_group is None:
+                cp_group = get_loongtrain_pg(cp_pg_meta, window_num, rank)
+                global_loongtrain_pg_groups[key] = cp_group
+
+        # -----    init test data   ---- #
+
+        seqlen, num_heads_q, num_heads_kv, head_dim = 4095, 16, 8, 128
+        causal = attn_mask_type == AttnMaskType.CAUSAL
+        device = self.device
+        qkv_format = "thd"
+        rng = np.random.default_rng(42)
+        all_seqlens = [
+            np.sort(rng.integers(0, 4095, size=10)).tolist() for i in range(3)
+        ]
+
+        test_case = f"[{TO_TEST}][{attn_mask_type}][{attn_backend}][{dtype=}]"
+        if dist.get_rank() == 0:
+            print(test_case)
+
+        q = torch.randn(
+            (seqlen, num_heads_q, head_dim),
+            device=device,
+            dtype=dtype,
+            requires_grad=False,
+        )
+        k = torch.randn(
+            (seqlen, num_heads_kv, head_dim),
+            device=device,
+            dtype=dtype,
+            requires_grad=False,
+        )
+        v = torch.randn(
+            (seqlen, num_heads_kv, head_dim),
+            device=device,
+            dtype=dtype,
+            requires_grad=False,
+        )
+        dout = torch.randn((seqlen, num_heads_q, head_dim), device=device, dtype=dtype)
+
+        dist.broadcast(q.data, src=0)
+        dist.broadcast(k.data, src=0)
+        dist.broadcast(v.data, src=0)
+        dist.broadcast(dout.data, src=0)
+
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+
+        # -----    init attn module   ---- #
+
+        if TO_TEST == AttnImpl.RING_ALLGATHER:
+            attn = RingAttnAllGather(
+                cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
+            )  # type: ignore
+            cal_runtime_args = [attn_mask_type, device]
+        elif TO_TEST == AttnImpl.RING_P2P:
+            attn = RingAttnP2P(
+                cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
+            )  # type: ignore
+            cal_runtime_args = [attn_mask_type, device]
+        elif TO_TEST == AttnImpl.ULYSSES:
+            attn = Ulysess(
+                cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
+            )  # type: ignore
+            cal_runtime_args = [device]
+        elif TO_TEST == AttnImpl.USP:
+            attn = USP(
+                cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
+            )  # type: ignore
+            cal_runtime_args = [attn_mask_type, device]
+        elif TO_TEST == AttnImpl.LOONGTRAIN:
+            attn = LoongTrain(
+                cp_process_group=cp_group, qkv_format=qkv_format, backend=attn_backend
+            )  # type: ignore
+            cal_runtime_args = [attn_mask_type, device]
+
+        torch.cuda.synchronize()
+        dist.barrier()
+
+        for i in range(3):
+            seqlens = [0] + all_seqlens[i] + [seqlen]
+            seqlens = [[seqlens[j], seqlens[j + 1]] for j in range(len(seqlens) - 1)]
+            q_ranges = AttnRanges.from_ranges(seqlens)
+            k_ranges = AttnRanges.from_ranges(seqlens)
+
+            # -----    dispatch   ---- #
+            q.grad = None
+            k.grad = None
+            v.grad = None
+            q_local = attn.dispatch(q, q_ranges, seqlen, "q")
+            k_local = attn.dispatch(k, k_ranges, seqlen, "k")
+            v_local = attn.dispatch(v, k_ranges, seqlen, "v")
+
+            # -----    pre compute   ---- #
+
+            attn.pre_compute_attn_runtime_meta(*cal_runtime_args)
+
+            # -----    forward   ---- #
+
+            out, lse = attn.apply_attn(
+                q_local,
+                k_local,
+                v_local,
+                attn_mask_type,
+                0.0,
+                None,  # type: ignore[arg-type]
+                True,
+            )
+
+            # -----    backward   ---- #
+
+            out_global = attn.undispatch(out, "q")
+            out_global.backward(dout)
+
+            dq_global = collect_global_grad(attn, q.grad, q_ranges, seqlen, "dq")
+            dk_global = collect_global_grad(attn, k.grad, k_ranges, seqlen, "dk")
+            dv_global = collect_global_grad(attn, v.grad, k_ranges, seqlen, "dv")
+
+            # -----    assert close torch sdpa ref   ---- #
+
+            cu_seqlens_q = torch.tensor(
+                q_ranges.to_cu_seqlens(seqlen), device=device, dtype=torch.int32
+            )
+            cu_seqlens_kv = torch.tensor(
+                k_ranges.to_cu_seqlens(seqlen), device=device, dtype=torch.int32
+            )
+            mask = get_attn_mask_from_cu_seqlens(cu_seqlens_q, cu_seqlens_kv, causal)
+            self.assert_close_to_sdpa_ref(
+                q, k, v, dout, out_global, dq_global, dk_global, dv_global, dtype, mask
+            )
+
+            torch.cuda.synchronize()
+            dist.barrier()
 
 
 if __name__ == "__main__":

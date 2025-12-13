@@ -1,0 +1,150 @@
+# Copyright (c) 2025 SandAI. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from dataclasses import dataclass
+
+import torch
+
+from exps.dist_attn.baselines.interface import AttnImpl
+from exps.dist_attn.baselines.utils_cp import AttnBackend
+from exps.dist_attn.benchmark.enums import FlashMaskType
+from magi_attention.common.enum import AttnOverlapMode
+from magi_attention.meta.solver.dispatch_solver import MinHeapDispatchAlg
+
+SEED = 42
+
+
+@dataclass
+class BENCH_CONFIG:
+    """
+    Benchmark combination configuration.
+        - quantiles: quantile points used for summarizing latency/throughput results.
+        - bench_flops: whether to benchmark flops.
+        - bench_mem: whether to benchmark memory.
+        - bench_mode: mode to summarize latency/throughput results (mean, median, min, max).
+        - iteration: number of iterations.
+        - warmup: number of warmup iterations.
+        - output_path: output folder.
+        - mask_pattern:
+            list of attention masks to run evaluate (FULL, CAUSAL, Varlen-FULL, Varlen-CAUSAL).
+        - dist_attn_impl:
+            distributed attention implementations to evaluate (Ulysess, Ring-P2P, Ring-AllGather,
+            USP, LoongTrain, MagiAttention).
+        - workload:
+            pipeline schedule modes to evaluate ("fwd"=forward only, "bwd"=backward only, "1f1b"=forward+backward).
+
+        e.g.
+        for mask in mask_patterm:
+            for dist_attn in dist_attn_impl:
+                for wd in workload:
+                    do_bench
+    """
+
+    quantiles = [0.2, 0.5, 0.8]
+    bench_flops = True
+    bench_mem = False
+    bench_mode = "mean"
+    iteration = 25
+    warmup = 5
+    output_path = "./outputs"
+    mask_pattern = [
+        FlashMaskType.FULL,
+        FlashMaskType.CAUSAL,
+        FlashMaskType.FULL_DOCUMENT,
+        FlashMaskType.CAUSAL_DOCUMENT,
+    ]
+    dist_attn_impl = [
+        AttnImpl.ULYSSES,
+        AttnImpl.RING_P2P,
+        AttnImpl.RING_ALLGATHER,
+        AttnImpl.USP,
+        AttnImpl.LOONGTRAIN,
+        AttnImpl.MAGI_ATTENTION,
+    ]
+    workload = [
+        "fwd",
+        "bwd",
+        "1f1b",
+    ]
+
+
+@dataclass
+class SAMPLE_CONFIG:
+    """
+    Mask sampler configuration.
+        - dataset_path: path to the csv or json file of dataset length distribution.
+        - pack_num: number of data packs to evaluate.
+        - chunk_ratio: ratio used to determine chunk size; sequences longer than `pack_len * chunk_ratio`
+            are split into chunks of this length.
+        - is_binned: whether the dataset statistics are provided as intervals with counts (binned)
+            or as individual lengths with counts.
+        - to_attn_ranges: convert to attn_ranges.
+    """
+
+    dataset_path = "./benchmark/datasets/default/doc_length_distribution.csv"
+    pack_num = 20
+    chunk_ratio = 0.25
+    is_binned = True
+    to_attn_ranges = True
+
+
+@dataclass
+class DATA_CONFIG:
+    """
+    Data configuration.
+        - seqlen_per_rank: sequence length per rank, total seqlen = seqlen_per_rank * world_size.
+        - embed_dim: embedding dimension.
+        - hidden_size: hidden size.
+        - heads_q: number of query heads.
+        - heads_kv: number of key/value heads.
+        - dtype: data dtype.
+    """
+
+    seqlen_per_rank = 8 * 1024
+    embed_dim = 1024
+    hidden_size = 128
+    heads_q = 64
+    heads_kv = 8
+    dtype = torch.bfloat16
+
+
+@dataclass
+class ATTN_CONFIG:
+    """
+    Baseline impl configuration.
+        - attn_backend: baseline attention backend to use (FA3, TE)
+        - dropout: dropout rate.
+        - softmax_scale: softmax scale.
+        - deterministic: whether to use deterministic mode.
+    MagiAttention impl configuration.
+        - chunk_size
+        - dispatch_alg
+        - OverlapConfig
+    """
+
+    # -----    cp baselie dist-attn conf   ---- #
+    attn_backend = AttnBackend.FA3
+    dropout = 0.0
+    softmax_scale = None
+    deterministic = False
+
+    # -----    magi-attention conf   ---- #
+    chunk_size = 2048
+    dispatch_alg = MinHeapDispatchAlg
+
+    enable_overlap = True
+    overlap_mode = AttnOverlapMode.STATIC
+    degree = 2
+    min_chunk_size = 512
+    max_num_chunks = 64

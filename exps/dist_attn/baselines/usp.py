@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict
+import copy
+from typing import Dict, List
 
 import torch
 import torch.distributed as dist
@@ -61,6 +62,7 @@ class USP(AttnBaselineInterface):
 
     # to call after q,k,v dispatch
     def pre_compute_attn_runtime_meta(self, attn_mask_type: AttnMaskType, device):
+        self.runtime_meta_per_step.clear()
         if self.backend == AttnBackend.FA3:
             causal = attn_mask_type == AttnMaskType.CAUSAL
             shard_q_meta = self.shard_meta["q"]
@@ -126,7 +128,7 @@ class USP(AttnBaselineInterface):
         x_global: torch.Tensor,
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
-        name: str,  # key name for shard_meta
+        name: str | List[str],  # key names for shard_meta
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -151,7 +153,10 @@ class USP(AttnBaselineInterface):
         )
 
         max_seqlen_padded = get_max_seqlen(host_cu_seqlens_padded)
-        self.shard_meta[name] = ShardMeta(
+        dispatch_keys = name
+        if isinstance(name, str):
+            dispatch_keys = [name]
+        shard_meta = ShardMeta(
             cu_seqlens=cu_seqlens,
             cu_seqlens_padded=cu_seqlens_padded,
             host_cu_seqlens=host_cu_seqlens,
@@ -159,6 +164,8 @@ class USP(AttnBaselineInterface):
             origin_shape=origin_shape,
             max_seqlen_padded=max_seqlen_padded,
         )
+        for key in dispatch_keys:
+            self.shard_meta[key] = copy.deepcopy(shard_meta)
         return x_local
 
     def undispatch(
@@ -198,8 +205,6 @@ class USP(AttnBaselineInterface):
         v_layer = _varlen_all2all_before_attn(v, self.pg_a2a)
 
         batch_p2p_comm = False
-        with torch.cuda.device(q.device):
-            cp_stream = torch.cuda.Stream()
 
         # ring attention p2p
         shard_q_meta = self.shard_meta["q"]
@@ -225,7 +230,6 @@ class USP(AttnBaselineInterface):
                 "thd",
                 self.pg_p2p,
                 attn_mask,
-                cp_stream,
                 deterministic,
                 batch_p2p_comm,
             )
@@ -246,7 +250,6 @@ class USP(AttnBaselineInterface):
                 dropout_p,
                 softmax_scale,
                 self.pg_p2p,
-                cp_stream,
                 deterministic,
                 batch_p2p_comm,
             )
