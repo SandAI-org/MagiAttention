@@ -58,7 +58,7 @@ class TestBlockSparseAttn(DistTestBase):
 
     @property
     def timeout(self) -> int:
-        return 600  # Increase timeout for JIT compilation
+        return 1800  # Increase timeout for JIT compilation
 
     def check_deterministic(
         self,
@@ -324,6 +324,7 @@ class TestBlockSparseAttn(DistTestBase):
         nhk,
         deterministic,
         test_accumulation_inplace,
+        sparse_load,
         test_case,
         err_msg_list,
         uniform=True,
@@ -384,7 +385,7 @@ class TestBlockSparseAttn(DistTestBase):
         v.grad = None
         """
 
-        ref_block_size = choose_ref_block(block_size)
+        ref_block_size = choose_ref_block(block_size, sparse_load=sparse_load)
         o, _ = flex_flash_attn_func(
             q,
             k,
@@ -394,6 +395,7 @@ class TestBlockSparseAttn(DistTestBase):
             attn_type_map=attn_type_map_tensor,
             auto_range_merge=True,
             ref_block_size=ref_block_size,
+            sparse_load=sparse_load,
         )
 
         o = rearrange(o, "(b h s) 1 d -> b s h d", b=1, s=s, h=h)
@@ -482,6 +484,7 @@ class TestBlockSparseAttn(DistTestBase):
         nhk,
         deterministic,
         test_accumulation_inplace,
+        sparse_load,
         test_case,
         uniform=True,
         block_row_sz=None,
@@ -542,6 +545,7 @@ class TestBlockSparseAttn(DistTestBase):
             nhk,
             deterministic,
             test_accumulation_inplace,
+            sparse_load,
             test_case,
             err_msg_list,
             uniform=uniform,
@@ -749,6 +753,7 @@ class TestBlockSparseAttn(DistTestBase):
     @parameterize("attn_type", [0])  # For now, we only test full mask.
     @parameterize("deterministic", [True, False])
     @parameterize("test_accumulation_inplace", [False])
+    @parameterize("sparse_load", [True, False])
     def test_block_sparse_attn(
         self,
         model_config: dict[str, Any],
@@ -760,6 +765,7 @@ class TestBlockSparseAttn(DistTestBase):
         attn_type: int,
         deterministic: bool,
         test_accumulation_inplace: bool,
+        sparse_load: bool,
     ):
         auto_range_merge = True
         # FIXME: auto_range_merge and deterministic can't be True at the same time
@@ -821,6 +827,7 @@ class TestBlockSparseAttn(DistTestBase):
             f"[auto_range_merge={auto_range_merge}]"
             f"[deterministic={deterministic}]"
             f"[test_accumulation_inplace={test_accumulation_inplace}]"
+            f"[sparse_load={sparse_load}]"
         )
         print(f"[RANK {self.rank}]: {test_case=}")
         # ----- Construct q, k, vdata ----- #
@@ -858,6 +865,7 @@ class TestBlockSparseAttn(DistTestBase):
             nhk=num_heads_kv,
             deterministic=deterministic,
             test_accumulation_inplace=test_accumulation_inplace,
+            sparse_load=sparse_load,
             test_case=test_case,
             uniform=(test_type == "uniform"),
             block_row_sz=block_row_sz,
