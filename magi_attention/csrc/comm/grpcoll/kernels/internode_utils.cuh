@@ -631,7 +631,8 @@ __device__ void reduce_token_in_warp(
   if constexpr (kUseTMA) {
     GRPCOLL_STATIC_ASSERT(kNumTMALoadBytes == sizeof(int4) * WARP_SIZE, "Invalid kNumTMALoadBytes");
     GRPCOLL_STATIC_ASSERT(
-        kNumTMABufferBytesPerStage == align(kNumTMALoadBytes * (kMaxNumSrcRanks + 1) + sizeof(uint64_t), sizeof(int4)), "Invalid kNumTMABufferBytesPerStage");
+        kNumTMABufferBytesPerStage == align(kNumTMALoadBytes * (kMaxNumSrcRanks + 1) + /*mbarrier*/ sizeof(uint64_t), sizeof(int4)),
+        "Invalid kNumTMABufferBytesPerStage");
 
     // Define functions to access TMA load/store buffers and mbarriers
     //  `tma_load_buffer`: shape=(kNumTMAStages, kMaxNumSrcRanks, kNumTMALoadBytes), dtype=int4

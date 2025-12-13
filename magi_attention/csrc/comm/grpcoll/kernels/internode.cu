@@ -1316,7 +1316,7 @@ void launch_group_cast(
   }
 
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
-  GRPCOLL_HOST_ASSERT(num_bytes_per_token + sizeof(uint64_t) <= kNumTMABytesPerWarp);
+  GRPCOLL_HOST_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp);
   // NOTES: in case of splitting, the issued put at the end of the buffer
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0);
 
@@ -1700,6 +1700,7 @@ void group_reduce_kernel(
   constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
   constexpr int kCommDtypePerDtype = sizeof(dtype_t) / sizeof(comm_dtype_t);
   constexpr int kCommDtypePerInt4 = kCommDtypePerDtype * kDtypePerInt4;
+  constexpr bool isLowPrecisionComm = !std::is_same_v<dtype_t, comm_dtype_t>;
 
   constexpr int kNumMaxSrcNVLRanks = NUM_MAX_NVL_PEERS;
   constexpr bool kIsLSEReduce = kReduceOp == ReduceOp::LSE;
@@ -1712,9 +1713,9 @@ void group_reduce_kernel(
 
   const int hidden_int4 = hidden_size / kDtypePerInt4, hidden_bytes = hidden_int4 * sizeof(int4);
   const int hidden_int4_comm = hidden_int4 / kCommDtypePerDtype, hidden_bytes_comm = hidden_int4_comm * sizeof(int4);
-  const int head_dim = kIsLSEReduce ? hidden_size / num_heads : -1;
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4_comm, num_heads);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads), num_bytes_per_token_comm = get_num_bytes_per_token(hidden_int4_comm, num_heads);
   const auto num_max_nvl_chunked_recv_tokens_per_rdma = num_max_nvl_chunked_recv_tokens / kNumRDMARanks; // split NVL queue for each RDMA peer
+  const int head_dim = kIsLSEReduce ? hidden_size / num_heads : -1;
 
   /** NOTE: Determine warp role and its target warp id
    * For Forwarder (Odd SMs):
@@ -1759,14 +1760,14 @@ void group_reduce_kernel(
     const auto dst_nvl_rank = target_warp_id;
 
     // Get NVL buffers
-    //  `nvl_channel_x`: shape=(num_channels, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_bytes_per_token), dtype=uint8_t
+    //  `nvl_channel_x`: shape=(num_channels, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_bytes_per_token_comm), dtype=uint8_t
     //  `nvl_channel_head`: shape=(num_channels, NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
     //  `nvl_channel_tail`: shape=(num_channels, NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
     // NOTES: to avoid deadlocks, we use separate NVL buffers for different RDMA sources
     auto dst_buffer_ptr = buffer_ptrs[dst_nvl_rank], local_buffer_ptr = buffer_ptrs[nvl_rank];
     auto nvl_channel_x = AsymBuffer<uint8_t>(
                              dst_buffer_ptr,
-                             /*num_elems=*/num_max_nvl_chunked_recv_tokens * num_bytes_per_token,
+                             /*num_elems=*/num_max_nvl_chunked_recv_tokens * num_bytes_per_token_comm,
                              /*num_ranks=*/NUM_MAX_NVL_PEERS,
                              /*sm_id=*/channel_id,
                              /*num_sms=*/num_channels,
@@ -1782,11 +1783,9 @@ void group_reduce_kernel(
             .advance_also(local_buffer_ptr);
 
     // Prepare TMA buffer and init mbarrier
-    // NOTES: it satisfies `hidden_size * sizeof(comm_dtype) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp`
-    // which is checked in host
     extern __shared__ __align__(1024) uint8_t smem_tma_buffer[]; // REVIEW: why aligned to 1024 bytes ?
     auto tma_buffer = smem_tma_buffer + dst_nvl_rank * kNumTMABytesPerSenderWarp;
-    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes);
+    auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + num_bytes_per_token);
     uint32_t tma_phase = 0;
     if (lane_id == 0) {
       mbarrier_init(tma_mbarrier, /*arrive_count=*/1);
@@ -1867,7 +1866,7 @@ void group_reduce_kernel(
 
           // Get token ptr in `x` and the one in NVL buffer of dst NVL peer
           auto token_ptr_in_x = x + token_idx_in_x * hidden_int4;
-          auto token_ptr_in_buffer = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
+          auto token_ptr_in_buffer = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token_comm;
 
           // TMA-copy token from `x` to TMA buffer in shared memory
           if (lane_id == 0) { // issued by lane0
@@ -1879,7 +1878,7 @@ void group_reduce_kernel(
                 /*smem_ptr=*/tma_buffer,
                 /*gmem_ptr=*/token_ptr_in_x,
                 /*mbar_ptr=*/tma_mbarrier,
-                /*num_bytes=*/hidden_bytes,
+                /*num_bytes=*/hidden_bytes, // NOTE: even for low-precision comm, we still need to copy `hidden_bytes` first
                 /*evict_first=*/true);
             mbarrier_arrive_and_expect_tx(tma_mbarrier, hidden_bytes);
           }
@@ -1889,17 +1888,29 @@ void group_reduce_kernel(
           // and flip the `tma_phase` in-place
           mbarrier_wait(tma_mbarrier, /*stage=*/tma_phase);
 
+          // For low-precision comm, we need to downcast the hidden states
+          // from `dtype_t` to `comm_dtype_t` in TMA buffer in shared memory
+          // resulting in only previous `hidden_bytes_comm` left in loaded `hidden_bytes`
+          if constexpr (isLowPrecisionComm) {
+            auto hidval_int4_ptr = reinterpret_cast<int4*>(tma_buffer);
+#pragma unroll
+            for (int i = lane_id; i < hidden_int4_comm; ++WARP_SIZE) {
+              hidval_int4_ptr[i] = vec_downcast(hidval_int4_ptr[i * kCommDtypePerDtype]);
+            }
+            __syncwarp();
+          }
+
           // Copy src meta to shared memory
           // NOTES: since we've NOT applied `post_perm_idx` to `recv_src_meta` in group cast stage,
           //    here we don't apply `pre_perm_idx` to `src_meta` either
           if (lane_id == 0) {
-            *reinterpret_cast<SourceMeta*>(tma_buffer + hidden_bytes) = ld_nc_global(src_meta + token_idx); // non-cached load
+            *reinterpret_cast<SourceMeta*>(tma_buffer + hidden_bytes_comm) = ld_nc_global(src_meta + token_idx); // non-cached load
           }
 
 #pragma unroll
           // Copy `lse` to shared memory
           for (int h = lane_id; h < num_heads; h += WARP_SIZE) {
-            *reinterpret_cast<float*>(tma_buffer + hidden_bytes + sizeof(SourceMeta) + h * sizeof(float)) =
+            *reinterpret_cast<float*>(tma_buffer + hidden_bytes_comm + sizeof(SourceMeta) + h * sizeof(float)) =
                 ld_nc_global(lse + token_idx_in_x * num_heads + h); // non-cached load
           }
 
@@ -1915,7 +1926,7 @@ void group_reduce_kernel(
             tma_store_1d(
                 /*smem_ptr=*/tma_buffer,
                 /*gmem_ptr=*/token_ptr_in_buffer,
-                /*num_bytes=*/num_bytes_per_token,
+                /*num_bytes=*/num_bytes_per_token_comm, // NOTE: only previous `num_bytes_per_token_comm` left
                 /*evict_first=*/false);
           }
         }
@@ -2021,7 +2032,8 @@ void group_reduce_kernel(
       //    4. aligned to 16 bytes
       GRPCOLL_STATIC_ASSERT(kNumTMALoadBytes == sizeof(int4) * WARP_SIZE, "Invalid kNumTMALoadBytes");
       GRPCOLL_STATIC_ASSERT(
-          kNumTMABufferBytesPerStage == align(kNumTMALoadBytes * (kNumMaxSrcNVLRanks + 1) + sizeof(uint64_t), sizeof(int4)), "Invalid kNumTMABufferBytesPerStage");
+          kNumTMABufferBytesPerStage == align(kNumTMALoadBytes * (kNumMaxSrcNVLRanks + 1) + /*mbarrier*/ sizeof(uint64_t), sizeof(int4)),
+          "Invalid kNumTMABufferBytesPerStage");
       GRPCOLL_STATIC_ASSERT(kNumTMAStages * kNumTMABufferBytesPerStage <= kNumTMABytesPerForwarderWarp, "TMA buffer is not larger enough");
 
       extern __shared__ __align__(1024) uint8_t smem_buffer[]; // REVIEW: why aligned to 1024 bytes ?
@@ -2435,7 +2447,7 @@ void launch_group_reduce(
 
   constexpr int kNumTMABytesPerSenderWarp = 16384; // 16KB
   constexpr int kNumTMALoadBytes = sizeof(int4) * WARP_SIZE; // 512B, as a warp-copy unit, each lane for one int4
-  constexpr int kNumTMABufferBytesPerStage = align(kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + sizeof(uint64_t), sizeof(int4)); // 4624B
+  constexpr int kNumTMABufferBytesPerStage = align(kNumTMALoadBytes * (NUM_MAX_NVL_PEERS + 1) + /*mbarrier*/ sizeof(uint64_t), sizeof(int4)); // 4624B
   constexpr int kNumTMABytesPerForwarderWarp = kNumTMAStages * kNumTMABufferBytesPerStage;
   constexpr int smem_size = std::max(
       kNumTMABytesPerSenderWarp * NUM_MAX_NVL_PEERS, // 16KB * 8 = 128KB, can still be raised up
@@ -2512,7 +2524,9 @@ void launch_group_reduce(
     GRPCOLL_HOST_ASSERT(num_heads <= kMaxNumHeads);
   }
 
-  GRPCOLL_HOST_ASSERT(hidden_size * sizeof(comm_dtype_t) + sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
+  const int hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t));
+  const int num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
+  GRPCOLL_HOST_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % kNumRDMARanks == 0);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / kNumRDMARanks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= kNumWarpsPerForwarder);

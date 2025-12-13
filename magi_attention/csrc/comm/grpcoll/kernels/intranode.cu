@@ -741,7 +741,7 @@ void launch_group_cast(
 #ifndef DISABLE_SM90_FEATURES
   GRPCOLL_HOST_ASSERT(hidden_int4 % kNumTMAStages == 0);
   int hidden_bytes_per_stage = (hidden_int4 / kNumTMAStages) * sizeof(int4);
-  GRPCOLL_HOST_ASSERT(hidden_bytes_per_stage + sizeof(uint64_t) <= kNumTMABytesPerWarp); // TMA buffer + mbarrier per warp
+  GRPCOLL_HOST_ASSERT(hidden_bytes_per_stage + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp); // TMA buffer + mbarrier per warp
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
