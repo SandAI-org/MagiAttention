@@ -588,7 +588,7 @@ __device__ void reduce_token_in_warp(
   GRPCOLL_STATIC_ASSERT(kMaxNumSrcRanks <= WARP_SIZE, "Too many src ranks");
 
   // Count and collect src slots and corr. src ranks from all lanes
-  // NOTES: lane `r` holds the `token_idx_in_queue` and `is_token_in_rank` of rank `r`
+  // NOTE: lane `r` holds the `token_idx_in_queue` and `is_token_in_rank` of rank `r`
   int num_src_ranks = 0, src_rank_idxs[kMaxNumSrcRanks], slot_indices[kMaxNumSrcRanks];
 #pragma unroll
   for (int r = 0; r < kNumRanks; ++r) {
@@ -664,7 +664,7 @@ __device__ void reduce_token_in_warp(
     }
 
     // Loop over the whole hidden size in int4 and group_reduce
-    // NOTES: hidden_int4 should be a multiple of WARP_SIZE
+    // NOTE: hidden_int4 should be a multiple of WARP_SIZE
     // since we need to sync the whole warp in each loop, and copy WARP_SIZE of int4s to/from shared memory
     for (int shifted = 0, iter = 0; shifted < hidden_int4; shifted += WARP_SIZE, iter += 1) { // warp-strided loop
       // Get TMA stage info
@@ -675,7 +675,7 @@ __device__ void reduce_token_in_warp(
       int4* reduce_hidval_ptr_int4 = reduced_token + shifted;
 
       // Get the optional head idx, valid and used only when `kIsLSEReduce`
-      // NOTES: we guarantee that each `kCommDtypePerInt4` of elems share the same head
+      // NOTE: we guarantee that each `kCommDtypePerInt4` of elems share the same head
       const int head_idx = kIsLSEReduce ? shifted / head_dim : -1;
 
       // Prefetch the hidden states of src tokens for next stage
@@ -766,7 +766,7 @@ __device__ void reduce_token_in_warp(
       int4* reduce_hidval_ptr_int4 = reduced_token + i * kCommDtypePerDtype;
 
       // Get the optional head idx, valid and used only when `kIsLSEReduce`
-      // NOTES: we guarantee that each `kCommDtypePerInt4` of elems share the same head
+      // NOTE: we guarantee that each `kCommDtypePerInt4` of elems share the same head
       const int head_idx = kIsLSEReduce ? i * kCommDtypePerInt4 / head_dim : -1;
 
       // Read hidden states of src tokens

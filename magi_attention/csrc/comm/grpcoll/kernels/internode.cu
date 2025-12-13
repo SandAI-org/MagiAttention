@@ -245,7 +245,7 @@ __global__ void notify_group_cast_kernel(
 #pragma unroll
         for (int j = 0; j < NUM_MAX_NVL_PEERS; ++j)
           count_per_nvl_rank[j] += is_token_in_rank_values[j];
-        count_all_nvl_ranks += (is_token_in_rank_uint64 != 0); // NOTES: one `uint64_t` is 8 bytes to cover 8 bools for 8 NVL peers
+        count_all_nvl_ranks += (is_token_in_rank_uint64 != 0); // NOTE: one `uint64_t` is 8 bytes to cover 8 bools for 8 NVL peers
       }
 
       // Warp reduce `count_per_nvl_rank` and `count_all_nvl_ranks` for this channel
@@ -514,11 +514,11 @@ void group_cast_kernel(
   //  `sync_rdma_sender_smem`: synchronize warps of `kRDMASender` and `kRDMASenderCoordinator`
   __shared__ int rdma_send_channel_lock[kNumRDMARanks];
   __shared__ int rdma_send_channel_tail[kNumRDMARanks];
-  __shared__ uint32_t rdma_send_channel_window[kNumRDMARanks]; // NOTES: each bit in one `uint32_t` corresponds to one transaction
+  __shared__ uint32_t rdma_send_channel_window[kNumRDMARanks]; // NOTE: each bit in one `uint32_t` corresponds to one transaction
   auto sync_rdma_sender_smem = []() { sync_warp_group(/*group_flag=*/0, /*group_size=*/(kNumGroupCastRDMASenderWarps + 1) * WARP_SIZE); };
 
   // Prepare TMA buffer and init mbarrier
-  // NOTES: TMA buffer is only used by `kRDMAAndNVLForwarder` and `kNVLReceivers`
+  // NOTE: TMA buffer is only used by `kRDMAAndNVLForwarder` and `kNVLReceivers`
   extern __shared__ __align__(1024) uint8_t smem_tma_buffer[]; // REVIEW: why aligned to 1024 bytes ?
   auto tma_buffer = smem_tma_buffer + target_rank * kNumTMABytesPerWarp;
   auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes);
@@ -551,7 +551,7 @@ void group_cast_kernel(
     //    `rdma_channel_prefix_matrix[r][c]`: the prefix-summed number of tokens sent to RDMA rank `r` by channel `c`
     GRPCOLL_STATIC_ASSERT(num_meta_per_rdma_channel <= WARP_SIZE, "Invalid number of NVL peers");
     for (int dst_rdma_rank = warp_id; dst_rdma_rank < kNumRDMARanks; dst_rdma_rank += kNumGroupCastRDMASenderWarps) {
-      auto dst_ptr = dst_rdma_rank == rdma_rank ? rdma_channel_meta.recv_buffer(dst_rdma_rank) // NOTES: for this NVL rank, we directly write to recv buffer
+      auto dst_ptr = dst_rdma_rank == rdma_rank ? rdma_channel_meta.recv_buffer(dst_rdma_rank) // NOTE: for this NVL rank, we directly write to recv buffer
                                                 : rdma_channel_meta.send_buffer(dst_rdma_rank);
       if (lane_id < NUM_MAX_NVL_PEERS) { // the start token idx of this channel sent to each NVL rank for dst RDMA peer
         dst_ptr[lane_id] = encode(channel_id == 0 ? 0 : gbl_channel_prefix_matrix[(dst_rdma_rank * NUM_MAX_NVL_PEERS + lane_id) * num_channels + channel_id - 1]);
@@ -571,7 +571,7 @@ void group_cast_kernel(
             /*req_lptr=*/reinterpret_cast<uint64_t>(rdma_channel_meta.send_buffer(dst_rdma_rank)),
             /*bytes=*/num_meta_per_rdma_channel * sizeof(int),
             /*dst_pe=*/get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
-            /*qp_id=*/channel_id, // NOTES: each channel use its own qp
+            /*qp_id=*/channel_id, // NOTE: each channel use its own qp
             /*lane_id=*/lane_id,
             /*message_idx=*/0);
       }
@@ -593,12 +593,12 @@ void group_cast_kernel(
       uint64_t is_token_in_rank_uint64 = 0;
       if (lane_id < kNumRDMARanks) {
         is_token_in_rank_uint64 = __ldg(reinterpret_cast<const uint64_t*>(is_token_in_rank + token_idx * num_ranks + lane_id * NUM_MAX_NVL_PEERS));
-        global_rdma_tail_idx += (is_token_in_rank_uint64 != 0); // NOTES: one `uint64_t` is 8 bytes to cover 8 bools for 8 NVL peers
+        global_rdma_tail_idx += (is_token_in_rank_uint64 != 0); // NOTE: one `uint64_t` is 8 bytes to cover 8 bools for 8 NVL peers
       }
       __syncwarp();
 
       // Skip the token which does not belong to this warp
-      // NOTES: each warp for one token in round-robin way
+      // NOTE: each warp for one token in round-robin way
       if ((token_idx - token_start_idx) % kNumGroupCastRDMASenderWarps != warp_id)
         continue;
 
@@ -768,7 +768,7 @@ void group_cast_kernel(
 
         // Read the latest progress of `kRDMASender`
         // to get the number of tokens copied into the RDMA send buffer
-        // NOTES: `rdma_send_channel_tail` does not need to be protected by lock
+        // NOTE: `rdma_send_channel_tail` does not need to be protected by lock
         auto processed_tail = broadcast_in_warp(/*val=*/ld_acquire_cta(const_cast<const int*>(rdma_send_channel_tail + dst_rdma_rank))); // CTA scope, acquire order
         auto synced_last_issued_tail = broadcast_in_warp(/*val=*/last_issued_tail, /*src_lane=*/dst_rdma_rank);
         auto num_tokens_processed = processed_tail - synced_last_issued_tail;
@@ -798,7 +798,7 @@ void group_cast_kernel(
               /*message_idx=*/0);
         } else { // this RDMA rank
           // Already in its own recv buffer, so no need to copy
-          memory_fence(); // NOTES: use lighter fence for local memory operations
+          memory_fence(); // NOTE: use lighter fence for local memory operations
         }
         __syncwarp();
 
@@ -821,7 +821,7 @@ void group_cast_kernel(
     const auto dst_nvl_rank = target_rank; // each warp for one dst NVL peer
 
     // Wait `rdma_channel_meta` to be ready for each RDMA peer
-    // NOTES: each lane will ready specific `num_tokens_to_recv_from_rdma` and `rdma_token_start_idx` for each RDMA peer
+    // NOTE: each lane will ready specific `num_tokens_to_recv_from_rdma` and `rdma_token_start_idx` for each RDMA peer
     int num_tokens_to_recv_from_rdma = 0, rdma_token_start_idx = 0;
     auto start_time = clock64();
     if (lane_id < kNumRDMARanks) {
@@ -883,7 +883,7 @@ void group_cast_kernel(
     sync_forwarder_smem();
 
     // Forward tokens from RDMA buffer to dst NVL buffer
-    // NOTES: always start from the local rank
+    // NOTE: always start from the local rank
     int src_rdma_rank = sm_id % kNumRDMARanks, rdma_nvl_token_idx = 0;
     int cached_rdma_channel_head = 0, cached_rdma_channel_tail = 0;
     int cached_nvl_channel_head = 0, cached_nvl_channel_tail = 0;
@@ -1193,7 +1193,7 @@ void group_cast_kernel(
         }
 
         // Copy src meta to `recv_src_meta` for group_reduce stage
-        // NOTES: here we don't apply `post_perm_idx` to `recv_src_meta`
+        // NOTE: here we don't apply `post_perm_idx` to `recv_src_meta`
         token_ptr_in_buffer += lse_bytes;
         if (lane_id == 0 and not kCachedMode) {
           st_na_global(recv_src_meta + recv_token_idx, src_meta); // non-cached store
@@ -1317,7 +1317,7 @@ void launch_group_cast(
 
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   GRPCOLL_HOST_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerWarp);
-  // NOTES: in case of splitting, the issued put at the end of the buffer
+  // NOTE: in case of splitting, the issued put at the end of the buffer
   GRPCOLL_HOST_ASSERT(num_max_rdma_chunked_recv_tokens % num_max_rdma_chunked_send_tokens == 0);
 
   // Even-numbered SMs for forwarders
@@ -1468,7 +1468,7 @@ __global__ void cached_notify_kernel(
       int token_start_idx, token_end_idx;
       get_channel_task_range(num_reduced_tokens, num_channels, warp_id, token_start_idx, token_end_idx);
 
-      // NOTES: `1 << 25` is a heuristic large number
+      // NOTE: `1 << 25` is a heuristic large number
       int last_head = 1 << 25;
       for (int token_idx = token_end_idx - 1; token_idx >= token_start_idx; --token_idx) {
         auto current_head = __ldg(reduced_rdma_head + token_idx * num_rdma_ranks + lane_id);
@@ -1512,7 +1512,7 @@ __global__ void cached_notify_kernel(
         int rank_prefix = dst_rdma_rank == 0 ? 0 : rdma_rank_prefix_sum[dst_rdma_rank - 1];
         token_start_idx += rank_prefix, token_end_idx += rank_prefix;
 
-        int last_head = 1 << 25; // NOTES: `1 << 25` is a heuristic large number
+        int last_head = 1 << 25; // NOTE: `1 << 25` is a heuristic large number
         for (int batch_end_idx = token_end_idx; batch_end_idx > token_start_idx; batch_end_idx -= num_tokens_per_batch) {
           auto batch_start_idx = max(token_start_idx, batch_end_idx - num_tokens_per_batch);
 
@@ -1763,7 +1763,7 @@ void group_reduce_kernel(
     //  `nvl_channel_x`: shape=(num_channels, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_bytes_per_token_comm), dtype=uint8_t
     //  `nvl_channel_head`: shape=(num_channels, NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
     //  `nvl_channel_tail`: shape=(num_channels, NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
-    // NOTES: to avoid deadlocks, we use separate NVL buffers for different RDMA sources
+    // NOTE: to avoid deadlocks, we use separate NVL buffers for different RDMA sources
     auto dst_buffer_ptr = buffer_ptrs[dst_nvl_rank], local_buffer_ptr = buffer_ptrs[nvl_rank];
     auto nvl_channel_x = AsymBuffer<uint8_t>(
                              dst_buffer_ptr,
@@ -1798,7 +1798,7 @@ void group_reduce_kernel(
     // i.e. the [token_start_idx, token_end_idx] in `x` for each RDMA peer w.r.t. dst_nvl_rank
     // `gbl_channel_prefix_matrix`: shape=(kNumRanks, kNumChannels), dtype=int
     int token_start_idx = 0, token_end_idx = 0;
-    // NOTES: since `token_start_idx` will be updated in the loop,
+    // NOTE: since `token_start_idx` will be updated in the loop,
     // we need to use `[&]` to capture reference instead of `[=]`
     auto is_task_valid = [&]() { return token_start_idx < token_end_idx; };
     if (lane_id < kNumRDMARanks) {
@@ -1809,7 +1809,7 @@ void group_reduce_kernel(
     __syncwarp();
 
     // Iterate over all tokens and send by chunks
-    // NOTES: here the cached value of each lane is only responsible for a single RDMA buffer
+    // NOTE: here the cached value of each lane is only responsible for a single RDMA buffer
     int cached_channel_head_idx = 0, cached_channel_tail_idx = 0;
     int current_rdma_idx = channel_id % kNumRDMARanks;
     while (true) {
@@ -1901,7 +1901,7 @@ void group_reduce_kernel(
           }
 
           // Copy src meta to shared memory
-          // NOTES: since we've NOT applied `post_perm_idx` to `recv_src_meta` in group cast stage,
+          // NOTE: since we've NOT applied `post_perm_idx` to `recv_src_meta` in group cast stage,
           //    here we don't apply `pre_perm_idx` to `src_meta` either
           if (lane_id == 0) {
             *reinterpret_cast<SourceMeta*>(tma_buffer + hidden_bytes_comm) = ld_nc_global(src_meta + token_idx); // non-cached load
@@ -1916,7 +1916,7 @@ void group_reduce_kernel(
 
           // Fence TMA store to wait the TMA buffer for each lane to be ready
           // before issuing the next TMA store by lane0
-          // NOTES: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
+          // NOTE: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
           tma_store_fence();
           __syncwarp();
 
@@ -2008,7 +2008,7 @@ void group_reduce_kernel(
 
     if (warp_role == WarpRole::kNVLAndRDMAForwarder) {
       // Determine warp group
-      // NOTES: we have `kNumForwarders` warps as `kNVLAndRDMAForwarder`
+      // NOTE: we have `kNumForwarders` warps as `kNVLAndRDMAForwarder`
       // and each `kNumWarpsPerForwarder` warps forms as a warp group for one RDMA peer
       const auto dst_rdma_rank = target_warp_id / kNumWarpsPerForwarder, sub_warp_id = target_warp_id % kNumWarpsPerForwarder;
       auto send_buffer = dst_rdma_rank == rdma_rank ? rdma_channel_data.recv_buffer(dst_rdma_rank) : rdma_channel_data.send_buffer(dst_rdma_rank);
@@ -2019,7 +2019,7 @@ void group_reduce_kernel(
           sync_warp_group(/*group_flag=*/dst_rdma_rank + 2, /*group_size=*/kNumWarpsPerForwarder * WARP_SIZE);
         }
       };
-      // NOTES: since `kNumForwarderWarps` is set to 24 for now,
+      // NOTE: since `kNumForwarderWarps` is set to 24 for now,
       // so when `kNumRDMARanks` > 12, `kNumWarpsPerForwarder` will always be 1,
       // thus no worry to reach the barrier limit (`kNumWarpsPerForwarder > 1` and `kNumRDMARanks > 14`)
       GRPCOLL_STATIC_ASSERT(kNumWarpsPerForwarder == 1 or kNumRDMARanks + 2 <= NUM_MAX_BARRIERS, "Barriers are not enough");
@@ -2214,7 +2214,7 @@ void group_reduce_kernel(
                 /*message_idx=*/0);
           } else { // this RDMA rank
             // Already in its own recv buffer, so no need to copy
-            memory_fence(); // NOTES: use lighter fence for local memory operations
+            memory_fence(); // NOTE: use lighter fence for local memory operations
           }
           __syncwarp();
 
@@ -2516,7 +2516,7 @@ void launch_group_reduce(
   }                                                   \
   break
 
-  // NOTES: when `kReduceOp != ReduceOp::LSE`,
+  // NOTE: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
   if (reduce_op != ReduceOp::LSE) {
     GRPCOLL_HOST_ASSERT(num_heads == 0);

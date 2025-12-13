@@ -314,7 +314,7 @@ DEVICE_INLINE static void* ibgda_get_wqe_ptr(nvshmemi_ibgda_device_qp_t* qp, uin
 
 DEVICE_INLINE static void nvshmemi_ibgda_rma_p(int* rptr, const int value, int dst_pe, int qp_id, uint32_t imm = std::numeric_limits<uint32_t>::max()) {
   // Get rkey
-  // NOTES: the `p` operation will not cross multiple remote chunks
+  // NOTE: the `p` operation will not cross multiple remote chunks
   __be32 rkey;
   uint64_t raddr;
   auto qp = ibgda_get_rc(dst_pe, qp_id);
@@ -454,7 +454,7 @@ DEVICE_INLINE static void ibgda_write_amo_add_wqe(
   raddr_seg.rkey = rkey;
   raddr_seg.reserved = 0;
 
-  // NOTES: `0x08000000` means `IBGDA_4_BYTE_EXT_AMO_OPMOD`
+  // NOTE: `0x08000000` means `IBGDA_4_BYTE_EXT_AMO_OPMOD`
   ctrl_seg.opmod_idx_opcode = HtoBE32(MLX5_OPCODE_ATOMIC_MASKED_FA | (wqe_idx << 8) | 0x08000000);
   auto atomic_32_masked_fa_seg = reinterpret_cast<ibgda_atomic_32_masked_fa_seg_t*>(&atomic_seg_1);
   atomic_32_masked_fa_seg->add_data = HtoBE32(value);

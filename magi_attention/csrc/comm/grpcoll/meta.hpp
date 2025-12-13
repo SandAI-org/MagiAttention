@@ -44,7 +44,7 @@ struct Meta {
     at::cuda::CUDAStream meta_stream_ = meta_stream.has_value() ? meta_stream.value() : at::cuda::getStreamFromPool();
 
     // Allocate all tensors on meta stream if set
-    // NOTES: do not allocate tensors upfront!
+    // NOTE: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
     if (allocate_on_meta_stream) {
       GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
@@ -120,7 +120,7 @@ struct Meta {
     at::cuda::CUDAStream meta_stream_ = meta_stream.has_value() ? meta_stream.value() : at::cuda::getStreamFromPool();
 
     // Allocate all tensors on meta stream if set
-    // NOTES: do not allocate tensors upfront!
+    // NOTE: do not allocate tensors upfront!
     auto compute_stream = at::cuda::getCurrentCUDAStream();
     if (allocate_on_meta_stream) {
       GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);

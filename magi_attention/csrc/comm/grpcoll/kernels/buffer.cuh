@@ -156,7 +156,7 @@ template <typename dtype_t, bool kDecoupled = true>
 struct SymBuffer {
  private:
   uint8_t* send_ptr;
-  uint8_t* recv_ptr; // NOTES: for coupled case, `recv_ptr` is not used
+  uint8_t* recv_ptr; // NOTE: for coupled case, `recv_ptr` is not used
   int num_bytes;
 
  public:

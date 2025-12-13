@@ -418,7 +418,7 @@ DEVICE_INLINE dtype_t ld_nc_global(const dtype_t* ptr) {
 template <>
 DEVICE_INLINE uint8_t ld_nc_global(const uint8_t* ptr) {
   uint16_t ret;
-  // NOTES: we must use `uint16_t` as inline ASM does not support 8-bit constraint letter (`h` below means unsigned 16-bit)
+  // NOTE: we must use `uint16_t` as inline ASM does not support 8-bit constraint letter (`h` below means unsigned 16-bit)
   asm volatile(LD_NC_FUNC ".u8 %0, [%1];" : "=h"(ret) : "l"(ptr));
   return static_cast<uint8_t>(ret);
 }
@@ -491,7 +491,7 @@ DEVICE_INLINE void st_na_release(const uint64_t* ptr, uint64_t val) {
 }
 
 // `st.global.L1::no_allocate` will be translated into `ST.E.NA.[width]` in SASS
-// NOTES: `L1::no_allocate` informs the compiler not to cache the data in L1 cache
+// NOTE: `L1::no_allocate` informs the compiler not to cache the data in L1 cache
 // since the data to be stored (i.e. recv data) won't be read
 #ifndef DISABLE_AGGRESSIVE_PTX_INSTRS
 #define ST_NA_FUNC "st.global.L1::no_allocate"
@@ -579,7 +579,7 @@ DEVICE_INLINE void mbarrier_wait(uint64_t* mbar_ptr, uint32_t& stage, int num_tm
       "r"(stage),
       "r"(0x989680));
 
-  // NOTES: stage is updated inplace
+  // NOTE: stage is updated inplace
   if (num_tma_stages == 2)
     stage ^= 1;
   else

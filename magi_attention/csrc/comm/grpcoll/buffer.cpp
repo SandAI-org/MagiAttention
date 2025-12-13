@@ -67,7 +67,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
       explicitly_destroy(explicitly_destroy),
       comm_stream(at::cuda::getStreamFromPool(true)) {
   // Calculate metadata memory
-  // NOTES: The retired signals are actually boolean flags, but to align with 16 bytes, we make it `int64_t`
+  // NOTE: The retired signals are actually boolean flags, but to align with 16 bytes, we make it `int64_t`
   int64_t barrier_signal_bytes = NUM_MAX_NVL_PEERS * sizeof(int); // host signal array for each nvl rank
   int64_t buffer_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(void*); // host buffer ptr array to each buffer ptr for each nvl rank
   int64_t barrier_signal_ptr_bytes = NUM_MAX_NVL_PEERS * sizeof(int*); // host signal ptr array to each signal for each nvl rank
@@ -127,7 +127,7 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     barrier_signal_ptrs_gpu = reinterpret_cast<int**>(local_nvl_buffer_byte_ptr + local_nvl_buffer_byte_offs);
 
     // Initialize local nvl signal to zero
-    // NOTES: no need to synchronize here, since we will apply a full device sync in `sync`
+    // NOTE: no need to synchronize here, since we will apply a full device sync in `sync`
     CUDA_CHECK(cudaMemsetAsync(barrier_signal_ptrs[nvl_rank], 0, barrier_signal_bytes, comm_stream));
   }
 
@@ -394,7 +394,7 @@ Buffer::intranode_group_cast(
   }
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
-  // NOTES: actually, hidden size in int4 should be aligned with the number of TMA stages in the kernel
+  // NOTE: actually, hidden size in int4 should be aligned with the number of TMA stages in the kernel
   // which we will verify later in the kernel launch function
   auto hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
   if (num_groups > 1) {
@@ -408,7 +408,7 @@ Buffer::intranode_group_cast(
 
   // LSE checks
   float* lse_ptr = nullptr;
-  int num_heads = 0; // NOTES: when lse is not provided, num_heads is set to 0 and consumes empty buffer
+  int num_heads = 0; // NOTE: when lse is not provided, num_heads is set to 0 and consumes empty buffer
   if (lse.has_value()) {
     GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
     GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
@@ -419,7 +419,7 @@ Buffer::intranode_group_cast(
   }
 
   // Set current stream to comm stream if needed
-  // NOTES: do not allocate tensors upfront!
+  // NOTE: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
     GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
@@ -715,7 +715,7 @@ Buffer::intranode_group_reduce(
   }
 
   // Set current stream to comm stream if needed
-  // NOTES: do not allocate tensors upfront!
+  // NOTE: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
     GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
@@ -739,7 +739,7 @@ Buffer::intranode_group_reduce(
   }
 
   // Allocate reduced_lse buffer and assign the ptr if needed
-  int num_heads = 0; // NOTES: when `reduce_op != ReduceOp::LSE`, num_heads is set to 0 and consumes empty buffer
+  int num_heads = 0; // NOTE: when `reduce_op != ReduceOp::LSE`, num_heads is set to 0 and consumes empty buffer
   auto reduced_lse = std::optional<torch::Tensor>();
   float *lse_ptr = nullptr, *reduced_lse_ptr = nullptr;
   if (lse.has_value()) {
@@ -995,7 +995,7 @@ Buffer::internode_group_cast(
 
   // LSE checks
   float* lse_ptr = nullptr;
-  int num_heads = 0; // NOTES: when lse is not provided, num_heads is set to 0 and consumes empty buffer
+  int num_heads = 0; // NOTE: when lse is not provided, num_heads is set to 0 and consumes empty buffer
   if (lse.has_value()) {
     GRPCOLL_HOST_ASSERT(lse->dim() == 2 and lse->is_contiguous());
     GRPCOLL_HOST_ASSERT(lse->scalar_type() == torch::kFloat32);
@@ -1006,7 +1006,7 @@ Buffer::internode_group_cast(
   }
 
   // Set current stream to comm stream if needed
-  // NOTES: do not allocate tensors upfront!
+  // NOTE: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
     GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
@@ -1166,7 +1166,7 @@ Buffer::internode_group_cast(
   }
 
   // Launch group_cast kernel
-  // NOTES: the buffer size checks are moved into the `.cu` file
+  // NOTE: the buffer size checks are moved into the `.cu` file
   internode::group_cast(
       /*recv_x=*/recv_x.data_ptr(),
       /*recv_lse=*/recv_lse_ptr,
@@ -1322,7 +1322,7 @@ Buffer::internode_group_reduce(
   GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.size(1) == NUM_MAX_NVL_PEERS);
 
   // Set current stream to comm stream if needed
-  // NOTES: do not allocate tensors upfront!
+  // NOTE: do not allocate tensors upfront!
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   if (allocate_on_comm_stream) {
     GRPCOLL_HOST_ASSERT(previous_event.has_value() and async_op);
@@ -1346,7 +1346,7 @@ Buffer::internode_group_reduce(
   }
 
   // Allocate reduced_lse buffer and assign the ptr if needed
-  int num_heads = 0; // NOTES: when `reduce_op != ReduceOp::LSE`, num_heads is set to 0 and consumes empty buffer
+  int num_heads = 0; // NOTE: when `reduce_op != ReduceOp::LSE`, num_heads is set to 0 and consumes empty buffer
   auto reduced_lse = std::optional<torch::Tensor>();
   float *lse_ptr = nullptr, *reduced_lse_ptr = nullptr;
   if (lse.has_value()) {
@@ -1566,7 +1566,7 @@ bool is_sm90_compiled() {
 // Low Latency APIs
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-// NOTES: we remain original low-latency APIs here for future potential usage,
+// NOTE: we remain original low-latency APIs here for future potential usage,
 // which won't be exposed to users for now, but guaranteed its compatibility internally
 std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
 Buffer::low_latency_dispatch(
@@ -1608,7 +1608,7 @@ Buffer::low_latency_dispatch(
   auto next_buffer = layout.buffers[low_latency_buffer_idx ^= 1];
 
   // Wait previous tasks to be finished
-  // NOTES: the hook mode will always use the default stream
+  // NOTE: the hook mode will always use the default stream
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   auto launch_stream = return_recv_hook ? compute_stream : comm_stream;
   GRPCOLL_HOST_ASSERT(not(async_op and return_recv_hook));
@@ -1679,7 +1679,7 @@ Buffer::low_latency_dispatch(
   // Wait streams
   std::optional<EventHandle> event;
   if (async_op) {
-    // NOTES: we must ensure the all tensors will not be deallocated before the stream-wait happens,
+    // NOTE: we must ensure the all tensors will not be deallocated before the stream-wait happens,
     // so in Python API, we must wrap all tensors into the event handle.
     event = EventHandle(launch_stream);
   } else if (not return_recv_hook) {
@@ -1742,7 +1742,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
   auto next_buffer = layout.buffers[low_latency_buffer_idx ^= 1];
 
   // Wait previous tasks to be finished
-  // NOTES: the hook mode will always use the default stream
+  // NOTE: the hook mode will always use the default stream
   auto compute_stream = at::cuda::getCurrentCUDAStream();
   auto launch_stream = return_recv_hook ? compute_stream : comm_stream;
   GRPCOLL_HOST_ASSERT(not(async_op and return_recv_hook));
@@ -1794,7 +1794,7 @@ std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::functio
   // Wait streams
   std::optional<EventHandle> event;
   if (async_op) {
-    // NOTES: we must ensure the all tensors will not be deallocated before the stream-wait happens,
+    // NOTE: we must ensure the all tensors will not be deallocated before the stream-wait happens,
     // so in Python API, we must wrap all tensors into the event handle.
     event = EventHandle(launch_stream);
   } else if (not return_recv_hook) {

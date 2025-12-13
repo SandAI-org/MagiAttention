@@ -330,7 +330,7 @@ void group_cast_kernel(
 
   if (is_sender) {
     // Ger send warp info
-    // NOTES: the warps in one block are first divided into `kNumRanks` warp groups
+    // NOTE: the warps in one block are first divided into `kNumRanks` warp groups
     // where each warp group is responsible for one rank, with the group size of `num_send_warps / kNumRanks`
     constexpr int num_send_warps = kNumThreads / WARP_SIZE;
     constexpr int num_send_warps_per_rank = num_send_warps / kNumRanks;
@@ -343,7 +343,7 @@ void group_cast_kernel(
     // Store the channel start_offset, end_offset from the channel_prefix_matrix
     if (lane_id == 0 and send_warp_id_in_rank == 0) { // the lane0 in the send warp0 for this rank
       // Send offset by code: `-value - 1`, e.g. 0 -> -1, 1 -> -2
-      // NOTES: this is for distinguishing zero tokens
+      // NOTE: this is for distinguishing zero tokens
       // and the receiver will restore the real offset by: `-code - 1`
 
       // Send start offset code into the receiver's channel_start_offset buffer
@@ -358,7 +358,7 @@ void group_cast_kernel(
 
     // Get send tasks
     // i.e. the range of tokens [start_idx, end_idx) in `x` for the responsible channel
-    // NOTES: this range does not distiguish the destination rank,
+    // NOTE: this range does not distiguish the destination rank,
     // thus every warp in the block will get the same range
     int token_start_idx, token_end_idx;
     get_channel_task_range(num_tokens, num_channels, responsible_channel, token_start_idx, token_end_idx);
@@ -370,10 +370,10 @@ void group_cast_kernel(
       auto start_time = clock64();
       while (lane_id == 0) { // the lane0 in this warp
         // Load channel head idx stored by the receiver
-        // NOTES: the head idxs received by each warp for the responsible rank might not be the same
+        // NOTE: the head idxs received by each warp for the responsible rank might not be the same
         int num_used_slots = cached_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile load
 
-        // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
+        // NOTE: we only consider the worst case, because counting the real numbers are time-consuming
         if (num_used_slots <= max_num_used_slots_in_queue)
           break; // the empty slots in recv queue is enough for this send chunk size
 
@@ -389,7 +389,7 @@ void group_cast_kernel(
       // Send one chunk
       int chunk_token_idx = 0;
       while (chunk_token_idx < num_max_send_tokens and token_idx < token_end_idx) {
-        // NOTES: for the same token, the warp assigned to save `send_head`
+        // NOTE: for the same token, the warp assigned to save `send_head`
         // may be different from the warp assigned to send the following data
         const auto is_token_in_responsible_rank = is_token_in_rank[token_idx * kNumRanks + responsible_rank];
 
@@ -474,14 +474,14 @@ void group_cast_kernel(
       sync_warp_group(/*group_flag=*/responsible_rank, /*group_size=*/num_threads_per_rank);
 
       // Update tail idx for the responsible rank w.r.t. the responsible channel
-      // NOTES: here all send warps for the responsible rank are supposed to share the same new tail
+      // NOTE: here all send warps for the responsible rank are supposed to share the same new tail
       // since they update it in the same way in the above loop, though they handle different tokens in a round-robin way
       if (lane_id == 0 and send_warp_id_in_rank == 0) // the lane0 in the send warp0 for the responsible rank
         st_release_sys_global(channel_tail_idx.buffer(), cached_channel_tail_idx); // system scope, release order
     }
   } else {
     // Ger recv warp info
-    // NOTES: the warps in one block are first divided into `kNumRanks` warp groups
+    // NOTE: the warps in one block are first divided into `kNumRanks` warp groups
     // where each warp group is responsible for one rank, with the group size of `num_recv_warps / kNumRanks`
     constexpr int num_recv_warps = kNumThreads / WARP_SIZE;
     constexpr int num_recv_warps_per_rank = num_recv_warps / kNumRanks;
@@ -527,7 +527,7 @@ void group_cast_kernel(
     num_tokens_to_recv = broadcast_in_warp(num_tokens_to_recv);
 
     // Prepare shared tail idxs for each rank in static shared memory
-    // NOTES: unlike the sender, the receiver must ensure that
+    // NOTE: unlike the sender, the receiver must ensure that
     // the tail index hold by all warps for the responsible rank are the same
     // thus we cannot use `broadcast_in_warp` to sync the tail idx
     // but only utilize the shared memory to sync across warps
@@ -619,7 +619,7 @@ void group_cast_kernel(
               );
 
               // Barrier the last load above to be finished before the next store below
-              // NOTES: TMA stage will be inplace updated
+              // NOTE: TMA stage will be inplace updated
               mbarrier_arrive_and_expect_tx(/*mbar_ptr=*/tma_mbarrier, /*num_bytes=*/hidden_bytes_per_stage);
               mbarrier_wait(/*mbar_ptr=*/tma_mbarrier, /*stage=*/tma_stage, /*num_tma_stages=*/kNumTMAStages);
 
@@ -655,7 +655,7 @@ void group_cast_kernel(
 
 #pragma unroll 4
       // Thead-copy `channel_src_idx` stored by the sender to `recv_src_idx`
-      // NOTES: here we don't apply `post_perm_idx` to `recv_src_idx`
+      // NOTE: here we don't apply `post_perm_idx` to `recv_src_idx`
       for (int chunk_idx = cached_channel_head_idx + recv_thread_id_in_rank; chunk_idx < cached_channel_tail_idx;
            chunk_idx += num_recv_threads_per_rank) // warp-group strided
         recv_src_idx[total_offset + chunk_idx - cached_channel_head_idx] = ld_nc_global(channel_src_idx_buffers.buffer() + chunk_idx % num_recv_buffer_tokens);
@@ -910,7 +910,7 @@ __global__ void cached_notify_group_reduce_kernel(
      * to next valid position by decoding with `-expected_head - 1` when they reach certain `-1` entry
      * and the reason of encoding `-p-1` is to maintain the `-1` entries still negative
      */
-    int last_head = 1 << 25; // NOTES: `1 << 25` is a heuristic large number
+    int last_head = 1 << 25; // NOTE: `1 << 25` is a heuristic large number
 #pragma unroll
     for (int token_idx_tail = token_end_idx - 1; token_idx_tail >= token_start_idx; token_idx_tail -= WARP_SIZE) {
       int token_idx = token_idx_tail - lane_id, expected_head = 0;
@@ -1036,7 +1036,7 @@ void group_reduce_kernel(
 
   if (is_sender) {
     // Ger send warp info
-    // NOTES: the warps in one block are first divided into `num_send_warps / kNumRanks` warp groups
+    // NOTE: the warps in one block are first divided into `num_send_warps / kNumRanks` warp groups
     // where for every single warp group, each warp is responsible for each rank, with the group size of `kNumRanks`
     // REVIEW: why interleaved organized, instead of following the way in group_cast stage ?
     constexpr int num_send_warps = kNumThreads / WARP_SIZE;
@@ -1082,7 +1082,7 @@ void group_reduce_kernel(
     }
 
     // Get rank offset
-    // NOTES: `rank_prefix_matrix`: shape=(kNumRanks, kNumRanks), dtype=int
+    // NOTE: `rank_prefix_matrix`: shape=(kNumRanks, kNumRanks), dtype=int
     //  is the same as the one in group_cast stage
     //  thus rank_prefix_matrix[:, rank]: the token end offsets sent by each rank to this rank in group_cast stage
     //  then, [rank_prefix_matrix[responsible_rank-1, rank], rank_prefix_matrix[responsible_rank, rank]) is the range of tokens in `x`
@@ -1091,7 +1091,7 @@ void group_reduce_kernel(
     int num_rank_tokens = rank_prefix_matrix[responsible_rank * kNumRanks + rank] - rank_offset;
 
     // Get channel offset
-    // NOTES: `channel_prefix_matrix`: shape=(kNumRanks, kNumChannels), dtype=int
+    // NOTE: `channel_prefix_matrix`: shape=(kNumRanks, kNumChannels), dtype=int
     //  is actually the `recv_channel_prefix_matrix` in group_cast stage
     //  thus channel_prefix_matrix[responsible_rank, :]: the token start offsets recv by responsible_rank for each channel to this rank in group_cast stage
     //  then, [channel_prefix_matrix[responsible_rank, responsible_channel], channel_prefix_matrix[responsible_rank, responsible_channel+1])
@@ -1101,7 +1101,7 @@ void group_reduce_kernel(
     int num_channel_tokens = (responsible_channel == num_channels - 1 ? num_rank_tokens : channel_prefix_matrix[responsible_rank_channel + 1]) - channel_offset;
 
     // Get send tasks, i.e. the range of tokens [start_idx, end_idx) in `x` for the responsible channel w.r.t. the responsible rank
-    // NOTES: this range distiguishs the destination rank, which is different from the one in group_cast stage
+    // NOTE: this range distiguishs the destination rank, which is different from the one in group_cast stage
     int token_start_idx = rank_offset + channel_offset, token_end_idx = rank_offset + channel_offset + num_channel_tokens;
 
     // Iterate over all tokens sent to the responsible rank for the responsible channel
@@ -1116,10 +1116,10 @@ void group_reduce_kernel(
       auto start_time = clock64();
       while (lane_id == 0) { // the lane0 in this warp
         // Load channel head idx stored by the receiver
-        // NOTES: the head idxs received by each warp for the responsible rank might not be the same
+        // NOTE: the head idxs received by each warp for the responsible rank might not be the same
         int num_used_slots = current_channel_tail_idx - ld_volatile_global(channel_head_idx.buffer()); // volatile load
 
-        // NOTES: we only consider the worst case, because counting the real numbers are time-consuming
+        // NOTE: we only consider the worst case, because counting the real numbers are time-consuming
         if (num_used_slots <= max_num_used_slots_in_queue)
           break;
 
@@ -1190,7 +1190,7 @@ void group_reduce_kernel(
         }
 
         // Copy channel src idx by lane0
-        // NOTES:
+        // NOTE:
         //  1. `src_idx` is actually the `recv_src_idx` in group_cast stage
         //    thus src_idx[j] indicates the token idx in `reduced_x` for x[j] to reduce to
         //  2. since we've NOT applied `post_perm_idx` to `recv_src_idx` in group cast stage,
@@ -1219,14 +1219,14 @@ void group_reduce_kernel(
     }
   } else {
     // Ger recv warp info
-    // NOTES: the first warp for updating the queue head, others for reduction
+    // NOTE: the first warp for updating the queue head, others for reduction
     constexpr int num_reduce_warps = kNumThreads / WARP_SIZE - 1;
     const int reduce_warp_id = warp_id - 1, responsible_rank = lane_id;
     GRPCOLL_STATIC_ASSERT(kNumRanks <= WARP_SIZE, "Invalid number of ranks");
     GRPCOLL_STATIC_ASSERT(num_reduce_warps > 0, "Invalid number of warps");
 
     // Get head info
-    // NOTES: the `num_heads` will be 0 if `kReduceOp != ReduceOp::LSE`
+    // NOTE: the `num_heads` will be 0 if `kReduceOp != ReduceOp::LSE`
     // and `max_num_heads` will be 1 if `kReduceOp != ReduceOp::LSE`
     constexpr int max_num_heads = kIsLSEReduce ? kMaxNumHeads : 1;
     const int head_dim = kIsLSEReduce ? hidden_size / num_heads : -1;
@@ -1347,7 +1347,7 @@ void group_reduce_kernel(
 
       // Get reduce tasks
       // i.e. the range of tokens [start_idx, end_idx) in `reduced_x` for the responsible channel
-      // NOTES: this range is exactly the same as the one in group_cast stage
+      // NOTE: this range is exactly the same as the one in group_cast stage
       // so as to reduce the tokens from all source ranks
       int token_start_idx, token_end_idx;
       get_channel_task_range(num_recv_tokens, num_channels, responsible_channel, token_start_idx, token_end_idx);
@@ -1365,7 +1365,7 @@ void group_reduce_kernel(
 
         // Wait for the expected heads of this token for each rank to be all ready
         auto start_time = clock64();
-        // NOTES: here we should check `expected_head >= 0` first
+        // NOTE: here we should check `expected_head >= 0` first
         // to avoid invalid `responsible_rank` when accessing `shared_channel_tail_idx`
         while (any_in_warp(/*pred=*/expected_head >= 0 and shared_channel_tail_idx[responsible_rank] <= expected_head)) {
           // Timeout check
@@ -1455,7 +1455,7 @@ void group_reduce_kernel(
         }
 
         // Reduce this token by all the received partial token from all src ranks
-        // NOTES: we guarantee that `hidden_int4_comm` is a multiple of `WARP_SIZE`
+        // NOTE: we guarantee that `hidden_int4_comm` is a multiple of `WARP_SIZE`
         // so that all lanes in warp will always enter the loop together
         // to make `__syncwarp` hang-free and TMA store bytes constant
 #pragma unroll
@@ -1469,7 +1469,7 @@ void group_reduce_kernel(
             int4* reduce_hidval_ptr_int4 = reduced_token_ptr_int4 + i * kCommDtypePerDtype;
 
             // Get the optional head idx, valid and used only when `kIsLSEReduce`
-            // NOTES: we guarantee that each `kCommDtypePerInt4` of elems share the same head
+            // NOTE: we guarantee that each `kCommDtypePerInt4` of elems share the same head
             const int head_idx = kIsLSEReduce ? i * kCommDtypePerInt4 / head_dim : -1;
 
             // Load all recv partial hidden values from all src ranks
@@ -1551,7 +1551,7 @@ void group_reduce_kernel(
 
             // Fence TMA store to wait the TMA buffer for each lane to be ready
             // before issuing the next TMA store by lane0
-            // NOTES: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
+            // NOTE: it's issued by all lanes, compared to other TMA ops which are only issued by lane0
             tma_store_fence();
             __syncwarp();
 
@@ -1635,7 +1635,7 @@ void launch_group_reduce(
   constexpr int smem_size = kNumTMABytesPerWarp * kNumWarps; // shared memory size = num bytes of TMA transfer per block
 #endif
 
-  // NOTES: when `kReduceOp != ReduceOp::LSE`,
+  // NOTE: when `kReduceOp != ReduceOp::LSE`,
   // num_heads should be 0 to let `lse_buffers` empty
   if (reduce_op != ReduceOp::LSE) {
     GRPCOLL_HOST_ASSERT(num_heads == 0);

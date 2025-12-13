@@ -29,7 +29,7 @@ enum class ReduceOp : uint8_t {
 };
 
 inline const std::map<std::string, ReduceOp>& get_str_to_reduce_op_map() {
-  // NOTES: use `Magic Statics` to initialize the map
+  // NOTE: use `Magic Statics` to initialize the map
   // to avoid `Static Initialization Order Fiasco` and thread unsafety
   static const std::map<std::string, ReduceOp> map = {{"sum", ReduceOp::SUM}, {"avg", ReduceOp::AVG}, {"lse", ReduceOp::LSE}};
   return map;
