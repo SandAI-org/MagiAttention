@@ -868,9 +868,10 @@ def test_func(
                 torch.testing.assert_close(
                     reduced_x, reduced_x_gr, atol=1e-8, rtol=5e-3
                 )
-            elif (
-                reduce_op == "lse"
-            ):  # NOTE: lse reduce on fp32 will lose some precision, might due to dirty data
+            elif reduce_op == "lse":
+                # NOTE: lse reduce on fp32 will lose some precision,
+                # which might blame to dirty data, or the re-downcast
+                # when forwarding the partial-reduced results from NVL to RDMA
                 torch.testing.assert_close(
                     reduced_x, reduced_x_gr, atol=1e-8, rtol=5e-4
                 )
@@ -1149,7 +1150,7 @@ def test_main(
     assert 1 <= num_data_groups <= 3
 
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
-    dtype = torch.bfloat16  # TODO: make it parameterizable
+    dtype = torch.float32  # TODO: make it parameterizable
     assert dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64)
 
     # Remake the hidden size to control
@@ -1172,10 +1173,10 @@ def test_main(
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"
 
     # set to True to use bf16/fp16 precision for comm when the input/output is fp32
-    use_lp_comm_dtype_for_reduce = False
+    use_lp_comm_dtype_for_reduce = True
     if use_lp_comm_dtype_for_reduce:
-        assert dtype == torch.float32
-        comm_dtype = torch.bfloat16
+        assert dtype == torch.float32, "only support fp32 for low-precision comm"
+        comm_dtype = torch.bfloat16  # set to float16 is also ok
     else:
         comm_dtype = None
 
@@ -1206,8 +1207,8 @@ def test_main(
     if local_rank == 0:
         print(
             (
-                f"[config] {num_sms=} | {num_channels=} | "
-                f"{num_tokens=} | {hidden_size=} | {dtype=}\n"
+                f"[config] {num_sms=} | {num_channels=}\n"
+                f"{num_tokens=} | {hidden_size=} | {dtype=} | {comm_dtype=}\n"
                 f"{num_heads=} | {num_data_groups=} | {cast_lse=} | {reduce_op=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"
                 f"{rdma_buffer_size=} | {num_max_rdma_chunked_send_tokens=} | {num_max_rdma_chunked_recv_tokens=}\n"

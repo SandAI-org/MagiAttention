@@ -1699,7 +1699,6 @@ void group_reduce_kernel(
 
   constexpr int kDtypePerInt4 = sizeof(int4) / sizeof(dtype_t);
   constexpr int kCommDtypePerDtype = sizeof(dtype_t) / sizeof(comm_dtype_t);
-  constexpr int kCommDtypePerInt4 = kCommDtypePerDtype * kDtypePerInt4;
   constexpr bool isLowPrecisionComm = !std::is_same_v<dtype_t, comm_dtype_t>;
 
   constexpr int kNumMaxSrcNVLRanks = NUM_MAX_NVL_PEERS;
@@ -2523,7 +2522,7 @@ void launch_group_reduce(
   }
 
   const int hidden_int4 = hidden_size / (sizeof(int4) / sizeof(dtype_t));
-  const int num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
+  const int num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads); // NOTE: we still need enough TMA load buffer for original dtype
   GRPCOLL_HOST_ASSERT(num_bytes_per_token + /*mbarrier*/ sizeof(uint64_t) <= kNumTMABytesPerSenderWarp);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens % kNumRDMARanks == 0);
   GRPCOLL_HOST_ASSERT(num_max_nvl_chunked_recv_tokens / kNumRDMARanks > std::max(num_max_rdma_chunked_send_tokens, num_max_nvl_chunked_send_tokens));

@@ -1224,8 +1224,8 @@ def test_main(
     # set to True to use bf16/fp16 precision for comm when the input/output is fp32
     use_lp_comm_dtype_for_reduce = True
     if use_lp_comm_dtype_for_reduce:
-        assert dtype == torch.float32
-        comm_dtype = torch.bfloat16
+        assert dtype == torch.float32, "only support fp32 for low-precision comm"
+        comm_dtype = torch.bfloat16  # set to float16 is also ok
     else:
         comm_dtype = None
 
