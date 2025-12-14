@@ -1172,7 +1172,7 @@ def test_main(
         assert pass_out_buffer, "acc_reduce_out_buffer requires pass_out_buffer"
 
     # set to True to use bf16/fp16 precision for comm when the input/output is fp32
-    use_lp_comm_dtype_for_reduce = False  # TODO: support lp comm dtype
+    use_lp_comm_dtype_for_reduce = False
     if use_lp_comm_dtype_for_reduce:
         assert dtype == torch.float32
         comm_dtype = torch.bfloat16
