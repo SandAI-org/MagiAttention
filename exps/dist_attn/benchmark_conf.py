@@ -22,7 +22,26 @@ from exps.dist_attn.benchmark.enums import FlashMaskType
 from magi_attention.common.enum import AttnOverlapMode
 from magi_attention.meta.solver.dispatch_solver import MinHeapDispatchAlg
 
+"""
+This file defines all cp benchmark configurations.
+Each config name should start with a capital letter to be cnocluded,
+all other keys will be discarded. The config will be loaded by `run_benchmark.py`
+and specified via `--config` in `run_benchmark.sh`.
+"""
+
+
 SEED = 42
+
+
+@dataclass
+class ENVVAR_CONFIG:
+    """
+    define env vars for MagiAttention here and dynamic switch in `run_benchmark.py`, avoid modify bash script
+    and simplify benchmarking process.
+    """
+
+    # short for MAGI_ATTENTION_HIERARCHICAL_COMM
+    hier_comm = False
 
 
 @dataclass
@@ -51,21 +70,21 @@ class BENCH_CONFIG:
                     do_bench
     """
 
-    quantiles = [0.2, 0.5, 0.8]
+    quantiles = [0.5, 0.2, 0.8]
     bench_flops = True
     bench_mem = False
     bench_mode = "mean"
-    iteration = 1
-    warmup = 1
+    iteration = 20
+    warmup = 5
     output_path = "./outputs"
     mask_pattern = [
-        FlashMaskType.FULL,
+        # FlashMaskType.FULL,
         # FlashMaskType.CAUSAL,
-        # FlashMaskType.FULL_DOCUMENT,
+        FlashMaskType.FULL_DOCUMENT,
         # FlashMaskType.CAUSAL_DOCUMENT,
     ]
     dist_attn_impl = [
-        # AttnImpl.ULYSSES,
+        AttnImpl.ULYSSES,
         # AttnImpl.RING_P2P,
         # AttnImpl.RING_ALLGATHER,
         # AttnImpl.USP,
@@ -92,9 +111,8 @@ class SAMPLE_CONFIG:
         - to_attn_ranges: convert to attn_ranges.
     """
 
-    # dataset_path = "./benchmark/datasets/default/doc_length_distribution.csv"
-    dataset_path = None
-    pack_num = 1
+    dataset_path = "./benchmark/datasets/default/doc_length_distribution.csv"
+    pack_num = 20
     chunk_ratio = 0.25
     is_binned = True
     to_attn_ranges = True
@@ -112,11 +130,11 @@ class DATA_CONFIG:
         - dtype: data dtype.
     """
 
-    seqlen_per_rank = 64
+    seqlen_per_rank = 8 * 1024
     embed_dim = 1024
     hidden_size = 128
-    heads_q = 4
-    heads_kv = 2
+    heads_q = 64
+    heads_kv = 64
     dtype = torch.bfloat16
 
 
@@ -141,11 +159,11 @@ class ATTN_CONFIG:
     deterministic = False
 
     # -----    magi-attention conf   ---- #
-    chunk_size = 64
+    chunk_size = 2048
     dispatch_alg = MinHeapDispatchAlg
 
     enable_overlap = True
     overlap_mode = AttnOverlapMode.STATIC
-    degree = 2
+    degree = 3
     min_chunk_size = 512
     max_num_chunks = 64

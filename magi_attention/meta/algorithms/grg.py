@@ -92,20 +92,32 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         eval_solver_map: list[list[int]],
         area_map: list[list[int]],
         average_area: float,
-        qk_rate: float = 1.0,
+        num_heads_q: int,
+        num_heads_kv: int,
     ) -> tuple[float, float, int]:
         # calc the area max
         area_per_rank = [0 for _ in range(cp_size)]
+        area_local_per_rank = [0 for _ in range(cp_size)]
+        area_remote_per_rank = [0 for _ in range(cp_size)]
         for i in range(m):
             for j in range(n):
                 rank = eval_solver_map[i][j]
                 if rank != -1:
                     area_per_rank[rank] += area_map[i][j]
+                    if rank_m[i] == rank_n[j] == rank:
+                        area_local_per_rank[rank] += area_map[i][j]
+                    else:
+                        area_remote_per_rank[rank] += area_map[i][j]
 
         area_max = max(area_per_rank)
 
+        qk_rate = num_heads_q / num_heads_kv
+        # qk_rate *= 10000000000
+
         # calc the communication max
-        comm_max = 0.0
+        # comm_max = 0.0
+        cast_comm_max = 0.0
+        reduce_comm_max = 0.0
         # calc the communication sum
         comm_sum = 0.0
         qo_lhrc: list[set] = [set() for _ in range(m)]
@@ -139,20 +151,62 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
             for j in kv_lcrh[i]:
                 kv_lcrh_len[i] += comm_len_n[j]
 
+        per_rank_cost_max = 0.0
+
+        def fix_comm(value):
+            return value * num_heads_kv
+
+        def fix_area(value):
+            return value * num_heads_q / 250000
+
         for i in range(cp_size):
-            fwd_send_len = (
-                qk_rate * qo_lhrc_len[i] + kv_lhrc_len[i] * 2 + qk_rate * qo_lcrh_len[i]
+            # calculate total comm and calc cost
+            # fwd_send_len = (
+            #     qk_rate * qo_lhrc_len[i] + kv_lhrc_len[i] * 2 + qk_rate * qo_lcrh_len[i]
+            # )
+            # fwd_recv_len = (
+            #     qk_rate * qo_lcrh_len[i] + kv_lcrh_len[i] * 2 + qk_rate * qo_lhrc_len[i]
+            # )
+            # comm_max = max(comm_max, fwd_send_len, fwd_recv_len)
+            # comm_sum += fwd_send_len + fwd_recv_len
+            # calculate comm cost as two stage: cast q k v and reduce o
+            fwd_cast_send_len = qk_rate * qo_lhrc_len[i] + kv_lhrc_len[i] * 2
+            fwd_cast_recv_len = qk_rate * qo_lcrh_len[i] + kv_lcrh_len[i] * 2
+            fwd_reduce_send_len = qk_rate * qo_lcrh_len[i]
+            fwd_reduce_recv_len = qk_rate * qo_lhrc_len[i]
+            fwd_cast_max = max(fwd_cast_send_len, fwd_cast_recv_len)
+            fwd_reduce_max = max(fwd_reduce_send_len, fwd_reduce_recv_len)
+            cast_comm_max = max(cast_comm_max, fwd_cast_max)
+            reduce_comm_max = max(reduce_comm_max, fwd_reduce_max)
+            comm_sum += (
+                fwd_cast_send_len
+                + fwd_cast_recv_len
+                + fwd_reduce_send_len
+                + fwd_reduce_recv_len
             )
-            fwd_recv_len = (
-                qk_rate * qo_lcrh_len[i] + kv_lcrh_len[i] * 2 + qk_rate * qo_lhrc_len[i]
+            per_rank_cost_max = max(
+                per_rank_cost_max,
+                max(fix_comm(cast_comm_max), fix_area(area_local_per_rank[i]))
+                + fix_area(area_remote_per_rank[i])
+                + fix_comm(reduce_comm_max),
             )
-            comm_max = max(comm_max, fwd_send_len, fwd_recv_len)
-            comm_sum += fwd_send_len + fwd_recv_len
+
+        cast_comm_max = fix_comm(cast_comm_max)
+        reduce_comm_max = fix_comm(reduce_comm_max)
+        comm_sum = fix_comm(comm_sum)
+
+        area_max = fix_area(area_max)
+        average_area = fix_area(average_area)
 
         # cost function
         return (
-            comm_max * (area_max - average_area + cp_size * 4) + comm_sum,
-            comm_max,
+            # comm_max * (area_max - average_area + cp_size * 4) + comm_sum,
+            # (cast_comm_max + reduce_comm_max) * (area_max - average_area + cp_size * 4) + comm_sum,
+            cast_comm_max + reduce_comm_max + area_max + comm_sum / (cp_size * 10),
+            # max(cast_comm_max, area_max) + reduce_comm_max + comm_sum / (cp_size * 10),
+            # per_rank_cost_max,
+            # comm_max,
+            cast_comm_max + reduce_comm_max,
             area_max,
         )
 
@@ -223,15 +277,13 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     for rank in rank_choice_list
                 ]
                 # normalize the communication length weight
-                sum_comm_len_weight = sum(
-                    [comm_len_m[rank] for rank in row[i]]
-                ) * qk_rate + sum([comm_len_n[rank] for rank in col[j]])
+                sum_comm_len_weight = comm_len_m[i] * len(
+                    row[i]
+                ) * qk_rate + comm_len_n[j] * len(col[j])
                 for rank in row[i]:
-                    weights_list[rank] += (
-                        comm_len_m[rank] * qk_rate / sum_comm_len_weight
-                    )
+                    weights_list[rank] += comm_len_m[i] * qk_rate / sum_comm_len_weight
                 for rank in col[j]:
-                    weights_list[rank] += comm_len_n[rank] / sum_comm_len_weight
+                    weights_list[rank] += comm_len_n[j] / sum_comm_len_weight
                 rank_choice = random.choices(
                     rank_choice_list, weights=weights_list, k=1
                 )[0]
@@ -274,7 +326,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
         random.seed(42)
 
         qk_rate = num_heads_q / num_heads_kv
-        print(f"{qk_rate=}")
+        # qk_rate *= 10000000000
         # get the host rank list of Q and K
         cp_size = len(bucket_per_rank)
         rank_m = []
@@ -333,12 +385,14 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
 
         # calculate average area
         average_area = total_area / cp_size
+        debug_flag = True
 
         # random initialize stage
         random_times = min(
             100000000 // m // n, 1000
         )  # limit the maximum number of iterations
-        if rank == 0:
+        if debug_flag and rank == 0:
+            print(f"{qk_rate=}")
             print(f"random initialize stage: {m=} {n=} {random_times=}")
         local_eval = float("inf")
         for iter in range(random_times):
@@ -354,6 +408,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 area_map,
                 grid_rects,
                 job_list,
+                qk_rate,
             )
             new_solver_eval, _, _ = self._eval_greedy_algorithm(
                 cp_size,
@@ -366,10 +421,11 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 new_solver_map,
                 area_map,
                 average_area,
-                qk_rate,
+                num_heads_q,
+                num_heads_kv,
             )
             if new_solver_eval <= local_eval:
-                if rank == 0:
+                if debug_flag and rank == 0:
                     print(f"initial iter {iter}: {new_solver_eval=}")
                 local_eval = new_solver_eval
                 local_optimal_solver_map = new_solver_map
@@ -377,9 +433,9 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
 
         # refinement stage
         refine_times = min(
-            100000000 // m // n, 10000
+            100000000 // m // n, 1000
         )  # limit the maximum number of iterations
-        if rank == 0:
+        if debug_flag and rank == 0:
             print(f"refinement stage: {m=} {n=} {refine_times=} {local_eval=}")
         early_stop_counter = 0
         for iter in range(refine_times):
@@ -438,6 +494,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     area_map,
                     grid_rects,
                     partial_job_list,
+                    qk_rate,
                 )
                 (
                     new_solver_eval,
@@ -454,7 +511,8 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     new_solver_map,
                     area_map,
                     average_area,
-                    qk_rate,
+                    num_heads_q,
+                    num_heads_kv,
                 )
                 if new_solver_eval > local_eval:
                     early_stop_counter += 1
@@ -463,7 +521,7 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                 else:
                     early_stop_counter = 0
                 if new_solver_eval <= local_eval:
-                    if rank == 0:
+                    if debug_flag and rank == 0:
                         print(
                             f"refinement iter {iter} random_iter {random_iter}: "
                             f"{new_solver_eval=} {local_eval=} {new_comm_max=} {new_area_max=}"
@@ -472,9 +530,38 @@ class GRGDynamicAttnAlgorithm(DynamicAttnAlgorithm):
                     local_optimal_solver_map = new_solver_map
 
             if early_stop_counter >= 20000:
-                if rank == 0:
+                if debug_flag and rank == 0:
                     print(f"refinement early stop at iter {iter}")
                 break
+
+        # special solution
+        # new_solver_map = copy.deepcopy(local_optimal_solver_map)
+        # for i in range(m):
+        #     for j in range(n):
+        #         if new_solver_map[i][j] != -1:
+        #             new_solver_map[i][j] = rank_m[i]
+
+        # (
+        #     new_solver_eval,
+        #     new_comm_max,
+        #     new_area_max,
+        # ) = self._eval_greedy_algorithm(
+        #     cp_size,
+        #     m,
+        #     n,
+        #     rank_m,
+        #     rank_n,
+        #     comm_len_m,
+        #     comm_len_n,
+        #     new_solver_map,
+        #     area_map,
+        #     average_area,
+        #     num_heads_q,
+        #     num_heads_kv,
+        # )
+        # if new_solver_eval <= local_eval:
+        #     local_eval = new_solver_eval
+        #     local_optimal_solver_map = new_solver_map
 
         # print(f"local_optimal_solver_map: {local_optimal_solver_map}")
 

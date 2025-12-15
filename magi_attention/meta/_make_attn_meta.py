@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
@@ -28,6 +30,8 @@ from magi_attention.meta.solver.dist_attn_solver import (
 )
 from magi_attention.meta.solver.dynamic_attn_solver import DynamicAttnSolver
 from magi_attention.meta.solver.overlap_solver import OverlapConfig
+
+_FLATTEN_HEAD_GROUPS = os.environ.get("MAGI_ATTENTION_FLATTEN_HEAD_GROUPS", "0") == "1"
 
 
 def make_attn_meta_from_dispatch_meta(
@@ -83,6 +87,7 @@ def make_attn_meta_from_dispatch_meta(
             q_ranges=q_ranges,
             k_ranges=k_ranges,
             attn_mask_type=attn_mask_type,
+            flatten_head_groups=_FLATTEN_HEAD_GROUPS,
         )
         # only for debug: visualize the buckets
         if cp_group.rank() == 0:

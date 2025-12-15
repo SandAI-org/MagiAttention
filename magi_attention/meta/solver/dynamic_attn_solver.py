@@ -81,6 +81,7 @@ class DynamicAttnSolver(BaseDistAttnSolver):
 
         self.num_heads_q = num_heads_q
         self.num_heads_kv = num_heads_kv
+        self.num_heads_group = 1
 
         # set some attributes that might be fetched from outside
         self.host_q_ranges_global = self.host_ranges_q[self.cp_rank]
@@ -90,12 +91,49 @@ class DynamicAttnSolver(BaseDistAttnSolver):
 
         self._is_solved = False
 
+    def _expand_attn_ranges(self, ranges: AttnRanges, stride: int) -> AttnRanges:
+        new_ranges = AttnRanges()
+        for i in range(self.num_heads_group):
+            offset = i * stride
+            for r in ranges:
+                new_ranges.append(AttnRange(r.start + offset, r.end + offset))
+        return new_ranges
+
     def solve(
         self,
         q_ranges: AttnRanges,
         k_ranges: AttnRanges,
         attn_mask_type: Union[list[int], list[AttnMaskType], AttnMaskType],
+        flatten_head_groups: bool = False,
     ):
+        print(f"{flatten_head_groups=}")
+        print(f"{self.num_heads_q=}, {self.num_heads_kv=}")
+        if flatten_head_groups:
+            self.num_heads_group = self.num_heads_kv
+            self.num_heads_q = self.num_heads_q // self.num_heads_group
+            self.num_heads_kv = 1
+
+            self.host_ranges_q = [
+                self._expand_attn_ranges(ranges, self.total_seqlen_q)
+                for ranges in self.host_ranges_q
+            ]
+            self.host_ranges_k = [
+                self._expand_attn_ranges(ranges, self.total_seqlen_k)
+                for ranges in self.host_ranges_k
+            ]
+            q_ranges = self._expand_attn_ranges(q_ranges, self.total_seqlen_q)
+            k_ranges = self._expand_attn_ranges(k_ranges, self.total_seqlen_k)
+
+            if isinstance(attn_mask_type, list):
+                attn_mask_type = attn_mask_type * self.num_heads_group
+
+            self.total_seqlen_q *= self.num_heads_group
+            self.total_seqlen_k *= self.num_heads_group
+
+            # reset some attributes that might be fetched from outside after flattening head groups
+            self.host_q_ranges_global = self.host_ranges_q[self.cp_rank]
+            self.host_k_ranges_global = self.host_ranges_k[self.cp_rank]
+
         if isinstance(attn_mask_type, AttnMaskType):
             attn_mask_type = [attn_mask_type] * len(q_ranges)
         self.rect = AttnRectangles.from_ranges(
