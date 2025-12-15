@@ -60,14 +60,14 @@ class DistAttnRuntimeKey:
     cp_group: dist.ProcessGroup
     cp_mesh: DeviceMesh | None
     dist_attn_config: DistAttnConfig
+    num_heads_q: int
+    num_heads_kv: int
     is_deterministic_mode_enable: bool
     is_hierarchical_comm_enable: bool
     is_qo_comm_enable: bool
     is_native_grpcoll_enable: bool
     is_flatten_head_groups_enable: bool
-    num_heads_q: int
-    num_heads_kv: int
-
+    is_fa4_backend_enable: bool
 
 class DistAttnRuntimeMgr:
     def __init__(
@@ -386,14 +386,15 @@ def init_dist_attn_runtime_key(
         cp_group=cp_group,
         cp_mesh=cp_mesh,
         dist_attn_config=dist_attn_config,
+        num_heads_q=num_heads_q,
+        num_heads_kv=num_heads_kv,
         # auto set other flags that might influence the runtime behavior
         is_deterministic_mode_enable=magi_attention.is_deterministic_mode_enable(),
         is_hierarchical_comm_enable=magi_attention.comm.is_hierarchical_comm_enable(),
         is_qo_comm_enable=magi_attention.comm.is_qo_comm_enable(),
         is_native_grpcoll_enable=magi_attention.comm.is_native_grpcoll_enable(),
         is_flatten_head_groups_enable=magi_attention.is_flatten_head_groups_enable(),
-        num_heads_q=num_heads_q,
-        num_heads_kv=num_heads_kv,
+        is_fa4_backend_enable=magi_attention.is_fa4_backend_enable(),
     )
 
 
