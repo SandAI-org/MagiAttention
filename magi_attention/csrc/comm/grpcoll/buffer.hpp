@@ -214,11 +214,11 @@ struct Buffer {
       const std::optional<torch::Tensor>& x_2nd,
       std::optional<torch::Tensor>& reduced_x_buf_2nd,
       /* other metadata */
-      const std::optional<torch::Tensor>& pre_perm_idx,
       const torch::Tensor& src_idx,
       const torch::Tensor& rank_prefix_matrix,
       const torch::Tensor& channel_prefix_matrix,
       const torch::Tensor& send_head,
+      const std::optional<torch::Tensor>& pre_perm_idx,
       const Config& config,
       std::optional<EventHandle>& previous_event,
       bool async_op,
@@ -279,6 +279,8 @@ struct Buffer {
       /* 1st group of output data */
       torch::Tensor,
       std::optional<torch::Tensor>,
+      /* 2nd group of output data */
+      std::optional<torch::Tensor>,
       /* event */
       std::optional<EventHandle>>
   internode_group_reduce(
@@ -287,6 +289,9 @@ struct Buffer {
       std::optional<torch::Tensor>& reduced_x_buf,
       const std::optional<torch::Tensor>& lse,
       std::optional<torch::Tensor>& reduced_lse_buf,
+      /* 2nd group of input / output data*/
+      const std::optional<torch::Tensor>& x_2nd,
+      std::optional<torch::Tensor>& reduced_x_buf_2nd,
       /* other metadata */
       const torch::Tensor& src_meta,
       const torch::Tensor& is_reduced_token_in_rank,

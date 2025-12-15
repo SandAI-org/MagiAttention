@@ -287,6 +287,9 @@ void group_reduce(
     float* reduced_lse,
     const void* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    void* reduced_x_2nd,
+    const void* x_2nd,
     /* other metadata */
     const bool* is_reduced_token_in_rank,
     const int* reduced_rdma_head,
@@ -300,6 +303,7 @@ void group_reduce(
     int num_reduced_tokens,
     int hidden_size,
     int num_heads,
+    int num_groups,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,

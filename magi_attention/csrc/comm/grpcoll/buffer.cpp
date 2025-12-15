@@ -665,11 +665,11 @@ Buffer::intranode_group_reduce(
     const std::optional<torch::Tensor>& x_2nd,
     std::optional<torch::Tensor>& reduced_x_buf_2nd,
     /* other metadata */
-    const std::optional<torch::Tensor>& pre_perm_idx,
     const torch::Tensor& src_idx,
     const torch::Tensor& rank_prefix_matrix,
     const torch::Tensor& channel_prefix_matrix,
     const torch::Tensor& send_head,
+    const std::optional<torch::Tensor>& pre_perm_idx,
     const Config& config,
     std::optional<EventHandle>& previous_event,
     bool async_op,
@@ -691,16 +691,17 @@ Buffer::intranode_group_reduce(
     ++num_groups;
   GRPCOLL_HOST_ASSERT(num_groups <= 2);
 
+  // One channel use two blocks,
+  // even-numbered blocks for sending, odd-numbered blocks for receiving
+  const int num_channels = config.num_sms / 2;
+  GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
+
   // Check tensors
   GRPCOLL_HOST_ASSERT(x.dim() == 2 and x.is_contiguous());
   GRPCOLL_HOST_ASSERT(src_idx.dim() == 1 and src_idx.is_contiguous() and src_idx.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(send_head.dim() == 2 and send_head.is_contiguous() and send_head.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(rank_prefix_matrix.dim() == 2 and rank_prefix_matrix.is_contiguous() and rank_prefix_matrix.scalar_type() == torch::kInt32);
   GRPCOLL_HOST_ASSERT(channel_prefix_matrix.dim() == 2 and channel_prefix_matrix.is_contiguous() and channel_prefix_matrix.scalar_type() == torch::kInt32);
-
-  // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
-  GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
-  int num_channels = config.num_sms / 2;
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1));
   auto num_reduced_tokens = static_cast<int>(send_head.size(0));
@@ -1332,6 +1333,8 @@ std::tuple<
     /* 1st group of output data */
     torch::Tensor,
     std::optional<torch::Tensor>,
+    /* 2nd group of output data */
+    std::optional<torch::Tensor>,
     /* event */
     std::optional<EventHandle>>
 Buffer::internode_group_reduce(
@@ -1340,6 +1343,9 @@ Buffer::internode_group_reduce(
     std::optional<torch::Tensor>& reduced_x_buf,
     const std::optional<torch::Tensor>& lse,
     std::optional<torch::Tensor>& reduced_lse_buf,
+    /* 2nd group of input / output data*/
+    const std::optional<torch::Tensor>& x_2nd,
+    std::optional<torch::Tensor>& reduced_x_buf_2nd,
     /* other metadata */
     const torch::Tensor& src_meta,
     const torch::Tensor& is_reduced_token_in_rank,
@@ -1364,6 +1370,12 @@ Buffer::internode_group_reduce(
   auto comm_dtype_ = comm_dtype.value_or(x_dtype);
   auto comm_elem_size = c10::elementSize(comm_dtype_);
 
+  // Get the number of data groups
+  int num_groups = 1;
+  if (x_2nd.has_value())
+    ++num_groups;
+  GRPCOLL_HOST_ASSERT(num_groups <= 2);
+
 #ifndef DISABLE_NVSHMEM
   // One channel use two SMs
   // one for forwarders, the other for (senders, receivers)
@@ -1384,7 +1396,7 @@ Buffer::internode_group_reduce(
   const auto num_tokens = static_cast<int>(x.size(0)), num_reduced_tokens = static_cast<int>(is_reduced_token_in_rank.size(0));
   const auto hidden_size = static_cast<int>(x.size(1)), hidden_int4 = static_cast<int>(hidden_size * comm_elem_size / sizeof(int4));
   GRPCOLL_HOST_ASSERT((hidden_size * comm_elem_size) % sizeof(int4) == 0); // hidden comm bytes should be aligned with int4
-  GRPCOLL_HOST_ASSERT(hidden_int4 % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
+  GRPCOLL_HOST_ASSERT(((hidden_size * comm_elem_size) / sizeof(int4)) % WARP_SIZE == 0); // hidden size in int4 should be aligned with warp size
   GRPCOLL_HOST_ASSERT(src_meta.size(1) == internode::get_source_meta_bytes());
   GRPCOLL_HOST_ASSERT(is_reduced_token_in_rank.size(1) == num_ranks);
   GRPCOLL_HOST_ASSERT(rdma_channel_prefix_matrix.size(0) == num_rdma_ranks and rdma_channel_prefix_matrix.size(1) == num_channels);
@@ -1392,6 +1404,10 @@ Buffer::internode_group_reduce(
   GRPCOLL_HOST_ASSERT(gbl_channel_prefix_matrix.size(0) == num_ranks and gbl_channel_prefix_matrix.size(1) == num_channels);
   GRPCOLL_HOST_ASSERT(reduced_rdma_head.dim() == 2 and reduced_rdma_head.size(0) == num_reduced_tokens and reduced_rdma_head.size(1) == num_rdma_ranks);
   GRPCOLL_HOST_ASSERT(reduced_nvl_head.dim() == 2 and reduced_nvl_head.size(1) == NUM_MAX_NVL_PEERS);
+  if (num_groups > 1) {
+    GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x_dtype);
+    GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size);
+  }
 
   // Set current stream to comm stream if needed
   // NOTE: do not allocate tensors upfront!
@@ -1461,7 +1477,7 @@ Buffer::internode_group_reduce(
   internode::cached_notify(
       /*hidden_int4=*/hidden_int4,
       /*num_heads=*/num_heads,
-      /*num_groups=*/1, // TODO: support data groups
+      /*num_groups=*/num_groups,
       /*num_ranks=*/num_ranks,
       /*num_channels=*/num_channels,
       /*num_reduced_tokens=*/num_reduced_tokens,
@@ -1499,12 +1515,31 @@ Buffer::internode_group_reduce(
     reduced_x = torch::empty({num_reduced_tokens, hidden_size}, x.options());
   }
 
+  // Allocate 2nd reduced_x buffer and assign the ptr if needed
+  auto reduced_x_2nd = std::optional<torch::Tensor>();
+  void *x_ptr_2nd = nullptr, *reduced_x_ptr_2nd = nullptr;
+  if (num_groups > 1) {
+    if (reduced_x_buf_2nd.has_value()) {
+      GRPCOLL_HOST_ASSERT(reduced_x_buf_2nd->dim() == 2 and reduced_x_buf_2nd->is_contiguous() and reduced_x_buf_2nd->scalar_type() == x_dtype);
+      GRPCOLL_HOST_ASSERT(reduced_x_buf_2nd->size(0) == num_reduced_tokens and reduced_x_buf_2nd->size(1) == hidden_size);
+      reduced_x_2nd.emplace(reduced_x_buf_2nd.value());
+    } else {
+      GRPCOLL_HOST_ASSERT(!acc_reduce);
+      reduced_x_2nd = torch::empty({num_reduced_tokens, hidden_size}, x_2nd->options());
+    }
+
+    x_ptr_2nd = x_2nd->data_ptr();
+    reduced_x_ptr_2nd = reduced_x_2nd->data_ptr();
+  }
+
   // Launch group reduce kernel
   internode::group_reduce(
       /*reduced_x=*/reduced_x.data_ptr(),
       /*reduced_lse=*/reduced_lse_ptr,
       /*x=*/x.data_ptr(),
       /*lse=*/lse_ptr,
+      /*reduced_x_2nd=*/reduced_x_ptr_2nd,
+      /*x_2nd=*/x_ptr_2nd,
       /*is_reduced_token_in_rank=*/is_reduced_token_in_rank.data_ptr<bool>(),
       /*reduced_rdma_head=*/reduced_rdma_head.data_ptr<int>(),
       /*reduced_nvl_head=*/reduced_nvl_head.data_ptr<int>(),
@@ -1517,6 +1552,7 @@ Buffer::internode_group_reduce(
       /*num_reduced_tokens=*/num_reduced_tokens,
       /*hidden_size=*/hidden_size,
       /*num_heads=*/num_heads,
+      /*num_groups=*/num_groups,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
       /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
@@ -1552,7 +1588,7 @@ Buffer::internode_group_reduce(
         t.record_stream(compute_stream);
     }
     // record optional tensors
-    for (auto& to : {lse, reduced_lse, pre_perm_idx}) {
+    for (auto& to : {x_2nd, reduced_x_2nd, lse, reduced_lse, pre_perm_idx}) {
       to.has_value() ? to->record_stream(comm_stream) : void();
       if (allocate_on_comm_stream)
         to.has_value() ? to->record_stream(compute_stream) : void();
@@ -1566,7 +1602,7 @@ Buffer::internode_group_reduce(
     at::cuda::setCurrentCUDAStream(compute_stream);
 
   // Return values
-  return {reduced_x, reduced_lse, event};
+  return {reduced_x, reduced_lse, reduced_x_2nd, event};
 #else
   GRPCOLL_HOST_ASSERT(false and "NVSHMEM is disabled during compilation");
   return {};

@@ -686,7 +686,9 @@ class GrpCollBuffer:
         # w/o introducing extra H2D for the vector of ptrs
         # TODO: find a more elegant way in the future
         num_groups = len(x)
-        assert 1 <= num_groups <= 3, "num_groups only supports {1,2,3}"
+        assert (
+            1 <= num_groups <= 3
+        ), f"num_groups only supports (1,2,3), but got {num_groups=}"
         x_1st = x[0]
         recv_x_1st = recv_x[0] if recv_x is not None else None
         if num_groups > 1:
@@ -749,9 +751,7 @@ class GrpCollBuffer:
             )
 
         # Pack recv_x groups
-        recv_x = [
-            recv_x_1st,
-        ]
+        recv_x = [recv_x_1st]
         if num_groups > 1:
             recv_x.append(recv_x_2nd)
         if num_groups > 2:
@@ -798,7 +798,9 @@ class GrpCollBuffer:
 
         # Unpack (x,reduced_x) groups
         num_groups = len(x)
-        assert 1 <= num_groups <= 2, "num_groups only supports {1,2}"
+        assert (
+            1 <= num_groups <= 2
+        ), f"num_groups only supports (1,2), but got {num_groups=}"
         x_1st = x[0]
         reduced_x_1st = reduced_x[0] if reduced_x is not None else None
         if num_groups > 1:
@@ -822,11 +824,11 @@ class GrpCollBuffer:
             reduced_lse,
             x_2nd,
             reduced_x_2nd,
-            pre_perm_idx,
             handle.recv_src_idx,  # src_idx
             handle.rank_prefix_matrix,  # rank_prefix_matrix
             handle.recv_channel_prefix_matrix,  # channel_prefix_matrix
             handle.send_head,  # send_head
+            pre_perm_idx,
             config.to_kernel_config(),
             getattr(previous_event, "event", None),
             async_op,
@@ -837,9 +839,7 @@ class GrpCollBuffer:
         )
 
         # Pack reduced_x groups
-        reduced_x = [
-            reduced_x_1st,
-        ]
+        reduced_x = [reduced_x_1st]
         if num_groups > 1:
             reduced_x.append(reduced_x_2nd)
 
@@ -905,7 +905,9 @@ class GrpCollBuffer:
         # w/o introducing extra H2D for the vector of ptrs
         # TODO: find a more elegant way in the future
         num_groups = len(x)
-        assert 1 <= num_groups <= 3, "num_groups only supports {1,2,3}"
+        assert (
+            1 <= num_groups <= 3
+        ), f"num_groups only supports (1,2,3), but got {num_groups=}"
         x_1st = x[0]
         recv_x_1st = recv_x[0] if recv_x is not None else None
         if num_groups > 1:
@@ -980,9 +982,7 @@ class GrpCollBuffer:
             )
 
         # Pack recv_x groups
-        recv_x = [
-            recv_x_1st,
-        ]
+        recv_x = [recv_x_1st]
         if num_groups > 1:
             recv_x.append(recv_x_2nd)
         if num_groups > 2:
@@ -1025,24 +1025,35 @@ class GrpCollBuffer:
             assert lse is not None, "lse should not be None when `reduce_op == lse`"
         else:  # no need to reduce lse, even passed in
             lse = None
-            # reduced_lse = None
+            reduced_lse = None
 
         # Unpack (x,reduced_x) groups
         num_groups = len(x)
-        assert num_groups == 1, "num_groups only supports {1,}"
+        assert (
+            1 <= num_groups <= 2
+        ), f"num_groups only supports (1,2), but got {num_groups=}"
         x_1st = x[0]
         reduced_x_1st = reduced_x[0] if reduced_x is not None else None
+        if num_groups > 1:
+            x_2nd = x[1]
+            reduced_x_2nd = reduced_x[1] if reduced_x is not None else None
+        else:
+            x_2nd = None
+            reduced_x_2nd = None
 
         # Launch the internode group reduce kernel
         (
             reduced_x_1st,
             reduced_lse,
+            reduced_x_2nd,
             event,
         ) = self.runtime.internode_group_reduce(
             x_1st,
             reduced_x_1st,
             lse,
             reduced_lse,
+            x_2nd,
+            reduced_x_2nd,
             handle.recv_src_meta,  # src_meta
             handle.is_token_in_rank,  # is_reduced_token_in_rank
             handle.recv_rdma_channel_prefix_matrix,  # rdma_channel_prefix_matrix
@@ -1061,9 +1072,9 @@ class GrpCollBuffer:
         )
 
         # Pack reduced_x groups
-        reduced_x = [
-            reduced_x_1st,
-        ]
+        reduced_x = [reduced_x_1st]
+        if num_groups > 1:
+            reduced_x.append(reduced_x_2nd)
 
         # View output to hidden shape
         for i in range(num_groups):

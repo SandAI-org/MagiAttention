@@ -1753,6 +1753,7 @@ template <
     ReduceOp kReduceOp,
     bool kAccReduce,
     bool kLowLatencyMode,
+    int kNumDataGroups,
     int kMaxNumHeads,
     int kNumRDMARanks,
     int kNumMaxSrcRDMARanks,
@@ -1772,6 +1773,9 @@ void group_reduce_kernel(
     float* reduced_lse,
     const int4* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    int4* reduced_x_2nd,
+    const int4* x_2nd,
     /* other metadata */
     const bool* is_reduced_token_in_rank,
     const int* reduced_rdma_head,
@@ -2503,13 +2507,24 @@ void group_reduce_kernel(
   }
 }
 
-template <typename dtype_t, typename comm_dtype_t, typename reduce_dtype_t, int kNumRDMARanks, int kMaxNumHeads, int kNumForwarderWarps, int kNumTMAStages>
+template <
+    typename dtype_t,
+    typename comm_dtype_t,
+    typename reduce_dtype_t,
+    int kNumDataGroups,
+    int kNumRDMARanks,
+    int kMaxNumHeads,
+    int kNumForwarderWarps,
+    int kNumTMAStages>
 void launch_group_reduce(
     /* 1st group of input / output data*/
     void* reduced_x,
     float* reduced_lse,
     const void* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    void* reduced_x_2nd,
+    const void* x_2nd,
     /* other metadata */
     const bool* is_reduced_token_in_rank,
     const int* reduced_rdma_head,
@@ -2562,6 +2577,7 @@ void launch_group_reduce(
         reduce_op,                                                           \
         acc_reduce,                                                          \
         false, /*disable low_latency_mode to decrease compilation overhead*/ \
+        kNumDataGroups,                                                      \
         kMaxNumHeads,                                                        \
         kNumRDMARanks,                                                       \
         kNumMaxSrcRDMARanks,                                                 \
@@ -2582,6 +2598,8 @@ void launch_group_reduce(
         reduced_lse,                                                         \
         reinterpret_cast<const int4*>(x),                                    \
         lse,                                                                 \
+        reinterpret_cast<int4*>(reduced_x_2nd),                              \
+        reinterpret_cast<const int4*>(x_2nd),                                \
         is_reduced_token_in_rank,                                            \
         reduced_rdma_head,                                                   \
         reduced_nvl_head,                                                    \
@@ -2648,6 +2666,9 @@ void group_reduce(
     float* reduced_lse,
     const void* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    void* reduced_x_2nd,
+    const void* x_2nd,
     /* other metadata */
     const bool* is_reduced_token_in_rank,
     const int* reduced_rdma_head,
@@ -2661,6 +2682,7 @@ void group_reduce(
     int num_reduced_tokens,
     int hidden_size,
     int num_heads,
+    int num_groups,
     void* rdma_buffer_ptr,
     int num_max_rdma_chunked_send_tokens,
     int num_max_rdma_chunked_recv_tokens,
@@ -2675,59 +2697,61 @@ void group_reduce(
     cudaDataType_t dtype,
     cudaDataType_t comm_dtype,
     ReduceOp reduce_op) {
-#define LAUNCH_INTERNODE_GROUP_REDUCE(num_tma_stages, max_num_heads, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps) \
-  {                                                                                                                                             \
-    launch_group_reduce<dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, max_num_heads, num_forwarder_warps, num_tma_stages>(              \
-        reduced_x,                                                                                                                              \
-        reduced_lse,                                                                                                                            \
-        x,                                                                                                                                      \
-        lse,                                                                                                                                    \
-        is_reduced_token_in_rank,                                                                                                               \
-        reduced_rdma_head,                                                                                                                      \
-        reduced_nvl_head,                                                                                                                       \
-        src_meta,                                                                                                                               \
-        rdma_channel_prefix_matrix,                                                                                                             \
-        rdma_rank_prefix_sum,                                                                                                                   \
-        gbl_channel_prefix_matrix,                                                                                                              \
-        pre_perm_idx,                                                                                                                           \
-        num_tokens,                                                                                                                             \
-        num_reduced_tokens,                                                                                                                     \
-        hidden_size,                                                                                                                            \
-        num_heads,                                                                                                                              \
-        rdma_buffer_ptr,                                                                                                                        \
-        num_max_rdma_chunked_send_tokens,                                                                                                       \
-        num_max_rdma_chunked_recv_tokens,                                                                                                       \
-        buffer_ptrs,                                                                                                                            \
-        num_max_nvl_chunked_send_tokens,                                                                                                        \
-        num_max_nvl_chunked_recv_tokens,                                                                                                        \
-        rank,                                                                                                                                   \
-        num_ranks,                                                                                                                              \
-        stream,                                                                                                                                 \
-        num_channels,                                                                                                                           \
-        acc_reduce,                                                                                                                             \
-        reduce_op);                                                                                                                             \
+#define LAUNCH_INTERNODE_GROUP_REDUCE(num_tma_stages, max_num_heads, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps) \
+  {                                                                                                                                                         \
+    launch_group_reduce<dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, max_num_heads, num_forwarder_warps, num_tma_stages>(              \
+        reduced_x,                                                                                                                                          \
+        reduced_lse,                                                                                                                                        \
+        x,                                                                                                                                                  \
+        lse,                                                                                                                                                \
+        reduced_x_2nd,                                                                                                                                      \
+        x_2nd,                                                                                                                                              \
+        is_reduced_token_in_rank,                                                                                                                           \
+        reduced_rdma_head,                                                                                                                                  \
+        reduced_nvl_head,                                                                                                                                   \
+        src_meta,                                                                                                                                           \
+        rdma_channel_prefix_matrix,                                                                                                                         \
+        rdma_rank_prefix_sum,                                                                                                                               \
+        gbl_channel_prefix_matrix,                                                                                                                          \
+        pre_perm_idx,                                                                                                                                       \
+        num_tokens,                                                                                                                                         \
+        num_reduced_tokens,                                                                                                                                 \
+        hidden_size,                                                                                                                                        \
+        num_heads,                                                                                                                                          \
+        rdma_buffer_ptr,                                                                                                                                    \
+        num_max_rdma_chunked_send_tokens,                                                                                                                   \
+        num_max_rdma_chunked_recv_tokens,                                                                                                                   \
+        buffer_ptrs,                                                                                                                                        \
+        num_max_nvl_chunked_send_tokens,                                                                                                                    \
+        num_max_nvl_chunked_recv_tokens,                                                                                                                    \
+        rank,                                                                                                                                               \
+        num_ranks,                                                                                                                                          \
+        stream,                                                                                                                                             \
+        num_channels,                                                                                                                                       \
+        acc_reduce,                                                                                                                                         \
+        reduce_op);                                                                                                                                         \
   }
 
-#define GROUP_REDUCE_TMA_STAGES_MAX_NUM_HEADS_LAUNCH_CASE(dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps) \
-  {                                                                                                                                  \
-    if (num_heads <= 48) { /*only set max_num_heads=48 to reduce shared memory*/                                                     \
-      if constexpr (num_forwarder_warps > 24) { /*too many warps, then only num_tma_stages=1*/                                       \
-        LAUNCH_INTERNODE_GROUP_REDUCE(1, 48, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps);             \
-      } else { /*small num_heads and num_warps, num_tma_stages=2 is ok*/                                                             \
-        LAUNCH_INTERNODE_GROUP_REDUCE(2, 48, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps);             \
-      }                                                                                                                              \
-    } else { /*try to set max_num_heads=128, then only num_tma_stages=1*/                                                            \
-      if constexpr (std::is_same_v<reduce_dtype_t, double>) { /*double reduce dtype costs too much shared memory*/                   \
-        if constexpr (num_forwarder_warps > 24) { /*too many warps, then max_num_heads=86*/                                          \
-          LAUNCH_INTERNODE_GROUP_REDUCE(1, 86, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps);           \
-        } else { /*small num_warps, max_num_heads=120 is ok*/                                                                        \
-          LAUNCH_INTERNODE_GROUP_REDUCE(1, 120, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps);          \
-        }                                                                                                                            \
-      } else { /*other reduce dtypes are ok to set max_num_heads=128*/                                                               \
-        LAUNCH_INTERNODE_GROUP_REDUCE(1, 128, dtype_t, comm_dtype_t, reduce_dtype_t, num_rdma_rank, num_forwarder_warps);            \
-      }                                                                                                                              \
-    }                                                                                                                                \
-  }                                                                                                                                  \
+#define GROUP_REDUCE_TMA_STAGES_MAX_NUM_HEADS_LAUNCH_CASE(dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps) \
+  {                                                                                                                                              \
+    if (num_heads <= 48) { /*only set max_num_heads=48 to reduce shared memory*/                                                                 \
+      if constexpr (num_forwarder_warps > 24) { /*too many warps, then only num_tma_stages=1*/                                                   \
+        LAUNCH_INTERNODE_GROUP_REDUCE(1, 48, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps);             \
+      } else { /*small num_heads and num_warps, num_tma_stages=2 is ok*/                                                                         \
+        LAUNCH_INTERNODE_GROUP_REDUCE(2, 48, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps);             \
+      }                                                                                                                                          \
+    } else { /*try to set max_num_heads=128, then only num_tma_stages=1*/                                                                        \
+      if constexpr (std::is_same_v<reduce_dtype_t, double>) { /*double reduce dtype costs too much shared memory*/                               \
+        if constexpr (num_forwarder_warps > 24) { /*too many warps, then max_num_heads=86*/                                                      \
+          LAUNCH_INTERNODE_GROUP_REDUCE(1, 86, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps);           \
+        } else { /*small num_warps, max_num_heads=120 is ok*/                                                                                    \
+          LAUNCH_INTERNODE_GROUP_REDUCE(1, 120, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps);          \
+        }                                                                                                                                        \
+      } else { /*other reduce dtypes are ok to set max_num_heads=128*/                                                                           \
+        LAUNCH_INTERNODE_GROUP_REDUCE(1, 128, dtype_t, comm_dtype_t, reduce_dtype_t, num_groups, num_rdma_rank, num_forwarder_warps);            \
+      }                                                                                                                                          \
+    }                                                                                                                                            \
+  }                                                                                                                                              \
   break
 
 #define GROUP_REDUCE_DTYPE_LAUNCH_CASE(...)                                                                    \
@@ -2736,8 +2760,15 @@ void group_reduce(
   }                                                                                                            \
   break
 
-  SWITCH_RDMA_RANKS_WITH_FORWARDER_WARPS(GROUP_REDUCE_DTYPE_LAUNCH_CASE);
+#define GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE(...)                        \
+  {                                                                      \
+    SWITCH_DATA_GROUPS_2(GROUP_REDUCE_DTYPE_LAUNCH_CASE, ##__VA_ARGS__); \
+  }                                                                      \
+  break
 
+  SWITCH_RDMA_RANKS_WITH_FORWARDER_WARPS(GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE);
+
+#undef GROUP_REDUCE_DATA_GROUPS_LAUNCH_CASE
 #undef GROUP_REDUCE_TMA_STAGES_MAX_NUM_HEADS_LAUNCH_CASE
 #undef GROUP_REDUCE_DTYPE_LAUNCH_CASE
 #undef LAUNCH_INTERNODE_GROUP_REDUCE
