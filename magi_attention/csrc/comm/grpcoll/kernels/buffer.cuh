@@ -101,6 +101,8 @@ struct AsymBuffer {
  public:
   int total_bytes;
 
+  DEVICE_INLINE AsymBuffer() : ptrs{nullptr}, num_bytes(0), total_bytes(0) {}
+
   DEVICE_INLINE AsymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1, int offset = 0) {
     GRPCOLL_STATIC_ASSERT(kNumRanks == 1, "This API is only available for single rank case");
     num_bytes = num_elems * sizeof(dtype_t);
@@ -161,6 +163,8 @@ struct SymBuffer {
 
  public:
   int total_bytes;
+
+  DEVICE_INLINE SymBuffer() : send_ptr(nullptr), recv_ptr(nullptr), num_bytes(0), total_bytes(0) {}
 
   // TODO: fix the parameter names
   DEVICE_INLINE SymBuffer(void*& gbl_ptr, int num_elems, int num_ranks, int sm_id = 0, int num_sms = 1) {

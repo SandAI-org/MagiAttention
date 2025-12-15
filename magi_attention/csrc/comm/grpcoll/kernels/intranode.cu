@@ -300,12 +300,14 @@ void group_cast_kernel(
   constexpr bool kIs3rdGroupExists = kNumDataGroups > 2;
   Buffer<int4, sizeof(int4)> channel_x_buffers_2nd;
   Buffer<int4, sizeof(int4)> channel_x_buffers_3rd;
-  if constexpr (kIs2ndGroupExists)
+  if constexpr (kIs2ndGroupExists) {
     channel_x_buffers_2nd =
         Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
-  if constexpr (kIs3rdGroupExists)
+  }
+  if constexpr (kIs3rdGroupExists) {
     channel_x_buffers_3rd =
         Buffer<int4, sizeof(int4)>(ptr, /*num_elems=*/num_channel_tokens_total * hidden_int4, /*elem_offset=*/channel_rank_token_offset * hidden_int4);
+  }
 
   // Get copy info
 #ifndef DISABLE_SM90_FEATURES

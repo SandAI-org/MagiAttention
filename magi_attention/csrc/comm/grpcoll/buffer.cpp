@@ -1249,6 +1249,7 @@ Buffer::internode_group_cast(
       /*num_tokens=*/num_tokens,
       /*hidden_int4=*/hidden_int4,
       /*num_heads=*/num_heads,
+      /*num_groups=*/num_groups,
       /*rdma_buffer_ptr=*/rdma_buffer_ptr,
       /*num_max_rdma_chunked_send_tokens=*/config.num_max_rdma_chunked_send_tokens,
       /*num_max_rdma_chunked_recv_tokens=*/config.num_max_rdma_chunked_recv_tokens,
