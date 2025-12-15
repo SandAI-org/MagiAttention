@@ -99,8 +99,9 @@ HOST_DEVICE_INLINE int get_num_bytes_per_token(int hidden_int4, int num_heads) {
       sizeof(int4)));
 }
 
-// Get meta data offset in RDMA buffer and meta data count to clean, all in `int32_t`
-// summing them together to get the required minimum RDMA buffer size
+// Get data buffer size and meta buffer size for RDMA buffer, all in `int32_t`
+// NOTE: summing them together to get the required minimum RDMA buffer size
+template <bool kDecoupled = true>
 HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(
     int hidden_int4,
     int num_heads,
@@ -108,17 +109,16 @@ HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(
     int num_rdma_ranks,
     int num_rdma_recv_buffer_tokens,
     int num_channels) {
+  constexpr int num_data_buffers = kDecoupled ? 2 : 1;
   auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
   auto total_num_bytes_per_token = num_bytes_per_token + hidden_int4 * sizeof(int4) * (num_groups - 1);
 
-  return {/*meta data offset, i.e. data buffer size*/ (
-              total_num_bytes_per_token * num_rdma_recv_buffer_tokens * num_rdma_ranks * /*decoupled send/recv*/ 2 * num_channels) /
-              sizeof(int),
-          /*meta data count to clean, i.e. meta data buffer size*/ (NUM_MAX_NVL_PEERS * 2 + 4) * num_rdma_ranks * /*decoupled send/recv*/ 2 * num_channels};
+  return {/*data buffer size*/ (total_num_bytes_per_token * num_rdma_recv_buffer_tokens * num_rdma_ranks * num_data_buffers * num_channels) / sizeof(int),
+          /*meta buffer size*/ (NUM_MAX_NVL_PEERS * 2 + 4) * num_rdma_ranks * num_data_buffers * num_channels};
 }
 
-// Get meta data offset in NVL buffer and meta data count to clean, all in `int32_t`
-// summing them together to get the required minimum NVL buffer size
+// Get data buffer size and meta buffer size for NVL buffer, all in `int32_t`
+// NOTE: summing them together to get the required minimum NVL buffer size
 HOST_DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
     int hidden_int4,
     int num_heads,
@@ -132,8 +132,8 @@ HOST_DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
   auto total_num_bytes_per_token = num_bytes_per_token + hidden_int4 * sizeof(int4) * (num_groups - 1);
 
   return {
-      /*meta data offset, i.e. data buffer size*/ (total_num_bytes_per_token * num_nvl_recv_buffer_tokens * num_nvl_ranks * num_channels) / sizeof(int),
-      /*meta data count to clean, i.e. meta data buffer size*/ num_nvl_ranks * (2 * num_rdma_ranks + 2) * num_channels,
+      /*data buffer size*/ (total_num_bytes_per_token * num_nvl_recv_buffer_tokens * num_nvl_ranks * num_channels) / sizeof(int),
+      /*meta buffer size*/ (num_rdma_ranks * 2 + 2) * num_nvl_ranks * num_channels,
   };
 }
 

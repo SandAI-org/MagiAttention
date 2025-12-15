@@ -1232,7 +1232,7 @@ def test_main(
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
     num_input_splits = 10
-    num_data_groups = 2  # set this > 1 to allow transfer multiple data groups together within the same kernel
+    num_data_groups = 3  # set this > 1 to allow transfer multiple data groups together within the same kernel
     assert 1 <= num_data_groups <= 3
 
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
@@ -1278,7 +1278,9 @@ def test_main(
     num_max_nvl_chunked_send_tokens = 8
     nvl_buffer_size = num_max_nvl_chunked_recv_tokens = (
         720 if num_ranks in (144, 160) else 512
-    )
+    ) // (
+        (dtype.itemsize // 2) if num_data_groups == 3 else 1
+    )  # NOTE: too large NVL buffer size for triple data groups
     num_max_rdma_chunked_send_tokens = 16
     rdma_buffer_size = num_max_rdma_chunked_recv_tokens = 128
     config = GrpCollConfig(
@@ -1288,12 +1290,26 @@ def test_main(
         rdma_chunk_size=num_max_rdma_chunked_send_tokens,  # num_max_rdma_chunked_send_tokens, default 6
         rdma_buffer_size=num_max_rdma_chunked_recv_tokens,  # num_max_rdma_chunked_recv_tokens, default 256
     )
+    min_num_rdma_bytes, min_num_nvl_bytes = GrpCollConfig.get_min_num_bytes_internode(
+        num_sms=num_sms,
+        num_rdma_ranks=num_nodes,
+        num_nvl_ranks=num_ranks // num_nodes,
+        hidden_size=hidden_size,
+        rdma_buffer_size=rdma_buffer_size,
+        nvl_buffer_size=nvl_buffer_size,
+        dtype=dtype,
+        transfer_lse=cast_lse or reduce_op == "lse",
+        num_heads=num_heads,
+        num_groups=num_data_groups,
+    )
 
     # print settings
     if local_rank == 0:
         print(
             (
-                f"[config] {num_sms=} | {num_channels=}\n"
+                f"[config] {num_sms=} | {num_channels=} "
+                f"| {min_num_rdma_bytes=} ({min_num_rdma_bytes / 1024**2:.2f} MB)"
+                f"| {min_num_nvl_bytes=} ({min_num_nvl_bytes / 1024**2:.2f} MB)\n"
                 f"{num_tokens=} | {hidden_size=} | {dtype=} | {comm_dtype=}\n"
                 f"{num_heads=} | {num_data_groups=} | {cast_lse=} | {reduce_op=}\n"
                 f"{nvl_buffer_size=} | {num_max_nvl_chunked_send_tokens=} | {num_max_nvl_chunked_recv_tokens=}\n"

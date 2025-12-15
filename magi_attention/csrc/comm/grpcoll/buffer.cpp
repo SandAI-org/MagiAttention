@@ -1084,7 +1084,7 @@ Buffer::internode_group_cast(
         /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
         /*rank=*/rank,
         /*stream=*/comm_stream,
-        /*num_rdma_bytes=*/config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
+        /*num_rdma_bytes=*/num_rdma_bytes,
         /*num_nvl_bytes=*/num_nvl_bytes,
         /*is_cached_group_cast=*/true);
   } else {
@@ -1121,7 +1121,7 @@ Buffer::internode_group_cast(
         /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
         /*rank=*/rank,
         /*stream=*/comm_stream,
-        /*num_rdma_bytes=*/config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
+        /*num_rdma_bytes=*/num_rdma_bytes,
         /*num_nvl_bytes=*/num_nvl_bytes);
 
     // Synchronize total received tokens and received tokens for each RDMA peer
@@ -1461,6 +1461,7 @@ Buffer::internode_group_reduce(
   internode::cached_notify(
       /*hidden_int4=*/hidden_int4,
       /*num_heads=*/num_heads,
+      /*num_groups=*/1, // TODO: support data groups
       /*num_ranks=*/num_ranks,
       /*num_channels=*/num_channels,
       /*num_reduced_tokens=*/num_reduced_tokens,
@@ -1475,7 +1476,7 @@ Buffer::internode_group_reduce(
       /*barrier_signal_ptrs=*/barrier_signal_ptrs_gpu,
       /*rank=*/rank,
       /*stream=*/comm_stream,
-      /*num_rdma_bytes=*/config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
+      /*num_rdma_bytes=*/num_rdma_bytes,
       /*num_nvl_bytes=*/num_nvl_bytes,
       /*is_cached_dispatch=*/false);
 

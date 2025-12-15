@@ -78,13 +78,6 @@ class GrpCollBuffer:
         runtime: the C++ runtime.
     """
 
-    # TODO: make it enum in cpp backend
-    reduce_op_str2int_map = {
-        "sum": 0,
-        "avg": 1,
-        "lse": 2,
-    }
-
     def __init__(
         self,
         group: dist.ProcessGroup,

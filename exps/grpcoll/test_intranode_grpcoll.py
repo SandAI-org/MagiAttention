@@ -1245,7 +1245,7 @@ def test_main(
         # num_max_rdma_chunked_send_tokens, default 6
         # num_max_rdma_chunked_recv_tokens, default 256
     )
-    min_num_nvl_bytes = GrpCollConfig.get_min_num_nvl_bytes(
+    min_num_nvl_bytes = GrpCollConfig.get_min_num_bytes_intranode(
         num_sms=num_sms,
         num_ranks=num_ranks,
         hidden_size=hidden_size,
@@ -1253,6 +1253,7 @@ def test_main(
         dtype=dtype,
         transfer_lse=cast_lse or reduce_op == "lse",
         num_heads=num_heads,
+        num_groups=num_data_groups,
     )
 
     # print settings

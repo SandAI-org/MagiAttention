@@ -131,7 +131,7 @@ class GrpCollConfig:
         return config_map[num_ranks]
 
     @staticmethod
-    def get_min_num_nvl_bytes(
+    def get_min_num_bytes_intranode(
         num_sms: int,
         num_ranks: int,
         hidden_size: int,
@@ -169,6 +169,61 @@ class GrpCollConfig:
             + num_channels * num_ranks * nvl_buffer_size * num_heads * torch.float32.itemsize
             # max padding bytes to align for vectorized token data buffer (int4)
             + 16 * num_groups
+            # align up to `alignment`
+            + alignment - 1
+        ) // alignment * alignment
+        # fmt: on
+
+    @staticmethod
+    def get_min_num_bytes_internode(
+        num_sms: int,
+        num_rdma_ranks: int,
+        num_nvl_ranks: int,
+        hidden_size: int,
+        rdma_buffer_size: int,
+        nvl_buffer_size: int,
+        dtype: torch.dtype,
+        transfer_lse: bool = False,
+        num_heads: int | None = None,
+        num_groups: int = 1,
+        alignment: int = 128,  # according to `NUM_BUFFER_ALIGNMENT_BYTES`
+        rdma_decoulped: bool = True,
+    ) -> tuple[int, int]:
+        if transfer_lse:
+            assert (
+                num_heads is not None
+            ), "num_heads must be set when transfer_lse is True"
+            assert (
+                hidden_size % num_heads == 0
+            ), "hidden_size must be divisible by num_heads"
+        else:
+            num_heads = 0
+
+        assert num_sms % 2 == 0, "num_sms must be even"
+        num_channels = num_sms // 2
+
+        num_data_buffers = 2 if rdma_decoulped else 1
+
+        hidden_bytes_per_token = hidden_size * dtype.itemsize * num_groups
+        lse_bytes_per_token = num_heads * torch.float32.itemsize
+        src_meta_bytes_per_token = 2 * torch.int32.itemsize
+        num_bytes_per_token = (
+            hidden_bytes_per_token + lse_bytes_per_token + src_meta_bytes_per_token
+        )
+
+        # fmt: off
+        return (
+            # data buffer (hidden states + lse + src meta)
+            num_channels * num_data_buffers * num_rdma_ranks * rdma_buffer_size * num_bytes_per_token
+            # meta buffer (queue head/tail per NVL rank + start/end idx for RDMA/NVL)
+            + num_channels * num_data_buffers * num_rdma_ranks * (num_nvl_ranks * 2 + 4) * torch.int32.itemsize
+            # align up to `alignment`
+            + alignment - 1
+        ) // alignment * alignment, (
+            # data buffer (hidden states + lse + src meta)
+            num_channels * num_nvl_ranks * nvl_buffer_size * num_bytes_per_token
+            # meta buffer (queue head/tail per RDMA rank + start/end idx for NVL)
+            + num_channels * num_nvl_ranks * (num_rdma_ranks * 2 + 2) * torch.int32.itemsize
             # align up to `alignment`
             + alignment - 1
         ) // alignment * alignment
