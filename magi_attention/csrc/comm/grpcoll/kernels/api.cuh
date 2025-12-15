@@ -204,6 +204,7 @@ void notify_group_cast(
     int num_channels,
     int hidden_int4,
     int num_heads,
+    int num_groups,
     int* rdma_channel_prefix_matrix,
     int* recv_rdma_rank_prefix_sum,
     int* gbl_channel_prefix_matrix,
@@ -261,6 +262,7 @@ void group_cast(
 void cached_notify(
     int hidden_int4,
     int num_heads,
+    int num_groups,
     int num_ranks,
     int num_channels,
     int num_reduced_tokens,

@@ -99,27 +99,41 @@ HOST_DEVICE_INLINE int get_num_bytes_per_token(int hidden_int4, int num_heads) {
       sizeof(int4)));
 }
 
-HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(int hidden_int4, int num_heads, int num_rdma_ranks, int num_rdma_recv_buffer_tokens, int num_channels) {
-  // Return `int32_t` offset and count to clean
-  return {
-      (get_num_bytes_per_token(hidden_int4, num_heads) * num_rdma_recv_buffer_tokens * num_rdma_ranks * 2 * num_channels) / sizeof(int),
-      (NUM_MAX_NVL_PEERS * 2 + 4) * num_rdma_ranks * 2 * num_channels};
+// Get meta data offset in RDMA buffer and meta data count to clean, all in `int32_t`
+// summing them together to get the required minimum RDMA buffer size
+HOST_DEVICE_INLINE std::pair<int, int> get_rdma_clean_meta(
+    int hidden_int4,
+    int num_heads,
+    int num_groups,
+    int num_rdma_ranks,
+    int num_rdma_recv_buffer_tokens,
+    int num_channels) {
+  auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
+  auto total_num_bytes_per_token = num_bytes_per_token + hidden_int4 * sizeof(int4) * (num_groups - 1);
+
+  return {/*meta data offset, i.e. data buffer size*/ (
+              total_num_bytes_per_token * num_rdma_recv_buffer_tokens * num_rdma_ranks * /*decoupled send/recv*/ 2 * num_channels) /
+              sizeof(int),
+          /*meta data count to clean, i.e. meta data buffer size*/ (NUM_MAX_NVL_PEERS * 2 + 4) * num_rdma_ranks * /*decoupled send/recv*/ 2 * num_channels};
 }
 
+// Get meta data offset in NVL buffer and meta data count to clean, all in `int32_t`
+// summing them together to get the required minimum NVL buffer size
 HOST_DEVICE_INLINE std::pair<int, int> get_nvl_clean_meta(
     int hidden_int4,
     int num_heads,
+    int num_groups,
     int num_rdma_ranks,
     int num_nvl_ranks,
     int num_nvl_recv_buffer_tokens,
     int num_channels,
     bool is_group_cast) {
-  GRPCOLL_STATIC_ASSERT(sizeof(SourceMeta) % sizeof(int) == 0, "Invalid size of `SourceMeta`");
+  auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
+  auto total_num_bytes_per_token = num_bytes_per_token + hidden_int4 * sizeof(int4) * (num_groups - 1);
 
-  // Return `int32_t` offset and to clean
   return {
-      (num_nvl_recv_buffer_tokens * get_num_bytes_per_token(hidden_int4, num_heads) * num_nvl_ranks * num_channels) / sizeof(int),
-      num_nvl_ranks * (2 * num_rdma_ranks + 2) * num_channels,
+      /*meta data offset, i.e. data buffer size*/ (total_num_bytes_per_token * num_nvl_recv_buffer_tokens * num_nvl_ranks * num_channels) / sizeof(int),
+      /*meta data count to clean, i.e. meta data buffer size*/ num_nvl_ranks * (2 * num_rdma_ranks + 2) * num_channels,
   };
 }
 

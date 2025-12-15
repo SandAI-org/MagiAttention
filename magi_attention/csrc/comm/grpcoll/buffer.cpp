@@ -1069,6 +1069,7 @@ Buffer::internode_group_cast(
     internode::cached_notify(
         /*hidden_int4=*/hidden_int4,
         /*num_heads=*/num_heads,
+        /*num_groups=*/num_groups,
         /*num_ranks=*/num_ranks,
         /*num_channels=*/num_channels,
         /*num_reduced_tokens=*/0,
@@ -1108,6 +1109,7 @@ Buffer::internode_group_cast(
         /*num_channels=*/num_channels,
         /*hidden_int4=*/hidden_int4,
         /*num_heads=*/num_heads,
+        /*num_groups=*/num_groups,
         /*rdma_channel_prefix_matrix=*/rdma_channel_prefix_matrix.data_ptr<int>(),
         /*recv_rdma_rank_prefix_sum=*/recv_rdma_rank_prefix_sum.data_ptr<int>(),
         /*gbl_channel_prefix_matrix=*/gbl_channel_prefix_matrix.data_ptr<int>(),

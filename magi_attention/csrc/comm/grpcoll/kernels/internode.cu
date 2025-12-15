@@ -291,6 +291,7 @@ void notify_group_cast(
     int num_channels,
     int hidden_int4,
     int num_heads,
+    int num_groups,
     int* rdma_channel_prefix_matrix,
     int* recv_rdma_rank_prefix_sum,
     int* gbl_channel_prefix_matrix,
@@ -341,10 +342,13 @@ void notify_group_cast(
   break
 
   // Get clean meta
-  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_heads, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
-  auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_heads, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, true);
+  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
+  auto nvl_clean_meta = get_nvl_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, true);
+
+  // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
+
   // REVIEW: why limited to INT_MAX ?
   GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
   GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
@@ -1662,6 +1666,7 @@ __global__ void cached_notify_kernel(
 void cached_notify(
     int hidden_int4,
     int num_heads,
+    int num_groups,
     int num_ranks,
     int num_channels,
     int num_reduced_tokens,
@@ -1686,14 +1691,18 @@ void cached_notify(
   const int num_sms = num_channels * 2;
 
   // Get clean meta
-  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_heads, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
+  auto rdma_clean_meta = get_rdma_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, num_max_rdma_chunked_recv_tokens, num_channels);
   auto nvl_clean_meta =
-      get_nvl_clean_meta(hidden_int4, num_heads, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, is_cached_group_cast);
+      get_nvl_clean_meta(hidden_int4, num_heads, num_groups, num_rdma_ranks, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_channels, is_cached_group_cast);
+
+  // Check if the buffer size is enough
   GRPCOLL_HOST_ASSERT((rdma_clean_meta.first + rdma_clean_meta.second) * sizeof(int) <= num_rdma_bytes);
   GRPCOLL_HOST_ASSERT((nvl_clean_meta.first + nvl_clean_meta.second) * sizeof(int) <= num_nvl_bytes);
+
   // REVIEW: why limited to INT_MAX ?
   GRPCOLL_HOST_ASSERT(num_rdma_bytes < INT_MAX);
   GRPCOLL_HOST_ASSERT(num_nvl_bytes < INT_MAX);
+
   GRPCOLL_HOST_ASSERT(num_sms > 3); // first to barrier, second to reset RDMA head, rest to reset NVL head
   GRPCOLL_HOST_ASSERT(num_warps > 1); // for `barrier_all`
   if (!is_cached_group_cast) {
