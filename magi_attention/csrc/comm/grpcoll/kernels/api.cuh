@@ -224,6 +224,12 @@ void group_cast(
     float* recv_lse,
     const void* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    void* recv_x_2nd,
+    const void* x_2nd,
+    /* 3rd group of input / output data*/
+    void* recv_x_3rd,
+    const void* x_3rd,
     /* other metadata */
     void* recv_src_meta,
     int* send_rdma_head,

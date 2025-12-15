@@ -689,6 +689,9 @@ class GrpCollBuffer:
             recv_lse = None
 
         # Unpack (x,recv_x) groups
+        # HACK: this is a hacky way to pack several tensors together
+        # w/o introducing extra H2D for the vector of ptrs
+        # TODO: find a more elegant way in the future
         num_groups = len(x)
         assert 1 <= num_groups <= 3, "num_groups only supports {1,2,3}"
         x_1st = x[0]
@@ -902,18 +905,35 @@ class GrpCollBuffer:
             assert lse is not None, "lse should not be None when `cast_lse` is set"
         else:  # no need to cast lse, even passed in
             lse = None
-            # recv_lse = None
+            recv_lse = None
 
         # Unpack (x,recv_x) groups
+        # HACK: this is a hacky way to pack several tensors together
+        # w/o introducing extra H2D for the vector of ptrs
+        # TODO: find a more elegant way in the future
         num_groups = len(x)
-        assert num_groups == 1, "num_groups only supports {1,}"
+        assert 1 <= num_groups <= 3, "num_groups only supports {1,2,3}"
         x_1st = x[0]
         recv_x_1st = recv_x[0] if recv_x is not None else None
+        if num_groups > 1:
+            x_2nd = x[1]
+            recv_x_2nd = recv_x[1] if recv_x is not None else None
+        else:
+            x_2nd = None
+            recv_x_2nd = None
+        if num_groups > 2:
+            x_3rd = x[2]
+            recv_x_3rd = recv_x[2] if recv_x is not None else None
+        else:
+            x_3rd = None
+            recv_x_3rd = None
 
         # Launch the internode group cast kernel
         (
             recv_x_1st,
             recv_lse,
+            recv_x_2nd,
+            recv_x_3rd,
             # handle
             rdma_channel_prefix_matrix,
             gbl_channel_prefix_matrix,
@@ -931,6 +951,10 @@ class GrpCollBuffer:
             recv_x_1st,
             lse,
             recv_lse,
+            x_2nd,
+            recv_x_2nd,
+            x_3rd,
+            recv_x_3rd,
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
             is_token_in_rank,
@@ -966,6 +990,10 @@ class GrpCollBuffer:
         recv_x = [
             recv_x_1st,
         ]
+        if num_groups > 1:
+            recv_x.append(recv_x_2nd)
+        if num_groups > 2:
+            recv_x.append(recv_x_3rd)
 
         # View output to hidden shape
         for i in range(num_groups):

@@ -346,9 +346,6 @@ Buffer::intranode_group_cast(
   // REVIEW: should we release GIL here like internode ?
   // py::gil_scoped_release release;
 
-  // Determine if we are using chunked mode
-  bool cached_mode = cached_rank_prefix_matrix.has_value();
-
   // Get the number of data groups
   int num_groups = 1;
   if (x_2nd.has_value())
@@ -359,9 +356,13 @@ Buffer::intranode_group_cast(
   }
   GRPCOLL_HOST_ASSERT(num_groups <= 3);
 
-  // One channel use two blocks, even-numbered blocks for sending, odd-numbered blocks for receiving.
+  // One channel use two blocks,
+  // even-numbered blocks for sending,
+  // odd-numbered blocks for receiving.
   GRPCOLL_HOST_ASSERT(config.num_sms % 2 == 0);
   int num_channels = config.num_sms / 2;
+
+  bool cached_mode = cached_rank_prefix_matrix.has_value();
   if (cached_mode) {
     GRPCOLL_HOST_ASSERT(cached_rank_prefix_matrix.has_value());
     GRPCOLL_HOST_ASSERT(cached_channel_prefix_matrix.has_value());
@@ -904,6 +905,10 @@ std::tuple<
     /* 1st group of output data */
     torch::Tensor,
     std::optional<torch::Tensor>,
+    /* 2nd group of output data */
+    std::optional<torch::Tensor>,
+    /* 3rd group of output data */
+    std::optional<torch::Tensor>,
     /* handle */
     torch::Tensor,
     torch::Tensor,
@@ -922,6 +927,12 @@ Buffer::internode_group_cast(
     std::optional<torch::Tensor>& recv_x_buf,
     const std::optional<torch::Tensor>& lse,
     std::optional<torch::Tensor>& recv_lse_buf,
+    /* 2nd group of input / output data*/
+    const std::optional<torch::Tensor>& x_2nd,
+    std::optional<torch::Tensor>& recv_x_buf_2nd,
+    /* 3rd group of input / output data*/
+    const std::optional<torch::Tensor>& x_3rd,
+    std::optional<torch::Tensor>& recv_x_buf_3rd,
     /* other metadata */
     const std::optional<torch::Tensor>& num_tokens_per_rank,
     const std::optional<torch::Tensor>& num_tokens_per_rdma_rank,
@@ -942,6 +953,16 @@ Buffer::internode_group_cast(
   // If users of grpcoll need to execute other Python code on other threads, such as KV transfer, their code will get stuck due to GIL
   // unless we release GIL here.
   py::gil_scoped_release release;
+
+  // Get the number of data groups
+  int num_groups = 1;
+  if (x_2nd.has_value())
+    ++num_groups;
+  if (x_3rd.has_value()) {
+    GRPCOLL_HOST_ASSERT(num_groups == 2);
+    ++num_groups;
+  }
+  GRPCOLL_HOST_ASSERT(num_groups <= 3);
 
   // One channel use two SMs
   // one for forwarders, the other for (senders, receivers)
@@ -992,6 +1013,14 @@ Buffer::internode_group_cast(
 
   auto num_tokens = static_cast<int>(x.size(0)), hidden_size = static_cast<int>(x.size(1)),
        hidden_int4 = static_cast<int>(hidden_size * x.element_size() / sizeof(int4));
+  if (num_groups > 1) {
+    GRPCOLL_HOST_ASSERT(x_2nd->dim() == 2 and x_2nd->is_contiguous() and x_2nd->scalar_type() == x.scalar_type());
+    GRPCOLL_HOST_ASSERT(x_2nd->size(0) == num_tokens and x_2nd->size(1) == hidden_size);
+  }
+  if (num_groups > 2) {
+    GRPCOLL_HOST_ASSERT(x_3rd->dim() == 2 and x_3rd->is_contiguous() and x_3rd->scalar_type() == x.scalar_type());
+    GRPCOLL_HOST_ASSERT(x_3rd->size(0) == num_tokens and x_3rd->size(1) == hidden_size);
+  }
 
   // LSE checks
   float* lse_ptr = nullptr;
@@ -1127,6 +1156,36 @@ Buffer::internode_group_cast(
     recv_x = torch::empty({num_recv_tokens, hidden_size}, x.options());
   }
 
+  // Allocate 2nd recv_x buffer and assign the ptr if needed
+  auto recv_x_2nd = std::optional<torch::Tensor>();
+  void *x_ptr_2nd = nullptr, *recv_x_ptr_2nd = nullptr;
+  if (num_groups > 1) {
+    if (recv_x_buf_2nd.has_value()) {
+      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->dim() == 2 and recv_x_buf_2nd->is_contiguous() and recv_x_buf_2nd->scalar_type() == x.scalar_type());
+      GRPCOLL_HOST_ASSERT(recv_x_buf_2nd->size(0) == num_recv_tokens and recv_x_buf_2nd->size(1) == hidden_size);
+      recv_x_2nd.emplace(recv_x_buf_2nd.value());
+    } else {
+      recv_x_2nd = torch::empty({num_recv_tokens, hidden_size}, x_2nd->options());
+    }
+    x_ptr_2nd = x_2nd->data_ptr();
+    recv_x_ptr_2nd = recv_x_2nd->data_ptr();
+  }
+
+  // Allocate 3rd recv_x buffer and assign the ptr if needed
+  auto recv_x_3rd = std::optional<torch::Tensor>();
+  void *x_ptr_3rd = nullptr, *recv_x_ptr_3rd = nullptr;
+  if (num_groups > 2) {
+    if (recv_x_buf_3rd.has_value()) {
+      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->dim() == 2 and recv_x_buf_3rd->is_contiguous() and recv_x_buf_3rd->scalar_type() == x.scalar_type());
+      GRPCOLL_HOST_ASSERT(recv_x_buf_3rd->size(0) == num_recv_tokens and recv_x_buf_3rd->size(1) == hidden_size);
+      recv_x_3rd.emplace(recv_x_buf_3rd.value());
+    } else {
+      recv_x_3rd = torch::empty({num_recv_tokens, hidden_size}, x_3rd->options());
+    }
+    x_ptr_3rd = x_3rd->data_ptr();
+    recv_x_ptr_3rd = recv_x_3rd->data_ptr();
+  }
+
   // Assign ptr for post_perm_idx if needed
   int64_t* post_perm_idx_ptr = nullptr;
   if (post_perm_idx.has_value()) {
@@ -1172,6 +1231,10 @@ Buffer::internode_group_cast(
       /*recv_lse=*/recv_lse_ptr,
       /*x=*/x.data_ptr(),
       /*lse=*/lse_ptr,
+      /*recv_x_2nd=*/recv_x_ptr_2nd,
+      /*x_2nd=*/x_ptr_2nd,
+      /*recv_x_3rd=*/recv_x_ptr_3rd,
+      /*x_3rd=*/x_ptr_3rd,
       /*recv_src_meta=*/cached_mode ? nullptr : recv_src_meta->data_ptr(),
       /*send_rdma_head=*/cached_mode ? nullptr : send_rdma_head->data_ptr<int>(),
       /*send_nvl_head=*/cached_mode ? nullptr : send_nvl_head->data_ptr<int>(),
@@ -1210,7 +1273,11 @@ Buffer::internode_group_cast(
     }
     // record optional tensors
     for (auto& to :
-         {lse,
+         {x_2nd,
+          recv_x_2nd,
+          x_3rd,
+          recv_x_3rd,
+          lse,
           recv_lse,
           num_tokens_per_rank,
           num_tokens_per_rdma_rank,
@@ -1240,6 +1307,8 @@ Buffer::internode_group_cast(
   return {
       recv_x,
       recv_lse,
+      recv_x_2nd,
+      recv_x_3rd,
       rdma_channel_prefix_matrix,
       gbl_channel_prefix_matrix,
       recv_rdma_channel_prefix_matrix,

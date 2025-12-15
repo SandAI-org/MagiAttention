@@ -376,6 +376,12 @@ void group_cast_kernel(
     float* recv_lse,
     const int4* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    int4* recv_x_2nd,
+    const int4* x_2nd,
+    /* 3rd group of input / output data*/
+    int4* recv_x_3rd,
+    const int4* x_3rd,
     /* other metadata */
     SourceMeta* recv_src_meta,
     int* send_rdma_head,
@@ -1218,6 +1224,12 @@ void launch_group_cast(
     float* recv_lse,
     const void* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    void* recv_x_2nd,
+    const void* x_2nd,
+    /* 3rd group of input / output data*/
+    void* recv_x_3rd,
+    const void* x_3rd,
     /* other metadata */
     void* recv_src_meta,
     int* send_rdma_head,
@@ -1273,6 +1285,10 @@ void launch_group_cast(
         recv_lse,                                                            \
         reinterpret_cast<const int4*>(x),                                    \
         lse,                                                                 \
+        reinterpret_cast<int4*>(recv_x_2nd),                                 \
+        reinterpret_cast<const int4*>(x_2nd),                                \
+        reinterpret_cast<int4*>(recv_x_3rd),                                 \
+        reinterpret_cast<const int4*>(x_3rd),                                \
         reinterpret_cast<SourceMeta*>(recv_src_meta),                        \
         send_rdma_head,                                                      \
         send_nvl_head,                                                       \
@@ -1339,6 +1355,12 @@ void group_cast(
     float* recv_lse,
     const void* x,
     const float* lse,
+    /* 2nd group of input / output data*/
+    void* recv_x_2nd,
+    const void* x_2nd,
+    /* 3rd group of input / output data*/
+    void* recv_x_3rd,
+    const void* x_3rd,
     /* other metadata */
     void* recv_src_meta,
     int* send_rdma_head,
@@ -1372,6 +1394,10 @@ void group_cast(
         recv_lse,                                     \
         x,                                            \
         lse,                                          \
+        recv_x_2nd,                                   \
+        x_2nd,                                        \
+        recv_x_3rd,                                   \
+        x_3rd,                                        \
         recv_src_meta,                                \
         send_rdma_head,                               \
         send_nvl_head,                                \
