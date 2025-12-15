@@ -77,11 +77,11 @@ class DistAttnRuntime:
         self.concat_kv = not self.use_native_grpcoll
 
         # NOTE: when disabling qo comm
-        # if not using sdpa backend,
+        # if not using sdpa backend and not using fa4 backend,
         # we will use accumulative buffer for partial out and lse
         # to avoid the storage of partial results
         # and an additional explicit `correct_attn_fwd_result`
-        self.fwd_out_lse_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend
+        self.fwd_out_lse_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend and not self.use_fa4_backend
 
         # NOTE: when enabling qo comm
         # and neither using native grpcoll nor enabling fwd high precision reduce
@@ -102,10 +102,10 @@ class DistAttnRuntime:
         self.concat_qo_do = self.enable_qo_comm and not self.use_native_grpcoll
 
         # NOTE: when disabling qo comm
-        # if not using sdpa backend,
+        # if not using sdpa backend and not using fa4 backend,
         # we will use accumulative buffer for partial dq
         # to avoid an additional explicit `add_`
-        self.bwd_dq_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend
+        self.bwd_dq_use_acc = not self.enable_qo_comm and not self.use_sdpa_backend and not self.use_fa4_backend
 
         # NOTE: when neither using native grpcoll nor enabling bwd high precision reduce
         # we're supposed to initialize the partial local dk,dv in low precision
