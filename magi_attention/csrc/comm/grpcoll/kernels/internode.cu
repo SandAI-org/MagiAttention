@@ -466,6 +466,7 @@ void group_cast_kernel(
   //  `rdma_channel_tail`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
   const auto hidden_bytes = hidden_int4 * sizeof(int4), lse_bytes = num_heads * sizeof(float);
   const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
+  const auto num_bytes_per_token_2nd = hidden_bytes; // for other groups, we only transfer distinct hidden states
   constexpr int num_meta_per_rdma_channel = 2 * (NUM_MAX_NVL_PEERS + 1); // (start, end) idx for dst RDMA peer (latter) + its each NVL rank (former)
   auto rdma_channel_data = SymBuffer<uint8_t, /*kDecoupled=*/true>(
       rdma_buffer_ptr,
@@ -481,12 +482,12 @@ void group_cast_kernel(
       SymBuffer<uint64_t, /*kDecoupled=*/false>(rdma_buffer_ptr, /*num_elems=*/1, /*num_ranks=*/kNumRDMARanks, /*sm_id=*/channel_id, /*num_sms=*/num_channels);
 
   // Get RDMA symmetric buffer for other groups
-  //  `rdma_channel_data`: shape=(num_channels, kNumRDMARanks, num_max_rdma_chunked_recv_tokens, hidden_bytes), dtype=uint8_t
+  //  `rdma_channel_data_2nd`: shape=(num_channels, kNumRDMARanks, num_max_rdma_chunked_recv_tokens, num_bytes_per_token_2nd), dtype=uint8_t
   SymBuffer<uint8_t, /*kDecoupled=*/true> rdma_channel_data_2nd;
   if constexpr (kIs2ndGroupExists) {
     rdma_channel_data_2nd = SymBuffer<uint8_t, /*kDecoupled=*/true>(
         rdma_buffer_ptr,
-        /*num_elems=*/num_max_rdma_chunked_recv_tokens * hidden_bytes,
+        /*num_elems=*/num_max_rdma_chunked_recv_tokens * num_bytes_per_token_2nd,
         /*num_ranks=*/kNumRDMARanks,
         /*sm_id=*/channel_id,
         /*num_sms=*/num_channels);
@@ -530,12 +531,12 @@ void group_cast_kernel(
           .advance_also(rs_wr_buffer_ptr);
 
   // Get NVL buffer for other groups
-  //  `nvl_channel_x`: shape=(num_channels, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_bytes_per_token), dtype=uint8_t
+  //  `nvl_channel_x_2nd`: shape=(num_channels, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_bytes_per_token_2nd), dtype=uint8_t
   AsymBuffer<uint8_t> nvl_channel_x_2nd;
   if constexpr (kIs2ndGroupExists) {
     nvl_channel_x_2nd = AsymBuffer<uint8_t>(
                             ws_rr_buffer_ptr,
-                            /*num_elems=*/num_max_nvl_chunked_recv_tokens * hidden_bytes,
+                            /*num_elems=*/num_max_nvl_chunked_recv_tokens * num_bytes_per_token_2nd,
                             /*num_ranks=*/NUM_MAX_NVL_PEERS,
                             /*sm_id=*/channel_id,
                             /*num_sms=*/num_channels,
@@ -557,7 +558,7 @@ void group_cast_kernel(
   // NOTE: TMA buffer is only used by `kRDMAAndNVLForwarder` and `kNVLReceivers`
   extern __shared__ __align__(1024) uint8_t smem_tma_buffer[]; // REVIEW: why aligned to 1024 bytes ?
   auto tma_buffer = smem_tma_buffer + target_rank * kNumTMABytesPerWarp;
-  auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + hidden_bytes);
+  auto tma_mbarrier = reinterpret_cast<uint64_t*>(tma_buffer + num_bytes_per_token);
   uint32_t tma_phase = 0;
   if ((warp_role == WarpRole::kRDMAAndNVLForwarder or warp_role == WarpRole::kNVLReceivers) and lane_id == 0) {
     mbarrier_init(tma_mbarrier, 1);
@@ -618,10 +619,16 @@ void group_cast_kernel(
     // are cleaned by `kRDMASenderCoordinator` before `kRDMASender` access them
     sync_rdma_sender_smem();
 
-    // Iterate over tokens and copy into buffer
+    // Prepare RDMA send buffer
     int64_t token_idx;
     int cached_rdma_channel_head = 0, global_rdma_tail_idx = 0;
-    auto send_buffer = lane_id == rdma_rank ? rdma_channel_data.recv_buffer(lane_id) : rdma_channel_data.send_buffer(lane_id);
+    uint8_t* send_buffer = lane_id == rdma_rank ? rdma_channel_data.recv_buffer(lane_id) : rdma_channel_data.send_buffer(lane_id);
+    uint8_t* send_buffer_2nd;
+    if constexpr (kIs2ndGroupExists) {
+      send_buffer_2nd = lane_id == rdma_rank ? rdma_channel_data_2nd.recv_buffer(lane_id) : rdma_channel_data_2nd.send_buffer(lane_id);
+    }
+
+    // Iterate over tokens and copy into RDMA send buffer
     GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
     for (token_idx = token_start_idx; token_idx < token_end_idx; ++token_idx) {
       // Update `global_rdma_tail_idx`
@@ -652,7 +659,7 @@ void group_cast_kernel(
 
       // Store RDMA head for group_reduce stage to reduce
       //  `send_rdma_head`: shape=(num_tokens, kNumRDMARanks), dtype=int
-      if (lane_id < kNumRDMARanks and not kCachedMode) {
+      if (lane_id < kNumRDMARanks and !kCachedMode) {
         send_rdma_head[token_idx * kNumRDMARanks + lane_id] = rdma_tail_idx;
       }
 
@@ -660,6 +667,7 @@ void group_cast_kernel(
       SourceMeta src_meta;
       int num_dst_rdma_ranks = 0;
       void* dst_send_buffers[kNumMaxDstRDMARanks];
+      void* dst_send_buffers_2nd[kIs2ndGroupExists ? kNumMaxDstRDMARanks : 1];
 #pragma unroll
       // Broadcast info about the dst RDMA ranks this token will be sent to, including:
       //  1. the `src_meta` to tell which NVL ranks this token should be sent to in each RDMA peer
@@ -669,10 +677,19 @@ void group_cast_kernel(
           slot_idx = slot_idx % num_max_rdma_chunked_recv_tokens;
           auto recv_is_token_in_rank_uint64 = broadcast_ptr_in_warp(/*ptr=*/is_token_in_rank_uint64, /*src_lane=*/r);
           auto recv_is_token_in_rank_values = reinterpret_cast<const bool*>(&recv_is_token_in_rank_uint64);
-          if (lane_id == num_dst_rdma_ranks)
+
+          // Prepare `src_meta`
+          if (lane_id == num_dst_rdma_ranks) {
             src_meta = SourceMeta(rdma_rank, recv_is_token_in_rank_values);
+          }
+
+          // Prepare `dst_send_buffer`
           dst_send_buffers[num_dst_rdma_ranks++] =
               reinterpret_cast<uint8_t*>(broadcast_ptr_in_warp(/*ptr=*/send_buffer, /*src_lane=*/r)) + slot_idx * num_bytes_per_token;
+          if constexpr (kIs2ndGroupExists) {
+            dst_send_buffers_2nd[num_dst_rdma_ranks++] =
+                reinterpret_cast<uint8_t*>(broadcast_ptr_in_warp(/*ptr=*/send_buffer_2nd, /*src_lane=*/r)) + slot_idx * num_bytes_per_token_2nd;
+          }
         }
       }
       GRPCOLL_DEVICE_ASSERT(num_dst_rdma_ranks <= kNumMaxDstRDMARanks); // REVIEW: why at most 8 RDMA peers to send to ?
@@ -1131,7 +1148,7 @@ void group_cast_kernel(
 
     // Store `recv_gbl_channel_prefix_matrix` for group_reduce stage
     //  `recv_gbl_channel_prefix_matrix`: shape=(kNumRanks, num_channels), dtype=int
-    if (lane_id < kNumRDMARanks and not kCachedMode)
+    if (lane_id < kNumRDMARanks and !kCachedMode)
       recv_gbl_channel_prefix_matrix[(lane_id * NUM_MAX_NVL_PEERS + src_nvl_rank) * num_channels + channel_id] = total_offset;
     __syncwarp();
 
@@ -1231,7 +1248,7 @@ void group_cast_kernel(
         // Copy src meta to `recv_src_meta` for group_reduce stage
         // NOTE: here we don't apply `post_perm_idx` to `recv_src_meta`
         token_ptr_in_buffer += lse_bytes;
-        if (lane_id == 0 and not kCachedMode) {
+        if (lane_id == 0 and !kCachedMode) {
           st_na_global(recv_src_meta + recv_token_idx, src_meta); // non-cached store
         }
 
