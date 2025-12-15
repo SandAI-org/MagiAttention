@@ -554,6 +554,14 @@ def test_func(
     ]
     gbl_num_tokens_per_rank: torch.Tensor = kwargs["gbl_num_tokens_per_rank"]
 
+    # --------------      test normal group_cast       -------------- #
+
+    if local_rank == 0:
+        print(
+            "\n# ------    Test Normal Intranode Group Cast   ------ #\n",
+            flush=True,
+        )
+
     # prepare group_cast args
     # x: shape=[num_local_tokens, hidden_dim]
     # num_tokens_per_rank: shape=[num_ranks]: the number of tokens sent to each rank
@@ -590,14 +598,6 @@ def test_func(
     }
     if previous_mode:
         group_cast_args.update({"previous_event": buffer.capture()})
-
-    # --------------      test normal group_cast       -------------- #
-
-    if local_rank == 0:
-        print(
-            "\n# ------    Test Normal Intranode Group Cast   ------ #\n",
-            flush=True,
-        )
 
     # group_cast
     # recv_x: shape=[num_recv_tokens, hidden_dim]:

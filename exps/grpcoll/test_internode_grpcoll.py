@@ -82,6 +82,7 @@ def prepare_test_func_kwargs(
     hidden_size: int,
     num_heads: int,
     num_input_splits: int,
+    num_data_groups: int,
     dtype: torch.dtype,
     comm_dtype: torch.dtype | None,
     distinct_token: bool,
@@ -457,6 +458,21 @@ def prepare_test_func_kwargs(
     group.barrier()
     time.sleep(1)
 
+    # prepare other data groups
+    # TODO: test group_reduce with `num_data_groups > 1`
+    if num_data_groups > 1:
+        x_2nd = x.clone() + 1
+        recv_x_gc_2nd = recv_x_gc.clone() + 1
+    else:
+        x_2nd = None
+        recv_x_gc_2nd = None
+    if num_data_groups > 2:
+        x_3rd = x.clone() + 2
+        recv_x_gc_3rd = recv_x_gc.clone() + 2
+    else:
+        x_3rd = None
+        recv_x_gc_3rd = None
+
     return dict(
         x=x,
         lse=lse,
@@ -464,6 +480,10 @@ def prepare_test_func_kwargs(
         recv_x_gc_buf=recv_x_gc_buf,
         recv_lse_gc=recv_lse_gc,
         recv_lse_gc_buf=recv_lse_gc_buf,
+        x_2nd=x_2nd,
+        recv_x_gc_2nd=recv_x_gc_2nd,
+        x_3rd=x_3rd,
+        recv_x_gc_3rd=recv_x_gc_3rd,
         reduced_x_gr=reduced_x_gr,
         reduced_x_gr_buf=reduced_x_gr_buf,
         reduced_lse_gr=reduced_lse_gr,
@@ -509,6 +529,10 @@ def test_func(
     recv_x_gc_buf: torch.Tensor | None = kwargs["recv_x_gc_buf"]
     recv_lse_gc: torch.Tensor | None = kwargs["recv_lse_gc"]
     recv_lse_gc_buf: torch.Tensor | None = kwargs["recv_lse_gc_buf"]
+    x_2nd: torch.Tensor | None = kwargs["x_2nd"]
+    recv_x_gc_2nd: torch.Tensor | None = kwargs["recv_x_gc_2nd"]
+    x_3rd: torch.Tensor | None = kwargs["x_3rd"]
+    recv_x_gc_3rd: torch.Tensor | None = kwargs["recv_x_gc_3rd"]
     reduced_x_gr: torch.Tensor = kwargs["reduced_x_gr"]
     reduced_x_gr_buf: torch.Tensor | None = kwargs["reduced_x_gr_buf"]
     reduced_lse_gr: torch.Tensor | None = kwargs["reduced_lse_gr"]
@@ -536,9 +560,29 @@ def test_func(
             flush=True,
         )
 
+    # prepare group_cast args
+    # x: shape=[num_local_tokens, hidden_dim]
+    # num_tokens_per_rank: shape=[num_ranks]: the number of tokens sent to each rank
+    # is_token_in_rank: shape=[num_local_tokens, num_ranks]: whether a local token should be sent to a rank
+    x_list, recv_x_gc_list = [x], [recv_x_gc]
+    recv_x_gc_buf_list = [recv_x_gc_buf] if pass_out_buffer else None
+    num_data_groups = 1
+    if x_2nd is not None and recv_x_gc_2nd is not None:
+        num_data_groups += 1
+        x_list.append(x_2nd)
+        recv_x_gc_list.append(recv_x_gc_2nd)
+        if pass_out_buffer:
+            recv_x_gc_buf_list.append(recv_x_gc_buf.clone())
+    if x_3rd is not None and recv_x_gc_3rd is not None:
+        num_data_groups += 1
+        x_list.append(x_3rd)
+        recv_x_gc_list.append(recv_x_gc_3rd)
+        if pass_out_buffer:
+            recv_x_gc_buf_list.append(recv_x_gc_buf.clone())
+
     common_group_cast_args: dict[str, Any] = {  # w/o handle tensors
-        "x": x,
-        "recv_x": recv_x_gc_buf,
+        "x": x if num_data_groups == 1 else x_list,
+        "recv_x": recv_x_gc_buf if num_data_groups == 1 else recv_x_gc_buf_list,
         "config": config,
         "async_op": async_mode,
         "post_perm_idx": perm_to_a2av_idx if use_a2av_perm_idxs == "inside" else None,
@@ -596,12 +640,12 @@ def test_func(
     #   send_nvl_head[i, r]: the token offset of the ith recv token in the nvl forward "list" for local rank r
     #   and if this recv token won't be sent to local rank r, then send_nvl_head[i, r] == -1 as well
     (
-        recv_x,
+        recv_x_list,
         recv_lse,
         handle,
         event,
     ) = buffer.group_cast(**group_cast_args)
-    recv_x = recv_x[0]
+    recv_x = recv_x_list[0]
 
     # wait
     event.current_stream_wait() if async_mode else ()
@@ -610,6 +654,13 @@ def test_func(
     if pass_out_buffer:
         assert recv_x_gc_buf is not None
         assert recv_x_gc_buf.data_ptr() == recv_x.data_ptr()
+
+        for i in range(1, num_data_groups):
+            assert recv_x_gc_buf_list[i] is not None
+            assert recv_x_gc_buf_list[i].data_ptr() == recv_x_list[i].data_ptr()
+            print(
+                f"\n[RANK {rank}]: {i}-th group of recv_x_gc_buf: {recv_x_gc_buf_list[i]=}\n"
+            )
 
     # check recv_lse in-place
     if cast_lse and pass_out_lse_buffer:
@@ -622,7 +673,8 @@ def test_func(
         if use_a2av_perm_idxs == "inside":
             # already permuted inside
             pass
-        else:
+        else:  # "outside" or "no"
+            # recv_x
             recv_x_from_a2av = recv_x.clone()
             if use_a2av_perm_idxs == "outside":
                 recv_x = recv_x[unperm_from_a2av_idx]
@@ -632,6 +684,17 @@ def test_func(
                     unperm_after_a2a_kwargs=range_gather_post_group_cast_kwargs,
                 )
             assert recv_x_from_a2av.shape == recv_x.shape
+
+            for i in range(1, num_data_groups):
+                ith_recv_x_from_a2av = recv_x_list[i].clone()
+                if use_a2av_perm_idxs == "outside":
+                    recv_x_list[i] = recv_x_list[i][unperm_from_a2av_idx]
+                elif use_a2av_perm_idxs == "no":
+                    recv_x_list[i] = unpermute_output(
+                        output=recv_x_list[i],
+                        unperm_after_a2a_kwargs=range_gather_post_group_cast_kwargs,
+                    )
+                assert ith_recv_x_from_a2av.shape == recv_x_list[i].shape
 
             # recv_lse
             if cast_lse:
@@ -680,7 +743,18 @@ def test_func(
     )
 
     # check
-    assert torch.equal(recv_x, recv_x_gc)
+    if pass_padded_out_buffer:
+        assert recv_x.size(0) > actual_gc_output_seqlen
+        assert torch.equal(recv_x[:actual_gc_output_seqlen], recv_x_gc)
+        for i in range(1, num_data_groups):
+            assert recv_x_list[i].size(0) > actual_gc_output_seqlen
+            assert torch.equal(
+                recv_x_list[i][:actual_gc_output_seqlen], recv_x_gc_list[i]
+            )
+    else:
+        assert torch.equal(recv_x, recv_x_gc)
+        for i in range(1, num_data_groups):
+            assert torch.equal(recv_x_list[i], recv_x_gc_list[i])
     if cast_lse:
         if pass_padded_out_buffer:
             assert recv_lse.size(0) > actual_gc_output_seqlen
@@ -693,7 +767,8 @@ def test_func(
         == recv_x.size(0)
     )
 
-    # TODO: specific check for recv_lse
+    # TODO: specific check for recv_lse like intranode
+    # due to lack of direct `recv_src_idx` in GrpCollInterHandle
     if cast_lse:
         assert recv_lse.size(0) == recv_src_meta.size(0)
 
@@ -1157,7 +1232,7 @@ def test_main(
     sim_gemm_weight = 2.0
     min_num_dst_ranks = 0
     num_input_splits = 10
-    num_data_groups = 1  # TODO: support num_data_groups > 1
+    num_data_groups = 2  # set this > 1 to allow transfer multiple data groups together within the same kernel
     assert 1 <= num_data_groups <= 3
 
     # choose dtype from {torch.bfloat16, torch.float16, torch.float32, torch.float64}
@@ -1242,6 +1317,7 @@ def test_main(
         hidden_size=hidden_size,
         num_heads=num_heads,
         num_input_splits=num_input_splits,
+        num_data_groups=num_data_groups,
         dtype=dtype,
         comm_dtype=comm_dtype,
         distinct_token=distinct_token,
