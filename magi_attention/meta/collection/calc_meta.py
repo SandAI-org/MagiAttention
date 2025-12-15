@@ -186,6 +186,12 @@ class FA4AttnArg(AttnArg):
         self.ffa_bwd_args_dict.clear()
 
     def _transfer_ffa_args_to_fa4_args(self) -> None:
+        assert self.skip_attn_fwd == self.skip_attn_bwd
+        if self.skip_attn_fwd:
+            self.fa4_fwd_args_dict = {}
+            self.fa4_bwd_args_dict = {}
+            return
+        
         # Get meta FA4 args
         self.seqlen_q = self.q_ranges.end
         self.seqlen_k = self.k_ranges.end
@@ -207,6 +213,12 @@ class FA4AttnArg(AttnArg):
             .unsqueeze(0)
             .unsqueeze(0)
         )
+        
+        # FIXME: fuse these to `magi_to_hstu_cuda`
+        from magi_attention.api.functools import pad_at_dim
+        hstu_func = pad_at_dim(hstu_func, dim=-1, pad_size=self.tile_m * 2, value=0)
+        # hstu_func.masked_fill_(hstu_func == -1, self.seqlen_q)
+        
         aux_tensors = [hstu_func]
 
         # DE-BUG:
@@ -291,10 +303,7 @@ class FA4AttnArg(AttnArg):
 
     def to_ffa_args(self, is_bwd: bool = False) -> dict:
         raise RuntimeError("FA4AttnArg does not support to_ffa_args")
-
-    def can_skip(self, is_bwd: bool = False) -> bool:
-        return False
-
+        
 
 @dataclass(repr=False)
 class CalcMeta:
