@@ -296,8 +296,7 @@ void group_cast_kernel(
   // Get channel data buffers for other groups
   //  `x_buffers_2nd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
   //  `x_buffers_3rd`: shape=(kNumChannels, kNumRanks, num_recv_buffer_tokens, hidden_int4), dtype=int4, alignment=sizeof(int4)
-  constexpr bool kIs2ndGroupExists = kNumDataGroups > 1;
-  constexpr bool kIs3rdGroupExists = kNumDataGroups > 2;
+  constexpr bool kIs2ndGroupExists = kNumDataGroups > 1, kIs3rdGroupExists = kNumDataGroups > 2;
   Buffer<int4, sizeof(int4)> channel_x_buffers_2nd;
   Buffer<int4, sizeof(int4)> channel_x_buffers_3rd;
   if constexpr (kIs2ndGroupExists) {

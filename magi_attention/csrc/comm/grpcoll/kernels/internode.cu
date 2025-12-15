@@ -411,12 +411,14 @@ void group_cast_kernel(
   const auto num_channels = num_sms / 2, channel_id = sm_id / 2;
   const auto rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
   const bool is_forwarder = sm_id % 2 == 0;
-
-  constexpr bool kIs2ndGroupExists = kNumDataGroups > 1;
-  constexpr bool kIs3rdGroupExists = kNumDataGroups > 2;
-
   GRPCOLL_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE, "Invalid number of RDMA peers");
   GRPCOLL_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe == num_channels or ibgda_get_state()->num_rc_per_pe >= num_sms);
+
+  const auto hidden_bytes = hidden_int4 * sizeof(int4), lse_bytes = num_heads * sizeof(float);
+  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
+  const auto total_num_bytes_per_token = num_bytes_per_token + hidden_bytes * (kNumDataGroups - 1); // for other groups, we only transfer distinct hidden states
+  constexpr int num_meta_per_rdma_channel = 2 * (NUM_MAX_NVL_PEERS + 1); // (start, end) idx for dst RDMA peer (latter) + its each NVL rank (former)
+  GRPCOLL_STATIC_ASSERT(kNumDataGroups >= 1 and kNumDataGroups <= 3, "Invalid number of data groups");
 
   /** NOTE: Determine warp role and its target rank
    * For Forwarder (Even SMs):
@@ -459,21 +461,30 @@ void group_cast_kernel(
   const auto warp_role = role_meta.first;
   const auto target_rank = role_meta.second;
 
-  // Get RDMA symmetric buffer
-  //  `rdma_channel_data`: shape=(num_channels, kNumRDMARanks, num_max_rdma_chunked_recv_tokens, num_bytes_per_token), dtype=uint8_t
-  //  `rdma_channel_meta`: shape=(num_channels, kNumRDMARanks, num_meta_per_rdma_channel), dtype=int
-  //  `rdma_channel_head`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
-  //  `rdma_channel_tail`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
-  const auto hidden_bytes = hidden_int4 * sizeof(int4), lse_bytes = num_heads * sizeof(float);
-  const auto num_bytes_per_token = get_num_bytes_per_token(hidden_int4, num_heads);
-  const auto num_bytes_per_token_2nd = hidden_bytes; // for other groups, we only transfer distinct hidden states
-  constexpr int num_meta_per_rdma_channel = 2 * (NUM_MAX_NVL_PEERS + 1); // (start, end) idx for dst RDMA peer (latter) + its each NVL rank (former)
+  int rs_wr_rank = 0, ws_rr_rank = 0; // `rs_wr` denotes "Read for Senders, Write for Receivers", while `ws_rr` denotes "Write for Senders, Read for Receivers"
+  if (warp_role == WarpRole::kRDMAAndNVLForwarder) {
+    // NVL forwarder/sender will read from this NVL rank and write to target NVL peer
+    rs_wr_rank = nvl_rank, ws_rr_rank = target_rank;
+  } else if (warp_role == WarpRole::kNVLReceivers) {
+    // NVL receiver will read from target NVL peer and write to this NVL rank
+    rs_wr_rank = target_rank, ws_rr_rank = nvl_rank;
+  }
+
+  // Get RDMA data buffer
+  // NOTE: for other data groups, we pack their hidden states together with the first for coalesce transfer if possible
+  //  `rdma_channel_data_1st`: shape=(num_channels, kNumRDMARanks, num_max_rdma_chunked_recv_tokens, num_bytes_per_token), dtype=uint8_t
+  //  `rdma_channel_data_2nd`: shape=(num_channels, kNumRDMARanks, num_max_rdma_chunked_recv_tokens, hidden_bytes), dtype=uint8_t
   auto rdma_channel_data = SymBuffer<uint8_t, /*kDecoupled=*/true>(
       rdma_buffer_ptr,
-      /*num_elems=*/num_max_rdma_chunked_recv_tokens * num_bytes_per_token,
+      /*num_elems=*/num_max_rdma_chunked_recv_tokens * total_num_bytes_per_token,
       /*num_ranks=*/kNumRDMARanks,
       /*sm_id=*/channel_id,
       /*num_sms=*/num_channels);
+
+  // Get RDMA meta buffer
+  //  `rdma_channel_meta`: shape=(num_channels, kNumRDMARanks, num_meta_per_rdma_channel), dtype=int
+  //  `rdma_channel_head`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
+  //  `rdma_channel_tail`: shape=(num_channels, kNumRDMARanks), dtype=uint64_t
   auto rdma_channel_meta = SymBuffer<int, /*kDecoupled=*/true>(
       rdma_buffer_ptr, /*num_elems=*/num_meta_per_rdma_channel, /*num_ranks=*/kNumRDMARanks, /*sm_id=*/channel_id, /*num_sms=*/num_channels);
   auto rdma_channel_head =
@@ -481,40 +492,25 @@ void group_cast_kernel(
   auto rdma_channel_tail =
       SymBuffer<uint64_t, /*kDecoupled=*/false>(rdma_buffer_ptr, /*num_elems=*/1, /*num_ranks=*/kNumRDMARanks, /*sm_id=*/channel_id, /*num_sms=*/num_channels);
 
-  // Get RDMA symmetric buffer for other groups
-  //  `rdma_channel_data_2nd`: shape=(num_channels, kNumRDMARanks, num_max_rdma_chunked_recv_tokens, num_bytes_per_token_2nd), dtype=uint8_t
-  SymBuffer<uint8_t, /*kDecoupled=*/true> rdma_channel_data_2nd;
-  if constexpr (kIs2ndGroupExists) {
-    rdma_channel_data_2nd = SymBuffer<uint8_t, /*kDecoupled=*/true>(
-        rdma_buffer_ptr,
-        /*num_elems=*/num_max_rdma_chunked_recv_tokens * num_bytes_per_token_2nd,
-        /*num_ranks=*/kNumRDMARanks,
-        /*sm_id=*/channel_id,
-        /*num_sms=*/num_channels);
-  }
-
-  // Get NVL buffer
-  //  `nvl_channel_x`: shape=(num_channels, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_bytes_per_token), dtype=uint8_t
-  //  `nvl_channel_prefix_start`: shape=(num_channels, NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
-  //  `nvl_channel_prefix_end`: shape=(num_channels, NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
-  //  `nvl_channel_head`: shape=(num_channels, NUM_MAX_NVL_PEERS), dtype=int
-  //  `nvl_channel_tail`: shape=(num_channels, NUM_MAX_NVL_PEERS), dtype=int
-  int rs_wr_rank = 0, ws_rr_rank = 0; // `rs_wr` denotes "Read for Senders, Write for Receivers", while `ws_rr` denotes "Write for Senders, Read for Receivers"
-  if (warp_role == WarpRole::kRDMAAndNVLForwarder)
-    // NVL forwarder/sender will read from this NVL rank and write to target NVL peer
-    rs_wr_rank = nvl_rank, ws_rr_rank = target_rank;
-  if (warp_role == WarpRole::kNVLReceivers)
-    // NVL receiver will read from target NVL peer and write to this NVL rank
-    rs_wr_rank = target_rank, ws_rr_rank = nvl_rank;
+  // Get NVL data buffer
+  // NOTE: for other data groups, we pack their hidden states together with the first for coalesce transfer if possible
+  //  `nvl_channel_x_1st`: shape=(num_channels, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_bytes_per_token), dtype=uint8_t
+  //  `nvl_channel_x_2nd`: shape=(num_channels, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, hidden_bytes), dtype=uint8_t
   auto rs_wr_buffer_ptr = buffer_ptrs[rs_wr_rank], ws_rr_buffer_ptr = buffer_ptrs[ws_rr_rank];
   auto nvl_channel_x = AsymBuffer<uint8_t>(
                            ws_rr_buffer_ptr,
-                           /*num_elems=*/num_max_nvl_chunked_recv_tokens * num_bytes_per_token,
+                           /*num_elems=*/num_max_nvl_chunked_recv_tokens * total_num_bytes_per_token,
                            /*num_ranks=*/NUM_MAX_NVL_PEERS,
                            /*sm_id=*/channel_id,
                            /*num_sms=*/num_channels,
                            /*offset=*/rs_wr_rank)
                            .advance_also(rs_wr_buffer_ptr);
+
+  // Get NVL meta buffer
+  //  `nvl_channel_prefix_start`: shape=(num_channels, NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
+  //  `nvl_channel_prefix_end`: shape=(num_channels, NUM_MAX_NVL_PEERS, kNumRDMARanks), dtype=int
+  //  `nvl_channel_head`: shape=(num_channels, NUM_MAX_NVL_PEERS), dtype=int
+  //  `nvl_channel_tail`: shape=(num_channels, NUM_MAX_NVL_PEERS), dtype=int
   auto nvl_channel_prefix_start =
       AsymBuffer<int>(
           ws_rr_buffer_ptr, /*num_elems=*/kNumRDMARanks, /*num_ranks=*/NUM_MAX_NVL_PEERS, /*sm_id=*/channel_id, /*num_sms=*/num_channels, /*offset=*/rs_wr_rank)
@@ -529,20 +525,6 @@ void group_cast_kernel(
   auto nvl_channel_tail =
       AsymBuffer<int>(ws_rr_buffer_ptr, /*num_elems=*/1, /*num_ranks=*/NUM_MAX_NVL_PEERS, /*sm_id=*/channel_id, /*num_sms=*/num_channels, /*offset=*/rs_wr_rank)
           .advance_also(rs_wr_buffer_ptr);
-
-  // Get NVL buffer for other groups
-  //  `nvl_channel_x_2nd`: shape=(num_channels, NUM_MAX_NVL_PEERS, num_max_nvl_chunked_recv_tokens, num_bytes_per_token_2nd), dtype=uint8_t
-  AsymBuffer<uint8_t> nvl_channel_x_2nd;
-  if constexpr (kIs2ndGroupExists) {
-    nvl_channel_x_2nd = AsymBuffer<uint8_t>(
-                            ws_rr_buffer_ptr,
-                            /*num_elems=*/num_max_nvl_chunked_recv_tokens * num_bytes_per_token_2nd,
-                            /*num_ranks=*/NUM_MAX_NVL_PEERS,
-                            /*sm_id=*/channel_id,
-                            /*num_sms=*/num_channels,
-                            /*offset=*/rs_wr_rank)
-                            .advance_also(rs_wr_buffer_ptr);
-  }
 
   // Prepare RDMA sender warp synchronization
   //  `rdma_send_channel_lock`: the lock to mutex access `rdma_send_channel_tail` and `rdma_send_channel_window` for each RDMA rank
@@ -623,10 +605,6 @@ void group_cast_kernel(
     int64_t token_idx;
     int cached_rdma_channel_head = 0, global_rdma_tail_idx = 0;
     uint8_t* send_buffer = lane_id == rdma_rank ? rdma_channel_data.recv_buffer(lane_id) : rdma_channel_data.send_buffer(lane_id);
-    uint8_t* send_buffer_2nd;
-    if constexpr (kIs2ndGroupExists) {
-      send_buffer_2nd = lane_id == rdma_rank ? rdma_channel_data_2nd.recv_buffer(lane_id) : rdma_channel_data_2nd.send_buffer(lane_id);
-    }
 
     // Iterate over tokens and copy into RDMA send buffer
     GRPCOLL_STATIC_ASSERT(NUM_MAX_NVL_PEERS * sizeof(bool) == sizeof(uint64_t), "Invalid number of NVL peers");
@@ -667,7 +645,6 @@ void group_cast_kernel(
       SourceMeta src_meta;
       int num_dst_rdma_ranks = 0;
       void* dst_send_buffers[kNumMaxDstRDMARanks];
-      void* dst_send_buffers_2nd[kIs2ndGroupExists ? kNumMaxDstRDMARanks : 1];
 #pragma unroll
       // Broadcast info about the dst RDMA ranks this token will be sent to, including:
       //  1. the `src_meta` to tell which NVL ranks this token should be sent to in each RDMA peer
@@ -685,36 +662,37 @@ void group_cast_kernel(
 
           // Prepare `dst_send_buffer`
           dst_send_buffers[num_dst_rdma_ranks++] =
-              reinterpret_cast<uint8_t*>(broadcast_ptr_in_warp(/*ptr=*/send_buffer, /*src_lane=*/r)) + slot_idx * num_bytes_per_token;
-          if constexpr (kIs2ndGroupExists) {
-            dst_send_buffers_2nd[num_dst_rdma_ranks++] =
-                reinterpret_cast<uint8_t*>(broadcast_ptr_in_warp(/*ptr=*/send_buffer_2nd, /*src_lane=*/r)) + slot_idx * num_bytes_per_token_2nd;
-          }
+              reinterpret_cast<uint8_t*>(broadcast_ptr_in_warp(/*ptr=*/send_buffer, /*src_lane=*/r)) + slot_idx * total_num_bytes_per_token;
         }
       }
       GRPCOLL_DEVICE_ASSERT(num_dst_rdma_ranks <= kNumMaxDstRDMARanks); // REVIEW: why at most 8 RDMA peers to send to ?
 
-      // Warp-copy the hidden value of this token
-      // into each RDMA send buffer for each dst RDMA rank to send to
-      auto st_dst_rdma_ranks = [=](const int hidden_offset, const int4& hidden_val_int4) {
 #pragma unroll
-        for (int j = 0; j < num_dst_rdma_ranks; ++j)
-          st_na_global(reinterpret_cast<int4*>(dst_send_buffers[j]) + hidden_offset, hidden_val_int4);
-      };
-      UNROLLED_WARP_COPY(
-          /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
-          /*LANE_ID=*/lane_id,
-          /*N=*/hidden_int4,
-          /*DST=*/0,
-          /*SRC=*/x + token_idx * hidden_int4,
-          /*LD_FUNC=*/ld_nc_global, // non-cached load
-          /*ST_FUNC=*/st_dst_rdma_ranks // non-cached store to each send buffer of each dst RDMA rank
-      );
+      // Warp-copy the hidden value of this token for each data group
+      // into each RDMA send buffer for each dst RDMA rank to send to
+      for (int l = 0; l < kNumDataGroups; ++l) {
+        auto st_dst_rdma_ranks = [=](const int hidden_offset, const int4& hidden_val_int4) {
+#pragma unroll
+          for (int j = 0; j < num_dst_rdma_ranks; ++j)
+            st_na_global(reinterpret_cast<int4*>(dst_send_buffers[j]) + hidden_int4 * l + hidden_offset, hidden_val_int4);
+        };
+        auto x_ptr = (l == 0) ? x : ((l == 1) ? x_2nd : x_3rd);
+
+        UNROLLED_WARP_COPY(
+            /*UNROLL_FACTOR=*/kWarpCopyUnrollStages,
+            /*LANE_ID=*/lane_id,
+            /*N=*/hidden_int4,
+            /*DST=*/0,
+            /*SRC=*/x_ptr + token_idx * hidden_int4,
+            /*LD_FUNC=*/ld_nc_global, // non-cached load
+            /*ST_FUNC=*/st_dst_rdma_ranks // non-cached store to each send buffer of each dst RDMA rank
+        );
+      }
 
 #pragma unroll
       // Offset the send buffers across the hidden states part
       for (int r = 0; r < num_dst_rdma_ranks; ++r)
-        dst_send_buffers[r] = reinterpret_cast<int4*>(dst_send_buffers[r]) + hidden_int4;
+        dst_send_buffers[r] = reinterpret_cast<int4*>(dst_send_buffers[r]) + hidden_int4 * kNumDataGroups;
 
 #pragma unroll
       // Copy `lse`
@@ -814,7 +792,8 @@ void group_cast_kernel(
       // Iterate all RDMA ranks if there's any (remaining) token to send
       for (int r = 0, synced_num_tokens_to_send; r < kNumRDMARanks; ++r) {
         // To mitigate in-cast congestion, shuffle the starting index of target rank for different ranks and channels
-        int dst_rdma_rank = (r + channel_id + rdma_rank) % kNumRDMARanks;
+        const int dst_rdma_rank = (r + channel_id + rdma_rank) % kNumRDMARanks;
+        const int dst_pe = get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank);
         synced_num_tokens_to_send = broadcast_in_warp(/*val=*/num_tokens_to_send, /*src_lane=*/dst_rdma_rank);
         if (synced_num_tokens_to_send == 0)
           continue;
@@ -837,15 +816,16 @@ void group_cast_kernel(
         if (dst_rdma_rank != rdma_rank) { // dst RDMA peer
           auto dst_slot_idx = synced_last_issued_tail % num_max_rdma_chunked_recv_tokens;
           GRPCOLL_DEVICE_ASSERT(dst_slot_idx + num_tokens_to_issue <= num_max_rdma_chunked_recv_tokens);
-          const size_t num_bytes_per_msg = num_bytes_per_token * num_tokens_to_issue;
-          const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * num_bytes_per_token);
-          const auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * num_bytes_per_token);
-          // TODO: try thread-level `put_nbi` ?
+
+          const size_t num_bytes_per_msg = total_num_bytes_per_token * num_tokens_to_issue;
+          auto dst_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.recv_buffer(rdma_rank) + dst_slot_idx * total_num_bytes_per_token);
+          auto src_ptr = reinterpret_cast<uint64_t>(rdma_channel_data.send_buffer(dst_rdma_rank) + dst_slot_idx * total_num_bytes_per_token);
+          // REVIEW: maybe better to use thread-level `put_nbi` ?
           nvshmemi_ibgda_put_nbi_warp</*kAlwaysDoPostSend=*/true>(
               /*req_rptr=*/dst_ptr,
               /*req_lptr=*/src_ptr,
               /*bytes=*/num_bytes_per_msg,
-              /*dst_pe=*/get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
+              /*dst_pe=*/dst_pe,
               /*qp_id=*/channel_id,
               /*lane_id=*/lane_id,
               /*message_idx=*/0);
@@ -863,7 +843,7 @@ void group_cast_kernel(
           nvshmemi_ibgda_amo_nonfetch_add(
               /*rptr=*/rdma_channel_tail.buffer(rdma_rank),
               /*value=*/num_tokens_to_issue,
-              /*pe=*/get_dst_rdma_rank<kLowLatencyMode>(dst_rdma_rank, nvl_rank),
+              /*pe=*/dst_pe,
               /*qp_id=*/channel_id,
               /*is_local_copy=*/dst_rdma_rank == rdma_rank);
         }
@@ -990,10 +970,10 @@ void group_cast_kernel(
         auto rdma_slot_idx = i % num_max_rdma_chunked_recv_tokens;
 
         // Get token ptr in RDMA recv buffer
-        auto rdma_token_ptr = rdma_channel_data.recv_buffer(src_rdma_rank) + rdma_slot_idx * num_bytes_per_token;
+        auto rdma_token_ptr = rdma_channel_data.recv_buffer(src_rdma_rank) + rdma_slot_idx * total_num_bytes_per_token;
 
         // Get `src_meta` for current token
-        auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(rdma_token_ptr + hidden_bytes + lse_bytes)); // non-cached load
+        auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(rdma_token_ptr + hidden_bytes * kNumDataGroups + lse_bytes)); // non-cached load
 
         // Decrement `num_tokens_to_recv_from_rdma`
         lane_id == src_rdma_rank ? (num_tokens_to_recv_from_rdma -= 1) : 0;
@@ -1016,33 +996,46 @@ void group_cast_kernel(
         int dst_slot_idx = (cached_nvl_channel_tail++) % num_max_nvl_chunked_recv_tokens;
 
         // Get token ptr in NVL buffer of dst NVL peer
-        auto nvl_token_ptr = nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
+        auto nvl_token_ptr = nvl_channel_x.buffer() + dst_slot_idx * total_num_bytes_per_token;
 
+#pragma unroll
         // TMA-copy token from RDMA buffer to TMA buffer in shared memory
-        if (lane_id == 0) { // issued by lane0
-          tma_load_1d(
-              /*smem_ptr=*/tma_buffer,
-              /*gmem_ptr=*/rdma_token_ptr,
-              /*mbar_ptr=*/tma_mbarrier,
-              /*num_bytes=*/num_bytes_per_token,
-              /*evict_first=*/false);
-          mbarrier_arrive_and_expect_tx(/*mbar_ptr=*/tma_mbarrier, /*num_bytes=*/num_bytes_per_token);
-        }
-        __syncwarp();
+        // NOTE: due to the shared memory size limit, we can not issue all in one go,
+        // thus we issue the hidden states iteratively for each data group,
+        // while the last data group also includes the lse and src_meta
+        for (int l = 0; l < kNumDataGroups; ++l) {
+          auto hidval_offsets = hidden_bytes * l;
+          auto tma_copy_bytes = (l < kNumDataGroups - 1) ? hidden_bytes : num_bytes_per_token;
 
-        // Wait TMA load to be finished
-        // and flip the `tma_phase` in-place
-        mbarrier_wait(/*mbar_ptr=*/tma_mbarrier, /*stage=*/tma_phase);
+          if (lane_id == 0) { // issued by lane0
+            // Wait for TMA-copy for previous data groups to be finished
+            if (l > 0)
+              tma_store_wait();
 
-        // TMA-copy token from TMA buffer in shared memory to NVL buffer
-        if (lane_id == 0) { // issued by lane0
-          tma_store_1d(
-              /*smem_ptr=*/tma_buffer,
-              /*gmem_ptr=*/nvl_token_ptr,
-              /*num_bytes=*/num_bytes_per_token,
-              /*evict_first=*/true);
+            tma_load_1d(
+                /*smem_ptr=*/tma_buffer,
+                /*gmem_ptr=*/rdma_token_ptr + hidval_offsets,
+                /*mbar_ptr=*/tma_mbarrier,
+                /*num_bytes=*/tma_copy_bytes,
+                /*evict_first=*/false);
+            mbarrier_arrive_and_expect_tx(/*mbar_ptr=*/tma_mbarrier, /*num_bytes=*/tma_copy_bytes);
+          }
+          __syncwarp();
+
+          // Wait TMA load to be finished
+          // and flip the `tma_phase` in-place
+          mbarrier_wait(/*mbar_ptr=*/tma_mbarrier, /*stage=*/tma_phase);
+
+          // TMA-copy token from TMA buffer in shared memory to NVL buffer
+          if (lane_id == 0) { // issued by lane0
+            tma_store_1d(
+                /*smem_ptr=*/tma_buffer,
+                /*gmem_ptr=*/nvl_token_ptr + hidval_offsets,
+                /*num_bytes=*/tma_copy_bytes,
+                /*evict_first=*/true);
+          }
+          __syncwarp();
         }
-        __syncwarp();
 
         // Early stop when the NVL chunk is full
         if ((++num_tokens_sent) == num_max_nvl_chunked_send_tokens)
@@ -1181,10 +1174,10 @@ void group_cast_kernel(
         int slot_idx_in_queue = (cached_channel_head_idx++) % num_max_nvl_chunked_recv_tokens;
 
         // Get token ptr in the NVL recv buffer of this NVL rank
-        auto token_ptr_in_buffer = nvl_channel_x.buffer() + slot_idx_in_queue * num_bytes_per_token;
+        auto token_ptr_in_buffer = nvl_channel_x.buffer() + slot_idx_in_queue * total_num_bytes_per_token;
 
         // Load src meta to get the `src_rdma_rank` for this token
-        auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(token_ptr_in_buffer + hidden_bytes + lse_bytes));
+        auto src_meta = ld_nc_global(reinterpret_cast<SourceMeta*>(token_ptr_in_buffer + hidden_bytes * kNumDataGroups + lse_bytes));
 
         // Get recv token idx in the `recv_x`
         int64_t recv_token_idx = broadcast_in_warp(/*val=*/total_offset, /*src_lane=*/src_meta.src_rdma_rank);
@@ -1196,44 +1189,59 @@ void group_cast_kernel(
         (lane_id == src_meta.src_rdma_rank) ? (++total_offset) : 0;
 
         // Get TMA load bytes, including hidden states and lse
-        bool lse_aligned = lse_bytes % 16 == 0;
-        auto tma_load_bytes = hidden_bytes + (lse_aligned ? lse_bytes : 0);
+        bool lse_aligned = lse_bytes % 16 == 0; // REVIEW: why need to check 16-bytes alignment here ?
 
+#pragma unroll
         // TMA-copy token from NVL recv buffer to TMA buffer in shared memory
-        // including hidden states and lse
-        if (lane_id == 0) { // issued by lane0
-          tma_load_1d(
-              /*smem_ptr=*/tma_buffer,
-              /*gmem_ptr=*/token_ptr_in_buffer,
-              /*mbar_ptr=*/tma_mbarrier,
-              /*num_bytes=*/tma_load_bytes,
-              /*evict_first=*/true);
-          mbarrier_arrive_and_expect_tx(tma_mbarrier, tma_load_bytes);
-        }
-        __syncwarp();
+        // NOTE: due to the shared memory size limit, we can not issue all in one go,
+        // thus we issue the hidden states iteratively for each data group,
+        // while the last data group also includes the lse if aligned
+        for (int l = 0; l < kNumDataGroups; ++l) {
+          auto hidval_offsets = hidden_bytes * l;
+          auto tma_load_bytes = (l < kNumDataGroups - 1) ? hidden_bytes : (hidden_bytes + (lse_aligned ? lse_bytes : 0));
+          auto recv_x_ptr = (l == 0) ? recv_x : ((l == 1) ? recv_x_2nd : recv_x_3rd);
 
-        // Wait TMA load to be finished
-        // and flip the `tma_phase` in-place
-        mbarrier_wait(tma_mbarrier, tma_phase);
+          if (lane_id == 0) { // issued by lane0
+            // Wait for TMA-copy for previous data groups to be finished
+            if (l > 0)
+              tma_store_wait();
 
-        // TMA-copy hidden states of the token from TMA buffer in shared memory to `recv_x`
-        if (lane_id == 0) { // issued by lane0
-          tma_store_1d(
-              /*smem_ptr=*/tma_buffer,
-              /*gmem_ptr=*/recv_x + token_idx_in_recv_x * hidden_int4,
-              /*num_bytes=*/hidden_bytes,
-              /*evict_first=*/false);
+            tma_load_1d(
+                /*smem_ptr=*/tma_buffer,
+                /*gmem_ptr=*/token_ptr_in_buffer + hidval_offsets,
+                /*mbar_ptr=*/tma_mbarrier,
+                /*num_bytes=*/tma_load_bytes,
+                /*evict_first=*/true);
+            mbarrier_arrive_and_expect_tx(tma_mbarrier, tma_load_bytes);
+          }
+          __syncwarp();
+
+          // Wait TMA load to be finished
+          // and flip the `tma_phase` in-place
+          mbarrier_wait(tma_mbarrier, tma_phase);
+
+          // TMA-copy hidden states of the token from TMA buffer in shared memory to `recv_x`
+          if (lane_id == 0) { // issued by lane0
+            tma_store_1d(
+                /*smem_ptr=*/tma_buffer,
+                /*gmem_ptr=*/recv_x_ptr + token_idx_in_recv_x * hidden_int4,
+                /*num_bytes=*/hidden_bytes,
+                /*evict_first=*/false);
+          }
+          __syncwarp();
         }
-        __syncwarp();
 
         // Copy lse of the token from TMA buffer in shared memory to `recv_lse`
-        token_ptr_in_buffer += hidden_bytes;
+        token_ptr_in_buffer += hidden_bytes * kNumDataGroups;
         if (lse_aligned) { // if aligned to 16 bytes, use TMA copy
-          tma_store_1d(
-              /*smem_ptr=*/tma_buffer + hidden_bytes,
-              /*gmem_ptr=*/recv_lse + token_idx_in_recv_x * num_heads,
-              /*num_bytes=*/lse_bytes,
-              /*evict_first=*/false);
+          if (lane_id == 0) { // issued by lane0
+            tma_store_1d(
+                /*smem_ptr=*/tma_buffer + hidden_bytes,
+                /*gmem_ptr=*/recv_lse + token_idx_in_recv_x * num_heads,
+                /*num_bytes=*/lse_bytes,
+                /*evict_first=*/false);
+          }
+          __syncwarp();
         } else { // if not aligned, use warp copy
           UNROLLED_WARP_COPY(
               /*UNROLL_FACTOR=*/1,
@@ -1241,8 +1249,9 @@ void group_cast_kernel(
               /*N=*/num_heads,
               /*DST=*/recv_lse + token_idx_in_recv_x * num_heads,
               /*SRC=*/reinterpret_cast<float*>(token_ptr_in_buffer),
-              /*LD_FUNC=*/ld_nc_global,
-              /*ST_FUNC=*/st_na_global);
+              /*LD_FUNC=*/ld_nc_global, // non-cached load
+              /*ST_FUNC=*/st_na_global // non-cached store
+          );
         }
 
         // Copy src meta to `recv_src_meta` for group_reduce stage
@@ -1258,8 +1267,9 @@ void group_cast_kernel(
       }
 
       // Update NVL queue head
-      if (lane_id == 0)
+      if (lane_id == 0) {
         st_relaxed_sys_global(nvl_channel_head.buffer(), cached_channel_head_idx); // system scope, relaxed order
+      }
     }
   }
 }
