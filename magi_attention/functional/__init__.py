@@ -44,5 +44,6 @@ def fa4_hsfu_max_num_funcs() -> int:
 
     if max_num_funcs == 0:
         raise ValueError("MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS is not set")
-
+    assert max_num_funcs % 2 == 1, "MAGI_ATTENTION_FA4_HSFU_MAX_NUM_FUNCS must be odd"
+    
     return max_num_funcs
