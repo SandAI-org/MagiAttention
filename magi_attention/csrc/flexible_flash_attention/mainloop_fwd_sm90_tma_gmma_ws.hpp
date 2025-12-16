@@ -97,7 +97,7 @@ struct CollectiveMainloopFwdSm90 {
   static constexpr int kHeadDim = get<2>(TileShape_MNK{});
 
   using SeqlenInfo_t = flash::DistributedSeqlenInfo;
-  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN>;
+  using BlockMN_t = flash::BlockMN<SeqlenInfo_t, kBlockM, kBlockN, PackGQA, qhead_per_khead>;
 
   // Register bandwidth is actually a bottleneck so we don't want Q to be in registers.
   // Leaving this option here for reference.
@@ -980,7 +980,7 @@ struct CollectiveMainloopFwdSm90 {
     // boundary_mask_fn: mask for boundary block, for the rightmost block in a tile job
     auto bypass_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {};
     auto boundary_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
-      mask.template apply<true /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+      mask.template apply<true /*Seqlenk_mask*/, PackGQA, qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
     };
     // no_mask_fn: no mask, for full attention block in a tile job
     auto no_mask_fn = [&](auto& tSrS, int n_block, auto const& attn_type, int const& seqlen_q, int const& seqlen_k) {
@@ -1000,10 +1000,10 @@ struct CollectiveMainloopFwdSm90 {
           boundary_mask_fn(tSrS, n_block, attn_type, seqlen_q, seqlen_k);
           finish_boundary = true;
         } else {
-          mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+          mask.template apply<false /*Seqlenk_mask*/, PackGQA, qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
         }
       } else {
-        mask.template apply<false /*Seqlenk_mask*/>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
+        mask.template apply<false /*Seqlenk_mask*/, PackGQA, qhead_per_khead>(tSrS, block_meta.m_block, n_block, attn_type, thread_idx, seqlen_q, seqlen_k);
       }
     };
 
