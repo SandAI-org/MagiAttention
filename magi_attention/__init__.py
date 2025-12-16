@@ -71,6 +71,19 @@ def is_sdpa_backend_enable() -> bool:
     return os.environ.get("MAGI_ATTENTION_SDPA_BACKEND", "0") == "1"
 
 
+def is_fa4_backend_enable() -> bool:
+    """
+    Toggle this env variable to ``1`` to switch the attn kernel backend
+    from ffa to a monkey patch version of flash-attention 4 implementation,
+    to temporarily support arbitrary mask on Blackwell GPUs
+
+    Default value is ``0``
+
+    NOTE: this is a beta feature, under development
+    """
+    return os.environ.get("MAGI_ATTENTION_FA4_BACKEND", "0") == "1"
+
+
 def is_cuda_device_max_connections_one() -> bool:
     """
     Check if "CUDA_DEVICE_MAX_CONNECTIONS" is set to ``1``,
